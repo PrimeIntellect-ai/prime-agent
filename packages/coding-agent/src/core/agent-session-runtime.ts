@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import type { AgentSession } from "./agent-session.js";
+import { type AgentSession, isAgentSessionInstance } from "./agent-session.js";
 import type { AgentSessionRuntimeConfig } from "./agent-session-config.js";
 import type {
 	AgentSessionCreationOptions,
@@ -10,7 +10,13 @@ import type {
 import { isNoModelsAvailableMessage } from "./auth-guidance.js";
 import type { ReplacedSessionContext, SessionShutdownEvent, SessionStartEvent } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
-import type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
+import {
+	type CreateRlmSubagentRuntimeOptions,
+	INVALID_SUBAGENT_RUNTIME_ERROR,
+	normalizeRlmSubagentRuntime,
+	type RlmSubagentRuntime,
+	type SubagentRuntimeHost,
+} from "./rlm-runtime.js";
 import type { CreateAgentSessionResult } from "./sdk.js";
 import { assertSessionCwdExists } from "./session-cwd.js";
 import { SessionImportFileNotFoundError } from "./session-import-errors.js";
@@ -314,6 +320,9 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		if (options.sandbox === true) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			sessionManager.newSession({
@@ -374,21 +383,33 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			await runtime.dispose();
 			throw error;
 		}
-		return runtime;
+		return Object.freeze({ session: runtime.session });
 	}
 
-	async deleteRlmSubagentRuntime(childId: string, session: AgentSession): Promise<void> {
-		const runtime = this.subagentRuntimes.get(childId);
-		if (!runtime) {
-			await session.disposeAsync();
+	async deleteRlmSubagentRuntime(childId: string, runtime?: RlmSubagentRuntime): Promise<void> {
+		let session: AgentSession | undefined;
+		if (runtime !== undefined) {
+			const normalized = normalizeRlmSubagentRuntime(runtime, (v: unknown): v is AgentSession =>
+				isAgentSessionInstance(v),
+			);
+			if (!normalized || "hostedPort" in normalized) {
+				throw new Error(INVALID_SUBAGENT_RUNTIME_ERROR);
+			}
+			session = normalized.session;
+		}
+		const subagentRuntime = this.subagentRuntimes.get(childId);
+		if (!subagentRuntime) {
+			if (session) {
+				await session.disposeAsync();
+			}
 			return;
 		}
 		this.subagentRuntimes.delete(childId);
-		const shouldDisposeStaleSession = runtime.session !== session;
+		const shouldDisposeStaleSession = session !== undefined && subagentRuntime.session !== session;
 		try {
-			await runtime.dispose();
+			await subagentRuntime.dispose();
 		} finally {
-			if (shouldDisposeStaleSession) {
+			if (shouldDisposeStaleSession && session) {
 				await session.disposeAsync();
 			}
 		}

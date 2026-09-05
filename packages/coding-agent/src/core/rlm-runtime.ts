@@ -1,7 +1,11 @@
+import { types } from "node:util";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
+import type { SandboxOptions } from "./execution-location.js";
+import { normalizeSandboxOptions } from "./execution-location.js";
 import type { ToolDefinition } from "./extensions/index.js";
+import { createHostedRlmRuntimePort, type HostedRlmRuntimePort } from "./hosted-rlm-runtime-port.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 
@@ -102,6 +106,33 @@ export function normalizeRequestedRlmSubagentModel(value: unknown): string | und
 		throw new Error("rlm.run model must not be empty");
 	}
 	return model;
+}
+
+export function normalizeRequestedRlmSubagentSandbox(value: unknown): boolean | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "boolean") {
+		throw new Error("rlm.run sandbox must be a boolean");
+	}
+	return value;
+}
+
+export function normalizeRequestedRlmSubagentSandboxOptions(
+	value: unknown,
+	sandbox: boolean | undefined,
+): SandboxOptions | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!sandbox) {
+		throw new Error("rlm.run sandbox_options requires sandbox=true");
+	}
+	const normalised = normalizeSandboxOptions(value);
+	if (normalised === undefined) {
+		throw new Error("rlm.run sandbox_options contains invalid fields");
+	}
+	return normalised;
 }
 
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
@@ -211,9 +242,7 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 	};
 }
 
-export interface RlmSubagentRuntime {
-	session: AgentSession;
-}
+export type RlmSubagentRuntime = Readonly<{ session: AgentSession }> | Readonly<{ hostedPort: HostedRlmRuntimePort }>;
 
 export interface CreateRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
@@ -224,6 +253,10 @@ export interface CreateRlmSubagentRuntimeOptions {
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;
+	/** Request a fresh sandbox for this subagent. Default false inherits the current execution host. */
+	sandbox?: boolean;
+	/** Sandbox descriptor options. Rejected unless sandbox is true. */
+	sandboxOptions?: SandboxOptions;
 	scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	activeToolNames: string[];
 	allowedToolNames?: string[];
@@ -244,14 +277,178 @@ export interface CreateRlmSubagentRuntimeOptions {
 export interface SubagentRuntimeHost {
 	createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
 	/** Persist host-owned completion before the child becomes passivation-eligible. */
-	completeRlmSubagentRuntime?(childId: string, session: AgentSession): boolean;
+	completeRlmSubagentRuntime?(childId: string, runtime: RlmSubagentRuntime): boolean | Promise<boolean>;
 	/** Release a host-owned child after its detached initial task settles. */
 	releaseRlmSubagentRuntime?: (
 		runtime: RlmSubagentRuntime,
 		options: CreateRlmSubagentRuntimeOptions,
 		status: "done" | "error" | "cancelled",
 	) => Promise<void>;
-	/** Close or remove the host-owned child; session is absent when a persisted child is still passive. */
-	deleteRlmSubagentRuntime(childId: string, session?: AgentSession): Promise<void>;
+	/** Close or remove the host-owned child; runtime is absent when a persisted child is still passive. */
+	deleteRlmSubagentRuntime(childId: string, runtime?: RlmSubagentRuntime): Promise<void>;
 	disposeRlmSubagentRuntimes?(): Promise<void>;
 }
+
+// ---------------------------------------------------------------------------
+// Exact-boundary normalizer for RlmSubagentRuntime
+// ---------------------------------------------------------------------------
+
+export interface NormalizedHostedIdentityMatch {
+	readonly childId: string;
+	readonly sessionName: string;
+	readonly modelSelector: string;
+	readonly sessionId: string;
+}
+
+function printableHostedIdentityValue(descriptor: PropertyDescriptor | undefined): string | null {
+	if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return null;
+	const value = descriptor.value;
+	if (typeof value !== "string" || value.length < 1 || value.length > 128) return null;
+	for (let index = 0; index < value.length; index += 1) {
+		const code = value.charCodeAt(index);
+		if (code <= 0x20 || code >= 0x7f) return null;
+	}
+	return value;
+}
+
+/** Snapshot the complete expected hosted identity before comparing a port. */
+function requireExactHostedIdentityRecord(raw: unknown): NormalizedHostedIdentityMatch | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	try {
+		if (
+			types.isProxy(raw) ||
+			Object.getPrototypeOf(raw) !== Object.prototype ||
+			Object.getOwnPropertySymbols(raw).length !== 0
+		) {
+			return null;
+		}
+		const names = Object.getOwnPropertyNames(raw);
+		if (
+			names.length !== 4 ||
+			!names.includes("childId") ||
+			!names.includes("sessionName") ||
+			!names.includes("modelSelector") ||
+			!names.includes("sessionId")
+		) {
+			return null;
+		}
+		const descriptors = Object.getOwnPropertyDescriptors(raw);
+		const childId = printableHostedIdentityValue(descriptors.childId);
+		const sessionName = printableHostedIdentityValue(descriptors.sessionName);
+		const modelSelector = printableHostedIdentityValue(descriptors.modelSelector);
+		const sessionId = printableHostedIdentityValue(descriptors.sessionId);
+		if (childId === null || sessionName === null || modelSelector === null || sessionId === null) return null;
+		return Object.freeze({ childId, sessionName, modelSelector, sessionId });
+	} catch {
+		return null;
+	}
+}
+
+/** Validate an untrusted raw value and return a frozen RlmSubagentRuntime,
+ * or null on any malformed/hostile input. Never throws.
+ *
+ * For the local arm: validates exact {session} with Proxy/accessor/Promise
+ * rejection, then invokes the caller-supplied `isAgentSession` predicate.
+ * Returns Object.freeze({session}).
+ *
+ * For the hosted arm: passes the raw port through createHostedRlmRuntimePort,
+ * matches identity fields against `expectedHostedIdentity` when provided, and
+ * returns Object.freeze({hostedPort}). `expectedHostedIdentity` is
+ * descriptor-snapshotted before any field access. */
+export function normalizeRlmSubagentRuntime(
+	raw: unknown,
+	isAgentSession: (value: unknown) => value is AgentSession,
+	expectedHostedIdentity?: unknown,
+): RlmSubagentRuntime | null {
+	let validated: { readonly [key: string]: unknown } | null;
+	try {
+		validated = requireExactSingleKeyRecord(raw);
+	} catch {
+		return null;
+	}
+	if (!validated) return null;
+	const key = Object.keys(validated)[0];
+	if (key !== "session" && key !== "hostedPort") return null;
+	if (key === "session") {
+		const session = validated.session;
+		if (typeof session !== "object" || session === null) return null;
+		try {
+			if (types.isProxy(session) || types.isPromise(session)) return null;
+		} catch {
+			return null;
+		}
+		let checked: AgentSession | null = null;
+		try {
+			if (isAgentSession(session)) {
+				checked = session;
+			}
+		} catch {
+			return null;
+		}
+		if (checked === null) return null;
+		return Object.freeze({ session: checked });
+	}
+	// hostedPort arm — always requires expectedHostedIdentity; only local arms may omit it.
+	if (expectedHostedIdentity === undefined) return null;
+	const port = validated.hostedPort;
+	const factoryResult = createHostedRlmRuntimePort(port);
+	if (!factoryResult.ok) return null;
+	const acceptedPort = factoryResult.value;
+	const snapshot = requireExactHostedIdentityRecord(expectedHostedIdentity);
+	// Reject malformed expectedHostedIdentity before reading acceptedPort.identity
+	if (!snapshot) return null;
+	const id = acceptedPort.identity;
+	try {
+		if (
+			id.childId !== snapshot.childId ||
+			id.sessionName !== snapshot.sessionName ||
+			id.modelSelector !== snapshot.modelSelector ||
+			id.sessionId !== snapshot.sessionId
+		) {
+			return null;
+		}
+	} catch {
+		return null;
+	}
+	return Object.freeze({ hostedPort: acceptedPort });
+}
+
+/** Return exact single-key own enumerable data record with Object.prototype,
+ * no Proxy, no Symbols, no accessors, or null. Never throws. */
+function requireExactSingleKeyRecord(raw: unknown): { readonly [key: string]: unknown } | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	try {
+		if (types.isProxy(raw)) return null;
+	} catch {
+		return null;
+	}
+	try {
+		if (Object.getPrototypeOf(raw) !== Object.prototype) return null;
+	} catch {
+		return null;
+	}
+	try {
+		if (Object.getOwnPropertySymbols(raw).length !== 0) return null;
+	} catch {
+		return null;
+	}
+	let names: string[];
+	try {
+		names = Object.getOwnPropertyNames(raw);
+	} catch {
+		return null;
+	}
+	if (names.length !== 1) return null;
+	const key = names[0];
+	if (key !== "session" && key !== "hostedPort") return null;
+	let desc: PropertyDescriptor | undefined;
+	try {
+		desc = Object.getOwnPropertyDescriptor(raw, key);
+	} catch {
+		return null;
+	}
+	if (!desc || !("value" in desc) || !desc.enumerable) return null;
+	return { [key]: desc.value };
+}
+
+export const INVALID_SUBAGENT_RUNTIME_ERROR = "Invalid subagent runtime";

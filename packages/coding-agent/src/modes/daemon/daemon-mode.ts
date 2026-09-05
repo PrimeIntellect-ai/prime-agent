@@ -64,7 +64,12 @@ import {
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
 } from "../../core/agent-observe.js";
-import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
+import {
+	type AgentSession,
+	isAgentSessionInstance,
+	type PromptOptions,
+	rlmChildLabel,
+} from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	type AgentSessionRuntime,
@@ -89,7 +94,13 @@ import {
 } from "../../core/cron-jobs.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
-import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
+import {
+	type CreateRlmSubagentRuntimeOptions,
+	INVALID_SUBAGENT_RUNTIME_ERROR,
+	normalizeRlmSubagentRuntime,
+	type RlmSubagentRuntime,
+	type SubagentRuntimeHost,
+} from "../../core/rlm-runtime.js";
 import {
 	canPassivateSession,
 	type IdleEvictionMinutes,
@@ -162,6 +173,7 @@ import {
 	isDaemonDialogExtensionUiRequest,
 	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
+	normalizeSandboxOptions,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -2364,7 +2376,12 @@ export class AgentDaemon {
 	private createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost {
 		return {
 			createRlmSubagentRuntime: async (options) => this.createRlmSubagentRuntime(parentState, options),
-			completeRlmSubagentRuntime: (childId, session) => {
+			completeRlmSubagentRuntime: (childId, runtime) => {
+				const normalized = normalizeRlmSubagentRuntime(runtime, (v: unknown): v is AgentSession =>
+					isAgentSessionInstance(v),
+				);
+				if (!normalized || !("session" in normalized)) return false;
+				const session = normalized.session;
 				const state = [...this.sessions.values()].find(
 					(candidate) =>
 						candidate.runtime.metadata.kind === "subagent" &&
@@ -2392,6 +2409,11 @@ export class AgentDaemon {
 				});
 			},
 			releaseRlmSubagentRuntime: async (runtime, options, status) => {
+				const normalized = normalizeRlmSubagentRuntime(runtime, (v: unknown): v is AgentSession =>
+					isAgentSessionInstance(v),
+				);
+				if (!normalized || !("session" in normalized)) throw new Error(INVALID_SUBAGENT_RUNTIME_ERROR);
+				const childSession = normalized.session;
 				// Persist the deletion boundary first, but never let a registry failure
 				// strand the cancelled child as a stale resident session.
 				let deletionError: unknown;
@@ -2407,7 +2429,7 @@ export class AgentDaemon {
 						candidate.runtime.metadata.kind === "subagent" &&
 						candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
 						candidate.runtime.metadata.rlmChildId === options.id &&
-						candidate.runtime.session === runtime.session,
+						candidate.runtime.session === childSession,
 				);
 				const disposal = status === "cancelled" ? { kernelSnapshot: false } : undefined;
 				try {
@@ -2421,13 +2443,13 @@ export class AgentDaemon {
 							disposal,
 						);
 					} else {
-						await runtime.session.disposeAsync(disposal);
+						await childSession.disposeAsync(disposal);
 					}
 				} finally {
 					// Sweep even when teardown throws (see deleteRlmSubagentRuntime);
 					// never throws, so it cannot mask a teardown error.
 					if (status === "cancelled" && deletionError === undefined) {
-						const childSessionFile = runtime.session?.sessionFile;
+						const childSessionFile = childSession?.sessionFile;
 						if (childSessionFile) {
 							await this.deleteRlmSubagentArtifacts(options.id, childSessionFile);
 						}
@@ -2435,7 +2457,15 @@ export class AgentDaemon {
 				}
 				if (deletionError !== undefined) throw deletionError;
 			},
-			deleteRlmSubagentRuntime: async (childId, session) => {
+			deleteRlmSubagentRuntime: async (childId, runtime) => {
+				let normalized: RlmSubagentRuntime | null = null;
+				if (runtime !== undefined) {
+					normalized = normalizeRlmSubagentRuntime(runtime, (v: unknown): v is AgentSession =>
+						isAgentSessionInstance(v),
+					);
+					if (!normalized || "hostedPort" in normalized) throw new Error(INVALID_SUBAGENT_RUNTIME_ERROR);
+				}
+				const session = normalized && "session" in normalized ? normalized.session : undefined;
 				const state = [...this.sessions.values()].find(
 					(candidate) =>
 						candidate.runtime.metadata.kind === "subagent" &&
@@ -2486,12 +2516,6 @@ export class AgentDaemon {
 						await staleSession?.disposeAsync({ kernelSnapshot: false });
 					}
 				} finally {
-					// Runs even when teardown throws: the jobs-cancel rewrite and the
-					// kernel dispose's final snapshot flush may have already happened,
-					// resurrecting the artifact dir swept in recordRlmSubagentDeletion.
-					// A killed close can join a passivation close that already skipped
-					// killed cleanup. Neither step may throw here: a jobs-store error
-					// would mask the teardown error and skip the sweep.
 					if (childSessionFile) {
 						try {
 							this.cancelScheduledJobsForSessionFile(childSessionFile);
@@ -2516,7 +2540,10 @@ export class AgentDaemon {
 	private async createRlmSubagentRuntime(
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
-	): Promise<AgentSessionRuntime> {
+	): Promise<RlmSubagentRuntime> {
+		if (options.sandbox === true) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		sessionManager.newSession({
 			parentSession: options.parentSession.sessionFile,
@@ -2655,7 +2682,7 @@ export class AgentDaemon {
 				`Failed to record RLM subagent spawn for ${options.id}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		return runtime;
+		return Object.freeze({ session: runtime.session });
 	}
 
 	private async sessionPassivationSnapshot(
@@ -3025,7 +3052,7 @@ export class AgentDaemon {
 			);
 			// The session transcript is authoritative for mutable metadata such as a
 			// later user-assigned name; the registry value is only the spawn snapshot.
-			if (!parentState.runtime.session.registerRlmChildSession(entry.childId, runtime.session)) {
+			if (!(await parentState.runtime.session.registerRlmChildSession(entry.childId, runtime.session))) {
 				await this.closeSession(state, "replaced");
 				throw new RuntimeOpenCancelledError();
 			}
@@ -3897,6 +3924,18 @@ export class AgentDaemon {
 			}
 
 			case "create": {
+				if (command.sandboxOptions !== undefined) {
+					if (command.sandbox !== true) {
+						throw new Error("sandboxOptions requires sandbox=true");
+					}
+					const normalised = normalizeSandboxOptions(command.sandboxOptions);
+					if (!normalised) {
+						throw new Error("sandboxOptions contains invalid fields");
+					}
+				}
+				if (command.sandbox === true) {
+					throw new Error("Sandbox execution is not available for this session");
+				}
 				const state = await this.createRuntime(command);
 				return success(command.id, "create", summaryForActiveSession(state));
 			}

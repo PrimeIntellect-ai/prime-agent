@@ -118,6 +118,7 @@ export interface AgentSessionMessagePayload {
 	/** Sender relationship from the receiver's point of view. */
 	fromRelationship?: AgentFamilyRelationship;
 	target: AgentSessionMessageEndpoint;
+	semanticDigest?: string;
 }
 
 export interface AgentSessionMessageDetails {
@@ -126,6 +127,8 @@ export interface AgentSessionMessageDetails {
 	from?: AgentSessionMessageSender;
 	fromRelationship?: AgentFamilyRelationship;
 	target?: AgentSessionMessageEndpoint;
+	/** Canonical SHA-256 digest used for transcript idempotency verification. */
+	semanticDigest?: string;
 }
 
 export interface AgentSessionMessage extends CustomMessage<AgentSessionMessageDetails> {
@@ -409,18 +412,22 @@ export function createAgentSessionMessage(
 	payload: AgentSessionMessagePayload,
 	timestamp = Date.now(),
 ): AgentSessionMessage {
+	const details: AgentSessionMessageDetails = {
+		id: payload.id,
+		message: payload.message,
+		from: payload.from,
+		fromRelationship: payload.fromRelationship,
+		target: payload.target,
+	};
+	if (typeof payload.semanticDigest === "string" && /^[0-9a-f]{64}$/.test(payload.semanticDigest)) {
+		details.semanticDigest = payload.semanticDigest;
+	}
 	return {
 		role: "custom",
 		customType: AGENT_MESSAGE_CUSTOM_TYPE,
 		content: createAgentSessionMessagePrompt(payload),
 		display: true,
-		details: {
-			id: payload.id,
-			message: payload.message,
-			from: payload.from,
-			fromRelationship: payload.fromRelationship,
-			target: payload.target,
-		},
+		details,
 		timestamp,
 	};
 }

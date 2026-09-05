@@ -1,0 +1,1 @@
+- Added the durable lifecycle, transport, journal, command, provider, messaging, observation, and workspace-codec foundations for sandbox-backed Prime Agent sessions. Hosted capability advertisement remains gated until the complete runtime composition and end-to-end cleanup checks are ready.

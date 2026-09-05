@@ -220,9 +220,13 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	INVALID_SUBAGENT_RUNTIME_ERROR,
 	normalizeRequestedRlmSubagentModel,
+	normalizeRequestedRlmSubagentSandbox,
+	normalizeRequestedRlmSubagentSandboxOptions,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	normalizeRlmSubagentRuntime,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -1048,6 +1052,9 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 	parentUsage.totalTokens = parentContextTokens;
 }
 
+/** Module-private branding: only the AgentSession constructor adds instances. */
+const agentSessionBrand = new WeakSet<object>();
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1246,6 +1253,7 @@ export class AgentSession {
 	};
 
 	constructor(config: AgentSessionConfig) {
+		agentSessionBrand.add(this);
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
@@ -9631,6 +9639,9 @@ export class AgentSession {
 	}
 
 	private _createInlineRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): RlmSubagentRuntime {
+		if (options.sandbox === true) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		const childSessionManager = SessionManager.create(this._cwd, options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			childSessionManager.newSession({
@@ -9698,7 +9709,7 @@ export class AgentSession {
 		}
 		options.onSessionPublished?.(child);
 
-		return { session: child };
+		return Object.freeze({ session: child });
 	}
 
 	private _abandonRlmRunForQuiescence(run: RlmChildRun): void {
@@ -9988,7 +9999,11 @@ export class AgentSession {
 
 	private _deleteRlmSubagentSession(childId: string, session?: AgentSession): Promise<void> {
 		if (this._subagentRuntimeHost) {
-			return this._subagentRuntimeHost.deleteRlmSubagentRuntime(childId, session);
+			const runtime: RlmSubagentRuntime | undefined = session
+				? (normalizeRlmSubagentRuntime({ session }, (v): v is AgentSession => isAgentSessionInstance(v)) ??
+					undefined)
+				: undefined;
+			return this._subagentRuntimeHost.deleteRlmSubagentRuntime(childId, runtime);
 		}
 		return session?.disposeAsync() ?? Promise.resolve();
 	}
@@ -10170,20 +10185,27 @@ export class AgentSession {
 	 * the child) when the parent is already tearing down, so the caller can drop the
 	 * matching event forwarder too.
 	 */
-	registerRlmChildSession(childId: string, session: AgentSession, unsubscribe?: () => void): boolean {
+	async registerRlmChildSession(childId: string, session: AgentSession, unsubscribe?: () => void): Promise<boolean> {
 		// A child can finish concurrently while the parent is (or has) torn down; don't
 		// resurrect the map (it would never be disposed), just drop the child now.
 		if (this._deletingRlmChildren.has(childId) || this._deletedRlmChildIds.has(childId)) {
 			return false;
 		}
-		if (this._subagentRuntimeHost?.completeRlmSubagentRuntime?.(childId, session) === false) {
+		// Normalize/brand the session before callback or map mutation.
+		// Fake Object.create(AgentSession.prototype) must return false and cause
+		// no callback/mutation/dispose. Use the normalized exact local arm.
+		const normalized = normalizeRlmSubagentRuntime({ session }, (v): v is AgentSession => isAgentSessionInstance(v));
+		if (!normalized || !("session" in normalized)) {
 			return false;
 		}
-		if (this._disposed || this._disposing) {
-			void session.disposeAsync().catch(() => undefined);
+		const brandedSession = normalized.session;
+		const runtime: RlmSubagentRuntime = Object.freeze({ session: brandedSession });
+		const completeResult = this._subagentRuntimeHost?.completeRlmSubagentRuntime?.(childId, runtime);
+		if (completeResult !== undefined && !(await completeResult)) {
 			return false;
 		}
-		this._rlmChildSessions.set(childId, { session, run: this._activeRlmChildRuns.get(childId) });
+		if (this._disposed || this._disposing) return false;
+		this._rlmChildSessions.set(childId, { session: brandedSession, run: this._activeRlmChildRuns.get(childId) });
 		if (unsubscribe) {
 			this._rlmChildUnsubscribes.set(childId, unsubscribe);
 		}
@@ -10556,7 +10578,14 @@ export class AgentSession {
 		// executing now. A spawn arriving outside an active run (a detached kernel task
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
 		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
-		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
+		const {
+			name: rawName,
+			model: rawModel,
+			thinking: rawThinking,
+			sandbox: rawSandbox,
+			sandbox_options: rawSandboxOptions,
+			...unsupported
+		} = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
@@ -10564,6 +10593,11 @@ export class AgentSession {
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
 		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
+		const requestedSandbox = normalizeRequestedRlmSubagentSandbox(rawSandbox);
+		const requestedSandboxOptions = normalizeRequestedRlmSubagentSandboxOptions(rawSandboxOptions, requestedSandbox);
+		if (requestedSandbox === true && !this._subagentRuntimeHost) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -10651,6 +10685,11 @@ export class AgentSession {
 				thinkingLevel: requestedThinkingLevel,
 				spawnedByRequestId,
 			}),
+			...(requestedSandbox === true && requestedSandboxOptions !== undefined
+				? { sandbox: true, sandboxOptions: requestedSandboxOptions }
+				: requestedSandbox === true
+					? { sandbox: true }
+					: {}),
 			onSessionPublished: publishChildSession,
 		};
 
@@ -10694,8 +10733,16 @@ export class AgentSession {
 		// retention, cancellation, and late-startup cleanup.
 		void (async () => {
 			let childRuntime: RlmSubagentRuntime | undefined;
+			let rawRuntime: unknown;
+			let rawRuntimeReceived = false;
 			try {
-				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+				rawRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+				rawRuntimeReceived = true;
+				const normalized = normalizeRlmSubagentRuntime(rawRuntime, (v): v is AgentSession =>
+					isAgentSessionInstance(v),
+				);
+				if (!normalized || !("session" in normalized)) throw new Error(INVALID_SUBAGENT_RUNTIME_ERROR);
+				childRuntime = normalized;
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 				if (child.sessionName !== sessionName) child.setSessionName(sessionName);
@@ -10817,7 +10864,7 @@ export class AgentSession {
 						}),
 					);
 				}
-				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
+				if (!(await this.registerRlmChildSession(run.id, child)) && !run.detachedDeletion) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
 						await this._subagentRuntimeHost
 							.releaseRlmSubagentRuntime(childRuntime, subagentOptions, "error")
@@ -10835,7 +10882,8 @@ export class AgentSession {
 				}
 				// A failed child still returns an error outcome the parent consumes;
 				// cancelled runs and zero-commit children return nothing.
-				const failedChild = childSession ?? childRuntime?.session;
+				const failedChild =
+					childSession ?? (childRuntime && "session" in childRuntime ? childRuntime.session : undefined);
 				const failedLastCommitted = failedChild?.semanticEdges.lastCommittedRequestId;
 				if (run.status === "error" && failedChild && failedLastCommitted !== undefined) {
 					this._semanticEdges.recordChildReturned(failedChild.sessionId, failedLastCommitted);
@@ -10888,7 +10936,9 @@ export class AgentSession {
 				} else if (!run.detachedDeletion) {
 					try {
 						if (childRuntime && this._subagentRuntimeHost) {
-							await this._subagentRuntimeHost.deleteRlmSubagentRuntime(run.id, childRuntime.session);
+							await this._subagentRuntimeHost.deleteRlmSubagentRuntime(run.id, childRuntime);
+						} else if (rawRuntimeReceived && this._subagentRuntimeHost) {
+							await this._subagentRuntimeHost.deleteRlmSubagentRuntime(run.id);
 						} else if (childSession) {
 							await childSession.disposeAsync();
 						}
@@ -10905,13 +10955,14 @@ export class AgentSession {
 					run.deletionRunFinished = true;
 					if (!run.settled) {
 						let cleanupSucceeded = !run.deletionCleanupFailed;
-						if (childRuntime && cleanupSucceeded) {
-							const cleanup =
-								run.deletionCleanup ?? this._ensureRlmRunDeletionCleanup(run, childRuntime.session);
+						if (childRuntime && "session" in childRuntime && cleanupSucceeded) {
+							// childRuntime already normalized upstream; safe property access
+							const childAgentSession = childRuntime.session;
+							const cleanup = run.deletionCleanup ?? this._ensureRlmRunDeletionCleanup(run, childAgentSession);
 							cleanupSucceeded = await this._observeRlmRunDeletionCleanup(
 								run,
 								run.detachedDeletion,
-								childRuntime.session,
+								childAgentSession,
 								cleanup,
 							);
 						}
@@ -12112,6 +12163,11 @@ export class AgentSession {
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
 	}
+}
+
+/** Exported branded predicate: rejects Object.create(AgentSession.prototype) and fake shapes. */
+export function isAgentSessionInstance(value: unknown): value is AgentSession {
+	return typeof value === "object" && value !== null && agentSessionBrand.has(value);
 }
 
 function isRlmHeartbeatStatusUpdate(value: unknown): value is AgentRlmHeartbeatStatusUpdate {

@@ -103,6 +103,7 @@ import {
 	failure,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	normalizeSandboxOptions,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -1970,6 +1971,18 @@ export class DaemonSupervisor {
 			case "list_saved_sessions":
 				return this.handleSavedSessionList(client, command);
 			case "create": {
+				if (command.sandboxOptions !== undefined) {
+					if (command.sandbox !== true) {
+						throw new Error("sandboxOptions requires sandbox=true");
+					}
+					const normalised = normalizeSandboxOptions(command.sandboxOptions);
+					if (!normalised) {
+						throw new Error("sandboxOptions contains invalid fields");
+					}
+				}
+				if (command.sandbox === true) {
+					throw new Error("Sandbox execution is not available for this session");
+				}
 				const worker = await this.createOrReuseWorker(this.protocolClientId(client), command);
 				const requestedSummary = command.sessionPath
 					? this.findSummaryInWorker(worker, command.sessionPath)

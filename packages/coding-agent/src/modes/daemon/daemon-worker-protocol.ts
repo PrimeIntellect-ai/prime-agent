@@ -5,7 +5,7 @@ import type { IdleEvictionMinutes } from "../../core/session-action-store.js";
 export { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../core/session-lease.js";
 
 import type { WorkerRosterEntry } from "./agent-roster.js";
-import type { DaemonClientCapability, DaemonCommand, DaemonOutbound } from "./daemon-protocol.js";
+import type { DaemonClientCapability, DaemonCommand, DaemonOutbound, SandboxOptions } from "./daemon-protocol.js";
 
 export const DAEMON_WORKER_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
 export const DAEMON_WORKER_TOKEN_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN";
@@ -59,6 +59,8 @@ export interface DurableDaemonCreateCommand {
 	type: "create";
 	sessionPath?: string;
 	noSession?: boolean;
+	sandbox?: boolean;
+	sandboxOptions?: SandboxOptions;
 }
 
 export function durableDaemonCreateCommand(command: DaemonCreateCommand): DurableDaemonCreateCommand {
@@ -66,6 +68,8 @@ export function durableDaemonCreateCommand(command: DaemonCreateCommand): Durabl
 		type: "create",
 		...(command.sessionPath !== undefined ? { sessionPath: command.sessionPath } : {}),
 		...(command.noSession !== undefined ? { noSession: command.noSession } : {}),
+		...(command.sandbox !== undefined ? { sandbox: command.sandbox } : {}),
+		...(command.sandboxOptions !== undefined ? { sandboxOptions: command.sandboxOptions } : {}),
 	};
 }
 

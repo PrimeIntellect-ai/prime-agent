@@ -512,7 +512,7 @@ function makeRuntimeSession(
 		rlmDepth: sessionManager.getHeader()?.rlmDepth ?? 0,
 		setSubagentRuntimeHost: vi.fn(),
 		getRlmChildRunStatus: vi.fn(() => "running"),
-		registerRlmChildSession: vi.fn(() => true),
+		registerRlmChildSession: vi.fn(async () => true),
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
 		subscribe: vi.fn(() => vi.fn()),
 		bindExtensions: vi.fn(async () => {}),

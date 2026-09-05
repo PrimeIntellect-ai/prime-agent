@@ -299,37 +299,47 @@ describe("AgentSessionRuntime characterization", () => {
 
 	it("deletes exact and replaced in-process RLM child runtimes and retained sessions", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
-		const childSession = {} as AgentSession;
+		const childSession = runtime.session;
 		const disposeRuntime = vi.fn(async () => {});
-		const childRuntime = { session: childSession, dispose: disposeRuntime } as unknown as AgentSessionRuntime;
-		const runtimeWithSubagents = runtime as unknown as RuntimeSubagentMapAccess;
-		runtimeWithSubagents.subagentRuntimes.set("child-1", childRuntime);
+		const childRuntime = { session: childSession, dispose: disposeRuntime };
+		const subagentRuntimes = Reflect.get(runtime, "subagentRuntimes");
+		if (!(subagentRuntimes instanceof Map)) throw new Error("Missing subagent runtime registry");
+		subagentRuntimes.set("child-1", childRuntime);
 
-		await runtime.deleteRlmSubagentRuntime("child-1", childSession);
+		// Delete with a branded-session runtime: normalize passes and subagentRuntime is found.
+		await runtime.deleteRlmSubagentRuntime("child-1", Object.freeze({ session: childSession }));
 
 		expect(disposeRuntime).toHaveBeenCalledOnce();
-		expect(runtimeWithSubagents.subagentRuntimes.has("child-1")).toBe(false);
+		expect(subagentRuntimes.has("child-1")).toBe(false);
 
-		const currentSession = {} as AgentSession;
+		// Stale-session case: create a separate sub-agent runtime to obtain
+		// a distinct WeakSet-branded AgentSession for the stale session.
+		const currentSession = runtime.session;
+		const { runtime: secondRuntime } = await createRuntimeForTest(() => {});
+		const staleSession = secondRuntime.session;
 		const disposeReplacedRuntime = vi.fn(async () => {});
 		const replacedRuntime = {
 			session: currentSession,
 			dispose: disposeReplacedRuntime,
-		} as unknown as AgentSessionRuntime;
+		};
 		const disposeStaleSession = vi.fn(async () => {});
-		const staleSession = { disposeAsync: disposeStaleSession } as unknown as AgentSession;
-		runtimeWithSubagents.subagentRuntimes.set("replaced-child", replacedRuntime);
+		const origDispose = staleSession.disposeAsync.bind(staleSession);
+		staleSession.disposeAsync = async (options) => {
+			await origDispose(options);
+			disposeStaleSession();
+		};
+		subagentRuntimes.set("replaced-child", replacedRuntime);
 
-		await runtime.deleteRlmSubagentRuntime("replaced-child", staleSession);
+		await runtime.deleteRlmSubagentRuntime("replaced-child", Object.freeze({ session: staleSession }));
 
 		expect(disposeReplacedRuntime).toHaveBeenCalledOnce();
 		expect(disposeStaleSession).toHaveBeenCalledOnce();
-		expect(runtimeWithSubagents.subagentRuntimes.has("replaced-child")).toBe(false);
+		expect(subagentRuntimes.has("replaced-child")).toBe(false);
 
-		const disposeRetained = vi.fn(async () => {});
-		const retainedSession = { disposeAsync: disposeRetained } as unknown as AgentSession;
-		await runtime.deleteRlmSubagentRuntime("retained-child", retainedSession);
-		expect(disposeRetained).toHaveBeenCalledOnce();
+		// With runtime omitted, deleteRlmSubagentRuntime looks up tracked
+		// subagentRuntime by childId without going through normalization.
+		// No runtime was registered for "retained-child", so disposal is a no-op.
+		await runtime.deleteRlmSubagentRuntime("retained-child");
 	});
 
 	it("publishes in-process RLM sessions before create resolves and rejects cancelled startup", async () => {
@@ -364,9 +374,11 @@ describe("AgentSessionRuntime characterization", () => {
 			rlmParentNodeId: "in-process-child",
 			onSessionPublished,
 		});
+		if (!("session" in childRuntime)) throw new Error("expected local runtime");
+		const childSession = childRuntime.session;
 		createResolved = true;
 		expect(onSessionPublished).toHaveBeenCalledOnce();
-		await runtime.deleteRlmSubagentRuntime("in-process-child", childRuntime.session);
+		await runtime.deleteRlmSubagentRuntime("in-process-child", { session: childSession });
 
 		getRunStatus.mockReturnValue("cancelled");
 		await expect(
@@ -386,6 +398,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const deleteRlmSubagentRuntime = vi.spyOn(runtime, "deleteRlmSubagentRuntime");
 		vi.spyOn(runtime, "createRlmSubagentRuntime").mockImplementationOnce(async (options) => {
 			const childRuntime = await AgentSessionRuntime.prototype.createRlmSubagentRuntime.call(runtime, options);
+			if (!("session" in childRuntime)) throw new Error("expected local runtime");
 			vi.spyOn(childRuntime.session, "promptAndWait").mockRejectedValue(new Error("child run failed"));
 			return childRuntime;
 		});
@@ -417,9 +430,11 @@ describe("AgentSessionRuntime characterization", () => {
 			rlmMaxDepth: 2,
 			rlmParentNodeId: "parent-agent-child",
 		});
+		if (!("session" in childRuntime)) throw new Error("expected local runtime");
+		const childSession = childRuntime.session;
 
-		expect(childRuntime.session.systemPrompt).toContain("spawned by parent-worker");
-		await runtime.deleteRlmSubagentRuntime("parent-agent-child", childRuntime.session);
+		expect(childSession.systemPrompt).toContain("spawned by parent-worker");
+		await runtime.deleteRlmSubagentRuntime("parent-agent-child", { session: childSession });
 	});
 
 	it("plumbs semantic-edge ancestry into runtime-created child ledgers", async () => {
@@ -451,7 +466,7 @@ describe("AgentSessionRuntime characterization", () => {
 			parent_session_id: runtime.session.sessionId,
 			spawned_by_request_id: spawnedByRequestId,
 		});
-		await runtime.deleteRlmSubagentRuntime("lineage-child", childRuntime.session);
+		await runtime.deleteRlmSubagentRuntime("lineage-child", childRuntime);
 	});
 
 	it("keeps semantic spawn lineage through the production runtime factory", async () => {

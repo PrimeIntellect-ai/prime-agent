@@ -72,8 +72,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 24 adds the capability-gated agent-roster subscription and push.
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
-export const DAEMON_SCHEMA_REVISION = 26;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-962b8b4c5e35";
+// Revision 27 adds capability-gated sandbox session creation options.
+export const DAEMON_SCHEMA_REVISION = 27;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-bf6a716337b3";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -120,7 +121,8 @@ export type DaemonServerCapability =
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
-	| "direct_peer_transport";
+	| "direct_peer_transport"
+	| "sandbox_sessions";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -179,6 +181,15 @@ export interface DaemonPeerTransportTicket {
 	token: string;
 	expiresAt: string;
 }
+
+import type { SandboxOptions as _CoreSandboxOptions } from "../../core/execution-location.js";
+import { normalizeSandboxOptions as _coreNormalize } from "../../core/execution-location.js";
+
+// Re-export from core execution-location module.
+// The interface and function remain in their canonical home
+// so core code never imports from modes.
+export type SandboxOptions = _CoreSandboxOptions;
+export const normalizeSandboxOptions = _coreNormalize;
 
 export interface DaemonRuntimeIdentity {
 	buildId: string;
@@ -411,6 +422,8 @@ export type DaemonCommand =
 			config?: AgentSessionRuntimeConfig;
 			runtimeMetadata?: AgentSessionRuntimeMetadata;
 			lifecycle?: DaemonSessionLifecycle;
+			sandbox?: boolean;
+			sandboxOptions?: SandboxOptions;
 	  } & DaemonClientEnv &
 			DaemonLaunchEnv)
 	// Attach env is adopt-if-absent only: it fills identity for env-less
@@ -991,6 +1004,13 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	}
 	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
+	}
+	if (command.type === "create" && (command.sandbox === true || command.sandboxOptions !== undefined)) {
+		requirements.push({
+			minProtocol: 7,
+			minSchemaRevision: 27,
+			capability: "sandbox_sessions",
+		});
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }

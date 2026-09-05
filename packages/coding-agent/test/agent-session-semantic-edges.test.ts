@@ -450,8 +450,8 @@ describe("AgentSession semantic edges", () => {
 				hostOptions.onSessionPublished?.(created);
 				return { session: created };
 			},
-			deleteRlmSubagentRuntime: async (_childId, session) => {
-				await session?.disposeAsync();
+			deleteRlmSubagentRuntime: async (_childId, runtime) => {
+				if (runtime && "session" in runtime) await runtime.session.disposeAsync();
 			},
 		};
 		return { host, state };
@@ -542,8 +542,8 @@ describe("AgentSession semantic edges", () => {
 				hostOptions.onSessionPublished?.(created);
 				return { session: created };
 			},
-			deleteRlmSubagentRuntime: async (_childId, session) => {
-				await session?.disposeAsync();
+			deleteRlmSubagentRuntime: async (_childId, runtime) => {
+				if (runtime && "session" in runtime) await runtime.session.disposeAsync();
 			},
 		};
 		const { session: root } = createSession({ subagentRuntimeHost: host });
