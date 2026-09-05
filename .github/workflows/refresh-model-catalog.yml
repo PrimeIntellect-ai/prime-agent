@@ -1,0 +1,61 @@
+name: Refresh hosted model catalog
+
+on:
+  schedule:
+    # Daily, off the top of the hour to avoid the cron rush.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-hosted-model-catalog
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Generate, validate, and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate aggregate catalog
+        working-directory: packages/ai
+        env:
+          PRIME_AGENT_MODEL_CATALOG_OUTPUT: /tmp/model-catalog.json
+          PRIME_AGENT_MODEL_CATALOG_STRICT: "1"
+        run: npm run generate-models
+
+      - name: Validate catalog
+        working-directory: packages/ai
+        run: npm run validate-model-catalog -- /tmp/model-catalog.json
+
+      - name: Publish catalog to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_DEFAULT_REGION: auto
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+        run: |
+          test -n "$R2_BUCKET"
+          test -n "$R2_ENDPOINT_URL"
+          aws s3 cp /tmp/model-catalog.json "s3://${R2_BUCKET}/model-catalog.json" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type application/json \
+            --cache-control 'public, max-age=3600, must-revalidate'

@@ -1,0 +1,1 @@
+- Added a validated aggregate model catalog for daily publication from live provider catalogs.

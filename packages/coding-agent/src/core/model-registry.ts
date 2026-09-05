@@ -16,6 +16,7 @@ import {
 	type OAuthProviderInterface,
 	type OpenAICompletionsCompat,
 	type OpenAIResponsesCompat,
+	ProviderCompatSchema,
 	registerApiProvider,
 	resetApiProviders,
 	type SimpleStreamOptions,
@@ -28,6 +29,7 @@ import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.js";
+import { isTruthyEnvFlag } from "../utils/env.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -37,54 +39,16 @@ import {
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
+	getMinimumRemoteModelCatalogSize,
+	mergeRemoteModelCatalog,
+	readCachedRemoteModelCatalog,
+	refreshRemoteModelCatalog,
+} from "./remote-model-catalog.js";
+import {
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
 } from "./resolve-config-value.js";
-
-const PercentileCutoffsSchema = Type.Object({
-	p50: Type.Optional(Type.Number()),
-	p75: Type.Optional(Type.Number()),
-	p90: Type.Optional(Type.Number()),
-	p99: Type.Optional(Type.Number()),
-});
-
-const OpenRouterRoutingSchema = Type.Object({
-	allow_fallbacks: Type.Optional(Type.Boolean()),
-	require_parameters: Type.Optional(Type.Boolean()),
-	data_collection: Type.Optional(Type.Union([Type.Literal("deny"), Type.Literal("allow")])),
-	zdr: Type.Optional(Type.Boolean()),
-	enforce_distillable_text: Type.Optional(Type.Boolean()),
-	order: Type.Optional(Type.Array(Type.String())),
-	only: Type.Optional(Type.Array(Type.String())),
-	ignore: Type.Optional(Type.Array(Type.String())),
-	quantizations: Type.Optional(Type.Array(Type.String())),
-	sort: Type.Optional(
-		Type.Union([
-			Type.String(),
-			Type.Object({
-				by: Type.Optional(Type.String()),
-				partition: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-			}),
-		]),
-	),
-	max_price: Type.Optional(
-		Type.Object({
-			prompt: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-			completion: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-			image: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-			audio: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-			request: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-		}),
-	),
-	preferred_min_throughput: Type.Optional(Type.Union([Type.Number(), PercentileCutoffsSchema])),
-	preferred_max_latency: Type.Optional(Type.Union([Type.Number(), PercentileCutoffsSchema])),
-});
-
-const VercelGatewayRoutingSchema = Type.Object({
-	only: Type.Optional(Type.Array(Type.String())),
-	order: Type.Optional(Type.Array(Type.String())),
-});
 
 const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Null()]);
 const ThinkingLevelMapSchema = Type.Object({
@@ -96,49 +60,6 @@ const ThinkingLevelMapSchema = Type.Object({
 	xhigh: Type.Optional(ThinkingLevelMapValueSchema),
 	max: Type.Optional(ThinkingLevelMapValueSchema),
 });
-
-const OpenAICompletionsCompatSchema = Type.Object({
-	supportsStore: Type.Optional(Type.Boolean()),
-	supportsDeveloperRole: Type.Optional(Type.Boolean()),
-	supportsReasoningEffort: Type.Optional(Type.Boolean()),
-	supportsUsageInStreaming: Type.Optional(Type.Boolean()),
-	maxTokensField: Type.Optional(Type.Union([Type.Literal("max_completion_tokens"), Type.Literal("max_tokens")])),
-	requiresToolResultName: Type.Optional(Type.Boolean()),
-	requiresAssistantAfterToolResult: Type.Optional(Type.Boolean()),
-	requiresThinkingAsText: Type.Optional(Type.Boolean()),
-	requiresReasoningContentOnAssistantMessages: Type.Optional(Type.Boolean()),
-	thinkingFormat: Type.Optional(
-		Type.Union([
-			Type.Literal("openai"),
-			Type.Literal("openrouter"),
-			Type.Literal("deepseek"),
-			Type.Literal("zai"),
-			Type.Literal("qwen"),
-			Type.Literal("qwen-chat-template"),
-		]),
-	),
-	cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
-	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
-	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
-	supportsStrictMode: Type.Optional(Type.Boolean()),
-	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
-});
-
-const OpenAIResponsesCompatSchema = Type.Object({
-	sendSessionIdHeader: Type.Optional(Type.Boolean()),
-	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
-});
-
-const AnthropicMessagesCompatSchema = Type.Object({
-	supportsEagerToolInputStreaming: Type.Optional(Type.Boolean()),
-	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
-});
-
-const ProviderCompatSchema = Type.Union([
-	OpenAICompletionsCompatSchema,
-	OpenAIResponsesCompatSchema,
-	AnthropicMessagesCompatSchema,
-]);
 
 // Most fields are optional with sensible defaults for local models (Ollama, LM Studio, etc.)
 const ModelDefinitionSchema = Type.Object({
@@ -424,12 +345,6 @@ function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): s
 	return createHash("sha256").update(apiKey).update("\0").update(teamId).digest("hex");
 }
 
-function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
-	if (!value) return false;
-	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
-}
-
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -445,6 +360,7 @@ export class ModelRegistry {
 	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
 	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
+	private remoteCatalogModels: Model<Api>[] | undefined;
 	private loadError: string | undefined = undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
@@ -479,6 +395,7 @@ export class ModelRegistry {
 		this.authorizedPrivatePrimeInferenceModelIds.clear();
 		this.authorizedPrivatePrimeInferenceTeamId = undefined;
 		this.explicitPrivatePrimeInferenceModelIds.clear();
+		this.remoteCatalogModels = undefined;
 		this.loadError = undefined;
 
 		// Credentials may have been written by another process (e.g. the UI
@@ -498,6 +415,10 @@ export class ModelRegistry {
 
 		this.loadModels();
 
+		this.reapplyRegisteredProviders();
+	}
+
+	private reapplyRegisteredProviders(): void {
 		for (const [providerName, config] of this.registeredProviders.entries()) {
 			this.applyProviderConfig(providerName, config);
 		}
@@ -508,6 +429,15 @@ export class ModelRegistry {
 	 */
 	getError(): string | undefined {
 		return this.loadError;
+	}
+
+	private remoteModelCatalogCachePath(): string | undefined {
+		return this.modelsJsonPath ? join(dirname(this.modelsJsonPath), "model-catalog-cache.json") : undefined;
+	}
+
+	private minimumRemoteModelCatalogSize(): number {
+		const bundledModelCount = getProviders().reduce((count, provider) => count + getModels(provider).length, 0);
+		return getMinimumRemoteModelCatalogSize(bundledModelCount);
 	}
 
 	private loadModels(): void {
@@ -525,7 +455,14 @@ export class ModelRegistry {
 		this.explicitPrivatePrimeInferenceModelIds = new Set(
 			customModels.filter(isPrivatePrimeInferenceModel).map((model) => model.id),
 		);
-		const builtInModels = [...this.loadBuiltInModels(overrides, modelOverrides), ...getPrivatePrimeInferenceModels()];
+		const cachePath = this.remoteModelCatalogCachePath();
+		const remoteModels =
+			this.remoteCatalogModels ??
+			(cachePath ? readCachedRemoteModelCatalog(cachePath, this.minimumRemoteModelCatalogSize()) : undefined);
+		const builtInModels = [
+			...this.loadBuiltInModels(overrides, modelOverrides, remoteModels),
+			...getPrivatePrimeInferenceModels(),
+		];
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
@@ -542,30 +479,26 @@ export class ModelRegistry {
 	private loadBuiltInModels(
 		overrides: Map<string, ProviderOverride>,
 		modelOverrides: Map<string, Map<string, ModelOverride>>,
+		remoteModels?: Model<Api>[],
 	): Model<Api>[] {
-		return getProviders().flatMap((provider) => {
-			const models = getModels(provider as KnownProvider) as Model<Api>[];
-			const providerOverride = overrides.get(provider);
-			const perModelOverrides = modelOverrides.get(provider);
+		const bundledModels = getProviders().flatMap((provider) => getModels(provider as KnownProvider) as Model<Api>[]);
+		const catalogModels = mergeRemoteModelCatalog(bundledModels, remoteModels);
+		return catalogModels.map((m) => {
+			const providerOverride = overrides.get(m.provider);
+			const perModelOverrides = modelOverrides.get(m.provider);
+			let model = m;
 
-			return models.map((m) => {
-				let model = m;
+			if (providerOverride) {
+				model = {
+					...model,
+					baseUrl: providerOverride.baseUrl ?? model.baseUrl,
+					compat: mergeCompat(model.compat, providerOverride.compat),
+				};
+			}
 
-				if (providerOverride) {
-					model = {
-						...model,
-						baseUrl: providerOverride.baseUrl ?? model.baseUrl,
-						compat: mergeCompat(model.compat, providerOverride.compat),
-					};
-				}
-
-				const modelOverride = perModelOverrides?.get(m.id);
-				if (modelOverride) {
-					model = applyModelOverride(model, modelOverride);
-				}
-
-				return model;
-			});
+			const modelOverride = perModelOverrides?.get(m.id);
+			if (modelOverride) model = applyModelOverride(model, modelOverride);
+			return model;
 		});
 	}
 
@@ -777,6 +710,19 @@ export class ModelRegistry {
 		const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
 		const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
 		this.refresh();
+		const cachePath = this.remoteModelCatalogCachePath();
+		if (cachePath) {
+			void refreshRemoteModelCatalog(cachePath, {
+				minimumModels: this.minimumRemoteModelCatalogSize(),
+			})
+				.then((remoteModels) => {
+					if (!remoteModels || remoteModels === this.remoteCatalogModels) return;
+					this.remoteCatalogModels = remoteModels;
+					this.loadModels();
+					this.reapplyRegisteredProviders();
+				})
+				.catch(() => {});
+		}
 		await this.refreshPrivatePrimeInferenceAuthorization(previousPrivateModelIds, previousTeamId);
 		return this.getAvailable();
 	}
@@ -803,13 +749,13 @@ export class ModelRegistry {
 			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.modelIds);
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
 			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-			if (cacheIsFresh || isOfflineModeEnabled()) {
+			if (cacheIsFresh || isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 				return;
 			}
 			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
 			return;
 		}
-		if (isOfflineModeEnabled()) {
+		if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
 			this.authorizedPrivatePrimeInferenceTeamId = undefined;
 			return;
