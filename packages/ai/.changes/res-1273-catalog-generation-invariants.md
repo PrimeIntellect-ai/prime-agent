@@ -1,0 +1,6 @@
+- Fixed GitHub Copilot Grok and MAI-Code models failing on chat completions by routing them through the Copilot Responses API.
+- Raised the Codex subscription (openai-codex) context window for the GPT-5.6 family from 272k to the full 1,050,000 measured on the API side.
+- Added low/high reasoning effort levels for Kimi K3 on effort-capable providers (OpenRouter, Prime Inference, Hugging Face, Fireworks, opencode, Kimi Coding, Vercel); the Moonshot and GitHub Copilot transports cannot send effort, so their rows now advertise no selectable levels instead of a no-op max.
+- Fixed thinkingmachines/Inkling-Small advertising a maxTokens above its context window.
+- Catalog regeneration now validates invariants (maxTokens vs context window, Copilot API classification, Codex context divergence, cross-provider thinking-level consistency) and fails instead of writing a violating catalog.
+- Updated OpenRouter DeepSeek V4 Flash Vision Exp pricing to the halved rates the upstream catalog now reports.

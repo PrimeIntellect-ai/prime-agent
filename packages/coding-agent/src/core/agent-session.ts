@@ -7266,7 +7266,8 @@ export class AgentSession {
 
 		if (isChanging) {
 			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (this.supportsThinking() || effectiveLevel !== "off") {
+			// A forced clamp on a model with no selectable levels is not a user preference; keep the persisted default.
+			if ((this.supportsThinking() && availableLevels.length > 0) || effectiveLevel !== "off") {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
 			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
@@ -7325,6 +7326,7 @@ export class AgentSession {
 		if (!this.supportsThinking()) return undefined;
 
 		const levels = this.getAvailableThinkingLevels();
+		if (levels.length === 0) return undefined;
 		const currentIndex = levels.indexOf(this.thinkingLevel);
 		const nextIndex = (currentIndex + 1) % levels.length;
 		const nextLevel = levels[nextIndex];
@@ -7346,7 +7348,7 @@ export class AgentSession {
 		if (explicitLevel !== undefined) {
 			return explicitLevel;
 		}
-		if (!this.supportsThinking()) {
+		if (!this.supportsThinking() || this.getAvailableThinkingLevels().length === 0) {
 			return this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
 		}
 		return this.thinkingLevel;
