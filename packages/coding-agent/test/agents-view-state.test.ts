@@ -619,6 +619,39 @@ describe("agents view state", () => {
 		expect(afterRollup?.descendantCount).toBe(1);
 	});
 
+	test("rolls up spawned subagents but never a branched session's copied lineage", () => {
+		const source = makeSummary({
+			id: "src",
+			activeSessionId: "src",
+			sessionId: "src-session",
+			sessionFile: "/tmp/project/src.jsonl",
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.4 },
+		});
+		const branch = makeSessionInfo({
+			path: "/tmp/project/branch.jsonl",
+			id: "branch-session",
+			parentSessionPath: "/tmp/project/src.jsonl",
+			// Branch/fork headers keep the source's depth; only spawns go deeper.
+			rlmDepth: 0,
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.4 },
+		});
+		const child = makeSessionInfo({
+			path: "/tmp/project/child.jsonl",
+			id: "child-session",
+			parentSessionPath: "/tmp/project/src.jsonl",
+			rlmDepth: 1,
+			usage: { inputTokens: 20, outputTokens: 2, cost: 0.1 },
+		});
+
+		const branchOnly = reconcileUnifiedSessions([source], [branch]);
+		expect(computeRecursiveRollups(branchOnly).get(branchOnly[0]!)).toEqual({ cost: 0.4, descendantCount: 0 });
+
+		const withChild = reconcileUnifiedSessions([source], [branch, child]);
+		const rollup = computeRecursiveRollups(withChild).get(withChild[0]!);
+		expect(rollup?.descendantCount).toBe(1);
+		expect(rollup?.cost).toBeCloseTo(0.5);
+	});
+
 	test("tallies a very deep child chain without overflowing the stack", () => {
 		const summaries = [
 			makeSummary({

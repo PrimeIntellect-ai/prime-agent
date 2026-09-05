@@ -457,6 +457,7 @@ export function computeRecursiveRollups(
 		let cost = record.daemon?.usage?.cost ?? record.saved?.usage?.cost ?? 0;
 		let descendantCount = 0;
 		for (const child of index.childrenByParent.get(record) ?? []) {
+			if (!isSubagentDescendantRecord(child, record)) continue;
 			const childRollup = rollups.get(child);
 			cost += childRollup?.cost ?? 0;
 			descendantCount += 1 + (childRollup?.descendantCount ?? 0);
@@ -464,6 +465,21 @@ export function computeRecursiveRollups(
 		rollups.set(record, { cost, descendantCount });
 	}
 	return rollups;
+}
+
+/**
+ * Rollups follow agent lineage only. A branched/forked session links to its
+ * source through parentSession but keeps the source's rlmDepth: it is a
+ * sibling chat, not a descendant, and its copied transcript would double-book
+ * the source's totals. Spawned subagents carry runtimeKind (resident) or a
+ * deeper rlmDepth (saved) and do roll up.
+ */
+function isSubagentDescendantRecord(child: UnifiedSessionRecord, parent: UnifiedSessionRecord): boolean {
+	if (child.daemon) {
+		return isSubagentSummary(child.daemon);
+	}
+	const childDepth = child.saved?.rlmDepth ?? 0;
+	return childDepth > (parent.daemon?.rlmDepth ?? parent.saved?.rlmDepth ?? 0);
 }
 
 export function buildUnifiedSessionIndex(records: readonly UnifiedSessionRecord[]): UnifiedSessionIndex {
