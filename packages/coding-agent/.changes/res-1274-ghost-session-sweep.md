@@ -1,0 +1,2 @@
+- Agents view: "(no messages)" ghost rows no longer render; stale empty session stubs (no content beyond the creation prefix, no queued input, no schedules, no children, not resident/attached/leased, older than 10 minutes) are deleted by a background daemon sweep that re-verifies every file under the eviction fence at delete time.
+- `--continue` now opens the newest real conversation for the directory instead of a newer message-less stub.

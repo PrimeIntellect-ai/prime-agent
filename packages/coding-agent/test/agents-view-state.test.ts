@@ -1990,4 +1990,18 @@ describe("partitionDisposableGhostSessions", () => {
 		const fresh = ghostInfo("/tmp/fresh.jsonl", "fresh", { modified: new Date(NOW - 1000) });
 		expect(partitionDisposableGhostSessions([fresh], [], [], NOW).ghostPaths).toEqual([]);
 	});
+	test("first run: a just-created empty session is kept and never queued for deletion", () => {
+		// New chat, no prompt sent yet, user opens the agents view: the fresh draft
+		// is resident, attached, and inside the grace window — each alone keeps it.
+		const saved = ghostInfo("/tmp/first-run.jsonl", "first-run", {
+			created: new Date(NOW - 5_000),
+			modified: new Date(NOW - 5_000),
+		});
+		const summaries = [
+			makeSummary({ sessionFile: "/tmp/first-run.jsonl", lifecycle: "draft", messageCount: 0, attachedClients: 1 }),
+		];
+		const { visibleSaved, ghostPaths } = partitionDisposableGhostSessions([saved], summaries, [], NOW);
+		expect(ghostPaths).toEqual([]);
+		expect(visibleSaved).toEqual([saved]);
+	});
 });
