@@ -18,7 +18,7 @@ Release docs use the Prime Agent package names. The source workspace manifests s
 ## Workspace Package
 
 ```bash
-npm install prime-agent-core
+bun add prime-agent-core
 ```
 
 ## Quick Start

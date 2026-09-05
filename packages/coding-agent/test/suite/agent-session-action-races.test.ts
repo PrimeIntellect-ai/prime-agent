@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CustomMessage } from "../../src/core/messages.js";
 import type { ActionStore, SessionAction } from "../../src/core/session-action-store.js";
 import { createHarness, getMessageText, getUserTexts, type Harness } from "./harness.js";
-import { createDeferred } from "./scheduling.js";
+import { createDeferred, expectPromiseRejection } from "./scheduling.js";
 
 type ActionKind = "turn" | "command";
 
@@ -225,7 +225,7 @@ describe("AgentSession action commit-fence races", () => {
 		schedule.mockRestore();
 		internals._scheduleSessionInputPump();
 		await vi.waitFor(() => expect(internals._actionStore.unfinishedActions()[0]?.lifecycle.state).toBe("selected"));
-		const rejection = expect(completion).rejects.toThrow("cleared before delivery");
+		const rejection = expectPromiseRejection(completion, "cleared before delivery");
 		expect(harness.session.clearQueue().followUp).toEqual([text]);
 		heldFence.release();
 

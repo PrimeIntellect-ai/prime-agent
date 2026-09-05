@@ -50,7 +50,7 @@ describe("#617 subagent terminal agent messages", () => {
 
 		const spawned = await parent.session.runRlmChild("finish without replying", { name: childSessionName });
 
-		await expect.poll(() => terminalNotices(parent!.session.messages)).toHaveLength(1);
+		await vi.waitFor(() => expect(terminalNotices(parent!.session.messages)).toHaveLength(1));
 		expect(sendAgentMessage).not.toHaveBeenCalled();
 		expect(terminalNotices(parent.session.messages)[0]).toMatchObject({
 			customType: "rlm_child_terminal_notice",

@@ -20,6 +20,22 @@ export function createDeferred<T = void>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
+/** Attach an immediate rejection handler without Bun's pending `.rejects` matcher deadlock. */
+export function expectPromiseRejection(promise: Promise<unknown>, expected: string | RegExp): Promise<void> {
+	return promise.then(
+		() => {
+			throw new Error(`Expected promise to reject with ${String(expected)}`);
+		},
+		(error: unknown) => {
+			const message = error instanceof Error ? error.message : String(error);
+			const matches = typeof expected === "string" ? message.includes(expected) : expected.test(message);
+			if (!matches) {
+				throw new Error(`Expected rejection ${String(expected)}, received: ${message}`);
+			}
+		},
+	);
+}
+
 /**
  * A before_agent_start gate as an extension factory: `reached` resolves when the
  * hook first runs (optionally filtered by prompt), `release()` lets gated runs

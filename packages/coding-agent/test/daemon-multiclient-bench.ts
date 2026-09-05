@@ -7,10 +7,10 @@
  *
  * Run from packages/coding-agent:
  *
- *   npx tsx test/daemon-multiclient-bench.ts
- *   npx tsx test/daemon-multiclient-bench.ts --session-file /path/to/session.jsonl
- *   npx tsx test/daemon-multiclient-bench.ts --generated-session-mib 100
- *   npx tsx test/daemon-multiclient-bench.ts --generated-session-mib 500
+ *   bun test/daemon-multiclient-bench.ts
+ *   bun test/daemon-multiclient-bench.ts --session-file /path/to/session.jsonl
+ *   bun test/daemon-multiclient-bench.ts --generated-session-mib 100
+ *   bun test/daemon-multiclient-bench.ts --generated-session-mib 500
  */
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";

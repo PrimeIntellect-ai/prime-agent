@@ -754,7 +754,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.waitForIdle).toHaveBeenCalledBefore(session.prompt);
+		expect(session.waitForIdle.mock.invocationCallOrder[0]).toBeLessThan(session.prompt.mock.invocationCallOrder[0]!);
 		expect(session.prompt).toHaveBeenCalledTimes(2);
 		expect(session.prompt.mock.calls[0][0]).toContain("Autonomous quality gate failed (attempt 1/3)");
 		expect(session.prompt.mock.calls[0][0]).toContain("0/9");

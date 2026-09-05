@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -5,13 +6,11 @@ const fsMocks = vi.hoisted(() => ({
 	createReadStream: vi.fn(),
 }));
 
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
-	return {
-		...actual,
-		createReadStream: fsMocks.createReadStream,
-	};
-});
+const __fs = createRequire(import.meta.url)("node:fs");
+vi.mock("node:fs", () => ({
+	...__fs,
+	createReadStream: fsMocks.createReadStream,
+}));
 
 const { readLinesAsBuffers } = await import("../src/utils/file-lines.js");
 

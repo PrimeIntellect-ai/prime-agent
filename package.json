@@ -2,6 +2,7 @@
 	"name": "prime-agent",
 	"private": true,
 	"type": "module",
+	"packageManager": "bun@1.4.0",
 	"workspaces": [
 		"packages/*",
 		"packages/coding-agent/examples/extensions/with-deps",
@@ -10,43 +11,53 @@
 		"packages/coding-agent/examples/extensions/sandbox"
 	],
 	"scripts": {
-		"clean": "npm run clean --workspaces",
-		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
-		"dev": "concurrently --names \"ai,agent,coding-agent,tui\" --prefix-colors \"cyan,yellow,red,magenta\" \"cd packages/ai && npm run dev\" \"cd packages/agent && npm run dev\" \"cd packages/coding-agent && npm run dev\" \"cd packages/tui && npm run dev\"",
-		"dev:tsc": "cd packages/ai && npm run dev:tsc",
-		"check": "biome check --write --error-on-warnings . && tsgo --noEmit && npm run check:installer && npm run check:browser-smoke",
-		"check:installer": "node scripts/check-installer.mjs",
-		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
-		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
-		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
-		"test": "npm run test --workspaces --if-present",
-		"version:patch": "npm version patch -ws --no-git-tag-version && node scripts/sync-versions.js && shx rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
-		"version:minor": "npm version minor -ws --no-git-tag-version && node scripts/sync-versions.js && shx rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
-		"version:major": "npm version major -ws --no-git-tag-version && node scripts/sync-versions.js && shx rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
-		"version:set": "npm version -ws",
-		"prepublishOnly": "npm run clean && npm run build && npm run check",
-		"publish": "npm run prepublishOnly && npm publish -ws --access public",
-		"publish:dry": "npm run prepublishOnly && npm publish -ws --access public --dry-run",
-		"release:pack": "node scripts/pack-prime-agent-release.mjs",
-		"release:patch": "node scripts/release.mjs patch",
-		"release:minor": "node scripts/release.mjs minor",
-		"release:major": "node scripts/release.mjs major",
-		"prepare": "husky"
+		"clean": "bun scripts/remove-paths.ts packages/tui/dist packages/ai/dist packages/agent/dist packages/coding-agent/dist",
+		"build": "bun run --cwd packages/tui build && bun run --cwd packages/ai build && bun run --cwd packages/agent build && bun run --cwd packages/coding-agent build",
+		"dev": "bun scripts/dev.ts",
+		"dev:tsc": "bun run --cwd packages/ai dev:tsc",
+		"models:refresh": "bun run --cwd packages/ai generate-models",
+		"check:bun-version": "bun scripts/check-bun-version.ts",
+		"check": "bun run check:bun-version && bun --bun biome check --write --error-on-warnings . && bun run check:type && bun run check:installer && bun run check:browser-smoke",
+		"check:installer": "bun scripts/check-installer-render.mjs",
+		"check:browser-smoke": "bun scripts/check-browser-smoke.mjs",
+		"profile:tui": "bun scripts/profile-coding-agent-node.mjs --mode tui",
+		"profile:rpc": "bun scripts/profile-coding-agent-node.mjs --mode rpc",
+		"test": "bun run --cwd packages/tui test && bun run --cwd packages/ai test && bun run --cwd packages/agent test && bun run --cwd packages/coding-agent test",
+		"version:patch": "bun scripts/set-version.ts patch",
+		"version:minor": "bun scripts/set-version.ts minor",
+		"version:major": "bun scripts/set-version.ts major",
+		"version:set": "bun scripts/set-version.ts",
+		"prepublishOnly": "bun run clean && bun run build && bun run check",
+		"publish": "bun run prepublishOnly && bun scripts/publish-workspaces.ts",
+		"publish:dry": "bun run prepublishOnly && bun scripts/publish-workspaces.ts --dry-run",
+		"release:pack": "bun scripts/pack-prime-agent-release.mjs",
+		"release:patch": "bun scripts/release.mjs patch",
+		"release:minor": "bun scripts/release.mjs minor",
+		"release:major": "bun scripts/release.mjs major",
+		"prepare": "bun --bun husky",
+		"build:binary": "bun run --cwd packages/coding-agent build:binary",
+		"dev:cli": "bun packages/coding-agent/src/bun/cli.ts",
+		"check:type": "bun --bun tsgo --noEmit",
+		"test:process": "bun run --cwd packages/coding-agent test:process",
+		"test:process-stress": "bun run --cwd packages/coding-agent test:process-stress",
+		"test:kernel": "bun run --cwd packages/coding-agent test:kernel"
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.55",
 		"@biomejs/biome": "2.5.5",
 		"@types/node": "^22.10.5",
 		"@typescript/native-preview": "7.0.0-dev.20260120.1",
-		"concurrently": "^9.2.4",
+		"bun-types": "1.4.0",
 		"husky": "^9.1.7",
 		"jiti": "^2.7.0",
-		"shx": "^0.4.0",
-		"tsx": "^4.23.1",
-		"typescript": "^7.0.2"
+		"typescript": "^7.0.2",
+		"@vitest/expect": "4.1.10",
+		"@vitest/runner": "4.1.10",
+		"@vitest/spy": "4.1.10"
 	},
 	"engines": {
-		"node": ">=22.8.0"
+		"node": ">=22.8.0",
+		"bun": "1.4.0"
 	},
 	"version": "0.9.1",
 	"dependencies": {
@@ -55,9 +66,6 @@
 	},
 	"overrides": {
 		"rimraf": "6.1.2",
-		"gaxios": {
-			"rimraf": "6.1.2"
-		},
 		"shell-quote": "^1.10.0"
 	}
 }

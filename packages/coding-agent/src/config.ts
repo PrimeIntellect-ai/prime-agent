@@ -98,7 +98,7 @@ export function detectInstallMethod(): InstallMethod {
 	if (resolvedPath.includes("/yarn/") || resolvedPath.includes("/.yarn/")) {
 		return "yarn";
 	}
-	if (isBunRuntime || resolvedPath.includes("/install/global/node_modules/")) {
+	if (resolvedPath.includes("/install/global/node_modules/")) {
 		return "bun";
 	}
 	if (resolvedPath.includes("/npm/") || resolvedPath.includes("/node_modules/")) {
@@ -150,16 +150,34 @@ function getDefaultUpdatePackageName(installedPackageName: string, updateSpec: s
 	return updateSpec;
 }
 
+export function buildBinarySelfUpdateArgs(targetVersion?: string): string[] {
+	return targetVersion ? ["--update", targetVersion] : ["--update"];
+}
+
 function getSelfUpdateCommandForMethod(
 	method: InstallMethod,
 	installedPackageName: string,
 	updateSpec = installedPackageName,
 	npmCommand?: string[],
 	updatePackageName = getDefaultUpdatePackageName(installedPackageName, updateSpec),
+	binaryTargetVersion?: string,
 ): SelfUpdateCommand | undefined {
 	const uninstallAfterInstall = isDirectPackageArtifactSpec(updateSpec);
 	switch (method) {
-		case "bun-binary":
+		case "bun-binary": {
+			// Bun-compiled binary: use install.sh sidecar for self-update
+			const installScript = join(getPackageDir(), "install.sh");
+			if (existsSync(installScript)) {
+				const updateCmd = makeSelfUpdateCommandStep(installScript, buildBinarySelfUpdateArgs(binaryTargetVersion));
+				return {
+					...updateCmd,
+					steps: [updateCmd],
+				};
+			}
+			// install.sh not bundled; self-update not available via command.
+			// The caller shows a download link as fallback.
+			return undefined;
+		}
 		case "homebrew":
 			return undefined;
 		case "pnpm":
@@ -211,6 +229,7 @@ function readCommandOutput(
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
 		shell: shouldUseWindowsShell(command),
+		env: process.env,
 	});
 	if (result.status === 0) return result.stdout.trim() || undefined;
 	if (options.requireSuccess) {
@@ -311,11 +330,23 @@ export function getSelfUpdateCommand(
 	npmCommand?: string[],
 	updateSpec = packageName,
 	updatePackageName = getDefaultUpdatePackageName(packageName, updateSpec),
+	binaryTargetVersion?: string,
 ): SelfUpdateCommand | undefined {
 	const method = detectInstallMethod();
-	const command = getSelfUpdateCommandForMethod(method, packageName, updateSpec, npmCommand, updatePackageName);
-	if (!command || !isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
-		return undefined;
+	const command = getSelfUpdateCommandForMethod(
+		method,
+		packageName,
+		updateSpec,
+		npmCommand,
+		updatePackageName,
+		binaryTargetVersion,
+	);
+	if (!command) return undefined;
+	// Compiled binary installs are managed by their versioned installer directory.
+	if (method !== "bun-binary") {
+		if (!isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
+			return undefined;
+		}
 	}
 	return command;
 }
@@ -328,6 +359,10 @@ export function getSelfUpdateUnavailableInstruction(
 ): string {
 	const method = detectInstallMethod();
 	if (method === "bun-binary") {
+		const installScript = join(getPackageDir(), "install.sh");
+		if (existsSync(installScript)) {
+			return `Update with: ${installScript} --update`;
+		}
 		return `Download from: https://github.com/PrimeIntellect-ai/prime-agent/releases/latest`;
 	}
 	if (method === "homebrew") {
@@ -360,7 +395,7 @@ export function getUpdateInstruction(packageName: string): string {
  * Get the base directory for resolving package assets (themes, package.json, README.md, CHANGELOG.md).
  * - For Bun binary: returns the directory containing the executable
  * - For Node.js (dist/): returns __dirname (the dist/ directory)
- * - For tsx (src/): returns parent directory (the package root)
+ * - For direct source execution (src/): returns parent directory (the package root)
  */
 export function getPackageDir(): string {
 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
@@ -391,7 +426,7 @@ export function getPackageDir(): string {
  * Get path to built-in themes directory (shipped with package)
  * - For Bun binary: theme/ next to executable
  * - For Node.js (dist/): dist/modes/interactive/theme/
- * - For tsx (src/): src/modes/interactive/theme/
+ * - For direct source execution (src/): src/modes/interactive/theme/
  */
 export function getThemesDir(): string {
 	if (isBunBinary) {
@@ -407,7 +442,7 @@ export function getThemesDir(): string {
  * Get path to HTML export template directory (shipped with package)
  * - For Bun binary: export-html/ next to executable
  * - For Node.js (dist/): dist/core/export-html/
- * - For tsx (src/): src/core/export-html/
+ * - For direct source execution (src/): src/core/export-html/
  */
 export function getExportTemplateDir(): string {
 	if (isBunBinary) {
@@ -437,7 +472,7 @@ export function getChangelogPath(): string {
  * Get path to built-in interactive assets directory.
  * - For Bun binary: assets/ next to executable
  * - For Node.js (dist/): dist/modes/interactive/assets/
- * - For tsx (src/): src/modes/interactive/assets/
+ * - For direct source execution (src/): src/modes/interactive/assets/
  */
 export function getInteractiveAssetsDir(): string {
 	if (isBunBinary) {
@@ -457,7 +492,7 @@ export function getBundledInteractiveAssetPath(name: string): string {
  * Get the directory containing built-in skills shipped with the package.
  * - For Bun binary: skills/ next to executable
  * - For Node.js (dist/): dist/skills/
- * - For tsx (src/): skills/ at the package root
+ * - For direct source execution (src/): skills/ at the package root
  */
 export function getBundledSkillsDir(): string {
 	if (isBunBinary) {

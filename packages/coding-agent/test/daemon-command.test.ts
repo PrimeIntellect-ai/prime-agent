@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const daemonClientMock = vi.hoisted(() => {
@@ -121,10 +122,8 @@ const spawnMock = vi.hoisted(() => {
 	};
 });
 
-vi.mock("node:child_process", async (importOriginal) => {
-	const original = (await importOriginal()) as Record<string, unknown>;
-	return { ...original, spawn: spawnMock.mockSpawn as never };
-});
+const __childProcess = createRequire(import.meta.url)("node:child_process");
+vi.mock("node:child_process", () => ({ ...__childProcess, spawn: spawnMock.mockSpawn as never }));
 
 import { handleDaemonCommand } from "../src/cli/daemon-command.js";
 
@@ -132,7 +131,7 @@ describe("daemon command", () => {
 	let consoleErrorMessages: unknown[];
 
 	beforeEach(() => {
-		process.exitCode = undefined;
+		process.exitCode = 0;
 		daemonClientMock.instances.length = 0;
 		daemonClientMock.behavior.promptSucceeds = false;
 		daemonClientMock.behavior.emitStaleAgentEndOnAttach = false;
@@ -149,7 +148,7 @@ describe("daemon command", () => {
 	});
 
 	afterEach(() => {
-		process.exitCode = undefined;
+		process.exitCode = 0;
 		vi.restoreAllMocks();
 	});
 

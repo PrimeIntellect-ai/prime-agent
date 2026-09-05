@@ -320,8 +320,8 @@ function createExtensionAPI(
 	return api;
 }
 
-// Replaced with `true` by the esbuild CLI bundle (scripts/bundle.mjs); stays
-// undefined in unbundled dist/ and under tsx.
+// Replaced with `true` by the Bun CLI bundle (scripts/bundle.mjs); stays
+// undefined in unbundled dist/ and direct source execution.
 declare const __PI_BUNDLED__: boolean | undefined;
 const isBundledCli = typeof __PI_BUNDLED__ !== "undefined" && __PI_BUNDLED__ === true;
 
@@ -333,11 +333,11 @@ async function loadExtensionModule(extensionPath: string) {
 	const { createJiti } = await import("jiti/static");
 	const jiti = createJiti(import.meta.url, {
 		moduleCache: false,
-		// In the Bun binary and the esbuild CLI bundle: serve pi packages from
+		// In the Bun binary and the Bun CLI bundle: serve pi packages from
 		// virtualModules so extensions share the bundle's module instances
 		// (file-path aliases would load a second, divergent copy of each package).
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
-		// In Node.js/dev: use aliases to resolve to node_modules paths
+		// In direct source execution: use aliases to resolve to node_modules paths
 		...(isBunBinary || isBundledCli
 			? { virtualModules: (await import("./bundled-modules.js")).VIRTUAL_MODULES, tryNative: false }
 			: { alias: getAliases() }),
@@ -522,7 +522,7 @@ function discoverExtensionsInDir(dir: string): string[] {
 	const discovered: string[] = [];
 
 	try {
-		const entries = fs.readdirSync(dir, { withFileTypes: true });
+		const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
 
 		for (const entry of entries) {
 			const entryPath = path.join(dir, entry.name);

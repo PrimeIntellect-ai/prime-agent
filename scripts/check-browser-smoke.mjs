@@ -1,36 +1,26 @@
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { build } from "esbuild";
 
-const outputPath = join(tmpdir(), "pi-browser-smoke.js");
-const errorLogPath = join(tmpdir(), "pi-browser-smoke-errors.log");
+const outputPath = join(tmpdir(), "prime-agent-browser-smoke.js");
+const errorLogPath = join(tmpdir(), "prime-agent-browser-smoke-errors.log");
 
 try {
-	await build({
-		entryPoints: ["scripts/browser-smoke-entry.ts"],
-		bundle: true,
-		platform: "browser",
+	const result = await Bun.build({
+		entrypoints: ["scripts/browser-smoke-entry.ts"],
+		target: "browser",
 		format: "esm",
-		logLevel: "silent",
-		outfile: outputPath,
+		sourcemap: "none",
+		write: false,
+		throw: false,
 	});
-	process.exit(0);
-} catch (error) {
-	let detailedErrors = "";
-	if (error && typeof error === "object" && "errors" in error && Array.isArray(error.errors)) {
-		detailedErrors = error.errors
-			.map((entry) => {
-				const location = entry.location
-					? `${entry.location.file}:${entry.location.line}:${entry.location.column}`
-					: "";
-				return [location, entry.text].filter(Boolean).join(" ");
-			})
-			.join("\n");
+	if (!result.success || result.outputs.length !== 1) {
+		throw new Error(result.logs.map((entry) => entry.message).join("\n") || "Bun browser bundle produced no output");
 	}
-
-	const baseError = error instanceof Error ? (error.stack ?? error.message) : String(error);
-	writeFileSync(errorLogPath, [detailedErrors, baseError].filter(Boolean).join("\n\n"), "utf-8");
+	await Bun.write(outputPath, result.outputs[0]);
+} catch (error) {
+	const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+	writeFileSync(errorLogPath, message, "utf-8");
 	console.error(`Browser smoke check failed. See ${errorLogPath}`);
 	process.exit(1);
 }

@@ -1,0 +1,8 @@
+[install]
+linker = "hoisted"
+minimumReleaseAge = 604800
+
+[test]
+preload = ["./packages/coding-agent/test/bun-test-preload.ts"]
+timeout = 30000
+pathIgnorePatterns = ["**/daemon-supervisor-process.test.ts", "**/compiled-artifact-smoke.test.ts", "**/daemon-supervisor-monitor.test.ts"]

@@ -1,5 +1,5 @@
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMcpOAuthProvider } from "../src/mcp/oauth.js";
 
 function jsonResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
@@ -58,9 +58,13 @@ async function loginWithManualCode(
 	return { creds, authUrl };
 }
 
-describe.sequential("MCP OAuth provider", () => {
+describe("MCP OAuth provider", () => {
+	let origFetchMCP: typeof globalThis.fetch | undefined;
 	afterEach(() => {
-		vi.unstubAllGlobals();
+		if (origFetchMCP !== undefined) {
+			globalThis.fetch = origFetchMCP;
+			origFetchMCP = undefined;
+		}
 	});
 
 	it("has a namespaced id and label", () => {
@@ -92,7 +96,8 @@ describe.sequential("MCP OAuth provider", () => {
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 
 		const { creds, authUrl } = await loginWithManualCode(createMcpOAuthProvider({ server: "plane", url: RESOURCE }));
 		expect(creds).toMatchObject({
@@ -119,45 +124,40 @@ describe.sequential("MCP OAuth provider", () => {
 			token_endpoint: "https://login.example/tenant/token",
 			registration_endpoint: "https://login.example/tenant/register",
 		};
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: unknown): Promise<Response> => {
-				const url = urlOf(input);
-				if (url === RESOURCE) return new Response("", { status: 404 });
-				if (url === PLANE_PRM_URL) return jsonResponse({ resource: RESOURCE, authorization_servers: [issuer] });
-				if (url === "https://login.example/.well-known/oauth-authorization-server/tenant")
-					return new Response("<html>not metadata</html>", {
-						status: 200,
-						headers: { "Content-Type": "text/html" },
-					});
-				if (url === oidcMeta) return jsonResponse(metadata);
-				if (url === metadata.registration_endpoint) return jsonResponse({ client_id: "c" });
-				if (url === metadata.token_endpoint) return jsonResponse({ access_token: "a", expires_in: 60 });
-				throw new Error(`unexpected fetch: ${url}`);
-			}),
-		);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: unknown): Promise<Response> => {
+			const url = urlOf(input);
+			if (url === RESOURCE) return new Response("", { status: 404 });
+			if (url === PLANE_PRM_URL) return jsonResponse({ resource: RESOURCE, authorization_servers: [issuer] });
+			if (url === "https://login.example/.well-known/oauth-authorization-server/tenant")
+				return new Response("<html>not metadata</html>", {
+					status: 200,
+					headers: { "Content-Type": "text/html" },
+				});
+			if (url === oidcMeta) return jsonResponse(metadata);
+			if (url === metadata.registration_endpoint) return jsonResponse({ client_id: "c" });
+			if (url === metadata.token_endpoint) return jsonResponse({ access_token: "a", expires_in: 60 });
+			throw new Error(`unexpected fetch: ${url}`);
+		});
 		const { creds } = await loginWithManualCode(createMcpOAuthProvider({ server: "plane", url: RESOURCE }));
 		expect(creds).toMatchObject({ resource: RESOURCE, issuer });
 	});
 
 	it("fails closed after protected-resource metadata selects an issuer", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: unknown): Promise<Response> => {
-				const url = urlOf(input);
-				if (url === RESOURCE)
-					return new Response("", {
-						status: 401,
-						headers: { "WWW-Authenticate": `Bearer resource_metadata="${PLANE_PRM_URL}"` },
-					});
-				if (url === PLANE_PRM_URL)
-					return jsonResponse({ resource: RESOURCE, authorization_servers: [PLANE_ISSUER] });
-				if (url === PLANE_META_URL) return jsonResponse({ ...PLANE_META, issuer: "https://wrong.example" });
-				if (url === "https://mcp.plane.so/http/.well-known/openid-configuration")
-					return new Response("", { status: 404 });
-				throw new Error(`unexpected fetch: ${url}`);
-			}),
-		);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: unknown): Promise<Response> => {
+			const url = urlOf(input);
+			if (url === RESOURCE)
+				return new Response("", {
+					status: 401,
+					headers: { "WWW-Authenticate": `Bearer resource_metadata="${PLANE_PRM_URL}"` },
+				});
+			if (url === PLANE_PRM_URL) return jsonResponse({ resource: RESOURCE, authorization_servers: [PLANE_ISSUER] });
+			if (url === PLANE_META_URL) return jsonResponse({ ...PLANE_META, issuer: "https://wrong.example" });
+			if (url === "https://mcp.plane.so/http/.well-known/openid-configuration")
+				return new Response("", { status: 404 });
+			throw new Error(`unexpected fetch: ${url}`);
+		});
 		await expect(
 			createMcpOAuthProvider({ server: "plane", url: RESOURCE }).login({
 				onAuth: () => {},
@@ -180,7 +180,8 @@ describe.sequential("MCP OAuth provider", () => {
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 		const { creds, authUrl } = await loginWithManualCode(
 			createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL }),
 		);
@@ -213,7 +214,8 @@ describe.sequential("MCP OAuth provider", () => {
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 		const provider = createMcpOAuthProvider({ server: "plane", url: RESOURCE });
 		const refreshed = await provider.refreshToken({
 			access: "access-1",
@@ -260,17 +262,15 @@ describe.sequential("MCP OAuth provider", () => {
 			authorization_endpoint: "https://root.example/authorize",
 			token_endpoint: "https://root.example/token",
 		};
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: unknown): Promise<Response> => {
-				const url = urlOf(input);
-				if (url === "https://root.example/") return new Response("", { status: 401 });
-				if (url === prm) return jsonResponse({ resource, authorization_servers: [issuer] });
-				if (url === asMetadata) return jsonResponse(metadata);
-				if (url === metadata.token_endpoint) return jsonResponse({ access_token: "root-access" });
-				throw new Error(`unexpected fetch: ${url}`);
-			}),
-		);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: unknown): Promise<Response> => {
+			const url = urlOf(input);
+			if (url === "https://root.example/") return new Response("", { status: 401 });
+			if (url === prm) return jsonResponse({ resource, authorization_servers: [issuer] });
+			if (url === asMetadata) return jsonResponse(metadata);
+			if (url === metadata.token_endpoint) return jsonResponse({ access_token: "root-access" });
+			throw new Error(`unexpected fetch: ${url}`);
+		});
 		const { creds, authUrl } = await loginWithManualCode(
 			createMcpOAuthProvider({ server: "root", url: resource, clientId: "root-client" }),
 		);
@@ -296,7 +296,8 @@ describe.sequential("MCP OAuth provider", () => {
 			if (url === metadata.token_endpoint) return jsonResponse({ access_token: "query-access" });
 			throw new Error(`unexpected fetch: ${url}`);
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 		const { creds } = await loginWithManualCode(
 			createMcpOAuthProvider({ server: "query", url: resource, clientId: "query-client" }),
 		);
@@ -314,7 +315,8 @@ describe.sequential("MCP OAuth provider", () => {
 			if (url === PLANE_META_URL) return jsonResponse(PLANE_META);
 			throw new Error(`unexpected fetch: ${url}`);
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 		await expect(
 			createMcpOAuthProvider({ server: "plane", url: RESOURCE }).refreshToken({
 				access: "origin-access",
@@ -329,20 +331,18 @@ describe.sequential("MCP OAuth provider", () => {
 	});
 
 	it("rejects a redirected token POST", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
-				const missing = absentPrm(input);
-				if (missing) return missing;
-				const url = urlOf(input);
-				if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
-				if (url === ORIGIN_META.token_endpoint) {
-					expect(init?.redirect).toBe("error");
-					return new Response("redirect", { status: 302, headers: { Location: "https://evil.test/token" } });
-				}
-				throw new Error(`unexpected fetch: ${url}`);
-			}),
-		);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const missing = absentPrm(input);
+			if (missing) return missing;
+			const url = urlOf(input);
+			if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
+			if (url === ORIGIN_META.token_endpoint) {
+				expect(init?.redirect).toBe("error");
+				return new Response("redirect", { status: 302, headers: { Location: "https://evil.test/token" } });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		});
 		const provider = createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL, clientId: "c" });
 		await expect(
 			provider.refreshToken({
@@ -370,7 +370,8 @@ describe.sequential("MCP OAuth provider", () => {
 			if (url === PLANE_META.token_endpoint) return jsonResponse({ access_token: "pointer-access" });
 			throw new Error(`unexpected fetch: ${url}`);
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 
 		const { creds } = await loginWithManualCode(createMcpOAuthProvider({ server: "plane", url: RESOURCE }));
 		expect(creds).toMatchObject({ access: "pointer-access", resource: RESOURCE, issuer: PLANE_ISSUER });
@@ -378,16 +379,14 @@ describe.sequential("MCP OAuth provider", () => {
 	});
 
 	it("rejects protected-resource metadata for a different resource", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: unknown): Promise<Response> => {
-				const url = urlOf(input);
-				if (url === RESOURCE) return new Response("", { status: 401 });
-				if (url === PLANE_PRM_URL)
-					return jsonResponse({ resource: "https://attacker.example/mcp", authorization_servers: [PLANE_ISSUER] });
-				throw new Error(`unexpected fetch: ${url}`);
-			}),
-		);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: unknown): Promise<Response> => {
+			const url = urlOf(input);
+			if (url === RESOURCE) return new Response("", { status: 401 });
+			if (url === PLANE_PRM_URL)
+				return jsonResponse({ resource: "https://attacker.example/mcp", authorization_servers: [PLANE_ISSUER] });
+			throw new Error(`unexpected fetch: ${url}`);
+		});
 
 		await expect(
 			createMcpOAuthProvider({ server: "plane", url: RESOURCE }).login({
@@ -404,18 +403,16 @@ describe.sequential("MCP OAuth provider", () => {
 			blocker.listen(53700, "127.0.0.1", () => resolve(true));
 		});
 		try {
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (input: unknown): Promise<Response> => {
-					const missing = absentPrm(input);
-					if (missing) return missing;
-					const url = urlOf(input);
-					if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
-					if (url === ORIGIN_META.registration_endpoint) return jsonResponse({ client_id: "c" });
-					if (url === ORIGIN_META.token_endpoint) return jsonResponse({ access_token: "a", expires_in: 60 });
-					throw new Error(`unexpected fetch: ${url}`);
-				}),
-			);
+			origFetchMCP = globalThis.fetch;
+			globalThis.fetch = vi.fn(async (input: unknown): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return missing;
+				const url = urlOf(input);
+				if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
+				if (url === ORIGIN_META.registration_endpoint) return jsonResponse({ client_id: "c" });
+				if (url === ORIGIN_META.token_endpoint) return jsonResponse({ access_token: "a", expires_in: 60 });
+				throw new Error(`unexpected fetch: ${url}`);
+			});
 			const { authUrl } = await loginWithManualCode(createMcpOAuthProvider({ server: "demo", url: ORIGIN_URL }));
 			const redirect = new URL(authUrl).searchParams.get("redirect_uri") ?? "";
 			expect(redirect).not.toContain(":53700/");
@@ -426,17 +423,15 @@ describe.sequential("MCP OAuth provider", () => {
 	});
 
 	it("fails clearly when dynamic client registration is unavailable", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: unknown): Promise<Response> => {
-				const missing = absentPrm(input);
-				if (missing) return missing;
-				const url = urlOf(input);
-				if (url === "https://srv.test/.well-known/oauth-authorization-server")
-					return jsonResponse({ ...ORIGIN_META, registration_endpoint: undefined });
-				throw new Error(`unexpected fetch: ${url}`);
-			}),
-		);
+		origFetchMCP = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: unknown): Promise<Response> => {
+			const missing = absentPrm(input);
+			if (missing) return missing;
+			const url = urlOf(input);
+			if (url === "https://srv.test/.well-known/oauth-authorization-server")
+				return jsonResponse({ ...ORIGIN_META, registration_endpoint: undefined });
+			throw new Error(`unexpected fetch: ${url}`);
+		});
 		await expect(
 			createMcpOAuthProvider({ server: "slackish", url: ORIGIN_URL }).login({
 				onAuth: () => {},

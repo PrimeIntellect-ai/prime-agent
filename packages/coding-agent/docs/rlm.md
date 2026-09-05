@@ -44,7 +44,7 @@ large_files = [path for path in config_files if path.stat().st_size > 10_000]
 Run a project's normal commands through its own environment with `bash()`:
 
 ```python
-result = await bash("npm run check")
+result = await bash("bun run check")
 print(result.output)
 ```
 

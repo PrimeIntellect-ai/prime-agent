@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
+import { isTestTagEnabled } from "./test-tags.js";
 
 const runtimePython = resolve("../../prime-agent-runtime/.venv/bin/python");
 const fallbackPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
@@ -18,7 +19,7 @@ function resolveKernelPython(): string | null {
 }
 
 const python = resolveKernelPython();
-const describeIfKernel = python ? describe : describe.skip;
+const describeIfKernel = python && isTestTagEnabled("kernel-heavy") ? describe : describe.skip;
 
 const MCP_SERVER = `import asyncio, json, os, sys
 from pathlib import Path
@@ -56,7 +57,7 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 	return !pidExists(pid);
 }
 
-describeIfKernel("real REPL kernel MCP shutdown", { tags: ["kernel-heavy"] }, () => {
+describeIfKernel("real REPL kernel MCP shutdown", () => {
 	let dir = "";
 	let fixture = "";
 	let pidFile = "";

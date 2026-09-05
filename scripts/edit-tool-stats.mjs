@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
@@ -62,7 +62,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-	console.log(`Usage: node scripts/edit-tool-stats.mjs [options]
+	console.log(`Usage: bun scripts/edit-tool-stats.mjs [options]
 
 Options:
   --sessions-dir <path>  Sessions directory (default: ~/.pi/agent/sessions)

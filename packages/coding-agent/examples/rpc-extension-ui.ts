@@ -5,7 +5,7 @@
  * Demonstrates how to build a custom UI on top of the RPC protocol,
  * including handling extension UI requests (select, confirm, input, editor).
  *
- * Usage: npx tsx examples/rpc-extension-ui.ts
+ * Usage: bun examples/rpc-extension-ui.ts
  *
  * Slash commands:
  *   /select  - demo select dialog

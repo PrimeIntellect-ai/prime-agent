@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const require = createRequire(import.meta.url);
-const tsxLoader = require.resolve("tsx/esm");
-const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const packageRoot = resolve(__dirname, "..");
 const aiEntryUrl = new URL("../src/index.ts", import.meta.url).href;
+const bedrockProviderEntryUrl = new URL("../src/bedrock-provider.ts", import.meta.url).href;
 
 const SDK_SPECIFIERS = [
 	"@anthropic-ai/sdk",
@@ -22,27 +22,17 @@ type ProbeResult = {
 };
 
 function runProbe(action: string): ProbeResult {
-	const script = `
-		import { registerHooks } from "node:module";
+	const script = [
+		`const targets = ${JSON.stringify([...SDK_SPECIFIERS])};`,
+		`const mod = await import("${aiEntryUrl}");`,
+		action,
+		`const Module = require("module");`,
+		`const cacheKeys = Object.keys(Module._cache);`,
+		`const loaded = targets.filter((spec) => cacheKeys.some((k) => k.includes(spec)));`,
+		`console.log(JSON.stringify({ loadedSpecifiers: loaded }));`,
+	].join("\n");
 
-		const targets = new Set(${JSON.stringify(SDK_SPECIFIERS)});
-		const loaded = [];
-
-		registerHooks({
-			resolve(specifier, context, nextResolve) {
-				if (targets.has(specifier)) {
-					loaded.push(specifier);
-				}
-				return nextResolve(specifier, context);
-			},
-		});
-
-		const mod = await import(${JSON.stringify(aiEntryUrl)});
-		${action}
-		console.log(JSON.stringify({ loadedSpecifiers: [...new Set(loaded)] }));
-	`;
-
-	const result = spawnSync(process.execPath, ["--import", tsxLoader, "--input-type=module", "--eval", script], {
+	const result = spawnSync(process.execPath, ["--eval", script], {
 		cwd: packageRoot,
 		encoding: "utf8",
 	});
@@ -69,33 +59,70 @@ describe("lazy provider module loading", () => {
 		expect(result.loadedSpecifiers).toEqual([]);
 	});
 
+	it("does not load the Bedrock SDK when registering its compiled-binary loader", () => {
+		const result = runProbe(
+			`mod.setBedrockProviderModuleLoader(async () => (await import("${bedrockProviderEntryUrl}")).bedrockProviderModule);`,
+		);
+		expect(result.loadedSpecifiers).toEqual([]);
+	});
+
+	it("loads the Bedrock SDK when the registered loader is first used", () => {
+		const result = runProbe(
+			[
+				`mod.setBedrockProviderModuleLoader(async () => {`,
+				`  await import("${bedrockProviderEntryUrl}");`,
+				`  const fail = () => { throw new Error("probe"); };`,
+				`  return { streamBedrock: fail, streamSimpleBedrock: fail };`,
+				`});`,
+				`const model = {`,
+				`  id: "anthropic.claude-3-5-sonnet-20241022-v2:0",`,
+				`  api: "bedrock-converse-stream",`,
+				`  provider: "amazon-bedrock",`,
+				`  baseUrl: "http://127.0.0.1:9",`,
+				`  reasoning: false,`,
+				`  input: ["text"],`,
+				`  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },`,
+				`  contextWindow: 200000,`,
+				`  maxTokens: 8192,`,
+				`};`,
+				`const context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };`,
+				`try { await mod.streamSimple(model, context).result(); } catch (_e) {}`,
+			].join("\n"),
+		);
+
+		expect(result.loadedSpecifiers).toEqual(["@aws-sdk/client-bedrock-runtime"]);
+	});
+
 	it("loads only the Anthropic SDK when calling the root lazy wrapper", () => {
-		const result = runProbe(`
-			const model = {
-				id: "claude-sonnet-4-6",
-				name: "Claude Sonnet 4",
-				api: "anthropic-messages",
-				provider: "anthropic",
-				baseUrl: "https://api.anthropic.com",
-				reasoning: true,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 200000,
-				maxTokens: 8192,
-			};
-			const context = { messages: [{ role: "user", content: "hi" }] };
-			await mod.streamSimpleAnthropic(model, context).result();
-		`);
+		const result = runProbe(
+			[
+				`const model = {`,
+				`  id: "claude-sonnet-4-6",`,
+				`  api: "anthropic-messages",`,
+				`  provider: "anthropic",`,
+				`  baseUrl: "http://127.0.0.1:9",`,
+				`  reasoning: true,`,
+				`  input: ["text"],`,
+				`  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },`,
+				`  contextWindow: 200000,`,
+				`  maxTokens: 8192,`,
+				`};`,
+				`const context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };`,
+				`try { await mod.streamSimpleAnthropic(model, context).result(); } catch (_e) {}`,
+			].join("\n"),
+		);
 
 		expect(result.loadedSpecifiers).toEqual(["@anthropic-ai/sdk"]);
 	});
 
 	it("loads only the Anthropic SDK when dispatching through streamSimple", () => {
-		const result = runProbe(`
-			const model = mod.getModel("anthropic", "claude-sonnet-4-6");
-			const context = { messages: [{ role: "user", content: "hi" }] };
-			await mod.streamSimple(model, context).result();
-		`);
+		const result = runProbe(
+			[
+				`const model = mod.getModel("anthropic", "claude-sonnet-4-6");`,
+				`const context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };`,
+				`try { await mod.streamSimple(model, context).result(); } catch (_e) {}`,
+			].join("\n"),
+		);
 
 		expect(result.loadedSpecifiers).toEqual(["@anthropic-ai/sdk"]);
 	});

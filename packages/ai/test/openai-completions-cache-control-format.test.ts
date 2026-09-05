@@ -28,9 +28,9 @@ interface CapturedParams {
 	tools?: ToolWithCacheControl[];
 }
 
-const mockState = vi.hoisted(() => ({
-	lastParams: undefined as CapturedParams | undefined,
-}));
+const mockState: { lastParams: CapturedParams | undefined } = {
+	lastParams: undefined,
+};
 
 const emptyUsage: Usage = {
 	input: 0,

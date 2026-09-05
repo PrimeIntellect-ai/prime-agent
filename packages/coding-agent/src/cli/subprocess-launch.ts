@@ -1,34 +1,43 @@
-import { existsSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { accessSync, constants, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isBunBinary } from "../config.js";
+
+const PRIME_AGENT_LAUNCHER_PATH_ENV = "PRIME_AGENT_LAUNCHER_PATH";
 
 export interface CliSubprocessLaunchSpec {
 	command: string;
 	args: string[];
 }
 
-export function createCliSubprocessEnv(
-	source: NodeJS.ProcessEnv = process.env,
-	entrypoint = process.argv[1],
-	execArgs: readonly string[] = process.execArgv,
-): NodeJS.ProcessEnv {
+export function resolveInstalledBinaryLauncher(executable = process.execPath): string | undefined {
+	try {
+		const versionDir = realpathSync(dirname(executable));
+		const state = readFileSync(join(versionDir, ".install-paths"), "utf8").split(/\r?\n/);
+		const versionsDirValue = state[0]?.trim();
+		const launcherPath = state[1]?.trim();
+		const commandName = state[2]?.trim() || (launcherPath ? basename(launcherPath) : undefined);
+		if (!versionsDirValue || !launcherPath || !commandName || !isAbsolute(launcherPath)) return undefined;
+
+		const versionsDir = realpathSync(versionsDirValue);
+		if (dirname(versionDir) !== versionsDir || basename(launcherPath) !== commandName) return undefined;
+		if (!lstatSync(launcherPath).isSymbolicLink()) return undefined;
+
+		const activeBinary = realpathSync(launcherPath);
+		if (dirname(dirname(activeBinary)) !== versionsDir) return undefined;
+		accessSync(activeBinary, constants.X_OK);
+		return launcherPath;
+	} catch {
+		return undefined;
+	}
+}
+
+export function createCliSubprocessEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
 	const environment = { ...source };
-	if (environment.TSX_TSCONFIG_PATH !== undefined || !entrypoint || !execArgs.some((arg) => arg.includes("tsx"))) {
-		return environment;
+	if (isBunBinary && !environment[PRIME_AGENT_LAUNCHER_PATH_ENV]) {
+		const launcherPath = resolveInstalledBinaryLauncher();
+		if (launcherPath) environment[PRIME_AGENT_LAUNCHER_PATH_ENV] = launcherPath;
 	}
-	let directory = dirname(resolve(entrypoint));
-	while (true) {
-		const tsconfigPath = join(directory, "tsconfig.json");
-		if (existsSync(tsconfigPath) && existsSync(join(directory, "node_modules", "tsx", "package.json"))) {
-			environment.TSX_TSCONFIG_PATH = tsconfigPath;
-			return environment;
-		}
-		const parent = dirname(directory);
-		if (parent === directory) {
-			return environment;
-		}
-		directory = parent;
-	}
+	return environment;
 }
 
 function quoteCommandArgument(value: string): string {
@@ -36,11 +45,11 @@ function quoteCommandArgument(value: string): string {
 }
 
 export function formatCurrentCliCommand(args: readonly string[], environment: NodeJS.ProcessEnv = process.env): string {
-	const launcherPath = environment.PRIME_AGENT_LAUNCHER_PATH;
+	const launcherPath = environment[PRIME_AGENT_LAUNCHER_PATH_ENV];
 	if (launcherPath) {
 		return [launcherPath, ...args].map(quoteCommandArgument).join(" ");
 	}
-	const launch = createCliSubprocessLaunchSpec(args);
+	const launch = createCliSubprocessLaunchSpec(args, process.execPath, process.execArgv, process.argv[1], environment);
 	return [launch.command, ...launch.args].map(quoteCommandArgument).join(" ");
 }
 
@@ -49,9 +58,13 @@ export function createCliSubprocessLaunchSpec(
 	executable = process.execPath,
 	execArgs: readonly string[] = process.execArgv,
 	entrypoint = process.argv[1],
+	environment: NodeJS.ProcessEnv = process.env,
+	compiledBinary = isBunBinary,
 ): CliSubprocessLaunchSpec {
-	if (isBunBinary) {
-		return { command: executable, args: [...args] };
+	if (compiledBinary) {
+		const command =
+			environment[PRIME_AGENT_LAUNCHER_PATH_ENV] || resolveInstalledBinaryLauncher(executable) || executable;
+		return { command, args: [...args] };
 	}
 	if (!entrypoint) {
 		throw new Error("Cannot determine current CLI entrypoint for subprocess launch");

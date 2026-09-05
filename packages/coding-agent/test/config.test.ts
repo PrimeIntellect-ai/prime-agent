@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "os";
 import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+	buildBinarySelfUpdateArgs,
 	detectInstallMethod,
 	ENV_LEGACY_SESSION_DIR,
 	ENV_SESSION_DIR,
@@ -165,6 +166,13 @@ function createFakeBunScript(bunBin: string): string {
 	const escapedBunBin = bunBin.replaceAll("'", "'\\''");
 	return `#!/bin/sh\nif [ "$1" = "pm" ] && [ "$2" = "bin" ] && [ "$3" = "-g" ]; then\n\tprintf '%s\\n' '${escapedBunBin}'\n\texit 0\nfi\nexit 1\n`;
 }
+
+describe("buildBinarySelfUpdateArgs", () => {
+	test("pins an update to the version already reported by the release manifest", () => {
+		expect(buildBinarySelfUpdateArgs("1.2.3")).toEqual(["--update", "1.2.3"]);
+		expect(buildBinarySelfUpdateArgs()).toEqual(["--update"]);
+	});
+});
 
 describe("detectInstallMethod", () => {
 	test("detects pnpm from Windows .pnpm install paths", () => {

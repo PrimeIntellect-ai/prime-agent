@@ -1,0 +1,3 @@
+[test]
+preload = ["./test/bun-test-preload.ts"]
+timeout = 30000

@@ -173,6 +173,17 @@ describe("kernel bootstrap", () => {
 		expect(getKernelVenvDir()).toBe(venv);
 	});
 
+	it("resolves a runtime sidecar beside a compiled binary", async () => {
+		const packageDir = join(tempDir, "binary-layout");
+		const runtimeDir = join(packageDir, "prime-agent-runtime");
+		mkdirSync(join(runtimeDir, "src", "rlm"), { recursive: true });
+		writeFileSync(join(runtimeDir, "pyproject.toml"), '[project]\nname = "prime-agent-runtime"\n');
+		writeFileSync(join(runtimeDir, "src", "rlm", "__init__.py"), "VALUE = 1\n");
+		process.env.PI_PACKAGE_DIR = packageDir;
+
+		expect(await resolveRuntimeIdentity()).toMatch(/^sha256:[0-9a-f]{64}$/);
+	});
+
 	it("bootstraps a missing venv with uv, prime-agent-runtime, and default extra packages", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");

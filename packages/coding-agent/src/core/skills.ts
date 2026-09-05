@@ -550,9 +550,10 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 				if (skill.kind === "python") {
 					const existingPythonSkill = pythonImportMap.get(skill.python.importName);
 					if (existingPythonSkill) {
+						const [firstName, secondName] = [existingPythonSkill.name, skill.name].sort();
 						pythonImportDiagnostics.push({
 							type: "warning",
-							message: `python import name "${skill.python.importName}" is shared by skills "${existingPythonSkill.name}" and "${skill.name}"`,
+							message: `python import name "${skill.python.importName}" is shared by skills "${firstName}" and "${secondName}"`,
 							path: skill.filePath,
 						});
 					} else {

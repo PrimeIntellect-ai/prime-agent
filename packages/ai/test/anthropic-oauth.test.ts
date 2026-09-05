@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { loginAnthropic, refreshAnthropicToken } from "../src/utils/oauth/anthropic.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
@@ -30,12 +30,17 @@ function getJsonBody(init?: RequestInit): Record<string, string> {
 	return JSON.parse(init.body) as Record<string, string>;
 }
 
-describe.sequential("Anthropic OAuth", () => {
+describe("Anthropic OAuth", () => {
+	let origFetch: typeof globalThis.fetch | undefined;
 	afterEach(() => {
-		vi.unstubAllGlobals();
+		if (origFetch !== undefined) {
+			globalThis.fetch = origFetch;
+			origFetch = undefined;
+		}
 	});
 
 	it("keeps the localhost redirect_uri for manual callback login", async () => {
+		origFetch = globalThis.fetch;
 		let authUrl = "";
 		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
 			expect(getUrl(input)).toBe("https://platform.claude.com/v1/oauth/token");
@@ -50,7 +55,7 @@ describe.sequential("Anthropic OAuth", () => {
 				expires_in: 3600,
 			});
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		globalThis.fetch = fetchMock;
 
 		const credentials = await loginAnthropic({
 			onAuth: (info) => {
@@ -70,10 +75,11 @@ describe.sequential("Anthropic OAuth", () => {
 
 		expect(credentials.access).toBe("access-token");
 		expect(credentials.refresh).toBe("refresh-token");
-		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("omits scope from refresh token requests", async () => {
+		origFetch = globalThis.fetch;
 		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
 			expect(getUrl(input)).toBe("https://platform.claude.com/v1/oauth/token");
 			expect(init?.method).toBe("POST");
@@ -88,12 +94,12 @@ describe.sequential("Anthropic OAuth", () => {
 				expires_in: 3600,
 			});
 		});
-		vi.stubGlobal("fetch", fetchMock);
+		globalThis.fetch = fetchMock;
 
 		const credentials = await refreshAnthropicToken("refresh-token");
 
 		expect(credentials.access).toBe("new-access-token");
 		expect(credentials.refresh).toBe("new-refresh-token");
-		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 });

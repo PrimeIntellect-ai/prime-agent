@@ -770,20 +770,20 @@ See `test/chat-simple.ts` for a complete chat interface example with:
 
 Run it:
 ```bash
-npx tsx test/chat-simple.ts
+bun test/chat-simple.ts
 ```
 
 ## Development
 
 ```bash
 # Install dependencies (from monorepo root)
-npm install
+bun install
 
 # Run type checking
-npm run check
+bun run check
 
 # Run the demo
-npx tsx test/chat-simple.ts
+bun test/chat-simple.ts
 ```
 
 ### Debug logging
@@ -791,5 +791,5 @@ npx tsx test/chat-simple.ts
 Set `PI_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
 
 ```bash
-PI_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx test/chat-simple.ts
+PI_TUI_WRITE_LOG=/tmp/tui-ansi.log bun test/chat-simple.ts
 ```

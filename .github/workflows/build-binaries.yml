@@ -40,6 +40,14 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
       - name: Resolve release context
         id: context
         env:
@@ -72,7 +80,7 @@ jobs:
             build_ref="$REF_NAME"
             publish_production=true
           else
-            production_version=$(node -p "require('./package.json').version")
+            production_version=$(bun -e "console.log(require('./package.json').version)")
             build_ref="$GITHUB_SHA_VALUE"
             beta_version="${production_version}-beta.${RUN_NUMBER}.${RUN_ATTEMPT}.${GITHUB_SHA_VALUE::7}"
             publish_beta=true
@@ -80,7 +88,7 @@ jobs:
             previous_version=
             if [ -n "$BEFORE_SHA" ] && ! printf '%s\n' "$BEFORE_SHA" | grep -Eq '^0+$' && git cat-file -e "${BEFORE_SHA}:package.json"; then
               git show "${BEFORE_SHA}:package.json" > /tmp/previous-package.json
-              previous_version=$(node -p "require('/tmp/previous-package.json').version")
+              previous_version=$(bun -e "console.log(require('/tmp/previous-package.json').version)")
             fi
 
             if [ -z "$previous_version" ] || [ "$production_version" != "$previous_version" ]; then
@@ -133,20 +141,41 @@ jobs:
           ref: ${{ env.BUILD_REF }}
           persist-credentials: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
         with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+          bun-version: 1.4.0
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: Install dependencies for all release platforms
+        run: bun install --frozen-lockfile --os=* --cpu=*
 
       - name: Build
-        run: npm run build
+        run: bun run build
 
       - name: Check
-        run: npm run check
+        run: bun run check
+
+      - name: Compile binaries for all platforms
+        working-directory: packages/coding-agent
+        run: |
+          mkdir -p binaries
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            echo "Compiling for $platform..."
+            mkdir -p "binaries/$platform"
+            bun build --compile --minify --keep-names --bytecode --format=esm --external koffi --target="bun-$platform" ./dist/bun/cli.js --outfile "binaries/$platform/pi"
+          done
+
+      - name: Copy binary sidecar assets
+        working-directory: packages/coding-agent
+        run: bun run copy-binary-assets
 
       - name: Pack production release
         if: env.PUBLISH_PRODUCTION == 'true'
@@ -154,7 +183,7 @@ jobs:
           PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
         run: |
           test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
-          npm run release:pack -- \
+          bun run release:pack -- \
             --channel stable \
             --version "$PRODUCTION_VERSION" \
             --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
@@ -166,46 +195,64 @@ jobs:
           PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
         run: |
           test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
-          npm run release:pack -- \
+          bun run release:pack -- \
             --channel beta \
             --version "$BETA_VERSION" \
             --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
             --out-dir packages/coding-agent/release/beta
 
-      - name: Smoke test installer with npm 12
+      - name: Smoke test host-platform archive
+        if: env.PUBLISH_PRODUCTION == 'true' || env.PUBLISH_BETA == 'true'
         run: |
-          npm install --global npm@12.0.2
-          npm --version | grep -Eq '^12\.'
+          # Determine which archive to test (prefer production, fall back to beta)
+          ARTIFACTS_DIR=""
+          if [ "$PUBLISH_PRODUCTION" = "true" ]; then
+            ARTIFACTS_DIR="packages/coding-agent/release/production/artifacts"
+          else
+            ARTIFACTS_DIR="packages/coding-agent/release/beta/artifacts"
+          fi
 
-          SMOKE_VERSION=0.0.0-installer-smoke
-          SMOKE_BASE_URL=http://127.0.0.1:18188
-          SMOKE_OUT=packages/coding-agent/release/npm12-smoke
-          SMOKE_ROOT=$(mktemp -d)
+          # Detect host platform
+          OS=$(uname -s)
+          ARCH=$(uname -m)
+          case "$OS" in
+            Linux)
+              case "$ARCH" in
+                x86_64) PLATFORM="linux-x64" ;;
+                aarch64|arm64) PLATFORM="linux-arm64" ;;
+                *) echo "Unknown host arch: $ARCH"; exit 1 ;;
+              esac
+              ;;
+            Darwin)
+              case "$ARCH" in
+                x86_64) PLATFORM="darwin-x64" ;;
+                arm64) PLATFORM="darwin-arm64" ;;
+                *) echo "Unknown host arch: $ARCH"; exit 1 ;;
+              esac
+              ;;
+            *)
+              echo "Unknown host OS: $OS"; exit 1 ;;
+          esac
 
-          npm run release:pack -- \
-            --channel stable \
-            --version "$SMOKE_VERSION" \
-            --base-url "$SMOKE_BASE_URL" \
-            --out-dir "$SMOKE_OUT"
+          # Extract host-platform archive and run --version
+          ARCHIVE=$(ls "$ARTIFACTS_DIR"/*-"${PLATFORM}.tar.gz" 2>/dev/null | head -1)
+          if [ -z "$ARCHIVE" ]; then
+            echo "No archive for host platform ${PLATFORM} in ${ARTIFACTS_DIR}"
+            exit 1
+          fi
 
-          mkdir -p "$SMOKE_ROOT/releases/v$SMOKE_VERSION"
-          cp "$SMOKE_OUT/artifacts/"* "$SMOKE_ROOT/releases/v$SMOKE_VERSION/"
-          sed \
-            -e "s|__PRIME_AGENT_DOWNLOAD_BASE_URL__|$SMOKE_BASE_URL|g" \
-            -e 's|__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__|stable|g' \
-            install.sh > /tmp/prime-agent-npm12-install.sh
-
-          python3 -m http.server 18188 --bind 127.0.0.1 --directory "$SMOKE_ROOT" >/tmp/prime-agent-npm12-http.log 2>&1 &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true; rm -rf "$SMOKE_ROOT" "$SMOKE_OUT"' EXIT
-
-          curl -fsS --retry 5 --retry-connrefused "$SMOKE_BASE_URL/releases/v$SMOKE_VERSION/SHA256SUMS"
-          export NPM_CONFIG_PREFIX="$SMOKE_ROOT/npm-prefix"
-          PATH="$NPM_CONFIG_PREFIX/bin:$PATH" \
-            PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0 \
-            PRIME_AGENT_INSTALLER_PLAIN=1 \
-            sh /tmp/prime-agent-npm12-install.sh "$SMOKE_VERSION"
-          test -x "$NPM_CONFIG_PREFIX/bin/prime-agent"
+          SMOKE_DIR=$(mktemp -d)
+          tar -xzf "$ARCHIVE" -C "$SMOKE_DIR"
+          chmod +x "$SMOKE_DIR/prime-agent"
+          if "$SMOKE_DIR/prime-agent" --version >/dev/null 2>&1; then
+            echo "Smoke test passed: $("$SMOKE_DIR/prime-agent" --version 2>&1)"
+          else
+            echo "Smoke test FAILED."
+            "$SMOKE_DIR/prime-agent" --version 2>&1 || true
+            rm -rf "$SMOKE_DIR"
+            exit 1
+          fi
+          rm -rf "$SMOKE_DIR"
 
       - name: Upload production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
@@ -247,6 +294,14 @@ jobs:
           ref: ${{ env.BUILD_REF }}
           persist-credentials: false
 
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
       - name: Download production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -267,7 +322,7 @@ jobs:
           export INSTALL_BASE_URL
           test -n "$INSTALL_BASE_URL"
 
-          node - <<'NODE'
+          bun -e '
           const fs = require("node:fs");
           const baseUrl = process.env.INSTALL_BASE_URL;
           if (!baseUrl) throw new Error("INSTALL_BASE_URL is required");
@@ -277,7 +332,7 @@ jobs:
             .replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", channel);
           fs.writeFileSync("/tmp/prime-agent-install.sh", renderInstaller("stable"));
           fs.writeFileSync("/tmp/prime-agent-install-beta.sh", renderInstaller("beta"));
-          NODE
+          '
 
       - name: Extract production release notes
         if: env.PUBLISH_PRODUCTION == 'true'
@@ -292,16 +347,15 @@ jobs:
         run: |
           PRODUCTION_DIR=release-artifacts/production
           RELEASE_PREFIX="releases/v${PRODUCTION_VERSION}"
-          TARBALL="$PRODUCTION_DIR/prime-agent-${PRODUCTION_VERSION}.tgz"
 
-          test -f "$TARBALL"
           test -f "$PRODUCTION_DIR/SHA256SUMS"
           test -f "$PRODUCTION_DIR/stable"
           test -f "$PRODUCTION_DIR/latest.json"
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$PRODUCTION_DIR"/*.tgz; do
+          for artifact in "$PRODUCTION_DIR"/*.tar.gz; do
+            test -f "$artifact" || continue
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
@@ -360,16 +414,15 @@ jobs:
         run: |
           BETA_DIR=release-artifacts/beta
           RELEASE_PREFIX="releases/v${BETA_VERSION}"
-          TARBALL="$BETA_DIR/prime-agent-${BETA_VERSION}.tgz"
 
-          test -f "$TARBALL"
           test -f "$BETA_DIR/SHA256SUMS"
           test -f "$BETA_DIR/beta"
           test -f "$BETA_DIR/beta.json"
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$BETA_DIR"/*.tgz; do
+          for artifact in "$BETA_DIR"/*.tar.gz; do
+            test -f "$artifact" || continue
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
@@ -394,6 +447,7 @@ jobs:
           fi
 
           BETA_DIR=release-artifacts/beta
+
           aws s3 cp "$BETA_DIR/beta.json" "s3://${R2_BUCKET}/beta.json" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type application/json \

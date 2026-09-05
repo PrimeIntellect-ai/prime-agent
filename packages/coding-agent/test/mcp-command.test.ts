@@ -43,10 +43,12 @@ describe("MCP management commands", () => {
 			"--",
 			"node",
 		]);
-		expect(config).toMatchObject({
-			type: "stdio",
-			env: { __proto__: { env: "PROTO_SOURCE" }, constructor: { env: "CONSTRUCTOR_SOURCE" } },
-		});
+		expect(config.type).toBe("stdio");
+		if (config.type !== "stdio") throw new Error("Expected stdio MCP config");
+		expect(Object.hasOwn(config.env ?? {}, "__proto__")).toBe(true);
+		expect(Reflect.get(config.env ?? {}, "__proto__")).toEqual({ env: "PROTO_SOURCE" });
+		expect(Object.hasOwn(config.env ?? {}, "constructor")).toBe(true);
+		expect(config.env?.constructor).toEqual({ env: "CONSTRUCTOR_SOURCE" });
 	});
 
 	it("validates transport, URL, names, auth, and stdio environment syntax", () => {

@@ -42,11 +42,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
         with:
-          node-version: 22
-          cache: npm
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
 
       - name: Install system dependencies
         run: |
@@ -54,14 +56,14 @@ jobs:
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
 
       - name: Build
-        run: npm run build
+        run: bun run build
 
       - name: Check
-        run: npm run check
+        run: bun run check
 
   test:
     name: Test (${{ matrix.name }})
@@ -75,39 +77,27 @@ jobs:
         include:
           - name: agent-core
             package: packages/agent
-            command: npm test
+            command: bun run test
             install_uv: false
           - name: ai
             package: packages/ai
-            command: npm test
+            command: bun run test
             install_uv: false
           - name: tui
             package: packages/tui
-            command: npm test
+            command: bun run test
             install_uv: false
           - name: coding-agent 1/3
             package: packages/coding-agent
-            command: npm run test:ci -- --shard=1/3
+            command: bun run test:ci -- --shard=1/3
             install_uv: true
           - name: coding-agent 2/3
             package: packages/coding-agent
-            command: npm run test:ci -- --shard=2/3
+            command: bun run test:ci -- --shard=2/3
             install_uv: true
           - name: coding-agent 3/3
             package: packages/coding-agent
-            command: npm run test:ci -- --shard=3/3
-            install_uv: true
-          - name: coding-agent process smoke
-            package: packages/coding-agent
-            command: npm run test:process
-            install_uv: true
-          - name: coding-agent kernel
-            package: packages/coding-agent
-            command: npm run test:kernel
-            install_uv: true
-          - name: runtime python
-            package: prime-agent-runtime
-            command: uv run python -m unittest discover -s test
+            command: bun run test:ci -- --shard=3/3
             install_uv: true
     steps:
       - name: Checkout
@@ -115,11 +105,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
         with:
-          node-version: 22
-          cache: npm
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
 
       - name: Install system dependencies
         run: |
@@ -127,32 +119,194 @@ jobs:
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
 
       - name: Build
-        run: npm run build
+        run: bun run build
 
-      - name: Install uv
+      - name: Install uv 0.12.4
         if: matrix.install_uv
-        run: |
-          python3 -m pip install --user uv
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
 
       - name: Test
         working-directory: ${{ matrix.package }}
         run: ${{ matrix.command }}
 
+  process-stress:
+    name: Process stress
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo ln -s $(which fdfind) /usr/local/bin/fd
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
+
+      - name: Run process stress tests
+        working-directory: packages/coding-agent
+        env:
+          PRIME_AGENT_STRESS_WORKERS: "10"
+        run: bun run test:process-stress
+
+  kernel-heavy:
+    name: Kernel-heavy
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo ln -s $(which fdfind) /usr/local/bin/fd
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
+
+      - name: Run kernel-heavy tests
+        working-directory: packages/coding-agent
+        run: bun run test:kernel
+
+  runtime-python:
+    name: Runtime Python
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
+
+      - name: Install Python runtime dependencies
+        working-directory: prime-agent-runtime
+        run: uv sync
+
+      - name: Run Python runtime tests
+        working-directory: prime-agent-runtime
+        run: uv run python -m unittest discover -s test
+
+  artifact-smoke:
+    name: Artifact smoke
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
+      - name: Install dependencies for all release platforms
+        run: bun install --frozen-lockfile --os=* --cpu=*
+
+      - name: Build
+        run: bun run build
+
+      - name: Build binary
+        working-directory: packages/coding-agent
+        run: bun run build:binary
+
+      - name: Run artifact smoke test
+        working-directory: packages/coding-agent
+        run: bun test test/compiled-artifact-smoke.test.ts
+
   build-check-test:
     name: build-check-test
     if: always() && needs.trust.outputs.allowed == 'true'
-    needs: [trust, build-check, test]
+    needs: [trust, build-check, test, process-stress, kernel-heavy, runtime-python, artifact-smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          PROCESS_STRESS_RESULT: ${{ needs.process-stress.result }}
+          KERNEL_HEAVY_RESULT: ${{ needs.kernel-heavy.result }}
+          RUNTIME_PYTHON_RESULT: ${{ needs.runtime-python.result }}
+          ARTIFACT_SMOKE_RESULT: ${{ needs.artifact-smoke.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success
+          test "$PROCESS_STRESS_RESULT" = success
+          test "$KERNEL_HEAVY_RESULT" = success
+          test "$RUNTIME_PYTHON_RESULT" = success
+          test "$ARTIFACT_SMOKE_RESULT" = success

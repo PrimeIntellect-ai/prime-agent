@@ -5,11 +5,11 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"scripts": {
-		"clean": "shx rm -rf dist",
-		"build": "tsgo -p tsconfig.build.json",
-		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
-		"test": "node --test --import tsx test/*.test.ts",
-		"prepublishOnly": "npm run clean && npm run build"
+		"clean": "bun ../../scripts/remove-paths.ts dist",
+		"build": "bun --bun tsgo -p tsconfig.build.json",
+		"dev": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"test": "bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000",
+		"prepublishOnly": "bun run clean && bun run build"
 	},
 	"files": [
 		"dist/**/*",
@@ -32,7 +32,8 @@
 		"directory": "packages/tui"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=20.0.0",
+		"bun": "1.4.0"
 	},
 	"types": "./dist/index.d.ts",
 	"dependencies": {

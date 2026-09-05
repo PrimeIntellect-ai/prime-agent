@@ -250,8 +250,9 @@ export class DaemonUpdateRestartStatusWriter {
 		private readonly path: string,
 		requestId: string,
 		socketPath: string,
+		private readonly clock: () => Date = () => new Date(),
 	) {
-		const now = new Date().toISOString();
+		const now = this.clock().toISOString();
 		const processStartId = getProcessStartId(process.pid);
 		this.status = {
 			version: 1,
@@ -270,7 +271,7 @@ export class DaemonUpdateRestartStatusWriter {
 	update(
 		update: Partial<Omit<DaemonUpdateRestartStatus, "version" | "requestId" | "socketPath" | "coordinator">>,
 	): void {
-		const now = new Date().toISOString();
+		const now = this.clock().toISOString();
 		this.status = {
 			...this.status,
 			...update,
@@ -293,7 +294,7 @@ export class DaemonUpdateRestartStatusWriter {
 	}
 
 	touch(): void {
-		this.status = { ...this.status, heartbeatAt: new Date().toISOString() };
+		this.status = { ...this.status, heartbeatAt: this.clock().toISOString() };
 		this.persist();
 	}
 

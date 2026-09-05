@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createConnection, type Socket } from "node:net";
+import { Socket } from "node:net";
 import { getDaemonLogPath } from "../../config.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import {
@@ -200,7 +200,7 @@ export class DaemonClient {
 		}
 		this.helloMessage = undefined;
 		this.daemonClosingReason = undefined;
-		const socket = createConnection(this.socketPath);
+		const socket = new Socket();
 		this.socket = socket;
 		this.detachReader = attachJsonlLineReader(socket, (line) => this.handleLine(line));
 
@@ -235,6 +235,7 @@ export class DaemonClient {
 			};
 			socket.once("connect", onConnect);
 			socket.once("error", onError);
+			socket.connect(this.socketPath);
 		});
 
 		socket.on("error", (error) =>

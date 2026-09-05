@@ -38,11 +38,6 @@ function isSupportedNodeVersion(version: ParsedNodeVersion): boolean {
 }
 
 export function assertNodeVersion(io: NodeVersionGuardIO): boolean {
-	// Bun ships its own runtime; its node-compat version is unrelated to the user's Node.
-	if (process.versions.bun) {
-		return true;
-	}
-
 	const version = parseVersion(io.version);
 	if (!version || isSupportedNodeVersion(version)) {
 		return true;

@@ -10,11 +10,11 @@
 		"README.md"
 	],
 	"scripts": {
-		"clean": "shx rm -rf dist",
-		"build": "tsgo -p tsconfig.build.json",
-		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
-		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"clean": "bun ../../scripts/remove-paths.ts dist",
+		"build": "bun --bun tsgo -p tsconfig.build.json",
+		"dev": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"test": "bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000",
+		"prepublishOnly": "bun run clean && bun run build"
 	},
 	"dependencies": {
 		"@earendil-works/pi-ai": "^0.9.1",
@@ -35,11 +35,11 @@
 		"directory": "packages/agent"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=20.0.0",
+		"bun": "1.4.0"
 	},
 	"devDependencies": {
 		"@types/node": "^24.3.0",
-		"typescript": "^7.0.2",
-		"vitest": "^4.1.10"
+		"typescript": "^7.0.2"
 	}
 }

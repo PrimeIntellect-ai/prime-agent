@@ -1,5 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { loginGitHubCopilot } from "../src/utils/oauth/github-copilot.js";
+
+/** Flush microtask queue so async continuations run */
+async function flush(times = 10): Promise<void> {
+	for (let i = 0; i < times; i++) {
+		await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
+	}
+}
 
 function jsonResponse(body: unknown, status: number = 200): Response {
 	return new Response(JSON.stringify(body), {
@@ -24,15 +31,18 @@ function getUrl(input: unknown): string {
 }
 
 describe("GitHub Copilot OAuth device flow", () => {
+	let origFetchGH: typeof globalThis.fetch | undefined;
 	afterEach(() => {
-		vi.unstubAllGlobals();
+		if (origFetchGH !== undefined) {
+			globalThis.fetch = origFetchGH;
+			origFetchGH = undefined;
+		}
 		vi.useRealTimers();
 	});
 
 	it("waits before the first poll and increases the safety margin after slow_down", async () => {
 		vi.useFakeTimers();
-		const startTime = new Date("2026-03-09T00:00:00Z");
-		vi.setSystemTime(startTime);
+		const baseTime = Date.now();
 
 		const accessTokenPollTimes: number[] = [];
 		const accessTokenResponses = [
@@ -92,7 +102,8 @@ describe("GitHub Copilot OAuth device flow", () => {
 			throw new Error(`Unexpected fetch URL: ${url}`);
 		});
 
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchGH = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 
 		const loginPromise = loginGitHubCopilot({
 			onAuth: () => {},
@@ -100,38 +111,41 @@ describe("GitHub Copilot OAuth device flow", () => {
 			onProgress: () => {},
 		});
 
-		await vi.advanceTimersByTimeAsync(0);
+		// Let loginGitHubCopilot initialize and enter the poll loop
+		await flush(30);
+
 		expect(accessTokenPollTimes).toHaveLength(0);
 
-		await vi.advanceTimersByTimeAsync(5999);
+		vi.advanceTimersByTime(5999);
+		await flush();
 		expect(accessTokenPollTimes).toHaveLength(0);
 
-		await vi.advanceTimersByTimeAsync(1);
+		vi.advanceTimersByTime(1);
+		await flush();
 		expect(accessTokenPollTimes).toHaveLength(1);
 
-		await vi.advanceTimersByTimeAsync(5999);
+		vi.advanceTimersByTime(5999);
+		await flush();
 		expect(accessTokenPollTimes).toHaveLength(1);
 
-		await vi.advanceTimersByTimeAsync(1);
+		vi.advanceTimersByTime(1);
+		await flush();
 		expect(accessTokenPollTimes).toHaveLength(2);
 
-		await vi.advanceTimersByTimeAsync(13999);
+		vi.advanceTimersByTime(13999);
+		await flush();
 		expect(accessTokenPollTimes).toHaveLength(2);
 
-		await vi.advanceTimersByTimeAsync(1);
+		vi.advanceTimersByTime(1);
+		await flush();
 		await loginPromise;
 
-		expect(accessTokenPollTimes).toEqual([
-			startTime.getTime() + 6000,
-			startTime.getTime() + 12000,
-			startTime.getTime() + 26000,
-		]);
+		expect(accessTokenPollTimes).toEqual([baseTime + 6000, baseTime + 12000, baseTime + 26000]);
 	});
 
 	it("uses the remaining lifetime for a final poll before timing out after repeated slow_down responses", async () => {
 		vi.useFakeTimers();
-		const startTime = new Date("2026-03-09T00:00:00Z");
-		vi.setSystemTime(startTime);
+		const baseTime = Date.now();
 
 		const accessTokenPollTimes: number[] = [];
 		const accessTokenResponses = [
@@ -142,7 +156,6 @@ describe("GitHub Copilot OAuth device flow", () => {
 
 		const fetchMock = vi.fn(async (input: unknown): Promise<Response> => {
 			const url = getUrl(input);
-
 			if (url.endsWith("/login/device/code")) {
 				return jsonResponse({
 					device_code: "device-code",
@@ -152,45 +165,50 @@ describe("GitHub Copilot OAuth device flow", () => {
 					expires_in: 25,
 				});
 			}
-
 			if (url.endsWith("/login/oauth/access_token")) {
 				accessTokenPollTimes.push(Date.now());
 				const response = accessTokenResponses.shift();
-				if (!response) {
-					throw new Error("Unexpected extra access token poll");
-				}
+				if (!response) throw new Error("Unexpected extra access token poll");
 				return response;
 			}
-
 			throw new Error(`Unexpected fetch URL: ${url}`);
 		});
 
-		vi.stubGlobal("fetch", fetchMock);
+		origFetchGH = globalThis.fetch;
+		globalThis.fetch = fetchMock;
 
 		const loginPromise = loginGitHubCopilot({
 			onAuth: () => {},
 			onPrompt: async () => "",
 		});
-		const rejection = expect(loginPromise).rejects.toThrow(
-			/Device flow timed out after one or more slow_down responses/,
-		);
+		// Let loginGitHubCopilot initialize and enter the poll loop
+		await flush(30);
 
-		await vi.advanceTimersByTimeAsync(6000);
-		expect(accessTokenPollTimes).toEqual([startTime.getTime() + 6000]);
+		// First wait: ceil(5000 * 1.2) = 6000ms
+		vi.advanceTimersByTime(6000);
+		await flush();
+		expect(accessTokenPollTimes).toEqual([baseTime + 6000]);
 
-		await vi.advanceTimersByTimeAsync(14000);
-		expect(accessTokenPollTimes).toEqual([startTime.getTime() + 6000, startTime.getTime() + 20000]);
+		// After slow_down: ceil(10000 * 1.4) = 14000ms
+		vi.advanceTimersByTime(14000);
+		await flush();
+		expect(accessTokenPollTimes).toEqual([baseTime + 6000, baseTime + 20000]);
 
-		await vi.advanceTimersByTimeAsync(4999);
-		expect(accessTokenPollTimes).toEqual([startTime.getTime() + 6000, startTime.getTime() + 20000]);
+		// After second slow_down: min(ceil(15000*1.4), remaining=5000) = 5000ms
+		vi.advanceTimersByTime(4999);
+		await flush();
+		expect(accessTokenPollTimes).toEqual([baseTime + 6000, baseTime + 20000]);
 
-		await vi.advanceTimersByTimeAsync(1);
-		await rejection;
+		// Deadline crossed, loop exits, slowDownResponses>0 -> throws
+		vi.advanceTimersByTime(1);
+		await flush();
+		try {
+			await loginPromise;
+			expect.unreachable("should have thrown");
+		} catch (e) {
+			expect((e as Error).message).toMatch(/Device flow timed out after one or more slow_down responses/);
+		}
 
-		expect(accessTokenPollTimes).toEqual([
-			startTime.getTime() + 6000,
-			startTime.getTime() + 20000,
-			startTime.getTime() + 25000,
-		]);
+		expect(accessTokenPollTimes).toEqual([baseTime + 6000, baseTime + 20000, baseTime + 25000]);
 	});
 });

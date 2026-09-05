@@ -1,19 +1,21 @@
-import type * as ChildProcessModule from "child_process";
+import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
-import type * as DaemonUpdateRestartModule from "../src/cli/daemon-update-restart.js";
 
 const updateMocks = vi.hoisted(() => ({
 	spawnSync: vi.fn(),
 	launchCoordinator: vi.fn(),
 }));
 
-vi.mock("child_process", async (importOriginal) => ({
-	...(await importOriginal<typeof ChildProcessModule>()),
+const __childProcess = createRequire(import.meta.url)("child_process");
+const __daemonUpdateRestart = createRequire(import.meta.url)("../src/cli/daemon-update-restart.js");
+
+vi.mock("child_process", () => ({
+	...__childProcess,
 	spawnSync: updateMocks.spawnSync,
 }));
 
-vi.mock("../src/cli/daemon-update-restart.js", async (importOriginal) => ({
-	...(await importOriginal<typeof DaemonUpdateRestartModule>()),
+vi.mock("../src/cli/daemon-update-restart.js", () => ({
+	...__daemonUpdateRestart,
 	launchDaemonUpdateRestartCoordinator: updateMocks.launchCoordinator,
 }));
 

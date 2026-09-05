@@ -63,13 +63,13 @@ describe("public command routing", () => {
 		mocks.reapCalls.length = 0;
 		mocks.shutdownCalls.length = 0;
 		mocks.mcpCommands.length = 0;
-		process.exitCode = undefined;
+		process.exitCode = 0;
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
 	});
 
 	afterEach(() => {
-		process.exitCode = undefined;
+		process.exitCode = 0;
 		vi.restoreAllMocks();
 	});
 

@@ -19,7 +19,7 @@ import { getProcessStartId } from "../src/core/session-lease.js";
 import { defaultDaemonSocketDir } from "../src/modes/daemon/daemon-socket.js";
 
 describe("worker socket classification", () => {
-	it.runIf(process.platform !== "win32")("recognizes only worker sockets in the default service directory", () => {
+	it.skipIf(process.platform === "win32")("recognizes only worker sockets in the default service directory", () => {
 		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "worker-abc.sock"))).toBe(true);
 		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "daemon.sock"))).toBe(false);
 		expect(isWorkerSocketPath("/tmp/worker-abc.sock")).toBe(false);
@@ -57,7 +57,9 @@ describe("parseSsListeners", () => {
 
 describe("parseLsofListeners", () => {
 	it("pairs each pid with its listening unix socket paths", () => {
-		const stdout = ["p1234", "fu", "n/tmp/a.sock", "p5678", "n/tmp/b.sock", "n0x0 (not a path)", ""].join("\n");
+		const stdout = ["p1234", "fu", "n/tmp/a.sock type=STREAM", "p5678", "n/tmp/b.sock", "n0x0 (not a path)", ""].join(
+			"\n",
+		);
 		expect(parseLsofListeners(stdout)).toEqual([
 			{ pid: 1234, socketPath: "/tmp/a.sock" },
 			{ pid: 5678, socketPath: "/tmp/b.sock" },

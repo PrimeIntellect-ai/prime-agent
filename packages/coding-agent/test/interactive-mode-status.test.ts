@@ -5026,9 +5026,9 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  @scope/pi-scoped, answer.ts, cli-extension.ts, HazAT/pi-interactive-subagents, HazAT/pi-interactive-subagents:subagents, local-index, pi-markdown-preview, user-index"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe(
+			"[Extensions]\n  @scope/pi-scoped, answer.ts, cli-extension.ts, HazAT/pi-interactive-subagents, HazAT/pi-interactive-subagents:subagents, local-index, pi-markdown-preview, user-index",
+		);
 	});
 
 	test("adds more parent folders until local extension labels are unique", () => {
@@ -5072,9 +5072,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  alpha/one, beta/one, gamma/one"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  alpha/one, beta/one, gamma/one");
 	});
 
 	test("strips index.ts from local extension label, showing parent dir", () => {
@@ -5100,9 +5098,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  plan-mode");
 	});
 
 	test("strips index.js from local extension label, showing parent dir", () => {
@@ -5128,9 +5124,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  plan-mode");
 	});
 
 	test("mixed single-file and subdirectory index.ts extensions strip index.ts", () => {
@@ -5165,9 +5159,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode, webfetch.ts"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  plan-mode, webfetch.ts");
 	});
 
 	test("multiple index.ts with unique parent dirs need no disambiguation", () => {
@@ -5202,9 +5194,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  bar, foo"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  bar, foo");
 	});
 
 	test("multiple index.ts with same parent dir name disambiguated with grandparent", () => {
@@ -5239,9 +5229,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  alpha/tools, beta/tools"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  alpha/tools, beta/tools");
 	});
 
 	test("non-index file in subdirectory stays as filename", () => {
@@ -5267,9 +5255,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  main.ts"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  main.ts");
 	});
 
 	test("package extensions still strip index.ts correctly (regression guard)", () => {
@@ -5295,9 +5281,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  pi-markdown-preview"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe("[Extensions]\n  pi-markdown-preview");
 	});
 	test("captures mixed extension layouts in expanded output", () => {
 		const fakeThis = createShowLoadedResourcesThis({
@@ -5311,22 +5295,9 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: true,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  project
-    /tmp/project/.pi/extensions/answer.ts
-    /tmp/project/.pi/extensions/local-index
-    git:github.com/HazAT/pi-interactive-subagents
-      extensions
-      extensions/subagents
-    npm:@scope/pi-scoped
-      extensions
-    npm:pi-markdown-preview
-      extensions
-  user
-    /tmp/agent/extensions/user-index
-  path
-    /tmp/temp/cli-extension.ts"`);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe(
+			"[Extensions]\n  project\n    /tmp/project/.pi/extensions/answer.ts\n    /tmp/project/.pi/extensions/local-index\n    git:github.com/HazAT/pi-interactive-subagents\n      extensions\n      extensions/subagents\n    npm:@scope/pi-scoped\n      extensions\n    npm:pi-markdown-preview\n      extensions\n  user\n    /tmp/agent/extensions/user-index\n  path\n    /tmp/temp/cli-extension.ts",
+		);
 	});
 
 	test("shows context paths relative to cwd while preserving full external paths", () => {
@@ -5419,13 +5390,9 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = normalizeRenderedOutput(fakeThis.chatContainer, 100);
-		expect(output).toMatchInlineSnapshot(`
-"[Skill warning]
-  first line of the warning.
-  second line with guidance.
-
-    indented detail"
-`);
+		expect(output).toBe(
+			"[Skill warning]\n  first line of the warning.\n  second line with guidance.\n\n    indented detail",
+		);
 		expect(output).not.toContain("[Skill conflicts]");
 	});
 });

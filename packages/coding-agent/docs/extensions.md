@@ -144,7 +144,7 @@ To share extensions via npm or git as Prime Agent packages, see [packages.md](pa
 | `@earendil-works/pi-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
 | `@earendil-works/pi-tui` | TUI components for custom rendering |
 
-npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `npm install`, and imports from `node_modules/` are resolved automatically.
+npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `bun install`, and imports from `node_modules/` are resolved automatically.
 
 For distributed Prime Agent packages installed with `prime-agent package install` (npm or git), runtime dependencies must be in `dependencies`. Package installation uses production installs (`npm install --omit=dev`) by default, so `devDependencies` are not available at runtime; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers.
 
@@ -241,8 +241,8 @@ This pattern makes the fetched models available during normal startup and to `pr
 ~/.prime/agent/extensions/
 └── my-extension/
     ├── package.json    # Declares dependencies and entry points
-    ├── package-lock.json
-    ├── node_modules/   # After npm install
+    ├── bun.lock
+    ├── node_modules/   # After bun install
     └── src/
         └── index.ts
 ```
@@ -261,7 +261,7 @@ This pattern makes the fetched models available during normal startup and to `pr
 }
 ```
 
-Run `npm install` in the extension directory, then imports from `node_modules/` work automatically.
+Run `bun install` in the extension directory, then imports from `node_modules/` work automatically.
 
 ## Events
 

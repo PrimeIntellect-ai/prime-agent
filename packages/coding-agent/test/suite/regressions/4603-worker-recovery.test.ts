@@ -8,6 +8,7 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
@@ -93,8 +94,6 @@ interface TestPaths {
 const fixturePath = resolve(__dirname, "../../fixtures/eng-4600-supervisor-fixture.ts");
 const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-extension.ts");
 const cliPath = resolve(__dirname, "../../../src/cli.ts");
-const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
-const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const handles = new Set<ProcessHandle>();
 const harnesses: Harness[] = [];
@@ -126,7 +125,14 @@ async function createPaths(): Promise<TestPaths> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
-	linkSync(process.execPath, executablePath);
+	try {
+		linkSync(process.execPath, executablePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EPERM" && (error as NodeJS.ErrnoException).code !== "EXDEV") {
+			throw error;
+		}
+		symlinkSync(process.execPath, executablePath);
+	}
 	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
 	socketTempDirs.add(socketTmpDir);
@@ -147,7 +153,7 @@ async function createPaths(): Promise<TestPaths> {
 
 function spawnSupervisor(paths: TestPaths): ProcessHandle {
 	return trackProcess(
-		spawn(paths.executablePath, [tsxPath, fixturePath], {
+		spawn(paths.executablePath, [fixturePath], {
 			cwd: paths.agentDir,
 			env: {
 				...process.env,
@@ -160,7 +166,6 @@ function spawnSupervisor(paths: TestPaths): ProcessHandle {
 				ENG_4600_SOCKET_PATH: paths.socketPath,
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
-				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		}),
@@ -175,26 +180,21 @@ function spawnStandaloneWorker(
 	extraEnv: NodeJS.ProcessEnv = {},
 ): ProcessHandle {
 	return trackProcess(
-		spawn(
-			paths.executablePath,
-			[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", workerSocketPath, "--offline"],
-			{
-				cwd: paths.agentDir,
-				env: {
-					...process.env,
-					...extraEnv,
-					[supervisorRegistryDirEnv]: paths.registryDir,
-					[ENV_AGENT_DIR]: paths.agentDir,
-					[DAEMON_WORKER_ROLE_ENV]: "1",
-					[DAEMON_WORKER_TOKEN_ENV]: token,
-					[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: "eng-4603-worker",
-					[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: paths.socketPath,
-					PI_OFFLINE: "1",
-					TSX_TSCONFIG_PATH: tsconfigPath,
-				},
-				stdio: ["ignore", "pipe", "pipe"],
+		spawn(paths.executablePath, [cliPath, "--mode", "daemon", "--daemon-socket", workerSocketPath, "--offline"], {
+			cwd: paths.agentDir,
+			env: {
+				...process.env,
+				...extraEnv,
+				[supervisorRegistryDirEnv]: paths.registryDir,
+				[ENV_AGENT_DIR]: paths.agentDir,
+				[DAEMON_WORKER_ROLE_ENV]: "1",
+				[DAEMON_WORKER_TOKEN_ENV]: token,
+				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: "eng-4603-worker",
+				[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: paths.socketPath,
+				PI_OFFLINE: "1",
 			},
-		),
+			stdio: ["ignore", "pipe", "pipe"],
+		}),
 		"worker",
 	);
 }
@@ -677,7 +677,7 @@ async function runCli(
 	extraEnv: NodeJS.ProcessEnv = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
 	const handle = trackProcess(
-		spawn(process.execPath, [tsxPath, cliPath, ...args], {
+		spawn(process.execPath, [cliPath, ...args], {
 			cwd: paths.agentDir,
 			env: {
 				...process.env,
@@ -686,7 +686,6 @@ async function runCli(
 				[ENV_AGENT_DIR]: paths.agentDir,
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
-				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		}),
@@ -1066,7 +1065,9 @@ describe("ENG-4603 worker recovery convergence", () => {
 		expect(listenersBeforeShutdown).toContain(`p${successor.child.pid}`);
 
 		const shutdown = await runCli(paths, ["shutdown", "--force", "--json"], 60_000, lsofEnvironment);
-		expect(shutdown.code).toBe(0);
+		if (shutdown.code !== 0) {
+			throw new Error(`Shutdown failed with code ${shutdown.code}: ${shutdown.stderr}\n${shutdown.stdout}`);
+		}
 		const shutdownResult = JSON.parse(shutdown.stdout) as { stopped: unknown[]; failed: unknown[] };
 		const survivingIdentities = [
 			{ pid: predecessor.child.pid!, processStartId: predecessorStartId },
