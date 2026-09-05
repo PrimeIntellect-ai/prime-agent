@@ -49,6 +49,7 @@ export {
 	getAgentsViewSessionTitle,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
+	partitionDisposableGhostSessions,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 	resolveAgentsViewScopeFrames,

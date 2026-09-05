@@ -124,6 +124,16 @@ describe("daemon protocol helpers", () => {
 		);
 	});
 
+	it("capability- and schema-gates the ghost-session sweep", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.sweep_ghost_sessions).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 27,
+			capability: "ghost_session_sweep",
+		});
+		expect(isDaemonMutatingCommand({ type: "sweep_ghost_sessions" })).toBe(true);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).not.toContain("ghost_session_sweep");
+	});
+
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
 			minProtocol: 7,

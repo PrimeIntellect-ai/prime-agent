@@ -34,6 +34,7 @@ import {
 	getAgentsViewSelectionKey,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
+	partitionDisposableGhostSessions,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 	resolveAgentsViewScopeFrames,
@@ -1901,6 +1902,7 @@ function makeSessionInfo(overrides: Partial<SessionInfo> & { path: string; id: s
 		created: overrides.created ?? new Date("2026-01-01T00:00:00Z"),
 		modified: overrides.modified ?? new Date("2026-01-01T00:00:00Z"),
 		messageCount: overrides.messageCount ?? 1,
+		hasUserContent: overrides.hasUserContent,
 		firstMessage: overrides.firstMessage ?? "hello",
 		allMessagesText: overrides.allMessagesText ?? "hello",
 		agentStatus: overrides.agentStatus,
@@ -1917,3 +1919,75 @@ function makeUiServices(cwd: string): InteractiveModeUiServices {
 		getThemes: (): Theme[] => [],
 	};
 }
+
+describe("partitionDisposableGhostSessions", () => {
+	const NOW = Date.parse("2026-02-01T12:00:00Z");
+	const OLD = new Date(NOW - 30 * 60_000);
+
+	function ghostInfo(path: string, id: string, overrides: Partial<SessionInfo> = {}) {
+		return makeSessionInfo({
+			path,
+			id,
+			messageCount: 0,
+			hasUserContent: false,
+			firstMessage: "(no messages)",
+			created: OLD,
+			modified: OLD,
+			...overrides,
+		});
+	}
+
+	test("hides a stale ghost row from render and queues its path for the sweep", () => {
+		const ghost = ghostInfo("/tmp/ghost.jsonl", "ghost");
+		const real = makeSessionInfo({ path: "/tmp/real.jsonl", id: "real", created: OLD, modified: OLD });
+		const { visibleSaved, ghostPaths } = partitionDisposableGhostSessions([ghost, real], [], [], NOW);
+		expect(ghostPaths).toEqual(["/tmp/ghost.jsonl"]);
+		expect(visibleSaved).toEqual([real]);
+	});
+
+	test("keeps rows whose scan predates the user-content flag", () => {
+		const legacy = ghostInfo("/tmp/legacy.jsonl", "legacy", { hasUserContent: undefined });
+		const { visibleSaved, ghostPaths } = partitionDisposableGhostSessions([legacy], [], [], NOW);
+		expect(ghostPaths).toEqual([]);
+		expect(visibleSaved).toEqual([legacy]);
+	});
+
+	test("keeps a resident ghost file: daemon summaries are the residency truth", () => {
+		const ghost = ghostInfo("/tmp/resident.jsonl", "resident");
+		const summaries = [makeSummary({ sessionFile: "/tmp/resident.jsonl", lifecycle: "draft" })];
+		expect(partitionDisposableGhostSessions([ghost], summaries, [], NOW).ghostPaths).toEqual([]);
+	});
+
+	test("keeps a passivated ghost with queued input recorded in its summary", () => {
+		const ghost = ghostInfo("/tmp/queued.jsonl", "queued");
+		const summaries = [
+			makeSummary({
+				sessionFile: "/tmp/queued.jsonl",
+				activeSessionId: undefined,
+				unfinishedActionCount: 1,
+			}),
+		];
+		expect(partitionDisposableGhostSessions([ghost], summaries, [], NOW).ghostPaths).toEqual([]);
+	});
+
+	test("keeps a ghost with an armed or paused heartbeat", () => {
+		const ghost = ghostInfo("/tmp/armed.jsonl", "armed");
+		expect(
+			partitionDisposableGhostSessions([ghost], [], [heartbeat("hb", undefined, "armed")], NOW).ghostPaths,
+		).toEqual([]);
+		expect(
+			partitionDisposableGhostSessions([ghost], [], [heartbeat("hb", undefined, "armed", "paused")], NOW).ghostPaths,
+		).toEqual([]);
+	});
+
+	test("keeps a ghost that other catalog rows name as their parent", () => {
+		const parent = ghostInfo("/tmp/parent.jsonl", "parent");
+		const child = makeSessionInfo({ path: "/tmp/child.jsonl", id: "child", parentSessionPath: "/tmp/parent.jsonl" });
+		expect(partitionDisposableGhostSessions([parent, child], [], [], NOW).ghostPaths).toEqual([]);
+	});
+
+	test("keeps a young ghost inside the grace window", () => {
+		const fresh = ghostInfo("/tmp/fresh.jsonl", "fresh", { modified: new Date(NOW - 1000) });
+		expect(partitionDisposableGhostSessions([fresh], [], [], NOW).ghostPaths).toEqual([]);
+	});
+});

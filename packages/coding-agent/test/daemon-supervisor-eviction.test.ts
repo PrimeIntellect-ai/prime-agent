@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSessionsDir } from "../src/config.js";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
+import type { DeleteSessionFileResult } from "../src/core/session-file-actions.js";
+import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { getSessionArtifactPathForFile, type SessionInfo } from "../src/core/session-manager.js";
 import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
@@ -1254,5 +1256,118 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(response).toMatchObject({ success: true });
 		expect(store.list().map((job) => job.status)).toEqual(["active"]);
 		expect(existsSync(stopped.descriptorPath)).toBe(false);
+	});
+});
+
+describe("daemon supervisor ghost-session sweep", () => {
+	const GHOST_AGE_MS = 30 * 60_000;
+
+	function writeSessionFile(directory: string, name: string, ageMs: number, extraLines = ""): string {
+		const file = join(directory, name);
+		const createdAt = new Date(Date.now() - ageMs).toISOString();
+		writeFileSync(
+			file,
+			`{"type":"session","id":"${name.replace(/\.jsonl$/, "")}","timestamp":"${createdAt}","cwd":"/tmp/project"}\n` +
+				`{"type":"model_change","id":"1","parentId":null,"timestamp":"${createdAt}","provider":"p","modelId":"m"}\n` +
+				`{"type":"thinking_level_change","id":"2","parentId":"1","timestamp":"${createdAt}","thinkingLevel":"off"}\n${extraLines}`,
+		);
+		const mtime = new Date(Date.now() - ageMs);
+		utimesSync(file, mtime, mtime);
+		return file;
+	}
+
+	function makeSweepSupervisor() {
+		const supervisor = makeSupervisor();
+		const ledgerParents: string[] = [];
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => []),
+			liveEdges: vi.fn(async () =>
+				ledgerParents.map((parent, index) => ({
+					parent,
+					child: `child-${index}`,
+					childId: `c${index}`,
+					depth: 1,
+					name: "x",
+				})),
+			),
+		};
+		const catalogDelete = vi.fn(async (path: string): Promise<DeleteSessionFileResult> => {
+			rmSync(path);
+			return { ok: true, method: "unlink" };
+		});
+		(supervisor.catalog as { delete?: unknown }).delete = catalogDelete;
+		const directory = mkdtempSync(join(tmpdir(), "prime-ghost-sweep-"));
+		tempDirs.push(directory);
+		return { supervisor, catalogDelete, directory, ledgerParents };
+	}
+
+	async function sweep(supervisor: SupervisorInternals, sessionPaths: string[]) {
+		return (await supervisor.handleCommand({}, { id: "sweep-1", type: "sweep_ghost_sessions", sessionPaths })) as {
+			success: boolean;
+			data: { deleted: string[] };
+		};
+	}
+
+	it("deletes only re-verified ghosts and keeps every excluded candidate", async () => {
+		const { supervisor, catalogDelete, directory, ledgerParents } = makeSweepSupervisor();
+		const ghost = writeSessionFile(directory, "ghost.jsonl", GHOST_AGE_MS);
+		const real = writeSessionFile(
+			directory,
+			"real.jsonl",
+			GHOST_AGE_MS,
+			'{"type":"message","id":"3","parentId":"2","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}\n',
+		);
+		const fresh = writeSessionFile(directory, "fresh.jsonl", 1000);
+		const resident = writeSessionFile(directory, "resident.jsonl", GHOST_AGE_MS);
+		const worker = makeWorker("resident", [makeSummary("resident-root", Date.now())]);
+		worker.descriptor.sessionFile = resident;
+		supervisor.workers.set("resident", worker);
+		const scheduled = writeSessionFile(directory, "scheduled.jsonl", GHOST_AGE_MS);
+		const artifactDir = getSessionArtifactPathForFile(scheduled, "scheduled");
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME), "{}");
+		const parent = writeSessionFile(directory, "parent.jsonl", GHOST_AGE_MS);
+		ledgerParents.push(parent);
+
+		const response = await sweep(supervisor, [ghost, real, fresh, resident, scheduled, parent]);
+
+		expect(response.success).toBe(true);
+		expect(response.data.deleted).toEqual([canonicalSessionPath(ghost)]);
+		expect(catalogDelete).toHaveBeenCalledTimes(1);
+		expect(existsSync(ghost)).toBe(false);
+		for (const kept of [real, fresh, resident, scheduled, parent]) {
+			expect(existsSync(kept)).toBe(true);
+		}
+	});
+
+	it("retries a transient EPERM delete instead of surfacing it", async () => {
+		const { supervisor, catalogDelete, directory } = makeSweepSupervisor();
+		const ghost = writeSessionFile(directory, "ghost.jsonl", GHOST_AGE_MS);
+		catalogDelete.mockImplementationOnce(async () => ({
+			ok: false,
+			error: "EPERM: operation not permitted, unlink",
+		}));
+
+		const response = await sweep(supervisor, [ghost]);
+
+		expect(response.data.deleted).toEqual([canonicalSessionPath(ghost)]);
+		expect(catalogDelete).toHaveBeenCalledTimes(2);
+		expect(existsSync(ghost)).toBe(false);
+	});
+
+	it("keeps the file and stays successful when the delete keeps failing", async () => {
+		const { supervisor, catalogDelete, directory } = makeSweepSupervisor();
+		const ghost = writeSessionFile(directory, "ghost.jsonl", GHOST_AGE_MS);
+		catalogDelete.mockImplementation(async () => ({
+			ok: false,
+			error: "EPERM: operation not permitted, unlink",
+		}));
+
+		const response = await sweep(supervisor, [ghost]);
+
+		expect(response.success).toBe(true);
+		expect(response.data.deleted).toEqual([]);
+		expect(existsSync(ghost)).toBe(true);
+		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Ghost sweep kept"));
 	});
 });
