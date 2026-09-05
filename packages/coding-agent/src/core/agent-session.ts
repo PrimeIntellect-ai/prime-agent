@@ -10807,15 +10807,28 @@ export class AgentSession {
 					!run.suppressTerminalNotice &&
 					child._parentReplyCount === parentReplyCountBeforeRun
 				) {
-					const lastAssistantText = child.getLastAssistantText();
-					await deliverTerminalMessageToParent(
-						createRlmChildTerminalNoticeMessage({
-							kind: "completed_without_reply",
-							childId: run.id,
-							sessionName,
-							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
-						}),
-					);
+					// A turn that ends with a graceful error message resolves promptAndWait,
+					// so it must be surfaced here or the parent never learns the task failed.
+					const lastAssistant = this._findLastAssistantInMessages(child.messages);
+					if (lastAssistant?.stopReason === "error") {
+						await deliverTerminalMessageToParent(
+							createRlmChildFailureMessage({
+								childId: run.id,
+								sessionName,
+								error: lastAssistant.errorMessage ?? "Assistant turn failed",
+							}),
+						);
+					} else {
+						const lastAssistantText = child.getLastAssistantText();
+						await deliverTerminalMessageToParent(
+							createRlmChildTerminalNoticeMessage({
+								kind: "completed_without_reply",
+								childId: run.id,
+								sessionName,
+								lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
+							}),
+						);
+					}
 				}
 				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {

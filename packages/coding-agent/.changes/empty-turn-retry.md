@@ -1,0 +1,1 @@
+- Surfaced an RLM child whose final turn ended in an error (e.g. exhausted empty-response retries) to the parent as a child failure message instead of a bare completed-without-reply notice.

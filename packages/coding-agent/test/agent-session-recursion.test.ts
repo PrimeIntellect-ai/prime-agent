@@ -1344,6 +1344,49 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("surfaces a child turn that exhausts empty-response retries as a failure to the parent", async () => {
+		const emptyAssistantMessage = (): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "pondering" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: usage(),
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const root = createSession({
+			// The child task prompt streams empty turns; the parent's reaction to the failure notice answers normally.
+			streamFn: (_model, context) => {
+				if (!userText(context).includes("empty child")) {
+					return streamAnswer("acknowledged");
+				}
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: emptyAssistantMessage() });
+				});
+				return stream;
+			},
+		});
+		// Session-level auto-retry also retries error turns; disable it so the
+		// child's turn error surfaces immediately instead of after backoff.
+		root.settingsManager.setRetryEnabled(false);
+
+		await root.runRlmChild("empty child", { name: "empty-worker" });
+		await vi.waitFor(() => {
+			const failures = root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_failure",
+			);
+			expect(failures).toHaveLength(1);
+			expect((failures[0] as { content: string }).content).toMatch(/empty response/i);
+		});
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+	});
+
 	it("suppresses a done child's unsettled fallback notice at the cancellation cut", async () => {
 		const root = createSession();
 		let suppressed = false;

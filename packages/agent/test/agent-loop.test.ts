@@ -1964,3 +1964,112 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(messages[0].role).toBe("assistant");
 	});
 });
+
+describe("empty assistant turn retry", () => {
+	function emptyTurnConfig(): AgentLoopConfig {
+		return {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+	}
+
+	function streamFnReturning(messages: AssistantMessage[]) {
+		const requests: Message[][] = [];
+		let call = 0;
+		const streamFn = ((_model: unknown, llmContext: { messages: Message[] }) => {
+			requests.push(llmContext.messages.slice());
+			const message = messages[Math.min(call, messages.length - 1)];
+			call += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		}) as unknown as Parameters<typeof runAgentLoop>[5];
+		return { streamFn, requests };
+	}
+
+	async function runOnce(message: AssistantMessage) {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const { streamFn, requests } = streamFnReturning([message]);
+		const events: AgentEvent[] = [];
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+		return { requests, events, assistant: messages.find((m) => m.role === "assistant") as AssistantMessage };
+	}
+
+	it("silently retries empty turns and keeps the transcript clean", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const thinkingOnly = createAssistantMessage([{ type: "thinking", thinking: "pondering..." }]);
+		const whitespaceOnly = createAssistantMessage([{ type: "text", text: "  \n" }]);
+		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
+		const { streamFn, requests } = streamFnReturning([thinkingOnly, whitespaceOnly, goodMessage]);
+		const events: AgentEvent[] = [];
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(3);
+		// Discarded attempts are neither resent to the provider nor kept as transcript turns.
+		expect(requests[1].filter((message) => message.role === "assistant")).toEqual([]);
+		expect(requests[2].filter((message) => message.role === "assistant")).toEqual([]);
+		expect(messages.filter((message) => message.role === "assistant")).toEqual([goodMessage]);
+		const assistantEnds = events.filter(
+			(event) => event.type === "message_end" && event.message.role === "assistant",
+		);
+		expect(assistantEnds.length).toBe(1);
+	});
+
+	it("surfaces an error after three consecutive empty turns", async () => {
+		const { requests, assistant } = await runOnce(createAssistantMessage([{ type: "thinking", thinking: "..." }]));
+
+		expect(requests.length).toBe(3);
+		expect(assistant.stopReason).toBe("error");
+		expect(assistant.errorMessage).toMatch(/empty response/i);
+	});
+
+	it("does not retry turns with visible content, a length stop, or a silent overflow", async () => {
+		const visible = await runOnce(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "..." },
+				{ type: "text", text: "partial but visible" },
+			]),
+		);
+		expect(visible.requests.length).toBe(1);
+		expect(visible.assistant.stopReason).toBe("stop");
+
+		const lengthStop = await runOnce(createAssistantMessage([{ type: "thinking", thinking: "..." }], "length"));
+		expect(lengthStop.requests.length).toBe(1);
+		expect(lengthStop.assistant.stopReason).toBe("length");
+		expect(lengthStop.assistant.errorMessage).toBeUndefined();
+
+		// z.ai-style silent overflow: normal stop, empty content, input past the window.
+		// It must reach message_end untouched so compaction recovery can see it.
+		const overflowMessage = createAssistantMessage([{ type: "text", text: "" }]);
+		overflowMessage.usage.input = createModel().contextWindow + 1;
+		const overflow = await runOnce(overflowMessage);
+		expect(overflow.requests.length).toBe(1);
+		expect(overflow.assistant).toBe(overflowMessage);
+		expect(overflow.assistant.stopReason).toBe("stop");
+		expect(overflow.assistant.errorMessage).toBeUndefined();
+		expect(overflow.events.some((event) => event.type === "message_end" && event.message === overflowMessage)).toBe(
+			true,
+		);
+	});
+});
