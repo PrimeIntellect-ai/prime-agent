@@ -314,13 +314,13 @@ function isLabeledQueuedPreview(message: string): boolean {
 	);
 }
 
-export function formatQueuedMessagePreview(message: string, label: "Steering" | "Follow-up"): string {
+export function formatQueuedMessagePreview(message: string, label: "Steering" | "Follow-up" | "Starting"): string {
 	return isLabeledQueuedPreview(message) ? message : `${label}: ${message}`;
 }
 
 export function styleQueuedMessagePreview(
 	message: string,
-	label: "Steering" | "Follow-up",
+	label: "Steering" | "Follow-up" | "Starting",
 	isRecognizedSlashCommand: (name: string) => boolean,
 ): string {
 	const preview = formatQueuedMessagePreview(message, label);
@@ -7494,9 +7494,22 @@ export class InteractiveMode {
 		// their own container below the execution indicator and recap.
 		this.queuedMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+		// A selected turn leaves the queued lanes while it prepares, but its prompt
+		// has not started (pre-turn compaction can hold it there for a long time),
+		// so the snapshot's active entry keeps the message visible.
+		const activeAction = this.connectionState?.sessionActions.active;
+		const startingTurn =
+			activeAction?.kind === "turn" && activeAction.phase === "preparing" ? activeAction.label : undefined;
 		const hasQueuedMessages = steeringMessages.length > 0 || followUpMessages.length > 0;
-		if (hasQueuedMessages) {
+		const queueAreaPopulated = hasQueuedMessages || startingTurn !== undefined;
+		if (queueAreaPopulated) {
 			this.queuedMessagesContainer.addChild(new Spacer(1));
+			if (startingTurn !== undefined) {
+				const text = styleQueuedMessagePreview(startingTurn, "Starting", (name) =>
+					this.isRecognizedSlashCommand(name),
+				);
+				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+			}
 			for (const message of steeringMessages) {
 				const text = styleQueuedMessagePreview(message, "Steering", (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
@@ -7505,14 +7518,16 @@ export class InteractiveMode {
 				const text = styleQueuedMessagePreview(message, "Follow-up", (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
+		}
+		if (hasQueuedMessages) {
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
 			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
-		if (hasQueuedMessages && !this.featureHintSuppressedByQueue) {
+		if (queueAreaPopulated && !this.featureHintSuppressedByQueue) {
 			this.featureHintSuppressedByQueue = true;
 			this.clearFeatureHintPresentation();
-		} else if (!hasQueuedMessages && this.featureHintSuppressedByQueue) {
+		} else if (!queueAreaPopulated && this.featureHintSuppressedByQueue) {
 			this.featureHintSuppressedByQueue = false;
 			this.resumeFeatureHintPresentation();
 		}

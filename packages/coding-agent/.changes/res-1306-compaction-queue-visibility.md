@@ -1,0 +1,1 @@
+- Fixed queued messages disappearing from the interactive queued-messages preview while a compaction runs; a prompt whose own pre-turn compaction is in progress now stays visible as a pending "Starting" entry.
