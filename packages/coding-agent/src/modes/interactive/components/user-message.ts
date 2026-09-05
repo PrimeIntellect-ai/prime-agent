@@ -1,51 +1,39 @@
-import { Box, type Component, Container, Markdown, type MarkdownTheme, visibleWidth } from "@earendil-works/pi-tui";
-import { parseSlashCommand } from "../../../core/slash-commands.js";
+import {
+	Box,
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	type TableCellSelectionRegion,
+} from "@earendil-works/pi-tui";
+import { builtinSlashCommandTakesArgument, parseSlashCommand } from "../../../core/slash-commands.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { isLeadingSlashCommand } from "./slash-command-message.js";
+import { PromptTokenMask } from "./prompt-highlight.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
-const COMMAND_MASK_BASE = "\uE000";
-const COMMAND_MASK_EXTRA_WIDTH = "\uFF9E";
-const COMMAND_MASK_ZERO_WIDTH = "\u2060";
-const COMMAND_MASK_PATTERN = /\u2060|\uE000\uFF9E*/gu;
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-class SlashCommandMarkdown implements Component {
+class HighlightedMarkdown implements Component {
 	private readonly markdown: Markdown;
-	private readonly commandGraphemes: string[];
+	private readonly mask: PromptTokenMask;
 
-	constructor(text: string, markdownTheme: MarkdownTheme) {
-		const parsed = parseSlashCommand(text);
-		const commandEnd = parsed ? parsed.name.length + 1 : text.length;
-		this.commandGraphemes = [...graphemeSegmenter.segment(text.slice(0, commandEnd))].map(({ segment }) => segment);
-		const placeholder = this.commandGraphemes
-			.map((grapheme) => {
-				const width = visibleWidth(grapheme);
-				return width === 0
-					? COMMAND_MASK_ZERO_WIDTH
-					: COMMAND_MASK_BASE + COMMAND_MASK_EXTRA_WIDTH.repeat(width - 1);
-			})
-			.join("");
-		this.markdown = new Markdown(`${placeholder}${text.slice(commandEnd)}`, 0, 0, markdownTheme, {
+	constructor(text: string, markdownTheme: MarkdownTheme, commandEnd = 0, includeBareSeparator = false) {
+		this.mask = new PromptTokenMask(text, commandEnd, includeBareSeparator);
+		this.markdown = new Markdown(this.mask.text, 0, 0, markdownTheme, {
 			color: (content: string) => theme.fg("userMessageText", content),
 		});
 	}
 
 	render(width: number): string[] {
-		let commandOffset = 0;
-		return this.markdown.render(width).map((line) => {
-			const chunks: string[] = [];
-			const replaced = line.replace(COMMAND_MASK_PATTERN, (placeholder) => {
-				const grapheme = this.commandGraphemes[commandOffset];
-				if (grapheme === undefined) return placeholder;
-				commandOffset++;
-				chunks.push(grapheme);
-				return "";
-			});
-			return chunks.length === 0 ? replaced : `${theme.fg("accent", chunks.join(""))}${replaced}`;
-		});
+		return this.markdown.render(width).map((line) => this.mask.restoreLine(line));
+	}
+
+	getSelectionRegions(): ReadonlyArray<TableCellSelectionRegion> {
+		return this.markdown.getSelectionRegions().map((region) => ({
+			...region,
+			content: this.mask.restoreText(region.content),
+		}));
 	}
 
 	invalidate(): void {
@@ -62,14 +50,12 @@ export class UserMessageComponent extends Container {
 		isRecognizedSlashCommand: (name: string) => boolean = () => false,
 	) {
 		super();
+		const command = parseSlashCommand(text);
+		const commandEnd = command && isRecognizedSlashCommand(command.name) ? command.name.length + 1 : 0;
+		const includeBareSeparator =
+			command !== undefined && commandEnd > 0 && builtinSlashCommandTakesArgument(command.name);
 		this.contentBox = new Box(2, 1, (content: string) => theme.getUserMessageBackgroundColor()(content));
-		this.contentBox.addChild(
-			isLeadingSlashCommand(text, isRecognizedSlashCommand)
-				? new SlashCommandMarkdown(text, markdownTheme)
-				: new Markdown(text, 0, 0, markdownTheme, {
-						color: (content: string) => theme.fg("userMessageText", content),
-					}),
-		);
+		this.contentBox.addChild(new HighlightedMarkdown(text, markdownTheme, commandEnd, includeBareSeparator));
 		this.addChild(this.contentBox);
 	}
 
