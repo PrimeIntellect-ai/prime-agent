@@ -2987,7 +2987,7 @@ export const MODELS = {
 			provider: "azure-openai-responses",
 			baseUrl: "",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max","off":null},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -4841,7 +4841,7 @@ export const MODELS = {
 			baseUrl: "https://api.individual.githubcopilot.com",
 			headers: {"User-Agent":"GitHubCopilotChat/0.35.0","Editor-Version":"vscode/1.107.0","Editor-Plugin-Version":"copilot-chat/0.35.0","Copilot-Integration-Id":"vscode-chat"},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max","off":null},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -8570,7 +8570,7 @@ export const MODELS = {
 			provider: "openai",
 			baseUrl: "https://api.openai.com/v1",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max","off":null},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -9782,7 +9782,7 @@ export const MODELS = {
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen/v1",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max","off":null},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -21229,6 +21229,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -21246,6 +21247,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 20,
