@@ -493,6 +493,7 @@ describe("AgentsViewMode", () => {
 			ui: { requestRender: vi.fn() },
 			setStatusMessage: vi.fn(),
 			withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+			maybeSweepGhostSessions: vi.fn(),
 		});
 		self.reconcileCatalogs = () => invoke("reconcileCatalogs", self);
 		invoke("reconcileCatalogs", self);
@@ -547,6 +548,7 @@ describe("AgentsViewMode", () => {
 			ui: { requestRender: vi.fn() },
 			setStatusMessage: vi.fn(),
 			withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+			maybeSweepGhostSessions: vi.fn(),
 		};
 		invoke("reconcileCatalogs", self);
 		expect(persistentState.scopeRootSummary).toMatchObject({ sessionId: root.sessionId });
@@ -633,6 +635,7 @@ describe("AgentsViewMode", () => {
 				ui: { requestRender: vi.fn() },
 				setStatusMessage: vi.fn(),
 				withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+				maybeSweepGhostSessions: vi.fn(),
 			};
 			invoke("reconcileCatalogs", self);
 			if (expand) {
