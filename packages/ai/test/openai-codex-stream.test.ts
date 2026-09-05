@@ -8,7 +8,7 @@ import {
 	streamOpenAICodexResponses,
 	streamSimpleOpenAICodexResponses,
 } from "../src/providers/openai-codex-responses.js";
-import type { Context, Model } from "../src/types.js";
+import type { AssistantMessage, Context, Model } from "../src/types.js";
 
 const originalFetch = global.fetch;
 const originalWebSocket = globalThis.WebSocket;
@@ -1004,5 +1004,109 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: 1,
 			lastPreviousResponseId: "resp_1",
 		});
+	});
+
+	function codexTestModel(): Model<"openai-codex-responses"> {
+		return {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+	}
+
+	/** Stub prompt-cache URLs plus a custom /codex/responses handler; returns the request counter. */
+	function stubCodexFetch(respond: () => Response): { responsesRequests: number } {
+		process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		const counter = { responsesRequests: 0 };
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+			}
+			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+			}
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				counter.responsesRequests++;
+				return respond();
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+		return counter;
+	}
+
+	async function runCodexErrorTurn(): Promise<AssistantMessage> {
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+		return streamOpenAICodexResponses(codexTestModel(), context, { apiKey: mockToken(), transport: "sse" }).result();
+	}
+
+	function failureDetails(result: AssistantMessage): { kind?: string; retryAfterMs?: number } | undefined {
+		const last = result.diagnostics?.at(-1);
+		return last?.type === "provider_stream_failure"
+			? (last as { details?: { kind?: string; retryAfterMs?: number } }).details
+			: undefined;
+	}
+
+	it("throws a structured failure after a single attempt on HTTP 500", async () => {
+		const counter = stubCodexFetch(
+			() => new Response(JSON.stringify({ error: { type: "server_error", message: "boom" } }), { status: 500 }),
+		);
+
+		const result = await runCodexErrorTurn();
+
+		expect(counter.responsesRequests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("boom");
+		expect(failureDetails(result)).toMatchObject({ kind: "server_error", status: 500 });
+	});
+
+	it("maps nested streaming usage-limit error payloads to a friendly rate-limit failure", async () => {
+		const resetsAt = Math.round(Date.now() / 1000) + 2 * 3600;
+		const sse = `data: ${JSON.stringify({
+			type: "error",
+			status_code: 429,
+			error: { type: "usage_limit_reached", message: "Usage limit reached", plan_type: "Plus", resets_at: resetsAt },
+		})}\n\n`;
+		stubCodexFetch(() => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }));
+
+		const result = await runCodexErrorTurn();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(
+			"You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min.",
+		);
+		const details = failureDetails(result);
+		expect(details?.kind).toBe("rate_limit");
+		expect(details?.retryAfterMs).toBeGreaterThan(0);
+		// resets_at has second granularity, so allow the rounding slack.
+		expect(details?.retryAfterMs).toBeLessThanOrEqual(2 * 3600 * 1000 + 1000);
+	});
+
+	it("waits for the longer of Retry-After header and usage-limit reset", async () => {
+		const resetsAt = Math.round(Date.now() / 1000) + 10;
+		stubCodexFetch(
+			() =>
+				new Response(
+					JSON.stringify({
+						error: { type: "usage_limit_reached", message: "Usage limit reached", resets_at: resetsAt },
+					}),
+					{ status: 429, headers: { "retry-after": "60" } },
+				),
+		);
+
+		const result = await runCodexErrorTurn();
+
+		expect(result.stopReason).toBe("error");
+		expect(failureDetails(result)?.retryAfterMs).toBe(60000);
 	});
 });

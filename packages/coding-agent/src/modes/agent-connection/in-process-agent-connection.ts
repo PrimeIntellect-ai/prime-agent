@@ -15,6 +15,7 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
+import { providerRetryPolicy } from "../../core/provider-retry.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
@@ -392,6 +393,7 @@ export class InProcessAgentConnection implements AgentConnection {
 			question,
 			(event) => this.emit({ type: "side_question_event", event }),
 			previousTurns,
+			providerRetryPolicy(this.session.settingsManager),
 		);
 		this.sideQuestionRuns.set(id, run);
 		const removeRun = () => {

@@ -115,6 +115,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 		const config: BedrockRuntimeClientConfig = {
 			profile: options.profile,
+			maxAttempts: 1,
 		};
 		const configuredRegion = getConfiguredBedrockRegion(options);
 		const hasConfiguredProfile = hasConfiguredBedrockProfile();

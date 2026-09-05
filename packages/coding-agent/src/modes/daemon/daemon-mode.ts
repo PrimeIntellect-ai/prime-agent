@@ -89,6 +89,7 @@ import {
 } from "../../core/cron-jobs.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
+import { providerRetryPolicy } from "../../core/provider-retry.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
 import {
 	canPassivateSession,
@@ -4395,6 +4396,7 @@ export class AgentDaemon {
 						}
 					},
 					command.previousTurns,
+					providerRetryPolicy(state.runtime.session.settingsManager),
 				);
 				this.sideQuestionRuns.set(command.sideQuestionId, {
 					run,

@@ -37,6 +37,19 @@ function structuredProviderFailure(kind: "auth" | "invalid_request" | "refusal")
 	};
 }
 
+function rateLimitedFailure(retryAfterMs: number): AssistantMessage {
+	return {
+		...fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limited" }),
+		diagnostics: [
+			{
+				type: "provider_stream_failure",
+				timestamp: Date.now(),
+				details: { kind: "rate_limit", status: 429, retryAfterMs },
+			},
+		],
+	};
+}
+
 type SessionRetryCompactionInternals = {
 	_retryAttempt: number;
 	_retryPromise: Promise<void> | undefined;
@@ -264,24 +277,68 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toEqual([true]);
 	});
 
-	for (const kind of ["auth", "invalid_request", "refusal"] as const) {
-		it(`retries structured permanent provider ${kind} failures once`, async () => {
+	it("retries structured provider auth failures once", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			structuredProviderFailure("auth"),
+			structuredProviderFailure("auth"),
+			fauxAssistantMessage("unused"),
+		]);
+
+		await harness.session.prompt("test");
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.eventsOfType("auto_retry_start").map((event) => event.attempt)).toEqual([1]);
+		expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toEqual([false]);
+		expect(harness.session.isRetrying).toBe(false);
+	});
+
+	for (const kind of ["invalid_request", "refusal"] as const) {
+		it(`does not retry structured permanent provider ${kind} failures`, async () => {
 			const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
 			harnesses.push(harness);
-			harness.setResponses([
-				structuredProviderFailure(kind),
-				structuredProviderFailure(kind),
-				fauxAssistantMessage("unused"),
-			]);
+			harness.setResponses([structuredProviderFailure(kind), fauxAssistantMessage("unused")]);
 
 			await harness.session.prompt("test");
 
-			expect(harness.faux.state.callCount).toBe(2);
-			expect(harness.eventsOfType("auto_retry_start").map((event) => event.attempt)).toEqual([1]);
-			expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toEqual([false]);
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
 			expect(harness.session.isRetrying).toBe(false);
 		});
 	}
+
+	it("waits at least the provider-requested Retry-After delay before retrying", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		harness.setResponses([rateLimitedFailure(50), fauxAssistantMessage("recovered")]);
+
+		await harness.session.prompt("test");
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.eventsOfType("auto_retry_start").map((event) => event.delayMs)).toEqual([50]);
+		expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toEqual([true]);
+	});
+
+	it("fails without retrying when the provider-requested delay exceeds maxRetryDelayMs", async () => {
+		const harness = await createHarness({
+			settings: {
+				retry: { enabled: true, maxRetries: 3, baseDelayMs: 1, provider: { maxRetryDelayMs: 100 } },
+			},
+		});
+		harnesses.push(harness);
+		harness.setResponses([rateLimitedFailure(3_600_000), fauxAssistantMessage("unused")]);
+
+		await harness.session.prompt("test");
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+		const retryEnd = harness.eventsOfType("auto_retry_end");
+		expect(retryEnd).toHaveLength(1);
+		expect(retryEnd[0]?.success).toBe(false);
+		expect(retryEnd[0]?.finalError).toContain("maxRetryDelayMs");
+		expect(harness.session.isRetrying).toBe(false);
+	});
 
 	it("keeps retry state active when overflow compaction will retry", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });

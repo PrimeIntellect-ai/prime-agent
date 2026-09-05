@@ -1,0 +1,1 @@
+- Removed the unused `maxRetryDelayMs` agent option; retry delays are owned by the session retry loop.

@@ -1,0 +1,4 @@
+- Removed SDK-internal provider retries (OpenAI, Azure, Anthropic, Bedrock, Codex): providers make a single attempt and report a structured failure so the agent's own retry loop owns every retry.
+- Added the server-requested Retry-After delay to structured stream-failure diagnostics.
+- Added structured stream-failure diagnostics to the OpenAI-completions and Codex providers, including friendly messages for Codex nested usage-limit error payloads.
+- Removed the `maxRetries` and `maxRetryDelayMs` stream options.

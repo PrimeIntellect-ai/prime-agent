@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "../../core/model-registry.js";
+import { completeWithProviderRetry } from "../../core/provider-retry.js";
 import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
@@ -162,19 +163,24 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 		return undefined;
 	}
 	try {
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt: AGENT_STATUS_SYSTEM_PROMPT,
-				messages: [
+		// One failed attempt would settle an idle session to a stale needs_input verdict.
+		const response = await completeWithProviderRetry(
+			() =>
+				completeSimple(
+					model,
 					{
-						role: "user" as const,
-						content: [{ type: "text" as const, text: buildStatusContext(messages, isWorking) }],
-						timestamp: Date.now(),
+						systemPrompt: AGENT_STATUS_SYSTEM_PROMPT,
+						messages: [
+							{
+								role: "user" as const,
+								content: [{ type: "text" as const, text: buildStatusContext(messages, isWorking) }],
+								timestamp: Date.now(),
+							},
+						],
 					},
-				],
-			},
-			{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+					{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+				),
+			{ signal },
 		);
 		if (response.stopReason === "error") {
 			return undefined;
