@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
@@ -63,12 +64,7 @@ interface AiGatewayModel {
 	};
 }
 
-const COPILOT_STATIC_HEADERS = {
-	"User-Agent": "GitHubCopilotChat/0.35.0",
-	"Editor-Version": "vscode/1.107.0",
-	"Editor-Plugin-Version": "copilot-chat/0.35.0",
-	"Copilot-Integration-Id": "vscode-chat",
-} as const;
+const COPILOT_STATIC_HEADERS = COPILOT_CLIENT_HEADERS;
 
 const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
