@@ -1,7 +1,7 @@
-import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
+import { AgentContinueError, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
@@ -77,6 +77,66 @@ describe("AgentSession retry and event characterization", () => {
 		expect(retryEvents).toEqual(["start:1", "end:true"]);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.session.isRetrying).toBe(false);
+	});
+
+	it("ends the retry when the scheduled continue cannot run", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		const retryEvents: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
+			if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}:${event.finalError}`);
+		});
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValue(
+			new AgentContinueError("nothing-to-continue", "Nothing to continue"),
+		);
+
+		const markStale = vi.spyOn(
+			harness.session as unknown as { _markProviderAuthStaleForRetryFailure: () => void },
+			"_markProviderAuthStaleForRetryFailure",
+		);
+
+		// Pre-fix this hangs: the swallowed rejection leaves the retry unresolved forever.
+		await harness.session.prompt("test");
+
+		expect(harness.session.isRetrying).toBe(false);
+		expect(retryEvents).toEqual(["start:1", "end:false:Nothing to continue"]);
+		// Terminal like every other retry end: a captured auth failure goes stale.
+		expect(markStale).toHaveBeenCalled();
+	});
+
+	it("ignores a stale continue rejection after the retry was aborted and a newer one runs", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		const retryEvents: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
+			if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}:${event.finalError}`);
+		});
+		let rejectStale: (error: Error) => void = () => {};
+		let rejectFresh: (error: Error) => void = () => {};
+		const continueSpy = vi
+			.spyOn(harness.session.agent, "continue")
+			.mockReturnValueOnce(new Promise((_resolve, reject) => (rejectStale = reject)))
+			.mockReturnValueOnce(new Promise((_resolve, reject) => (rejectFresh = reject)));
+
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		const first = harness.session.prompt("one");
+		await vi.waitFor(() => expect(continueSpy.mock.calls.length).toBe(1));
+		harness.session.abortRetry();
+		await first;
+
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		const second = harness.session.prompt("two");
+		await vi.waitFor(() => expect(continueSpy.mock.calls.length).toBe(2));
+		// The aborted retry's parked continue settles while the NEWER retry runs:
+		// it must not clear the new retry's state or emit its end event.
+		rejectStale(new AgentContinueError("busy", "Busy"));
+		rejectFresh(new AgentContinueError("nothing-to-continue", "Nothing to continue"));
+		await second;
+
+		expect(retryEvents).toEqual(["start:1", "end:false:Retry cancelled", "start:1", "end:false:Nothing to continue"]);
 	});
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {

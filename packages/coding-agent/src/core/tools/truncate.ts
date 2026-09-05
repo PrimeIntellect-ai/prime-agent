@@ -185,12 +185,13 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 
 		if (outputBytesCount + lineBytes > maxBytes) {
 			truncatedBy = "bytes";
-			// Edge case: if we haven't added ANY lines yet and this line exceeds maxBytes,
-			// take the end of the line (partial)
-			if (outputLinesArr.length === 0) {
-				const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes);
+			// Trailing blanks must not defeat the oversized-line rescue; keep as many as the budget allows.
+			if (outputLinesArr.every((collected) => collected.length === 0)) {
+				const keptBlanks = Math.min(outputLinesArr.length, Math.max(0, maxBytes - 1));
+				outputLinesArr.length = keptBlanks;
+				const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes - keptBlanks);
 				outputLinesArr.unshift(truncatedLine);
-				outputBytesCount = Buffer.byteLength(truncatedLine, "utf-8");
+				outputBytesCount = Buffer.byteLength(truncatedLine, "utf-8") + keptBlanks;
 				lastLinePartial = true;
 			}
 			break;

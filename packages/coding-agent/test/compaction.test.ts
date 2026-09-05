@@ -324,6 +324,30 @@ describe("findCutPoint", () => {
 		expect(result.firstKeptEntryIndex).toBe(0);
 	});
 
+	it("keeps only the final turn when the budget is crossed inside trailing tool results", () => {
+		const hugeToolResult = {
+			role: "toolResult" as const,
+			toolCallId: "tc1",
+			toolName: "ipython",
+			content: [{ type: "text" as const, text: "x".repeat(40_000) }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createAssistantMessage("A1", createMockUsage(0, 100, 1000, 0))),
+			createMessageEntry(createUserMessage("Turn 2")), // index 2
+			createMessageEntry(createAssistantMessage("A2", createMockUsage(0, 100, 2000, 0))), // index 3: last cut point
+			createMessageEntry(hugeToolResult),
+			createMessageEntry(hugeToolResult),
+		];
+
+		// The budget is crossed inside the trailing tool results, past every cut
+		// point; the whole history must not be silently kept.
+		const result = findCutPoint(entries, 0, entries.length, 1000);
+		expect(result.firstKeptEntryIndex).toBe(3);
+	});
+
 	it("should indicate split turn when cutting at assistant message", () => {
 		// Create a scenario where we cut at an assistant message mid-turn
 		const entries: SessionEntry[] = [

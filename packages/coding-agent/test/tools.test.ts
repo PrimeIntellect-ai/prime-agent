@@ -428,6 +428,33 @@ describe("Coding Agent Tools", () => {
 			expect(result.output).toBe("red\n");
 		});
 
+		it("omits the full-output pointer and still succeeds when the spill degrades", async () => {
+			const realTmp = process.env.TMPDIR;
+			process.env.TMPDIR = join(testDir, "no-such-tmp");
+			try {
+				const operations: BashOperations = {
+					exec: async (_command, _cwd, { onData }) => {
+						for (let i = 1; i <= 3000; i++) {
+							onData(Buffer.from(`${i}\n`, "utf-8"));
+						}
+						return { exitCode: 0 };
+					},
+				};
+				const bash = createBashTool(testDir, { operations });
+				const result = await bash.execute("test-call-degraded-spill", { command: "chatty" });
+				const output = getTextOutput(result);
+
+				expect(result.details?.truncation?.truncated).toBe(true);
+				expect(result.details?.fullOutputPath).toBeUndefined();
+				expect(output).not.toContain("Full output:");
+				expect(output).toMatch(/\[Showing lines \d+-\d+ of \d+\]/);
+				expect(output).toContain("3000");
+			} finally {
+				if (realTmp === undefined) delete process.env.TMPDIR;
+				else process.env.TMPDIR = realTmp;
+			}
+		});
+
 		it("should persist full output when truncation happens by line count only", async () => {
 			const bash = createBashTool(testDir);
 			const result = await bash.execute("test-call-line-truncation", { command: "seq 3000" });

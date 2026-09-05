@@ -301,7 +301,7 @@ export function createBashToolDefinition(
 				if (!onUpdate || !updateDirty) return;
 				updateDirty = false;
 				lastUpdateAt = Date.now();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
+				const snapshot = output.snapshot();
 				onUpdate({
 					content: [{ type: "text", text: snapshot.content || "" }],
 					details: {
@@ -346,9 +346,9 @@ export function createBashToolDefinition(
 				output.finish();
 				clearUpdateTimer();
 				emitOutputUpdate();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
+				// Snapshot only after the spill settled: the advertised path is terminal.
 				await output.closeTempFile();
-				return snapshot;
+				return output.snapshot();
 			};
 
 			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
@@ -359,13 +359,17 @@ export function createBashToolDefinition(
 					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
 					const endLine = truncation.totalLines;
+					// A degraded spill has no path; never advertise "Full output: undefined".
+					const location = snapshot.fullOutputPath ? `. Full output: ${snapshot.fullOutputPath}` : "";
 					if (truncation.lastLinePartial) {
-						const lastLineSize = formatSize(output.getLastLineBytes());
-						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}]`;
+						// The partial line is the first SHOWN line; trailing blanks can follow it.
+						const lastLineBytes = output.getLastLineBytes();
+						const lineSize = lastLineBytes > 0 ? ` (line is ${formatSize(lastLineBytes)})` : "";
+						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${startLine}${lineSize}${location}]`;
 					} else if (truncation.truncatedBy === "lines") {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}${location}]`;
 					} else {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit)${location}]`;
 					}
 				}
 				return { text, details };
