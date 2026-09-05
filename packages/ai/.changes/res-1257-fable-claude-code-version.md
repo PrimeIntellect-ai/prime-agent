@@ -1,1 +1,0 @@
-- Fixed Claude Fable 5.x failing over Anthropic OAuth with "Claude Code 2.1.75 does not support this model" by bumping the impersonated Claude Code version to 2.1.257 ([#1962](https://github.com/PrimeIntellect-ai/prime-agent/issues/1962))

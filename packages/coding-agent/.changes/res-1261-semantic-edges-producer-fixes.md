@@ -1,1 +1,0 @@
-- Daemon- and runtime-hosted subagents record their spawn lineage again (the production runtime factory dropped it), and a compaction summary slice that resolves after a sibling already failed the compaction settles as failed instead of staying in-flight forever.

@@ -1,2 +1,0 @@
-- Fixed the agents view undercounting running subagents: the "N subagents running" indicator now counts busy descendants at any depth, stays visible on collapsed groups, and idle sessions with busy subagents sort above plain idle sessions.
-- Changed the agents view Running section to mean the session's own work: sessions whose only activity is delegated to subagents now list as Idle with the running-subagents badge.

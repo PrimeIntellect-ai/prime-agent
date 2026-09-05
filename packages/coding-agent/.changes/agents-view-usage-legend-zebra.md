@@ -1,3 +1,0 @@
-- Changed agents-view row usage to aligned `↑in ↓out · $agent · #sub · $total · age` columns with an explicit total-subagent count; empty sessions show only their age.
-- Added a bold usage legend and session count to every agents-view section header, sharing one column layout with the rows.
-- Changed empty sessions to sort last within their agents-view section, except the session the view was entered from.
