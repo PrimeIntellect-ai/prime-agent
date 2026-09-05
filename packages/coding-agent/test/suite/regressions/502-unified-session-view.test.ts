@@ -449,7 +449,7 @@ describe("#502 unified session view regressions", () => {
 		expect(rendered).toMatch(/↑0\s+↓0 ·\s+\$0\.00 ·\s+0 ·\s+\$0\.00 ·\s+2h\s*$/);
 	});
 
-	test("scoped subagent rows keep model and effort ahead of summaries", () => {
+	test("rows keep model and effort ahead of summaries on every row kind", () => {
 		initTheme("dark");
 		const subagent = {
 			// Direct children in a scoped Agents View render as agent rows while
@@ -511,6 +511,21 @@ describe("#502 unified session view regressions", () => {
 		subagent.summary.summary = "A later summary";
 		expect(render(120)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
 		expect(render(120)).not.toContain(":off");
+
+		// Top-level sessions show the same label; the model cell is not subagent-only.
+		subagent.summary.runtimeKind = "top-level";
+		subagent.summary.rlmChildId = undefined;
+		expect(render(120)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
+
+		// Pending delete replaces the suffixes, model label included.
+		const pendingDelete = { ...harness, isPendingDeleteRow: () => true, getPendingDeleteTitle: () => "delete?" };
+		expect(
+			stripAnsi(
+				privateMethod<(this: typeof pendingDelete, row: typeof subagent, width: number) => string>(
+					"renderRow",
+				).call(pendingDelete, subagent, 120),
+			),
+		).not.toContain("prime-inference");
 
 		expect(render(20)).toHaveLength(20);
 	});

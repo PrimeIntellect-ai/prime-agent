@@ -84,7 +84,6 @@ import {
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
 	isEmptyAgentsViewSession,
-	isSubagentSummary,
 	migrateAgentsViewIdentitySet,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
@@ -2584,7 +2583,7 @@ export class AgentsViewMode implements Component, Focusable {
 		// Keep stable model information ahead of the variable summary so narrow rows truncate the summary first.
 		const summaryText = !pendingDelete && !pendingKill ? row.summary.summary : undefined;
 		const modelLabel =
-			isSubagentSummary(row.summary) && !pendingDelete && !pendingKill && row.summary.model
+			!pendingDelete && !pendingKill && row.summary.model
 				? `${row.summary.model.provider}/${row.summary.model.id}${row.summary.thinkingLevel && row.summary.thinkingLevel !== "off" ? `:${row.summary.thinkingLevel}` : ""}`
 				: undefined;
 		const statusLabel =
