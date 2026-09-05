@@ -242,6 +242,7 @@ export {
 	type SkillPythonMetadata,
 } from "./core/skills.js";
 export { createSyntheticSourceInfo } from "./core/source-info.js";
+export type { SystemPromptSource } from "./core/system-prompt.js";
 // Tools
 export {
 	type BashOperations,
