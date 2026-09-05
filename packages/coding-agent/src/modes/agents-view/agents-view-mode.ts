@@ -2511,7 +2511,11 @@ export class AgentsViewMode implements Component, Focusable {
 			0,
 			visibleRows - (showLeadingEllipsis ? 1 : 0) - (showTrailingEllipsis ? 1 : 0),
 		);
-		const visibleItems = displayItems.slice(start, start + contentVisibleRows);
+		// The prepended ellipsis consumes a viewport line; shift the window down
+		// so a selection at the very end is not pushed out of the slice.
+		const sliceStart =
+			selectedDisplayIndex >= start + contentVisibleRows ? selectedDisplayIndex - contentVisibleRows + 1 : start;
+		const visibleItems = displayItems.slice(sliceStart, sliceStart + contentVisibleRows);
 		const lines = visibleItems.map((item) => {
 			if (item.type === "spacer") {
 				return "";

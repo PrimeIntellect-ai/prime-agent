@@ -883,6 +883,34 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("keeps a selection at the end of the list visible when the leading ellipsis is shown", () => {
+		const summaries = Array.from({ length: 12 }, (_, index) =>
+			summary({
+				id: `saved-${index}`,
+				activeSessionId: undefined,
+				sessionId: `saved-${index}-session`,
+				sessionName: `saved-${index}`,
+				sessionFile: `/tmp/saved-${index}.jsonl`,
+				rosterStatus: "inactive" as const,
+				created: `2026-01-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+			}),
+		);
+		const rows = buildAgentsViewRows(summaries);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			Reflect.set(view, "rows", rows);
+			Reflect.set(view, "selectedIndex", rows.length - 1);
+			Reflect.set(view, "ui", { terminal: { rows: 13 }, requestRender: () => {} });
+			const lines = (invoke("renderSessionRows", view, 120, 4) as string[]).map(stripAnsi);
+			expect(lines[0]).toContain("...");
+			const lastTitle = rows.at(-1)!.title;
+			expect(lines.some((line) => line.includes(lastTitle))).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("renders a collapsed group's busy-subagent badge legibly instead of dimmed", () => {
 		const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
 		const busyChild = summary({
