@@ -79,7 +79,7 @@ import {
 import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
-import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
+import { DaemonSessionRecoveringError, deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import {
 	collectDaemonClientEnv,
 	createDaemonEventMeta,
@@ -2208,14 +2208,7 @@ export class DaemonSupervisor {
 				if ((this.workerStopCounts?.get(worker) ?? 0) > 0) {
 					throw new Error("Session worker is stopping; retry after it finishes");
 				}
-				worker.intentionalStop = false;
-				worker.descriptor.stopRequestedAt = undefined;
-				worker.descriptor.archiveOnStop = undefined;
-				worker.descriptor.lifecycle = "recovering";
-				worker.descriptor.consecutiveFailures = 0;
-				worker.deferredRecoveryRounds = 0;
-				this.persistWorker(worker);
-				await this.recoverWorker(worker);
+				await this.retryWorkerRecovery(worker);
 				if (this.workers.get(worker.descriptor.workerId)?.descriptor.lifecycle !== "ready") {
 					throw new Error(worker.descriptor.lastError ?? "Session worker recovery failed");
 				}
@@ -2923,13 +2916,15 @@ export class DaemonSupervisor {
 		ownerClientId: string | undefined,
 		sessionPath: string,
 	): Promise<ResidentWorker> {
-		if (worker.descriptor.lifecycle === "failed") {
+		if (worker.descriptor.lifecycle === "failed" && !this.canRetryFailedWorker(worker)) {
 			throw new Error(
 				`Session "${sessionPath}" is registered to a failed worker that could not be safely reclaimed`,
 			);
 		}
 		this.assertWorkerCreateOwner(worker, ownerClientId, sessionPath);
-		if (!this.isWorkerReadyForCreate(worker)) {
+		if (this.canRetryFailedWorker(worker)) {
+			await this.retryWorkerRecovery(worker);
+		} else if (!this.isWorkerReadyForCreate(worker)) {
 			if (worker.recovery) {
 				await worker.recovery;
 			} else if (this.isWorkerRecoveryEligible(worker)) {
@@ -3595,6 +3590,28 @@ export class DaemonSupervisor {
 		return this.isWorkerRecoveryCandidate(worker) && worker.recovery === undefined;
 	}
 
+	/** Failed is not terminal for an identity-verified live worker: any touch retries recovery, like manual retry_worker. */
+	private canRetryFailedWorker(worker: ResidentWorker): boolean {
+		return (
+			worker.descriptor.lifecycle === "failed" &&
+			(this.workerStopCounts?.get(worker) ?? 0) === 0 &&
+			// A user-stopped worker stays stopped; only an explicit retry_worker clears the persisted stop markers.
+			!this.isWorkerStopping(worker) &&
+			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) === "current"
+		);
+	}
+
+	private async retryWorkerRecovery(worker: ResidentWorker): Promise<void> {
+		worker.intentionalStop = false;
+		worker.descriptor.stopRequestedAt = undefined;
+		worker.descriptor.archiveOnStop = undefined;
+		worker.descriptor.lifecycle = "recovering";
+		worker.descriptor.consecutiveFailures = 0;
+		worker.deferredRecoveryRounds = 0;
+		this.persistWorker(worker);
+		await this.recoverWorker(worker);
+	}
+
 	private isWorkerRecoveryCandidate(worker: ResidentWorker): boolean {
 		return (
 			!this.shuttingDown &&
@@ -3610,7 +3627,8 @@ export class DaemonSupervisor {
 			return;
 		}
 		// A live-but-silent worker must not probe forever: park it failed (user-visible through the
-		// roster's failed status) and keep its process alive for a manual retry_worker.
+		// roster's failed status) and keep its process alive. The park is not terminal: retry_worker,
+		// attach, and create all retry recovery while the process identity stays current.
 		worker.deferredRecoveryRounds = (worker.deferredRecoveryRounds ?? 0) + 1;
 		if (worker.deferredRecoveryRounds > MAX_DEFERRED_RECOVERY_ROUNDS) {
 			worker.descriptor.lifecycle = "failed";
@@ -4831,6 +4849,31 @@ export class DaemonSupervisor {
 		if (matches.length > 1) {
 			throw new Error(`Ambiguous active session "${selector}"`);
 		}
+		// Descriptors are the durable half of addressability: an unhydrated root is recovering, not unknown;
+		// failed workers stay unknown so clients take the create fallback, which reclaims or retries them.
+		const recoveringRoots = (matchesSelector: (worker: ResidentWorker) => boolean) =>
+			[...this.workers.values()].filter(
+				(worker) =>
+					matchesSelector(worker) &&
+					(!includeWorker || includeWorker(worker)) &&
+					worker.descriptor.lifecycle !== "failed" &&
+					this.isWorkerRecoveryCandidate(worker),
+			);
+		// matchWorkers' addressing rule: exact ids first, unambiguous hex suffixes second.
+		const exactRecovering = recoveringRoots(
+			(worker) => worker.descriptor.rootActiveSessionId === selector || worker.descriptor.rootSessionId === selector,
+		);
+		const recoveringMatches =
+			exactRecovering.length > 0
+				? exactRecovering
+				: recoveringRoots(
+						(worker) =>
+							matchesSessionIdSuffix(worker.descriptor.rootActiveSessionId, selector) ||
+							matchesSessionIdSuffix(worker.descriptor.rootSessionId ?? "", selector),
+					);
+		if (recoveringMatches.length === 1) {
+			throw new DaemonSessionRecoveringError(recoveringMatches[0]!.descriptor.rootActiveSessionId);
+		}
 		throw new Error(`Unknown active session: ${selector}`);
 	}
 
@@ -4931,6 +4974,14 @@ export class DaemonSupervisor {
 		command: DaemonCommand,
 		timeoutMs = WORKER_REQUEST_TIMEOUT_MS,
 	): Promise<DaemonResponse> {
+		// Every forwarded command is a touch: a cached failed roster row must not outrank
+		// the descriptor truth that the worker is recoverable (--attach-agent's get_state preflight lands here).
+		if (this.canRetryFailedWorker(worker)) {
+			await this.retryWorkerRecovery(worker);
+		} else if (worker.recovery) {
+			// Join a concurrent touch's in-flight recovery instead of throwing mid-ladder.
+			await worker.recovery;
+		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
 		const response = await client.request(withoutCommandId(command), timeoutMs);
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
@@ -4947,46 +4998,47 @@ export class DaemonSupervisor {
 		client: DaemonSocketClient,
 		command: Extract<DaemonCommand, { type: "attach" }>,
 	): Promise<WorkerAttachData> {
-		const ownedWorker = [...this.workers.values()].find(
+		const descriptorWorker = [...this.workers.values()].find(
 			(worker) =>
-				worker.descriptor.ownerClientId !== undefined &&
-				(worker.descriptor.rootActiveSessionId === command.activeSessionId ||
-					worker.descriptor.rootSessionId === command.activeSessionId),
+				worker.descriptor.rootActiveSessionId === command.activeSessionId ||
+				worker.descriptor.rootSessionId === command.activeSessionId,
 		);
-		if (ownedWorker) {
-			if (ownedWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
-				throw new Error(`Unknown active session: ${command.activeSessionId}`);
-			}
-			this.assertTelemetryAttachAllowed(ownedWorker, command.telemetryDisabled);
-			ownedWorker.launchEnv = command.launchEnv ?? ownedWorker.launchEnv;
-			if (!ownedWorker.client || ownedWorker.descriptor.lifecycle !== "ready") {
-				if (command.recoveryConfig) {
-					ownedWorker.transientCreateCommand = {
-						...ownedWorker.descriptor.createCommand,
-						config: {
-							...command.recoveryConfig,
-							...(ownedWorker.descriptor.telemetryDisabled === true ? { telemetryDisabled: true } : {}),
-						},
-						env: command.env,
-						launchEnv: command.launchEnv,
-						lifecycle: "client_owned",
-					};
+		if (descriptorWorker) {
+			// The descriptor lookup is universal; owner-only attach payload stays in the owned branch.
+			if (descriptorWorker.descriptor.ownerClientId !== undefined) {
+				if (descriptorWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
+					throw new Error(`Unknown active session: ${command.activeSessionId}`);
 				}
-				if (!ownedWorker.launchEnv) {
-					throw new Error("Client-owned session recovery requires the owning client environment");
+				this.assertTelemetryAttachAllowed(descriptorWorker, command.telemetryDisabled);
+				descriptorWorker.launchEnv = command.launchEnv ?? descriptorWorker.launchEnv;
+				if (!descriptorWorker.client || descriptorWorker.descriptor.lifecycle !== "ready") {
+					if (command.recoveryConfig) {
+						descriptorWorker.transientCreateCommand = {
+							...descriptorWorker.descriptor.createCommand,
+							config: {
+								...command.recoveryConfig,
+								...(descriptorWorker.descriptor.telemetryDisabled === true ? { telemetryDisabled: true } : {}),
+							},
+							env: command.env,
+							launchEnv: command.launchEnv,
+							lifecycle: "client_owned",
+						};
+					}
+					if (!descriptorWorker.launchEnv) {
+						throw new Error("Client-owned session recovery requires the owning client environment");
+					}
+					await this.retryWorkerRecovery(descriptorWorker);
 				}
-				ownedWorker.intentionalStop = false;
-				ownedWorker.descriptor.stopRequestedAt = undefined;
-				ownedWorker.descriptor.archiveOnStop = undefined;
-				ownedWorker.descriptor.lifecycle = "recovering";
-				ownedWorker.descriptor.consecutiveFailures = 0;
-				ownedWorker.deferredRecoveryRounds = 0;
-				this.persistWorker(ownedWorker);
-				await this.recoverWorker(ownedWorker);
+			} else if (this.canRetryFailedWorker(descriptorWorker)) {
+				await this.retryWorkerRecovery(descriptorWorker);
 			}
 		}
 		const match = await this.findWorkerForClient(client, command.activeSessionId);
 		this.assertTelemetryAttachAllowed(match.worker, command.telemetryDisabled);
+		if (match.worker !== descriptorWorker && this.canRetryFailedWorker(match.worker)) {
+			// Child-session attaches land here without a descriptor match; one touch runs at most one ladder.
+			await this.retryWorkerRecovery(match.worker);
+		}
 		this.requireAvailableWorkerClient(match.worker);
 		const activeSessionId = match.summary.activeSessionId ?? match.summary.id;
 		const duplicateValidation = this.currentSnapshotGeneration(match.worker, activeSessionId)?.validation;

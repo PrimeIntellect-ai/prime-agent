@@ -3,6 +3,16 @@ import { SessionImportFileNotFoundError } from "../../core/session-import-errors
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { DaemonErrorInfo, DaemonResponse } from "./daemon-protocol.js";
 
+/** A known session (a persisted descriptor names it) that cannot be routed to yet; retryable, unlike "Unknown active session". */
+export class DaemonSessionRecoveringError extends Error {
+	readonly code = "session_recovering" as const;
+
+	constructor(readonly activeSessionId: string) {
+		super(`Active session ${activeSessionId} is recovering; retry shortly`);
+		this.name = "DaemonSessionRecoveringError";
+	}
+}
+
 export function serializeDaemonError(error: unknown): DaemonErrorInfo | undefined {
 	if (error instanceof MissingSessionCwdError) {
 		return { code: "missing_session_cwd", issue: error.issue };
@@ -16,6 +26,9 @@ export function serializeDaemonError(error: unknown): DaemonErrorInfo | undefine
 			sessionPath: error.sessionPath,
 			activeSessionId: error.activeSessionId,
 		};
+	}
+	if (error instanceof DaemonSessionRecoveringError) {
+		return { code: "session_recovering", activeSessionId: error.activeSessionId };
 	}
 	return undefined;
 }
@@ -44,6 +57,9 @@ export function deserializeDaemonError(response: Extract<DaemonResponse, { succe
 	}
 	if (errorInfo?.code === "session_already_active") {
 		return new SessionAlreadyActiveError(errorInfo.sessionPath, errorInfo.activeSessionId);
+	}
+	if (errorInfo?.code === "session_recovering") {
+		return new DaemonSessionRecoveringError(errorInfo.activeSessionId);
 	}
 	return new Error(response.error);
 }
