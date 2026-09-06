@@ -88,6 +88,7 @@ describe("getSupportedThinkingLevels", () => {
 	it("exposes GPT-6 Astra through the Codex subscription without off or minimal", () => {
 		const model = getModel("openai-codex", "gpt-6-astra");
 		expect(model).toBeDefined();
+		// Upstream also lists "ultra" (multi-agent delegation); ThinkingLevel has no such tier, deliberately unmapped.
 		expect(getSupportedThinkingLevels(model!)).toEqual(["low", "medium", "high", "xhigh", "max"]);
 	});
 
