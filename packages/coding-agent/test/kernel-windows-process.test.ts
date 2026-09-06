@@ -50,6 +50,26 @@ afterEach(() => {
 });
 
 describe("Windows bootstrap rename recovery", () => {
+	test("an old release handle cannot remove a newer lease owned by this process", async () => {
+		const venv = join(root, "venv");
+		const firstRelease = await acquireBootstrapLock(venv);
+		await firstRelease();
+		const secondRelease = await acquireBootstrapLock(venv);
+		try {
+			await firstRelease();
+			expect(readFileSync(join(`${venv}.bootstrap.lock`, "pid"), "utf8").trim()).toBe(String(process.pid));
+		} finally {
+			await secondRelease();
+		}
+		expect(readdirSync(root)).toEqual([]);
+	});
+
+	test("concurrent calls to one release handle complete the same cleanup", async () => {
+		const release = await acquireBootstrapLock(join(root, "venv"));
+		await expect(Promise.all([release(), release()])).resolves.toEqual([undefined, undefined]);
+		expect(readdirSync(root)).toEqual([]);
+	});
+
 	test.each(["acquire", "reclaim", "release"] as const)("retries sharing violations during %s", async (phase) => {
 		const venv = join(root, "venv");
 		const lockDir = `${venv}.bootstrap.lock`;

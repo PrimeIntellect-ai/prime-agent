@@ -720,17 +720,17 @@ export async function acquireBootstrapLock(venv: string): Promise<() => Promise<
 				}
 			});
 			if (acquired) {
-				return async () => {
-					if ((await readLockPid(lockDir)) !== process.pid) {
-						return;
-					}
-					// Release on win32 may get EPERM/EACCES when renaming a
-					// directory.  Retry a bounded number of times before
-					// throwing the error so the lock cleanup failure is visible
-					// in normal operation.
-					const releasedDir = path.join(lockRoot, `.${path.basename(lockDir)}.released-${randomUUID()}`);
-					await renameWithTransientRetry(lockDir, releasedDir);
-					await rm(releasedDir, { recursive: true, force: true }).catch(() => undefined);
+				let releasePromise: Promise<void> | undefined;
+				return () => {
+					releasePromise ??= (async () => {
+						if ((await readLockPid(lockDir)) !== process.pid) {
+							return;
+						}
+						const releasedDir = path.join(lockRoot, `.${path.basename(lockDir)}.released-${randomUUID()}`);
+						await renameWithTransientRetry(lockDir, releasedDir);
+						await rm(releasedDir, { recursive: true, force: true }).catch(() => undefined);
+					})();
+					return releasePromise;
 				};
 			}
 		} catch (error) {
