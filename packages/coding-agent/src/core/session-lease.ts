@@ -124,7 +124,8 @@ function isProcessAlive(pid: number): boolean {
 		process.kill(pid, 0);
 		return true;
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
+		// Only ESRCH proves that the owner is gone; an uncertain probe must not release its lease.
+		return !(error instanceof Error && "code" in error && error.code === "ESRCH");
 	}
 }
 

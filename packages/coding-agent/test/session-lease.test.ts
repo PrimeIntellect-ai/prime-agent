@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
@@ -93,6 +93,38 @@ describe("session leases", () => {
 		expect(second?.sessionPath).toBe(canonicalSessionPath(sessionPath));
 		second?.release();
 	});
+
+	it.each(["EPERM", "EACCES", "EINVAL", "EIO", undefined])(
+		"preserves an existing owner when its PID probe fails with %s",
+		(code) => {
+			const agentDir = createTempDir();
+			const sessionPath = canonicalSessionPath(join(agentDir, "session.jsonl"));
+			const key = createHash("sha256").update(sessionPath).digest("hex");
+			const directory = join(agentDir, "session-leases", `${key}.lock`);
+			mkdirSync(directory, { recursive: true });
+			const ownerPath = join(directory, "owner.json");
+			const owner = JSON.stringify({
+				version: 1,
+				token: "existing-owner",
+				pid: process.pid,
+				activeSessionId: "resident-a",
+				sessionPath,
+				createdAt: new Date(0).toISOString(),
+			});
+			writeFileSync(ownerPath, owner);
+			const probe = vi.spyOn(process, "kill").mockImplementation(() => {
+				throw Object.assign(new Error("PID probe unavailable"), { code });
+			});
+			try {
+				expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-b"))).toThrow(
+					SessionAlreadyActiveError,
+				);
+				expect(readFileSync(ownerPath, "utf8")).toBe(owner);
+			} finally {
+				probe.mockRestore();
+			}
+		},
+	);
 
 	it("reclaims a lease whose owner process is gone", () => {
 		const agentDir = createTempDir();
