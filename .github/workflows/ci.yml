@@ -361,6 +361,7 @@ jobs:
           test/herdr-agent-state.test.ts
           test/kernel-bash-shell.test.ts
           test/kernel-bootstrap-windows.test.ts
+          test/kernel-windows-process.test.ts
           test/path-utils.test.ts
           test/rlm-subagent-display.test.ts
           test/rlm-subagent-display-windows.test.ts

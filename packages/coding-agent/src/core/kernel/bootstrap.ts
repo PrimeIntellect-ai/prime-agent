@@ -444,9 +444,14 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
 				env: invocation.env,
 				stdio: options.stdio ?? "ignore",
 				windowsVerbatimArguments: true,
+				windowsHide: process.platform === "win32" && (options.stdio ?? "ignore") !== "inherit",
 			});
 		} else {
-			child = spawn(command, args, { env, stdio: options.stdio ?? "ignore" });
+			child = spawn(command, args, {
+				env,
+				stdio: options.stdio ?? "ignore",
+				windowsHide: process.platform === "win32" && (options.stdio ?? "ignore") !== "inherit",
+			});
 		}
 		child.on("error", reject);
 		child.on("exit", (code, signal) => {
@@ -576,6 +581,27 @@ async function isLockHeldError(error: unknown, lockDir: string): Promise<boolean
 	return false;
 }
 
+// Windows scanners can briefly hold the source; destination contention remains visible to callers.
+async function renameWithTransientRetry(source: string, target: string): Promise<void> {
+	const deadline = Date.now() + 10_000;
+	for (;;) {
+		try {
+			await rename(source, target);
+			return;
+		} catch (error) {
+			if (
+				process.platform !== "win32" ||
+				!(isNodeError(error, "EBUSY") || isNodeError(error, "EPERM") || isNodeError(error, "EACCES")) ||
+				Date.now() >= deadline ||
+				(await exists(target))
+			) {
+				throw error;
+			}
+			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
+		}
+	}
+}
+
 async function withBootstrapLockGuard<T>(lockRoot: string, action: () => Promise<T>): Promise<T> {
 	const guardPath = path.join(lockRoot, `${BOOTSTRAP_LOCK_NAME}.guard`);
 	let compromisedError: Error | undefined;
@@ -646,22 +672,16 @@ export async function acquireBootstrapLock(venv: string): Promise<() => Promise<
 					}
 					const staleDir = path.join(lockRoot, `.${path.basename(lockDir)}.stale-${randomUUID()}`);
 					try {
-						await rename(lockDir, staleDir);
+						await renameWithTransientRetry(lockDir, staleDir);
 					} catch (error) {
-						// The stale lock vanished or a peer reclaimed it between
-						// our staleness check and this rename; retry the whole
-						// acquisition loop instead of crashing.
-						// isLockHeldError checks whether the TARGET path (staleDir) already
-						// exists, not whether the source (lockDir) is still reachable.
-						if (isNodeError(error, "ENOENT") || (await isLockHeldError(error, staleDir))) {
-							return false;
-						}
+						if (isNodeError(error, "ENOENT")) return false;
+						if (await isLockHeldError(error, staleDir)) return false;
 						throw error;
 					}
 					await rm(staleDir, { recursive: true, force: true }).catch(() => undefined);
 				}
 				try {
-					await rename(candidate, lockDir);
+					await renameWithTransientRetry(candidate, lockDir);
 					return true;
 				} catch (error) {
 					if (await isLockHeldError(error, lockDir)) return false;
@@ -678,24 +698,7 @@ export async function acquireBootstrapLock(venv: string): Promise<() => Promise<
 					// throwing the error so the lock cleanup failure is visible
 					// in normal operation.
 					const releasedDir = path.join(lockRoot, `.${path.basename(lockDir)}.released-${randomUUID()}`);
-					const releaseDeadline = Date.now() + 10_000;
-					for (;;) {
-						try {
-							await rename(lockDir, releasedDir);
-							break;
-						} catch (error) {
-							const code = error instanceof Error && "code" in error ? String(error.code) : undefined;
-							if (
-								IS_WINDOWS &&
-								(code === "EBUSY" || code === "EPERM" || code === "EACCES") &&
-								Date.now() < releaseDeadline
-							) {
-								await sleep(BOOTSTRAP_LOCK_RETRY_MS);
-								continue;
-							}
-							throw error;
-						}
-					}
+					await renameWithTransientRetry(lockDir, releasedDir);
 					await rm(releasedDir, { recursive: true, force: true }).catch(() => undefined);
 				};
 			}
