@@ -27,6 +27,7 @@ import type { AssistantMessage } from "../types.js";
  *   with output=0 (no room left to generate). Detected via stopReason "length" + zero output +
  *   input filling the context window.
  * - Ollama: Some deployments truncate silently, others return errors like "prompt too long; exceeded max context length by X tokens"
+ * - LiteLLM (proxy/gateway in front of vLLM, OpenAI, etc.): "Requested token count exceeds the model's maximum context length of X tokens. You requested a total of Y tokens: Z tokens from the input messages and W tokens for the completion."
  */
 const OVERFLOW_PATTERNS = [
 	/prompt is too long/i, // Anthropic token overflow
@@ -45,6 +46,7 @@ const OVERFLOW_PATTERNS = [
 	/too large for model with \d+ maximum context length/i, // Mistral
 	/model_context_window_exceeded/i, // z.ai non-standard finish_reason surfaced as error text
 	/prompt too long; exceeded (?:max )?context length/i, // Ollama explicit overflow error
+	/requested token count exceeds/i, // LiteLLM proxy (vLLM/OpenAI backends): "Requested token count exceeds the model's maximum context length of X tokens"
 	/context[_ ]length[_ ]exceeded/i, // Generic fallback
 	/too many tokens/i, // Generic fallback
 	/token limit exceeded/i, // Generic fallback

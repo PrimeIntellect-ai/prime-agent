@@ -35,6 +35,13 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 32768)).toBe(true);
 	});
 
+	it("detects LiteLLM proxy token-count errors", () => {
+		const message = createErrorMessage(
+			"400 litellm.BadRequestError: OpenAIException - Requested token count exceeds the model's maximum context length of 262144 tokens. You requested a total of 270128 tokens: 261936 tokens from the input messages and 8192 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.. Received Model Group=qwen3.8-27b-nvfp4",
+		);
+		expect(isContextOverflow(message, 262144)).toBe(true);
+	});
+
 	it("does not treat generic non-overflow Ollama errors as overflow", () => {
 		const message = createErrorMessage("500 `model runner crashed unexpectedly`");
 		expect(isContextOverflow(message, 32768)).toBe(false);

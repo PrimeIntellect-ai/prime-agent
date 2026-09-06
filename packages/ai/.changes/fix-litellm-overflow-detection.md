@@ -1,0 +1,1 @@
+- Fixed context-overflow recovery not triggering behind LiteLLM proxies, which report "Requested token count exceeds the model's maximum context length" instead of a recognized overflow error.
