@@ -60,6 +60,7 @@ describe("AgentSessionRuntime characterization", () => {
 			sessionConfig?: AgentSessionRuntimeConfig;
 			sessionManager?: SessionManager;
 			sessionOptions?: Parameters<CreateAgentSessionRuntimeFactory>[0]["sessionOptions"];
+			systemPrompt?: string;
 			onCreateRuntime?: (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => void;
 		},
 	) {
@@ -84,6 +85,7 @@ describe("AgentSessionRuntime characterization", () => {
 			model: options?.bootstrapModel === false ? undefined : faux.getModel(),
 			thinkingLevel: options?.bootstrapThinkingLevel === false ? undefined : undefined,
 			resourceLoaderOptions: {
+				systemPrompt: options?.systemPrompt,
 				extensionFactories: [
 					(pi: ExtensionAPI) => {
 						pi.registerProvider(faux.getModel().provider, {
@@ -394,6 +396,39 @@ describe("AgentSessionRuntime characterization", () => {
 
 		await vi.waitFor(() => expect(deleteRlmSubagentRuntime).toHaveBeenCalledOnce());
 		expect(runtime.listSubagentRuntimes()).toEqual([]);
+	});
+
+	it("preserves an empty custom prompt when creating and rebuilding a child runtime", async () => {
+		const { runtime } = await createRuntimeForTest(() => {}, { systemPrompt: "" });
+		const childRuntime = await runtime.createRlmSubagentRuntime({
+			parentSession: runtime.session,
+			id: "provenance-child",
+			prompt: "preserve prompt provenance",
+			sessionName: "provenance-worker",
+			sessionDir: join(runtime.cwd, "provenance-child"),
+			model: runtime.session.model!,
+			thinkingLevel: "off",
+			serviceTier: null,
+			scopedModels: [],
+			activeToolNames: [],
+			customTools: [],
+			includeGoals: false,
+			includeCompactSkill: false,
+			rlmDepth: 1,
+			rlmMaxDepth: 2,
+			rlmParentNodeId: "provenance-child",
+		});
+		const assertCustomPrompt = () => {
+			expect(childRuntime.session.systemPrompt.startsWith("\nCurrent date: ")).toBe(true);
+			expect(childRuntime.session.systemPrompt).not.toContain(
+				"You are a general purpose agent that uses code to solve tasks.",
+			);
+		};
+
+		assertCustomPrompt();
+		await childRuntime.session.reload();
+		assertCustomPrompt();
+		await runtime.deleteRlmSubagentRuntime("provenance-child", childRuntime.session);
 	});
 
 	it("plumbs the parent agent identity into runtime-created child prompts", async () => {

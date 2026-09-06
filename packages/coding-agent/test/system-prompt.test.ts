@@ -524,6 +524,32 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).not.toContain("await refine.run()");
 	});
 
+	test("preserves a caller-present empty custom prompt without default assembly", () => {
+		const prompt = buildSystemPrompt({
+			systemPromptSource: { provenance: "custom", content: "" },
+			selectedTools: [],
+			contextFiles: [],
+			skills: [],
+			cwd: "/repo",
+		});
+
+		expect(prompt.startsWith("\nCurrent date: ")).toBe(true);
+		expect(prompt).not.toContain("You are a general purpose agent that uses code to solve tasks.");
+	});
+
+	test("fails closed for unknown system prompt provenance", () => {
+		const prompt = buildSystemPrompt({
+			systemPromptSource: { provenance: "unknown" },
+			selectedTools: ["ipython"],
+			appendSystemPrompt: "caller content",
+			contextFiles: [{ path: "AGENTS.md", content: "caller context" }],
+			skills: [skill("caller-skill")],
+			cwd: "/repo",
+		});
+
+		expect(prompt).toBe("");
+	});
+
 	test("custom prompt override bypasses the rlm harness body", () => {
 		const harnessState: HarnessState = {
 			schema: 1,

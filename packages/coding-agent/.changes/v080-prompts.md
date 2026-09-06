@@ -1,0 +1,1 @@
+- Fixed caller-provided empty system prompts falling back to the built-in prompt during session rebuilds.

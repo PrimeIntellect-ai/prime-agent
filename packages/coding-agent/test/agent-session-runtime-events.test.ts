@@ -24,7 +24,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		vi.unstubAllEnvs();
 	});
 
-	async function createRuntimeHost(extensionFactory: ExtensionFactory) {
+	async function createRuntimeHost(extensionFactory: ExtensionFactory, options?: { systemPrompt?: string }) {
 		const tempDir = join(tmpdir(), `pi-runtime-events-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -39,6 +39,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			authStorage,
 			model: faux.getModel(),
 			resourceLoaderOptions: {
+				systemPrompt: options?.systemPrompt,
 				extensionFactories: [extensionFactory],
 				noSkills: true,
 				noPromptTemplates: true,
@@ -78,6 +79,20 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		return { runtimeHost, faux };
 	}
+
+	it("preserves an empty custom prompt when replacing the runtime session", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => undefined, { systemPrompt: "" });
+		const assertCustomPrompt = () => {
+			expect(runtimeHost.session.systemPrompt.startsWith("\nCurrent date: ")).toBe(true);
+			expect(runtimeHost.session.systemPrompt).not.toContain(
+				"You are a general purpose agent that uses code to solve tasks.",
+			);
+		};
+
+		assertCustomPrompt();
+		await runtimeHost.newSession();
+		assertCustomPrompt();
+	});
 
 	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {
 		const phases: string[] = [];
