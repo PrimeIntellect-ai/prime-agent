@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
 	getWindowsProcessStartId,
+	isRenameTargetContention,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 	SessionAlreadyActiveError,
@@ -92,6 +93,38 @@ describe("session leases", () => {
 		expect(second?.sessionPath).toBe(canonicalSessionPath(sessionPath));
 		second?.release();
 	});
+
+	it.each(["EPERM", "EACCES", "EINVAL", "EIO", undefined])(
+		"preserves an existing owner when its PID probe fails with %s",
+		(code) => {
+			const agentDir = createTempDir();
+			const sessionPath = canonicalSessionPath(join(agentDir, "session.jsonl"));
+			const key = createHash("sha256").update(sessionPath).digest("hex");
+			const directory = join(agentDir, "session-leases", `${key}.lock`);
+			mkdirSync(directory, { recursive: true });
+			const ownerPath = join(directory, "owner.json");
+			const owner = JSON.stringify({
+				version: 1,
+				token: "existing-owner",
+				pid: process.pid,
+				activeSessionId: "resident-a",
+				sessionPath,
+				createdAt: new Date(0).toISOString(),
+			});
+			writeFileSync(ownerPath, owner);
+			const probe = vi.spyOn(process, "kill").mockImplementation(() => {
+				throw Object.assign(new Error("PID probe unavailable"), { code });
+			});
+			try {
+				expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-b"))).toThrow(
+					SessionAlreadyActiveError,
+				);
+				expect(readFileSync(ownerPath, "utf8")).toBe(owner);
+			} finally {
+				probe.mockRestore();
+			}
+		},
+	);
 
 	it("reclaims a lease whose owner process is gone", () => {
 		const agentDir = createTempDir();
@@ -179,6 +212,81 @@ describe("session leases", () => {
 		const lease = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"));
 		expect(lease?.sessionPath).toBe(sessionPath);
 		lease?.release();
+	});
+
+	it("fails closed on corrupt owner.json instead of reclaiming the lease", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "corrupt.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(join(lockDirectory, "owner.json"), "this is not json");
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow("Corrupt");
+	});
+
+	it("fails closed on owner.json with missing required fields", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "partial.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ version: 1, token: "orphan" }));
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow("Corrupt");
+	});
+
+	it("reclaims a lease when owner.json is absent", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "absent-lock.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		const lease = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"));
+		expect(lease?.sessionPath).toBe(sessionPath);
+		lease?.release();
+	});
+
+	it("isRenameTargetContention returns true for EEXIST and ENOTEMPTY", () => {
+		expect(isRenameTargetContention("/tmp", "EEXIST")).toBe(true);
+		expect(isRenameTargetContention("/tmp", "ENOTEMPTY")).toBe(true);
+	});
+
+	it("isRenameTargetContention returns false for EPERM on a nonexistent target", () => {
+		const dir = createTempDir();
+		const missing = join(dir, "nonexistent.lock");
+		// Target does not exist, so EPERM is a real permission error.
+		// No existing target and platform does not matter for that case.
+		expect(isRenameTargetContention(missing, "EPERM")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns true for EPERM on an existing target", () => {
+		const dir = createTempDir();
+		const target = join(dir, "existing.lock");
+		mkdirSync(target, { recursive: true });
+		// Target exists, so EPERM from renameSync means contention on Windows.
+		expect(isRenameTargetContention(target, "EPERM", "win32")).toBe(true);
+		expect(isRenameTargetContention(target, "EPERM", "darwin")).toBe(false);
+		expect(isRenameTargetContention(target, "EPERM", "linux")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns true for EACCES on an existing target", () => {
+		const dir = createTempDir();
+		const target = join(dir, "existing-eacces.lock");
+		mkdirSync(target, { recursive: true });
+		expect(isRenameTargetContention(target, "EACCES", "win32")).toBe(true);
+		expect(isRenameTargetContention(target, "EACCES", "darwin")).toBe(false);
+		expect(isRenameTargetContention(target, "EACCES", "linux")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns false for EACCES on a nonexistent target", () => {
+		const dir = createTempDir();
+		const missing = join(dir, "missing-eacces.lock");
+		expect(isRenameTargetContention(missing, "EACCES")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns false for unrelated error codes", () => {
+		expect(isRenameTargetContention("/tmp", "EIO")).toBe(false);
+		expect(isRenameTargetContention("/tmp", "EBUSY")).toBe(false);
+		expect(isRenameTargetContention("/tmp", undefined)).toBe(false);
 	});
 
 	it("is inert for direct SDK runtimes unless worker isolation enables it", () => {

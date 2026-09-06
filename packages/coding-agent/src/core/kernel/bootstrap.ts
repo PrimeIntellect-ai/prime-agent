@@ -1,13 +1,14 @@
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { type ChildProcess, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import fs, { constants, existsSync, readdirSync, readFileSync } from "node:fs";
+import { access, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import lockfile from "proper-lockfile";
 import { getPackageDir } from "../../config.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
@@ -35,6 +36,47 @@ export const DEFAULT_RLM_EXTRA_UV_ARGS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) =>
 export const DEFAULT_RLM_EXTRA_IMPORT_NAMES = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.importName);
 export const DEFAULT_RLM_EXTRA_IMPORT_LABELS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.promptLabel);
 const IS_WINDOWS = process.platform === "win32";
+
+/** Default Windows PATHEXT entries. */
+const WINDOWS_PATHEXT_DEFAULT = [".COM", ".EXE", ".BAT", ".CMD"];
+const WINDOWS_SUPPORTED_EXECUTABLE_EXTENSIONS = new Set(
+	WINDOWS_PATHEXT_DEFAULT.map((extension) => extension.toLowerCase()),
+);
+
+// The guard covers only the short ownership update, not the venv build.
+const BOOTSTRAP_LOCK_GUARD_RETRIES = 600;
+
+export interface BatchShimInvocation {
+	args: string[];
+	env: NodeJS.ProcessEnv;
+}
+
+/** Build a cmd.exe invocation without embedding user-controlled values in its command string. */
+export function buildBatchShimInvocation(
+	command: string,
+	args: readonly string[],
+	baseEnv: NodeJS.ProcessEnv,
+	token = randomUUID().replaceAll("-", ""),
+): BatchShimInvocation {
+	if (!/^[A-Za-z0-9_]+$/.test(token)) {
+		throw new Error("Windows batch shim token contains unsupported characters");
+	}
+	const values = [command, ...args];
+	if (values.some((value) => /["\0\r\n]/.test(value))) {
+		throw new Error("Windows batch shim paths and arguments cannot contain quotes or line breaks");
+	}
+	const env = { ...baseEnv };
+	const variables = values.map((value, index) => {
+		const name = `PRIME_AGENT_BATCH_${token}_${index}`;
+		env[name] = value;
+		return `"%${name}%"`;
+	});
+	return {
+		args: ["/d", "/v:off", "/s", "/c", `"${variables.join(" ")}"`],
+		env,
+	};
+}
+
 const UV_INSTALL_COMMAND_POSIX = "curl -LsSf https://astral.sh/uv/install.sh | sh";
 const UV_INSTALL_COMMAND_WINDOWS =
 	'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"';
@@ -377,12 +419,40 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 	}
 }
 
+/** True when a resolved command is a Windows batch shim that must be spawned through cmd.exe. */
+function isBatchShim(command: string): boolean {
+	return IS_WINDOWS && /\.(cmd|bat)$/i.test(command);
+}
+
+/**
+ * Run a child process.
+ *
+ * On Windows, .cmd/.bat shims are spawned through cmd.exe (which is the only
+ * way to run batch files. CreateProcess cannot execute them directly) with
+ * an explicitly quoted command line that handles spaces and cmd metacharacters
+ * in arguments. On Windows, PYTHONUTF8=1 makes CPython read .pth
+ * files with UTF-8 (finite locale encoding) under any Windows code page,
+ * preventing UnicodeDecodeError on non-ASCII venv paths.
+ */
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, {
-			env: process.env,
-			stdio: options.stdio ?? "ignore",
-		});
+		const env = { ...process.env, ...(IS_WINDOWS ? { PYTHONUTF8: "1" } : {}) };
+		let child: ChildProcess;
+		if (isBatchShim(command)) {
+			const invocation = buildBatchShimInvocation(command, args, env);
+			child = spawn(process.env.ComSpec ?? "cmd.exe", invocation.args, {
+				env: invocation.env,
+				stdio: options.stdio ?? "ignore",
+				windowsVerbatimArguments: true,
+				windowsHide: process.platform === "win32" && (options.stdio ?? "ignore") !== "inherit",
+			});
+		} else {
+			child = spawn(command, args, {
+				env,
+				stdio: options.stdio ?? "ignore",
+				windowsHide: process.platform === "win32" && (options.stdio ?? "ignore") !== "inherit",
+			});
+		}
 		child.on("error", reject);
 		child.on("exit", (code, signal) => {
 			if (code === 0) {
@@ -406,7 +476,10 @@ async function pythonImports(python: string, moduleName: string): Promise<boolea
 
 async function hasPrimeAgentRuntime(python: string): Promise<boolean> {
 	try {
-		await run(python, ["-c", RUNTIME_READY_CHECK], { stdio: "ignore" });
+		const check = isBatchShim(python)
+			? `import base64; exec(base64.b64decode('${Buffer.from(RUNTIME_READY_CHECK).toString("base64")}'))`
+			: RUNTIME_READY_CHECK;
+		await run(python, ["-c", check], { stdio: "ignore" });
 		return true;
 	} catch {
 		return false;
@@ -448,12 +521,25 @@ function bootstrapLockDir(venv: string): string {
 	return path.join(path.dirname(venv), `${path.basename(venv)}${BOOTSTRAP_LOCK_NAME}`);
 }
 
+/**
+ * Check whether a process is alive.
+ *
+ * Unlike a bare `EPERM` check, any error other than `ESRCH` means the pid
+ * exists but cannot be signalled (e.g. a process owned by another user, or a
+ * Windows EINVAL for an alive process), so it must be treated as running.
+ */
 function processIsRunning(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
 	} catch (error) {
-		return isNodeError(error, "EPERM");
+		// Only ESRCH means the process is definitely dead.  Any other error
+		// (EPERM, EACCES, EINVAL on Windows, or a non-Error thrown value)
+		// means the pid exists but cannot be signalled, so it is alive.
+		if (error instanceof Error && "code" in error) {
+			return error.code !== "ESRCH";
+		}
+		return true; // Unknown failures are not proof that the process is dead.
 	}
 }
 
@@ -467,6 +553,7 @@ async function readLockPid(lockDir: string): Promise<number | null> {
 	}
 }
 
+/** A lock without a readable pid is only stale once its mtime is old. */
 async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	try {
 		const lockStat = await stat(lockDir);
@@ -476,33 +563,223 @@ async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	}
 }
 
-async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> {
-	const lockDir = bootstrapLockDir(venv);
-	await mkdir(path.dirname(lockDir), { recursive: true });
+/** True when a lock dir belongs to a dead process and can be reclaimed. */
+async function isBootstrapLockStale(lockDir: string): Promise<boolean> {
+	const pid = await readLockPid(lockDir);
+	return pid === null ? lockMissingPidIsStale(lockDir) : !processIsRunning(pid);
+}
 
+/** True when a rename failed because the lock path is held, preserving real permission errors. */
+async function isLockHeldError(error: unknown, lockDir: string): Promise<boolean> {
+	if (!(error instanceof Error && "code" in error)) return false;
+	const code = String(error.code);
+	if (code === "EEXIST" || code === "ENOTEMPTY") return true;
+	// Windows: renaming a directory onto an existing target returns EPERM (and
+	// sometimes EACCES). Treat that as lock-held only when the target actually
+	// exists; a genuine permission error (e.g. an unwritable parent directory)
+	// must be thrown rather than treated as a retryable collision.
+	if (IS_WINDOWS && (code === "EPERM" || code === "EACCES")) {
+		return await exists(lockDir);
+	}
+	return false;
+}
+
+// Windows scanners can briefly hold the source; destination contention remains visible to callers.
+async function renameWithTransientRetry(source: string, target: string): Promise<void> {
+	const deadline = Date.now() + 10_000;
 	for (;;) {
 		try {
-			await mkdir(lockDir);
-			await writeFile(path.join(lockDir, "pid"), `${process.pid}\n`, "utf8");
-			return () => rm(lockDir, { recursive: true, force: true });
+			await rename(source, target);
+			return;
 		} catch (error) {
-			if (!isNodeError(error, "EEXIST")) throw error;
-
-			const pid = await readLockPid(lockDir);
-			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
-				await rm(lockDir, { recursive: true, force: true });
-				continue;
+			if (
+				process.platform !== "win32" ||
+				!(isNodeError(error, "EBUSY") || isNodeError(error, "EPERM") || isNodeError(error, "EACCES")) ||
+				Date.now() >= deadline ||
+				(await exists(target))
+			) {
+				throw error;
 			}
-
 			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
 		}
 	}
 }
 
+async function removeBootstrapGuard(directory: string): Promise<void> {
+	const deadline = Date.now() + 10_000;
+	for (;;) {
+		try {
+			await rmdir(directory);
+			return;
+		} catch (error) {
+			if (
+				process.platform !== "win32" ||
+				!(isNodeError(error, "EBUSY") || isNodeError(error, "EPERM") || isNodeError(error, "EACCES")) ||
+				Date.now() >= deadline
+			) {
+				throw error;
+			}
+			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
+		}
+	}
+}
+
+async function withBootstrapLockGuard<T>(lockRoot: string, action: () => Promise<T>): Promise<T> {
+	const guardPath = path.join(lockRoot, `${BOOTSTRAP_LOCK_NAME}.guard`);
+	let compromisedError: Error | undefined;
+	const release = await lockfile.lock(lockRoot, {
+		realpath: false,
+		lockfilePath: guardPath,
+		// proper-lockfile's release callback is single-use, so retry its directory removal instead.
+		fs: {
+			...fs,
+			rmdir(directory: string, callback: (error: NodeJS.ErrnoException | null) => void) {
+				void removeBootstrapGuard(directory).then(() => callback(null), callback);
+			},
+		},
+		stale: BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS,
+		update: 5_000,
+		onCompromised: (error) => {
+			compromisedError ??= error;
+		},
+		retries: {
+			retries: BOOTSTRAP_LOCK_GUARD_RETRIES,
+			factor: 1,
+			minTimeout: BOOTSTRAP_LOCK_RETRY_MS,
+			maxTimeout: BOOTSTRAP_LOCK_RETRY_MS,
+		},
+	});
+	try {
+		if (compromisedError) {
+			throw new Error(`Bootstrap lock guard was compromised: ${errorMessage(compromisedError)}`);
+		}
+		return await action();
+	} finally {
+		await release();
+	}
+}
+
+/**
+ * Acquire the bootstrap lock for a venv, waiting for and safely reclaiming stale locks.
+ *
+ * Acquisition creates a uniquely named candidate directory, writes the pid, and
+ * renames it onto the lock path. The rename atomically fails when the target
+ * already exists. Reclaim renames a stale lock aside before deleting it, so a
+ * live lock created in between is never touched. The candidate dance runs under
+ * a proper-lockfile guard so two processes can never both reclaim the same lock.
+ */
+export async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> {
+	const lockDir = bootstrapLockDir(venv);
+	const lockRoot = path.dirname(lockDir);
+	await mkdir(lockRoot, { recursive: true });
+
+	for (;;) {
+		const candidate = path.join(lockRoot, `.${path.basename(lockDir)}.candidate-${process.pid}-${randomUUID()}`);
+		try {
+			await mkdir(candidate);
+		} catch (error) {
+			// The candidate path includes a UUID, so EEXIST here means a
+			// real path collision (extremely unlikely); retry.
+			if (isNodeError(error, "EEXIST")) {
+				await sleep(BOOTSTRAP_LOCK_RETRY_MS);
+				continue;
+			}
+			throw error;
+		}
+		try {
+			await writeFile(path.join(candidate, "pid"), `${process.pid}\n`, "utf8");
+		} catch (error) {
+			await rm(candidate, { recursive: true, force: true }).catch(() => undefined);
+			throw error;
+		}
+
+		let acquired = false;
+		try {
+			await withBootstrapLockGuard(lockRoot, async () => {
+				if (await exists(lockDir)) {
+					if (!(await isBootstrapLockStale(lockDir))) {
+						return false;
+					}
+					const staleDir = path.join(lockRoot, `.${path.basename(lockDir)}.stale-${randomUUID()}`);
+					try {
+						await renameWithTransientRetry(lockDir, staleDir);
+					} catch (error) {
+						if (isNodeError(error, "ENOENT")) return false;
+						if (await isLockHeldError(error, staleDir)) return false;
+						throw error;
+					}
+					await rm(staleDir, { recursive: true, force: true }).catch(() => undefined);
+				}
+				try {
+					await renameWithTransientRetry(candidate, lockDir);
+					acquired = true;
+					return true;
+				} catch (error) {
+					if (await isLockHeldError(error, lockDir)) return false;
+					throw error;
+				}
+			});
+			if (acquired) {
+				let releasePromise: Promise<void> | undefined;
+				return () => {
+					releasePromise ??= (async () => {
+						if ((await readLockPid(lockDir)) !== process.pid) {
+							return;
+						}
+						const releasedDir = path.join(lockRoot, `.${path.basename(lockDir)}.released-${randomUUID()}`);
+						await renameWithTransientRetry(lockDir, releasedDir);
+						await rm(releasedDir, { recursive: true, force: true }).catch(() => undefined);
+					})().catch((error) => {
+						releasePromise = undefined;
+						throw error;
+					});
+					return releasePromise;
+				};
+			}
+		} catch (error) {
+			// A guard-release failure must not strand a published lease without a release handle.
+			if (acquired) {
+				await renameWithTransientRetry(lockDir, candidate).catch(() => undefined);
+			}
+			throw error;
+		} finally {
+			await rm(candidate, { recursive: true, force: true }).catch(() => undefined);
+		}
+		await sleep(BOOTSTRAP_LOCK_RETRY_MS);
+	}
+}
+
+/**
+ * Candidate executable file names for a command on Windows, honoring PATHEXT.
+ *
+ * If the command already carries a known extension, it is used as-is. Otherwise
+ * the bare name is tried first, then each PATHEXT extension in order, so a
+ * `uv.exe` wins over a `uv.cmd` shim exactly like `where uv` resolves it.
+ */
+export function windowsExecutableCandidates(name: string, pathext: string | undefined): string[] {
+	const extensions = (pathext ?? "")
+		.split(";")
+		.map((ext) => ext.trim().toLowerCase())
+		.filter((ext) => WINDOWS_SUPPORTED_EXECUTABLE_EXTENSIONS.has(ext));
+	const lowerName = name.toLowerCase();
+	if (extensions.some((ext) => lowerName.endsWith(ext))) {
+		return [name];
+	}
+	const seen = new Set<string>([name.toLowerCase()]);
+	const candidates = [name];
+	for (const ext of extensions.length > 0 ? extensions : WINDOWS_PATHEXT_DEFAULT) {
+		const candidate = `${name}${ext}`;
+		if (seen.has(candidate.toLowerCase())) continue;
+		seen.add(candidate.toLowerCase());
+		candidates.push(candidate);
+	}
+	return candidates;
+}
+
 async function findExecutable(name: string): Promise<string | null> {
 	const pathValue = process.env.PATH;
 	if (!pathValue) return null;
-	const candidates = process.platform === "win32" ? [name, `${name}.exe`] : [name];
+	const candidates = IS_WINDOWS ? windowsExecutableCandidates(name, process.env.PATHEXT) : [name];
 	for (const dir of pathValue.split(path.delimiter)) {
 		if (!dir) continue;
 		for (const candidate of candidates) {

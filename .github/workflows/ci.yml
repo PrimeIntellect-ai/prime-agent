@@ -349,12 +349,41 @@ jobs:
       - name: Run Windows behavior tests
         working-directory: packages/coding-agent
         run: >-
-          bun test
+          bun test --isolate --timeout 120000
           test/bash-close-hang-windows.test.ts
           test/child-process.test.ts
+          test/command-recovery-journal.test.ts
+          test/config-windows-hardening.test.ts
+          test/daemon-command.test.ts
           test/daemon-socket.test.ts
+          test/daemon-worker-connect.test.ts
           test/exec.test.ts
+          test/frontmatter.test.ts
+          test/herdr-agent-state.test.ts
           test/kernel-bash-shell.test.ts
+          test/kernel-bootstrap-windows.test.ts
+          test/kernel-windows-process.test.ts
+          test/path-utils.test.ts
+          test/rlm-subagent-display.test.ts
+          test/rlm-subagent-display-windows.test.ts
+          test/session-lease.test.ts
+          test/settings-manager.test.ts
+          test/settings-manager-bug.test.ts
+          test/shell-windows-hardening.test.ts
+          test/system-prompt.test.ts
+
+      - name: Test Windows RLM deletion races
+        working-directory: packages/coding-agent
+        run: >-
+          bun test --isolate --timeout 120000
+          --test-name-pattern
+          "emits exactly one failure notice per delete retry|keeps a child live when its durable deletion boundary cannot be read|reconciles a stale display status|uses the persistent artifact dir and sets RLM_SESSION_DIR"
+          test/agent-session-recursion.test.ts
+          test/daemon-mode.test.ts
+
+      - name: Test daemon worker named-pipe lifecycle
+        working-directory: packages/coding-agent
+        run: bun test --isolate --timeout 240000 test/daemon-named-pipe-lifecycle.test.ts
 
       - name: Test terminal behavior
         working-directory: packages/tui
@@ -374,6 +403,12 @@ jobs:
           PRIME_AGENT_INSTALL_UV: "0"
           PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
         run: bun src/core/kernel/bootstrap-cli.ts
+
+      - name: Test Python batch shim overrides
+        working-directory: packages/coding-agent
+        env:
+          PRIME_AGENT_TEST_KERNEL_PYTHON: ${{ runner.temp }}\Prime Agent ø\kernel-venv\Scripts\python.exe
+        run: bun test --isolate --timeout 120000 test/kernel-python-shim.test.ts
 
       - name: Test persistent CPython kernel behavior
         working-directory: packages/coding-agent

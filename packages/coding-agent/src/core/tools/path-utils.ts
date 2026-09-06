@@ -1,6 +1,6 @@
 import { accessSync, constants } from "node:fs";
 import * as os from "node:os";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { isAbsolute, join as joinPath, resolve as resolvePath } from "node:path";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const NARROW_NO_BREAK_SPACE = "\u202F";
@@ -41,8 +41,9 @@ export function expandPath(filePath: string): string {
 	if (normalized === "~") {
 		return os.homedir();
 	}
-	if (normalized.startsWith("~/")) {
-		return os.homedir() + normalized.slice(1);
+	if (normalized.startsWith("~/")) return joinPath(os.homedir(), normalized.slice(2));
+	if (process.platform === "win32" && normalized.startsWith("~\\")) {
+		return joinPath(os.homedir(), normalized.slice(2));
 	}
 	return normalized;
 }

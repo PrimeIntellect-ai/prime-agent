@@ -17,6 +17,27 @@ describe("parseFrontmatter", () => {
 		expect(body).toBe("Line one\nLine two");
 	});
 
+	it("strips a UTF-8 BOM before frontmatter (Windows editors)", () => {
+		const input = "\uFEFF---\nname: skill-name\ndescription: A desc\n---\n\nBody text";
+		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(input);
+		expect(frontmatter.name).toBe("skill-name");
+		expect(frontmatter.description).toBe("A desc");
+		expect(body).toBe("Body text");
+	});
+
+	it("strips a UTF-8 BOM with CRLF newlines", () => {
+		const input = "\uFEFF---\r\nname: test\r\n---\r\nLine one";
+		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(input);
+		expect(frontmatter.name).toBe("test");
+		expect(body).toBe("Line one");
+	});
+
+	it("strips a UTF-8 BOM from content without frontmatter", () => {
+		const input = "\uFEFFJust text";
+		const result = parseFrontmatter(input);
+		expect(result.body).toBe("Just text");
+	});
+
 	it("throws on invalid YAML frontmatter", () => {
 		const input = "---\nfoo: [bar\n---\nBody";
 		expect(() => parseFrontmatter<Record<string, string>>(input)).toThrow(/at line 1, column 10/);

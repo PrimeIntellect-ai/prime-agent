@@ -178,7 +178,9 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
-const WORKER_CONNECT_TIMEOUT_MS = 30_000;
+// win32 AV/EDR scanning can delay worker startup to 30-50s, so the whole
+// spawn-to-hello handshake budget is much larger there.
+const WORKER_CONNECT_TIMEOUT_MS = process.platform === "win32" ? 90_000 : 30_000;
 const ROSTER_WATCHDOG_INTERVAL_MS = 15_000;
 const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
 const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -206,7 +208,7 @@ const STALE_RECLAIM_WAIT_MS = 10_000;
 // Polling loops probe existence cheaply via kill(0); the ps-backed zombie and
 // identity checks are throttled so a wedged worker cannot saturate the
 // supervisor event loop with synchronous subprocess spawns.
-const LIVENESS_IDENTITY_RECHECK_MS = 500;
+// Note: win32 uses a longer recheck (see below) to avoid expensive PowerShell identity storms.
 const OWNED_WORKER_DISCONNECT_GRACE_MS = 30_000;
 const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
@@ -217,6 +219,26 @@ const SCHEDULED_WAKE_MAX_TIMEOUT_MS = 2_147_483_647;
 const SCHEDULED_WAKE_CLIENT_ID = "scheduled-wake";
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
+
+// Windows named pipes under AV/EDR add 1-5s of startup latency on the worker
+// side (process spawn → pipe server listen).  The per-probe timeouts below
+// give the worker more breathing room on win32, while the connect back-off
+// sequence avoids a blind retry storm (hundreds of failed named-pipe connect()
+// calls within the overall 90s (win32) / 30s (other) budget).
+const IS_WIN32 = process.platform === "win32";
+/** Per-probe connection timeout for slow Windows pipe creation. */
+const WORKER_CONNECT_PROBE_MS = IS_WIN32 ? 2_000 : 500;
+/** Per-probe hello and auth timeout. */
+const WORKER_HELLO_AUTH_TIMEOUT_MS = IS_WIN32 ? 5_000 : 1_000;
+/** Repeat interval for kill(0) + ps-backed identity probes.  On win32 the
+ *  "ps-backed" path spawns PowerShell, which is itself expensive under real-time
+ *  scanning; a longer interval reduces overhead without leaving the supervisor
+ *  blind for longer than an AV-slowed spawn takes. */
+const LIVENESS_IDENTITY_RECHECK_MS = IS_WIN32 ? 3_000 : 500;
+/** How long the connectWorker loop sleeps between probe failures.  First probe
+ *  delayed by MIN, each subsequent failure doubles up to MAX (bounded back-off). */
+const WORKER_PROBE_BACKOFF_MIN_MS = 25;
+const WORKER_PROBE_BACKOFF_MAX_MS = IS_WIN32 ? 2_000 : 25;
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -3143,6 +3165,7 @@ export class DaemonSupervisor {
 			detached: true,
 			env: workerEnvironment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
+			windowsHide: process.platform === "win32",
 		});
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
@@ -3368,13 +3391,19 @@ export class DaemonSupervisor {
 
 	private async connectWorker(worker: ResidentWorker, timeoutMs: number): Promise<DaemonWorkerClient> {
 		const deadline = Date.now() + timeoutMs;
+		const probeTimeout = (maximum: number): number => {
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new DaemonWorkerProbeTimeoutError("Worker connection deadline elapsed");
+			return Math.min(maximum, remaining);
+		};
 		let lastError: unknown;
+		let backoffMs = WORKER_PROBE_BACKOFF_MIN_MS;
 		while (Date.now() < deadline) {
 			await this.assertRecoveryAllowed();
 			const client = new DaemonWorkerClient(worker.descriptor.socketPath);
 			try {
-				await client.connect(Math.min(500, Math.max(50, deadline - Date.now())));
-				await client.waitForHello(1000);
+				await client.connect(probeTimeout(WORKER_CONNECT_PROBE_MS));
+				await client.waitForHello(probeTimeout(WORKER_HELLO_AUTH_TIMEOUT_MS));
 				// Listen before authenticating: the worker flushes its roster snapshot right after auth succeeds.
 				client.onFrame((frame) => this.handleWorkerFrame(worker, frame, client));
 				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
@@ -3388,7 +3417,7 @@ export class DaemonSupervisor {
 								? { workerInstanceId: worker.descriptor.workerInstanceId }
 								: {}),
 						},
-						1000,
+						probeTimeout(WORKER_HELLO_AUTH_TIMEOUT_MS),
 					);
 					await this.assertRecoveryAllowed();
 					if (!workerAuthAdvertisesRoster(authResponse.data)) {
@@ -3412,7 +3441,13 @@ export class DaemonSupervisor {
 				) {
 					throw error;
 				}
-				await delay(25);
+				// Exponential back-off: each failed probe waits longer so that
+				// slow-to-appear Windows named-pipe servers do not trigger a
+				// retry storm of hundreds of instant-ECONNREFUSED connect() calls.
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) break;
+				await delay(Math.min(backoffMs, remaining));
+				backoffMs = Math.min(backoffMs * 2, WORKER_PROBE_BACKOFF_MAX_MS);
 			}
 		}
 		throw new DaemonWorkerProbeTimeoutError(`Timed out connecting to daemon session worker: ${String(lastError)}`);
@@ -6372,16 +6407,17 @@ export class DaemonSupervisor {
 		worker.transcriptCaches.clear();
 		worker.snapshotCache.clear();
 		worker.snapshotGenerations?.clear();
-		if (worker.client) {
+		const client = worker.client;
+		if (client) {
 			if (archiveSession) {
-				await worker.client
+				await client
 					.requestWorker({ type: "worker_archive_and_shutdown" }, force ? 1000 : 5000)
 					.catch(() => undefined);
 			} else {
-				await worker.client.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
+				await client.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
 			}
-			worker.client.close();
-			worker.client = undefined;
+			client.close();
+			if (worker.client === client) worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
 		} else if (this.processIdentity(entryPid, entryStartId) === "current") {
@@ -6416,8 +6452,9 @@ export class DaemonSupervisor {
 			if (directChild) {
 				sigkillSent = directChild.child.kill("SIGKILL");
 			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
-				// Fresh, unthrottled check: the cached verdict may be up to 500ms
-				// old, long enough for the pid to be recycled.
+				// Fresh, unthrottled check: the cached verdict may be up to
+				// LIVENESS_IDENTITY_RECHECK_MS old, long enough for the pid to be
+				// recycled.
 				signalProcessGroupOrProcess(entryPid, "SIGKILL");
 				sigkillSent = true;
 			}
@@ -6531,8 +6568,9 @@ export class DaemonSupervisor {
 			}
 			if (!killed && stoppedCanSignal && Date.now() >= sigkillDeadline) {
 				// Fresh, unthrottled identity check right before signalling: the
-				// cached verdict may be up to 500ms old, long enough for the pid
-				// to be recycled by an unrelated process. A transiently
+				// cached verdict may be up to LIVENESS_IDENTITY_RECHECK_MS old,
+				// long enough for the pid to be recycled by an unrelated process.
+				// A transiently
 				// unobservable identity skips this attempt but keeps escalation
 				// armed so a wedged worker is still killed on a later pass.
 				const observedNow = processStartId === undefined ? undefined : getProcessStartId(pid);
@@ -6951,6 +6989,7 @@ export class DaemonSupervisor {
 				detached: true,
 				env: environment,
 				stdio: "ignore",
+				windowsHide: process.platform === "win32",
 			});
 			replacement.unref();
 		}

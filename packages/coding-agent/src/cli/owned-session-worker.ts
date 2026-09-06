@@ -338,6 +338,7 @@ export async function runOwnedSessionWorkerFrontend(
 		const child = spawn(launch.command, launch.args, {
 			cwd: process.cwd(),
 			detached: process.platform !== "win32",
+			windowsHide: process.platform === "win32" && !interactive,
 			env: {
 				...process.env,
 				[OWNED_WORKER_ENV]: "1",

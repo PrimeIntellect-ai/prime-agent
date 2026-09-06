@@ -357,6 +357,7 @@ export class DaemonCatalogClient {
 		const child = spawn(command, args, {
 			cwd: process.cwd(),
 			env: environment,
+			windowsHide: process.platform === "win32",
 			stdio: ["ignore", "ignore", "ignore", "ipc"],
 		});
 		this.child = child;

@@ -70,7 +70,13 @@ interface SupervisorInternals {
 	socketPath: string;
 	defaultSessionConfig: { agentDir?: string; sessionDir?: string };
 	persistWorker(worker: WorkerFixture): void;
-	stopWorkerUntracked(worker: WorkerFixture, removeDescriptor: boolean, force?: boolean): Promise<void>;
+	stopWorkerUntracked(
+		worker: WorkerFixture,
+		removeDescriptor: boolean,
+		force?: boolean,
+		archiveSession?: boolean,
+	): Promise<void>;
+	handleWorkerClose(worker: WorkerFixture, client: NonNullable<WorkerFixture["client"]>, error: Error): Promise<void>;
 	promoteOwnedWorker(client: object, worker: WorkerFixture): Promise<void>;
 	loadWorkerDescriptors(): void;
 	adoptOrRecoverWorker(worker: WorkerFixture): Promise<void>;
@@ -139,6 +145,32 @@ function makeSupervisor(idleEvictionMinutes: number | "off" = 90): SupervisorInt
 	supervisor.log = vi.fn();
 	return supervisor;
 }
+
+describe("daemon worker shutdown connection race", () => {
+	it.each([false, true])("finishes when the client disconnects during shutdown (archive=%s)", async (archive) => {
+		const supervisor = makeSupervisor();
+		const worker = makeWorker("disconnecting", []);
+		worker.descriptor.pid = 2_000_000_000;
+		worker.stopRevision = 0;
+		worker.transcriptCaches = new Map();
+		worker.snapshotCache = new Map();
+		supervisor.workers.set(worker.descriptor.workerId, worker);
+		vi.spyOn(supervisor, "persistWorker").mockImplementation(() => {});
+		const client = worker.client!;
+		const disconnect = async () => {
+			await supervisor.handleWorkerClose(worker, client, new Error("worker exited"));
+			return success(undefined, "shutdown");
+		};
+		client.request.mockImplementation(disconnect);
+		client.requestWorker.mockImplementation(disconnect);
+
+		await supervisor.stopWorkerUntracked(worker, false, false, archive);
+
+		expect(client.close).toHaveBeenCalledTimes(1);
+		expect(worker.client).toBeUndefined();
+		expect(supervisor.workers.has(worker.descriptor.workerId)).toBe(false);
+	});
+});
 
 describe("daemon supervisor whole-tree eviction", () => {
 	it("derives a bounded sweep interval from the live threshold", () => {

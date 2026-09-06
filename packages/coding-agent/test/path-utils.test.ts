@@ -1,5 +1,5 @@
 import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.js";
@@ -14,6 +14,18 @@ describe("path-utils", () => {
 		it("should expand ~/path to home directory", () => {
 			const result = expandPath("~/Documents/file.txt");
 			expect(result).not.toContain("~/");
+		});
+
+		it("should expand a backslash tilde prefix only on Windows", () => {
+			const input = "~\\Documents\\file.txt";
+			expect(expandPath(input)).toBe(
+				process.platform === "win32" ? join(homedir(), "Documents", "file.txt") : input,
+			);
+		});
+
+		it("should preserve non-native separators outside Windows", () => {
+			const input = "~/Documents\\file.txt";
+			expect(expandPath(input)).toBe(join(homedir(), "Documents\\file.txt"));
 		});
 
 		it("should normalize Unicode spaces", () => {
