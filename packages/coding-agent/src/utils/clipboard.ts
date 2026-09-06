@@ -1,4 +1,4 @@
-import { execSync, spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { platform } from "os";
 import { isWaylandSession } from "./clipboard-image.js";
 import { clipboard } from "./clipboard-native.js";
@@ -9,12 +9,54 @@ type NativeClipboardExecOptions = {
 	stdio: ["pipe", "ignore", "ignore"];
 };
 
-function copyToX11Clipboard(options: NativeClipboardExecOptions): void {
-	try {
-		execSync("xclip -selection clipboard", options);
-	} catch {
-		execSync("xsel --clipboard --input", options);
-	}
+function runClipboardCommand(command: string, args: string[], options: NativeClipboardExecOptions): boolean {
+	const result = spawnSync(command, args, { ...options, shell: false });
+	return result.error === undefined && result.signal === null && result.status === 0;
+}
+
+function copyToX11Clipboard(options: NativeClipboardExecOptions): boolean {
+	return (
+		runClipboardCommand("xclip", ["-selection", "clipboard"], options) ||
+		runClipboardCommand("xsel", ["--clipboard", "--input"], options)
+	);
+}
+
+function copyToWaylandClipboard(text: string, timeoutMs = 5000): Promise<boolean> {
+	return new Promise((resolve) => {
+		const proc = spawn("wl-copy", [], { shell: false, stdio: ["pipe", "ignore", "ignore"] });
+		let settled = false;
+		const finish = (success: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(success);
+		};
+		const onError = () => {
+			if (settled) return;
+			proc.stdin.destroy();
+			finish(false);
+		};
+		const onStdinError = () => {
+			if (settled) return;
+			proc.kill("SIGKILL");
+			finish(false);
+		};
+		const onSpawn = () => {
+			if (!settled) proc.stdin.end(text);
+		};
+		const onClose = (code: number | null, signal: NodeJS.Signals | null) => finish(code === 0 && signal === null);
+		const timer = setTimeout(() => {
+			proc.kill("SIGKILL");
+			proc.stdin.destroy();
+			finish(false);
+		}, timeoutMs);
+
+		proc.unref();
+		proc.once("error", onError);
+		proc.stdin.once("error", onStdinError);
+		proc.once("spawn", onSpawn);
+		proc.once("close", onClose);
+	});
 }
 
 const MAX_OSC52_ENCODED_LENGTH = 100_000;
@@ -66,20 +108,13 @@ export async function copyToClipboard(text: string): Promise<void> {
 	if (!copied) {
 		try {
 			if (p === "darwin") {
-				execSync("pbcopy", options);
-				copied = true;
+				copied = runClipboardCommand("pbcopy", [], options);
 			} else if (p === "win32") {
-				execSync("clip", options);
-				copied = true;
+				copied = runClipboardCommand("clip", [], options);
 			} else {
 				// Linux. Try Termux, Wayland, or X11 clipboard tools.
 				if (process.env.TERMUX_VERSION) {
-					try {
-						execSync("termux-clipboard-set", options);
-						copied = true;
-					} catch {
-						// Fall back to Wayland or X11 tools.
-					}
+					copied = runClipboardCommand("termux-clipboard-set", [], options);
 				}
 
 				if (!copied) {
@@ -87,27 +122,12 @@ export async function copyToClipboard(text: string): Promise<void> {
 					const hasX11Display = Boolean(process.env.DISPLAY);
 					const isWayland = isWaylandSession();
 					if (isWayland && hasWaylandDisplay) {
-						try {
-							// Verify wl-copy exists (spawn errors are async and won't be caught)
-							execSync("which wl-copy", { stdio: "ignore" });
-							// wl-copy with execSync hangs due to fork behavior; use spawn instead
-							const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
-							proc.stdin.on("error", () => {
-								// Ignore EPIPE errors if wl-copy exits early
-							});
-							proc.stdin.write(text);
-							proc.stdin.end();
-							proc.unref();
-							copied = true;
-						} catch {
-							if (hasX11Display) {
-								copyToX11Clipboard(options);
-								copied = true;
-							}
+						copied = await copyToWaylandClipboard(text);
+						if (!copied && hasX11Display) {
+							copied = copyToX11Clipboard(options);
 						}
 					} else if (hasX11Display) {
-						copyToX11Clipboard(options);
-						copied = true;
+						copied = copyToX11Clipboard(options);
 					}
 				}
 			}

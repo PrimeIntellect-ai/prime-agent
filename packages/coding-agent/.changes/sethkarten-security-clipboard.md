@@ -1,0 +1,1 @@
+- Fixed clipboard fallback continuing after an unresponsive Wayland helper.
