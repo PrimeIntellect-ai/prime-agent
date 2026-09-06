@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.9.3] - 2026-09-06
+
+- Fixed ChatGPT OAuth model discovery hiding GPT-6 Astra by advertising Codex CLI 0.153.4 instead of 0.147.0.
+
 ## [0.9.2] - 2026-09-05
 
 - Fixed daemon session creation after macOS timezone changes ([#879](https://github.com/PrimeIntellect-ai/prime-agent/issues/879))
