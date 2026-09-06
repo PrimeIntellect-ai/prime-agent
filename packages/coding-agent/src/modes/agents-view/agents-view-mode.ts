@@ -2509,6 +2509,13 @@ export class AgentsViewMode implements Component, Focusable {
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {
 				displayItems.push({ type: "row", row });
+				if (
+					(row.kind === "agent" || row.kind === "subagent") &&
+					row.runningSubagentCount > 0 &&
+					!this.expandedSubagentParents.has(row.identity)
+				) {
+					displayItems.push({ type: "running-subagents", row });
+				}
 			}
 		}
 		if (displayItems.length === 0) {
@@ -2531,6 +2538,14 @@ export class AgentsViewMode implements Component, Focusable {
 		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
 		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
 			if (item.type === "spacer") return "";
+			if (item.type === "running-subagents") {
+				const count = item.row.runningSubagentCount;
+				const indent = "  ".repeat(item.row.depth + 1);
+				return theme.fg(
+					"success",
+					truncateToWidth(`${indent}${count} subagent${count === 1 ? "" : "s"} running`, width),
+				);
+			}
 			if (item.type === "heading") {
 				const collapsed =
 					item.section === "inactive" && !this.rows.some((row) => row.depth === 0 && row.section === "inactive");
@@ -2761,6 +2776,7 @@ export class AgentsViewMode implements Component, Focusable {
 type DisplayItem =
 	| { type: "spacer" }
 	| { type: "heading"; section: AgentsViewSection }
+	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };
 
 function compactSessionRows(rows: readonly AgentsViewRow[], showInactive: boolean): AgentsViewRow[] {

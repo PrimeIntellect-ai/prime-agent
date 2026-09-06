@@ -961,7 +961,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("expands subagents from the parent row without an extra summary row", () => {
+	it("shows running-subagent counts only while collapsed and work remains", () => {
 		const parent = summary({ sessionName: "parent" });
 		const child = summary({
 			id: "child",
@@ -973,18 +973,44 @@ describe("AgentsViewMode", () => {
 			activity: "working",
 			isStreaming: true,
 		});
+		const secondChild = {
+			...child,
+			id: "child-2",
+			activeSessionId: "child-2",
+			sessionId: "child-session-2",
+			sessionFile: "/tmp/child-2.jsonl",
+		};
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
+		const lines = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
 		try {
-			Reflect.set(view, "lastListedSummaries", [parent, child]);
+			Reflect.set(view, "lastListedSummaries", [parent, child, secondChild]);
 			invoke("reconcileCatalogs", view);
 			expect(rows()).toHaveLength(1);
 			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▸");
+			const collapsed = lines();
+			const parentIndex = collapsed.findIndex((line) => line.includes("parent"));
+			expect(collapsed[parentIndex + 1]).toBe("  2 subagents running");
+			invoke("moveSelection", view, 1);
+			expect(Reflect.get(view, "selectedIndex")).toBe(0);
 			view.handleInput("\x1b[1;3C");
-			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent"]);
+			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent", "subagent"]);
+			expect(lines().join("\n")).not.toContain("subagents running");
 			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▾");
 			view.handleInput("\x1b[1;3C");
 			expect(rows()).toHaveLength(1);
+			expect(lines()).toContain("  2 subagents running");
+			const idleChild = { ...child, activity: "idle", isStreaming: false };
+			Reflect.set(view, "lastListedSummaries", [parent, idleChild, secondChild]);
+			invoke("reconcileCatalogs", view);
+			expect(lines()).toContain("  1 subagent running");
+			Reflect.set(view, "lastListedSummaries", [
+				parent,
+				idleChild,
+				{ ...secondChild, activity: "idle", isStreaming: false },
+			]);
+			invoke("reconcileCatalogs", view);
+			expect(lines().join("\n")).not.toMatch(/subagents? running/);
 		} finally {
 			stopThemeWatcher();
 		}
