@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { getApiProvider, getModels } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
 
@@ -21,6 +21,7 @@ describe("ModelRegistry", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllGlobals();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
@@ -647,6 +648,49 @@ describe("ModelRegistry", () => {
 				cost: { input: 1, output: 2 },
 			});
 			expect(getModelsForProvider(registry, "openrouter")).toHaveLength(getModels("openrouter").length);
+		});
+
+		test("restores cached authorized deployment metadata without waiting for the network", async () => {
+			const privateRoute = {
+				id: "vendor/model:deployment",
+				display_name: "Private Deployment",
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				specs: {
+					context_window: 200_000,
+					max_output_tokens: 20_000,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: false,
+				},
+			};
+			authStorage.set("prime-inference", {
+				type: "api_key",
+				key: "prime-key",
+				primeTeam: { teamId: "research-team", name: "Research" },
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(
+					async (_url: string | URL | Request, init?: RequestInit) =>
+						new Response(
+							JSON.stringify({ data: new Headers(init?.headers).has("Authorization") ? [privateRoute] : [] }),
+						),
+				),
+			);
+			const firstRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(
+				(await firstRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
+
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => {
+					throw new Error("offline");
+				}),
+			);
+			const restoredRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(
+				(await restoredRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
 		});
 	});
 

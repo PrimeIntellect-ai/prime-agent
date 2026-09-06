@@ -92,6 +92,7 @@ describe("Prime Inference model catalog", () => {
 			buildPrimeInferenceModels(
 				[model("bundled")],
 				[entry("new/complete"), { id: "new/incomplete", input: 1, output: 2 }],
+				{ minimumModels: 0 },
 			) ?? [];
 		expect(models.map(({ id }) => id)).toEqual(["new/complete"]);
 	});
@@ -104,12 +105,18 @@ describe("Prime Inference model catalog", () => {
 		expect(live).toMatchObject({ name: "Renamed", contextWindow: 100_000, maxTokens: 10_000, reasoning: true });
 	});
 
-	test("filters private routes from the anonymous catalog and rejects severe truncation", () => {
+	test("filters private routes and measures coverage against bundled models", () => {
+		const bundled = [model("one"), model("two"), model("three")];
 		expect(
-			buildPrimeInferenceModels(
-				[model("one"), model("two"), model("three")],
-				[entry("internal/private"), entry("dev/private"), entry("poolside/model:deployment"), entry("one")],
-			),
+			buildPrimeInferenceModels(bundled, [
+				entry("internal/private"),
+				entry("dev/private"),
+				entry("poolside/model:deployment"),
+				entry("one"),
+			]),
+		).toBeUndefined();
+		expect(
+			buildPrimeInferenceModels(bundled, [entry("new/one"), entry("new/two"), entry("new/three")]),
 		).toBeUndefined();
 	});
 

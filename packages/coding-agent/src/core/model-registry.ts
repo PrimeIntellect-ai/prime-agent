@@ -16,6 +16,7 @@ import {
 	type OAuthProviderInterface,
 	type OpenAICompletionsCompat,
 	type OpenAIResponsesCompat,
+	parsePrimeInferenceModelCatalog,
 	registerApiProvider,
 	resetApiProviders,
 	type SimpleStreamOptions,
@@ -31,6 +32,7 @@ import { getAgentDir } from "../config.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
+	buildPrimeInferenceModels,
 	mergePrimeInferenceModels,
 	readCachedPrimeInferenceModels,
 	refreshPrimeInferenceModels,
@@ -421,7 +423,7 @@ const PRIVATE_PRIME_BACKGROUND_REFRESH_TIMEOUT_MS = 3_000;
 
 interface PrivatePrimeAuthorizationCache {
 	fingerprint: string;
-	modelIds: Set<string>;
+	models: Model<"openai-completions">[];
 	refreshedAt: number;
 }
 
@@ -842,14 +844,14 @@ export class ModelRegistry {
 		const fingerprint = privatePrimeAuthorizationFingerprint(apiKey, teamId);
 		const cached = this.readPrivatePrimeAuthorizationCache();
 		if (cached?.fingerprint === fingerprint) {
-			// Serve the persisted authorization decision so startup and model lists
-			// don't block on the network. A stale cache refreshes in the background
-			// and the updated ids apply to subsequent lookups in this process.
-			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.modelIds);
+			// Serve the credential-scoped cache so startup and model lists don't
+			// block on the network. Stale entries refresh in the background.
+			this.authorizedPrivatePrimeInferenceModels = cached.models;
+			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.models.map((model) => model.id));
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
+			this.reloadModelsAfterCatalogChange();
 			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-			const missingModelMetadata = [...cached.modelIds].some((id) => !this.find(PRIME_INFERENCE_PROVIDER_ID, id));
-			if (isOfflineModeEnabled() || (cacheIsFresh && !missingModelMetadata)) return;
+			if (isOfflineModeEnabled() || cacheIsFresh) return;
 			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
 			return;
 		}
@@ -880,11 +882,7 @@ export class ModelRegistry {
 			this.authorizedPrivatePrimeInferenceModelIds = new Set(authorizedModels.map((model) => model.id));
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
 			this.reloadModelsAfterCatalogChange();
-			this.writePrivatePrimeAuthorizationCache({
-				fingerprint,
-				modelIds: this.authorizedPrivatePrimeInferenceModelIds,
-				refreshedAt: Date.now(),
-			});
+			this.writePrivatePrimeAuthorizationCache({ fingerprint, models: authorizedModels, refreshedAt: Date.now() });
 		} else if (teamId === previousTeamId) {
 			this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
@@ -929,7 +927,7 @@ export class ModelRegistry {
 				this.reloadModelsAfterCatalogChange();
 				this.writePrivatePrimeAuthorizationCache({
 					fingerprint,
-					modelIds: this.authorizedPrivatePrimeInferenceModelIds,
+					models: authorizedModels,
 					refreshedAt: Date.now(),
 				});
 			} catch {
@@ -961,25 +959,28 @@ export class ModelRegistry {
 
 	private readPrivatePrimeAuthorizationCache(): PrivatePrimeAuthorizationCache | undefined {
 		const cachePath = this.privatePrimeAuthorizationCachePath();
-		if (!cachePath) {
-			return undefined;
-		}
+		if (!cachePath) return undefined;
 		try {
-			const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<
-				Omit<PrivatePrimeAuthorizationCache, "modelIds"> & { modelIds: string[] }
-			>;
+			const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as {
+				fingerprint?: unknown;
+				data?: unknown;
+				refreshedAt?: unknown;
+			};
 			if (
 				typeof parsed.fingerprint !== "string" ||
-				!Array.isArray(parsed.modelIds) ||
+				!Array.isArray(parsed.data) ||
 				typeof parsed.refreshedAt !== "number"
 			) {
 				return undefined;
 			}
-			return {
-				fingerprint: parsed.fingerprint,
-				modelIds: new Set(parsed.modelIds),
-				refreshedAt: parsed.refreshedAt,
-			};
+			const entries = parsePrimeInferenceModelCatalog({ data: parsed.data }, { allowEmpty: true }).filter((entry) =>
+				isPrivatePrimeInferenceModel({ provider: PRIME_INFERENCE_PROVIDER_ID, id: entry.id }),
+			);
+			const models = buildPrimeInferenceModels(getPrivatePrimeInferenceModels(), entries, {
+				includePrivate: true,
+				minimumModels: 0,
+			});
+			return { fingerprint: parsed.fingerprint, models: models ?? [], refreshedAt: parsed.refreshedAt };
 		} catch {
 			return undefined;
 		}
@@ -987,12 +988,32 @@ export class ModelRegistry {
 
 	private writePrivatePrimeAuthorizationCache(cache: PrivatePrimeAuthorizationCache): void {
 		const cachePath = this.privatePrimeAuthorizationCachePath();
-		if (!cachePath) {
-			return;
-		}
+		if (!cachePath) return;
+		const data = cache.models.map((model) => ({
+			id: model.id,
+			display_name: model.name,
+			pricing: {
+				input_usd_per_mtok: model.cost.input,
+				output_usd_per_mtok: model.cost.output,
+				cache_read_usd_per_mtok: model.cost.cacheRead,
+				cache_write_usd_per_mtok: model.cost.cacheWrite,
+			},
+			specs: {
+				context_window: model.contextWindow,
+				max_output_tokens: model.maxTokens,
+				modalities: { input: model.input, output: ["text"] },
+				supports_reasoning: model.reasoning,
+			},
+		}));
 		try {
 			const tmpPath = `${cachePath}.${process.pid}.tmp`;
-			writeFileSync(tmpPath, JSON.stringify({ ...cache, modelIds: [...cache.modelIds] }), { mode: 0o600 });
+			writeFileSync(
+				tmpPath,
+				JSON.stringify({ fingerprint: cache.fingerprint, data, refreshedAt: cache.refreshedAt }),
+				{
+					mode: 0o600,
+				},
+			);
 			renameSync(tmpPath, cachePath);
 		} catch {
 			// A failed cache write only requires a later refetch.

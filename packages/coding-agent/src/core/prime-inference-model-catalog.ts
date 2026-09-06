@@ -63,7 +63,8 @@ export function buildPrimeInferenceModels(
 		});
 	}
 	const minimumModels = options.minimumModels ?? Math.ceil(bundledModels.length * MIN_CATALOG_COVERAGE);
-	return models.length >= minimumModels ? models : undefined;
+	const coveredBundledModels = models.filter((model) => bundled.has(model.id.toLowerCase())).length;
+	return coveredBundledModels >= minimumModels ? models : undefined;
 }
 
 export function mergePrimeInferenceModels(

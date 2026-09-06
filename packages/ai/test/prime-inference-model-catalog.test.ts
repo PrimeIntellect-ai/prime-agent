@@ -39,17 +39,31 @@ describe("Prime Inference model catalog", () => {
 		});
 	});
 
-	test("keeps priced entries without specs for bundled fallback", () => {
+	test("keeps priced entries without complete specs for bundled fallback", () => {
 		expect(
 			parsePrimeInferenceModelCatalog(
-				response({
-					id: "vendor/model",
-					display_name: null,
-					pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
-					specs: null,
-				}),
+				response(
+					{
+						id: "vendor/no-specs",
+						pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+						specs: null,
+					},
+					{
+						id: "vendor/partial-specs",
+						pricing: { input_usd_per_mtok: 3, output_usd_per_mtok: 4 },
+						specs: {
+							context_window: 100_000,
+							max_output_tokens: 10_000,
+							modalities: { output: ["text"] },
+							supports_reasoning: false,
+						},
+					},
+				),
 			),
-		).toEqual([{ id: "vendor/model", input: 1, output: 2 }]);
+		).toEqual([
+			{ id: "vendor/no-specs", input: 1, output: 2 },
+			{ id: "vendor/partial-specs", input: 3, output: 4 },
+		]);
 	});
 
 	test("rejects empty and duplicate catalogs", () => {

@@ -46,11 +46,23 @@ export function parsePrimeInferenceModelCatalog(
 		const name = typeof item.display_name === "string" ? item.display_name.trim() : "";
 		const specs = isRecord(item.specs) ? item.specs : {};
 		const modalities = isRecord(specs.modalities) ? specs.modalities : {};
-		const inputModalities = Array.isArray(modalities.input) ? modalities.input : [];
+		const inputModalities =
+			Array.isArray(modalities.input) && modalities.input.every((modality) => typeof modality === "string")
+				? modalities.input
+				: undefined;
+		const outputModalities =
+			Array.isArray(modalities.output) && modalities.output.every((modality) => typeof modality === "string")
+				? modalities.output
+				: undefined;
 		const contextWindow = positiveInteger(specs.context_window);
 		const maxTokens = positiveInteger(specs.max_output_tokens);
 		const reasoning = typeof specs.supports_reasoning === "boolean" ? specs.supports_reasoning : undefined;
-		const hasSpecs = contextWindow !== undefined && maxTokens !== undefined && reasoning !== undefined;
+		const hasSpecs =
+			contextWindow !== undefined &&
+			maxTokens !== undefined &&
+			reasoning !== undefined &&
+			inputModalities !== undefined &&
+			outputModalities !== undefined;
 		const cacheRead = nonNegativeNumber(pricing.cache_read_usd_per_mtok);
 		const cacheWrite = nonNegativeNumber(pricing.cache_write_usd_per_mtok);
 
