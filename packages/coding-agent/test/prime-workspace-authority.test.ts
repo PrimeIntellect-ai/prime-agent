@@ -106,7 +106,7 @@ while True:
     if MODE == "partial-read":
         os.write(1, b"\\x00\\x00")
         time.sleep(60)
-    if opcode == 1:
+    if opcode == 0xFE:
         if MODE == "delayed-header-payload":
             stat_payload = valid_stat()
             time.sleep(1.8)
@@ -220,7 +220,7 @@ describe("real helper lifecycle", () => {
 		const root = freshSessionRoot();
 		const pathPayload = new TextEncoder().encode(root);
 		const lockPayload = new Uint8Array(4);
-		const input = Buffer.concat([frame(1, pathPayload), frame(64, lockPayload), frame(255, new Uint8Array(0))]);
+		const input = Buffer.concat([frame(0xfe, pathPayload), frame(64, lockPayload), frame(255, new Uint8Array(0))]);
 		const result = spawnSync(PYTHON, [HELPER], {
 			input,
 			maxBuffer: 2_097_152,
@@ -237,7 +237,30 @@ describe("real helper lifecycle", () => {
 		]);
 	});
 
-	it("rejects an unknown operation after entering dispatch", () => {
+	it("requires 0xfe as the first and only OPEN_ROOT command", () => {
+		const root = freshSessionRoot();
+		const pathPayload = new TextEncoder().encode(root);
+		const oldOpcode = spawnSync(PYTHON, [HELPER], {
+			input: frame(0x01, pathPayload),
+			maxBuffer: 1024,
+			timeout: 5000,
+		});
+		expect(oldOpcode.status).toBe(0);
+		expect(readFrames(oldOpcode.stdout)).toEqual([{ status: 1, payloadLength: 4 }]);
+
+		const duplicate = spawnSync(PYTHON, [HELPER], {
+			input: Buffer.concat([frame(0xfe, pathPayload), frame(0xfe, pathPayload)]),
+			maxBuffer: 1024,
+			timeout: 5000,
+		});
+		expect(duplicate.status).toBe(0);
+		expect(readFrames(duplicate.stdout)).toEqual([
+			{ status: 0, payloadLength: 72 },
+			{ status: 1, payloadLength: 4 },
+		]);
+	});
+
+	it("rejects an unknown operation before entering dispatch", () => {
 		const result = spawnSync(PYTHON, [HELPER], {
 			input: frame(0x99, new Uint8Array(0)),
 			maxBuffer: 1024,

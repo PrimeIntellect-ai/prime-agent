@@ -34,7 +34,7 @@ const GROUP_POLL_MS = 200;
 const GROUP_POLL_COUNT = 10;
 const DRAIN_GRACE_MS = 2000;
 
-const OPEN_ROOT = 0x01;
+const OPEN_ROOT = 0xfe;
 const FLOCK_EX_NB = 0x40;
 const QUIT = 0xff;
 const RESPONSE_OK = 0x00;

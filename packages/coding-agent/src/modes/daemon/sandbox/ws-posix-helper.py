@@ -8,7 +8,7 @@ import stat as stat_module
 import struct
 import sys
 
-SEM_OPEN_ROOT = 0x01
+SEM_OPEN_ROOT = 0xFE
 SEM_FLOCK_EX_NB = 0x40
 SEM_QUIT = 0xFF
 RESP_OK = 0x00
