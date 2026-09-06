@@ -1,1 +1,0 @@
-- Fixed finished agents lingering in the agents view Running section as "classifying" when their status summary text did not change.

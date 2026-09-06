@@ -1,1 +1,0 @@
-- Fixed daemon session creation after macOS timezone changes ([#879](https://github.com/PrimeIntellect-ai/prime-agent/issues/879))
