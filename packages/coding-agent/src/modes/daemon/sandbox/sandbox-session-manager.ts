@@ -27,7 +27,6 @@ import type {
 import { copySandboxEd25519PublicKey } from "./prime-sandbox-transport.js";
 import { isPreparedFileUpload, type PreparedFileUpload } from "./prime-sandbox-upload-body.js";
 
-const ISSUE = Object.freeze({});
 const FIXED_IMAGE = "python:3.11.13-slim-bookworm";
 const FIXED_CPU_CORES = 1;
 const FIXED_MEMORY_GB = 1;
@@ -67,6 +66,22 @@ export type PrimeSandboxInternalBinding = Readonly<{
 	name: string;
 }>;
 
+export type PrimeSandboxSessionFamily = Readonly<{
+	start(
+		artifactsValue: unknown,
+		homeIdentity: unknown,
+		allowedModel: unknown,
+		signal?: unknown,
+	): Promise<PrimeSandboxSessionManagerResult<unknown>>;
+	proxy(
+		sessionRaw: unknown,
+		inferencePort: unknown,
+		signal?: unknown,
+	): Promise<SandboxInferenceProxyResult | PrimeSandboxSessionManagerFailure>;
+	delete(sessionRaw: unknown): Promise<PrimeSandboxSessionManagerResult<true>>;
+	retryCleanup(): Promise<PrimeSandboxSessionManagerResult<true>>;
+}>;
+
 interface SessionManagerState {
 	readonly lifecycleBundle: SandboxLifecycleBundle;
 	readonly credential: PrimeCliCredentialAuthority;
@@ -90,32 +105,6 @@ interface SessionManagerState {
 	proxyBusy: boolean;
 	checkpointCompleted: boolean;
 }
-
-interface SessionState {
-	readonly manager: PrimeSandboxSessionManager;
-}
-
-export class PrimeSandboxSession {
-	constructor(token: object) {
-		if (token !== ISSUE) throw new Error();
-		Object.freeze(this);
-	}
-}
-
-export class PrimeSandboxSessionManager {
-	constructor(token: object) {
-		if (token !== ISSUE) throw new Error();
-		Object.freeze(this);
-	}
-}
-
-Object.freeze(PrimeSandboxSession.prototype);
-Object.freeze(PrimeSandboxSession);
-Object.freeze(PrimeSandboxSessionManager.prototype);
-Object.freeze(PrimeSandboxSessionManager);
-
-const managers = new WeakMap<object, SessionManagerState>();
-const sessions = new WeakMap<object, SessionState>();
 
 function failure(code: PrimeSandboxSessionManagerCode): PrimeSandboxSessionManagerFailure {
 	return Object.freeze({ ok: false, code });
@@ -148,6 +137,16 @@ function signalState(value: unknown): boolean | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+function resolvedSignal(value: unknown): AbortSignal | undefined {
+	if (value === undefined) return undefined;
+	if (exactAbortSignal(value)) return value;
+	return undefined;
+}
+
+function isSandboxInferencePort(value: unknown): value is SandboxInferencePort {
+	return typeof value === "function";
 }
 
 function exactOwnDataObject(value: unknown, keys: readonly string[]): value is object {
@@ -362,67 +361,35 @@ async function cleanupState(state: SessionManagerState): Promise<boolean> {
 	return true;
 }
 
-function createManagerState(
-	lifecycleBundle: SandboxLifecycleBundle,
-	credential: PrimeCliCredentialAuthority,
-	cliAuthority: PrimeCliAuthority | undefined,
-	ownsAuthorities: boolean,
-	dispatch?: SandboxFetchPort,
-	connectRuntime?: SandboxRuntimeConnectPort,
-): PrimeSandboxSessionManager {
-	const manager = new PrimeSandboxSessionManager(ISSUE);
-	managers.set(manager, {
-		lifecycleBundle,
-		credential,
-		cliAuthority,
-		ownsAuthorities,
-		credentialClosed: !ownsAuthorities,
-		cliClosed: !ownsAuthorities,
-		dispatch,
-		connectRuntime,
-		phase: "idle",
-		effectPossible: false,
-		handle: undefined,
-		provider: undefined,
-		connection: undefined,
-		artifacts: undefined,
-		connectionClosed: false,
-		exposureAbsent: false,
-		providerClosed: false,
-		sandboxAbsent: false,
-		inferenceClaimed: false,
-		proxyBusy: false,
-		checkpointCompleted: false,
-	});
-	return manager;
-}
-
-export function createPrimeSandboxSessionManagerForTesting(
+export function createPrimeSandboxSessionFamilyForTesting(
 	lifecycleBundle: SandboxLifecycleBundle,
 	credential: PrimeCliCredentialAuthority,
 	dispatch: SandboxFetchPort,
 	connectRuntime: SandboxRuntimeConnectPort,
-): PrimeSandboxSessionManager {
-	return createManagerState(lifecycleBundle, credential, undefined, false, dispatch, connectRuntime);
+): PrimeSandboxSessionManagerResult<PrimeSandboxSessionFamily> {
+	const family = createSessionFamily(lifecycleBundle, credential, undefined, false, dispatch, connectRuntime);
+	if (family === undefined) return failure("SETUP_FAILED");
+	return success(family);
 }
 
-export async function createManagedPrimeSandboxSessionManager(
+export async function createManagedPrimeSandboxSessionFamily(
 	agentHome: unknown,
 	basePython: unknown,
 	apiKeyBytes: unknown,
 	bindingValue: unknown,
-	signal?: AbortSignal,
-): Promise<PrimeSandboxSessionManagerResult<PrimeSandboxSessionManager>> {
+	signal?: unknown,
+): Promise<PrimeSandboxSessionManagerResult<PrimeSandboxSessionFamily>> {
 	const initialSignal = signalState(signal);
 	const binding = copyBinding(bindingValue);
 	if (initialSignal === undefined || binding === undefined) return failure("INPUT_INVALID");
 	if (initialSignal) return failure("ABORTED");
+	const sig: AbortSignal | undefined = resolvedSignal(signal);
 	const credentialResult = createPrimeCliCredentialAuthority(apiKeyBytes);
 	if (!credentialResult.ok) return failure("INPUT_INVALID");
 	const credential = credentialResult.value;
 	let provisioned: Awaited<ReturnType<typeof provisionPrimeCliV1>>;
 	try {
-		provisioned = await provisionPrimeCliV1(agentHome, basePython, signal);
+		provisioned = await provisionPrimeCliV1(agentHome, basePython, sig);
 	} catch {
 		closePrimeCliCredentialAuthority(credential);
 		return failure("SETUP_FAILED");
@@ -432,7 +399,7 @@ export async function createManagedPrimeSandboxSessionManager(
 		return failure(provisioned.code === "ABORTED" ? "ABORTED" : "SETUP_FAILED");
 	}
 	const cliAuthority = provisioned.value;
-	if (signalState(signal)) {
+	if (sig !== undefined && sig.aborted) {
 		closePrimeCliCredentialAuthority(credential);
 		closePrimeCliAuthority(cliAuthority);
 		return failure("ABORTED");
@@ -470,211 +437,247 @@ export async function createManagedPrimeSandboxSessionManager(
 		closePrimeCliAuthority(cliAuthority);
 		return failure("SETUP_FAILED");
 	}
-	if (signalState(signal)) {
+	if (sig !== undefined && sig.aborted) {
 		closePrimeCliCredentialAuthority(credential);
 		closePrimeCliAuthority(cliAuthority);
 		return failure("ABORTED");
 	}
-	return success(createManagerState(lifecycle.value, credential, cliAuthority, true));
-}
-
-async function failStart(
-	state: SessionManagerState,
-	code: "ABORTED" | "START_FAILED",
-	signal?: AbortSignal,
-): Promise<PrimeSandboxSessionManagerFailure> {
-	const effectiveCode = signalState(signal) ? "ABORTED" : code;
-	const cleaned = await cleanupState(state);
-	return cleaned ? failure(effectiveCode) : failure("CLEANUP_UNCERTAIN");
-}
-
-export async function startPrimeSandboxSession(
-	managerValue: unknown,
-	artifactsValue: unknown,
-	homeIdentity: unknown,
-	allowedModel: unknown,
-	signal?: AbortSignal,
-): Promise<PrimeSandboxSessionManagerResult<PrimeSandboxSession>> {
-	if (typeof managerValue !== "object" || managerValue === null) return failure("INPUT_INVALID");
-	const state = managers.get(managerValue);
-	const artifacts = copyArtifacts(artifactsValue);
-	const initialSignal = signalState(signal);
-	if (
-		state === undefined ||
-		artifacts === undefined ||
-		!isSandboxInferenceModel(allowedModel) ||
-		initialSignal === undefined
-	) {
-		return failure("INPUT_INVALID");
+	const family = createSessionFamily(lifecycle.value, credential, cliAuthority, true);
+	if (family === undefined) {
+		closePrimeCliCredentialAuthority(credential);
+		closePrimeCliAuthority(cliAuthority);
+		return failure("SETUP_FAILED");
 	}
-	const publicKey = copySandboxEd25519PublicKey(homeIdentity);
-	if (publicKey === undefined) return failure("INPUT_INVALID");
-	publicKey.fill(0);
-	if (initialSignal) return failure("ABORTED");
-	if (state.phase !== "idle") return failure("ALREADY_STARTED");
-	state.phase = "starting";
-	state.artifacts = artifacts;
-	let inspected: Awaited<ReturnType<SandboxLifecycleBundle["lifecycle"]["inspect"]>>;
+	return success(family);
+}
+
+function createSessionFamily(
+	lifecycleBundle: SandboxLifecycleBundle,
+	credential: PrimeCliCredentialAuthority,
+	cliAuthority: PrimeCliAuthority | undefined,
+	ownsAuthorities: boolean,
+	dispatch?: SandboxFetchPort,
+	connectRuntime?: SandboxRuntimeConnectPort,
+): PrimeSandboxSessionFamily | undefined {
+	const state: SessionManagerState = {
+		lifecycleBundle,
+		credential,
+		cliAuthority,
+		ownsAuthorities,
+		credentialClosed: !ownsAuthorities,
+		cliClosed: !ownsAuthorities,
+		dispatch,
+		connectRuntime,
+		phase: "idle",
+		effectPossible: false,
+		handle: undefined,
+		provider: undefined,
+		connection: undefined,
+		artifacts: undefined,
+		connectionClosed: false,
+		exposureAbsent: false,
+		providerClosed: false,
+		sandboxAbsent: false,
+		inferenceClaimed: false,
+		proxyBusy: false,
+		checkpointCompleted: false,
+	};
+
+	const box: { issue: (() => object) | null } = { issue: null };
+
 	try {
-		inspected = await state.lifecycleBundle.lifecycle.inspect(signal);
-	} catch {
-		return await failStart(state, "START_FAILED", signal);
-	}
-	if (!inspected.ok) return await failStart(state, inspected.code === "ABORTED" ? "ABORTED" : "START_FAILED", signal);
-	if (inspected.kind === "empty") {
-		state.effectPossible = true;
-		let created: Awaited<ReturnType<SandboxLifecycleBundle["lifecycle"]["create"]>>;
-		try {
-			created = await state.lifecycleBundle.lifecycle.create(inspected.value.createPermission, signal);
-		} catch {
-			return await failStart(state, "START_FAILED", signal);
+		class SessionCap {
+			private constructor() {}
+			static {
+				box.issue = () => Object.freeze(new SessionCap());
+			}
 		}
-		if (!created.ok) return await failStart(state, created.code === "ABORTED" ? "ABORTED" : "START_FAILED", signal);
-		state.handle = created.value;
-	} else {
-		state.effectPossible = true;
-		state.handle = inspected.value;
-	}
-	const handle = state.handle;
-	if (handle === undefined) return await failStart(state, "START_FAILED", signal);
-	let ready: Awaited<ReturnType<SandboxLifecycleBundle["lifecycle"]["waitUntilReady"]>>;
-	try {
-		ready = await state.lifecycleBundle.lifecycle.waitUntilReady(handle, signal);
+		Object.defineProperty(SessionCap.prototype, "constructor", { value: null });
+		Object.freeze(SessionCap.prototype);
+		Object.freeze(SessionCap);
 	} catch {
-		return await failStart(state, "START_FAILED", signal);
+		return undefined;
 	}
-	if (!ready.ok) return await failStart(state, ready.code === "ABORTED" ? "ABORTED" : "START_FAILED", signal);
-	const bound = bindPrimeSandboxProviderWithCredential(
-		state.lifecycleBundle.providerBinder,
-		handle,
-		state.credential,
-		state.dispatch,
-		state.connectRuntime,
-	);
-	if (!bound.ok) return await failStart(state, "START_FAILED", signal);
-	const provider = bound.value;
-	state.provider = provider;
-	const uploads = [
-		() => provider.uploadRelease(artifacts.release, signal),
-		() => provider.uploadManifest(artifacts.manifest, signal),
-		() => provider.uploadBootstrap(artifacts.bootstrap, signal),
-		() => provider.uploadTrust(artifacts.trust, signal),
-	];
-	for (const upload of uploads) {
-		let uploaded: Awaited<ReturnType<typeof upload>>;
-		try {
-			uploaded = await upload();
-		} catch {
-			return await failStart(state, "START_FAILED", signal);
+
+	if (box.issue === null) return undefined;
+	const issue = box.issue;
+	let issuedSession: object | undefined;
+
+	async function failStart(
+		code: "ABORTED" | "START_FAILED",
+		signal?: AbortSignal,
+	): Promise<PrimeSandboxSessionManagerFailure> {
+		const effectiveCode = signalState(signal) ? "ABORTED" : code;
+		const cleaned = await cleanupState(state);
+		return cleaned ? failure(effectiveCode) : failure("CLEANUP_UNCERTAIN");
+	}
+
+	async function start(
+		artifactsValue: unknown,
+		homeIdentity: unknown,
+		allowedModel: unknown,
+		signal?: unknown,
+	): Promise<PrimeSandboxSessionManagerResult<unknown>> {
+		const artifacts = copyArtifacts(artifactsValue);
+		const initialSignal = signalState(signal);
+		if (artifacts === undefined || !isSandboxInferenceModel(allowedModel) || initialSignal === undefined) {
+			return failure("INPUT_INVALID");
 		}
-		if (!uploaded.ok) return await failStart(state, uploaded.code === "ABORTED" ? "ABORTED" : "START_FAILED", signal);
+		const publicKey = copySandboxEd25519PublicKey(homeIdentity);
+		if (publicKey === undefined) return failure("INPUT_INVALID");
+		publicKey.fill(0);
+		if (initialSignal) return failure("ABORTED");
+		if (state.phase !== "idle") return failure("ALREADY_STARTED");
+		const sig: AbortSignal | undefined = resolvedSignal(signal);
+		state.phase = "starting";
+		state.artifacts = artifacts;
+		let inspected: Awaited<ReturnType<SandboxLifecycleBundle["lifecycle"]["inspect"]>>;
+		try {
+			inspected = await state.lifecycleBundle.lifecycle.inspect(sig);
+		} catch {
+			return await failStart("START_FAILED", sig);
+		}
+		if (!inspected.ok) return await failStart(inspected.code === "ABORTED" ? "ABORTED" : "START_FAILED", sig);
+		if (inspected.kind === "empty") {
+			state.effectPossible = true;
+			let created: Awaited<ReturnType<SandboxLifecycleBundle["lifecycle"]["create"]>>;
+			try {
+				created = await state.lifecycleBundle.lifecycle.create(inspected.value.createPermission, sig);
+			} catch {
+				return await failStart("START_FAILED", sig);
+			}
+			if (!created.ok) return await failStart(created.code === "ABORTED" ? "ABORTED" : "START_FAILED", sig);
+			state.handle = created.value;
+		} else {
+			state.effectPossible = true;
+			state.handle = inspected.value;
+		}
+		const handle = state.handle;
+		if (handle === undefined) return await failStart("START_FAILED", sig);
+		let ready: Awaited<ReturnType<SandboxLifecycleBundle["lifecycle"]["waitUntilReady"]>>;
+		try {
+			ready = await state.lifecycleBundle.lifecycle.waitUntilReady(handle, sig);
+		} catch {
+			return await failStart("START_FAILED", sig);
+		}
+		if (!ready.ok) return await failStart(ready.code === "ABORTED" ? "ABORTED" : "START_FAILED", sig);
+		const bound = bindPrimeSandboxProviderWithCredential(
+			state.lifecycleBundle.providerBinder,
+			handle,
+			state.credential,
+			state.dispatch,
+			state.connectRuntime,
+		);
+		if (!bound.ok) return await failStart("START_FAILED", sig);
+		const provider = bound.value;
+		state.provider = provider;
+		const uploads = [
+			() => provider.uploadRelease(artifacts.release, sig),
+			() => provider.uploadManifest(artifacts.manifest, sig),
+			() => provider.uploadBootstrap(artifacts.bootstrap, sig),
+			() => provider.uploadTrust(artifacts.trust, sig),
+		];
+		for (const upload of uploads) {
+			let uploaded: Awaited<ReturnType<typeof upload>>;
+			try {
+				uploaded = await upload();
+			} catch {
+				return await failStart("START_FAILED", sig);
+			}
+			if (!uploaded.ok) return await failStart(uploaded.code === "ABORTED" ? "ABORTED" : "START_FAILED", sig);
+		}
+		if (!(await closeArtifacts(state))) return await failStart("START_FAILED", sig);
+		let launched: Awaited<ReturnType<PrimeSandboxProviderPort["bootstrapAndLaunch"]>>;
+		try {
+			launched = await provider.bootstrapAndLaunch(sig);
+		} catch {
+			return await failStart("START_FAILED", sig);
+		}
+		if (!launched.ok) return await failStart(launched.code === "ABORTED" ? "ABORTED" : "START_FAILED", sig);
+		let exposed: Awaited<ReturnType<PrimeSandboxProviderPort["exposeRuntime"]>>;
+		try {
+			exposed = await provider.exposeRuntime(sig);
+		} catch {
+			return await failStart("START_FAILED", sig);
+		}
+		if (!exposed.ok) return await failStart(exposed.code === "ABORTED" ? "ABORTED" : "START_FAILED", sig);
+		const connected = await connectAndActivateSandboxRuntime(
+			provider,
+			homeIdentity,
+			launched.value,
+			allowedModel,
+			sig,
+		);
+		if (!connected.ok) return await failStart(connected.code === "ABORTED" ? "ABORTED" : "START_FAILED", sig);
+		state.connection = connected.value;
+		state.phase = "active";
+		let sessionCap: object;
+		try {
+			sessionCap = issue();
+		} catch {
+			state.phase = "starting";
+			return await failStart("START_FAILED", sig);
+		}
+		issuedSession = sessionCap;
+		return success(sessionCap);
 	}
-	if (!(await closeArtifacts(state))) return await failStart(state, "START_FAILED", signal);
-	let launched: Awaited<ReturnType<PrimeSandboxProviderPort["bootstrapAndLaunch"]>>;
-	try {
-		launched = await provider.bootstrapAndLaunch(signal);
-	} catch {
-		return await failStart(state, "START_FAILED", signal);
-	}
-	if (!launched.ok) return await failStart(state, launched.code === "ABORTED" ? "ABORTED" : "START_FAILED", signal);
-	let exposed: Awaited<ReturnType<PrimeSandboxProviderPort["exposeRuntime"]>>;
-	try {
-		exposed = await provider.exposeRuntime(signal);
-	} catch {
-		return await failStart(state, "START_FAILED", signal);
-	}
-	if (!exposed.ok) return await failStart(state, exposed.code === "ABORTED" ? "ABORTED" : "START_FAILED", signal);
-	const connected = await connectAndActivateSandboxRuntime(
-		provider,
-		homeIdentity,
-		launched.value,
-		allowedModel,
-		signal,
-	);
-	if (!connected.ok) return await failStart(state, connected.code === "ABORTED" ? "ABORTED" : "START_FAILED", signal);
-	state.connection = connected.value;
-	state.phase = "active";
-	const session = new PrimeSandboxSession(ISSUE);
-	sessions.set(session, Object.freeze({ manager: managerValue }));
-	return success(session);
-}
 
-export async function proxyPrimeSandboxSessionInference(
-	managerValue: unknown,
-	sessionValue: unknown,
-	inferencePort: SandboxInferencePort,
-	signal?: AbortSignal,
-): Promise<SandboxInferenceProxyResult | PrimeSandboxSessionManagerFailure> {
-	if (
-		typeof managerValue !== "object" ||
-		managerValue === null ||
-		typeof sessionValue !== "object" ||
-		sessionValue === null
-	) {
-		return failure("INPUT_INVALID");
+	async function proxy(
+		sessionRaw: unknown,
+		inferencePort: unknown,
+		signal?: unknown,
+	): Promise<SandboxInferenceProxyResult | PrimeSandboxSessionManagerFailure> {
+		if (
+			typeof sessionRaw !== "object" ||
+			sessionRaw === null ||
+			sessionRaw !== issuedSession ||
+			!isSandboxInferencePort(inferencePort)
+		) {
+			return failure("INPUT_INVALID");
+		}
+		const initialSignal = signalState(signal);
+		if (initialSignal === undefined) return failure("INPUT_INVALID");
+		if (initialSignal) return failure("ABORTED");
+		const sig: AbortSignal | undefined = resolvedSignal(signal);
+		if (state.phase !== "active" || state.connection === undefined) return failure("NOT_ACTIVE");
+		if (state.proxyBusy) return failure("BUSY");
+		if (state.inferenceClaimed) return failure("INFERENCE_ALREADY_CLAIMED");
+		state.inferenceClaimed = true;
+		state.proxyBusy = true;
+		try {
+			return await proxyNextSandboxInference(state.connection, inferencePort, sig);
+		} finally {
+			state.proxyBusy = false;
+		}
 	}
-	const state = managers.get(managerValue);
-	const session = sessions.get(sessionValue);
-	const initialSignal = signalState(signal);
-	if (
-		state === undefined ||
-		session === undefined ||
-		session.manager !== managerValue ||
-		typeof inferencePort !== "function" ||
-		initialSignal === undefined
-	) {
-		return failure("INPUT_INVALID");
-	}
-	if (initialSignal) return failure("ABORTED");
-	if (state.phase !== "active" || state.connection === undefined) return failure("NOT_ACTIVE");
-	if (state.proxyBusy) return failure("BUSY");
-	if (state.inferenceClaimed) return failure("INFERENCE_ALREADY_CLAIMED");
-	state.inferenceClaimed = true;
-	state.proxyBusy = true;
-	try {
-		return await proxyNextSandboxInference(state.connection, inferencePort, signal);
-	} finally {
-		state.proxyBusy = false;
-	}
-}
 
-export async function deletePrimeSandboxSession(
-	managerValue: unknown,
-	sessionValue: unknown,
-): Promise<PrimeSandboxSessionManagerResult<true>> {
-	if (
-		typeof managerValue !== "object" ||
-		managerValue === null ||
-		typeof sessionValue !== "object" ||
-		sessionValue === null
-	) {
-		return failure("INPUT_INVALID");
+	async function del(sessionRaw: unknown): Promise<PrimeSandboxSessionManagerResult<true>> {
+		if (typeof sessionRaw !== "object" || sessionRaw === null || sessionRaw !== issuedSession) {
+			return failure("INPUT_INVALID");
+		}
+		if (state.proxyBusy) return failure("BUSY");
+		if (state.phase !== "active" && state.phase !== "cleaning") return failure("NOT_ACTIVE");
+		// PR A has no mutable remote workspace yet. Record its no-op checkpoint
+		// before runtime shutdown; PR C replaces this boundary with PAWS commit.
+		if (state.phase === "active") state.checkpointCompleted = true;
+		if (!state.checkpointCompleted) return failure("CLEANUP_UNCERTAIN");
+		const cleaned = await cleanupState(state);
+		if (!cleaned) return failure("CLEANUP_UNCERTAIN");
+		return success(true);
 	}
-	const state = managers.get(managerValue);
-	const session = sessions.get(sessionValue);
-	if (state === undefined || session === undefined || session.manager !== managerValue)
-		return failure("INPUT_INVALID");
-	if (state.proxyBusy) return failure("BUSY");
-	if (state.phase !== "active" && state.phase !== "cleaning") return failure("NOT_ACTIVE");
-	// PR A has no mutable remote workspace yet. Record its no-op checkpoint
-	// before runtime shutdown; PR C replaces this boundary with PAWS commit.
-	if (state.phase === "active") state.checkpointCompleted = true;
-	if (!state.checkpointCompleted) return failure("CLEANUP_UNCERTAIN");
-	const cleaned = await cleanupState(state);
-	if (!cleaned) return failure("CLEANUP_UNCERTAIN");
-	sessions.delete(sessionValue);
-	return success(true);
-}
 
-export async function retryPrimeSandboxSessionCleanup(
-	managerValue: unknown,
-): Promise<PrimeSandboxSessionManagerResult<true>> {
-	if (typeof managerValue !== "object" || managerValue === null) return failure("INPUT_INVALID");
-	const state = managers.get(managerValue);
-	if (state === undefined) return failure("INPUT_INVALID");
-	if (state.proxyBusy || state.phase === "starting") return failure("BUSY");
-	if (state.phase === "closed") return success(true);
-	if (state.phase === "active") return failure("NOT_ACTIVE");
-	const cleaned = await cleanupState(state);
-	return cleaned ? success(true) : failure("CLEANUP_UNCERTAIN");
+	async function retryCleanup(): Promise<PrimeSandboxSessionManagerResult<true>> {
+		if (state.proxyBusy || state.phase === "starting") return failure("BUSY");
+		if (state.phase === "closed") return success(true);
+		if (state.phase === "active") return failure("NOT_ACTIVE");
+		const cleaned = await cleanupState(state);
+		return cleaned ? success(true) : failure("CLEANUP_UNCERTAIN");
+	}
+
+	return Object.freeze({
+		start,
+		proxy,
+		delete: del,
+		retryCleanup,
+	});
 }
