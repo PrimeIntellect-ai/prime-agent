@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ const HELPER = join(
 );
 const AUTHORITY = join(dirname(HELPER), "prime-workspace-authority.ts");
 const AUTHORITY_TYPES = join(dirname(HELPER), "prime-workspace-authority-types.ts");
+const AUTHORITY_CORE = join(dirname(HELPER), "prime-workspace-helper-core.ts");
 
 const roots: string[] = [];
 const fixtureDirectories: string[] = [];
@@ -168,16 +169,17 @@ function createHarness(mode: string, missingPython: boolean, uncertainProbe: boo
 	fixtureDirectories.push(directory);
 	writeFileSync(join(directory, "ws-posix-helper.py"), fixtureSource(mode), { mode: 0o700 });
 	writeFileSync(join(directory, "prime-workspace-authority-types.ts"), readFileSync(AUTHORITY_TYPES, "utf8"));
-	let authoritySource = readFileSync(AUTHORITY, "utf8");
+	let coreSource = readFileSync(AUTHORITY_CORE, "utf8");
 	if (missingPython) {
 		const missingPath = JSON.stringify(join(directory, "missing-python"));
-		authoritySource = authoritySource.replace('"/opt/homebrew/bin/python3"', missingPath);
-		authoritySource = authoritySource.replace('"/usr/local/bin/python3"', missingPath);
+		coreSource = coreSource.replace('"/opt/homebrew/bin/python3"', missingPath);
+		coreSource = coreSource.replace('"/usr/local/bin/python3"', missingPath);
 	}
 	if (uncertainProbe) {
-		authoritySource = authoritySource.replace("CAPTURED_PROCESS_KILL(-pgid, 0);", "CAPTURED_PROCESS_KILL(1, 0);");
+		coreSource = coreSource.replace("CAPTURED_PROCESS_KILL(-pgid, 0);", "CAPTURED_PROCESS_KILL(1, 0);");
 	}
-	writeFileSync(join(directory, "prime-workspace-authority.ts"), authoritySource);
+	writeFileSync(join(directory, "prime-workspace-helper-core.ts"), coreSource);
+	writeFileSync(join(directory, "prime-workspace-authority.ts"), readFileSync(AUTHORITY, "utf8"));
 	writeFileSync(
 		join(directory, "runner.ts"),
 		`import { verifyWorkspaceRootLifecycle } from "./prime-workspace-authority.ts";
@@ -393,4 +395,31 @@ describe("hostile helper lifecycle", () => {
 	it("removes surviving descendants and rejects the lifecycle", async () => {
 		expect(await verifyWithFixture("descendant-survival")).toBe(false);
 	}, 15_000);
+});
+
+describe("module export and import inventory", () => {
+	it("authority and core export exactly the expected public surface", async () => {
+		const authMod = await import("../src/modes/daemon/sandbox/prime-workspace-authority.js");
+		const coreMod = await import("../src/modes/daemon/sandbox/prime-workspace-helper-core.js");
+		expect(Object.keys(authMod).sort()).toEqual(["verifyWorkspaceRootLifecycle"]);
+		expect(Object.keys(coreMod).sort()).toEqual(["verifyWorkspaceRootLifecycleInternal"]);
+		expect(typeof authMod.verifyWorkspaceRootLifecycle).toBe("function");
+		expect(typeof coreMod.verifyWorkspaceRootLifecycleInternal).toBe("function");
+	});
+
+	it("no file except authority imports prime-workspace-helper-core at stage 1", () => {
+		const sandboxDir = dirname(AUTHORITY);
+		const importedBy: string[] = [];
+		const tsFiles = readdirSync(sandboxDir, { withFileTypes: true })
+			.filter((e) => e.isFile() && e.name.endsWith(".ts") && e.name !== "prime-workspace-helper-core.ts")
+			.map((e) => e.name)
+			.sort();
+		for (const entry of tsFiles) {
+			const content = readFileSync(join(sandboxDir, entry), "utf8");
+			if (content.includes("./prime-workspace-helper-core")) {
+				importedBy.push(entry);
+			}
+		}
+		expect(importedBy).toEqual(["prime-workspace-authority.ts"]);
+	});
 });
