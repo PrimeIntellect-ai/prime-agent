@@ -70,6 +70,33 @@ describe("Windows bootstrap rename recovery", () => {
 		expect(readdirSync(root)).toEqual([]);
 	});
 
+	test("a failed release can retry without losing successful-release idempotence", async () => {
+		const venv = join(root, "venv");
+		const release = await acquireBootstrapLock(venv);
+		const failure = Object.assign(new Error("held source handle"), { code: "EPERM" });
+		let attempts = 0;
+		rename.mockImplementation(async () => {
+			if (++attempts === 2) {
+				const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 20_000);
+				restoreClock = () => clock.mockRestore();
+			}
+			throw failure;
+		});
+		await expect(release()).rejects.toBe(failure);
+		expect(attempts).toBe(2);
+		expect(readFileSync(join(`${venv}.bootstrap.lock`, "pid"), "utf8").trim()).toBe(String(process.pid));
+		rename.mockImplementation(actualFs.rename);
+		await release();
+		const nextRelease = await acquireBootstrapLock(venv);
+		try {
+			await release();
+			expect(readFileSync(join(`${venv}.bootstrap.lock`, "pid"), "utf8").trim()).toBe(String(process.pid));
+		} finally {
+			await nextRelease();
+		}
+		expect(readdirSync(root)).toEqual([]);
+	});
+
 	test.each(["acquire", "reclaim", "release"] as const)("retries sharing violations during %s", async (phase) => {
 		const venv = join(root, "venv");
 		const lockDir = `${venv}.bootstrap.lock`;

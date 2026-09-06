@@ -729,7 +729,10 @@ export async function acquireBootstrapLock(venv: string): Promise<() => Promise<
 						const releasedDir = path.join(lockRoot, `.${path.basename(lockDir)}.released-${randomUUID()}`);
 						await renameWithTransientRetry(lockDir, releasedDir);
 						await rm(releasedDir, { recursive: true, force: true }).catch(() => undefined);
-					})();
+					})().catch((error) => {
+						releasePromise = undefined;
+						throw error;
+					});
 					return releasePromise;
 				};
 			}
