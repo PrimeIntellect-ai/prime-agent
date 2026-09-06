@@ -1,1 +1,0 @@
-- Bumped the impersonated client versions: Claude Code 2.1.257 -> 2.1.261 and GitHub Copilot Chat 0.35.0 -> 0.48.1 on VS Code 1.136.1, keeping OAuth traffic accepted as a current client; the Copilot client identity now has a single owner shared by the OAuth flow and the generated catalog headers.
