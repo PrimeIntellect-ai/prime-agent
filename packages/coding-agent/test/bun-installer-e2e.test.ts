@@ -824,8 +824,8 @@ describe("compiled binary installer", () => {
 			});
 			expect(r.status, r.stderr).toBe(0);
 			// Pre-existing symlink at repair path must retain its target
-			if (existsSync(join(vd, "v1.2.3.repair." + r.pid + ".0"))) {
-				expect(readFileSync(join(vd, "v1.2.3.repair." + r.pid + ".0"), "utf8")).toBe("blocker");
+			if (existsSync(join(vd, `v1.2.3.repair.${r.pid}.0`))) {
+				expect(readFileSync(join(vd, `v1.2.3.repair.${r.pid}.0`), "utf8")).toBe("blocker");
 			}
 		});
 
@@ -862,7 +862,7 @@ describe("compiled binary installer", () => {
 			expect(r.stderr).toContain("could not claim directory");
 			// All pre-existing dirs still have their content
 			for (let i = 0; i <= 100; i++) {
-				const d = join(vd, `v1.2.3.repair.${r.pid}` + (i === 0 ? "" : "." + i));
+				const d = join(vd, `v1.2.3.repair.${r.pid}${i === 0 ? "" : `.${i}`}`);
 				if (existsSync(join(d, "blocker"))) expect(readFileSync(join(d, "blocker"), "utf8")).toBe("blocker");
 			}
 		});

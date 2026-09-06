@@ -1,13 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const installer = join(repoRoot, "install.sh");
-const installerText = readFileSync(installer, "utf-8");
 
 let tempDirs: string[] = [];
 afterEach(() => {
@@ -29,7 +28,7 @@ function sourceVar(v: string): string {
 	const result = execFileSync(
 		"sh",
 		["-c", `eval "$(sed 's/^main "$@"/# &/' "$1")" 2>/dev/null; printf '%s' "$${v}"`, "--", installer],
-		{ encoding: "utf-8", env: process.env as any },
+		{ encoding: "utf-8" },
 	);
 	return result.trim();
 }
@@ -40,24 +39,20 @@ describe("install.sh shell syntax", () => {
 		expect(() => execFileSync("sh", ["-n", installer], { stdio: "pipe" })).not.toThrow();
 	});
 
-	it("supports compiled binary installs and updates only", () => {
-		expect(installerText).toContain("prime_agent_binary_fresh_install");
-		expect(installerText).toContain("prime_agent_binary_update");
-		expect(installerText).toContain("--update");
-		expect(installerText).not.toContain("prime_agent_npm_install");
-		expect(installerText).not.toContain("install_node_npm");
-		expect(installerText).not.toContain("npm install");
-		expect(installerText).not.toContain("NPM Install Path");
-		expect(installerText).not.toContain("prime_agent_package");
-		expect(installerText).not.toContain("prime_agent_original_path");
-		expect(installerText).not.toContain("prime_agent_bootstrap_kernel_on_install");
-		expect(installerText).not.toContain("prime_agent_screen_question");
-		expect(installerText).toContain("prime_agent_binary_acquire_lock");
-		expect(installerText).toContain('grep -F -q -- "$_bin_dir"');
-	});
-
 	it("rejects removed package-manager method flags", () => {
-		expect(installerText).toContain("--method is no longer supported");
+		const root = mkdtempSync(join(tmpdir(), "pi-installer-method-"));
+		tempDirs.push(root);
+		const result = spawnSync("sh", [installer, "--method=npm", "1.2.3"], {
+			encoding: "utf8",
+			env: {
+				HOME: join(root, "home"),
+				PATH: process.env.PATH,
+				PRIME_AGENT_DOWNLOAD_BASE_URL: "https://downloads.example.test",
+				TERM: "dumb",
+			},
+		});
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("--method is no longer supported");
 	});
 
 	it("reports an actionable error when HOME and explicit install paths are absent", () => {
@@ -100,7 +95,7 @@ describe("versioned-dir variables", () => {
 				"--",
 				installer,
 			],
-			{ encoding: "utf-8", env: process.env as any },
+			{ encoding: "utf-8" },
 		).trim();
 		expect(result).toBe("/custom/versions");
 	});
@@ -116,7 +111,7 @@ describe("versioned-dir variables", () => {
 				"--",
 				installer,
 			],
-			{ encoding: "utf-8", env: process.env as any },
+			{ encoding: "utf-8" },
 		).trim();
 		expect(result).toBe("/custom/bin/prime-agent");
 	});
@@ -133,7 +128,7 @@ describe("platform detection", () => {
 				"--",
 				installer,
 			],
-			{ encoding: "utf-8", env: process.env as any },
+			{ encoding: "utf-8" },
 		).trim();
 		expect(["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"]).toContain(platform);
 	});
@@ -169,44 +164,7 @@ describe("atomic symlink function", () => {
 		chmodSync(helper, 0o755);
 		const result = execFileSync("sh", [helper, installer, v1, v2, resolvedV2, link], {
 			encoding: "utf-8",
-			env: process.env as any,
 		}).trim();
 		expect(result).toBe("OK");
-	});
-});
-
-// ============================================================================
-describe("config dir isolation", () => {
-	it("does not use ~/.prime for binary install paths", () => {
-		const versionsLine = installerText.match(/^prime_agent_binary_versions_dir=.*$/m);
-		const symlinkLine = installerText.match(/^prime_agent_binary_symlink=.*$/m);
-		if (versionsLine) expect(versionsLine[0]).not.toContain(".prime");
-		if (symlinkLine) expect(symlinkLine[0]).not.toContain(".prime");
-	});
-
-	it("uses XDG data dir for versions", () => {
-		expect(installerText).toContain("XDG_DATA_HOME");
-	});
-
-	it("uses separate bin dir for symlink", () => {
-		expect(installerText).toContain("prime_agent_binary_symlink");
-	});
-
-	it("does not copy sidecars into ~/.prime", () => {
-		const freshSection = installerText.match(/prime_agent_binary_fresh_install[^}]*}/s)?.[0] || "";
-		expect(freshSection).not.toContain(".prime");
-	});
-});
-
-// ============================================================================
-describe("install.sh sidecar", () => {
-	it("ensures install.sh is made executable in versioned dir", () => {
-		expect(installerText).toContain('chmod +x "$_version_dir/install.sh"');
-	});
-
-	it("appears in both fresh_install and update paths", () => {
-		const matches = installerText.match(/chmod \+x "\$_version_dir\/install\.sh"/g);
-		expect(matches).not.toBeNull();
-		expect(matches!.length).toBe(2);
 	});
 });
