@@ -6407,16 +6407,17 @@ export class DaemonSupervisor {
 		worker.transcriptCaches.clear();
 		worker.snapshotCache.clear();
 		worker.snapshotGenerations?.clear();
-		if (worker.client) {
+		const client = worker.client;
+		if (client) {
 			if (archiveSession) {
-				await worker.client
+				await client
 					.requestWorker({ type: "worker_archive_and_shutdown" }, force ? 1000 : 5000)
 					.catch(() => undefined);
 			} else {
-				await worker.client.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
+				await client.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
 			}
-			worker.client.close();
-			worker.client = undefined;
+			client.close();
+			if (worker.client === client) worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
 		} else if (this.processIdentity(entryPid, entryStartId) === "current") {
