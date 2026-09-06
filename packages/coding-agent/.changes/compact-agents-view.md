@@ -1,0 +1,1 @@
+- Simplified the agents view with per-session models, total cost and age, one column header, and collapsed inactive sessions while keeping the logo, startup metadata, and search.
