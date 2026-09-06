@@ -43,7 +43,7 @@ export type OwnershipJournalCode =
 	| "IO_UNCERTAIN"
 	| "INVALID_TRANSITION";
 
-export type JournalResult = Readonly<
+type JournalResult = Readonly<
 	{ ok: true; value: Readonly<{ chain: ValidatedOwnershipChain }> } | { ok: false; code: OwnershipJournalCode }
 >;
 
@@ -714,9 +714,9 @@ export async function createOwnershipJournal(
 
 export type OwnershipDeletionCode = OwnershipJournalCode | "LIFECYCLE_FAILED" | "PROOF_INVALID";
 
-export type OwnershipDeletionResult = Readonly<{ ok: true } | { ok: false; code: OwnershipDeletionCode }>;
+type OwnershipDeletionResult = Readonly<{ ok: true } | { ok: false; code: OwnershipDeletionCode }>;
 
-export type OwnershipDeletionFactoryResult = Readonly<
+type OwnershipDeletionFactoryResult = Readonly<
 	| {
 			ok: true;
 			value: Readonly<{

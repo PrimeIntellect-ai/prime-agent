@@ -321,7 +321,6 @@ class TestExactResultTypes(unittest.TestCase):
         from rlm.sandbox_bootstrap_trust import (
             DecodeTrustSuccess,
             DecodeTrustFailure,
-            BootstrapTrustErrorCode,
             decode_bootstrap_trust,
         )
         s = decode_bootstrap_trust(

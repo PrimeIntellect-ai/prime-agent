@@ -5,6 +5,7 @@ import {
 	encryptSandboxTransportFrame,
 	randomSandboxHandshakeBytes,
 } from "./prime-sandbox-transport.js";
+import { copyBytes, equalBytes } from "./prime-sandbox-validation.js";
 
 const ISSUE = Object.freeze({});
 const MESSAGE_BYTES = 48;
@@ -55,19 +56,6 @@ function failure(
 	code: "CAPABILITY_INVALID" | "PROTOCOL_ERROR" | "CRYPTO_FAILURE",
 ): Readonly<{ ok: false; code: "CAPABILITY_INVALID" | "PROTOCOL_ERROR" | "CRYPTO_FAILURE" }> {
 	return Object.freeze({ ok: false, code });
-}
-
-function copyBytes(value: Uint8Array): Uint8Array<ArrayBuffer> {
-	const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
-	copy.set(value);
-	return copy;
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	let difference = 0;
-	for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
-	return difference === 0;
 }
 
 function decodeMessage(value: Uint8Array, type: number): Uint8Array<ArrayBuffer> | undefined {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-export const MAX_OWNERSHIP_RECORD_BYTES = 4096;
-export const MAX_OWNERSHIP_FIELD_BYTES = 256;
+const MAX_OWNERSHIP_RECORD_BYTES = 4096;
+const MAX_OWNERSHIP_FIELD_BYTES = 256;
 
 export type OwnershipStage = "pre_admit" | "creating" | "active" | "delete_intent" | "deleting" | "deleted";
 
@@ -26,23 +26,23 @@ export type OwnershipRecord = Readonly<{
 	contentDigest: string;
 }>;
 
-export type OwnershipCodecFailureCode = "INPUT_INVALID" | "CORRUPT" | "CONFLICT" | "INVALID_TRANSITION";
-export type OwnershipCodecFailure = Readonly<{ ok: false; code: OwnershipCodecFailureCode }>;
+type OwnershipCodecFailureCode = "INPUT_INVALID" | "CORRUPT" | "CONFLICT" | "INVALID_TRANSITION";
+type OwnershipCodecFailure = Readonly<{ ok: false; code: OwnershipCodecFailureCode }>;
 
-export type CanonicalOwnershipPayload = Readonly<{
+type CanonicalOwnershipPayload = Readonly<{
 	byteLength: number;
 	take: () => Uint8Array | undefined;
 	discard: () => boolean;
 }>;
 
-export type OwnershipRecordCreation = Readonly<{
+type OwnershipRecordCreation = Readonly<{
 	record: OwnershipRecord;
 	payload: CanonicalOwnershipPayload;
 }>;
 
-export type OwnershipCreateResult = Readonly<{ ok: true; value: OwnershipRecordCreation }> | OwnershipCodecFailure;
+type OwnershipCreateResult = Readonly<{ ok: true; value: OwnershipRecordCreation }> | OwnershipCodecFailure;
 
-export type OwnershipDecodeResult = Readonly<{ ok: true; value: OwnershipRecord }> | OwnershipCodecFailure;
+type OwnershipDecodeResult = Readonly<{ ok: true; value: OwnershipRecord }> | OwnershipCodecFailure;
 
 export type ValidatedOwnershipChain = Readonly<{
 	records: readonly OwnershipRecord[];
@@ -50,9 +50,9 @@ export type ValidatedOwnershipChain = Readonly<{
 	intent: OwnershipIntent;
 }>;
 
-export type OwnershipChainResult = Readonly<{ ok: true; value: ValidatedOwnershipChain }> | OwnershipCodecFailure;
+type OwnershipChainResult = Readonly<{ ok: true; value: ValidatedOwnershipChain }> | OwnershipCodecFailure;
 
-export type OwnershipTransitionResult =
+type OwnershipTransitionResult =
 	| Readonly<{ ok: true; idempotent: false; value: OwnershipRecordCreation }>
 	| Readonly<{ ok: true; idempotent: true; value: OwnershipRecord }>
 	| OwnershipCodecFailure;

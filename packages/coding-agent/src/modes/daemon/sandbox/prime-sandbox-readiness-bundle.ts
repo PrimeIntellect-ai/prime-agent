@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { types } from "node:util";
+import { copyBytes, isExactUint8Array } from "./prime-sandbox-validation.js";
 
 const MAX_READINESS_BYTES = 512;
 const ISSUE = Object.freeze({});
@@ -48,28 +49,6 @@ Object.freeze(SandboxReadinessBundle);
 
 function failure(code: SandboxReadinessError): Readonly<{ ok: false; code: SandboxReadinessError }> {
 	return Object.freeze({ ok: false, code });
-}
-
-function copyBytes(value: Uint8Array): Uint8Array<ArrayBuffer> {
-	const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
-	copy.set(value);
-	return copy;
-}
-
-function isExactUint8Array(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
 }
 
 function isExactArrayBuffer(value: unknown): value is ArrayBuffer {

@@ -43,7 +43,6 @@ _MIN_ZERO_BLOCKS: Final[int] = 2
 _CHAR_BLACKLIST: Final[bytes] = bytes(list(range(0x00, 0x20)))
 
 _HEX64_RE: Final = re.compile(r"^[0-9a-f]{64}$")
-_MODE_OCTAL_RE: Final = re.compile(r"^0[0-7]{3,4}$")
 
 _C_BUF: Final[int] = 65536
 _D_BUF: Final[int] = 65536
@@ -159,9 +158,6 @@ class ArchiveErrorCode(enum.StrEnum):
     PARENT_ORDER = "parent_order"
     ZERO_LENGTH_EMPTY_SHA = "zero_length_empty_sha"
 
-
-# Convenience alias: every error code str.
-ErrorCode = ArchiveErrorCode  # shorthand
 
 
 # ---------------------------------------------------------------------------

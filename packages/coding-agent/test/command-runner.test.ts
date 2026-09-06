@@ -34,8 +34,6 @@ function streamFrom(data: Uint8Array): ReadableStream<Uint8Array> {
 	});
 }
 
-/* streamChunkThenHang removed */
-
 function streamError(msg = "stream error"): ReadableStream<Uint8Array> {
 	return new ReadableStream({
 		start(ctrl) {
