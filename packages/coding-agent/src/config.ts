@@ -364,7 +364,7 @@ export function getUpdateInstruction(packageName: string): string {
  */
 export function getPackageDir(): string {
 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
-	const envDir = process.env.PI_PACKAGE_DIR;
+	const envDir = getEnvPath("PI_PACKAGE_DIR");
 	if (envDir) {
 		if (envDir === "~") return homedir();
 		if (envDir.startsWith("~/")) return homedir() + envDir.slice(1);
@@ -509,6 +509,11 @@ export function expandTildePath(path: string): string {
 	return path;
 }
 
+function getEnvPath(name: string): string | undefined {
+	const value = process.env[name]?.trim();
+	return value || undefined;
+}
+
 const DEFAULT_SHARE_VIEWER_URL = "https://pi.dev/session/";
 
 /** Get the share viewer URL for a gist ID */
@@ -523,7 +528,7 @@ export function getShareViewerUrl(gistId: string): string {
 
 /** Get the agent config directory (e.g., ~/.prime/agent/) */
 export function getAgentDir(): string {
-	const envDir = process.env[ENV_AGENT_DIR];
+	const envDir = getEnvPath(ENV_AGENT_DIR);
 	if (envDir) {
 		return expandTildePath(envDir);
 	}
@@ -626,7 +631,7 @@ export function getSessionsDir(agentDir: string = getAgentDir()): string {
 }
 
 export function getSessionDirEnvOverride(): string | undefined {
-	const envDir = process.env[ENV_SESSION_DIR] ?? process.env[ENV_LEGACY_SESSION_DIR];
+	const envDir = getEnvPath(ENV_SESSION_DIR) ?? getEnvPath(ENV_LEGACY_SESSION_DIR);
 	return envDir ? expandTildePath(envDir) : undefined;
 }
 

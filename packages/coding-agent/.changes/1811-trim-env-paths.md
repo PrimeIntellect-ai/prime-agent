@@ -1,0 +1,1 @@
+- Fixed whitespace-only package, agent, and session directory environment variables producing invalid relative paths instead of using configured fallbacks ([#1811](https://github.com/PrimeIntellect-ai/prime-agent/issues/1811)).

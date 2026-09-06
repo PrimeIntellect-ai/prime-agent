@@ -3,10 +3,14 @@ import { homedir, tmpdir } from "os";
 import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+	CONFIG_DIR_NAME,
 	detectInstallMethod,
+	ENV_AGENT_DIR,
 	ENV_LEGACY_SESSION_DIR,
 	ENV_SESSION_DIR,
+	getAgentDir,
 	getDaemonLogPath,
+	getPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	getSessionsDir,
@@ -17,6 +21,7 @@ import { getDefaultSessionDir } from "../src/core/session-manager.js";
 const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
 const originalPath = process.env.PATH;
 const originalPiPackageDir = process.env.PI_PACKAGE_DIR;
+const originalAgentDir = process.env[ENV_AGENT_DIR];
 const originalSessionDir = process.env[ENV_SESSION_DIR];
 const originalLegacySessionDir = process.env[ENV_LEGACY_SESSION_DIR];
 let tempDir: string | undefined;
@@ -41,6 +46,11 @@ afterEach(() => {
 		delete process.env.PI_PACKAGE_DIR;
 	} else {
 		process.env.PI_PACKAGE_DIR = originalPiPackageDir;
+	}
+	if (originalAgentDir === undefined) {
+		delete process.env[ENV_AGENT_DIR];
+	} else {
+		process.env[ENV_AGENT_DIR] = originalAgentDir;
 	}
 	if (originalSessionDir === undefined) {
 		delete process.env[ENV_SESSION_DIR];
@@ -445,6 +455,43 @@ describe("session paths", () => {
 		const sessionDir = getDefaultSessionDir(cwd, join(tempDir, "agent"));
 
 		expect(sessionDir).toBe(sessionRoot);
+	});
+});
+
+describe("env path trimming", () => {
+	test("getAgentDir ignores whitespace-only env var and falls back to default", () => {
+		process.env[ENV_AGENT_DIR] = "   ";
+		expect(getAgentDir()).toBe(join(homedir(), CONFIG_DIR_NAME));
+	});
+
+	test("getAgentDir trims surrounding whitespace from a valid override", () => {
+		const dir = join(tmpdir(), `pi-agent-dir-${Date.now()}`);
+		process.env[ENV_AGENT_DIR] = `  ${dir}  `;
+		expect(getAgentDir()).toBe(dir);
+	});
+
+	test("getSessionsDir ignores whitespace-only session env var", () => {
+		delete process.env[ENV_LEGACY_SESSION_DIR];
+		process.env[ENV_SESSION_DIR] = "   ";
+		expect(getSessionsDir("/agent")).toBe(join("/agent", "sessions"));
+	});
+
+	test("getSessionsDir falls back to legacy env var when primary is whitespace-only", () => {
+		const legacy = join(tmpdir(), `pi-legacy-${Date.now()}`);
+		process.env[ENV_SESSION_DIR] = "   ";
+		process.env[ENV_LEGACY_SESSION_DIR] = legacy;
+		expect(getSessionsDir("/agent")).toBe(legacy);
+	});
+
+	test("getPackageDir ignores whitespace-only env var and trims valid overrides", () => {
+		delete process.env.PI_PACKAGE_DIR;
+		const expected = getPackageDir();
+		process.env.PI_PACKAGE_DIR = "   ";
+		expect(getPackageDir()).toBe(expected);
+		const temp = mkdtempSync(join(tmpdir(), "pi-pkg-"));
+		tempDir = temp;
+		process.env.PI_PACKAGE_DIR = `  ${temp}  `;
+		expect(getPackageDir()).toBe(temp);
 	});
 });
 
