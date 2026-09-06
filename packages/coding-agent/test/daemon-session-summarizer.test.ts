@@ -1,9 +1,10 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import type { AgentStatus } from "../src/core/session-manager.js";
+import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import {
-	agentStatusChanged,
 	buildStatusContext,
+	DaemonSessionSummarizer,
 	parseAgentStatusResponse,
 } from "../src/modes/daemon/daemon-session-summarizer.js";
 
@@ -154,15 +155,63 @@ describe("daemon session summarizer", () => {
 		});
 	});
 
-	describe("agentStatusChanged", () => {
-		const base: AgentStatus = { summary: "Working on it", taskState: "needs_input", basedOnMessageCount: 4 };
-		test("is true when there is no previous status", () => {
-			expect(agentStatusChanged(undefined, { summary: "x" })).toBe(true);
+	describe("status change notification", () => {
+		function makeState(options: {
+			messages: AgentMessage[];
+			isSessionActive: boolean;
+			summaryState?: AgentStatus;
+		}): ActiveSessionState {
+			return {
+				activeSessionId: "active-1",
+				summaryState: options.summaryState,
+				runtime: {
+					session: {
+						isSessionActive: options.isSessionActive,
+						messages: options.messages,
+						modelRegistry: {},
+						state: { streamingMessage: undefined },
+						sessionManager: { appendAgentStatus: () => {} },
+					},
+				},
+			} as unknown as ActiveSessionState;
+		}
+
+		async function settle(state: ActiveSessionState, generated: { summary: string; taskState?: "needs_input" }) {
+			const onStatusChanged = vi.fn();
+			const summarizer = new DaemonSessionSummarizer(
+				() => [state],
+				onStatusChanged,
+				async () => generated,
+			);
+			await (summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> }).summarize(state);
+			return onStatusChanged;
+		}
+
+		test("an idle settle with unchanged verdict text still notifies: its currency drives the roster", async () => {
+			const previous: AgentStatus = { summary: "Working on it", taskState: "needs_input", basedOnMessageCount: 1 };
+			const state = makeState({
+				messages: [userMessage("hi"), userMessage("more")],
+				isSessionActive: false,
+				summaryState: previous,
+			});
+
+			const onStatusChanged = await settle(state, { summary: "Working on it", taskState: "needs_input" });
+
+			expect(state.summaryState?.basedOnMessageCount).toBe(2);
+			expect(onStatusChanged).toHaveBeenCalledOnce();
 		});
-		test("detects summary and verdict changes", () => {
-			expect(agentStatusChanged(base, { summary: "Working on it", taskState: "needs_input" })).toBe(false);
-			expect(agentStatusChanged(base, { summary: "Done", taskState: "needs_input" })).toBe(true);
-			expect(agentStatusChanged(base, { summary: "Working on it", taskState: "completed" })).toBe(true);
+
+		test("a working refresh with unchanged text stays quiet", async () => {
+			const previous: AgentStatus = { summary: "Working on it", taskState: "needs_input", basedOnMessageCount: 2 };
+			const state = makeState({
+				messages: [userMessage("hi"), userMessage("more")],
+				isSessionActive: true,
+				summaryState: previous,
+			});
+
+			const onStatusChanged = await settle(state, { summary: "Working on it" });
+
+			expect(onStatusChanged).not.toHaveBeenCalled();
 		});
 	});
 });

@@ -56,6 +56,8 @@ export interface KernelManagerOptions {
 	snapshot?: KernelSnapshotConfig;
 	/** Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again. */
 	bootstrapCode?: string;
+	/** File receiving the kernel process's stderr, rotated once at each spawn. */
+	stderrLogPath?: string;
 }
 
 export interface KernelStartOptions {

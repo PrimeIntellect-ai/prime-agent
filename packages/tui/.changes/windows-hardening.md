@@ -1,0 +1,1 @@
+- Fixed multiline paste handling in terminals that do not send bracketed-paste markers.

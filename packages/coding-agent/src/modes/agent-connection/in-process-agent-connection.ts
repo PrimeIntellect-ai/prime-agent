@@ -3,7 +3,6 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
-import { flushAllPendingAgentTraceUploads } from "../../core/agent-traces.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
@@ -634,11 +633,7 @@ export class InProcessAgentConnection implements AgentConnection {
 			this.runtimeHost.setBeforeSessionInvalidate(undefined);
 		}
 		this.runtimeHost.setRebindSession(undefined);
-		try {
-			await this.runtimeHost.dispose();
-		} finally {
-			await flushAllPendingAgentTraceUploads();
-		}
+		await this.runtimeHost.dispose();
 	}
 
 	private get session() {

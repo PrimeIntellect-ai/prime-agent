@@ -150,12 +150,17 @@ function getDefaultUpdatePackageName(installedPackageName: string, updateSpec: s
 	return updateSpec;
 }
 
+export function buildBinarySelfUpdateArgs(targetVersion?: string): string[] {
+	return targetVersion ? ["--update", targetVersion] : ["--update"];
+}
+
 function getSelfUpdateCommandForMethod(
 	method: InstallMethod,
 	installedPackageName: string,
 	updateSpec = installedPackageName,
 	npmCommand?: string[],
 	updatePackageName = getDefaultUpdatePackageName(installedPackageName, updateSpec),
+	binaryTargetVersion?: string,
 ): SelfUpdateCommand | undefined {
 	const uninstallAfterInstall = isDirectPackageArtifactSpec(updateSpec);
 	switch (method) {
@@ -163,7 +168,7 @@ function getSelfUpdateCommandForMethod(
 			// Bun-compiled binary: use install.sh sidecar for self-update
 			const installScript = join(getPackageDir(), "install.sh");
 			if (existsSync(installScript)) {
-				const updateCmd = makeSelfUpdateCommandStep(installScript, ["--update"]);
+				const updateCmd = makeSelfUpdateCommandStep(installScript, buildBinarySelfUpdateArgs(binaryTargetVersion));
 				return {
 					...updateCmd,
 					steps: [updateCmd],
@@ -325,9 +330,17 @@ export function getSelfUpdateCommand(
 	npmCommand?: string[],
 	updateSpec = packageName,
 	updatePackageName = getDefaultUpdatePackageName(packageName, updateSpec),
+	binaryTargetVersion?: string,
 ): SelfUpdateCommand | undefined {
 	const method = detectInstallMethod();
-	const command = getSelfUpdateCommandForMethod(method, packageName, updateSpec, npmCommand, updatePackageName);
+	const command = getSelfUpdateCommandForMethod(
+		method,
+		packageName,
+		updateSpec,
+		npmCommand,
+		updatePackageName,
+		binaryTargetVersion,
+	);
 	if (!command) return undefined;
 	// Compiled binary installs are managed by their versioned installer directory.
 	if (method !== "bun-binary") {
