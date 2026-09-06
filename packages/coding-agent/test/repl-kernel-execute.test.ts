@@ -12,10 +12,13 @@ import {
 } from "../src/core/kernel/index.js";
 
 function resolveReplPython(): string | null {
+	const venvPython = (...parts: string[]) =>
+		process.platform === "win32" ? join(...parts, "Scripts", "python.exe") : join(...parts, "bin", "python");
 	const candidates = [
 		process.env.PRIME_AGENT_KERNEL_PYTHON,
-		resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv", "bin", "python"),
-		join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
+		process.env.PRIME_AGENT_KERNEL_VENV ? venvPython(process.env.PRIME_AGENT_KERNEL_VENV) : undefined,
+		venvPython(resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv")),
+		venvPython(homedir(), ".prime", "agent", "kernel-venv"),
 	].filter((p): p is string => Boolean(p));
 	for (const python of candidates) {
 		if (!existsSync(python)) continue;

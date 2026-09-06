@@ -44,6 +44,55 @@ describe("ProcessTerminal dimensions", () => {
 	});
 });
 
+describe("ProcessTerminal Windows console input", () => {
+	it("enables virtual terminal input through Bun FFI", () => {
+		const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+		const bunRuntime = Reflect.get(globalThis, "Bun") as { FFI: unknown };
+		const originalBunFfi = bunRuntime.FFI;
+		const handle = {};
+		let setMode: number | undefined;
+		let closed = false;
+
+		Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+		bunRuntime.FFI = {
+			dlopen: (library: string) => {
+				assert.equal(library, "kernel32.dll");
+				return {
+					symbols: {
+						GetStdHandle: (identifier: number) => {
+							assert.equal(identifier, -10);
+							return handle;
+						},
+						GetConsoleMode: (actualHandle: unknown, mode: Uint32Array) => {
+							assert.equal(actualHandle, handle);
+							mode[0] = 0x10;
+							return true;
+						},
+						SetConsoleMode: (actualHandle: unknown, mode: number) => {
+							assert.equal(actualHandle, handle);
+							setMode = mode;
+							return true;
+						},
+					},
+					close: () => {
+						closed = true;
+					},
+				};
+			},
+			ptr: (buffer: Uint32Array) => buffer,
+		};
+		try {
+			const terminal = new ProcessTerminal() as unknown as { enableWindowsVTInput(): void };
+			terminal.enableWindowsVTInput();
+			assert.equal(setMode, 0x210);
+			assert.equal(closed, true);
+		} finally {
+			restoreProperty(process, "platform", originalPlatform);
+			bunRuntime.FFI = originalBunFfi;
+		}
+	});
+});
+
 describe("ProcessTerminal alternate screen handoff", () => {
 	it("keeps raw input active and discards keys until the next fullscreen TUI starts", () => {
 		const originalWrite = process.stdout.write;

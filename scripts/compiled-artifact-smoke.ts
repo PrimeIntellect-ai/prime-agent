@@ -15,6 +15,7 @@ export const REQUIRED_BINARY_SIDECARS = [
 	"README.md",
 	"CHANGELOG.md",
 	"install.sh",
+	"install.ps1",
 	"prime-agent-runtime",
 	"skills",
 	"theme",
@@ -46,9 +47,10 @@ function run(executable: string, args: string[], cwd: string, path: string): Run
 	};
 }
 
-export function inspectNativeExecutable(path: string): "elf" | "mach-o" | "unknown" {
+export function inspectNativeExecutable(path: string): "elf" | "mach-o" | "pe" | "unknown" {
 	const header = readFileSync(path).subarray(0, 4).toString("hex");
 	if (header === "7f454c46") return "elf";
+	if (header.startsWith("4d5a")) return "pe";
 	if ([
 		"feedface", "cefaedfe", "feedfacf", "cffaedfe",
 		"cafebabe", "bebafeca", "cafebabf", "bfbafeca",

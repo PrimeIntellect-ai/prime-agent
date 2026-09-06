@@ -347,8 +347,8 @@ class ReplTest(unittest.TestCase):
         self.assertIn("wrote 262144", tagged)
 
     def test_interrupt_without_pthread_kill_cancels_awaited_cell(self):
-        # Windows fallback seam: with pthread_kill absent the reader cancels
-        # the active task on the loop; an await-suspended cell still interrupts.
+        # Windows fallback seam: interrupt_main runs the SIGINT handler on the
+        # main thread; an await-suspended cell still interrupts.
         code = "\n".join(
             [
                 "import signal",

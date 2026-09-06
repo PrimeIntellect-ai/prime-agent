@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 
@@ -13,6 +14,31 @@ const DAEMON_SOCKET_RELEASE_POLL_MS = 25;
 const DAEMON_SOCKET_LOCK_STALE_MS = 5000;
 const DAEMON_SOCKET_LOCK_UPDATE_MS = 1000;
 const DAEMON_SOCKET_FLUSH_TIMEOUT_MS = 1000;
+
+/** Map a Windows named pipe to a per-user filesystem lock target. */
+function windowsPipeLockPath(socketPath: string): string {
+	const pipeHash = createHash("sha256").update(socketPath.toLowerCase()).digest("hex").slice(0, 24);
+	return join(defaultDaemonSocketDir(), `pipe-${pipeHash}`);
+}
+
+/** Probe a Windows named pipe by attempting a short-lived connection. */
+function canConnectToWindowsPipe(pipePath: string): Promise<boolean> {
+	return new Promise((resolveConnect) => {
+		const socket = createConnection(pipePath);
+		let settled = false;
+		const finish = (canConnect: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeoutId);
+			socket.removeAllListeners();
+			socket.destroy();
+			resolveConnect(canConnect);
+		};
+		const timeoutId = setTimeout(() => finish(false), 250);
+		socket.once("connect", () => finish(true));
+		socket.once("error", () => finish(false));
+	});
+}
 
 export function endDaemonSocketAfterFlush(socket: Socket): void {
 	if (socket.destroyed) return;
@@ -80,9 +106,14 @@ export interface DaemonSocketIdentity {
 	ino: number;
 }
 
+export function windowsNamedPipeUserScope(): string {
+	const user = userInfo();
+	return createHash("sha256").update(`${user.username}\0${user.homedir}`).digest("hex").slice(0, 16);
+}
+
 export function defaultDaemonSocketPath(): string {
 	if (process.platform === "win32") {
-		return "\\\\.\\pipe\\prime-agent-daemon";
+		return `\\\\.\\pipe\\prime-agent-daemon-${windowsNamedPipeUserScope()}`;
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
@@ -90,7 +121,29 @@ export function defaultDaemonSocketPath(): string {
 export async function acquireDaemonSocketPathLease(socketPath: string): Promise<DaemonSocketPathLease | undefined> {
 	ensureDefaultDaemonSocketDir(socketPath);
 	if (process.platform === "win32") {
-		return undefined;
+		// Use a file-based lock for Windows named pipes since proper-lockfile
+		// requires a filesystem path.
+		const lockPath = windowsPipeLockPath(socketPath);
+		let lease: DaemonSocketPathLease | undefined;
+		let pendingCompromise: Error | undefined;
+		const releaseLock = await lockfile.lock(lockPath, {
+			realpath: false,
+			stale: DAEMON_SOCKET_LOCK_STALE_MS,
+			update: DAEMON_SOCKET_LOCK_UPDATE_MS,
+			onCompromised: (error) => {
+				if (lease) lease.recordCompromise(error);
+				else pendingCompromise = error;
+			},
+			retries: {
+				retries: 600,
+				factor: 1,
+				minTimeout: DAEMON_SOCKET_RELEASE_POLL_MS,
+				maxTimeout: DAEMON_SOCKET_RELEASE_POLL_MS,
+			},
+		});
+		lease = new DaemonSocketPathLease(socketPath, releaseLock);
+		if (pendingCompromise) lease.recordCompromise(pendingCompromise);
+		return lease;
 	}
 	let lease: DaemonSocketPathLease | undefined;
 	let pendingCompromise: Error | undefined;
@@ -118,6 +171,11 @@ export async function prepareDaemonSocketPath(socketPath: string, lease?: Daemon
 	ensureDefaultDaemonSocketDir(socketPath);
 
 	if (process.platform === "win32") {
+		// Windows named pipes have no filesystem artifact. Check if a server
+		// is already listening on this pipe name; reject if so.
+		if (await canConnectToWindowsPipe(socketPath)) {
+			throw new Error(`Daemon socket already in use: ${socketPath}`);
+		}
 		return;
 	}
 	if (lease) {
@@ -191,6 +249,7 @@ async function prepareUnixDaemonSocketPath(socketPath: string, lease?: DaemonSoc
 
 export function restrictDaemonSocketPath(socketPath: string): void {
 	if (process.platform === "win32") {
+		// Named pipes have no chmod-equivalent filesystem mode.
 		return;
 	}
 	chmodSync(socketPath, DAEMON_SOCKET_MODE);
@@ -198,6 +257,7 @@ export function restrictDaemonSocketPath(socketPath: string): void {
 
 export function getDaemonSocketIdentity(socketPath: string): DaemonSocketIdentity | undefined {
 	if (process.platform === "win32") {
+		// Windows named pipes do not expose inode identity.
 		return undefined;
 	}
 	const stat = lstatSync(socketPath);
@@ -210,6 +270,8 @@ export function cleanupDaemonSocketPath(
 	lease?: DaemonSocketPathLease,
 ): void {
 	if (process.platform === "win32") {
+		// Named pipes have no filesystem artifact to clean up. The lock file
+		// is released when the lease is released.
 		return;
 	}
 	if (lease) {
@@ -290,7 +352,12 @@ function assertSocketLeaseHeld(socketPath: string, lease: DaemonSocketPathLease)
 }
 
 export function defaultDaemonSocketDir(): string {
-	const suffix = typeof process.getuid === "function" ? String(process.getuid()) : "user";
+	const suffix =
+		process.platform === "win32"
+			? windowsNamedPipeUserScope()
+			: typeof process.getuid === "function"
+				? String(process.getuid())
+				: "user";
 	// Bun caches os.tmpdir() at startup. Read the standard overrides here so
 	// isolated processes and tests can select a runtime temporary directory.
 	const runtimeTmpDir = process.env.TMPDIR || process.env.TMP || process.env.TEMP || tmpdir();
@@ -298,24 +365,24 @@ export function defaultDaemonSocketDir(): string {
 }
 
 function ensureDefaultDaemonSocketDir(socketPath: string): void {
-	if (process.platform === "win32" || dirname(socketPath) !== defaultDaemonSocketDir()) {
-		return;
+	const socketDir = defaultDaemonSocketDir();
+	if (process.platform !== "win32" && dirname(socketPath) !== socketDir) return;
+
+	if (!existsSync(socketDir)) {
+		mkdirSync(socketDir, { recursive: true, mode: DAEMON_SOCKET_DIR_MODE });
 	}
 
-	if (!existsSync(defaultDaemonSocketDir())) {
-		mkdirSync(defaultDaemonSocketDir(), { recursive: true, mode: DAEMON_SOCKET_DIR_MODE });
-	}
-
-	const stat = lstatSync(defaultDaemonSocketDir());
+	const stat = lstatSync(socketDir);
 	if (!stat.isDirectory()) {
-		throw new Error(`Daemon socket directory exists and is not a directory: ${defaultDaemonSocketDir()}`);
+		throw new Error(`Daemon socket directory exists and is not a directory: ${socketDir}`);
 	}
 
-	if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-		throw new Error(`Daemon socket directory is not owned by the current user: ${defaultDaemonSocketDir()}`);
+	if (process.platform !== "win32") {
+		if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+			throw new Error(`Daemon socket directory is not owned by the current user: ${socketDir}`);
+		}
+		chmodSync(socketDir, DAEMON_SOCKET_DIR_MODE);
 	}
-
-	chmodSync(defaultDaemonSocketDir(), DAEMON_SOCKET_DIR_MODE);
 }
 
 function canConnectToUnixSocket(socketPath: string): Promise<boolean> {
