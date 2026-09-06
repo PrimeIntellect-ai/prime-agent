@@ -24,7 +24,7 @@ import {
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
-import { createCliSubprocessEnv, formatCurrentCliCommand } from "./subprocess-launch.js";
+import { createCliSubprocessEnv, createCliSubprocessLaunchSpec, formatCurrentCliCommand } from "./subprocess-launch.js";
 
 const DAEMON_STARTUP_TIMEOUT_MS = 30_000;
 const DAEMON_STARTUP_LOG_TAIL_BYTES = 4 * 1024;
@@ -346,11 +346,22 @@ async function shutdownStaleDaemonIfNotBusy(socketPath: string): Promise<StaleDa
 	return (await shutdownConnectedDaemonAndWait(client, socketPath, 5000, hello)) ? "stopped" : "busy";
 }
 
-async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promise<void> {
+export interface DaemonLaunchTiming {
+	startupTimeoutMs?: number;
+	initialHelloTimeoutMs?: number;
+}
+
+async function ensureDaemonRunning(
+	socketPath: string,
+	spawnCwd?: string,
+	timing: DaemonLaunchTiming = {},
+): Promise<void> {
+	const startupTimeoutMs = timing.startupTimeoutMs ?? DAEMON_STARTUP_TIMEOUT_MS;
+	const initialHelloTimeoutMs = timing.initialHelloTimeoutMs ?? 2000;
 	const probeStartedAt = Date.now();
-	let probe = await probeDaemonVersion(socketPath);
+	let probe = await probeDaemonVersion(socketPath, initialHelloTimeoutMs);
 	if (probe.status === "unresponsive") {
-		const remainingStartupMs = Math.max(1, DAEMON_STARTUP_TIMEOUT_MS - (Date.now() - probeStartedAt));
+		const remainingStartupMs = Math.max(1, startupTimeoutMs - (Date.now() - probeStartedAt));
 		probe = await probeDaemonVersion(socketPath, remainingStartupMs);
 	}
 	if (probe.status === "current") {
@@ -358,7 +369,7 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 	}
 	if (probe.status === "unresponsive") {
 		throw new Error(
-			`Prime Agent daemon on ${socketPath} accepted connections but did not finish startup within ${DAEMON_STARTUP_TIMEOUT_MS / 1000} seconds. ` +
+			`Prime Agent daemon on ${socketPath} accepted connections but did not finish startup within ${startupTimeoutMs / 1000} seconds. ` +
 				`It was left running to avoid interrupting active work.
 
 Run:
@@ -371,11 +382,6 @@ Then retry the original command.`,
 		const disposition = await shutdownStaleDaemonIfNotBusy(socketPath);
 		if (disposition === "current") return;
 		if (disposition === "busy") throw new StaleDaemonError(socketPath, probe.hello);
-	}
-
-	const entrypoint = process.argv[1];
-	if (!entrypoint) {
-		throw new Error("Cannot determine current CLI entrypoint for daemon launch");
 	}
 
 	// Strip inherited daemon worker/supervisor role env vars so the spawned
@@ -394,19 +400,22 @@ Then retry the original command.`,
 	delete env[SESSION_LEASE_OWNER_ID_ENV];
 
 	const logOffset = currentDaemonLogSize(socketPath);
-	const child = spawn(
+	const launch = createCliSubprocessLaunchSpec(
+		["--mode", "daemon", "--daemon-socket", socketPath],
 		process.execPath,
-		[...process.execArgv, entrypoint, "--mode", "daemon", "--daemon-socket", socketPath],
-		{
-			cwd: spawnCwd ?? process.cwd(),
-			detached: true,
-			env,
-			// A pipe would tie the daemon's stderr to this short-lived CLI
-			// (EPIPE once it exits); crash details come from the daemon log,
-			// which the supervisor writes to before rethrowing startup errors.
-			stdio: "ignore",
-		},
+		process.execArgv,
+		process.argv[1],
+		env,
 	);
+	const child = spawn(launch.command, launch.args, {
+		cwd: spawnCwd ?? process.cwd(),
+		detached: true,
+		env,
+		// A pipe would tie the daemon's stderr to this short-lived CLI
+		// (EPIPE once it exits); crash details come from the daemon log,
+		// which the supervisor writes to before rethrowing startup errors.
+		stdio: "ignore",
+	});
 	let childFailure:
 		| { type: "error"; error: Error }
 		| { type: "exit"; code: number | null; signal: NodeJS.Signals | null }
@@ -436,7 +445,7 @@ Then retry the original command.`,
 	// A child exit is not immediately fatal: it may have lost the socket to a
 	// concurrent launcher whose daemon is still booting. Keep probing for a
 	// short grace window before attributing the failure to the exit.
-	const deadline = Date.now() + DAEMON_STARTUP_TIMEOUT_MS;
+	const deadline = Date.now() + startupTimeoutMs;
 	let exitDeadline: number | undefined;
 	while (Date.now() < Math.min(deadline, exitDeadline ?? Number.POSITIVE_INFINITY)) {
 		const started = await probeDaemonVersion(socketPath);
@@ -489,10 +498,14 @@ const ensurePromises = new Map<string, Promise<void>>();
  * main.ts share one probe/spawn; failed attempts are forgotten so a later call
  * retries (and surfaces the real error at its await site).
  */
-export function ensureInteractiveDaemonRunning(socketPath: string, spawnCwd?: string): Promise<void> {
+export function ensureInteractiveDaemonRunning(
+	socketPath: string,
+	spawnCwd?: string,
+	timing?: DaemonLaunchTiming,
+): Promise<void> {
 	let promise = ensurePromises.get(socketPath);
 	if (!promise) {
-		promise = ensureDaemonRunning(socketPath, spawnCwd);
+		promise = ensureDaemonRunning(socketPath, spawnCwd, timing);
 		ensurePromises.set(socketPath, promise);
 		const clear = () => {
 			if (ensurePromises.get(socketPath) === promise) {

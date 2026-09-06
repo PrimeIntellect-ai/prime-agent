@@ -1,176 +1,123 @@
 #!/usr/bin/env bash
 #
-# Build pi binaries for all platforms locally.
-# Mirrors .github/workflows/build-binaries.yml
+# Build pi binaries for supported platforms locally.
+# Mirrors the Bun-compiled release lane in .github/workflows/build-binaries.yml.
 #
 # Usage:
 #   ./scripts/build-binaries.sh [--skip-deps] [--platform <platform>]
 #
 # Options:
-#   --skip-deps         Skip installing cross-platform dependencies
-#   --platform <name>   Build only for specified platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64)
+#   --skip-deps         Skip frozen dependency install and package build
+#   --platform <name>   Build only for specified platform
+#                       (darwin-arm64, darwin-x64, linux-x64, linux-arm64)
 #
 # Output:
 #   packages/coding-agent/binaries/
-#     pi-darwin-arm64.tar.gz
-#     pi-darwin-x64.tar.gz
-#     pi-linux-x64.tar.gz
-#     pi-linux-arm64.tar.gz
-#     pi-windows-x64.zip
+#     <platform>/pi
+#
+#   packages/coding-agent/release/artifacts/
+#     prime-agent-<version>-<platform>.tar.gz
+#     SHA256SUMS
+#     stable
+#     latest.json
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Require Bun 1.4.0
+EXPECTED_BUN_VERSION="1.4.0"
+ACTUAL_BUN_VERSION=$(bun --version 2>/dev/null || echo "not-found")
+if [ "$ACTUAL_BUN_VERSION" != "$EXPECTED_BUN_VERSION" ]; then
+	echo "ERROR: Expected Bun ${EXPECTED_BUN_VERSION}, got ${ACTUAL_BUN_VERSION}"
+	echo "Install Bun ${EXPECTED_BUN_VERSION}:"
+	echo "  curl -fsSL https://bun.sh/install | bash -s -- bun-v${EXPECTED_BUN_VERSION}"
+	exit 1
+fi
+
 SKIP_DEPS=false
 PLATFORM=""
 
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --skip-deps)
-            SKIP_DEPS=true
-            shift
-            ;;
-        --platform)
-            PLATFORM="$2"
-            shift 2
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
-    esac
+	case $1 in
+		--skip-deps)
+			SKIP_DEPS=true
+			shift
+			;;
+		--platform)
+			PLATFORM="$2"
+			shift 2
+			;;
+		*)
+			echo "Unknown option: $1"
+			exit 1
+			;;
+	esac
 done
 
 # Validate platform if specified
 if [[ -n "$PLATFORM" ]]; then
-    case "$PLATFORM" in
-        darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64)
-            ;;
-        *)
-            echo "Invalid platform: $PLATFORM"
-            echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64"
-            exit 1
-            ;;
-    esac
+	case "$PLATFORM" in
+		darwin-arm64|darwin-x64|linux-x64|linux-arm64) ;;
+		*)
+			echo "Invalid platform: $PLATFORM"
+			echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64"
+			exit 1
+			;;
+	esac
 fi
-
-echo "==> Installing dependencies..."
-npm ci
 
 if [[ "$SKIP_DEPS" == "false" ]]; then
-    echo "==> Installing cross-platform native bindings..."
-    # npm ci only installs optional deps for the current platform
-    # We need all platform bindings for bun cross-compilation
-    # Use --force to bypass platform checks (os/cpu restrictions in package.json)
-    # Install all in one command to avoid npm removing packages from previous installs
-    npm install --no-save --force \
-        @mariozechner/clipboard-darwin-arm64@0.3.0 \
-        @mariozechner/clipboard-darwin-x64@0.3.0 \
-        @mariozechner/clipboard-linux-x64-gnu@0.3.0 \
-        @mariozechner/clipboard-linux-arm64-gnu@0.3.0 \
-        @mariozechner/clipboard-win32-x64-msvc@0.3.0 \
-        @img/sharp-darwin-arm64@0.34.5 \
-        @img/sharp-darwin-x64@0.34.5 \
-        @img/sharp-linux-x64@0.34.5 \
-        @img/sharp-linux-arm64@0.34.5 \
-        @img/sharp-win32-x64@0.34.5 \
-        @img/sharp-libvips-darwin-arm64@1.2.4 \
-        @img/sharp-libvips-darwin-x64@1.2.4 \
-        @img/sharp-libvips-linux-x64@1.2.4 \
-        @img/sharp-libvips-linux-arm64@1.2.4
-else
-    echo "==> Skipping cross-platform native bindings (--skip-deps)"
+	echo "==> Installing dependencies for all release platforms (frozen lockfile)..."
+	bun install --frozen-lockfile --os=* --cpu=*
+
+	echo "==> Building all packages..."
+	bun run build
 fi
 
-echo "==> Building all packages..."
-npm run build
-
-echo "==> Building binaries..."
+echo "==> Compiling binaries..."
 cd packages/coding-agent
 
 # Clean previous builds
 rm -rf binaries
-mkdir -p binaries/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64}
+mkdir -p binaries
 
 # Determine which platforms to build
 if [[ -n "$PLATFORM" ]]; then
-    PLATFORMS=("$PLATFORM")
+	PLATFORMS=("$PLATFORM")
 else
-    PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64)
+	PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64)
 fi
 
 for platform in "${PLATFORMS[@]}"; do
-    echo "Building for $platform..."
-    # Externalize koffi to avoid embedding all 18 platform .node files (~74MB)
-    # into every binary. Koffi is only used on Windows for VT input and the
-    # call site has a try/catch fallback. For Windows builds, we copy the
-    # appropriate .node file alongside the binary below.
-    if [[ "$platform" == "windows-x64" ]]; then
-        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi.exe
-    else
-        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi
-    fi
+	echo "Building for $platform..."
+	mkdir -p "binaries/$platform"
+	bun build --compile --minify --keep-names --bytecode --format=esm --external koffi --target="bun-$platform" ./dist/bun/cli.js --outfile "binaries/$platform/pi"
 done
 
-echo "==> Creating release archives..."
+echo "==> Copying sidecar assets..."
+bun run copy-binary-assets
 
-# Copy shared files to each platform directory
-for platform in "${PLATFORMS[@]}"; do
-    cp package.json binaries/$platform/
-    cp README.md binaries/$platform/
-    cp CHANGELOG.md binaries/$platform/
-    cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm binaries/$platform/
-    mkdir -p binaries/$platform/theme
-    cp dist/modes/interactive/theme/*.json binaries/$platform/theme/
-    mkdir -p binaries/$platform/assets
-    cp dist/modes/interactive/assets/* binaries/$platform/assets/
-    cp -r dist/core/export-html binaries/$platform/
-    cp -r docs binaries/$platform/
-    cp -r examples binaries/$platform/
-    cp -r skills binaries/$platform/
-
-    # Copy koffi native module for Windows (needed for VT input support)
-    if [[ "$platform" == "windows-x64" ]]; then
-        mkdir -p binaries/$platform/node_modules/koffi/build/koffi/win32_x64
-        cp ../../node_modules/koffi/index.js binaries/$platform/node_modules/koffi/
-        cp ../../node_modules/koffi/package.json binaries/$platform/node_modules/koffi/
-        cp ../../node_modules/koffi/build/koffi/win32_x64/koffi.node binaries/$platform/node_modules/koffi/build/koffi/win32_x64/
-    fi
-done
-
-# Create archives
-cd binaries
-
-for platform in "${PLATFORMS[@]}"; do
-    if [[ "$platform" == "windows-x64" ]]; then
-        # Windows (zip)
-        echo "Creating pi-$platform.zip..."
-        (cd $platform && zip -r ../pi-$platform.zip .)
-    else
-        # Unix platforms (tar.gz) - use wrapper directory for mise compatibility
-        echo "Creating pi-$platform.tar.gz..."
-        mv $platform pi && tar -czf pi-$platform.tar.gz pi && mv pi $platform
-    fi
-done
-
-# Extract archives for easy local testing
-echo "==> Extracting archives for testing..."
-for platform in "${PLATFORMS[@]}"; do
-    rm -rf $platform
-    if [[ "$platform" == "windows-x64" ]]; then
-        mkdir -p $platform && (cd $platform && unzip -q ../pi-$platform.zip)
-    else
-        tar -xzf pi-$platform.tar.gz && mv pi $platform
-    fi
-done
+echo "==> Assembling release archives..."
+VERSION=$(bun -e "console.log(require('./package.json').version)")
+BASE_URL="${PRIME_AGENT_DOWNLOAD_BASE_URL:-https://releases.pi.ai}"
+PACK_PLATFORM_ARGS=()
+if [[ -n "$PLATFORM" ]]; then
+	PACK_PLATFORM_ARGS=(--platform "$PLATFORM")
+fi
+bun ../../scripts/pack-prime-agent-release.mjs \
+	--channel stable \
+	--version "$VERSION" \
+	--base-url "$BASE_URL" \
+	--binary-base-dir "$(pwd)/binaries" \
+	--sidecar-dir "$(pwd)/dist" \
+	--out-dir "$(pwd)/release" \
+	"${PACK_PLATFORM_ARGS[@]}"
 
 echo ""
 echo "==> Build complete!"
-echo "Archives available in packages/coding-agent/binaries/"
-ls -lh *.tar.gz *.zip 2>/dev/null || true
+echo "Release archives:"
+ls -lh "release/artifacts/"*.tar.gz
 echo ""
-echo "Extracted directories for testing:"
-for platform in "${PLATFORMS[@]}"; do
-    echo "  binaries/$platform/pi"
-done
+echo "Metadata:"
+ls -lh "release/artifacts/SHA256SUMS" "release/artifacts/latest.json" "release/artifacts/stable" 2>/dev/null || true

@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * Bundles the compiled CLI entry (dist/cli.js) into dist/bundle/ with esbuild.
+ * Bundles the compiled CLI entry (dist/cli.js) into dist/bundle/ with Bun.
  *
  * Why: the unbundled module graph is ~2,500 files; resolving and reading them
  * dominates startup (~1.5s on slow filesystems). The bundle loads the same code
@@ -15,7 +15,6 @@ import { chmodSync, readFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const outdir = join(packageDir, "dist", "bundle");
@@ -31,22 +30,34 @@ try {
 
 rmSync(outdir, { recursive: true, force: true });
 
-await build({
-	entryPoints: [join(packageDir, "dist", "cli.js")],
+const result = await Bun.build({
+	entrypoints: [join(packageDir, "dist", "cli.js")],
 	outdir,
-	bundle: true,
 	splitting: true,
 	format: "esm",
-	platform: "node",
+	target: "node",
+	sourcemap: "linked",
 	// Native or interop-sensitive packages stay external; they resolve from
 	// node_modules at runtime (and are loaded via createRequire/lazily anyway).
 	external: ["koffi", "undici", "@silvia-odwyer/photon-node", "@mariozechner/clipboard"],
-	define: { __PI_BUNDLED__: "true", __PI_BUILD_ID__: JSON.stringify(buildId) },
-	banner: {
-		js: "import { createRequire as __piBundleCreateRequire } from 'node:module'; const require = __piBundleCreateRequire(import.meta.url);",
+	define: {
+		__PI_BUNDLED__: "true",
+		__PI_BUILD_ID__: JSON.stringify(buildId),
 	},
-	logLevel: "warning",
+	banner: `import { createRequire as __piBundleCreateRequire } from 'node:module'; const require = __piBundleCreateRequire(import.meta.url);`,
+	naming: {
+		entry: "[name].js",
+		chunk: "[name]-[hash].js",
+	},
+	throw: false,
 });
+
+if (!result.success) {
+	for (const log of result.logs) {
+		console.error(log);
+	}
+	process.exit(1);
+}
 
 chmodSync(join(outdir, "cli.js"), 0o755);
 console.log("bundled dist/cli.js -> dist/bundle/");

@@ -1,7 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
@@ -344,20 +343,16 @@ export class DaemonCatalogClient {
 	private async spawnCatalog(): Promise<void> {
 		let command: string;
 		let args: string[];
-		let environment = createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" });
+		const environment = createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" });
 		if (isBunBinary) {
 			const launch = createCliSubprocessLaunchSpec(["--version"]);
 			command = launch.command;
 			args = launch.args;
 		} else {
 			const catalogEntry = resolveDaemonCatalogEntrypoint();
-			const execArgs = catalogEntry.endsWith(".ts")
-				? [...process.execArgv, "--import", createRequire(import.meta.url).resolve("tsx")]
-				: process.execArgv;
-			const launch = createCliSubprocessLaunchSpec([], undefined, execArgs, catalogEntry);
+			const launch = createCliSubprocessLaunchSpec([], undefined, process.execArgv, catalogEntry);
 			command = launch.command;
 			args = launch.args;
-			environment = createCliSubprocessEnv(environment, catalogEntry, execArgs);
 		}
 		const child = spawn(command, args, {
 			cwd: process.cwd(),

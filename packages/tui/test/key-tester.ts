@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { matchesKey } from "../src/keys.js";
 import { ProcessTerminal } from "../src/terminal.js";
 import { type Component, TUI } from "../src/tui.js";

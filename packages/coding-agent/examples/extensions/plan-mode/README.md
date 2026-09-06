@@ -60,6 +60,6 @@ Safe commands (allowed):
 Blocked commands:
 - File modification: `rm`, `mv`, `cp`, `mkdir`, `touch`
 - Git write: `git add`, `git commit`, `git push`
-- Package install: `npm install`, `yarn add`, `pip install`
+- Package install: `bun install`, `npm install`, `yarn add`, `pip install`
 - System: `sudo`, `kill`, `reboot`
 - Editors: `vim`, `nano`, `code`

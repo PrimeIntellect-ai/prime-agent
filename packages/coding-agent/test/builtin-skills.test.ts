@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { REQUIRED_BINARY_SIDECARS } from "../../../scripts/compiled-artifact-smoke.js";
 import { getBundledSkillsDir } from "../src/config.js";
 import { DefaultPackageManager } from "../src/core/package-manager.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
@@ -297,26 +298,16 @@ describe("builtin skills", () => {
 	// Verify every shipping path includes bundled skills; source-only success would hide a release packaging regression.
 	describe("packaging ships bundled skills", () => {
 		const packageRoot = join(__dirname, "..");
-		const repoRoot = join(packageRoot, "..", "..");
 
-		it("npm build (copy-assets) copies skills into dist", () => {
+		it("package and binary builds require bundled skills", () => {
 			const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as {
 				files?: string[];
 				scripts?: Record<string, string>;
 			};
-			expect(pkg.scripts?.["copy-assets"]).toContain("skills dist/skills");
-			// npm publish ships the source skills/ dir via the files allowlist too.
+			expect(pkg.scripts?.["copy-assets"]).toBe("bun scripts/copy-assets.ts package");
+			expect(pkg.scripts?.["copy-binary-assets"]).toBe("bun scripts/copy-assets.ts binary");
 			expect(pkg.files).toContain("skills");
-		});
-
-		it("binary release script copies skills next to the executable", () => {
-			const script = readFileSync(join(repoRoot, "scripts", "build-binaries.sh"), "utf-8");
-			expect(script).toMatch(/cp -r skills binaries\/\$platform\//);
-		});
-
-		it("release packer includes skills in the packed package", () => {
-			const script = readFileSync(join(repoRoot, "scripts", "pack-prime-agent-release.mjs"), "utf-8");
-			expect(script).toContain('"skills"');
+			expect(REQUIRED_BINARY_SIDECARS).toContain("skills");
 		});
 	});
 });

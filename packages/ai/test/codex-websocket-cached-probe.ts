@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env bun
 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -79,7 +79,7 @@ function required(value: string | undefined, flag: string): string {
 }
 
 function printHelp(): void {
-	console.log(`Usage: npx tsx test/codex-websocket-cached-probe.ts [options]
+	console.log(`Usage: bun test/codex-websocket-cached-probe.ts [options]
 
 Options:
   --turns <n>          Number of user turns. Default: ${DEFAULT_TURNS}

@@ -4,10 +4,10 @@ import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../src/providers/cloudfla
 import { streamSimple } from "../src/stream.js";
 import type { Model } from "../src/types.js";
 
-const mockState = vi.hoisted(() => ({
-	lastParams: undefined as unknown,
-	lastClientOptions: undefined as unknown,
-}));
+const mockState: { lastParams: unknown; lastClientOptions: unknown } = {
+	lastParams: undefined,
+	lastClientOptions: undefined,
+};
 
 vi.mock("openai", () => {
 	class FakeOpenAI {

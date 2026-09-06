@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
-const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
 
 const tempDirs: string[] = [];
 
@@ -55,12 +54,11 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
 	);
 
 	return await new Promise((resolvePromise, reject) => {
-		const child = spawn(process.execPath, [tsxPath, cliPath, ...args], {
+		const child = spawn(process.execPath, [cliPath, ...args], {
 			cwd: projectDir,
 			env: {
 				...process.env,
 				[ENV_AGENT_DIR]: agentDir,
-				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		});

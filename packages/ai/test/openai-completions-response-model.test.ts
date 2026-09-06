@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { complete } from "../src/stream.js";
 import type { Model } from "../src/types.js";
 
-const mockState = vi.hoisted(() => ({
-	chunks: [] as unknown[],
-}));
+const mockState: { chunks: unknown[] } = {
+	chunks: [],
+};
 
 vi.mock("openai", () => {
 	class FakeOpenAI {

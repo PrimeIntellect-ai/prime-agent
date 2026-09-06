@@ -1,10 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Measures attach payload bytes for legacy vs slim_attach clients against a
  * daemon session loaded from a given session file. Uses an isolated agent dir
  * so no test sessions leak into the shared sessions directory.
  *
- *   node scripts/bench-attach-bytes.mjs <session.jsonl>
+ *   bun scripts/bench-attach-bytes.mjs <session.jsonl>
  */
 import { spawn } from "node:child_process";
 import { copyFileSync, mkdtempSync, rmSync } from "node:fs";

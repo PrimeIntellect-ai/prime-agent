@@ -4,7 +4,7 @@
 STAGED_FILES=$(git diff --cached --name-only)
 
 echo "Running formatting, linting, and type checking..."
-npm run check
+bun run check
 if [ $? -ne 0 ]; then
   echo "Checks failed. Please fix the errors before committing."
   exit 1

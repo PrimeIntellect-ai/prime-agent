@@ -162,7 +162,7 @@ describe("Serialized refine controller availability (unit)", () => {
 
 		expect(internals._rlmHeartbeatController).toBe(fakeController);
 		expect(internals._ipythonKernelProvisioner).not.toBe(initialProvisioner);
-		expect(internals._createKernelHostHandlers()).toHaveProperty("rlm_heartbeat.create");
+		expect(internals._createKernelHostHandlers()).toHaveProperty(["rlm_heartbeat.create"]);
 
 		// Verify the controller is usable via host request.
 		const result = harness.session.handleRlmHeartbeatHostRequest("rlm_heartbeat.list");

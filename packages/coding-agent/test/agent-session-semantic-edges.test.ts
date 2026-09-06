@@ -320,8 +320,19 @@ describe("AgentSession semantic edges", () => {
 
 	/** Attribution requires an active run: production spawns execute inside a turn's tool call. */
 	function spawnDuringRun<T>(session: AgentSession, spawn: () => Promise<T>): Promise<T> {
-		const activeRun = vi.spyOn(session, "isStreaming", "get").mockReturnValue(true);
-		return spawn().finally(() => activeRun.mockRestore());
+		// Bun vi.spyOn does not support accessor properties; use defineProperty instead.
+		const ownDescriptor = Object.getOwnPropertyDescriptor(session, "isStreaming");
+		Object.defineProperty(session, "isStreaming", {
+			get: () => true,
+			configurable: true,
+		});
+		return spawn().finally(() => {
+			if (ownDescriptor) {
+				Object.defineProperty(session, "isStreaming", ownDescriptor);
+			} else {
+				Reflect.deleteProperty(session, "isStreaming");
+			}
+		});
 	}
 
 	it("records spawned-child ancestry from the latest turn and returns it on success", async () => {

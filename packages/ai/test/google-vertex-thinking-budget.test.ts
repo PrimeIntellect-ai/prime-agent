@@ -1,9 +1,10 @@
-import type * as GoogleGenAi from "@google/genai";
+import { describe, expect, it, mock } from "bun:test";
 import type { GenerateContentParameters } from "@google/genai";
-import { describe, expect, it, vi } from "vitest";
 
-vi.mock("@google/genai", async (importOriginal) => {
-	const actual = await importOriginal<typeof GoogleGenAi>();
+// Import the module normally before mocking so we can spread its exports
+import * as googleGenAiActual from "@google/genai";
+
+mock.module("@google/genai", () => {
 	class GoogleGenAI {
 		models = {
 			generateContentStream: async function* () {
@@ -16,7 +17,7 @@ vi.mock("@google/genai", async (importOriginal) => {
 	}
 
 	return {
-		...actual,
+		...googleGenAiActual,
 		GoogleGenAI,
 		ResourceScope: { COLLECTION: "COLLECTION" },
 		ThinkingLevel: {
@@ -62,12 +63,14 @@ async function captureMinimalReasoningPayload(
 }
 
 describe("Google Vertex thinking budget payload", () => {
-	it.each(flashLiteModels)("uses the supported minimal budget for $id", async (model) => {
-		const payload = await captureMinimalReasoningPayload(model);
+	for (const model of flashLiteModels) {
+		it(`uses the supported minimal budget for ${model.id}`, async () => {
+			const payload = await captureMinimalReasoningPayload(model);
 
-		expect(payload.config?.thinkingConfig).toEqual({
-			includeThoughts: true,
-			thinkingBudget: 512,
+			expect(payload.config?.thinkingConfig).toEqual({
+				includeThoughts: true,
+				thinkingBudget: 512,
+			});
 		});
-	});
+	}
 });

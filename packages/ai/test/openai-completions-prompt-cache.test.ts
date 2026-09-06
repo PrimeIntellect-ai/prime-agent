@@ -15,10 +15,13 @@ interface CapturedCompletionsPayload {
 	prompt_cache_retention?: "24h" | "in-memory" | null;
 }
 
-const mockState = vi.hoisted(() => ({
-	lastParams: undefined as CapturedCompletionsPayload | undefined,
-	lastClientOptions: undefined as FakeOpenAIClientOptions | undefined,
-}));
+const mockState: {
+	lastParams: CapturedCompletionsPayload | undefined;
+	lastClientOptions: FakeOpenAIClientOptions | undefined;
+} = {
+	lastParams: undefined,
+	lastClientOptions: undefined,
+};
 
 vi.mock("openai", () => {
 	class FakeOpenAI {

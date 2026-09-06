@@ -3348,11 +3348,11 @@ export class InteractiveMode {
 	}
 
 	private clearFeatureHintPresentation(): void {
-		if (this.featureHintTimer) {
+		if (this.featureHintTimer !== undefined) {
 			clearTimeout(this.featureHintTimer);
 			this.featureHintTimer = undefined;
 		}
-		if (this.featureHintAnimationTimer) {
+		if (this.featureHintAnimationTimer !== undefined) {
 			clearInterval(this.featureHintAnimationTimer);
 			this.featureHintAnimationTimer = undefined;
 		}
@@ -8775,12 +8775,6 @@ export class InteractiveMode {
 	}
 
 	private async handleUpdateCommand(args: string): Promise<void> {
-		const entrypoint = process.argv[1];
-		if (!entrypoint) {
-			this.showError("Cannot determine current CLI entrypoint for update");
-			return;
-		}
-
 		const updateArgs = parseCommandArgs(args);
 		const includesSelf = updateArgsIncludeSelf(updateArgs);
 		const updateCwd = this.getCurrentCwd();
@@ -8794,15 +8788,12 @@ export class InteractiveMode {
 		this.ui.stop();
 
 		const updateEnv = includesSelf ? { ...process.env, [SELF_UPDATE_INTERACTIVE_CHILD_ENV]: "1" } : process.env;
-		const updateResult = spawnSync(
-			process.execPath,
-			[...process.execArgv, entrypoint, "update", ...updateChildArgs],
-			{
-				stdio: "inherit",
-				cwd: updateCwd,
-				env: updateEnv,
-			},
-		);
+		const updateLaunch = createCliSubprocessLaunchSpec(["update", ...updateChildArgs]);
+		const updateResult = spawnSync(updateLaunch.command, updateLaunch.args, {
+			stdio: "inherit",
+			cwd: updateCwd,
+			env: updateEnv,
+		});
 		const updateExitCode = updateResult.status ?? (updateResult.signal ? 1 : 0);
 		const selfUpdateNotAttempted =
 			includesSelf && !updateResult.error && updateExitCode === SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE;

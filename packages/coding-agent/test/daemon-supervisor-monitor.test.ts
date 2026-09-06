@@ -1,6 +1,7 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,96 +51,92 @@ const workerLaunchTestState = vi.hoisted(() => ({
 	spawned: [] as Array<{ child: ChildProcess; args: readonly string[] }>,
 }));
 
-vi.mock("node:child_process", async (importOriginal) => {
-	const actual = (await importOriginal()) as Record<string, unknown> & {
-		spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess;
-	};
-	return {
-		...actual,
-		spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
-			const failureCode = workerLaunchTestState.spawnFailureCode;
-			if (failureCode) {
-				// Node's failed-spawn shape: no pid, stdio undefined, "error" then "close".
-				const failing = Object.assign(new EventEmitter(), {
-					pid: undefined,
-					stdio: undefined,
-					stderr: undefined,
-					unref: () => {},
-				}) as unknown as ChildProcess;
-				process.nextTick(() => {
-					failing.emit(
-						"error",
-						Object.assign(new Error(`spawn ${command} ${failureCode}`), { code: failureCode }),
-					);
-					failing.emit("close", null, null);
-				});
-				return failing;
-			}
-			const child = actual.spawn(command, args, options);
-			if (workerLaunchTestState.capture) {
-				workerLaunchTestState.spawned.push({ child, args });
-			}
-			return child;
-		},
-	};
-});
+const __childProcess = createRequire(import.meta.url)("node:child_process") as Record<string, unknown> & {
+	spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess;
+};
+const spawnChildProcess = __childProcess.spawn;
+vi.mock("node:child_process", () => ({
+	...__childProcess,
+	spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
+		const failureCode = workerLaunchTestState.spawnFailureCode;
+		if (failureCode) {
+			// Node's failed-spawn shape: no pid, stdio undefined, "error" then "close".
+			const failing = Object.assign(new EventEmitter(), {
+				pid: undefined,
+				stdio: undefined,
+				stderr: undefined,
+				unref: () => {},
+			}) as unknown as ChildProcess;
+			queueMicrotask(() => {
+				failing.emit("error", Object.assign(new Error(`spawn ${command} ${failureCode}`), { code: failureCode }));
+				failing.emit("close", null, null);
+			});
+			return failing;
+		}
+		const child = spawnChildProcess(command, args, options);
+		if (workerLaunchTestState.capture) {
+			workerLaunchTestState.spawned.push({ child, args });
+		}
+		return child;
+	},
+}));
 
-vi.mock("../src/cli/subprocess-launch.js", async (importOriginal) => {
-	const actual = (await importOriginal()) as Record<string, unknown>;
-	return {
-		...actual,
-		createCliSubprocessLaunchSpec(args: readonly string[]) {
-			if (!workerLaunchTestState.capture) {
-				return (actual.createCliSubprocessLaunchSpec as (args: readonly string[]) => unknown)(args);
-			}
-			if (workerLaunchTestState.fixtureMode === "rollback-gate") {
-				const markerPath = JSON.stringify(workerLaunchTestState.gateMarkerPath);
-				const commitMarker = JSON.stringify(DAEMON_WORKER_STARTUP_GATE_COMMIT);
-				return {
-					command: process.execPath,
-					args: [
-						"--eval",
-						`const fs = require("node:fs"); const marker = fs.readFileSync(3, "utf8"); if (marker === ${commitMarker}) { fs.writeFileSync(${markerPath}, marker); setInterval(() => {}, 1000); }`,
-						"--",
-						...args,
-					],
-				};
-			}
-			if (workerLaunchTestState.fixtureMode === "close-gate") {
-				return {
-					command: process.execPath,
-					args: ["--eval", 'require("node:fs").closeSync(3)'],
-				};
-			}
-			if (workerLaunchTestState.fixtureMode === "successful-gate") {
-				const markerPath = JSON.stringify(workerLaunchTestState.gateMarkerPath);
-				return {
-					command: process.execPath,
-					args: [
-						"--eval",
-						`const fs = require("node:fs"); const marker = fs.readFileSync(3, "utf8"); fs.writeFileSync(${markerPath}, marker); setInterval(() => {}, 1000);`,
-					],
-				};
-			}
+const __subprocessLaunch = createRequire(import.meta.url)("../src/cli/subprocess-launch.js") as Record<string, unknown>;
+const createSubprocessLaunchSpec = __subprocessLaunch.createCliSubprocessLaunchSpec as (
+	args: readonly string[],
+) => unknown;
+vi.mock("../src/cli/subprocess-launch.js", () => ({
+	...__subprocessLaunch,
+	createCliSubprocessLaunchSpec(args: readonly string[]) {
+		if (!workerLaunchTestState.capture) {
+			return createSubprocessLaunchSpec(args);
+		}
+		if (workerLaunchTestState.fixtureMode === "rollback-gate") {
+			const markerPath = JSON.stringify(workerLaunchTestState.gateMarkerPath);
+			const commitMarker = JSON.stringify(DAEMON_WORKER_STARTUP_GATE_COMMIT);
 			return {
 				command: process.execPath,
-				args: [workerLaunchTestState.tsxCliPath, workerLaunchTestState.cliEntrypoint, ...args],
+				args: [
+					"--eval",
+					`const fs = require("node:fs"); const marker = fs.readFileSync(3, "utf8"); if (marker === ${commitMarker}) { fs.writeFileSync(${markerPath}, marker); setInterval(() => {}, 1000); }`,
+					"--",
+					...args,
+				],
 			};
-		},
-	};
-});
+		}
+		if (workerLaunchTestState.fixtureMode === "close-gate") {
+			return {
+				command: process.execPath,
+				args: ["--eval", 'require("node:fs").closeSync(3); process.reallyExit(0)'],
+			};
+		}
+		if (workerLaunchTestState.fixtureMode === "successful-gate") {
+			const markerPath = JSON.stringify(workerLaunchTestState.gateMarkerPath);
+			return {
+				command: process.execPath,
+				args: [
+					"--eval",
+					`const fs = require("node:fs"); const marker = fs.readFileSync(3, "utf8"); fs.writeFileSync(${markerPath}, marker); setInterval(() => {}, 1000);`,
+				],
+			};
+		}
+		return {
+			command: process.execPath,
+			args: [workerLaunchTestState.tsxCliPath, workerLaunchTestState.cliEntrypoint, ...args],
+		};
+	},
+}));
 
-vi.mock("../src/core/session-lease.js", async (importOriginal) => {
-	const actual = (await importOriginal()) as Record<string, unknown> & {
-		getProcessStartId(pid: number): string | undefined;
-	};
-	return {
-		...actual,
-		getProcessStartId(pid: number): string | undefined {
-			return workerLaunchTestState.forceMissingProcessStartId ? undefined : actual.getProcessStartId(pid);
-		},
-	};
-});
+const __sessionLease = createRequire(import.meta.url)("../src/core/session-lease.js") as Record<string, unknown> & {
+	getProcessStartId(pid: number): string | undefined;
+};
+const readProcessStartId = __sessionLease.getProcessStartId;
+vi.mock("../src/core/session-lease.js", () => ({
+	...__sessionLease,
+	getProcessStartId(pid: number): string | undefined {
+		return workerLaunchTestState.forceMissingProcessStartId ? undefined : readProcessStartId(pid);
+	},
+}));
 
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const previousSupervisorRegistryDir = process.env[supervisorRegistryDirEnv];
@@ -699,9 +696,12 @@ describe("daemon worker supervisor monitoring", () => {
 			launchWorker(command: { type: "create"; config: { cwd: string; agentDir: string } }): Promise<unknown>;
 		};
 
-		await expect(supervisor.launchWorker({ type: "create", config: { cwd: root, agentDir: root } })).rejects.toThrow(
-			/EMFILE.*resident session workers.*ulimit -n/s,
-		);
+		const emfileFailure = await supervisor
+			.launchWorker({ type: "create", config: { cwd: root, agentDir: root } })
+			.then(() => undefined)
+			.catch((error: Error) => error);
+		expect(emfileFailure).toBeInstanceOf(Error);
+		expect(emfileFailure?.message).toMatch(/EMFILE.*resident session workers.*ulimit -n/s);
 		expect(workers.size).toBe(0);
 
 		workerLaunchTestState.spawnFailureCode = "ENOENT";

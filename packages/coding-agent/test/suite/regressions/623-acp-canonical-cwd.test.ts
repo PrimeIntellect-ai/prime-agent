@@ -88,7 +88,7 @@ describe("#623 ACP canonical cwd comparison", () => {
 		expect(cwdMeta(created)).toBeUndefined();
 	}, 30_000);
 
-	it.runIf(caseVariantCwd !== undefined)(
+	it.skipIf(caseVariantCwd === undefined)(
 		"uses filesystem identity when realpath preserves different component casing",
 		async () => {
 			if (!caseVariantCwd) throw new Error("Expected a case-only cwd variant");

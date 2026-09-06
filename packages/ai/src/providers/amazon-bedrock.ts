@@ -208,6 +208,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			if (nextCommandInput !== undefined) {
 				commandInput = nextCommandInput as typeof commandInput;
 			}
+			if (options.signal?.aborted) {
+				throw new Error("Request was aborted");
+			}
 			const command = new ConverseStreamCommand(commandInput);
 
 			const response = await client.send(command, { abortSignal: options.signal });

@@ -1958,11 +1958,9 @@ describe("DaemonAgentConnection", () => {
 
 		expect(fakeClient.reconnectCount).toBe(0);
 		expect(closedEvents).toHaveLength(1);
-		expect(closedEvents[0]).toMatchObject({
-			type: "closed",
-			error: expect.stringContaining("The Prime Agent daemon shut down while this window was attached."),
-		});
+		expect(closedEvents[0]?.type).toBe("closed");
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
+		expect(closedError).toContain("The Prime Agent daemon shut down while this window was attached.");
 		expect(closedError).toContain("Session ID: session-current.");
 		expect(closedError).toContain("Session file: /tmp/session-current.jsonl.");
 		expect(closedError).toContain("Diagnostic log:");

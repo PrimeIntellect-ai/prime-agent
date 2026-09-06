@@ -1,13 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock } from "bun:test";
 import { getModel } from "../src/models.js";
 import type { Context } from "../src/types.js";
 
-const mockState = vi.hoisted(() => ({
-	constructorOpts: undefined as Record<string, unknown> | undefined,
-	createParams: undefined as Record<string, unknown> | undefined,
-}));
+const mockState: {
+	constructorOpts: Record<string, unknown> | undefined;
+	createParams: Record<string, unknown> | undefined;
+} = {
+	constructorOpts: undefined,
+	createParams: undefined,
+};
 
-vi.mock("@anthropic-ai/sdk", () => {
+mock.module("@anthropic-ai/sdk", () => {
 	function createSseResponse(): Response {
 		const body = [
 			`event: message_start\ndata: ${JSON.stringify({

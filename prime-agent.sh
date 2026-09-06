@@ -62,20 +62,27 @@ if [[ "$NO_ENV" == "true" ]]; then
   echo "Running Prime Agent without API keys..."
 fi
 
-# --dist runs the bundled build (what users get; ~3x faster startup than tsx).
-if [[ "$USE_DIST" == "true" ]]; then
-  BUNDLE="$SCRIPT_DIR/packages/coding-agent/dist/bundle/cli.js"
-  if [[ ! -f "$BUNDLE" ]]; then
-    echo "Bundle not found at $BUNDLE. Run npm run build first." >&2
-    exit 1
-  fi
-  exec node "$BUNDLE" ${ARGS[@]+"${ARGS[@]}"}
-fi
-
-TSX_BIN="$SCRIPT_DIR/node_modules/.bin/tsx"
-if [[ ! -x "$TSX_BIN" ]]; then
-  echo "tsx not found at $TSX_BIN. Run npm install from the repo root first." >&2
+BUN_BIN="$(command -v bun || true)"
+if [[ -z "$BUN_BIN" ]]; then
+  echo "Bun is required. Install version $(cat "$SCRIPT_DIR/.bun-version") and run bun install --frozen-lockfile." >&2
   exit 1
 fi
 
-"$TSX_BIN" "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
+EXPECTED_BUN_VERSION="$(cat "$SCRIPT_DIR/.bun-version")"
+ACTUAL_BUN_VERSION="$($BUN_BIN --version)"
+if [[ "$ACTUAL_BUN_VERSION" != "$EXPECTED_BUN_VERSION" ]]; then
+  echo "Prime Agent requires Bun $EXPECTED_BUN_VERSION; found $ACTUAL_BUN_VERSION." >&2
+  exit 1
+fi
+
+# --dist runs the bundled build. Source mode runs TypeScript directly with Bun.
+if [[ "$USE_DIST" == "true" ]]; then
+  BUNDLE="$SCRIPT_DIR/packages/coding-agent/dist/bundle/cli.js"
+  if [[ ! -f "$BUNDLE" ]]; then
+    echo "Bundle not found at $BUNDLE. Run bun run build first." >&2
+    exit 1
+  fi
+  exec "$BUN_BIN" "$BUNDLE" ${ARGS[@]+"${ARGS[@]}"}
+fi
+
+exec "$BUN_BIN" "$SCRIPT_DIR/packages/coding-agent/src/bun/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
