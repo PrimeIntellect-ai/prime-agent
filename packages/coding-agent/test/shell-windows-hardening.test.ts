@@ -45,6 +45,29 @@ afterEach(() => {
 });
 
 describe("getShellConfig on win32", () => {
+	it.each([
+		["ProgramFiles", "D:\\Applications ø", "D:\\Applications ø\\Git\\bin\\bash.exe"],
+		["ProgramFiles(x86)", "E:\\Apps (x86)", "E:\\Apps (x86)\\Git\\bin\\bash.exe"],
+	])("uses relocated %s for both command and kernel shells", (variable, directory, gitBash) => {
+		stubWin32();
+		process.env[variable] = directory;
+		mocks.existsSync.mockImplementation((path: string) => path === gitBash);
+		expect(getShellConfig()).toEqual({ shell: gitBash, args: ["-c"] });
+		expect(resolveKernelBashShell()).toBe(gitBash);
+		expect(mocks.spawnSync).not.toHaveBeenCalled();
+	});
+
+	it("uses default installation directories when ProgramFiles variables are missing", () => {
+		stubWin32();
+		delete process.env.ProgramFiles;
+		delete process.env["ProgramFiles(x86)"];
+		const gitBash = "C:\\Program Files (x86)\\Git\\bin\\bash.exe";
+		mocks.existsSync.mockImplementation((path: string) => path === gitBash);
+		expect(getShellConfig().shell).toBe(gitBash);
+		expect(resolveKernelBashShell()).toBe(gitBash);
+		expect(mocks.spawnSync).not.toHaveBeenCalled();
+	});
+
 	it("returns canonical 64-bit Git Bash when installed", () => {
 		stubWin32();
 		const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";

@@ -112,8 +112,10 @@ function readRlmSubagentDisplayEntrySync(sessionDir: string): RlmSubagentDisplay
 	let contents: string;
 	try {
 		contents = readFileSync(rlmSubagentDisplayPath(sessionDir), "utf8");
-	} catch {
-		return undefined;
+	} catch (error) {
+		// An unreadable file may hold a deletion tombstone; only a missing file permits a new write.
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+		throw error;
 	}
 	try {
 		const parsed = JSON.parse(contents) as unknown;

@@ -19,8 +19,9 @@ import { ReplKernelManager } from "../src/core/kernel/index.js";
 const actualFs = { ...fsPromises };
 const actualSpawn = childProcess.spawn;
 const rename = vi.fn(actualFs.rename);
+const rmdir = vi.fn(actualFs.rmdir);
 const spawn = vi.fn(actualSpawn);
-vi.mock("node:fs/promises", () => ({ ...actualFs, rename }));
+vi.mock("node:fs/promises", () => ({ ...actualFs, rename, rmdir }));
 vi.mock("node:child_process", () => ({ ...childProcess, spawn }));
 
 const originalPlatform = process.platform;
@@ -32,6 +33,7 @@ beforeEach(() => {
 	root = mkdtempSync(join(os.tmpdir(), "prime-kernel-windows-"));
 	originalEnv = { ...process.env };
 	rename.mockReset().mockImplementation(actualFs.rename);
+	rmdir.mockReset().mockImplementation(actualFs.rmdir);
 	spawn.mockReset().mockImplementation(actualSpawn);
 	Object.defineProperty(process, "platform", { value: "win32" });
 });
@@ -42,6 +44,7 @@ afterEach(() => {
 	Object.defineProperty(process, "platform", { value: originalPlatform });
 	process.env = originalEnv;
 	rename.mockReset().mockImplementation(actualFs.rename);
+	rmdir.mockReset().mockImplementation(actualFs.rmdir);
 	spawn.mockReset().mockImplementation(actualSpawn);
 	rmSync(root, { recursive: true, force: true });
 });
@@ -105,6 +108,57 @@ describe("Windows bootstrap rename recovery", () => {
 		await expect(acquireBootstrapLock(join(root, "venv"))).rejects.toBe(failure);
 		expect(rename).toHaveBeenCalledTimes(1);
 		expect(readdirSync(root)).toEqual([]);
+	});
+});
+
+describe("Windows bootstrap guard release", () => {
+	test("retries sharing violations before reporting successful lock acquisition", async () => {
+		const venv = join(root, "venv");
+		const guard = join(root, ".bootstrap.lock.guard");
+		const errors = ["EBUSY", "EPERM", "EACCES"];
+		let attempts = 0;
+		rmdir.mockImplementation(async (directory) => {
+			if (String(directory) === guard && attempts++ < errors.length) {
+				throw Object.assign(new Error("guard handle open"), { code: errors[attempts - 1] });
+			}
+			return actualFs.rmdir(directory);
+		});
+		const release = await acquireBootstrapLock(venv);
+		try {
+			expect(attempts).toBe(4);
+			expect(existsSync(guard)).toBe(false);
+		} finally {
+			await release();
+		}
+		const nextRelease = await acquireBootstrapLock(venv);
+		await nextRelease();
+		expect(readdirSync(root)).toEqual([]);
+	});
+
+	test("reports persistent guard removal failures and rolls back its new lease", async () => {
+		const failure = Object.assign(new Error("guard removal denied"), { code: "EPERM" });
+		let attempts = 0;
+		rmdir.mockImplementation(async () => {
+			if (++attempts === 2) {
+				const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 20_000);
+				restoreClock = () => clock.mockRestore();
+			}
+			throw failure;
+		});
+		await expect(acquireBootstrapLock(join(root, "venv"))).rejects.toBe(failure);
+		expect(attempts).toBe(2);
+		expect(readdirSync(root)).toEqual([".bootstrap.lock.guard"]);
+	});
+
+	test.each([
+		["win32", "EIO"],
+		["linux", "EACCES"],
+	] as const)("propagates %s %s guard removal errors without retry", async (platform, code) => {
+		Object.defineProperty(process, "platform", { value: platform });
+		const failure = Object.assign(new Error("guard removal failed"), { code });
+		rmdir.mockRejectedValue(failure);
+		await expect(acquireBootstrapLock(join(root, "venv"))).rejects.toBe(failure);
+		expect(rmdir).toHaveBeenCalledTimes(1);
 	});
 });
 

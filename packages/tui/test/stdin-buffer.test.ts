@@ -406,9 +406,6 @@ describe("StdinBuffer", () => {
 			["CRLF", "line1\r\nline2"],
 			["LF", "line1\nline2"],
 			["CR", "line1\rline2"],
-			["leading newline", "\rhello"],
-			["trailing newline", "hello\r"],
-			["trailing CRLF", "hello\r\n"],
 			["blank lines", "line1\r\n\r\nline2"],
 			["mixed line endings", "a\rb\nc"],
 			["Unicode", "Hello 世界\n🎉"],
@@ -417,6 +414,20 @@ describe("StdinBuffer", () => {
 				processInput(input);
 				assert.deepStrictEqual(emittedPaste, [input]);
 				assert.deepStrictEqual(emittedSequences, []);
+			});
+		}
+
+		for (const input of ["hello\r", "hello\n", "hello\r\n", "\rhello"] as const) {
+			it(`preserves text and Enter regardless of chunk boundary: ${JSON.stringify(input)}`, () => {
+				for (let split = 0; split <= input.length; split++) {
+					buffer.clear();
+					emittedSequences.length = 0;
+					emittedPaste.length = 0;
+					if (split > 0) processInput(input.slice(0, split));
+					if (split < input.length) processInput(input.slice(split));
+					assert.deepStrictEqual(emittedPaste, []);
+					assert.deepStrictEqual(emittedSequences, [...input]);
+				}
 			});
 		}
 

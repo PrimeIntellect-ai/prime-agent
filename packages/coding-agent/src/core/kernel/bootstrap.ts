@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import fs, { constants, existsSync, readdirSync, readFileSync } from "node:fs";
+import { access, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
@@ -476,7 +476,10 @@ async function pythonImports(python: string, moduleName: string): Promise<boolea
 
 async function hasPrimeAgentRuntime(python: string): Promise<boolean> {
 	try {
-		await run(python, ["-c", RUNTIME_READY_CHECK], { stdio: "ignore" });
+		const check = isBatchShim(python)
+			? `import base64; exec(base64.b64decode('${Buffer.from(RUNTIME_READY_CHECK).toString("base64")}'))`
+			: RUNTIME_READY_CHECK;
+		await run(python, ["-c", check], { stdio: "ignore" });
 		return true;
 	} catch {
 		return false;
@@ -602,12 +605,38 @@ async function renameWithTransientRetry(source: string, target: string): Promise
 	}
 }
 
+async function removeBootstrapGuard(directory: string): Promise<void> {
+	const deadline = Date.now() + 10_000;
+	for (;;) {
+		try {
+			await rmdir(directory);
+			return;
+		} catch (error) {
+			if (
+				process.platform !== "win32" ||
+				!(isNodeError(error, "EBUSY") || isNodeError(error, "EPERM") || isNodeError(error, "EACCES")) ||
+				Date.now() >= deadline
+			) {
+				throw error;
+			}
+			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
+		}
+	}
+}
+
 async function withBootstrapLockGuard<T>(lockRoot: string, action: () => Promise<T>): Promise<T> {
 	const guardPath = path.join(lockRoot, `${BOOTSTRAP_LOCK_NAME}.guard`);
 	let compromisedError: Error | undefined;
 	const release = await lockfile.lock(lockRoot, {
 		realpath: false,
 		lockfilePath: guardPath,
+		// proper-lockfile's release callback is single-use, so retry its directory removal instead.
+		fs: {
+			...fs,
+			rmdir(directory: string, callback: (error: NodeJS.ErrnoException | null) => void) {
+				void removeBootstrapGuard(directory).then(() => callback(null), callback);
+			},
+		},
 		stale: BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS,
 		update: 5_000,
 		onCompromised: (error) => {
@@ -626,7 +655,7 @@ async function withBootstrapLockGuard<T>(lockRoot: string, action: () => Promise
 		}
 		return await action();
 	} finally {
-		await release().catch(() => undefined);
+		await release();
 	}
 }
 
@@ -664,8 +693,9 @@ export async function acquireBootstrapLock(venv: string): Promise<() => Promise<
 			throw error;
 		}
 
+		let acquired = false;
 		try {
-			const acquired = await withBootstrapLockGuard(lockRoot, async () => {
+			await withBootstrapLockGuard(lockRoot, async () => {
 				if (await exists(lockDir)) {
 					if (!(await isBootstrapLockStale(lockDir))) {
 						return false;
@@ -682,6 +712,7 @@ export async function acquireBootstrapLock(venv: string): Promise<() => Promise<
 				}
 				try {
 					await renameWithTransientRetry(candidate, lockDir);
+					acquired = true;
 					return true;
 				} catch (error) {
 					if (await isLockHeldError(error, lockDir)) return false;
@@ -702,6 +733,12 @@ export async function acquireBootstrapLock(venv: string): Promise<() => Promise<
 					await rm(releasedDir, { recursive: true, force: true }).catch(() => undefined);
 				};
 			}
+		} catch (error) {
+			// A guard-release failure must not strand a published lease without a release handle.
+			if (acquired) {
+				await renameWithTransientRetry(lockDir, candidate).catch(() => undefined);
+			}
+			throw error;
 		} finally {
 			await rm(candidate, { recursive: true, force: true }).catch(() => undefined);
 		}

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter } from "node:path";
+import { delimiter, win32 } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
@@ -10,8 +10,13 @@ export interface ShellConfig {
 	args: string[];
 }
 
-/** Canonical Git for Windows locations. PATH is not trusted for shell selection. */
-const WINDOWS_GIT_BASH_PATHS = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe"];
+/** System installation locations only; PATH is not trusted for shell selection. */
+function windowsGitBashPaths(): string[] {
+	return [
+		process.env.ProgramFiles || "C:\\Program Files",
+		process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)",
+	].map((directory) => win32.join(directory, "Git", "bin", "bash.exe"));
+}
 
 function findBashOnPath(): string | null {
 	try {
@@ -35,7 +40,8 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	}
 
 	if (process.platform === "win32") {
-		for (const shellPath of WINDOWS_GIT_BASH_PATHS) {
+		const shellPaths = windowsGitBashPaths();
+		for (const shellPath of shellPaths) {
 			if (existsSync(shellPath)) {
 				return { shell: shellPath, args: ["-c"] };
 			}
@@ -43,7 +49,7 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 		throw new Error(
 			`Git Bash not found. Install Git for Windows from https://git-scm.com/download/win. ` +
 				`Set shellPath in settings.json for a nonstandard installation.\n\n` +
-				`Searched:\n${WINDOWS_GIT_BASH_PATHS.map((shellPath) => `  ${shellPath}`).join("\n")}`,
+				`Searched:\n${shellPaths.map((shellPath) => `  ${shellPath}`).join("\n")}`,
 		);
 	}
 
@@ -66,7 +72,7 @@ export function resolveKernelBashShell(customShellPath?: string): string | undef
 	if (process.platform !== "win32") {
 		return existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
 	}
-	return WINDOWS_GIT_BASH_PATHS.find((shellPath) => existsSync(shellPath));
+	return windowsGitBashPaths().find((shellPath) => existsSync(shellPath));
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {

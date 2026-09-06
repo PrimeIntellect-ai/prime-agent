@@ -3391,16 +3391,19 @@ export class DaemonSupervisor {
 
 	private async connectWorker(worker: ResidentWorker, timeoutMs: number): Promise<DaemonWorkerClient> {
 		const deadline = Date.now() + timeoutMs;
+		const probeTimeout = (maximum: number): number => {
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new DaemonWorkerProbeTimeoutError("Worker connection deadline elapsed");
+			return Math.min(maximum, remaining);
+		};
 		let lastError: unknown;
 		let backoffMs = WORKER_PROBE_BACKOFF_MIN_MS;
 		while (Date.now() < deadline) {
 			await this.assertRecoveryAllowed();
 			const client = new DaemonWorkerClient(worker.descriptor.socketPath);
 			try {
-				const remaining = deadline - Date.now();
-				if (remaining <= 0) break;
-				await client.connect(Math.min(WORKER_CONNECT_PROBE_MS, Math.max(WORKER_PROBE_BACKOFF_MIN_MS, remaining)));
-				await client.waitForHello(WORKER_HELLO_AUTH_TIMEOUT_MS);
+				await client.connect(probeTimeout(WORKER_CONNECT_PROBE_MS));
+				await client.waitForHello(probeTimeout(WORKER_HELLO_AUTH_TIMEOUT_MS));
 				// Listen before authenticating: the worker flushes its roster snapshot right after auth succeeds.
 				client.onFrame((frame) => this.handleWorkerFrame(worker, frame, client));
 				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
@@ -3414,7 +3417,7 @@ export class DaemonSupervisor {
 								? { workerInstanceId: worker.descriptor.workerInstanceId }
 								: {}),
 						},
-						WORKER_HELLO_AUTH_TIMEOUT_MS,
+						probeTimeout(WORKER_HELLO_AUTH_TIMEOUT_MS),
 					);
 					await this.assertRecoveryAllowed();
 					if (!workerAuthAdvertisesRoster(authResponse.data)) {
@@ -3441,7 +3444,9 @@ export class DaemonSupervisor {
 				// Exponential back-off: each failed probe waits longer so that
 				// slow-to-appear Windows named-pipe servers do not trigger a
 				// retry storm of hundreds of instant-ECONNREFUSED connect() calls.
-				await delay(backoffMs);
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) break;
+				await delay(Math.min(backoffMs, remaining));
 				backoffMs = Math.min(backoffMs * 2, WORKER_PROBE_BACKOFF_MAX_MS);
 			}
 		}

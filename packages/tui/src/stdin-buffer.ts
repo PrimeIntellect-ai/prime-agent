@@ -170,8 +170,8 @@ function parseUnmodifiedKittyPrintableCodepoint(sequence: string): number | unde
 
 function isRawMultilinePaste(data: string): boolean {
 	if (data.includes(ESC)) return false;
-	if (!data.includes("\r") && !data.includes("\n")) return false;
-	return /[^\r\n]/.test(data);
+	// A leading or trailing Enter alone is ordinary key input, not evidence of a multiline paste.
+	return /[^\r\n][\r\n]+[^\r\n]/.test(data);
 }
 
 function extractCompleteSequences(buffer: string): { sequences: string[]; remainder: string } {

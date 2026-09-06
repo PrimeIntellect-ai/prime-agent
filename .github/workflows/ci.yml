@@ -356,6 +356,7 @@ jobs:
           test/config-windows-hardening.test.ts
           test/daemon-command.test.ts
           test/daemon-socket.test.ts
+          test/daemon-worker-connect.test.ts
           test/exec.test.ts
           test/frontmatter.test.ts
           test/herdr-agent-state.test.ts
@@ -402,6 +403,12 @@ jobs:
           PRIME_AGENT_INSTALL_UV: "0"
           PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
         run: bun src/core/kernel/bootstrap-cli.ts
+
+      - name: Test Python batch shim overrides
+        working-directory: packages/coding-agent
+        env:
+          PRIME_AGENT_TEST_KERNEL_PYTHON: ${{ runner.temp }}\Prime Agent ø\kernel-venv\Scripts\python.exe
+        run: bun test --isolate --timeout 120000 test/kernel-python-shim.test.ts
 
       - name: Test persistent CPython kernel behavior
         working-directory: packages/coding-agent

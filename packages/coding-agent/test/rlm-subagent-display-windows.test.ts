@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,15 +9,18 @@ import {
 	writeRlmSubagentDisplayEntry,
 } from "../src/modes/daemon/rlm-subagent-display.js";
 
+const actualFs = { ...fs };
+const readFile = vi.fn(actualFs.readFileSync);
+
 const renameBehavior = vi.hoisted(() => ({
 	failuresRemaining: 0,
 	errorCode: "EPERM" as string,
 }));
 
 vi.mock("node:fs", () => {
-	const actual = require("node:fs");
 	return {
-		...actual,
+		...actualFs,
+		readFileSync: readFile,
 		renameSync: (oldPath: string, newPath: string) => {
 			if (renameBehavior.failuresRemaining > 0) {
 				renameBehavior.failuresRemaining -= 1;
@@ -25,7 +28,7 @@ vi.mock("node:fs", () => {
 				error.code = renameBehavior.errorCode;
 				throw error;
 			}
-			return actual.renameSync(oldPath, newPath);
+			return actualFs.renameSync(oldPath, newPath);
 		},
 	};
 });
@@ -138,6 +141,32 @@ describe("rlm subagent display files: Windows rename resilience", () => {
 });
 
 describe("rlm subagent display files: deletion lifecycle authority", () => {
+	it.each(["EBUSY", "EPERM", "EACCES"])(
+		"preserves a deletion tombstone when a late writer cannot read it: %s",
+		(code) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-display-read-error-"));
+			try {
+				const sessionDir = join(tempDir, "sub-1234abcd");
+				writeRlmSubagentDisplayEntry(makeEntry(sessionDir, { status: "deleted" }));
+				const displayPath = rlmSubagentDisplayPath(sessionDir);
+				const contents = readFileSync(displayPath, "utf8");
+				for (const status of ["running", "completed"] as const) {
+					const failure = Object.assign(new Error("display read blocked"), { code });
+					readFile.mockImplementationOnce(() => {
+						throw failure;
+					});
+					expect(() => writeRlmSubagentDisplayEntry(makeEntry(sessionDir, { status }))).toThrow(failure);
+					expect(readFileSync(displayPath, "utf8")).toBe(contents);
+					expect(readdirSync(sessionDir)).toEqual(["rlm-subagent.json"]);
+					expect(writeRlmSubagentDisplayEntry(makeEntry(sessionDir, { status }))).toBe(false);
+				}
+			} finally {
+				readFile.mockReset().mockImplementation(actualFs.readFileSync);
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("does not resurrect a deleted tombstone with a later running or completed write", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-display-tombstone-"));
 		try {
