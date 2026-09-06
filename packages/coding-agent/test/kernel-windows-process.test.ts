@@ -1,5 +1,14 @@
 import * as childProcess from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import os from "node:os";
 import { join } from "node:path";
@@ -106,11 +115,24 @@ describe("Windows kernel subprocess visibility", () => {
 		});
 	});
 
-	test.each(["python.exe", "python.cmd"])("hides background bootstrap for %s", async (executable) => {
-		process.env.PRIME_AGENT_KERNEL_PYTHON = join(root, executable);
+	test("hides background Python bootstrap", async () => {
+		process.env.PRIME_AGENT_KERNEL_PYTHON = join(root, "python.exe");
 		await expect(ensureKernelPython()).rejects.toThrow("PRIME_AGENT_KERNEL_PYTHON");
 		expect(spawn).toHaveBeenCalled();
 		expect(spawn.mock.calls[0]?.[2]).toMatchObject({ windowsHide: true, stdio: "ignore" });
+	});
+
+	test.skipIf(originalPlatform !== "win32")("hides a uv.cmd bootstrap subprocess", async () => {
+		delete process.env.PRIME_AGENT_KERNEL_PYTHON;
+		process.env.PRIME_AGENT_KERNEL_VENV = join(root, "venv");
+		process.env.PATH = root;
+		process.env.PATHEXT = ".CMD";
+		writeFileSync(join(root, "uv.cmd"), "@echo off\r\n");
+		await expect(ensureKernelPython({ onProgress: () => {} })).rejects.toThrow("spawn refused by test");
+		const call = spawn.mock.calls.at(-1);
+		expect(call?.[0]).toBe(process.env.ComSpec ?? "cmd.exe");
+		expect(call?.[1]).toContain("/c");
+		expect(call?.[2]).toMatchObject({ windowsHide: true, stdio: "ignore" });
 	});
 
 	test("keeps the interactive installer subprocess visible", async () => {
