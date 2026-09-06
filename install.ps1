@@ -60,15 +60,41 @@ function Write-Step([string]$Message) {
 }
 
 function Get-ReleasePlatform {
-    $architecture = if ($env:PROCESSOR_ARCHITEW6432) {
-        $env:PROCESSOR_ARCHITEW6432
-    } else {
-        $env:PROCESSOR_ARCHITECTURE
+    if (-not ("PrimeAgent.WindowsNativeMethods" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace PrimeAgent {
+    public static class WindowsNativeMethods {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool IsWow64Process2(
+            IntPtr process,
+            out ushort processMachine,
+            out ushort nativeMachine);
     }
-    switch ($architecture.ToUpperInvariant()) {
-        "AMD64" { return "windows-x64" }
-        "ARM64" { return "windows-arm64" }
-        default { throw "Unsupported Windows architecture: $architecture" }
+}
+"@
+    }
+
+    [UInt16]$processMachine = 0
+    [UInt16]$nativeMachine = 0
+    $process = [System.Diagnostics.Process]::GetCurrentProcess()
+    try {
+        if (-not [PrimeAgent.WindowsNativeMethods]::IsWow64Process2(
+            $process.Handle,
+            [ref]$processMachine,
+            [ref]$nativeMachine)) {
+            $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw [System.ComponentModel.Win32Exception]::new($errorCode)
+        }
+    } finally {
+        $process.Dispose()
+    }
+
+    switch ($nativeMachine) {
+        0x8664 { return "windows-x64" }
+        0xAA64 { return "windows-arm64" }
+        default { throw "Unsupported native Windows machine type: 0x$($nativeMachine.ToString('X4'))" }
     }
 }
 
@@ -149,9 +175,9 @@ function Assert-ArchiveLayout([string]$Directory) {
 
 function Set-ActiveVersion([string]$VersionDirectory) {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-    $binaryPath = Join-Path $VersionDirectory "prime-agent.exe"
+    $versionName = Split-Path -Leaf $VersionDirectory
     $temporaryShim = Join-Path $BinDir "$CommandName.cmd.$([guid]::NewGuid().ToString("N")).tmp"
-    $shim = "@echo off`r`n`"$binaryPath`" %*`r`n"
+    $shim = "@echo off`r`nsetlocal DisableDelayedExpansion`r`n`"%~dp0..\versions\$versionName\prime-agent.exe`" %*`r`n"
     $backupShim = "$CommandShim.backup"
     try {
         Set-Content -LiteralPath $temporaryShim -Value $shim -Encoding Ascii -NoNewline

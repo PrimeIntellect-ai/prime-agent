@@ -64,7 +64,11 @@ export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals)
 		try {
 			const args = ["/PID", String(pid), "/T"];
 			if (signal === "SIGKILL") args.push("/F");
-			const taskkill = spawn("taskkill", args, { stdio: "ignore", windowsHide: true });
+			const taskkill = spawn("taskkill", args, {
+				stdio: "ignore",
+				windowsHide: true,
+				detached: true,
+			});
 			taskkill.once("error", fallback);
 			taskkill.once("exit", (code) => {
 				if (code !== 0 && isProcessAlive(pid)) fallback();

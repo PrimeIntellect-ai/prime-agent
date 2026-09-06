@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { execCommand } from "../src/core/exec.js";
+import { isProcessAlive } from "../src/utils/child-process.js";
 
 const SIGKILL_EXIT_CODE = 128 + constants.signals.SIGKILL;
 
@@ -11,6 +12,14 @@ async function waitForFile(path: string): Promise<void> {
 	while (!existsSync(path)) {
 		if (Date.now() >= deadline) throw new Error("Child did not become ready");
 		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+	const deadline = Date.now() + 10_000;
+	while (isProcessAlive(pid)) {
+		if (Date.now() >= deadline) throw new Error(`Process ${pid} did not exit`);
+		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 }
 
@@ -54,23 +63,39 @@ describe.skipIf(process.platform === "win32")("execCommand", () => {
 describe.skipIf(process.platform !== "win32")("execCommand on Windows", () => {
 	it("cancels a running process tree", async () => {
 		const testDir = mkdtempSync(join(tmpdir(), "prime-agent-exec-windows-test-"));
-		const readyFile = join(testDir, "ready");
+		const grandchildPidFile = join(testDir, "grandchild.pid");
 		const controller = new AbortController();
+		let grandchildPid: number | undefined;
 		let resultPromise: Promise<Awaited<ReturnType<typeof execCommand>>> | undefined;
 		try {
 			resultPromise = execCommand(
 				process.execPath,
-				["-e", `require("node:fs").writeFileSync(process.argv[1], ""); setInterval(() => {}, 1000);`, readyFile],
+				[
+					"-e",
+					`const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); writeFileSync(process.argv[1], String(child.pid)); setInterval(() => {}, 1000);`,
+					grandchildPidFile,
+				],
 				process.cwd(),
 				{ signal: controller.signal },
 			);
-			await waitForFile(readyFile);
+			await waitForFile(grandchildPidFile);
+			grandchildPid = Number.parseInt(readFileSync(grandchildPidFile, "utf8"), 10);
+			expect(isProcessAlive(grandchildPid)).toBe(true);
+
 			controller.abort();
 			const result = await resultPromise;
 			expect(result.killed).toBe(true);
+			await waitForProcessExit(grandchildPid);
 		} finally {
 			controller.abort();
 			await resultPromise;
+			if (grandchildPid && isProcessAlive(grandchildPid)) {
+				try {
+					process.kill(grandchildPid, "SIGKILL");
+				} catch {
+					// The process may have exited after the liveness check.
+				}
+			}
 			rmSync(testDir, { recursive: true, force: true });
 		}
 	});

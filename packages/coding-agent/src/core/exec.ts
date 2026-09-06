@@ -76,7 +76,11 @@ export async function execCommand(
 		const killProcess = () => {
 			if (!killed) {
 				killed = true;
-				proc.kill("SIGTERM");
+				if (process.platform === "win32" && proc.pid) {
+					signalProcessGroupOrProcess(proc.pid, "SIGTERM");
+				} else {
+					proc.kill("SIGTERM");
+				}
 				forceKillTimeoutId = setTimeout(() => {
 					forceKillTimeoutId = undefined;
 					if (proc.exitCode === null && proc.signalCode === null) {
