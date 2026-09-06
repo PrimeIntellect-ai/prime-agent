@@ -451,8 +451,8 @@ jobs:
             }
           }
 
-      - name: Test the PowerShell installer end to end
-        shell: pwsh
+      - name: Test the PowerShell 5.1 installer end to end
+        shell: powershell
         run: ./scripts/test-windows-installer.ps1
 
       - name: Smoke test the native Windows executable

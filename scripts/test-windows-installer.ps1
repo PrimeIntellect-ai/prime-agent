@@ -6,7 +6,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
+if ($PSVersionTable.PSEdition -eq "Core" -and -not $IsWindows) {
     throw "Windows installer smoke test must run on Windows."
 }
 
@@ -18,11 +18,13 @@ $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) "prime-agent-windows-ins
 $serverRoot = Join-Path $testRoot "server"
 $releaseDir = Join-Path $serverRoot "releases\v$version"
 $stagingDir = Join-Path $testRoot "archive"
-$localAppData = Join-Path $testRoot "local-app-data"
+$localAppData = Join-Path $testRoot ("local app {0}{1} & % ! (test)" -f ([char]0x6D4B), ([char]0x8BD5))
 $artifactName = "prime-agent-$version-windows-x64.zip"
 $artifactPath = Join-Path $releaseDir $artifactName
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalDownloadBaseUrl = $env:PRIME_AGENT_DOWNLOAD_BASE_URL
+$originalProcessorArchitecture = $env:PROCESSOR_ARCHITECTURE
+$originalProcessorArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
 $originalUserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
 $server = $null
 
@@ -57,7 +59,13 @@ try {
 
     $env:LOCALAPPDATA = $localAppData
     $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $baseUrl
+    # Environment variables describe an emulated process, not the native OS.
+    # Poison both values so this x64 runner proves the installer uses the Win32 native-machine API.
+    $env:PROCESSOR_ARCHITECTURE = "ARM64"
+    $env:PROCESSOR_ARCHITEW6432 = "ARM64"
     & (Join-Path $repoRoot "install.ps1") -Version $version
+    $env:PROCESSOR_ARCHITECTURE = $originalProcessorArchitecture
+    $env:PROCESSOR_ARCHITEW6432 = $originalProcessorArchitectureW6432
 
     $shim = Join-Path $localAppData "PrimeAgent\bin\prime-agent.cmd"
     $binary = Join-Path $localAppData "PrimeAgent\versions\v$version\prime-agent.exe"
@@ -82,5 +90,7 @@ try {
     [Environment]::SetEnvironmentVariable("PATH", $originalUserPath, "User")
     $env:LOCALAPPDATA = $originalLocalAppData
     $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $originalDownloadBaseUrl
+    $env:PROCESSOR_ARCHITECTURE = $originalProcessorArchitecture
+    $env:PROCESSOR_ARCHITEW6432 = $originalProcessorArchitectureW6432
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
