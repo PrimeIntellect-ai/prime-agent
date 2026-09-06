@@ -13,10 +13,7 @@ export interface SubagentSummaryCounts {
 	inactive: number;
 }
 
-export function classifySubagentSnapshotStatus(
-	child: AgentConnectionRlmChildAgentSnapshot,
-	activeHeartbeatSessionIds: ReadonlySet<string>,
-): AgentRosterStatus {
+export function classifySubagentSnapshotStatus(child: AgentConnectionRlmChildAgentSnapshot): AgentRosterStatus {
 	// Activity implies a live session; the in-process connection never stamps activeSessionId.
 	const resident = child.activeSessionId !== undefined || child.activity !== undefined;
 	const busy = child.status === "running" || child.status === "queued" || child.activity !== undefined;
@@ -24,20 +21,18 @@ export function classifySubagentSnapshotStatus(
 		resident,
 		queuedChild: !resident && busy,
 		busy,
-		hasActiveHeartbeat: child.activeSessionId !== undefined && activeHeartbeatSessionIds.has(child.activeSessionId),
 	});
 }
 
 export function countDirectSubagentStatuses(
 	children: Iterable<AgentConnectionRlmChildAgentSnapshot>,
 	parentId: string | undefined,
-	activeHeartbeatSessionIds: ReadonlySet<string>,
 ): SubagentSummaryCounts {
 	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
 	for (const child of children) {
 		if (child.parentId !== parentId || child.status === "cancelled") continue;
 		counts.total += 1;
-		counts[classifySubagentSnapshotStatus(child, activeHeartbeatSessionIds)] += 1;
+		counts[classifySubagentSnapshotStatus(child)] += 1;
 	}
 	return counts;
 }
@@ -45,18 +40,13 @@ export function countDirectSubagentStatuses(
 export function countRosterSubagentStatuses(
 	summaries: Iterable<SessionSummary>,
 	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
-	activeHeartbeatSessionIds: ReadonlySet<string>,
 ): SubagentSummaryCounts {
 	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
 	for (const child of summaries) {
 		if (child.runtimeKind !== "subagent" || child.lifecycle !== "live") continue;
 		if (!isDirectAgentChild(child, parent)) continue;
 		counts.total += 1;
-		const status =
-			child.activeSessionId !== undefined && activeHeartbeatSessionIds.has(child.activeSessionId)
-				? "running"
-				: (child.rosterStatus ?? classifySessionRosterStatus(child));
-		counts[status] += 1;
+		counts[child.rosterStatus ?? classifySessionRosterStatus(child)] += 1;
 	}
 	return counts;
 }

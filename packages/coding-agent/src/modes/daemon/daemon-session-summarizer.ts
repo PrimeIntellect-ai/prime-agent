@@ -189,14 +189,6 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 	}
 }
 
-/** True when the new status differs enough from the stored one to be worth broadcasting. */
-export function agentStatusChanged(previous: AgentStatus | undefined, next: AgentStatusResult): boolean {
-	if (!previous) {
-		return true;
-	}
-	return previous.summary !== next.summary || previous.taskState !== next.taskState;
-}
-
 function isSessionWorking(state: ActiveSessionState): boolean {
 	const session = state.runtime.session;
 	return session.isSessionActive;
@@ -357,7 +349,12 @@ export class DaemonSessionSummarizer {
 				taskState,
 				basedOnMessageCount: messageCount,
 			};
-			const changed = previous?.summary !== status.summary || previous?.taskState !== status.taskState;
+			// An idle settle refreshes the verdict's currency, which drives the roster's
+			// activity axis: it must publish even when the verdict text is unchanged.
+			const changed =
+				previous?.summary !== status.summary ||
+				previous?.taskState !== status.taskState ||
+				(!isWorking && previous?.basedOnMessageCount !== status.basedOnMessageCount);
 			state.summaryState = status;
 			// Persist only settled idle verdicts, never mid-stream.
 			if (!isWorking) {

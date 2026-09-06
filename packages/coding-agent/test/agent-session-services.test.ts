@@ -186,7 +186,9 @@ describe("createAgentSessionFromServices", () => {
 				],
 				"owner-a",
 			);
-			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `task`, `zebra`.");
+			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
+			expect(session.systemPrompt).not.toContain('await mcp.list_tools("task")');
+			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["mcp_list_tools_task", "mcp_call_task"]));
 			expect(session.systemPrompt).not.toContain("task-secret");
 			rebuildRuntime.mockClear();
 			const waitForIdle = vi.spyOn(session.agent, "waitForIdle");
@@ -202,6 +204,8 @@ describe("createAgentSessionFromServices", () => {
 			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");
 			expect(execute.mock.calls[0]?.[0]).toContain('["task"]');
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
+			expect(session.getAllTools().map((tool) => tool.name)).not.toContain("mcp_call_task");
+			expect(session.getActiveToolNames()).not.toContain("mcp_call_task");
 
 			settingsManager.setGlobalMcpServer("added", { type: "stdio", command: "new-secret" });
 			settingsManager.removeGlobalMcpServer("filesystem");

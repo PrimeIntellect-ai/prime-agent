@@ -238,7 +238,6 @@ describe("whole-tree eviction capability", () => {
 	const idleSession = {
 		isSessionActive: false,
 		attachedClients: 0,
-		hasRegisteredHeartbeat: false,
 		hasRegisteredCronJob: false,
 		lastActivityAt: now - 90 * 60_000,
 	};
@@ -248,6 +247,7 @@ describe("whole-tree eviction capability", () => {
 		isStopping: false,
 		hasOwnerClient: false,
 		isPreparingUpdateRestart: false,
+		hasWakeBlindSchedule: false,
 		sessions: [idleSession],
 	};
 
@@ -270,10 +270,10 @@ describe("whole-tree eviction capability", () => {
 			{ sessions: [{ ...idleSession, isSessionActive: true }] },
 		],
 		["attached client", { sessions: [{ ...idleSession, attachedClients: 1 }] }],
-		["heartbeat", { sessions: [{ ...idleSession, hasRegisteredHeartbeat: true }] }],
 		["cron job", { sessions: [{ ...idleSession, hasRegisteredCronJob: true }] }],
 		["missing activity timestamp", { sessions: [{ ...idleSession, lastActivityAt: Number.NaN }] }],
 		["owner client", { hasOwnerClient: true }],
+		["wake-blind schedule", { hasWakeBlindSchedule: true }],
 		["update preparation", { isPreparingUpdateRestart: true }],
 		["disconnected worker", { isConnected: false }],
 		["stopping worker", { isStopping: true }],
@@ -296,7 +296,6 @@ describe("child passivation capability", () => {
 	const idleChild = {
 		isSessionActive: false,
 		attachedClients: 0,
-		hasRegisteredHeartbeat: false,
 		hasRegisteredCronJob: false,
 		lastActivityAt: now - 90 * 60_000,
 		hasParent: true,
@@ -314,7 +313,6 @@ describe("child passivation capability", () => {
 		["hydrating child", { isHydrating: true }],
 		["busy child", { isSessionActive: true }],
 		["attached child", { attachedClients: 1 }],
-		["heartbeat child", { hasRegisteredHeartbeat: true }],
 		["cron child", { hasRegisteredCronJob: true }],
 		["recent child", { lastActivityAt: now - 89 * 60_000 }],
 		["child without activity time", { lastActivityAt: Number.NaN }],

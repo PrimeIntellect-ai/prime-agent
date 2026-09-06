@@ -1,5 +1,6 @@
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import { unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -89,7 +90,8 @@ export function startSideQuestion(
 		},
 		convertToLlm: parent.convertToLlm,
 		transformContext: parent.transformContext,
-		streamFn: parent.streamFn,
+		// Side questions are excluded from session history; their calls carry no provenance.
+		streamFn: unwrapSemanticEdgeStreamFn(parent.streamFn),
 		getApiKey: parent.getApiKey,
 		onPayload: parent.onPayload,
 		onResponse: parent.onResponse,

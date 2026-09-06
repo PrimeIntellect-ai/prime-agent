@@ -7,6 +7,7 @@ import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-ser
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
+import type { SessionUsageSummary } from "../../core/usage.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
@@ -55,6 +56,7 @@ export interface SessionSummary {
 	isCompacting: boolean;
 	isBashRunning?: boolean;
 	hasRunningRlmChildren?: boolean;
+	usage?: SessionUsageSummary;
 	/** True while the agent is streaming with tool calls pending; drives the "running tools" label. */
 	isRunningTools?: boolean;
 	attachedClients: number;
@@ -140,7 +142,6 @@ export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean
 		summary.messageCount === 0 &&
 		!summary.sessionName &&
 		!isSessionSummaryBusy(summary) &&
-		summary.hasRegisteredHeartbeat !== true &&
 		summary.hasRegisteredCronJob !== true
 	);
 }
@@ -259,6 +260,7 @@ export function summaryForActiveSession(
 		isCompacting: session.isCompacting,
 		isBashRunning: session.isBashRunning,
 		hasRunningRlmChildren: session.hasRunningRlmChildren(),
+		usage: session.getOwnUsageSummary?.(),
 		isRunningTools: session.isStreaming && session.state.pendingToolCalls.size > 0,
 		attachedClients: activeSession.clients.size,
 		...(directAttachedClients > 0 ? { directAttachedClients } : {}),
@@ -347,6 +349,7 @@ export function summaryForInactiveSession(
 		firstMessage: session.firstMessage,
 		parentSessionPath: session.parentSessionPath,
 		rlmDepth: session.rlmDepth,
+		usage: session.usage,
 		// Carry the persisted recap/verdict so an off-daemon session keeps its
 		// agents-view bucket (e.g. Completed) instead of defaulting to Needs Input.
 		// Gate on message-count currency like isSummaryCurrent does for resident
@@ -408,15 +411,15 @@ function readMessageText(content: unknown): string {
 		.join("\n");
 }
 
-// Agent doing work, ignoring the classification verdict.
-export function isActiveSessionBusy(activeSession: ActiveSessionState): boolean {
+// Live work that dies with the worker; the display activity axis deliberately excludes delegated work.
+export function hasLiveSessionWork(activeSession: ActiveSessionState): boolean {
 	const session = activeSession.runtime.session;
-	// Background subagents keep the parent "working" even after its own turn ends.
 	return session.isSessionActive || session.hasRunningRlmChildren();
 }
 
 export function activeActivityForSession(activeSession: ActiveSessionState): SessionActivity {
-	if (isActiveSessionBusy(activeSession)) {
+	// The session's own work only, ignoring the classification verdict.
+	if (activeSession.runtime.session.isSessionActive) {
 		return "working";
 	}
 	// A finished subagent is resident but never gets a summarizer verdict, so don't hold

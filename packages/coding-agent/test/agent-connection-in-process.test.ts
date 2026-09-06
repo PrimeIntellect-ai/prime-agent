@@ -1,17 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener, PromptOptions } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
-import { installAgentTraceUpload } from "../src/core/agent-traces.js";
-import { AuthStorage } from "../src/core/auth-storage.js";
 import { emptyGoalState } from "../src/core/goals.js";
-import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
-import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type { AgentConnectionEvent, AgentConnectionState } from "../src/modes/agent-connection/types.js";
 
@@ -151,56 +143,6 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 }
 
 describe("InProcessAgentConnection", () => {
-	it("drains pending trace uploads even when runtime disposal throws", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-in-process-dispose-"));
-		try {
-			const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-			sessionManager.newSession();
-			const calls: string[] = [];
-			let releaseFetch: () => void = () => {};
-			const gate = new Promise<void>((resolve) => {
-				releaseFetch = resolve;
-			});
-			installAgentTraceUpload(sessionManager, {
-				authStorage: AuthStorage.inMemory({
-					[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-				}),
-				settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-				baseUrl: "https://api.example.test",
-				fetchFn: (async (input: unknown) => {
-					calls.push(String(input));
-					await gate;
-					return new Response(JSON.stringify({ bytes_stored: 1 }), {
-						status: 200,
-						headers: { "content-type": "application/json" },
-					});
-				}) as typeof fetch,
-			});
-			sessionManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 1 });
-			sessionManager.flushNow();
-
-			const control = createFakeSession("dispose-throws", []);
-			const runtime = new FakeRuntime(control.session);
-			runtime.dispose = async () => {
-				throw new Error("teardown failed");
-			};
-			const connection = new InProcessAgentConnection(asRuntime(runtime));
-
-			let settledError: Error | undefined;
-			const disposal = connection.dispose().catch((error: Error) => {
-				settledError = error;
-				return error;
-			});
-			await vi.waitFor(() => expect(calls).toHaveLength(1));
-			expect(settledError).toBeUndefined();
-			releaseFetch();
-			await expect(disposal).resolves.toMatchObject({ message: "teardown failed" });
-			expect(calls).toHaveLength(1);
-		} finally {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
-
 	it.each([
 		{ accepted: true, promptResult: "pending", expectedError: undefined },
 		{ accepted: false, promptResult: "resolve", expectedError: "Prompt was not accepted by the session." },

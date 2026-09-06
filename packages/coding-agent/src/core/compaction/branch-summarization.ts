@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, Usage } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import {
 	convertToLlm,
@@ -31,6 +31,7 @@ export interface BranchSummaryResult {
 	modifiedFiles?: string[];
 	aborted?: boolean;
 	error?: string;
+	usage?: Usage;
 }
 
 /** Details stored in BranchSummaryEntry.details for file tracking */
@@ -303,5 +304,6 @@ export async function generateBranchSummary(
 		summary: summary || "No summary generated",
 		readFiles,
 		modifiedFiles,
+		usage: response.usage,
 	};
 }

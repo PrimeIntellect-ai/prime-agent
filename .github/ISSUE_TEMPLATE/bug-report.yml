@@ -43,8 +43,21 @@ body:
     id: version
     attributes:
       label: Prime Agent version
-      description: Output of `prime-agent --version`.
-      placeholder: "e.g. 0.1.0"
+      description: Output of `prime-agent --version`, or the commit SHA when running from source.
+      placeholder: "e.g. 0.9.1 or 81ae3cb"
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      description: How was this Prime Agent version installed?
+      options:
+        - Stable release installer
+        - Beta release installer
+        - npm package
+        - From source
+        - Other
     validations:
       required: true
   - type: dropdown
@@ -55,7 +68,35 @@ body:
         - macOS
         - Linux
         - Windows
+        - Windows Subsystem for Linux (WSL)
         - Other
+    validations:
+      required: true
+  - type: input
+    id: os_version
+    attributes:
+      label: Operating system version
+      description: Include the exact release or build. For WSL, include both the distribution and Windows version.
+      placeholder: "e.g. macOS 15.6, Ubuntu 24.04, or Windows 11 24H2"
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: CPU architecture
+      description: Use `uname -m`, or `$env:PROCESSOR_ARCHITECTURE` in PowerShell, if unsure.
+      options:
+        - arm64 / aarch64
+        - x86_64 / amd64
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: shell_terminal
+    attributes:
+      label: Shell and terminal
+      description: Include both the shell and terminal application where the problem occurred.
+      placeholder: "e.g. zsh 5.9 in Terminal.app or PowerShell 7.5 in Windows Terminal"
     validations:
       required: true
   - type: textarea

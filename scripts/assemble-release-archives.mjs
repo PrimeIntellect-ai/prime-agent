@@ -53,7 +53,8 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const defaultOutDir = join(root, "packages", "coding-agent", "release");
 const releaseChannels = new Set(["stable", "beta"]);
-const publicPackageName = "prime-agent";
+const archivePackageName = "prime-agent";
+const legacyRegistryPackageName = "@earendil-works/pi-coding-agent";
 const binaryName = "prime-agent";
 
 const PLATFORMS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64", "windows-arm64"];
@@ -73,6 +74,23 @@ const REQUIRED_SIDECARS = [
 	"examples",
 	"photon_rs_bg.wasm",
 ];
+const REQUIRED_SIDECAR_FILES = [
+	"package.json",
+	"README.md",
+	"CHANGELOG.md",
+	"install.sh",
+	"install.ps1",
+	"photon_rs_bg.wasm",
+	"prime-agent-runtime/pyproject.toml",
+	"theme/prime.json",
+	"theme/dark.json",
+	"theme/light.json",
+	"theme/theme-schema.json",
+	"export-html/template.html",
+	"export-html/template.css",
+	"export-html/template.js",
+];
+const REQUIRED_SIDECAR_DIRECTORIES = ["skills", "assets", "docs", "examples", "export-html/vendor"];
 
 function parseArgs(args) {
 	const parsed = {
@@ -241,13 +259,15 @@ function binaryNameForPlatform(platform) {
 }
 
 function validateSidecars(sidecarDir) {
-	const missing = [];
-	for (const name of REQUIRED_SIDECARS) {
-		if (!existsSync(join(sidecarDir, name))) {
-			missing.push(name);
-		}
-	}
-	return missing;
+	const missingFiles = REQUIRED_SIDECAR_FILES.filter((name) => {
+		const path = join(sidecarDir, name);
+		return !existsSync(path) || !lstatSync(path).isFile();
+	});
+	const missingDirectories = REQUIRED_SIDECAR_DIRECTORIES.filter((name) => {
+		const path = join(sidecarDir, name);
+		return !existsSync(path) || !lstatSync(path).isDirectory();
+	});
+	return [...missingFiles, ...missingDirectories];
 }
 
 const FORBIDDEN_RELEASE_DIRECTORIES = new Set(["node_modules", ".venv", "__pycache__", ".pytest_cache"]);
@@ -266,7 +286,7 @@ function findForbiddenReleaseDirectory(root, relativePath = "") {
 
 function renderPackageManifest(path, version, platform) {
 	const manifest = JSON.parse(readFileSync(path, "utf8"));
-	manifest.name = publicPackageName;
+	manifest.name = archivePackageName;
 	manifest.version = version;
 	manifest.bin = { [binaryName]: `./${binaryNameForPlatform(platform)}` };
 	manifest.packageManager = "bun@1.4.0";
@@ -361,7 +381,7 @@ function main() {
 		JSON.stringify(
 			{
 				version: `v${args.version}`,
-				package: publicPackageName,
+				package: legacyRegistryPackageName,
 				platforms: archives.map((a) => ({
 					platform: a.platform,
 					file: a.file,

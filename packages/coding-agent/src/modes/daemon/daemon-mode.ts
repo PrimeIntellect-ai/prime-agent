@@ -73,7 +73,6 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
-import { flushAllPendingAgentTraceUploads } from "../../core/agent-traces.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -172,8 +171,8 @@ import {
 	buildRlmChildSnapshots,
 	buildSessionList,
 	classifySessionRosterStatus,
+	hasLiveSessionWork,
 	inactiveLifecycleForSession,
-	isActiveSessionBusy,
 	type SessionSummary,
 	scheduledJobRegistrations,
 	summaryForActiveSession,
@@ -216,6 +215,7 @@ import {
 	RlmSpawnLedger,
 	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
 	tombstoneSavedSessionDelete,
+	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
@@ -983,6 +983,16 @@ export class AgentDaemon {
 		return this.rlmSpawnLedgerInstance;
 	}
 
+	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
+	private rlmSpawnLedgerFor(sessionDir: string | undefined): RlmSpawnLedger {
+		if (sessionDir === undefined || resolve(sessionDir) === resolve(this.rlmLedgerSessionsDir())) {
+			return this.rlmSpawnLedger();
+		}
+		return new RlmSpawnLedger(this.agentDir, sessionDir, createRlmLedgerRegistrySeedSource(), (message) =>
+			this.log(message),
+		);
+	}
+
 	private async appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): Promise<void> {
 		const childId = state.runtime.metadata.rlmChildId;
 		const child = state.runtime.session.sessionFile;
@@ -1531,6 +1541,32 @@ export class AgentDaemon {
 		}
 		if (this.cronStore.registerSessionArtifact(session.sessionId, artifactDir)) {
 			this.cronStore.recoverSessionArtifact(session.sessionId);
+			this.cronScheduler.wake();
+		}
+		// A fresh worker only knows resident sessions' jobs; passive descendants' schedules must fire without hydration.
+		if (state.runtime.metadata.kind !== "subagent") {
+			void this.registerPassiveDescendantCronArtifacts().catch((error) => {
+				this.log(`Could not register passive descendant scheduled jobs: ${String(error)}`);
+			});
+		}
+	}
+
+	private async registerPassiveDescendantCronArtifacts(): Promise<void> {
+		let registered = false;
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			try {
+				const artifactDir = getSessionArtifactPathForFile(resolve(passive.entry.sessionFile), passive.info.id);
+				if (this.cronStore.registerSessionArtifact(passive.info.id, artifactDir)) {
+					registered = true;
+					this.cronStore.recoverSessionArtifact(passive.info.id);
+				}
+			} catch (error) {
+				this.log(
+					`Could not register scheduled jobs for passive subagent ${passive.entry.childId}: ${String(error)}`,
+				);
+			}
+		}
+		if (registered) {
 			this.cronScheduler.wake();
 		}
 	}
@@ -2539,6 +2575,8 @@ export class AgentDaemon {
 					rlmSessionDir: options.sessionDir,
 					rlmParentNodeId: options.rlmParentNodeId,
 					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
+					semanticParentSessionId: options.parentSession.sessionId,
+					semanticSpawnedByRequestId: options.spawnedByRequestId,
 				},
 				runtimeMetadata: {
 					kind: "subagent",
@@ -2643,7 +2681,6 @@ export class AgentDaemon {
 		return {
 			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true || hasPendingAdmission,
 			attachedClients: state.clients.size + state.pendingAttaches,
-			hasRegisteredHeartbeat: jobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
 			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
 			lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
 			hasParent: state.runtime.metadata.kind === "subagent" && !!state.runtime.metadata.parentActiveSessionId,
@@ -3673,7 +3710,6 @@ export class AgentDaemon {
 					for (const state of [...this.sessions.values()]) {
 						await this.closeSession(state, "killed");
 					}
-					await flushAllPendingAgentTraceUploads();
 					this.fencePeerTransports();
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
@@ -3851,8 +3887,13 @@ export class AgentDaemon {
 					command.scope === "current"
 						? await SessionManager.list(cwd, sessionDir, callbacks)
 						: await SessionManager.listAll(callbacks, sessionDir);
+				const sessions = await withPassiveRlmDescendantInfos(savedSessions, this.rlmSpawnLedgerFor(sessionDir), {
+					...(command.scope === "current" ? { cwd } : {}),
+					...(callbacks ? { onSession: callbacks.onSession } : {}),
+					log: (message) => this.log(message),
+				});
 				return success(command.id, "list_saved_sessions", {
-					sessions: savedSessions.map(serializeSavedSessionInfo),
+					sessions: sessions.map(serializeSavedSessionInfo),
 				});
 			}
 
@@ -5389,9 +5430,6 @@ export class AgentDaemon {
 				activity: session.isSessionActive ? "working" : "idle",
 				isSessionActive: session.isSessionActive,
 				hasRunningRlmChildren: session.hasRunningRlmChildren?.() ?? false,
-				hasActiveHeartbeat:
-					this.cronStore.getHeartbeat(state.activeSessionId)?.status === "active" ||
-					this.cronStore.listRlmHeartbeats(state.activeSessionId).some((job) => job.status === "active"),
 				isStreaming: session.isStreaming,
 			} as SessionSummary),
 			...(metadata.rlmChildId ? { rlmChildId: metadata.rlmChildId } : {}),
@@ -6027,8 +6065,7 @@ export class AgentDaemon {
 		if (state.runtime.metadata.kind === "subagent") {
 			return false;
 		}
-		// A running bash or in-flight turn means there is live work to preserve.
-		if (state.runtime.session.isBashRunning || isActiveSessionBusy(state)) {
+		if (state.runtime.session.isBashRunning || hasLiveSessionWork(state)) {
 			return false;
 		}
 		return this.isEmptyDraftContent(state);
@@ -6257,7 +6294,6 @@ export class AgentDaemon {
 			}
 		}
 		for (const state of [...this.sessions.values()]) await this.closeSession(state, "killed");
-		await flushAllPendingAgentTraceUploads();
 		return manifest;
 	}
 
@@ -6954,7 +6990,7 @@ export class AgentDaemon {
 		}
 		const session = state.runtime.session;
 		const busy =
-			busyOverride ?? (isActiveSessionBusy(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
+			busyOverride ?? (hasLiveSessionWork(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
 		try {
 			this.recoveryJournal.record({
 				activeSessionId: state.activeSessionId,
@@ -7305,12 +7341,8 @@ export class AgentDaemon {
 			cleanup();
 		}
 		this.cronScheduler.stop();
-		try {
-			for (const state of [...this.sessions.values()]) {
-				await this.closeSession(state, closingReason);
-			}
-		} finally {
-			await flushAllPendingAgentTraceUploads();
+		for (const state of [...this.sessions.values()]) {
+			await this.closeSession(state, closingReason);
 		}
 		for (const client of this.clients) {
 			client.detachInput();

@@ -18,6 +18,7 @@ import { isLocalPath } from "../utils/paths.js";
 import { isValidThinkingLevel } from "./args.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
 import { runPs, runReap } from "./daemon-ps.js";
+import { createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
 interface ParsedDaemonClientCommand {
 	command: string;
@@ -673,22 +674,15 @@ async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
 		return;
 	}
 
-	const entrypoint = process.argv[1];
-	if (!entrypoint) {
-		throw new Error("Cannot determine current CLI entrypoint for daemon launch");
-	}
-
 	const sessionArgs = parseSessionArgs(parsed.positionals);
-	const daemonArgs = [
-		...process.execArgv,
-		entrypoint,
+	const launch = createCliSubprocessLaunchSpec([
 		"--mode",
 		"daemon",
 		"--daemon-socket",
 		parsed.socketPath,
 		...sessionArgs.daemonArgs.filter((arg) => arg !== "--background" && arg !== "-d"),
-	];
-	const child = spawn(process.execPath, daemonArgs, {
+	]);
+	const child = spawn(launch.command, launch.args, {
 		cwd: sessionArgs.config?.cwd ?? process.cwd(),
 		detached: true,
 		env: process.env,
