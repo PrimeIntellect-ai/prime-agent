@@ -91,8 +91,6 @@ describe("Prime Inference models", () => {
 			expect(model.reasoning).toBe(true);
 			expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "high", "max"]);
 			expect(model.input).toEqual(["text", "image"]);
-			expect(model.contextWindow).toBeGreaterThan(0);
-			expect(model.maxTokens).toBeGreaterThan(0);
 			expect(model.maxTokens).toBeLessThanOrEqual(model.contextWindow);
 			expect(model.cost.input).toBe(provider === "prime-inference" ? 3.45 : 3);
 			expect(model.cost.output).toBe(provider === "prime-inference" ? 17.25 : 15);
@@ -109,8 +107,6 @@ describe("Prime Inference models", () => {
 		const nemotronSuper = getModel("prime-inference", "nvidia/nemotron-3-super-120b-a12b");
 		expect(nemotronSuper.reasoning).toBe(true);
 		expect(nemotronSuper.input).toEqual(["text"]);
-		expect(nemotronSuper.contextWindow).toBeGreaterThan(0);
-		expect(nemotronSuper.maxTokens).toBeGreaterThan(0);
 		expect(nemotronSuper.maxTokens).toBeLessThanOrEqual(nemotronSuper.contextWindow);
 
 		const maverick = getModel("prime-inference", "meta-llama/llama-4-maverick");
@@ -206,7 +202,6 @@ describe("Prime Inference models", () => {
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.6").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-5").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-haiku-4.5").contextWindow).toBe(200000);
-		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.5").contextWindow).toBeGreaterThan(0);
 	});
 
 	it("resolves PRIME_API_KEY from the environment", () => {

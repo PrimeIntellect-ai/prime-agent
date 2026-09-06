@@ -7,6 +7,7 @@ import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
 import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
+	isPrivatePrimeInferenceModelId,
 	parsePrimeInferenceModelCatalog,
 	type PrimeInferenceCatalogEntry,
 } from "../src/prime-inference-model-catalog.js";
@@ -209,11 +210,6 @@ const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {
 const PRIME_INFERENCE_DEFAULT_CONTEXT_WINDOW = 128000;
 const PRIME_INFERENCE_DEFAULT_MAX_TOKENS = 8192;
 
-function isPrimeInferencePrivateModel(modelId: string): boolean {
-	const id = modelId.toLowerCase();
-	return id.startsWith("internal/") || id.startsWith("dev/") || id.includes(":");
-}
-
 const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.1",
 	"gpt-5.2",
@@ -374,7 +370,7 @@ function getPrimeInferenceCacheCosts(modelId: string, inputCost: number): { cach
 function getExistingPrimeInferenceModels(): Model<"openai-completions">[] {
 	const models = EXISTING_MODELS["prime-inference"] as unknown as Record<string, Model<"openai-completions">>;
 	return Object.values(models)
-		.filter((model) => !isPrimeInferencePrivateModel(model.id))
+		.filter((model) => !isPrivatePrimeInferenceModelId(model.id))
 		.map((model) => ({
 			...model,
 			input: [...model.input],
@@ -542,7 +538,7 @@ async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[
 	}
 
 	const catalogModels = catalog
-		.filter((entry) => !isPrimeInferencePrivateModel(entry.id))
+		.filter((entry) => !isPrivatePrimeInferenceModelId(entry.id))
 		.map((entry) =>
 			createPrimeInferenceModel(
 				entry,
@@ -2264,7 +2260,7 @@ async function generateModels() {
 	}
 
 	// Group by provider and deduplicate by model ID
-	const providers: Record<string, Record<string, Model<any>>> = {};
+	const providers: Record<string, Record<string, Model<Api>>> = {};
 	for (const model of allModels) {
 		if (!providers[model.provider]) {
 			providers[model.provider] = {};

@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import {
 	type Api,
+	isPrivatePrimeInferenceModelId,
 	type Model,
 	type OpenAICompletionsCompat,
 	type PrimeInferenceCatalogEntry,
@@ -13,11 +14,6 @@ const FETCH_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MIN_CATALOG_COVERAGE = 0.5;
 const pendingRefreshes = new Map<string, Promise<Model<"openai-completions">[] | undefined>>();
-
-export function isPrivatePrimeInferenceModelId(modelId: string): boolean {
-	const normalizedId = modelId.toLowerCase();
-	return normalizedId.startsWith("internal/") || normalizedId.startsWith("dev/") || normalizedId.includes(":");
-}
 
 const DEFAULT_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: false,
@@ -43,31 +39,29 @@ export function buildPrimeInferenceModels(
 	options: { includePrivate?: boolean; minimumModels?: number } = {},
 ): Model<"openai-completions">[] | undefined {
 	const bundled = new Map(bundledModels.map((model) => [model.id.toLowerCase(), model]));
-	const models = entries.flatMap((entry): Model<"openai-completions">[] => {
-		const normalizedId = entry.id.toLowerCase();
-		if (!options.includePrivate && isPrivatePrimeInferenceModelId(normalizedId)) return [];
+	const models: Model<"openai-completions">[] = [];
+	for (const entry of entries) {
+		if (!options.includePrivate && isPrivatePrimeInferenceModelId(entry.id)) continue;
 		const template = bundled.get(entry.id.toLowerCase());
-		if (!template && (!entry.contextWindow || !entry.maxTokens || entry.reasoning === undefined)) return [];
+		if (!template && (!entry.contextWindow || !entry.maxTokens || entry.reasoning === undefined)) continue;
 		const contextWindow = entry.contextWindow ?? template?.contextWindow ?? 0;
 		const maxTokens = Math.min(entry.maxTokens ?? template?.maxTokens ?? 0, contextWindow);
-		return [
-			{
-				id: entry.id,
-				name: entry.name ?? template?.name ?? entry.id,
-				api: "openai-completions",
-				provider: "prime-inference",
-				baseUrl: PRIME_INFERENCE_BASE_URL,
-				reasoning: entry.reasoning ?? template?.reasoning ?? false,
-				...(template?.thinkingLevelMap ? { thinkingLevelMap: { ...template.thinkingLevelMap } } : {}),
-				input: (entry.vision ?? template?.input.includes("image")) ? ["text", "image"] : ["text"],
-				cost: { input: entry.input, output: entry.output, ...cacheCosts(entry, template) },
-				contextWindow,
-				maxTokens,
-				...(template?.featured ? { featured: true } : {}),
-				compat: structuredClone(template?.compat ?? DEFAULT_COMPAT),
-			},
-		];
-	});
+		models.push({
+			id: entry.id,
+			name: entry.name ?? template?.name ?? entry.id,
+			api: "openai-completions",
+			provider: "prime-inference",
+			baseUrl: PRIME_INFERENCE_BASE_URL,
+			reasoning: entry.reasoning ?? template?.reasoning ?? false,
+			...(template?.thinkingLevelMap ? { thinkingLevelMap: { ...template.thinkingLevelMap } } : {}),
+			input: (entry.vision ?? template?.input.includes("image")) ? ["text", "image"] : ["text"],
+			cost: { input: entry.input, output: entry.output, ...cacheCosts(entry, template) },
+			contextWindow,
+			maxTokens,
+			...(template?.featured ? { featured: true } : {}),
+			compat: structuredClone(template?.compat ?? DEFAULT_COMPAT),
+		});
+	}
 	const minimumModels = options.minimumModels ?? Math.ceil(bundledModels.length * MIN_CATALOG_COVERAGE);
 	return models.length >= minimumModels ? models : undefined;
 }
@@ -80,7 +74,7 @@ export function mergePrimeInferenceModels(
 	return [...bundledModels.filter((model) => model.provider !== "prime-inference"), ...livePrimeInferenceModels];
 }
 
-function readCache(
+export function readCachedPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
 ): Model<"openai-completions">[] | undefined {
@@ -153,19 +147,12 @@ export async function fetchPrimeInferenceModelCatalog(
 	return { payload, entries: parsePrimeInferenceModelCatalog(payload, { allowEmpty: options.allowEmpty }) };
 }
 
-export function readCachedPrimeInferenceModels(
-	cachePath: string,
-	bundledModels: readonly Model<"openai-completions">[],
-): Model<"openai-completions">[] | undefined {
-	return readCache(cachePath, bundledModels);
-}
-
 export async function refreshPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
 	options: { fetchFn?: typeof fetch; offline?: boolean } = {},
 ): Promise<Model<"openai-completions">[] | undefined> {
-	const cached = readCache(cachePath, bundledModels);
+	const cached = readCachedPrimeInferenceModels(cachePath, bundledModels);
 	if (options.offline) return cached;
 	const existing = pendingRefreshes.get(cachePath);
 	if (existing) return existing;

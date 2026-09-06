@@ -1,1 +1,1 @@
-- Parse Prime Inference model names, pricing, limits, modalities, and reasoning support from the live `/models` response.
+- Added live Prime Inference model names, pricing, limits, modalities, and reasoning support to the bundled catalog.

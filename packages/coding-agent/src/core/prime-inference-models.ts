@@ -1,8 +1,7 @@
-import type { Model } from "@earendil-works/pi-ai";
+import { isPrivatePrimeInferenceModelId, type Model } from "@earendil-works/pi-ai";
 import {
 	buildPrimeInferenceModels,
 	fetchPrimeInferenceModelCatalog,
-	isPrivatePrimeInferenceModelId,
 	PRIME_INFERENCE_BASE_URL,
 	PrimeInferenceCatalogRequestError,
 } from "./prime-inference-model-catalog.js";

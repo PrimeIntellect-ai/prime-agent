@@ -23,6 +23,11 @@ function positiveInteger(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+export function isPrivatePrimeInferenceModelId(modelId: string): boolean {
+	const normalizedId = modelId.toLowerCase();
+	return normalizedId.startsWith("internal/") || normalizedId.startsWith("dev/") || normalizedId.includes(":");
+}
+
 export function parsePrimeInferenceModelCatalog(
 	value: unknown,
 	options: { allowEmpty?: boolean } = {},
@@ -38,6 +43,7 @@ export function parsePrimeInferenceModelCatalog(
 		const output = nonNegativeNumber(pricing.output_usd_per_mtok);
 		if (input === undefined || output === undefined) continue;
 
+		const name = typeof item.display_name === "string" ? item.display_name.trim() : "";
 		const specs = isRecord(item.specs) ? item.specs : {};
 		const modalities = isRecord(specs.modalities) ? specs.modalities : {};
 		const inputModalities = Array.isArray(modalities.input) ? modalities.input : [];
@@ -45,21 +51,17 @@ export function parsePrimeInferenceModelCatalog(
 		const maxTokens = positiveInteger(specs.max_output_tokens);
 		const reasoning = typeof specs.supports_reasoning === "boolean" ? specs.supports_reasoning : undefined;
 		const hasSpecs = contextWindow !== undefined && maxTokens !== undefined && reasoning !== undefined;
+		const cacheRead = nonNegativeNumber(pricing.cache_read_usd_per_mtok);
+		const cacheWrite = nonNegativeNumber(pricing.cache_write_usd_per_mtok);
 
 		seen.add(item.id);
 		models.push({
 			id: item.id,
-			...(typeof item.display_name === "string" && item.display_name.trim()
-				? { name: item.display_name.trim() }
-				: {}),
+			...(name ? { name } : {}),
 			input,
 			output,
-			...(nonNegativeNumber(pricing.cache_read_usd_per_mtok) !== undefined
-				? { cacheRead: nonNegativeNumber(pricing.cache_read_usd_per_mtok) }
-				: {}),
-			...(nonNegativeNumber(pricing.cache_write_usd_per_mtok) !== undefined
-				? { cacheWrite: nonNegativeNumber(pricing.cache_write_usd_per_mtok) }
-				: {}),
+			...(cacheRead !== undefined ? { cacheRead } : {}),
+			...(cacheWrite !== undefined ? { cacheWrite } : {}),
 			...(hasSpecs
 				? {
 						contextWindow,

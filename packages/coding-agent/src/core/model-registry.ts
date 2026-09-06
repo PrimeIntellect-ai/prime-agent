@@ -447,7 +447,6 @@ export class ModelRegistry {
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private authorizedPrivatePrimeInferenceModelIds = new Set<string>();
 	private authorizedPrivatePrimeInferenceModels: Model<"openai-completions">[] = [];
-	private privatePrimeInferenceModelIds = new Set<string>();
 	private authorizedPrivatePrimeInferenceTeamId: string | undefined;
 	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
@@ -558,7 +557,6 @@ export class ModelRegistry {
 				model,
 			]),
 		);
-		this.privatePrimeInferenceModelIds = new Set(privateModels.keys());
 		const builtInModels = [
 			...this.loadBuiltInModels(overrides, modelOverrides, this.livePrimeInferenceModels),
 			...privateModels.values(),
@@ -794,8 +792,7 @@ export class ModelRegistry {
 	getAvailable(): Model<Api>[] {
 		return this.models.filter((model) => {
 			if (
-				model.provider === PRIME_INFERENCE_PROVIDER_ID &&
-				this.privatePrimeInferenceModelIds.has(model.id) &&
+				isPrivatePrimeInferenceModel(model) &&
 				!this.explicitPrivatePrimeInferenceModelIds.has(model.id) &&
 				!this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
 			) {
@@ -851,7 +848,7 @@ export class ModelRegistry {
 			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.modelIds);
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
 			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-			const missingModelMetadata = [...cached.modelIds].some((id) => !this.privatePrimeInferenceModelIds.has(id));
+			const missingModelMetadata = [...cached.modelIds].some((id) => !this.find(PRIME_INFERENCE_PROVIDER_ID, id));
 			if (isOfflineModeEnabled() || (cacheIsFresh && !missingModelMetadata)) return;
 			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
 			return;
