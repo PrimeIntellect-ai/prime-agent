@@ -16,6 +16,7 @@ on:
 concurrency:
   group: release-prime-agent
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
