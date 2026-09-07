@@ -105,6 +105,9 @@ describe("AgentsViewMode", () => {
 			editor: { getText: () => "matching query" },
 			persistentState: { query: "" },
 			savedSearchFetchStarted: true,
+			// Searching claims the visible row even while a remembered anchor is
+			// still waiting for its catalog row: user intent supersedes restore.
+			selectionAnchorPending: true,
 			selectedIndex: 4,
 			rebuildRows: vi.fn(),
 			syncSelectedRowState: vi.fn(),
@@ -119,6 +122,7 @@ describe("AgentsViewMode", () => {
 		expect(self.persistentState.query).toBe("matching query");
 		expect(self.rebuildRows).toHaveBeenCalledOnce();
 		expect(self.selectedIndex).toBe(4);
+		expect(self.syncSelectedRowState).toHaveBeenCalledOnce();
 	});
 
 	it("loads the saved catalog on view entry without a search query", () => {

@@ -1,6 +1,7 @@
 import stripAnsi from "strip-ansi";
 import { describe, expect, test, vi } from "vitest";
 import { AgentsViewMode } from "../../../src/modes/agents-view/agents-view-mode.js";
+import { buildUnifiedSessionIndex } from "../../../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createDeferred as deferred } from "../scheduling.js";
@@ -304,7 +305,7 @@ describe("#502 unified session view regressions", () => {
 		expect(harness.setStatusMessage).not.toHaveBeenCalled();
 	});
 
-	test("a missing selection anchor blocks open only until both catalogs settle", () => {
+	test("a pending selection anchor never blocks opening the visible row", () => {
 		const finish = vi.fn();
 		const fallback = summary("fallback");
 		const harness = {
@@ -314,21 +315,26 @@ describe("#502 unified session view regressions", () => {
 			selectedActiveSessionId: undefined as string | undefined,
 			selectedRowIdentity: "identity-intended",
 			rows: [{ selectable: true, kind: "agent", summary: fallback }],
+			unifiedRecords: [],
+			unifiedIndex: buildUnifiedSessionIndex([]),
 			isPendingDeleteRow: () => false,
 			setStatusMessage: vi.fn(),
 			finish,
 		};
 
+		// Enter acts on the row under the cursor even while the anchor waits.
 		privateMethod<(this: typeof harness) => void>("openSelected").call(harness);
-		expect(finish).not.toHaveBeenCalled();
+		expect(finish).toHaveBeenCalledWith(expect.objectContaining({ type: "open", summary: fallback }));
+		expect(harness.setStatusMessage).not.toHaveBeenCalled();
+
+		// Untouched, the anchor restore still waits for the saved catalog...
 		privateMethod<(this: typeof harness) => void>("resolveMissingSelectionAnchor").call(harness);
 		expect(harness.selectionAnchorPending).toBe(true);
 		harness.savedCatalogRefreshPending = false;
 		privateMethod<(this: typeof harness) => void>("resolveMissingSelectionAnchor").call(harness);
-		// Open unblocks on the visible fallback row...
 		expect(harness.selectionAnchorPending).toBe(false);
 		expect(harness.selectedActiveSessionId).toBe(fallback.activeSessionId ?? fallback.id);
-		// ...but the restored anchor identity survives so a late poll can still re-anchor.
+		// ...and the restored anchor identity survives so a late poll can still re-anchor.
 		expect(harness.selectedRowIdentity).toBe("identity-intended");
 	});
 	test("rename uses the captured row after refresh removes it", async () => {

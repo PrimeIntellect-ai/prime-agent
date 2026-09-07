@@ -1645,6 +1645,14 @@ describe("agents view state", () => {
 			});
 			const handoffFrame = persistentState.scopeFrames?.at(-1);
 
+			// The scope root is never a row of its own children view: seeding it as
+			// the selection anchor would only arm pending-anchor for the whole scan.
+			expect(persistentState.selectedRowIdentity).toBeUndefined();
+			expect(persistentState.selectedSessionKey).toBeUndefined();
+			expect(persistentState.backSession).toBe(chat);
+			const unscoped = createInitialAgentsViewPersistentState({ initialSession: chat });
+			expect(unscoped.selectedRowIdentity).toBeDefined();
+
 			expect(handoffFrame).toEqual({ scope: rootScope, returnChat: chat });
 			expect(createInitialAgentsViewScopeFrames(rootScope, persistentState.backSession)).toEqual([handoffFrame]);
 			expect(createInitialAgentsViewScopeFrames(rootScope, makeSummary({ sessionId: "stale-session" }))).toEqual([

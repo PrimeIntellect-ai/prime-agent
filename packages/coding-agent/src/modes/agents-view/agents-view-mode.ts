@@ -278,12 +278,16 @@ export function createInitialAgentsViewPersistentState(
 	options: Pick<AgentsViewModeOptions, "initialScopeKey" | "initialSession">,
 ): AgentsViewPersistentState {
 	const initialSession = options.initialSession;
+	// A scoped view excludes its root from its own rows, so anchoring the
+	// selection on the entered-from chat could never resolve there and would
+	// only arm the pending-anchor state for the whole catalog scan.
+	const seedSelection = initialSession && !options.initialScopeKey;
 	return {
-		...(initialSession
+		...(initialSession ? { backSession: initialSession } : {}),
+		...(seedSelection
 			? {
 					selectedRowIdentity: getSummaryIdentity(initialSession),
 					selectedSessionKey: getAgentsViewSelectionKey(initialSession),
-					backSession: initialSession,
 				}
 			: {}),
 		...(options.initialScopeKey
@@ -1271,9 +1275,9 @@ export class AgentsViewMode implements Component, Focusable {
 		this.persistentState.query = this.editor.getText();
 		this.armSavedSearchFetch();
 		this.rebuildRows();
-		// Typing must not claim the visible fallback row while the restored
-		// anchor is still waiting for its catalog row.
-		if (!this.selectionAnchorPending) this.syncSelectedRowState();
+		// Searching is explicit user intent: claim the visible row as the new
+		// anchor even if a remembered one is still waiting for its catalog row.
+		this.syncSelectedRowState();
 		this.ui.requestRender();
 	}
 
@@ -1370,10 +1374,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private openSelected(): void {
 		const row = this.rows[this.selectedIndex];
 		if (!row?.selectable || this.isPendingDeleteRow(row)) {
-			return;
-		}
-		if (this.selectionAnchorPending) {
-			this.setStatusMessage("Waiting for the selected session to load");
 			return;
 		}
 		if (row.kind === "subagent-summary") {
