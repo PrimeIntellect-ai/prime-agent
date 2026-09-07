@@ -762,11 +762,7 @@ export class ModelRegistry {
 	 */
 	getAvailable(): Model<Api>[] {
 		return this.models.filter((model) => {
-			if (
-				isPrivatePrimeInferenceModel(model) &&
-				!this.explicitPrivatePrimeInferenceModelIds.has(model.id) &&
-				!this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
-			) {
+			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
 				return false;
 			}
 			return this.hasConfiguredAuth(model);
@@ -774,11 +770,27 @@ export class ModelRegistry {
 	}
 
 	async refreshAvailableModels(): Promise<Model<Api>[]> {
-		const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
-		const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
-		this.refresh();
-		await this.refreshPrivatePrimeInferenceAuthorization(previousPrivateModelIds, previousTeamId);
-		return this.getAvailable();
+		// Serialized: a concurrent call snapshotting between this call's clear
+		// (inside refresh()) and its restore would capture an empty entitlement
+		// set and lose the cached private-model authorization for good.
+		return this.runSerializedEntitlementRefresh(async () => {
+			const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
+			const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
+			this.refresh();
+			await this.refreshPrivatePrimeInferenceAuthorization(previousPrivateModelIds, previousTeamId);
+			return this.getAvailable();
+		});
+	}
+
+	private entitlementRefreshChain: Promise<unknown> = Promise.resolve();
+
+	private runSerializedEntitlementRefresh<T>(task: () => Promise<T>): Promise<T> {
+		const run = this.entitlementRefreshChain.then(task, task);
+		this.entitlementRefreshChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	private async refreshPrivatePrimeInferenceAuthorization(
@@ -789,6 +801,17 @@ export class ModelRegistry {
 		const teamHeaders = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
 		const teamId = teamHeaders?.["X-Prime-Team-ID"];
 		if (!apiKey || !teamHeaders || !teamId) {
+			// Stale is not logout: keep fetched entitlements for explicit re-selection
+			// (the auth filter still hides the models while stale) — but only for
+			// the team they were fetched for; a team switch invalidates them.
+			if (
+				this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source === "stale" &&
+				teamId === previousTeamId
+			) {
+				this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
+				this.authorizedPrivatePrimeInferenceTeamId = previousTeamId;
+				return;
+			}
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
 			this.authorizedPrivatePrimeInferenceTeamId = undefined;
 			return;
@@ -948,7 +971,12 @@ export class ModelRegistry {
 		};
 	}
 
-	async canUseModel(model: Model<Api>): Promise<boolean> {
+	/** `assumeAuthConfigured` validates an explicit stale-provider selection BEFORE the clear commits. */
+	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
+		if (options?.assumeAuthConfigured) {
+			// Must be side-effect-free: a keyless refresh would drop the cached entitlements it needs.
+			return !isPrivatePrimeInferenceModel(model) || this.isAuthorizedPrivatePrimeInferenceModel(model);
+		}
 		if (!this.hasConfiguredAuth(model)) {
 			return false;
 		}
@@ -960,8 +988,15 @@ export class ModelRegistry {
 		return availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
 	}
 
+	private isAuthorizedPrivatePrimeInferenceModel(model: Model<Api>): boolean {
+		return (
+			this.explicitPrivatePrimeInferenceModelIds.has(model.id) ||
+			this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
+		);
+	}
+
 	async getExecutableModels(): Promise<Model<Api>[]> {
-		await this.refreshPrivatePrimeInferenceAuthorization();
+		await this.runSerializedEntitlementRefresh(() => this.refreshPrivatePrimeInferenceAuthorization());
 		const availableModels = this.getAvailable();
 		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
 		if (codexModels.length === 0) {
@@ -1193,6 +1228,12 @@ export class ModelRegistry {
 
 		const token = this.getCurrentProviderAuthSourceToken(provider);
 		return token ? this.markProviderAuthSourceStale(token) : false;
+	}
+
+	/** Forget stale-auth markings; a structured auth failure on the next request re-marks the provider. */
+	clearProviderAuthStale(provider: string): void {
+		this.staleProviderRequestAuthSources.delete(provider);
+		this.authStorage.clearAuthStale(provider);
 	}
 
 	getCurrentProviderAuthSourceToken(provider: string): AuthSourceToken | undefined {

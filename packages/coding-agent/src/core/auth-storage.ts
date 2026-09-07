@@ -611,6 +611,11 @@ export class AuthStorage {
 		return true;
 	}
 
+	/** Forget every stale marking for a provider (explicit user re-selection). */
+	clearAuthStale(provider: string): void {
+		this.staleAuthSources.delete(provider);
+	}
+
 	private clearStaleAuthSource(provider: string, source: ActiveAuthStatusSource): void {
 		const stale = this.staleAuthSources.get(provider);
 		if (!stale) {
@@ -1059,7 +1064,8 @@ export class AuthStorage {
 		if (authSource === "runtime" || authSource === "environment") {
 			return undefined;
 		}
-		if (authSource === "prime_cli") {
+		// A stale CLI key must not erase the selected team used to validate cached model access.
+		if (authSource === "prime_cli" || (authSource === "stale" && config?.apiKey)) {
 			if (credential?.type === "api_key" && credential.primeTeam === null) {
 				return null;
 			}

@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentStatus } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import {
 	buildStatusContext,
@@ -169,6 +170,7 @@ describe("daemon session summarizer", () => {
 						isSessionActive: options.isSessionActive,
 						messages: options.messages,
 						modelRegistry: {},
+						settingsManager: SettingsManager.inMemory(),
 						state: { streamingMessage: undefined },
 						sessionManager: { appendAgentStatus: () => {} },
 					},

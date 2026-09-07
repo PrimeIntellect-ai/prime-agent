@@ -2,7 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "../../core/model-registry.js";
-import { completeWithProviderRetry } from "../../core/provider-retry.js";
+import { completeWithProviderRetry, type ProviderRetryPolicy, providerRetryPolicy } from "../../core/provider-retry.js";
 import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
@@ -145,12 +145,13 @@ export interface GenerateAgentStatusParams {
 	registry: ModelRegistry;
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
+	retryPolicy?: ProviderRetryPolicy;
 	signal?: AbortSignal;
 }
 
 /** One cheap model call for a fresh status, or undefined if unavailable/empty/failed. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
-	const { registry, messages, isWorking, signal } = params;
+	const { registry, messages, isWorking, retryPolicy, signal } = params;
 	if (messages.length === 0) {
 		return undefined;
 	}
@@ -180,7 +181,7 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 					},
 					{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
 				),
-			{ signal },
+			{ policy: retryPolicy, signal },
 		);
 		if (response.stopReason === "error") {
 			return undefined;
@@ -323,6 +324,7 @@ export class DaemonSessionSummarizer {
 				registry: session.modelRegistry,
 				messages: contextMessages,
 				isWorking,
+				retryPolicy: providerRetryPolicy(session.settingsManager),
 				signal: controller.signal,
 			});
 			// A failed classification on an idle session would spin at "working"
