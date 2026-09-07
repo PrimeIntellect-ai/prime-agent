@@ -23,6 +23,7 @@ $artifactName = "prime-agent-$version-windows-x64.zip"
 $artifactPath = Join-Path $releaseDir $artifactName
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalDownloadBaseUrl = $env:PRIME_AGENT_DOWNLOAD_BASE_URL
+$originalVersion = $env:PRIME_AGENT_VERSION
 $originalProcessorArchitecture = $env:PROCESSOR_ARCHITECTURE
 $originalProcessorArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
 $originalUserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -58,12 +59,18 @@ try {
     }
 
     $env:LOCALAPPDATA = $localAppData
-    $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $baseUrl
+    $installerSource = Get-Content -LiteralPath (Join-Path $repoRoot "install.ps1") -Raw
+    foreach ($channel in @("stable", "beta")) {
+        $rendered = $installerSource.Replace("__PRIME_AGENT_DOWNLOAD_BASE_URL__", $baseUrl).Replace("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", $channel)
+        Set-Content -LiteralPath (Join-Path $testRoot "install-$channel.ps1") -Value $rendered -Encoding UTF8
+    }
+    $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $null
+    $env:PRIME_AGENT_VERSION = $null
     # Environment variables describe an emulated process, not the native OS.
     # Poison both values so this x64 runner proves the installer uses the Win32 native-machine API.
     $env:PROCESSOR_ARCHITECTURE = "ARM64"
     $env:PROCESSOR_ARCHITEW6432 = "ARM64"
-    & (Join-Path $repoRoot "install.ps1") -Version $version
+    & (Join-Path $testRoot "install-stable.ps1")
     $env:PROCESSOR_ARCHITECTURE = $originalProcessorArchitecture
     $env:PROCESSOR_ARCHITEW6432 = $originalProcessorArchitectureW6432
 
@@ -77,8 +84,10 @@ try {
     & $shim --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Installed prime-agent --help failed with $LASTEXITCODE" }
 
-    & (Join-Path $repoRoot "install.ps1") -Version $version -Update
-    & (Join-Path $repoRoot "install.ps1") -Uninstall
+    Remove-Item -LiteralPath (Join-Path $serverRoot "stable")
+    Set-Content -LiteralPath (Join-Path $serverRoot "beta") -Value $version -Encoding Ascii
+    & (Join-Path $testRoot "install-beta.ps1") -Update
+    & (Join-Path $testRoot "install-beta.ps1") -Uninstall
     if (Test-Path -LiteralPath (Join-Path $localAppData "PrimeAgent")) {
         throw "Uninstall left the PrimeAgent install directory behind"
     }
@@ -90,6 +99,7 @@ try {
     [Environment]::SetEnvironmentVariable("PATH", $originalUserPath, "User")
     $env:LOCALAPPDATA = $originalLocalAppData
     $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $originalDownloadBaseUrl
+    $env:PRIME_AGENT_VERSION = $originalVersion
     $env:PROCESSOR_ARCHITECTURE = $originalProcessorArchitecture
     $env:PROCESSOR_ARCHITEW6432 = $originalProcessorArchitectureW6432
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue

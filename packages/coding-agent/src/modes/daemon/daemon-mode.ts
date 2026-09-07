@@ -6139,29 +6139,41 @@ export class AgentDaemon {
 					const resolved = this.resolveAgentFamilySessionName(options.fromState, targetSelector, error);
 					targetState = await this.getOrHydrateBoundSessionState(resolved.activeSessionId);
 				} else {
-					const residentChild = [...this.sessions.values()].find(
+					const initialResidentMatches = [...this.sessions.values()].filter(
 						(state) =>
 							state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === targetSelector,
 					);
-					const passiveSubagent = residentChild ? undefined : await this.findPassiveRlmSubagent(targetSelector);
-					if (residentChild) {
-						targetState = await this.waitForHydratingChild(residentChild, targetSelector);
-					} else if (passiveSubagent) {
-						if (options.origin === "agent" && options.fromState) {
-							assertAgentFamilyReach(
-								this.agentFamilyEntry(options.fromState),
-								this.passiveAgentFamilyEntry(passiveSubagent),
-							);
-						}
-						targetState = await this.hydratePassiveRlmSubagent(passiveSubagent);
-					} else {
-						const hydratingChild = [...this.sessions.values()].find(
+					if (initialResidentMatches.length > 1) {
+						throw new Error(`Session selector "${targetSelector}" is ambiguous`);
+					}
+					const reservedResident = initialResidentMatches[0];
+					if (reservedResident) reservedResident.pendingAttaches++;
+					try {
+						const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector, true);
+						const residentMatches = [...this.sessions.values()].filter(
 							(state) =>
 								state.runtime.metadata.kind === "subagent" &&
 								state.runtime.metadata.rlmChildId === targetSelector,
 						);
-						if (hydratingChild) {
-							targetState = await this.waitForHydratingChild(hydratingChild, targetSelector);
+						const residentChild = residentMatches[0];
+						if (
+							residentMatches.length > 1 ||
+							(residentChild &&
+								passiveSubagent &&
+								this.findSessionBySessionFile(passiveSubagent.entry.sessionFile) !== residentChild)
+						) {
+							throw new Error(`Session selector "${targetSelector}" is ambiguous`);
+						}
+						if (passiveSubagent) {
+							if (options.origin === "agent" && options.fromState) {
+								assertAgentFamilyReach(
+									this.agentFamilyEntry(options.fromState),
+									this.passiveAgentFamilyEntry(passiveSubagent),
+								);
+							}
+							targetState = await this.hydratePassiveRlmSubagent(passiveSubagent);
+						} else if (residentChild) {
+							targetState = await this.waitForHydratingChild(residentChild, targetSelector);
 						} else if (this.options.worker && options.fromState) {
 							// The supervisor can resolve and wake a saved worker even when it is no longer
 							// present in this worker's resident peer snapshot.
@@ -6169,6 +6181,8 @@ export class AgentDaemon {
 						} else {
 							throw error;
 						}
+					} finally {
+						if (reservedResident) reservedResident.pendingAttaches--;
 					}
 				}
 			}

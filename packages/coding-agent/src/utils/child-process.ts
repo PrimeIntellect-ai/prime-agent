@@ -19,6 +19,7 @@ import {
 import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename } from "node:path";
+import { createWindowsProcessTreeSignal } from "./windows-process-signal.js";
 
 const EXIT_STDIO_GRACE_MS = 100;
 
@@ -167,30 +168,30 @@ export function signalProcessGroupIfHeld(pgid: number, signal: NodeJS.Signals): 
 	return true;
 }
 
-export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
+export function signalProcessGroupOrProcess(
+	pid: number,
+	signal: NodeJS.Signals,
+	onFailure?: (error: Error) => void,
+): void {
 	if (process.platform === "win32") {
-		const fallbackSignal = signal === "SIGKILL" ? "SIGTERM" : signal;
-		const fallback = () => {
-			try {
-				process.kill(pid, fallbackSignal);
-			} catch {
-				// Process may already be dead.
-			}
+		let reported = false;
+		const reportFailure = (reason: unknown) => {
+			if (reported) return;
+			reported = true;
+			const error = reason instanceof Error ? reason : new Error(String(reason));
+			if (onFailure) onFailure(error);
+			else console.error(`Could not signal Windows process tree ${pid} (${signal}): ${error.message}`);
 		};
 		try {
-			const args = ["/PID", String(pid), "/T"];
-			if (signal === "SIGKILL") args.push("/F");
-			const taskkill = spawnHidden("taskkill", args, {
-				stdio: "ignore",
-				detached: true,
+			const { command, args } = createWindowsProcessTreeSignal(pid, signal);
+			const helper = spawnHidden(command, args, { stdio: "ignore", detached: true });
+			helper.once("error", reportFailure);
+			helper.once("exit", (code) => {
+				if (code !== 0 && isProcessAlive(pid)) reportFailure(`identity helper exited with code ${code}`);
 			});
-			taskkill.once("error", fallback);
-			taskkill.once("exit", (code) => {
-				if (code !== 0 && isProcessAlive(pid)) fallback();
-			});
-			taskkill.unref();
-		} catch {
-			fallback();
+			helper.unref();
+		} catch (error) {
+			reportFailure(error);
 		}
 		return;
 	}

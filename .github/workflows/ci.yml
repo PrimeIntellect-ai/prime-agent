@@ -372,6 +372,17 @@ jobs:
           test/settings-manager-bug.test.ts
           test/shell-windows-hardening.test.ts
           test/system-prompt.test.ts
+          test/windows-process-signal.test.ts
+
+      - name: Test identity-pinned tree signals under Bun and Node
+        working-directory: packages/coding-agent
+        run: |
+          bun ./test/fixtures/windows-process-signal-native.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun build ./test/fixtures/windows-process-signal-native.ts --target=node --external koffi --outfile=./node_modules/.cache/windows-process-signal-native.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/.cache/windows-process-signal-native.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test Windows RLM deletion races
         working-directory: packages/coding-agent

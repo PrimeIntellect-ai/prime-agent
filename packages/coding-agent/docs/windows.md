@@ -1,6 +1,6 @@
 # Windows Setup
 
-Prime Agent supports native Windows 10 and 11 on x64 and Arm64. WSL is not required.
+Prime Agent supports native Windows 10 version 1809 or later and Windows 11 on x64 and Arm64. WSL is not required.
 
 ## Requirements
 
@@ -72,7 +72,7 @@ Git Bash is the supported default. Cygwin and MSYS2 can be selected explicitly, 
 
 The persistent CPython kernel is prepared automatically with `uv`. The Windows bootstrap uses PowerShell and a virtual environment at `~/.prime/agent/kernel-venv`, whose interpreter is under `Scripts\python.exe`.
 
-On managed systems that block the uv installer, install uv separately or set `PRIME_AGENT_KERNEL_PYTHON` to a CPython environment that already contains `prime-agent-runtime`.
+On managed systems that block the uv installer, install uv separately or set `PRIME_AGENT_KERNEL_PYTHON` to a CPython environment that already contains a current `prime-agent-runtime` and the default Python packages, including `PyYAML`.
 
 ## Troubleshooting
 
@@ -91,6 +91,8 @@ Run the command in a normal interactive PowerShell session. Organization policy 
 ### A child process survives cancellation
 
 Run `prime-agent shutdown --force`. Prime Agent uses Windows process-tree termination and CPython Job Objects, but a process moved into a separately managed Windows service or job can require manual termination.
+
+Verified process-tree termination requires permitted Windows PowerShell. Under Node, it also requires the optional `koffi` package. The .NET `Process.Handle` check requires `ALL_ACCESS`; narrower process DACLs can cause refusal even when `taskkill` alone could work. Failed verification or helper launch does not fall back to a PID-only kill. `execCommand` reports final termination failure as `code: 1` and `killed: false`. It continues watching and draining the live child until it exits.
 
 ### Terminal input or colors are incorrect
 

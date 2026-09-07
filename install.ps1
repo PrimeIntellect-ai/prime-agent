@@ -35,7 +35,7 @@ $DownloadBaseUrl = if ($env:PRIME_AGENT_DOWNLOAD_BASE_URL) {
     "__PRIME_AGENT_DOWNLOAD_BASE_URL__"
 }
 $DefaultChannel = "__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__"
-if ($DefaultChannel -eq "__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__") {
+if ($DefaultChannel -eq ("__PRIME_AGENT_DEFAULT_RELEASE_" + "CHANNEL__")) {
     $DefaultChannel = "stable"
 }
 if (-not $Channel) {
@@ -248,7 +248,7 @@ if ($Uninstall) {
     Uninstall-PrimeAgent
     exit 0
 }
-if ($DownloadBaseUrl -eq "__PRIME_AGENT_DOWNLOAD_BASE_URL__") {
+if ($DownloadBaseUrl -eq ("__PRIME_AGENT_DOWNLOAD_BASE" + "_URL__")) {
     throw "Installer download URL is not configured. Use the published installer or set PRIME_AGENT_DOWNLOAD_BASE_URL."
 }
 
