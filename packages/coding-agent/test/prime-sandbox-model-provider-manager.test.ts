@@ -814,4 +814,93 @@ process.stdout.write(JSON.stringify({ code: result.code, calls: shutdownState.ca
 		expect(providerState.calls).toBe(40);
 		expect((await manager.shutdown()).code).toBe("SHUT_DOWN");
 	});
+
+	test("exact bundle signal is forwarded to provider", async () => {
+		const captured: { signal: unknown } = { signal: null };
+		const manager = createModelStreamProviderManager(
+			frozen({
+				provide: (_request: unknown, signal: AbortSignal): Promise<unknown> => {
+					captured.signal = signal;
+					return Promise.resolve(successOutcome());
+				},
+			}),
+			physicalOk,
+		);
+		const controller = new AbortController();
+		manager.dispatchApplication(bundle(validModelBytes(), controller.signal, replyCapture().reply));
+		await settle();
+		expect(captured.signal).toBe(controller.signal);
+		expect((await manager.shutdown()).code).toBe("SHUT_DOWN");
+	});
+
+	test("provider receives abort and manager suppresses reply", async () => {
+		const providerGate = gate<unknown>();
+		let abortFired = false;
+		const manager = createModelStreamProviderManager(
+			frozen({
+				provide: (_request: unknown, signal: AbortSignal): Promise<unknown> => {
+					signal.addEventListener("abort", (): void => {
+						abortFired = true;
+					});
+					return providerGate.promise;
+				},
+			}),
+			physicalOk,
+		);
+		let replies = 0;
+		const controller = new AbortController();
+		manager.dispatchApplication(
+			bundle(validModelBytes(), controller.signal, (): Promise<unknown> => {
+				replies += 1;
+				return Promise.resolve(sent());
+			}),
+		);
+		controller.abort();
+		providerGate.resolve(successOutcome());
+		await settle();
+		expect(abortFired).toBe(true);
+		expect(replies).toBe(0);
+		expect((await manager.shutdown()).code).toBe("SHUT_DOWN");
+	});
+
+	test("aborted provider slot is reusable for a subsequent dispatch", async () => {
+		const providerGate = gate<unknown>();
+		let calls = 0;
+		const manager = createModelStreamProviderManager(
+			frozen({
+				provide: (_request: unknown, _signal: unknown): Promise<unknown> => {
+					calls += 1;
+					return providerGate.promise;
+				},
+			}),
+			physicalOk,
+		);
+		const controller = new AbortController();
+		manager.dispatchApplication(bundle(validModelBytes(), controller.signal, replyCapture().reply));
+		controller.abort();
+		providerGate.resolve(successOutcome());
+		await settle();
+		const second = replyCapture();
+		manager.dispatchApplication(bundle(validModelBytes(), new AbortController().signal, second.reply));
+		await settle();
+		expect(second.copies.length).toBe(1);
+		expect(calls).toBe(2);
+		expect((await manager.shutdown()).code).toBe("SHUT_DOWN");
+	});
+
+	test("physical shutdown receives zero arguments", async () => {
+		let shutdownArgCount = -1;
+		const manager = createModelStreamProviderManager(
+			providerOk,
+			frozen({
+				shutdown: function (): Promise<unknown> {
+					// biome-ignore lint/complexity/noArguments: Exact zero-argument forwarding is the behavior under test.
+					shutdownArgCount = arguments.length;
+					return Promise.resolve(frozen({ code: "SHUT_DOWN" }));
+				},
+			}),
+		);
+		await manager.shutdown();
+		expect(shutdownArgCount).toBe(0);
+	});
 });

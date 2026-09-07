@@ -86,11 +86,18 @@ type Manager = Readonly<{
 	shutdown: () => Promise<ShutdownResult>;
 }>;
 
-type CapturedCall = (value?: unknown) => unknown;
 type ReplyCall = (value: unknown) => unknown;
 
-interface CapturedPort {
-	readonly invoke: CapturedCall;
+type ProviderInvoke = (request: unknown, signal: AbortSignal) => unknown;
+
+interface ProviderPort {
+	readonly invoke: ProviderInvoke;
+}
+
+type ShutdownCall = () => unknown;
+
+interface ShutdownPort {
+	readonly invoke: ShutdownCall;
 }
 
 interface Deferred<T> {
@@ -188,25 +195,40 @@ function proxyFree(value: object): boolean {
 	}
 }
 
-function capturedPort(raw: unknown, name: string): CapturedPort | null {
+function captureProvide(raw: unknown): ProviderPort | null {
 	if ((typeof raw !== "object" && typeof raw !== "function") || raw === null) return null;
 	if (!proxyFree(raw)) return null;
 	try {
 		if (!isFrozen(raw) || getPrototypeOf(raw) !== objectPrototype) return null;
 		const keys = ownKeys(raw);
-		if (keys.length !== 1 || keys[0] !== name) return null;
-		const descriptor = getOwnPropertyDescriptor(raw, name);
+		if (keys.length !== 1 || keys[0] !== "provide") return null;
+		const descriptor = getOwnPropertyDescriptor(raw, "provide");
 		if (descriptor === undefined) return null;
 		if (descriptor.get !== undefined || descriptor.set !== undefined) return null;
 		const method: unknown = descriptor.value;
 		if (typeof method !== "function" || !proxyFree(method)) return null;
-		if (name === "provide") {
-			return {
-				invoke: (value?: unknown): unknown => apply(method, raw, [value]),
-			};
-		}
 		return {
-			invoke: (_value?: unknown): unknown => apply(method, raw, []),
+			invoke: (request: unknown, signal: AbortSignal): unknown => apply(method, raw, [request, signal]),
+		};
+	} catch {
+		return null;
+	}
+}
+
+function captureShutdown(raw: unknown): ShutdownPort | null {
+	if ((typeof raw !== "object" && typeof raw !== "function") || raw === null) return null;
+	if (!proxyFree(raw)) return null;
+	try {
+		if (!isFrozen(raw) || getPrototypeOf(raw) !== objectPrototype) return null;
+		const keys = ownKeys(raw);
+		if (keys.length !== 1 || keys[0] !== "shutdown") return null;
+		const descriptor = getOwnPropertyDescriptor(raw, "shutdown");
+		if (descriptor === undefined) return null;
+		if (descriptor.get !== undefined || descriptor.set !== undefined) return null;
+		const method: unknown = descriptor.value;
+		if (typeof method !== "function" || !proxyFree(method)) return null;
+		return {
+			invoke: (): unknown => apply(method, raw, []),
 		};
 	} catch {
 		return null;
@@ -454,8 +476,8 @@ function makeTask(index: number, reply: ReplyCall, payload: Uint8Array): Task {
 }
 
 export function createModelStreamProviderManager(providerRaw: unknown, physicalShutdownRaw: unknown): Manager {
-	const provider = capturedPort(providerRaw, "provide");
-	const physical = capturedPort(physicalShutdownRaw, "shutdown");
+	const provider = captureProvide(providerRaw);
+	const physical = captureShutdown(physicalShutdownRaw);
 	const shutDownResult = frozenShutdown("SHUT_DOWN");
 	const poisonedResult = frozenShutdown("POISONED");
 	if (provider === null || physical === null || !promiseInvariantsHold()) {
@@ -467,8 +489,8 @@ export function createModelStreamProviderManager(providerRaw: unknown, physicalS
 			shutdown: (): Promise<ShutdownResult> => failed,
 		});
 	}
-	let providerCapability: CapturedCall | null = provider.invoke;
-	let physicalCapability: CapturedCall | null = physical.invoke;
+	let providerCapability: ProviderInvoke | null = provider.invoke;
+	let physicalCapability: ShutdownCall | null = physical.invoke;
 
 	const tasks = new NativeArray<Task | null>(MAX_TASKS);
 	for (let index = 0; index < MAX_TASKS; index += 1) tasks[index] = null;
@@ -960,7 +982,7 @@ export function createModelStreamProviderManager(providerRaw: unknown, physicalS
 		let providerRawResult: unknown;
 		let providerThrew = false;
 		try {
-			providerRawResult = capability(decoded.request);
+			providerRawResult = capability(decoded.request, bundle.signal);
 		} catch {
 			providerThrew = true;
 		}
