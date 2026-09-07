@@ -1,24 +1,43 @@
-import * as util from "node:util";
+import { types } from "node:util";
 
 const reflectApply = Reflect.apply;
-const getPrototypeOf = Object.getPrototypeOf;
-const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-const getOwnPropertyNames = Object.getOwnPropertyNames;
-const getOwnPropertySymbols = Object.getOwnPropertySymbols;
-const freeze = Object.freeze;
-const typedArrayPrototype = getPrototypeOf(Uint8Array.prototype);
-const arrayBufferPrototype = ArrayBuffer.prototype;
-const inspectionFailed = freeze({});
+const objectConstructor = Object;
+const getPrototypeOf = objectConstructor.getPrototypeOf;
+const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+const getOwnPropertyNames = objectConstructor.getOwnPropertyNames;
+const getOwnPropertySymbols = objectConstructor.getOwnPropertySymbols;
+const freeze = objectConstructor.freeze;
+const freezeObject: (value: object) => object = freeze;
+const numberConstructor = Number;
+const numberIsSafeInteger = numberConstructor.isSafeInteger;
+const numberIsInteger = numberConstructor.isInteger;
+const stringConstructor = String;
+const uint8ArrayConstructor = Uint8Array;
+const uint8ArrayPrototype = uint8ArrayConstructor.prototype;
+const arrayBufferConstructor = ArrayBuffer;
+const arrayBufferPrototype = arrayBufferConstructor.prototype;
+const typedArrayPrototype = reflectApply(getPrototypeOf, objectConstructor, [uint8ArrayPrototype]);
+const utilTypes = types;
+const utilTypesIsProxy = utilTypes.isProxy;
+const inspectionFailed = reflectApply(freezeObject, objectConstructor, [{}]);
 const maximumStrictByteLength = 1_048_576;
 
 type CapturedGetter = (target: unknown) => unknown;
 
 function captureGetter(prototype: object, name: string): CapturedGetter | undefined {
-	const descriptor = getOwnPropertyDescriptor(prototype, name);
+	const descriptor = reflectApply(getOwnPropertyDescriptor, objectConstructor, [prototype, name]);
 	if (descriptor === undefined) return undefined;
 	const getter: unknown = descriptor.get;
 	if (typeof getter !== "function") return undefined;
 	return (target: unknown): unknown => reflectApply(getter, target, []);
+}
+
+function captureTypedArrayZeroer(prototype: object): CapturedGetter | undefined {
+	const descriptor = reflectApply(getOwnPropertyDescriptor, objectConstructor, [prototype, "fill"]);
+	if (descriptor === undefined) return undefined;
+	const method: unknown = descriptor.value;
+	if (typeof method !== "function") return undefined;
+	return (target: unknown): unknown => reflectApply(method, target, [0]);
 }
 
 const getTypedArrayBuffer = captureGetter(typedArrayPrototype, "buffer");
@@ -28,6 +47,7 @@ const getTypedArrayLength = captureGetter(typedArrayPrototype, "length");
 const getArrayBufferByteLength = captureGetter(arrayBufferPrototype, "byteLength");
 const getArrayBufferDetached = captureGetter(arrayBufferPrototype, "detached");
 const getArrayBufferResizable = captureGetter(arrayBufferPrototype, "resizable");
+const zeroTypedArray = captureTypedArrayZeroer(typedArrayPrototype);
 
 export type SandboxStrictByteCopyCode = "INPUT_INVALID" | "INPUT_TOO_LARGE";
 
@@ -43,12 +63,14 @@ export interface SandboxStrictByteCopyFailure {
 
 export type SandboxStrictByteCopyResult = SandboxStrictByteCopySuccess | SandboxStrictByteCopyFailure;
 
-const invalidResult: SandboxStrictByteCopyFailure = freeze({ ok: false, code: "INPUT_INVALID" });
-const tooLargeResult: SandboxStrictByteCopyFailure = freeze({ ok: false, code: "INPUT_TOO_LARGE" });
+const freezeFailure: (value: SandboxStrictByteCopyFailure) => SandboxStrictByteCopyFailure = freeze;
+const freezeSuccess: (value: SandboxStrictByteCopySuccess) => SandboxStrictByteCopySuccess = freeze;
+const invalidResult = reflectApply(freezeFailure, objectConstructor, [{ ok: false, code: "INPUT_INVALID" }]);
+const tooLargeResult = reflectApply(freezeFailure, objectConstructor, [{ ok: false, code: "INPUT_TOO_LARGE" }]);
 
 function proxyOrInspectionFailure(value: object): boolean {
 	try {
-		return util.types.isProxy(value);
+		return reflectApply(utilTypesIsProxy, utilTypes, [value]);
 	} catch {
 		return true;
 	}
@@ -56,7 +78,7 @@ function proxyOrInspectionFailure(value: object): boolean {
 
 function inspectPrototype(value: object): object | null {
 	try {
-		return getPrototypeOf(value);
+		return reflectApply(getPrototypeOf, objectConstructor, [value]);
 	} catch {
 		return inspectionFailed;
 	}
@@ -64,7 +86,7 @@ function inspectPrototype(value: object): object | null {
 
 function inspectNames(value: object): readonly string[] | undefined {
 	try {
-		return getOwnPropertyNames(value);
+		return reflectApply(getOwnPropertyNames, objectConstructor, [value]);
 	} catch {
 		return undefined;
 	}
@@ -72,7 +94,7 @@ function inspectNames(value: object): readonly string[] | undefined {
 
 function inspectSymbols(value: object): readonly symbol[] | undefined {
 	try {
-		return getOwnPropertySymbols(value);
+		return reflectApply(getOwnPropertySymbols, objectConstructor, [value]);
 	} catch {
 		return undefined;
 	}
@@ -87,20 +109,34 @@ function callCaptured(getter: CapturedGetter | undefined, target: object): unkno
 	}
 }
 
+function discardOwnedCopy(copy: Uint8Array): SandboxStrictByteCopyFailure {
+	if (zeroTypedArray === undefined) return invalidResult;
+	try {
+		zeroTypedArray(copy);
+	} catch {
+		return invalidResult;
+	}
+	return invalidResult;
+}
+
 function isSafeLength(value: unknown): value is number {
-	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+	return typeof value === "number" && reflectApply(numberIsSafeInteger, numberConstructor, [value]) && value >= 0;
 }
 
 function makeSuccess(value: Uint8Array): SandboxStrictByteCopySuccess {
-	const result: SandboxStrictByteCopySuccess = { ok: true, value };
-	return freeze(result);
+	return reflectApply(freezeSuccess, objectConstructor, [{ ok: true, value }]);
 }
 
 export function copySandboxStrictBytes(input: unknown, maxBytes: number): SandboxStrictByteCopyResult {
-	if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > maximumStrictByteLength) return invalidResult;
+	if (
+		!reflectApply(numberIsSafeInteger, numberConstructor, [maxBytes]) ||
+		maxBytes < 0 ||
+		maxBytes > maximumStrictByteLength
+	)
+		return invalidResult;
 	if (typeof input !== "object" || input === null) return invalidResult;
 	if (proxyOrInspectionFailure(input)) return invalidResult;
-	if (inspectPrototype(input) !== Uint8Array.prototype) return invalidResult;
+	if (inspectPrototype(input) !== uint8ArrayPrototype) return invalidResult;
 
 	const lengthValue = callCaptured(getTypedArrayLength, input);
 	const byteLengthValue = callCaptured(getTypedArrayByteLength, input);
@@ -132,27 +168,32 @@ export function copySandboxStrictBytes(input: unknown, maxBytes: number): Sandbo
 	if (ownNames === undefined || ownSymbols === undefined) return invalidResult;
 	if (ownSymbols.length !== 0 || ownNames.length !== lengthValue) return invalidResult;
 
-	const values: number[] = new Array<number>(lengthValue);
+	if (zeroTypedArray === undefined) return invalidResult;
+	const copy = new uint8ArrayConstructor(lengthValue);
 	for (let index = 0; index < lengthValue; index += 1) {
-		const name = String(index);
-		if (ownNames.indexOf(name) === -1) return invalidResult;
+		const name = reflectApply(stringConstructor, undefined, [index]);
+		if (ownNames[index] !== name) return discardOwnedCopy(copy);
 		let descriptor: PropertyDescriptor | undefined;
 		try {
-			descriptor = getOwnPropertyDescriptor(input, name);
+			descriptor = reflectApply(getOwnPropertyDescriptor, objectConstructor, [input, name]);
 		} catch {
-			return invalidResult;
+			return discardOwnedCopy(copy);
 		}
-		if (descriptor === undefined) return invalidResult;
-		if (descriptor.get !== undefined || descriptor.set !== undefined) return invalidResult;
+		if (descriptor === undefined) return discardOwnedCopy(copy);
+		if (descriptor.get !== undefined || descriptor.set !== undefined) return discardOwnedCopy(copy);
 		if (descriptor.writable !== true || descriptor.enumerable !== true || descriptor.configurable !== true) {
-			return invalidResult;
+			return discardOwnedCopy(copy);
 		}
 		const byte: unknown = descriptor.value;
-		if (typeof byte !== "number" || !Number.isInteger(byte) || byte < 0 || byte > 255) return invalidResult;
-		values[index] = byte;
+		if (
+			typeof byte !== "number" ||
+			!reflectApply(numberIsInteger, numberConstructor, [byte]) ||
+			byte < 0 ||
+			byte > 255
+		)
+			return discardOwnedCopy(copy);
+		copy[index] = byte;
 	}
 
-	const copy = new Uint8Array(lengthValue);
-	for (let index = 0; index < lengthValue; index += 1) copy[index] = values[index];
 	return makeSuccess(copy);
 }
