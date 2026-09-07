@@ -1,3 +1,2 @@
 - Fixed Windows worker startup deadlines, session lease contention, and UTF-8 Python execution.
 - Fixed deleted subagents returning in saved display state and duplicate cleanup failure notices.
-- Fixed Windows native tilde expansion.

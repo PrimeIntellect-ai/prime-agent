@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter } from "node:path";
+import { delimiter, win32 } from "node:path";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
 import { spawnHidden, spawnSyncHidden } from "./child-process.js";
@@ -12,7 +12,8 @@ export interface ShellConfig {
 /** System32\bash.exe is the WSL launcher (runs Linux-side), so %SystemRoot% matches are only a last resort. */
 export function orderWindowsBashCandidates(matches: readonly string[], systemRoot: string | undefined): string[] {
 	if (!systemRoot) return [...matches];
-	const underSystemRoot = (match: string) => match.toLowerCase().startsWith(`${systemRoot.toLowerCase()}\\`);
+	const prefix = win32.join(systemRoot, "\\").toLowerCase();
+	const underSystemRoot = (match: string) => win32.normalize(match).toLowerCase().startsWith(prefix);
 	return [...matches.filter((match) => !underSystemRoot(match)), ...matches.filter(underSystemRoot)];
 }
 

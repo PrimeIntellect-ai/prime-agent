@@ -69,3 +69,21 @@ it("orderWindowsBashCandidates prefers any other bash over WSL's System32 trampo
 	expect(orderWindowsBashCandidates([wsl], "C:\\Windows")).toEqual([wsl]);
 	expect(orderWindowsBashCandidates([wsl, scoopGitBash], undefined)).toEqual([wsl, scoopGitBash]);
 });
+
+it.each(["C:\\Windows", "C:\\Windows\\", "C:/Windows/", "c:\\WINDOWS\\\\"])(
+	"normalizes candidate comparisons under %s without changing paths or stable order",
+	(systemRoot) => {
+		const wsl = "C:/Windows/System32/bash.exe";
+		const neighboringDirectory = "C:\\WindowsExtra\\bash.exe";
+		const scoop = "C:\\Users\\u\\scoop\\shims\\bash.exe";
+		const winget = "D:/Git/bin/bash.exe";
+		expect(orderWindowsBashCandidates([wsl, neighboringDirectory, scoop, winget], systemRoot)).toEqual([
+			neighboringDirectory,
+			scoop,
+			winget,
+			wsl,
+		]);
+		const backslashWsl = wsl.replaceAll("/", "\\");
+		expect(orderWindowsBashCandidates([backslashWsl, scoop], systemRoot)).toEqual([scoop, backslashWsl]);
+	},
+);
