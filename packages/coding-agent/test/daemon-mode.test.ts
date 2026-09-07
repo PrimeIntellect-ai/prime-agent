@@ -85,10 +85,9 @@ describe("daemon mode helpers", () => {
 				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 				createRuntime: vi.fn(),
 			});
-			// Watcher off: the worker has no TTY and must not hold a theme file watcher.
+			// Extensions receive this proxy via ctx.ui.theme; the watcher stays off in the headless worker.
 			expect(initSpy).toHaveBeenCalledOnce();
 			expect(initSpy.mock.calls[0]?.[1]).toBe(false);
-			// ctx.ui.theme hands extensions this proxy; the first access must not throw.
 			expect(() => themeModule.theme.fg("dim", "worker")).not.toThrow();
 		} finally {
 			initSpy.mockRestore();

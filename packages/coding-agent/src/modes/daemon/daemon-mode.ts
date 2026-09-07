@@ -597,9 +597,7 @@ export class AgentDaemon {
 			throw new Error("Daemon config is missing agentDir");
 		}
 		this.agentDir = options.defaultSessionConfig.agentDir;
-		// Hosted extensions receive ctx.ui.theme; without a process-level init the
-		// first theme access throws and the uncaught handler kills the worker.
-		// Headless process: no theme file watcher.
+		// Hosted extensions get ctx.ui.theme; init it headlessly (no TTY, watcher off) or their first access kills the worker.
 		initTheme(
 			SettingsManager.create(options.defaultSessionConfig.cwd ?? process.cwd(), this.agentDir).getTheme(),
 			false,
