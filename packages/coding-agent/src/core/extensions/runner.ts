@@ -258,7 +258,7 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
-	// One host object handed runner-to-runner on adoption, so error reporting and scheduling authority always follow the adopting runner. Weak tracking: a timer cancelled via the global clearTimeout/clearInterval is dropped by GC instead of retained until unload; pending timers stay reachable through Node's active-timer list.
+	// WeakRefs let GC drop globally cleared timers; pending timers stay reachable via Node's active-timer list.
 	private timerHost: {
 		current: ExtensionRunner;
 		timers: Set<WeakRef<ReturnType<typeof setTimeout>>>;
@@ -489,13 +489,13 @@ export class ExtensionRunner {
 		return this.extensions === extensions;
 	}
 
-	/** Runtime-only rebuilds keep the same extension world: take over the previous runner's timer host so already-scheduled (and old-ctx-scheduled) timers report through, and are gated by, the adopting runner. */
+	/** Take over the previous runner's timer host: adopted timers report through, and are gated by, this runner. */
 	adoptHostTimers(previous: ExtensionRunner): void {
 		this.timerHost = previous.timerHost;
 		this.timerHost.current = this;
 	}
 
-	/** Runner-local retirement for runner replacement: ctx goes stale and no host timer outlives the runner, while the runtime object stays live for the replacement runner (it may be shared or reused). */
+	/** Retire a replaced runner: ctx goes stale and no host timer outlives it, while the possibly shared/reused runtime stays live. */
 	retire(
 		message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 	): void {
@@ -579,7 +579,6 @@ export class ExtensionRunner {
 		this.timerHost.refs.delete(handle);
 	}
 
-	// Instance method invoked via timerHost.current so adopted timers report through the runner that owns the live error listener.
 	private emitHostTimerError(kind: "setTimeout" | "setInterval", ownerPath: string | undefined, err: unknown): void {
 		this.emitError({
 			extensionPath: ownerPath ?? "unknown",

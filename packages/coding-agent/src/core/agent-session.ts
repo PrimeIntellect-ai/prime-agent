@@ -9357,7 +9357,7 @@ export class AgentSession {
 			this.sessionManager,
 			this._modelRegistry,
 		);
-		// Retire only when the extension world restarts (reload: fresh extensions, session_start re-fires). Runtime-only rebuilds (MCP set, heartbeat controller) share the timer registry instead, so session_start timers keep running and unload still cancels them.
+		// Retire only when the extension world restarts (reload); runtime-only rebuilds adopt the timer host instead, so session_start timers survive and unload still cancels them.
 		if (previousRunner) {
 			if (previousRunner.builtFromSameExtensions(extensionsResult.extensions)) {
 				this._extensionRunner.adoptHostTimers(previousRunner);
