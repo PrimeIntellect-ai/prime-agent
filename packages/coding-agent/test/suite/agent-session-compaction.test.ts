@@ -1478,6 +1478,31 @@ describe("AgentSession compaction characterization", () => {
 		expect(clampNotices()).toHaveLength(1);
 	});
 
+	it("keeps the turn alive when persisting the clamp notice fails", async () => {
+		const harness = await createHarness({
+			settings: {
+				compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1000, maxContextTokens: 1 },
+			},
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		vi.spyOn(internals, "_runAutoCompaction").mockResolvedValue();
+		vi.spyOn(harness.session.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+
+		await internals._checkCompaction(
+			createAssistant(harness, { stopReason: "stop", totalTokens: 1, timestamp: Date.now() }),
+		);
+
+		expect(
+			harness.session.agent.state.messages.some(
+				(message) => message.role === "custom" && message.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+			),
+		).toBe(true);
+	});
+
 	it("does not trigger threshold compaction below the threshold or when disabled", async () => {
 		const belowThresholdHarness = await createHarness({
 			settings: { compaction: { enabled: true, reserveTokens: 1000 } },

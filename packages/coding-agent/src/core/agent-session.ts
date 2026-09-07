@@ -2913,7 +2913,16 @@ export class AgentSession {
 			details: undefined,
 			timestamp: Date.now(),
 		};
-		this.sessionManager.appendCustomMessageEntry(notice.customType, notice.content, notice.display, notice.details);
+		try {
+			this.sessionManager.appendCustomMessageEntryWithRollback(
+				notice.customType,
+				notice.content,
+				notice.display,
+				notice.details,
+			);
+		} catch {
+			// Best-effort disclosure: a failed session write must not fail the turn; the notice still shows in-memory.
+		}
 		this.agent.state.messages.push(notice);
 		this._emit({ type: "message_start", message: notice });
 		this._emit({ type: "message_end", message: notice });
