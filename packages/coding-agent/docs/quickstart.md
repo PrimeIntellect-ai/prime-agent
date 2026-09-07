@@ -61,7 +61,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 preme-agent
 ```
 
-You can also run `/login` and select an API-key provider to store the key in `~/.supreme/agent/auth.json`.
+You can also run `/login` and select an API-key provider to store the key in `~/.preme-agent/auth.json`.
 
 See [Providers](providers.md) for all supported providers, environment variables, and cloud-provider setup.
 
@@ -103,7 +103,7 @@ Preme Agent loads context files at startup. Add an `AGENTS.md` file to tell it h
 
 Preme Agent loads:
 
-- `~/.supreme/agent/AGENTS.md` for global instructions
+- `~/.preme-agent/AGENTS.md` for global instructions
 - `AGENTS.md` or `CLAUDE.md` from parent directories and the current directory
 
 Restart Preme Agent, or run `/reload`, after changing context files.
@@ -137,7 +137,7 @@ Use `/model` or Ctrl+L to choose a model. Use `/effort` to set the reasoning lev
 
 ### Continue Later
 
-Sessions are saved automatically under `~/.supreme/agent/sessions/`:
+Sessions are saved automatically under `~/.preme-agent/sessions/`:
 
 ```bash
 preme-agent -c                  # Continue the most recent session

@@ -3,6 +3,7 @@ import { APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
 import { AuthStorage } from "../core/auth-storage.js";
 import { runMcpManagementCommand } from "../core/mcp/mcp-command.js";
 import { SettingsManager } from "../core/settings-manager.js";
+import { runDoctorChecks } from "../doctor.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
 import {
@@ -259,10 +260,18 @@ async function runStatus(args: string[]): Promise<PublicCommandResult> {
 async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	const options = parseBooleanOptions(args, new Set(["--fix", "--json"]), "doctor");
 	if (!options) return HANDLED;
+	const report = runDoctorChecks(options.has("--fix"));
+	if (options.has("--json")) {
+		console.log(JSON.stringify(report));
+		return HANDLED;
+	}
+	for (const check of report.checks) {
+		console.log(`${check.ok ? "ok" : "error"} ${check.name}: ${check.detail}`);
+	}
 	if (options.has("--fix")) {
-		await runReap(options.has("--json"), false);
+		await runReap(false, false);
 	} else {
-		await runPs(options.has("--json"));
+		await runPs(false);
 	}
 	return HANDLED;
 }

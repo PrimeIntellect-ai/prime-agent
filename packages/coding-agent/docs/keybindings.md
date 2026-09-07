@@ -1,6 +1,6 @@
 # Keybindings
 
-All keyboard shortcuts can be customized via `~/.supreme/agent/keybindings.json`. Each action can be bound to one or more keys.
+All keyboard shortcuts can be customized via `~/.preme-agent/keybindings.json`. Each action can be bound to one or more keys.
 
 The config file uses the same namespaced keybinding ids that Preme Agent uses internally and that extension authors use in `keyHint()` and injected `keybindings` managers.
 
@@ -164,7 +164,7 @@ Used inside the scoped models selector (opened via `/scoped-models`).
 
 ## Custom Configuration
 
-Create `~/.supreme/agent/keybindings.json`:
+Create `~/.preme-agent/keybindings.json`:
 
 ```json
 {

@@ -16,7 +16,7 @@ export function writeFileLogEntry(entry: LogEntry): void {
 
 /**
  * Route all structured logging (coding-agent and pi-ai) to the shared JSONL
- * log at ~/.supreme/agent/logs/agent.jsonl. One master file, filterable by the
+ * log at ~/.preme-agent/logs/agent.jsonl. One master file, filterable by the
  * pid/context fields; writes are best-effort and size-bounded.
  */
 export function installFileLogSink(fields?: Record<string, unknown>): void {

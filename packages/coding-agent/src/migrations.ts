@@ -444,25 +444,50 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
  */
 
 /**
- * Migrate user data from ~/.supreme/agent to ~/.supreme/agent.
- *
- * This runs once on startup when the new ~/.supreme/agent directory does not
- * yet exist, but the legacy ~/.supreme/agent directory does. All files are
- * copied so auth, sessions, settings, and extensions survive the rebrand.
+ * Migrate user data from an old agent directory into ~/.preme-agent.
  */
-export function migratePrimeToSupremeDir(
-	legacyDir: string = join(homedir(), ".prime", "agent"),
-	newDir: string = getAgentDir(),
-): void {
+export function migrateLegacyAgentDir(legacyDir: string, newDir: string = getAgentDir()): void {
 	if (!existsSync(legacyDir)) return;
-	if (existsSync(newDir)) return;
 
 	try {
 		mkdirSync(dirname(newDir), { recursive: true });
-		copyRecursiveSync(legacyDir, newDir);
+		if (existsSync(newDir)) {
+			copyRecursiveMissingSync(legacyDir, newDir);
+		} else {
+			copyRecursiveSync(legacyDir, newDir);
+		}
 	} catch {
-		// Best-effort migration; if it fails, the user still has .supreme/agent
-		// and can manually copy or set PRIME_AGENT_CODING_AGENT_DIR.
+		// Best-effort migration. The legacy directory remains available for recovery.
+	}
+}
+
+/** Migrate known legacy config roots in order of newest to oldest. */
+export function migrateLegacyAgentDirectories(newDir: string = getAgentDir()): void {
+	for (const legacyDir of [
+		join(homedir(), ".supreme", "agent"),
+		join(homedir(), ".prime", "agent"),
+		join(homedir(), ".pi", "agent"),
+	]) {
+		if (existsSync(newDir)) return;
+		migrateLegacyAgentDir(legacyDir, newDir);
+	}
+}
+
+/** @deprecated Use migrateLegacyAgentDir for explicit source and destination paths. */
+export function migratePrimeToSupremeDir(legacyDir: string, newDir: string = getAgentDir()): void {
+	migrateLegacyAgentDir(legacyDir, newDir);
+}
+
+function copyRecursiveMissingSync(src: string, dst: string): void {
+	for (const entry of readdirSync(src, { withFileTypes: true })) {
+		const srcPath = join(src, entry.name);
+		const dstPath = join(dst, entry.name);
+		if (entry.isDirectory()) {
+			mkdirSync(dstPath, { recursive: true });
+			copyRecursiveMissingSync(srcPath, dstPath);
+		} else if (!existsSync(dstPath)) {
+			copyFileSync(srcPath, dstPath);
+		}
 	}
 }
 
@@ -489,7 +514,7 @@ export function runMigrations(cwd: string): {
 	migratedAuthProviders: string[];
 	deprecationWarnings: string[];
 } {
-	migratePrimeToSupremeDir();
+	migrateLegacyAgentDirectories();
 	const migratedAuthProviders = migrateAuthToAuthJson();
 	migrateSessionsFromAgentRoot();
 	migrateLegacySessionDirsToSessionRoot();

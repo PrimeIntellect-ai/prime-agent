@@ -76,7 +76,7 @@ The Python side does not call providers or implement an agent loop.
 The kernel is created lazily on first Python REPL use. Python resolution is:
 
 1. `PRIME_AGENT_KERNEL_PYTHON`, when it has a current `prime-agent-runtime`;
-2. `~/.supreme/agent/kernel-venv/bin/python`, bootstrapped with `uv`; or
+2. `~/.preme-agent/kernel-venv/bin/python`, bootstrapped with `uv`; or
 3. the XDG data location when `~/.prime` is not writable.
 
 The managed environment includes Python 3.11, `prime-agent-runtime`, `dill`, and the default Python packages. A bootstrap marker detects stale environments.
@@ -188,7 +188,7 @@ On reload, the aggregate is reapplied to the parent message. Context-tree report
 
 `rlm.harness` is a persisted state ledger for prompt notes, memories, reusable skill descriptions, sub-agent specifications, and refinement events. It is not a second execution engine.
 
-Session-local state lives in the session artifact directory under `harness/harness_state.json`. Explicitly global entries live under `~/.supreme/agent/harness/`. The Python store reloads after external modification so host-side `/refine` writes and kernel writes do not overwrite each other.
+Session-local state lives in the session artifact directory under `harness/harness_state.json`. Explicitly global entries live under `~/.preme-agent/harness/`. The Python store reloads after external modification so host-side `/refine` writes and kernel writes do not overwrite each other.
 
 `/refine` runs a dedicated review over the current trajectory and applies small create/update/delete edits. Rollback uses recorded before/after snapshots. The base system prompt remains immutable; refinements are supplemental state.
 
@@ -209,7 +209,7 @@ Goal state, persistence, token and wall-clock accounting, and continuation promp
 For a persisted root session, the relevant layout is:
 
 ```text
-~/.supreme/agent/
+~/.preme-agent/
   sessions/
     <root-session-id>.jsonl
   session-artifacts/

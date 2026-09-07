@@ -9,7 +9,7 @@ Example extensions for Preme Agent.
 ./prime-agent.sh --extension packages/coding-agent/examples/extensions/permission-gate.ts
 
 # Or copy to extensions directory for auto-discovery
-cp permission-gate.ts ~/.supreme/agent/extensions/
+cp permission-gate.ts ~/.preme-agent/extensions/
 ```
 
 ## Examples

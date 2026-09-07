@@ -4,7 +4,7 @@
 
 Extensions are TypeScript modules that extend Preme Agent's behavior. They can subscribe to lifecycle events, register custom tools callable by the LLM, add commands, and more.
 
-> **Placement for /reload:** Put extensions in `~/.supreme/agent/extensions/` (global) or `.supreme/agent/extensions/` (project-local) for auto-discovery. Use `preme-agent -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
+> **Placement for /reload:** Put extensions in `~/.preme-agent/extensions/` (global) or `.preme-agent/extensions/` (project-local) for auto-discovery. Use `preme-agent -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
 
 **Key capabilities:**
 - **Custom tools** - Register tools the LLM can call via `pi.registerTool()`
@@ -54,7 +54,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 
 ## Quick Start
 
-Create `~/.supreme/agent/extensions/my-extension.ts`:
+Create `~/.preme-agent/extensions/my-extension.ts`:
 
 ```typescript
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -113,10 +113,10 @@ Extensions are auto-discovered from:
 
 | Location | Scope |
 |----------|-------|
-| `~/.supreme/agent/extensions/*.ts` | Global (all projects) |
-| `~/.supreme/agent/extensions/*/index.ts` | Global (subdirectory) |
-| `.supreme/agent/extensions/*.ts` | Project-local |
-| `.supreme/agent/extensions/*/index.ts` | Project-local (subdirectory) |
+| `~/.preme-agent/extensions/*.ts` | Global (all projects) |
+| `~/.preme-agent/extensions/*/index.ts` | Global (subdirectory) |
+| `.preme-agent/extensions/*.ts` | Project-local |
+| `.preme-agent/extensions/*/index.ts` | Project-local (subdirectory) |
 
 Additional paths via `settings.json`:
 
@@ -221,14 +221,14 @@ This pattern makes the fetched models available during normal startup and to `pr
 **Single file** - simplest, for small extensions:
 
 ```
-~/.supreme/agent/extensions/
+~/.preme-agent/extensions/
 └── my-extension.ts
 ```
 
 **Directory with index.ts** - for multi-file extensions:
 
 ```
-~/.supreme/agent/extensions/
+~/.preme-agent/extensions/
 └── my-extension/
     ├── index.ts        # Entry point (exports default function)
     ├── tools.ts        # Helper module
@@ -238,7 +238,7 @@ This pattern makes the fetched models available during normal startup and to `pr
 **Package with dependencies** - for extensions that need npm packages:
 
 ```
-~/.supreme/agent/extensions/
+~/.preme-agent/extensions/
 └── my-extension/
     ├── package.json    # Declares dependencies and entry points
     ├── package-lock.json

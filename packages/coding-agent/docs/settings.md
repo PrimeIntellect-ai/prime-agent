@@ -4,8 +4,8 @@ Preme Agent uses JSON settings files with project settings overriding global set
 
 | Location | Scope |
 |----------|-------|
-| `~/.supreme/agent/settings.json` | Global (all projects) |
-| `.supreme/agent/settings.json` | Project (current directory) |
+| `~/.preme-agent/settings.json` | Global (all projects) |
+| `.preme-agent/settings.json` | Project (current directory) |
 
 Edit directly or use `/settings` for common options.
 
@@ -92,7 +92,7 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 
 Preme Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
 
-Preme Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.supreme/agent/`).
+Preme Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.preme-agent/`).
 
 Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.
 
@@ -268,7 +268,7 @@ Normally the package manager's global modules location is queried using `root -g
 |---------|------|---------|-------------|
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
 
-`idleEvictionMinutes` is a global daemon policy and is read only from `~/.supreme/agent/settings.json`. Set it to a positive number to configure the idle threshold.
+`idleEvictionMinutes` is a global daemon policy and is read only from `~/.preme-agent/settings.json`. Set it to a positive number to configure the idle threshold.
 
 ### Sessions
 
@@ -277,7 +277,7 @@ Normally the package manager's global modules location is queried using `root -g
 | `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
 
 ```json
-{ "sessionDir": ".supreme/agent/sessions" }
+{ "sessionDir": ".preme-agent/sessions" }
 ```
 
 When multiple sources specify a session directory, precedence is `--session-dir`, `PRIME_AGENT_SESSION_DIR`, the legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in `settings.json`.
@@ -304,7 +304,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 These settings define where to load extensions, skills, prompts, and themes from.
 
-Paths in `~/.supreme/agent/settings.json` resolve relative to `~/.supreme/agent`. Paths in `.supreme/agent/settings.json` resolve relative to `.supreme/agent`. Absolute paths and `~` are supported.
+Paths in `~/.preme-agent/settings.json` resolve relative to `~/.preme-agent`. Paths in `.preme-agent/settings.json` resolve relative to `.preme-agent`. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -382,16 +382,16 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.supreme/agent/settings.json`) override global settings. Nested objects are merged:
+Project settings (`.preme-agent/settings.json`) override global settings. Nested objects are merged:
 
 ```json
-// ~/.supreme/agent/settings.json (global)
+// ~/.preme-agent/settings.json (global)
 {
   "theme": "dark",
   "compaction": { "enabled": true, "reserveTokens": 16384 }
 }
 
-// .supreme/agent/settings.json (project)
+// .preme-agent/settings.json (project)
 {
   "compaction": { "reserveTokens": 8192 }
 }

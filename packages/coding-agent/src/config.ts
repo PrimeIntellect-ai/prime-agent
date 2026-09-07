@@ -42,7 +42,7 @@ export const SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE = 75;
 // Install Method Detection
 // =============================================================================
 
-export type InstallMethod = "bun-binary" | "homebrew" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+export type InstallMethod = "source" | "bun-binary" | "homebrew" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 
 interface SelfUpdateCommandStep {
 	command: string;
@@ -89,9 +89,18 @@ export function detectInstallMethod(): InstallMethod {
 	if (isHomebrewInstall()) {
 		return "homebrew";
 	}
+	if (getSourceCheckoutDir()) {
+		return "source";
+	}
 
 	const resolvedPath = `${__dirname}\0${process.execPath || ""}`.toLowerCase().replace(/\\/g, "/");
 
+	if (
+		resolvedPath.includes("/.preme-agent/packages/coding-agent/") ||
+		resolvedPath.includes("/.preme-agent\\packages\\coding-agent\\")
+	) {
+		return "source";
+	}
 	if (resolvedPath.includes("/pnpm/") || resolvedPath.includes("/.pnpm/")) {
 		return "pnpm";
 	}
@@ -159,6 +168,29 @@ function getSelfUpdateCommandForMethod(
 ): SelfUpdateCommand | undefined {
 	const uninstallAfterInstall = isDirectPackageArtifactSpec(updateSpec);
 	switch (method) {
+		case "source": {
+			const sourceDir = getSourceCheckoutDir();
+			if (!sourceDir) return undefined;
+			const codingAgentDir = join(sourceDir, "packages", "coding-agent");
+			return {
+				command: "git",
+				args: ["-C", sourceDir, "pull", "--ff-only", "origin", "main"],
+				display: `git -C ${sourceDir} pull --ff-only origin main`,
+				steps: [
+					{
+						command: "git",
+						args: ["-C", sourceDir, "pull", "--ff-only", "origin", "main"],
+						display: `git -C ${sourceDir} pull --ff-only origin main`,
+					},
+					{ command: "npm", args: ["--prefix", sourceDir, "ci"], display: `npm --prefix ${sourceDir} ci` },
+					{
+						command: "npm",
+						args: ["--prefix", codingAgentDir, "link"],
+						display: `npm --prefix ${codingAgentDir} link`,
+					},
+				],
+			};
+		}
 		case "bun-binary":
 		case "homebrew":
 			return undefined;
@@ -258,6 +290,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 			}
 			return roots;
 		}
+		case "source":
 		case "bun-binary":
 		case "homebrew":
 		case "unknown":
@@ -282,6 +315,13 @@ function normalizeExistingPathForComparison(path: string): string | undefined {
 	return normalizedPath;
 }
 
+function getSourceCheckoutDir(): string | undefined {
+	const packageDir = getPackageDir();
+	if (!packageDir.endsWith(join("packages", "coding-agent"))) return undefined;
+	const sourceDir = dirname(dirname(packageDir));
+	return existsSync(join(sourceDir, ".git")) ? sourceDir : undefined;
+}
+
 function isSelfUpdatePathWritable(): boolean {
 	const packageDir = getPackageDir();
 	try {
@@ -294,6 +334,7 @@ function isSelfUpdatePathWritable(): boolean {
 }
 
 function isManagedByGlobalPackageManager(method: InstallMethod, packageName: string, npmCommand?: string[]): boolean {
+	if (method === "source") return !!getSourceCheckoutDir();
 	const packageDir = normalizeExistingPathForComparison(getPackageDir());
 	return (
 		!!packageDir &&
@@ -495,7 +536,7 @@ const envPrefix =
 export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
 export const APP_NAME: string = piConfigName || "pi";
 export const APP_TITLE: string = "Preme Agent";
-export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".supreme/agent";
+export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".preme-agent";
 export const VERSION: string = pkg.version || "0.0.0";
 
 // e.g., PI_CODING_AGENT_DIR or PRIME_AGENT_CODING_AGENT_DIR
@@ -523,10 +564,10 @@ export function getShareViewerUrl(gistId: string): string {
 }
 
 // =============================================================================
-// User Config Paths (~/.supreme/agent/*)
+// User Config Paths (~/.preme-agent/*)
 // =============================================================================
 
-/** Get the agent config directory (e.g., ~/.supreme/agent/) */
+/** Get the agent config directory (e.g., ~/.preme-agent/) */
 export function getAgentDir(): string {
 	const envDir = process.env[ENV_AGENT_DIR] ?? process.env[ENV_AGENT_DIR_LEGACY];
 	if (envDir) {
@@ -540,7 +581,7 @@ export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
-/** Directory where daemon and client diagnostic logs are written (e.g. ~/.supreme/agent/logs/). */
+/** Directory where daemon and client diagnostic logs are written (e.g. ~/.preme-agent/logs/). */
 export function getLogsDir(): string {
 	return join(getAgentDir(), "logs");
 }

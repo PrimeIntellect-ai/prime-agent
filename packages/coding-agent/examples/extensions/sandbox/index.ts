@@ -10,10 +10,10 @@
  * via `tool_call` input mutation without replacing the tool.
  *
  * Config files (merged, project takes precedence):
- * - ~/.supreme/agent/extensions/sandbox.json (global)
- * - <cwd>/.supreme/agent/sandbox.json (project-local)
+ * - ~/.preme-agent/extensions/sandbox.json (global)
+ * - <cwd>/.preme-agent/sandbox.json (project-local)
  *
- * Example .supreme/agent/sandbox.json:
+ * Example .preme-agent/sandbox.json:
  * ```json
  * {
  *   "enabled": true,
@@ -35,8 +35,8 @@
  * - `/sandbox` - show current sandbox configuration
  *
  * Setup:
- * 1. Copy sandbox/ directory to ~/.supreme/agent/extensions/
- * 2. Run `npm install` in ~/.supreme/agent/extensions/sandbox/
+ * 1. Copy sandbox/ directory to ~/.preme-agent/extensions/
+ * 2. Run `npm install` in ~/.preme-agent/extensions/sandbox/
  *
  * Linux also requires: bubblewrap, socat, ripgrep
  */

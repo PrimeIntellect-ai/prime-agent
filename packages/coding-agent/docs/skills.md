@@ -27,10 +27,10 @@ Preme Agent implements the [Agent Skills standard](https://agentskills.io/specif
 Preme Agent loads skills from:
 
 - Global:
-  - `~/.supreme/agent/skills/`
+  - `~/.preme-agent/skills/`
   - `~/.agents/skills/`
 - Project:
-  - `.supreme/agent/skills/`
+  - `.preme-agent/skills/`
   - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
 - Packages: `skills/` directories or `pi.skills` entries in `package.json`
 - Settings: `skills` array with files or directories
@@ -38,7 +38,7 @@ Preme Agent loads skills from:
 - Built-in: `skills/` shipped with the preme-agent package (lowest precedence)
 
 Discovery rules:
-- In `~/.supreme/agent/skills/` and `.supreme/agent/skills/`, direct root `.md` files are discovered as individual skills
+- In `~/.preme-agent/skills/` and `.preme-agent/skills/`, direct root `.md` files are discovered as individual skills
 - In all skill locations, directories containing `SKILL.md` are discovered recursively
 - In `~/.agents/skills/` and project `.agents/skills/`, root `.md` files are ignored
 
@@ -119,7 +119,7 @@ To use skills from Claude Code or OpenAI Codex, add their directories to setting
 }
 ```
 
-For project-level Claude Code skills, add to `.supreme/agent/settings.json`:
+For project-level Claude Code skills, add to `.preme-agent/settings.json`:
 
 ```json
 {
@@ -165,7 +165,7 @@ await web_search.run("prime agent skills")
 help(web_search)
 ```
 
-Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.supreme/agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Preme Agent rebuilds the kernel venv so dependency changes are picked up.
+Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.preme-agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Preme Agent rebuilds the kernel venv so dependency changes are picked up.
 
 If you set `PRIME_AGENT_KERNEL_PYTHON`, Prime Agent does not install packages into that environment. The Python must already have a current `prime-agent-runtime` and the default runtime packages installed. Missing Python skill imports are disabled with a warning and calling the skill raises a `RuntimeError`.
 
@@ -204,7 +204,7 @@ Preme Agent ships with a built-in `skill-creator` skill that teaches the agent b
 
 ```text
 Create a project Python-backed skill named release-audit in
-.supreme/agent/skills/release-audit. It should expose
+.preme-agent/skills/release-audit. It should expose
 await release_audit(repository, target_version), include concise SKILL.md
 instructions, declare its dependencies, and verify the callable in a fresh
 Preme Agent session.
@@ -218,7 +218,7 @@ To force the creation workflow explicitly, invoke the built-in skill command:
 
 Tell the agent three things:
 
-1. **Scope:** use `.supreme/agent/skills/<name>/` for a project skill committed with the repository, or `~/.supreme/agent/skills/<name>/` for a personal skill.
+1. **Scope:** use `.preme-agent/skills/<name>/` for a project skill committed with the repository, or `~/.preme-agent/skills/<name>/` for a personal skill.
 2. **Kind:** ask for a markdown skill when the capability is primarily instructions; ask for a Python-backed skill when the agent should call reusable functionality from the Python REPL.
 3. **Contract:** describe the intended Python call, inputs, output, dependencies, credentials, and verification behavior.
 

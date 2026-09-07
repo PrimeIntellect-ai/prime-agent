@@ -412,7 +412,7 @@ describe("detectInstallMethod", () => {
 
 describe("session paths", () => {
 	test("uses the short app-prefixed session dir env var", () => {
-		expect(ENV_SESSION_DIR).toBe("SUPREME_AGENT_SESSION_DIR");
+		expect(ENV_SESSION_DIR).toBe("PREME_AGENT_SESSION_DIR");
 	});
 
 	test("uses the session root env var when computing sessions dir", () => {

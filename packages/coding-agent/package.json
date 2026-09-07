@@ -5,7 +5,7 @@
 	"type": "module",
 	"piConfig": {
 		"name": "preme-agent",
-		"configDir": ".supreme/agent"
+		"configDir": ".preme-agent"
 	},
 	"bin": {
 		"preme-agent": "bin/preme-agent.cjs",

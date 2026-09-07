@@ -20,7 +20,7 @@ Use `/login` in interactive mode, then select a provider:
 - GitHub Copilot
 - xAI Grok (eligible subscriptions)
 
-Use `/logout` to clear credentials. Tokens are stored in `~/.supreme/agent/auth.json` and auto-refresh when expired.
+Use `/logout` to clear credentials. Tokens are stored in `~/.preme-agent/auth.json` and auto-refresh when expired.
 
 ### OpenAI Codex
 
@@ -94,7 +94,7 @@ Reference for environment variables and `auth.json` keys: [`env-api-keys.ts`](..
 
 #### Auth File
 
-Store credentials in `~/.supreme/agent/auth.json`:
+Store credentials in `~/.preme-agent/auth.json`:
 
 ```json
 {

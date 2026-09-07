@@ -26,7 +26,13 @@ curl -fsSL https://raw.githubusercontent.com/JonusNattapong/preme-agent/main/ins
 
 The installer keeps the checkout in `~/.preme-agent`, installs dependencies, and links the `preme-agent` command. Set `PREME_AGENT_SOURCE_DIR` to use a different location.
 
-On Windows PowerShell, use the source setup below. The shell installer requires a POSIX-compatible shell such as Git Bash or WSL.
+On Windows PowerShell, use the native installer:
+
+```powershell
+irm https://raw.githubusercontent.com/JonusNattapong/preme-agent/main/install.ps1 | iex
+```
+
+The shell installer requires a POSIX-compatible shell such as Git Bash or WSL.
 
 ## Requirements
 

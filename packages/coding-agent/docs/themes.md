@@ -19,8 +19,8 @@ Themes are JSON files that define colors for the TUI.
 Preme Agent loads themes from:
 
 - Built-in: `dark`, `light`
-- Global: `~/.supreme/agent/themes/*.json`
-- Project: `.supreme/agent/themes/*.json`
+- Global: `~/.preme-agent/themes/*.json`
+- Project: `.preme-agent/themes/*.json`
 - Packages: `themes/` directories or `pi.themes` entries in `package.json`
 - Settings: `themes` array with files or directories
 - CLI: `--theme <path>` (repeatable)
@@ -44,8 +44,8 @@ On first run, Preme Agent detects your terminal background and defaults to `dark
 1. Create a theme file:
 
 ```bash
-mkdir -p ~/.supreme/agent/themes
-vim ~/.supreme/agent/themes/my-theme.json
+mkdir -p ~/.preme-agent/themes
+vim ~/.preme-agent/themes/my-theme.json
 ```
 
 2. Define the theme with all required colors (see [Color Tokens](#color-tokens)):

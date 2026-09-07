@@ -5,14 +5,14 @@ Sessions are stored as JSONL (JSON Lines) files. Each line is a JSON object with
 ## File Location
 
 ```
-~/.supreme/agent/sessions/<session-id>.jsonl
+~/.preme-agent/sessions/<session-id>.jsonl
 ```
 
 The header records the working directory. Current releases keep sessions in a flat directory; older per-project directories are migrated automatically.
 
 ## Deleting Sessions
 
-Sessions can be removed by deleting their `.jsonl` files under `~/.supreme/agent/sessions/`.
+Sessions can be removed by deleting their `.jsonl` files under `~/.preme-agent/sessions/`.
 
 Preme Agent also supports deleting sessions interactively from `/resume` (select a session and press `Ctrl+D`, then confirm). When available, Preme Agent uses the `trash` CLI to avoid permanent deletion.
 

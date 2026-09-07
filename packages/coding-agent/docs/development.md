@@ -34,7 +34,7 @@ Public releases are currently versioned tarball artifacts installed by the stabl
 
 ## Local Configuration
 
-User configuration lives under `~/.supreme/agent/`. Project-local settings, prompts, themes, extensions, skills, and system-prompt files live under `.supreme/agent/` in the project root. Override the user config directory with `PRIME_AGENT_CODING_AGENT_DIR` and the session directory with `PRIME_AGENT_SESSION_DIR`.
+User configuration lives under `~/.preme-agent/`. Project-local settings, prompts, themes, extensions, skills, and system-prompt files live under `.preme-agent/` in the project root. Override the user config directory with `PRIME_AGENT_CODING_AGENT_DIR` and the session directory with `PRIME_AGENT_SESSION_DIR`.
 
 Use an isolated config directory when manually exercising daemon behavior so development sessions do not collide with normal sessions:
 
@@ -58,7 +58,7 @@ Do not resolve packaged assets directly from `__dirname`.
 
 ## Debugging
 
-The hidden `/debug` command writes `~/.supreme/agent/prime-agent-debug.log` with rendered TUI lines, their visible widths, and the current agent messages. Daemon, worker, client, and provider diagnostic logs live under `~/.supreme/agent/logs/`.
+The hidden `/debug` command writes `~/.preme-agent/prime-agent-debug.log` with rendered TUI lines, their visible widths, and the current agent messages. Daemon, worker, client, and provider diagnostic logs live under `~/.preme-agent/logs/`.
 
 Useful service commands:
 
