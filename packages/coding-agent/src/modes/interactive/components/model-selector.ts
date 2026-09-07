@@ -569,7 +569,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private filterModels(query: string): void {
 		const queryChanged = query !== this.searchQuery;
 		this.searchQuery = query;
-		if (query.trim()) {
+		const trimmedQuery = query.trim();
+		if (trimmedQuery) {
 			const matches = this.activeModels.flatMap((item) => {
 				const match = scoreModelSearch(item, query);
 				return match ? [{ item, ...match }] : [];
@@ -585,7 +586,43 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					this.recentRankOf(a.item) - this.recentRankOf(b.item) ||
 					this.getModelKey(a.item).localeCompare(this.getModelKey(b.item), undefined, { numeric: true }),
 			);
-			this.filteredModels = matches.map(({ item }) => item);
+
+			const filteredModels = matches.map(({ item }) => item);
+			const currentProvider = this.currentModel?.provider;
+			const exactCurrentProviderModel = currentProvider
+				? this.activeModels.find(
+						(item) => item.provider === currentProvider && item.id.toLowerCase() === trimmedQuery.toLowerCase(),
+					)
+				: undefined;
+			const hasCurrentProviderMatch = currentProvider
+				? filteredModels.some((item) => item.provider === currentProvider)
+				: false;
+			const shouldOfferCustomModel =
+				this.scope === "all" &&
+				this.currentModel !== undefined &&
+				exactCurrentProviderModel === undefined &&
+				(trimmedQuery.includes("/") || !hasCurrentProviderMatch);
+
+			if (shouldOfferCustomModel && this.currentModel) {
+				const customModel = {
+					...this.currentModel,
+					id: trimmedQuery,
+					name: trimmedQuery,
+					input: [...this.currentModel.input],
+					cost: { ...this.currentModel.cost },
+					...(this.currentModel.compat ? { compat: { ...this.currentModel.compat } } : {}),
+					...(this.currentModel.thinkingLevelMap
+						? { thinkingLevelMap: { ...this.currentModel.thinkingLevelMap } }
+						: {}),
+					...(this.currentModel.headers ? { headers: { ...this.currentModel.headers } } : {}),
+				};
+				this.filteredModels = [
+					{ provider: customModel.provider, id: customModel.id, model: customModel },
+					...filteredModels,
+				];
+			} else {
+				this.filteredModels = filteredModels;
+			}
 		} else {
 			this.filteredModels = this.activeModels;
 		}

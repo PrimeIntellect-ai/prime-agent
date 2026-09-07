@@ -1,2 +1,3 @@
 - Added Kilo Code and Cline to built-in provider selection with default models and API-key login support.
 - Preferred the source CLI for linked workspace installs so new providers are not hidden by a stale bundle.
+- Allowed arbitrary model IDs to stay on the current provider in the interactive model selector.
