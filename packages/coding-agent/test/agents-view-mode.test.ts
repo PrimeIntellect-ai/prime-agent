@@ -786,37 +786,57 @@ describe("AgentsViewMode", () => {
 			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
 			usage: { inputTokens: 900, outputTokens: 80, cost: 123.45 },
 		});
-		const rows = buildAgentsViewRows([parent, child, inactive]);
+		const empty = summary({
+			id: "empty-draft",
+			activeSessionId: undefined,
+			sessionId: "empty-draft-session",
+			sessionFile: "/tmp/empty-draft.jsonl",
+			rosterStatus: "inactive",
+			messageCount: 0,
+			modified: created,
+		});
+		const rows = buildAgentsViewRows([parent, child, inactive, empty]);
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 		Reflect.set(view, "rows", rows);
 		Reflect.set(view, "selectedIndex", -1);
 		try {
 			const parentRow = rows.find((row) => row.summary.sessionId === parent.sessionId)!;
 			const savedRow = rows.find((row) => row.summary.sessionId === inactive.sessionId)!;
+			const layout = buildCompactAgentsViewLayout(rows, 120);
 			const render = (row: AgentsViewRow, width: number) =>
 				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
 			const parentLine = render(parentRow, 120);
 			const savedLine = render(savedRow, 120);
 			expect(parentLine).toContain("gpt-5.6-sol");
 			expect(savedLine).toContain("glm-5.2-fast");
-			expect(parentLine).toContain("$1.10");
-			expect(parentLine).not.toContain("$0.42");
-			expect(parentLine).not.toMatch(/[↑↓]/);
-			expect(parentLine).toMatch(/2m\s*$/);
-			expect(parentLine.indexOf("$1.10") + "$1.10".length).toBe(savedLine.indexOf("$123.45") + "$123.45".length);
-			for (const width of [60, 80]) {
-				const narrow = render(parentRow, width);
-				expect(narrow).toContain("gpt-5.6-sol");
-				expect(narrow).toContain("$1.10");
-				expect(narrow).toMatch(/2m\s*$/);
-				expect(narrow.length).toBeLessThanOrEqual(width);
-			}
+			// Full #2056 usage cell: tokens, own cost, explicit descendant count, total.
+			expect(parentLine).toContain("↑12k ↓1.2k");
+			expect(parentLine).toMatch(/\$0\.42 ·\s+1 ·\s+\$1\.10 ·\s+2m\s*$/);
+			// Every section's age column ends at the terminal edge.
+			expect(savedLine).toMatch(/\$123\.45 ·\s+2m\s*$/);
+			expect(parentLine.length).toBe(savedLine.length);
+			// The ` · ` separators land in the same column for a section's legend
+			// and each of its rows.
+			const dotColumns = (text: string) => [...text].flatMap((ch, index) => (ch === "·" ? [index] : []));
+			expect(dotColumns(layout.details.get(parentRow.identity)!)).toEqual(dotColumns(layout.legends.get("idle")!));
+			expect(dotColumns(layout.details.get(savedRow.identity)!)).toEqual(
+				dotColumns(layout.legends.get("inactive")!),
+			);
+			// Empty sessions keep only their age, aligned to the age column.
+			const emptyDetails = layout.details.get(rows.find((row) => row.summary.messageCount === 0)!.identity)!;
+			expect(emptyDetails.trim()).toBe("2m");
+			expect(emptyDetails).not.toContain("$");
+			// Activity shrinks first at narrow widths; model and usage survive at 80.
+			const narrow = render(parentRow, 80);
+			expect(narrow).toContain("gpt-5.6-sol");
+			expect(narrow).toMatch(/\$1\.10 ·\s+2m\s*$/);
+			expect(narrow.length).toBeLessThanOrEqual(80);
 		} finally {
 			stopThemeWatcher();
 		}
 	});
 
-	it("renders one column header across status groups without repeating subagent hints", () => {
+	it("puts the bold usage legend on each section header without repeating subagent hints", () => {
 		const summaries = [
 			summary({
 				id: "busy",
@@ -849,10 +869,12 @@ describe("AgentsViewMode", () => {
 			Reflect.set(view, "ui", { terminal: { rows: 60 }, requestRender: () => {} });
 			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
 			const lines = rendered.map(stripAnsi);
-			expect(lines.filter((line) => /Model/.test(line) && /Age/i.test(line))).toHaveLength(1);
-			expect(lines.some((line) => line.startsWith("Running"))).toBe(true);
-			expect(lines.some((line) => line.startsWith("Idle"))).toBe(true);
-			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
+			const headings = lines.filter((line) => /^(Running|Idle|Inactive) \(\d+\)/.test(line));
+			expect(headings.length).toBeGreaterThanOrEqual(2);
+			for (const heading of headings) {
+				expect(heading).toMatch(/↑in\s+↓out ·\s+\$agent ·\s+#sub ·\s+\$total ·\s+age$/);
+			}
+			expect(lines.join("\n")).not.toMatch(/show program|Session\s+Model/);
 			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
 			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
 			for (const line of rendered) {
@@ -963,7 +985,7 @@ describe("AgentsViewMode", () => {
 			Reflect.set(view, "selectedIndex", rows.length - 1);
 			Reflect.set(view, "ui", { terminal: { rows: 13 }, requestRender: () => {} });
 			const lines = (invoke("renderSessionRows", view, 120, 4) as string[]).map(stripAnsi);
-			expect(lines[1]).toContain("...");
+			expect(lines[0]).toContain("...");
 			expect(lines).toHaveLength(4);
 			const lastTitle = rows.at(-1)!.title;
 			expect(lines.some((line) => line.includes(lastTitle))).toBe(true);

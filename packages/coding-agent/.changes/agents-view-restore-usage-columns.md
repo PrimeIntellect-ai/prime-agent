@@ -1,0 +1,1 @@
+- Restored the reviewed agents-view usage columns (`↑in ↓out · $agent · #sub · $total · age`) with per-section alignment and bold header legends, alongside the model column.

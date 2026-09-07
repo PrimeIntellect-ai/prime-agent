@@ -453,7 +453,7 @@ describe("#502 unified session view regressions", () => {
 				50,
 			),
 		);
-		expect(rendered).toMatch(/\$0\.00\s+2h\s*$/);
+		expect(rendered).toMatch(/\$0\.00 ·\s+2h\s*$/);
 	});
 
 	test("rows keep compact model IDs visible on every row kind", () => {
@@ -500,10 +500,13 @@ describe("#502 unified session view regressions", () => {
 
 		const full = render(160);
 		expect(full).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+Investigate a variable background status/);
-		for (const width of [60, 80, 120]) {
+		for (const width of [80, 120]) {
 			expect(render(width)).toContain("gpt-5.6-terra");
 			expect(render(width)).toHaveLength(width);
 		}
+		// Below ~70 columns the model column truncates before the usage cell does.
+		expect(render(60)).toContain("gpt-5");
+		expect(render(60)).toHaveLength(60);
 		const narrow = render(100);
 		expect(narrow).toContain("gpt-5.6-terra");
 		expect(narrow).not.toContain("prime-inference/");

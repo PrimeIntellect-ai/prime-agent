@@ -45,6 +45,7 @@ import {
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
 import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
@@ -83,6 +84,7 @@ import {
 	getAgentsViewSummaryIdentity as getSummaryIdentity,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
+	isEmptyAgentsViewSession,
 	migrateAgentsViewIdentitySet,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
@@ -2508,9 +2510,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (displayItems.length === 0) {
 			return [theme.fg("dim", "No sessions match your search.")];
 		}
-		// Reserve the shared column header before calculating the selection viewport.
-		const headerRows = maxRows > 1 ? 1 : 0;
-		const visibleRows = maxRows - headerRows;
+		const visibleRows = maxRows;
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
 			(item) => item.type === "row" && item.row.identity === selectedIdentity,
@@ -2534,13 +2534,20 @@ export class AgentsViewMode implements Component, Focusable {
 				);
 			}
 			if (item.type === "heading") {
-				return theme.bold(truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
+				// The legend is right-aligned to the same edge as the usage cells and
+				// bold like the title, so its columns sit exactly above the rows'.
+				const title = `${sectionTitle(item.section)} (${counts[item.section]})`;
+				const legend = layout.legends.get(item.section) ?? "";
+				const gap = width - visibleWidth(title) - visibleWidth(legend);
+				if (legend.length === 0 || gap < 2) {
+					return theme.bold(truncateToWidth(title, width, ""));
+				}
+				return `${theme.bold(title)}${" ".repeat(gap)}${theme.bold(legend)}`;
 			}
 			return this.renderRow(item.row, width, layout);
 		});
 		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
 		if (showTrailingEllipsis) lines.push(theme.fg("dim", "  ..."));
-		if (headerRows > 0) lines.unshift(theme.fg("muted", layout.legend));
 		return lines;
 	}
 
@@ -2579,8 +2586,11 @@ export class AgentsViewMode implements Component, Focusable {
 			formatTableCell(theme.fg("muted", formatSessionModel(row.summary)), layout.modelWidth),
 		];
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
-		cells.push(details);
-		return markRow(formatTableCell(cells.join("  "), width));
+		const left = cells.join("  ");
+		// Usage cells right-align to the terminal edge so every section's age
+		// column ends at the same column even when section widths differ.
+		const line = `${left}  ${padCellStart(details, Math.max(0, width - visibleWidth(left) - 2))}`;
+		return markRow(formatTableCell(line, width));
 	}
 
 	private renderActions(width: number): string[] {
@@ -2804,24 +2814,102 @@ function hasLiveWork(row: AgentsViewRow): boolean {
 	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
 }
 
+interface AgentsViewUsageParts {
+	inTokens: string;
+	outTokens: string;
+	agentCost: string;
+	count: string;
+	totalCost: string;
+	age: string;
+}
+
+const AGENTS_VIEW_USAGE_LABELS: AgentsViewUsageParts = {
+	inTokens: "↑in",
+	outTokens: "↓out",
+	agentCost: "$agent",
+	count: "#sub",
+	totalCost: "$total",
+	age: "age",
+};
+
+const AGENTS_VIEW_USAGE_COLUMNS = Object.keys(AGENTS_VIEW_USAGE_LABELS) as (keyof AgentsViewUsageParts)[];
+
 export interface AgentsViewUsageLayout {
-	legend: string;
+	/** Usage legend per section, padded to that section's column widths. */
+	legends: ReadonlyMap<AgentsViewSection, string>;
+	/** Usage details per row identity, padded to its section's column widths. */
 	details: ReadonlyMap<string, string>;
 	nameWidth: number;
 	modelWidth: number;
 	activityWidth: number;
+	/** Widest section's usage cell; the left columns size against it. */
+	detailsWidth: number;
 }
 
+/**
+ * One shared usage-column layout per section for the header legend and every
+ * row: each column is as wide as the section's widest value or its legend
+ * label, everything right-aligned, so the ` · ` separators land in the same
+ * terminal column for the legend and every row of that section. Empty sessions
+ * render only the age, aligned to the age column. The Session/Model/Activity
+ * columns on the left size against the widest section; Activity shrinks first.
+ */
 export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], width = 120): AgentsViewUsageLayout {
+	// Nested rows render inside their top-level agent's section block, so group
+	// by the block's section rather than each row's own.
+	const rowsBySection = new Map<AgentsViewSection, AgentsViewRow[]>();
+	let blockSection: AgentsViewSection = "running";
+	for (const row of rows) {
+		if (row.depth === 0) blockSection = row.section;
+		if (row.kind !== "agent" && row.kind !== "subagent") continue;
+		const sectionRows = rowsBySection.get(blockSection) ?? [];
+		sectionRows.push(row);
+		rowsBySection.set(blockSection, sectionRows);
+	}
+	const legends = new Map<AgentsViewSection, string>();
+	const details = new Map<string, string>();
+	let detailsWidth = 0;
+	for (const section of ["running", "idle", "inactive"] as const) {
+		const entries = (rowsBySection.get(section) ?? []).map((row) => {
+			const usage = row.summary.usage;
+			const parts: AgentsViewUsageParts = {
+				inTokens: `↑${formatTokenCount(usage?.inputTokens ?? 0)}`,
+				outTokens: `↓${formatTokenCount(usage?.outputTokens ?? 0)}`,
+				agentCost: `$${(usage?.cost ?? 0).toFixed(2)}`,
+				count: String(row.descendantCount),
+				totalCost: `$${row.recursiveCost.toFixed(2)}`,
+				age: formatSessionDuration(row.summary),
+			};
+			return { identity: row.identity, empty: isEmptyAgentsViewSession(row.summary), parts };
+		});
+		const widths = {} as Record<keyof AgentsViewUsageParts, number>;
+		for (const column of AGENTS_VIEW_USAGE_COLUMNS) {
+			let columnWidth = visibleWidth(AGENTS_VIEW_USAGE_LABELS[column]);
+			for (const entry of entries) {
+				// Empty sessions render no usage segment; only their age takes space.
+				if (entry.empty && column !== "age") continue;
+				columnWidth = Math.max(columnWidth, visibleWidth(entry.parts[column]));
+			}
+			widths[column] = columnWidth;
+		}
+		const pad = (parts: AgentsViewUsageParts, column: keyof AgentsViewUsageParts): string =>
+			padCellStart(parts[column], widths[column]);
+		const formatLine = (parts: AgentsViewUsageParts): string =>
+			[
+				`${pad(parts, "inTokens")} ${pad(parts, "outTokens")}`,
+				pad(parts, "agentCost"),
+				pad(parts, "count"),
+				pad(parts, "totalCost"),
+				pad(parts, "age"),
+			].join(" · ");
+		const legend = formatLine(AGENTS_VIEW_USAGE_LABELS);
+		legends.set(section, legend);
+		detailsWidth = Math.max(detailsWidth, visibleWidth(legend));
+		for (const entry of entries) {
+			details.set(entry.identity, entry.empty ? pad(entry.parts, "age") : formatLine(entry.parts));
+		}
+	}
 	const sessions = rows.filter((row) => row.kind === "agent" || row.kind === "subagent");
-	const entries = sessions.map((row) => ({
-		identity: row.identity,
-		cost: `$${row.recursiveCost.toFixed(2)}`,
-		age: formatSessionDuration(row.summary),
-	}));
-	const costWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.cost)), 4);
-	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
-	const detailsWidth = costWidth + 2 + ageWidth;
 	const available = Math.max(0, width - detailsWidth - 4);
 	const desiredModelWidth = sessions.reduce(
 		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
@@ -2830,17 +2918,7 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
-	const detailLine = (cost: string, age: string) => `${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
-	const headings = [formatTableCell("Session", nameWidth), formatTableCell("Model", modelWidth)];
-	if (activityWidth > 0) headings.push(formatTableCell("Activity", activityWidth));
-	headings.push(detailLine("Cost", "Age"));
-	return {
-		legend: formatTableCell(headings.join("  "), width),
-		details: new Map(entries.map((entry) => [entry.identity, detailLine(entry.cost, entry.age)])),
-		nameWidth,
-		modelWidth,
-		activityWidth,
-	};
+	return { legends, details, nameWidth, modelWidth, activityWidth, detailsWidth };
 }
 
 function padCellStart(value: string, width: number): string {
