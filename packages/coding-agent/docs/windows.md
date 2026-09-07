@@ -27,12 +27,20 @@ From PowerShell:
 git clone https://github.com/JonusNattapong/Supreme-agent.git
 cd Supreme-agent
 npm ci
+.\prime-agent.ps1
+```
+
+The PowerShell runner executes the source checkout directly and preserves the caller's working directory. It supports the same development flags as `prime-agent.sh`, including `--dist` and `--no-env`.
+
+To expose the primary CLI aliases globally from the checkout:
+
+```powershell
 cd packages/coding-agent
 npm link
 supreme
 ```
 
-`npm link` exposes `supreme`, `supreme-agent`, `prime-agent`, and `pi` from the local checkout.
+`npm link` exposes `supreme`, `supreme-agent`, `prime-agent`, and `pi`.
 
 ## Python Kernel Bootstrap
 

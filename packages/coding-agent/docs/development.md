@@ -12,13 +12,19 @@ cd prime-agent
 npm ci
 ```
 
-Run from source:
+Run from source on macOS or Linux:
 
 ```bash
 /path/to/prime-agent/prime-agent.sh
 ```
 
-The script can be called from any directory and preserves the caller's working directory. Use that behavior to run a source checkout against a separate test project.
+On Windows PowerShell:
+
+```powershell
+C:\path\to\prime-agent\prime-agent.ps1
+```
+
+Both source runners can be called from any directory and preserve the caller's working directory. They also accept `--dist` and `--no-env`. Use that behavior to run a source checkout against a separate test project.
 
 ## Product and Source Names
 
