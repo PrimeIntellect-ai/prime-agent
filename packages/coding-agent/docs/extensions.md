@@ -1005,6 +1005,20 @@ pi.on("before_agent_start", (event, ctx) => {
 });
 ```
 
+### ctx.setTimeout() / ctx.setInterval()
+
+Host-owned timers for scheduling extension work. Unlike the raw globals, a throwing (or rejecting) callback is reported through the extension error boundary instead of crashing the process, and all pending timers are cancelled automatically when the extension host unloads (session dispose, reload, or replacement). Handles work with `ctx.clearTimeout()` / `ctx.clearInterval()`.
+
+Raw global `setTimeout`/`setInterval` are unsupported for scheduling extension work: an uncaught error in a global timer callback can kill the whole process (including daemon session workers), and nothing cancels them on unload.
+
+```typescript
+pi.on("session_start", (_event, ctx) => {
+  const timer = ctx.setInterval(() => pollSomething(), 2000);
+  // Optional: unload cancels it automatically, or clear it yourself:
+  // ctx.clearInterval(timer);
+});
+```
+
 ## ExtensionCommandContext
 
 Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.
@@ -2187,7 +2201,7 @@ For more control (e.g., to distinguish timeout from user cancel), use `AbortSign
 
 ```typescript
 const controller = new AbortController();
-const timeoutId = setTimeout(() => controller.abort(), 5000);
+const timeoutId = ctx.setTimeout(() => controller.abort(), 5000);
 
 const confirmed = await ctx.ui.confirm(
   "Timed Confirmation",
@@ -2195,7 +2209,7 @@ const confirmed = await ctx.ui.confirm(
   { signal: controller.signal }
 );
 
-clearTimeout(timeoutId);
+ctx.clearTimeout(timeoutId);
 
 if (confirmed) {
   // User confirmed
