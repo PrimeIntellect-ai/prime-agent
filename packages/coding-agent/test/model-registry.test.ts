@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
-import { getApiProvider } from "@earendil-works/pi-ai";
+import { getApiProvider, getModels } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
 
@@ -21,6 +21,7 @@ describe("ModelRegistry", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllGlobals();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
@@ -600,6 +601,96 @@ describe("ModelRegistry", () => {
 			const anthropicModels = getModelsForProvider(registry, "anthropic");
 			expect(anthropicModels.some((m) => m.id === "claude-custom")).toBe(false);
 			expect(anthropicModels.some((m) => m.id.includes("claude"))).toBe(true);
+		});
+	});
+
+	describe("live Prime Inference models", () => {
+		test("loads the cache without replacing external providers and applies local overrides", () => {
+			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
+			const catalogEntries = bundled.map((model) => ({
+				id: model.id,
+				display_name: `Live ${model.name}`,
+				pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+				specs: {
+					context_window: model.contextWindow,
+					max_output_tokens: model.maxTokens,
+					modalities: { input: model.input, output: ["text"] },
+					supports_reasoning: model.reasoning,
+				},
+			}));
+			catalogEntries.push({
+				id: "test/live-added",
+				display_name: "Live Added",
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				specs: {
+					context_window: 200_000,
+					max_output_tokens: 20_000,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: false,
+				},
+			});
+			writeFileSync(
+				join(tempDir, "prime-inference-models-cache.json"),
+				JSON.stringify({ object: "list", data: catalogEntries }),
+			);
+			writeRawModelsJson({
+				"prime-inference": {
+					baseUrl: "https://local-proxy.example.com/v1",
+					modelOverrides: { "test/live-added": { name: "Local Added", contextWindow: 123_456 } },
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.find("prime-inference", "test/live-added")).toMatchObject({
+				name: "Local Added",
+				baseUrl: "https://local-proxy.example.com/v1",
+				contextWindow: 123_456,
+				cost: { input: 1, output: 2 },
+			});
+			expect(getModelsForProvider(registry, "openrouter")).toHaveLength(getModels("openrouter").length);
+		});
+
+		test("restores cached authorized deployment metadata without waiting for the network", async () => {
+			const privateRoute = {
+				id: "vendor/model:deployment",
+				display_name: "Private Deployment",
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				specs: {
+					context_window: 200_000,
+					max_output_tokens: 20_000,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: false,
+				},
+			};
+			authStorage.set("prime-inference", {
+				type: "api_key",
+				key: "prime-key",
+				primeTeam: { teamId: "research-team", name: "Research" },
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(
+					async (_url: string | URL | Request, init?: RequestInit) =>
+						new Response(
+							JSON.stringify({ data: new Headers(init?.headers).has("Authorization") ? [privateRoute] : [] }),
+						),
+				),
+			);
+			const firstRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(
+				(await firstRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
+
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => {
+					throw new Error("offline");
+				}),
+			);
+			const restoredRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(
+				(await restoredRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
 		});
 	});
 

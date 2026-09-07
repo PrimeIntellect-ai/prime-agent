@@ -52,6 +52,7 @@ describe("ENG-4645 internal GLM configuration", () => {
 		});
 		expect(fetchMock).toHaveBeenCalledWith("https://api.pinference.ai/api/v1/models", {
 			headers: {
+				accept: "application/json",
 				Authorization: "Bearer prime-key",
 				"X-Prime-Team-ID": "engineering-team",
 			},

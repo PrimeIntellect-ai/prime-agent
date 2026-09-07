@@ -1,12 +1,16 @@
 #!/usr/bin/env tsx
 
-import { readFileSync, writeFileSync } from "fs";
-import { homedir } from "os";
+import { writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
 import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
+import {
+	isPrivatePrimeInferenceModelId,
+	parsePrimeInferenceModelCatalog,
+	type PrimeInferenceCatalogEntry,
+} from "../src/prime-inference-model-catalog.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -21,6 +25,7 @@ import {
 	type OpenAICompletionsCompat,
 } from "../src/types.js";
 import { MODELS as EXISTING_MODELS } from "../src/models.generated.js";
+import { renderModelsFile } from "./render-models.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -116,15 +121,6 @@ const PRIME_INFERENCE_COMPAT: OpenAICompletionsCompat = {
 	maxTokensField: "max_tokens",
 	supportsStrictMode: false,
 };
-interface PrimeInferenceCatalogEntry {
-	id: string;
-	input: number;
-	output: number;
-	contextWindow?: number;
-	maxTokens?: number;
-	reasoning?: boolean;
-}
-
 interface PrimeInferenceModelMetadata {
 	contextWindow?: number;
 	maxTokens?: number;
@@ -132,13 +128,9 @@ interface PrimeInferenceModelMetadata {
 	name?: string;
 }
 
-// The full Prime Inference catalog is registered (minus raw/duplicate variants).
-// Prime's /models endpoint publishes pricing only, so context/output limits and
-// modalities are read from OpenRouter's public catalog, used here purely as a
-// published spec sheet for the same upstream models — requests always go to
-// Prime's own baseUrl. Entries below override those specs where the Prime route
-// enforces a different limit (verified against the live API) or fill gaps for
-// models OpenRouter does not list or leaves incomplete.
+// Prime's /models endpoint is authoritative for route metadata. OpenRouter and
+// these overrides only fill gaps for older or incomplete endpoint entries;
+// requests always go to Prime's own baseUrl.
 const PRIME_INFERENCE_MODEL_METADATA: Record<string, PrimeInferenceModelMetadata> = {
 	// These routes accept 200k, checked against the live API 2026-07-08. The
 	// other Claude routes take the full window their spec lists.
@@ -217,22 +209,6 @@ const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {
 // over-declared one breaks context tracking.
 const PRIME_INFERENCE_DEFAULT_CONTEXT_WINDOW = 128000;
 const PRIME_INFERENCE_DEFAULT_MAX_TOKENS = 8192;
-
-// Raw checkpoints and duplicate routes that would clutter the picker: BF16
-// exports, fine-tune outputs, zai-org/ and HF-cased twins of canonical ids.
-function isPrimeInferenceRawVariant(modelId: string): boolean {
-	const id = modelId.toLowerCase();
-	if (id.endsWith("-bf16") || id.includes(":")) {
-		return true;
-	}
-	const vendor = modelId.split("/")[0] ?? "";
-	return vendor === "zai-org" || vendor !== vendor.toLowerCase();
-}
-
-function isPrimeInferencePrivateModel(modelId: string): boolean {
-	const id = modelId.toLowerCase();
-	return id.startsWith("internal/") || id.startsWith("dev/");
-}
 
 const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.1",
@@ -385,51 +361,6 @@ function getOptionalNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function getOptionalBoolean(value: unknown): boolean | undefined {
-	return typeof value === "boolean" ? value : undefined;
-}
-
-function readPrimeCliConfig(): Record<string, unknown> {
-	try {
-		const parsed = JSON.parse(readFileSync(join(homedir(), ".prime", "config.json"), "utf8"));
-		return isRecord(parsed) ? parsed : {};
-	} catch {
-		return {};
-	}
-}
-
-function getPrimeInferenceConfigValue(
-	envName: "PRIME_API_KEY" | "PRIME_TEAM_ID",
-	config: Record<string, unknown>,
-	configKeys: readonly string[],
-): string | undefined {
-	const fromEnv = process.env[envName]?.trim();
-	if (fromEnv) {
-		return fromEnv;
-	}
-
-	for (const key of configKeys) {
-		const value = config[key];
-		if (typeof value === "string" && value.trim()) {
-			return value.trim();
-		}
-	}
-
-	return undefined;
-}
-
-function getPrimeInferenceHeaders(apiKey: string | undefined, teamId: string | undefined): Record<string, string> | undefined {
-	const headers: Record<string, string> = {};
-	if (apiKey) {
-		headers.Authorization = `Bearer ${apiKey}`;
-	}
-	if (teamId) {
-		headers["X-Prime-Team-ID"] = teamId;
-	}
-
-	return Object.keys(headers).length > 0 ? headers : undefined;
-}
-
 function getPrimeInferenceCacheCosts(modelId: string, inputCost: number): { cacheRead: number; cacheWrite: number } {
 	return modelId.toLowerCase().startsWith("anthropic/")
 		? getAnthropicCacheCosts(inputCost, "5m")
@@ -439,7 +370,7 @@ function getPrimeInferenceCacheCosts(modelId: string, inputCost: number): { cach
 function getExistingPrimeInferenceModels(): Model<"openai-completions">[] {
 	const models = EXISTING_MODELS["prime-inference"] as unknown as Record<string, Model<"openai-completions">>;
 	return Object.values(models)
-		.filter((model) => !isPrimeInferenceRawVariant(model.id) && !isPrimeInferencePrivateModel(model.id))
+		.filter((model) => !isPrivatePrimeInferenceModelId(model.id))
 		.map((model) => ({
 			...model,
 			input: [...model.input],
@@ -486,20 +417,6 @@ function refreshPrimeInferenceAliasLimits(
 	});
 }
 
-function includesCatalogCapability(value: unknown, capabilities: readonly string[]): boolean {
-	if (!Array.isArray(value)) {
-		return false;
-	}
-
-	return value.some((item) => {
-		if (typeof item !== "string") {
-			return false;
-		}
-		const normalized = item.toLowerCase();
-		return capabilities.some((capability) => normalized.includes(capability));
-	});
-}
-
 function getPrimeInferenceDisplayName(modelId: string): string {
 	const rawName = modelId.split("/").at(-1) ?? modelId;
 	return rawName
@@ -511,29 +428,6 @@ function getPrimeInferenceDisplayName(modelId: string): string {
 			return part.charAt(0).toUpperCase() + part.slice(1);
 		})
 		.join(" ");
-}
-
-function getPrimeInferenceCatalogReasoning(item: Record<string, unknown>): boolean | undefined {
-	const metadata = isRecord(item.metadata) ? item.metadata : {};
-	const direct =
-		getOptionalBoolean(item.reasoning) ??
-		getOptionalBoolean(item.supports_reasoning) ??
-		getOptionalBoolean(item.supportsReasoning) ??
-		getOptionalBoolean(metadata.reasoning) ??
-		getOptionalBoolean(metadata.supports_reasoning) ??
-		getOptionalBoolean(metadata.supportsReasoning);
-	if (direct !== undefined) {
-		return direct;
-	}
-
-	return includesCatalogCapability(item.supported_parameters, ["reasoning", "thinking"]) ||
-		includesCatalogCapability(item.capabilities, ["reasoning", "thinking"]) ||
-		includesCatalogCapability(item.tags, ["reasoning", "thinking"]) ||
-		includesCatalogCapability(metadata.supported_parameters, ["reasoning", "thinking"]) ||
-		includesCatalogCapability(metadata.capabilities, ["reasoning", "thinking"]) ||
-		includesCatalogCapability(metadata.tags, ["reasoning", "thinking"])
-		? true
-		: undefined;
 }
 
 function isPrimeInferenceReasoningModel(modelId: string, catalogReasoning?: boolean): boolean {
@@ -570,37 +464,6 @@ function getPrimeInferenceCompat(modelId: string): OpenAICompletionsCompat {
 	}
 
 	return PRIME_INFERENCE_COMPAT;
-}
-
-function parsePrimeInferenceCatalog(data: unknown): PrimeInferenceCatalogEntry[] {
-	if (!isRecord(data) || !Array.isArray(data.data)) {
-		return [];
-	}
-
-	return data.data.flatMap((item): PrimeInferenceCatalogEntry[] => {
-		if (!isRecord(item) || typeof item.id !== "string") {
-			return [];
-		}
-
-		const pricing = isRecord(item.pricing) ? item.pricing : {};
-		const input = getOptionalNumber(pricing.input_usd_per_mtok);
-		const output = getOptionalNumber(pricing.output_usd_per_mtok);
-		if (input === undefined || output === undefined) {
-			return [];
-		}
-
-		const limit = isRecord(item.limit) ? item.limit : {};
-		return [
-			{
-				id: item.id,
-				input,
-				output,
-				contextWindow: getOptionalNumber(item.context_window ?? item.contextWindow ?? limit.context),
-				maxTokens: getOptionalNumber(item.max_tokens ?? item.maxTokens ?? limit.output),
-				reasoning: getPrimeInferenceCatalogReasoning(item),
-			},
-		];
-	});
 }
 
 interface PrimeInferenceOpenRouterMetadata {
@@ -651,17 +514,12 @@ function getPrimeInferenceOpenRouterMetadata(
 }
 
 async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[]> {
-	const primeConfig = readPrimeCliConfig();
-	const apiKey = getPrimeInferenceConfigValue("PRIME_API_KEY", primeConfig, ["api_key", "apiKey"]);
-	const teamId = getPrimeInferenceConfigValue("PRIME_TEAM_ID", primeConfig, ["team_id", "teamId", "teamID"]);
 	let catalog: PrimeInferenceCatalogEntry[] = [];
 
 	try {
-		console.log("Fetching models from Prime Inference API...");
-		const response = await fetch(`${PRIME_INFERENCE_BASE_URL}/models`, {
-			headers: getPrimeInferenceHeaders(apiKey, teamId),
-		});
-		catalog = parsePrimeInferenceCatalog(await response.json());
+		console.log("Fetching public models from Prime Inference API...");
+		const response = await fetch(`${PRIME_INFERENCE_BASE_URL}/models`);
+		catalog = parsePrimeInferenceModelCatalog(await response.json());
 	} catch (error) {
 		console.error("Failed to fetch Prime Inference models:", error);
 	}
@@ -680,7 +538,7 @@ async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[
 	}
 
 	const catalogModels = catalog
-		.filter((entry) => !isPrimeInferenceRawVariant(entry.id) && !isPrimeInferencePrivateModel(entry.id))
+		.filter((entry) => !isPrivatePrimeInferenceModelId(entry.id))
 		.map((entry) =>
 			createPrimeInferenceModel(
 				entry,
@@ -689,6 +547,10 @@ async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[
 			),
 		);
 	let snapshotModels = getExistingPrimeInferenceModels();
+	if (catalog.length > 0 && catalogModels.length < Math.ceil(snapshotModels.length * 0.5)) {
+		console.error("Prime Inference catalog is severely truncated; keeping snapshot models");
+		return snapshotModels;
+	}
 	if (catalog.length > 0) {
 		const liveIds = new Set(catalogModels.map((model) => model.id.toLowerCase()));
 		snapshotModels = snapshotModels.filter((model) => liveIds.has(model.id.toLowerCase()));
@@ -704,8 +566,12 @@ function createPrimeInferenceModel(
 	override: PrimeInferenceModelMetadata | undefined,
 	openRouter: PrimeInferenceOpenRouterMetadata | undefined,
 ): Model<"openai-completions"> {
-	const vision = override?.vision ?? openRouter?.vision ?? false;
-	const cacheCosts = getPrimeInferenceCacheCosts(entry.id, entry.input);
+	const vision = entry.vision ?? override?.vision ?? openRouter?.vision ?? false;
+	const fallbackCacheCosts = getPrimeInferenceCacheCosts(entry.id, entry.input);
+	const cacheCosts = {
+		cacheRead: entry.cacheRead ?? fallbackCacheCosts.cacheRead,
+		cacheWrite: entry.cacheWrite ?? fallbackCacheCosts.cacheWrite,
+	};
 	const contextWindow =
 		entry.contextWindow ??
 		override?.contextWindow ??
@@ -721,7 +587,7 @@ function createPrimeInferenceModel(
 	return {
 		id: entry.id,
 		...(PRIME_INFERENCE_FEATURED_MODELS.has(entry.id.toLowerCase()) ? { featured: true } : {}),
-		name: override?.name ?? getPrimeInferenceDisplayName(entry.id),
+		name: entry.name ?? override?.name ?? getPrimeInferenceDisplayName(entry.id),
 		api: "openai-completions",
 		provider: "prime-inference",
 		baseUrl: PRIME_INFERENCE_BASE_URL,
@@ -2394,7 +2260,7 @@ async function generateModels() {
 	}
 
 	// Group by provider and deduplicate by model ID
-	const providers: Record<string, Record<string, Model<any>>> = {};
+	const providers: Record<string, Record<string, Model<Api>>> = {};
 	for (const model of allModels) {
 		if (!providers[model.provider]) {
 			providers[model.provider] = {};
@@ -2406,63 +2272,9 @@ async function generateModels() {
 		}
 	}
 
-	// Generate TypeScript file
-	let output = `// This file is auto-generated by scripts/generate-models.ts
-// Do not edit manually - run 'npm run generate-models' to update
-
-import type { Model } from "./types.js";
-
-export const MODELS = {
-`;
-
-	// Generate provider sections (sorted for deterministic output)
-	const sortedProviderIds = Object.keys(providers).sort();
-	for (const providerId of sortedProviderIds) {
-		const models = providers[providerId];
-		output += `\t${JSON.stringify(providerId)}: {\n`;
-
-		const sortedModelIds = Object.keys(models).sort();
-		for (const modelId of sortedModelIds) {
-			const model = models[modelId];
-			output += `\t\t"${model.id}": {\n`;
-			output += `\t\t\tid: "${model.id}",\n`;
-			output += `\t\t\tname: "${model.name}",\n`;
-			output += `\t\t\tapi: "${model.api}",\n`;
-			output += `\t\t\tprovider: "${model.provider}",\n`;
-			if (model.baseUrl !== undefined) {
-				output += `\t\t\tbaseUrl: "${model.baseUrl}",\n`;
-			}
-			if (model.headers) {
-				output += `\t\t\theaders: ${JSON.stringify(model.headers)},\n`;
-			}
-			if (model.compat) {
-				output += `			compat: ${JSON.stringify(model.compat)},
-`;
-			}
-			output += `\t\t\treasoning: ${model.reasoning},\n`;
-			if (model.thinkingLevelMap) {
-				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
-			}
-			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
-			output += `\t\t\tcost: {\n`;
-			output += `\t\t\t\tinput: ${model.cost.input},\n`;
-			output += `\t\t\t\toutput: ${model.cost.output},\n`;
-			output += `\t\t\t\tcacheRead: ${model.cost.cacheRead},\n`;
-			output += `\t\t\t\tcacheWrite: ${model.cost.cacheWrite},\n`;
-			output += `\t\t\t},\n`;
-			output += `\t\t\tcontextWindow: ${model.contextWindow},\n`;
-			output += `\t\t\tmaxTokens: ${model.maxTokens},\n`;
-			if (model.featured) {
-				output += `\t\t\tfeatured: true,\n`;
-			}
-			output += `\t\t} satisfies Model<"${model.api}">,\n`;
-		}
-
-		output += `\t},\n`;
-	}
-
-	output += `} as const;
-`;
+	// Generate TypeScript file. JSON string literals prevent remote catalog
+	// text from becoming executable source code.
+	const output = renderModelsFile(providers);
 
 	// Write file
 	writeFileSync(join(packageRoot, "src/models.generated.ts"), output);
