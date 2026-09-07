@@ -62,6 +62,44 @@ prime_agent_native_stage=
 prime_agent_native_lock=
 prime_agent_allow_insecure_http=0
 
+install_from_source() {
+	preme_agent_repo="${PREME_AGENT_SOURCE_REPO:-https://github.com/JonusNattapong/preme-agent.git}"
+	preme_agent_dir="${PREME_AGENT_SOURCE_DIR:-${HOME:-}/.preme-agent}"
+
+	for command_name in git node npm; do
+		if ! command -v "$command_name" >/dev/null 2>&1; then
+			printf 'error: %s is required for source installation.\n' "$command_name" >&2
+			exit 1
+		fi
+	done
+
+	if [ -e "$preme_agent_dir" ] && [ ! -d "$preme_agent_dir/.git" ]; then
+		printf 'error: install directory exists but is not a git checkout: %s\n' "$preme_agent_dir" >&2
+		exit 1
+	fi
+
+	if [ -d "$preme_agent_dir/.git" ]; then
+		if ! git -C "$preme_agent_dir" diff --quiet || ! git -C "$preme_agent_dir" diff --cached --quiet; then
+			printf 'error: install directory has local changes: %s\n' "$preme_agent_dir" >&2
+			exit 1
+		fi
+		git -C "$preme_agent_dir" pull --ff-only origin main
+	else
+		mkdir -p "$(dirname "$preme_agent_dir")"
+		git clone --depth 1 "$preme_agent_repo" "$preme_agent_dir"
+	fi
+
+	(
+		cd "$preme_agent_dir"
+		npm ci
+		cd packages/coding-agent
+		npm link
+	)
+
+	printf '\nPreme Agent was installed successfully.\n'
+	printf 'Run it with: preme-agent\n'
+}
+
 main() {
 	if [ "${1:-}" = --rollback ]; then
 		prime_agent_native_rollback
@@ -91,9 +129,8 @@ main() {
 
 prime_agent_install_node() {
 	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
-		printf 'error: installer download URL is not configured.\n' >&2
-		printf 'Set PRIME_AGENT_DOWNLOAD_BASE_URL or use the installer published by the release workflow.\n' >&2
-		exit 1
+		install_from_source
+		exit 0
 	fi
 	prime_agent_validate_download_base_url
 

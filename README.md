@@ -16,6 +16,18 @@ It is an open-source coding and research agent for long-running work. The agent 
 - **Multiple execution modes** including interactive TUI, JSON, RPC, and ACP.
 - **Cross-platform source runners** for Windows, macOS, and Linux.
 
+## Install
+
+On macOS or Linux, install directly from the latest source checkout:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JonusNattapong/preme-agent/main/install.sh | sh
+```
+
+The installer keeps the checkout in `~/.preme-agent`, installs dependencies, and links the `preme-agent` command. Set `PREME_AGENT_SOURCE_DIR` to use a different location.
+
+On Windows PowerShell, use the source setup below. The shell installer requires a POSIX-compatible shell such as Git Bash or WSL.
+
 ## Requirements
 
 - Node.js `22.8.0` or newer
