@@ -1192,6 +1192,8 @@ export class AgentSession {
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
 	private readonly _unpersistedOutcomes: CustomMessage[] = [];
+	/** Fresh/empty contexts defer digest injection to the first committed turn so untouched sessions stay empty. */
+	private _harnessDigestPending = false;
 
 	private _bashAbortControllers = new Set<AbortController>();
 	private _userBashRunning = false;
@@ -6164,6 +6166,12 @@ export class AgentSession {
 					) {
 						throw new DeferredSessionInputError("Agent became active before session input handoff");
 					}
+					if (this._harnessDigestPending) {
+						// First committed turn of a fresh context: the digest lands
+						// before the prompt as the first context message.
+						this._harnessDigestPending = false;
+						this._appendHarnessDigestIfStale();
+					}
 					if (executionPolicy.nextTurnContextTiming === "commit") {
 						nextTurnMessages = this._takePendingNextTurnMessages();
 					}
@@ -8260,10 +8268,21 @@ export class AgentSession {
 
 	/**
 	 * Deliver the harness digest at cold context boundaries: fresh sessions get it
-	 * as the first context message; resumed sessions append a fresh one at the tail
-	 * only when the newest digest in live context no longer matches disk state.
+	 * as the first context message of their first committed turn (so untouched
+	 * sessions stay empty for draft cleanup and emptiness checks); non-empty
+	 * contexts (resume, tree navigation) append a fresh digest at the tail only
+	 * when the newest digest in live context no longer matches disk state.
 	 */
 	private _ensureHarnessDigestContext(): void {
+		if (this.agent.state.messages.length === 0) {
+			this._harnessDigestPending = true;
+			return;
+		}
+		this._harnessDigestPending = false;
+		this._appendHarnessDigestIfStale();
+	}
+
+	private _appendHarnessDigestIfStale(): void {
 		const digest = this._harnessDigest();
 		if (this._latestContextHarnessDigest() === digest) return;
 		const message = createHarnessDigestMessage(digest);
@@ -12116,6 +12135,9 @@ export class AgentSession {
 			this.agent.state.messages = sessionContext.messages;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
+			// Tree navigation rebuilds the context, so it is a cold boundary like
+			// resume: refresh the digest when the branch carries a stale or missing one.
+			this._ensureHarnessDigestContext();
 			this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();

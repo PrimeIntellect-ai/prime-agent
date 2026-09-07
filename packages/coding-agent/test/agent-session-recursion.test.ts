@@ -4850,13 +4850,11 @@ describe("AgentSession RLM session dir", () => {
 		);
 		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
 
-		const digest = root.messages.find(
-			(message) => message.role === "custom" && message.customType === "harness_digest",
-		);
+		const digest = (root as unknown as { _harnessDigest(): string })._harnessDigest();
 
 		expect(root.systemPrompt).not.toContain("Ephemeral note");
-		expect(getMessageText(digest)).toContain("Ephemeral note");
-		expect(getMessageText(digest)).toContain("Loaded from the RLM session harness path.");
+		expect(digest).toContain("Ephemeral note");
+		expect(digest).toContain("Loaded from the RLM session harness path.");
 	});
 
 	it("exports the configured agentDir to the kernel so skills find auth.json", () => {

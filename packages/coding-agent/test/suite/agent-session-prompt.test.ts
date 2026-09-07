@@ -1127,8 +1127,11 @@ stale post-hook extension instructions`,
 		await harness.session.acceptAgentMessagePrompt("agent-to-agent payload", { expandPromptTemplates: false });
 		await harness.session.agent.waitForIdle();
 
-		expect(contextRoles).toEqual([["user", "user", "assistant", "user", "user"]]);
-		expect(contextTexts[0]?.[3]).toContain("Ran `echo hi`");
+		// The session's first pipeline turn injects the harness digest; the earlier
+		// direct agent.prompt bypassed the pipeline, so the digest lands here.
+		expect(contextRoles).toEqual([["user", "assistant", "user", "user", "user"]]);
+		expect(contextTexts[0]?.[2]).toContain("Ran `echo hi`");
+		expect(contextTexts[0]?.[3]).toContain("The persistent memories produced across this session so far:");
 		expect(contextTexts[0]?.[4]).toBe("agent-to-agent payload");
 		expect(harness.session.hasPendingBashMessages).toBe(false);
 	});
@@ -2097,12 +2100,25 @@ describe("Harness digest at cold boundaries", () => {
 		);
 	}
 
-	it("injects the digest as the first context message of a fresh session", async () => {
+	it("keeps untouched sessions empty and injects the digest at the first committed turn", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 
+		// Construction leaves the session untouched so abandoned-draft cleanup and
+		// raw message-count emptiness checks still see an empty session.
+		expect(harness.session.messages).toHaveLength(0);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message" || entry.type === "message"),
+		).toHaveLength(0);
+
+		harness.setResponses([fauxAssistantMessage("hi")]);
+		await harness.session.prompt("hello");
+
 		const first = harness.session.messages[0];
 		expect(first).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
+		expect(harness.session.messages[1]).toMatchObject({ role: "user" });
 		expect(getMessageText(first)).toContain("The persistent memories produced across this session so far:");
 		expect(getMessageText(first)).toContain("# Continual Harness State");
 		// Passes through to the model as a user message and is durably persisted.
@@ -2112,6 +2128,57 @@ describe("Harness digest at cold boundaries", () => {
 				.getEntries()
 				.some((entry) => entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE),
 		).toBe(true);
+	});
+
+	it("treats tree navigation as a cold boundary with digest dedupe", async () => {
+		// Pin the global harness store to an empty temp dir so the digest content
+		// only reflects the local entry written between navigations.
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		const agentDir = join(tmpdir(), `pi-digest-agent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(agentDir, { recursive: true });
+		tempDirs.push(agentDir);
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = agentDir;
+		onTestFinished(() => {
+			if (previousAgentDir === undefined) delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			else process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+		});
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one reply"), fauxAssistantMessage("two reply")]);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		const [firstUser, secondUser] = harness.session.getUserMessagesForForking();
+		expect(digestMessages(harness)).toHaveLength(1);
+
+		// Navigation with an unchanged harness keeps the existing digest (dedupe).
+		await harness.session.navigateTree(secondUser!.entryId);
+		expect(digestMessages(harness)).toHaveLength(1);
+
+		// After a disk change, navigation refreshes the digest at the tail.
+		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
+		const state = loadHarnessState(localDir, "local");
+		state.entries.memory.nav_test_memory = {
+			id: "nav_test_memory",
+			kind: "memory",
+			title: "Nav test memory",
+			content: "Written before navigation.",
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-09-07T00:00:00.000Z",
+			updated_at: "2026-09-07T00:00:00.000Z",
+			version: 1,
+		};
+		saveHarnessState(localDir!, state);
+
+		await harness.session.navigateTree(firstUser!.entryId);
+		const digests = digestMessages(harness);
+		expect(digests).toHaveLength(2);
+		expect(harness.session.messages.at(-1)).toBe(digests.at(-1));
+		expect(getMessageText(digests.at(-1))).toContain("[local:nav_test_memory] Nav test memory");
 	});
 
 	it("prefers the newest digest by timestamp over a retained pre-compaction digest", async () => {
