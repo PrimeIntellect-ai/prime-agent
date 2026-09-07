@@ -10999,8 +10999,7 @@ export class AgentSession {
 					!run.suppressTerminalNotice &&
 					child._parentReplyCount === parentReplyCountBeforeRun
 				) {
-					// A turn that ends with a graceful error message resolves promptAndWait,
-					// so it must be surfaced here or the parent never learns the task failed.
+					// A graceful error turn resolves promptAndWait; surface it or the parent never learns the task failed.
 					const lastAssistant = this._findLastAssistantInMessages(child.messages);
 					if (lastAssistant?.stopReason === "error") {
 						await deliverTerminalMessageToParent(

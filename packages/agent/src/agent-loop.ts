@@ -452,12 +452,7 @@ async function runLoop(
 
 const MAX_EMPTY_TURN_ATTEMPTS = 3;
 
-/**
- * A final turn with no tool calls and no non-thinking content. Providers occasionally
- * end a stream like this with a normal stop reason; treating it as completion would
- * silently abandon the task, so it is retried instead. Error, abort, and length turns
- * are excluded: they are signals of their own, and an identical resend cannot help.
- */
+/** No tool calls and no visible text on a normal stop: completion here would silently abandon the task. Error/abort/length turns are signals of their own. */
 function isEmptyAssistantTurn(message: AssistantMessage): boolean {
 	if (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "length") {
 		return false;
@@ -480,8 +475,7 @@ async function streamAssistantResponse(
 		// Overflow turns must pass through untouched so compaction recovery can see them.
 		if (isEmptyAssistantTurn(message) && !isContextOverflow(message, config.model.contextWindow)) {
 			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
-				// Drop the empty attempt so it is neither resent to the provider nor
-				// finalized as a transcript turn (message_end is what makes it durable).
+				// Neither resent to the provider nor finalized (message_end is what makes a turn durable).
 				context.messages.pop();
 				discardedUsage = sumUsage(discardedUsage, message.usage);
 				continue;

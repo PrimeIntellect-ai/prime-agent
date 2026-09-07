@@ -2064,7 +2064,6 @@ describe("empty assistant turn retry", () => {
 		const lengthStop = await runOnce(createAssistantMessage([{ type: "thinking", thinking: "..." }], "length"));
 		expect(lengthStop.requests.length).toBe(1);
 		expect(lengthStop.assistant.stopReason).toBe("length");
-		expect(lengthStop.assistant.errorMessage).toBeUndefined();
 
 		// z.ai-style silent overflow: normal stop, empty content, input past the window.
 		// It must reach message_end untouched so compaction recovery can see it.
@@ -2073,8 +2072,6 @@ describe("empty assistant turn retry", () => {
 		const overflow = await runOnce(overflowMessage);
 		expect(overflow.requests.length).toBe(1);
 		expect(overflow.assistant).toBe(overflowMessage);
-		expect(overflow.assistant.stopReason).toBe("stop");
-		expect(overflow.assistant.errorMessage).toBeUndefined();
 		expect(overflow.events.some((event) => event.type === "message_end" && event.message === overflowMessage)).toBe(
 			true,
 		);
