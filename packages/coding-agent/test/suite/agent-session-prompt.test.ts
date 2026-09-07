@@ -2147,6 +2147,34 @@ describe("Harness digest at cold boundaries", () => {
 		expect(firstContextText).toContain("The persistent memories produced across this session so far:");
 	});
 
+	it("re-arms the digest when a failed commit parks next-turn context", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		vi.spyOn(harness.session.agent, "prompt").mockImplementationOnce(async () => {
+			throw new Error("dispatch failed");
+		});
+		await expect(harness.session.prompt("first")).rejects.toThrow("dispatch failed");
+
+		// A skip-policy custom-trigger turn never drains parked context, so the
+		// digest must arrive via re-armed lazy injection - and exactly once.
+		let texts: string[] = [];
+		harness.setResponses([
+			(context) => {
+				texts = context.messages.map(getMessageText);
+				return fauxAssistantMessage("ok");
+			},
+		]);
+		await harness.session.sendCustomMessage(
+			{ customType: "kickoff", content: "go", display: false },
+			{ triggerTurn: true },
+		);
+		await harness.session.waitForIdle();
+
+		expect(
+			texts.filter((text) => text.startsWith("The persistent memories produced across this session so far:")),
+		).toHaveLength(1);
+	});
+
 	it("strips the digest with a cleared first turn and re-delivers it on the next turn", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
