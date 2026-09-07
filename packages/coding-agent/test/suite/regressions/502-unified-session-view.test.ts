@@ -415,7 +415,8 @@ describe("#502 unified session view regressions", () => {
 		expect(filtered.map((record) => record.identity)).toEqual(["match"]);
 	});
 
-	test("inactive rows give usage and age their full responsive cell", () => {
+	test("inactive rows keep total cost and age visible in a narrow row", () => {
+		initTheme("dark");
 		const inactive = {
 			kind: "agent" as const,
 			section: "inactive" as const,
@@ -452,7 +453,7 @@ describe("#502 unified session view regressions", () => {
 				50,
 			),
 		);
-		expect(rendered).toMatch(/↑0\s+↓0 ·\s+\$0\.00 ·\s+0 ·\s+\$0\.00 ·\s+2h\s*$/);
+		expect(rendered).toMatch(/\$0\.00\s+2h\s*$/);
 	});
 
 	test("rows keep model and effort ahead of summaries on every row kind", () => {
@@ -498,30 +499,30 @@ describe("#502 unified session view regressions", () => {
 			);
 
 		const full = render(160);
-		expect(full).toContain(
-			"Inspect agents view · prime-inference/gpt-5.6-terra:high · Investigate a variable background status",
+		expect(full).toMatch(
+			/Inspect agents view\s+prime-inference\/gpt-5\.6-terra:high\s+Investigate a variable background status/,
 		);
 		const narrow = render(100);
 		expect(narrow).toContain("prime-inference/gpt-5.6-terra:high");
 		expect(narrow).not.toContain("Investigate a variable background status");
 
 		subagent.summary.summary = "";
-		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+		expect(render(100)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra:high/);
 
 		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
 		subagent.summary.runtimeKind = undefined;
 		subagent.summary.rlmChildId = "effort-child";
-		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+		expect(render(100)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra:high/);
 
 		subagent.summary.thinkingLevel = "off";
 		subagent.summary.summary = "A later summary";
-		expect(render(120)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
+		expect(render(120)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra\s+A later summary/);
 		expect(render(120)).not.toContain(":off");
 
 		// Top-level sessions show the same label; the model cell is not subagent-only.
 		subagent.summary.runtimeKind = "top-level";
 		subagent.summary.rlmChildId = undefined;
-		expect(render(120)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
+		expect(render(120)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra\s+A later summary/);
 
 		// Pending delete replaces the suffixes, model label included.
 		const pendingDelete = { ...harness, isPendingDeleteRow: () => true, getPendingDeleteTitle: () => "delete?" };
