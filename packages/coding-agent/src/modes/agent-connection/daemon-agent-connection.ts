@@ -963,7 +963,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		action: AgentHeartbeatManagementAction,
 	): Promise<AgentCronJob> {
 		if (!this.client.supportsServerCapability("heartbeat_management")) {
-			throw new Error("Heartbeat management requires a newer Supreme Agent daemon.");
+			throw new Error("Heartbeat management requires a newer Preme Agent daemon.");
 		}
 		try {
 			const data = await this.requestData<{ heartbeat: AgentCronJob }>({
@@ -975,7 +975,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			return data.heartbeat;
 		} catch (error) {
 			if (isUnknownDaemonCommandError(error, "heartbeat_manage")) {
-				throw new Error("Heartbeat management requires a newer Supreme Agent daemon.");
+				throw new Error("Heartbeat management requires a newer Preme Agent daemon.");
 			}
 			throw error;
 		}
@@ -2068,23 +2068,23 @@ export class DaemonAgentConnection implements AgentConnection {
 			killed:
 				"The daemon stopped this agent session. Its transcript remains saved and can be reopened from Agents View.",
 			shutdown:
-				"The Supreme Agent daemon shut down while this window was attached. The session transcript remains saved; restart Supreme Agent and reopen it from Agents View.",
+				"The Preme Agent daemon shut down while this window was attached. The session transcript remains saved; restart Preme Agent and reopen it from Agents View.",
 			completed:
 				"The daemon closed this agent session after it completed. Its transcript remains available from Agents View.",
 			replaced:
 				"The daemon replaced this agent session with another session. Reopen the current session from Agents View.",
 			update:
-				"The Supreme Agent daemon restarted for an update, but this window did not restore automatically. The session transcript remains saved; restart Supreme Agent and reopen it from Agents View.",
+				"The Preme Agent daemon restarted for an update, but this window did not restore automatically. The session transcript remains saved; restart Preme Agent and reopen it from Agents View.",
 		};
 		return `${explanation[reason]} ${this.formatDaemonDiagnosticContext()}`;
 	}
 
 	private formatDaemonConnectionClosedError(error: Error): string {
-		return `Lost connection to the Supreme Agent daemon. Cause: ${formatErrorSentence(error)} The session transcript remains saved; restart Supreme Agent or reopen the session from Agents View. ${this.formatDaemonDiagnosticContext()}`;
+		return `Lost connection to the Preme Agent daemon. Cause: ${formatErrorSentence(error)} The session transcript remains saved; restart Preme Agent or reopen the session from Agents View. ${this.formatDaemonDiagnosticContext()}`;
 	}
 
 	private formatUpdateReconnectError(error: unknown): string {
-		return `The Supreme Agent daemon restarted for an update, but this window could not reconnect to its restored session before the recovery timeout expired. Last error: ${formatErrorSentence(error)} The session transcript remains saved; restart Supreme Agent and reopen it from Agents View. ${this.formatDaemonDiagnosticContext()}`;
+		return `The Preme Agent daemon restarted for an update, but this window could not reconnect to its restored session before the recovery timeout expired. Last error: ${formatErrorSentence(error)} The session transcript remains saved; restart Preme Agent and reopen it from Agents View. ${this.formatDaemonDiagnosticContext()}`;
 	}
 
 	private formatDaemonDiagnosticContext(): string {
@@ -2107,7 +2107,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		void this.emit({
 			type: "connection_status",
 			status: "reconnecting",
-			error: "The Supreme Agent daemon is restarting for an update.",
+			error: "The Preme Agent daemon is restarting for an update.",
 		});
 		const reconnectPromise = reconnectDaemonTransportAfterUpdate(this.client)
 			.then(() => this.restoreConnectionAfterUpdate())

@@ -2,13 +2,13 @@
 
 Delegate tasks to specialized subprocess agents with isolated context windows.
 
-Supreme Agent also provides native recursive delegation through `rlm.call()` and
+Preme Agent also provides native recursive delegation through `rlm.call()` and
 `rlm.run_async()`. This extension is a separate example for users who want
 file-defined agent profiles and explicit single, parallel, or chained workflows.
 
 ## Features
 
-- **Isolated context**: Each subagent runs in a separate Supreme Agent process
+- **Isolated context**: Each subagent runs in a separate Preme Agent process
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
@@ -58,7 +58,7 @@ done
 
 ## Security Model
 
-This tool executes a separate Supreme Agent subprocess with a delegated system prompt and tool/model configuration.
+This tool executes a separate Preme Agent subprocess with a delegated system prompt and tool/model configuration.
 
 **Project-local agents** (`.supreme/agent/agents/*.md`) are repo-controlled prompts that can instruct the model to run IPython, shell commands, and other tools.
 

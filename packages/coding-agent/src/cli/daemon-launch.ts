@@ -166,7 +166,7 @@ export class StaleDaemonError extends Error {
 			: `Daemon: unknown build on ${socketPath}`;
 		const client = getDaemonRuntimeIdentity();
 		super(
-			`An incompatible Supreme Agent daemon is running.\n\n${daemonIdentity}\n` +
+			`An incompatible Preme Agent daemon is running.\n\n${daemonIdentity}\n` +
 				`Client: v${VERSION}, protocol ${DAEMON_PROTOCOL_VERSION}, schema ${DAEMON_SCHEMA_ID}, build ${client.buildId}, ` +
 				`executable ${client.launcherPath ?? client.entrypointPath ?? client.executablePath}\n\nRun:\n` +
 				`${formatCurrentCliCommand(["shutdown", "--force"])}\n\nThen retry the original command.`,
@@ -359,7 +359,7 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 	}
 	if (probe.status === "unresponsive") {
 		throw new Error(
-			`Supreme Agent daemon on ${socketPath} accepted connections but did not finish startup within ${DAEMON_STARTUP_TIMEOUT_MS / 1000} seconds. ` +
+			`Preme Agent daemon on ${socketPath} accepted connections but did not finish startup within ${DAEMON_STARTUP_TIMEOUT_MS / 1000} seconds. ` +
 				`It was left running to avoid interrupting active work.
 
 Run:
@@ -427,11 +427,11 @@ Then retry the original command.`,
 		}
 		const logTail = readDaemonLogTail(socketPath, logOffset);
 		if (childFailure.type === "error") {
-			throw new Error(`Failed to spawn Supreme Agent daemon: ${childFailure.error.message}.${logTail}`);
+			throw new Error(`Failed to spawn Preme Agent daemon: ${childFailure.error.message}.${logTail}`);
 		}
 		const signal = childFailure.signal ? `, signal ${childFailure.signal}` : "";
 		throw new Error(
-			`Supreme Agent daemon exited during startup (code ${childFailure.code ?? "unknown"}${signal}).${logTail}`,
+			`Preme Agent daemon exited during startup (code ${childFailure.code ?? "unknown"}${signal}).${logTail}`,
 		);
 	};
 

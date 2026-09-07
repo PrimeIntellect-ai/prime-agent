@@ -1,4 +1,4 @@
-> Supreme Agent can create prompt templates. Ask it to build one for your workflow.
+> Preme Agent can create prompt templates. Ask it to build one for your workflow.
 
 # Prompt Templates
 
@@ -6,7 +6,7 @@ Prompt templates are Markdown snippets that expand into full prompts. Type `/nam
 
 ## Locations
 
-Supreme Agent loads prompt templates from:
+Preme Agent loads prompt templates from:
 
 - Global: `~/.supreme/agent/prompts/*.md`
 - Project: `.supreme/agent/prompts/*.md`

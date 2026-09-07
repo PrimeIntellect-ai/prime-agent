@@ -123,7 +123,7 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			);
 			if (hasLegacySelfTarget && hasLegacyPackageTarget) {
 				return fail(
-					"Supreme Agent and package updates are now separate.",
+					"Preme Agent and package updates are now separate.",
 					`Run "${APP_NAME} update [--force]" and "${APP_NAME} package update [source]" separately.`,
 				);
 			}
@@ -208,15 +208,15 @@ function rejectRemovedCommand(args: string[]): PublicCommandResult {
 	const [command, subcommand] = args;
 	let replacement: string | undefined;
 	if (command === "daemon") {
-		replacement = 'Run "supreme-agent help" to see the agent commands.';
+		replacement = 'Run "preme-agent help" to see the agent commands.';
 	} else if (command === "app" && subcommand === "update") {
-		replacement = 'Use "supreme-agent update".';
+		replacement = 'Use "preme-agent update".';
 	} else if (command === "install") {
-		replacement = 'Use "supreme-agent package install".';
+		replacement = 'Use "preme-agent package install".';
 	} else if (command === "remove" || command === "uninstall") {
-		replacement = 'Use "supreme-agent package remove".';
+		replacement = 'Use "preme-agent package remove".';
 	} else if (command === "manage") {
-		replacement = 'Use "supreme-agent agents".';
+		replacement = 'Use "preme-agent agents".';
 	}
 	return fail(`Unknown command: ${args.slice(0, 2).join(" ")}`, replacement);
 }
@@ -303,14 +303,14 @@ async function runPackage(args: string[]): Promise<PublicCommandResult> {
 			rest.some((arg) => arg === "--self" || arg === "--extensions" || arg === "--extension" || arg === "--force")
 		) {
 			return fail(
-				'Package updates accept only an optional source. Use "supreme-agent update --force" to update Supreme Agent.',
+				'Package updates accept only an optional source. Use "preme-agent update --force" to update Preme Agent.',
 			);
 		}
 		if (rest.length > 1) {
 			return fail(`Usage: ${APP_NAME} package update [source]`);
 		}
 		if (rest[0] && isSelfUpdateSource(rest[0])) {
-			return fail('Use "supreme-agent update" to update Supreme Agent.');
+			return fail('Use "preme-agent update" to update Preme Agent.');
 		}
 		await handlePackageCommand(["update", ...(rest.length === 0 ? ["--extensions"] : rest)]);
 		return HANDLED;

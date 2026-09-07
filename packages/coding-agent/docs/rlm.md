@@ -1,6 +1,6 @@
 # RLM Programming Model
 
-Supreme Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; the Python REPL is the model-facing programming surface.
+Preme Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; the Python REPL is the model-facing programming surface.
 
 ## RLM Loop
 
@@ -55,11 +55,11 @@ checks = bash("npm test")
 checks.pid
 ```
 
-When an unawaited handle's process group finishes, Supreme Agent sends a "Background command finished" notice with its PID and foreground exit code. A busy agent receives it as steering at the next safe turn boundary, without interrupting a running tool. An idle agent resumes to handle it. `await handle` and `handle.poll()` still return the foreground result before shell background jobs finish. The kernel stays resident until the process group is reaped, including for handles awaited in their creating cell. The message asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second notice.
+When an unawaited handle's process group finishes, Preme Agent sends a "Background command finished" notice with its PID and foreground exit code. A busy agent receives it as steering at the next safe turn boundary, without interrupting a running tool. An idle agent resumes to handle it. `await handle` and `handle.poll()` still return the foreground result before shell background jobs finish. The kernel stays resident until the process group is reaped, including for handles awaited in their creating cell. The message asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second notice.
 
 Reading the finished result withdraws the notice. Any read from a live cell counts -- `await handle`, `handle.poll()`, `handle.output()`, `handle.tail()` -- so a notice that is still queued is dropped and a notice that was not sent yet is never sent. Reads that no cell receives do not count: a detached watcher polling the handle between turns leaves the notice in place, because that notice is the only wake-up an idle session gets, and an `asyncio.as_completed` or `create_task` wrapper that resolves with no live cell waiting for it does not count either. A notice the agent already received is never retracted.
 
-Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Supreme Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
+Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Preme Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
 ### 2. Subagents are native RLM calls
 
@@ -118,7 +118,7 @@ The default recursion depth allows a root agent to create children. Raising the 
 
 ### 3. Skills add programmatic capability
 
-Supreme Agent supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Supreme Agent installs into the kernel environment and exposes by import name.
+Preme Agent supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Preme Agent installs into the kernel environment and exposes by import name.
 
 For a skill named `release-audit`, the model can call:
 

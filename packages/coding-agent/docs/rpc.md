@@ -7,7 +7,7 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 ## Starting RPC Mode
 
 ```bash
-supreme-agent --mode rpc [options]
+preme-agent --mode rpc [options]
 ```
 
 Common options:
@@ -1181,7 +1181,7 @@ Set the terminal window/tab title. Fire-and-forget.
   "type": "extension_ui_request",
   "id": "uuid-8",
   "method": "setTitle",
-  "title": "Supreme Agent - my project"
+  "title": "Preme Agent - my project"
 }
 ```
 

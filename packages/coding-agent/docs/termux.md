@@ -1,6 +1,6 @@
 # Termux (Android) Setup
 
-Supreme Agent runs on Android via [Termux](https://termux.dev/), a terminal emulator and Linux environment for Android.
+Preme Agent runs on Android via [Termux](https://termux.dev/), a terminal emulator and Linux environment for Android.
 
 ## Prerequisites
 
@@ -16,12 +16,12 @@ pkg update && pkg upgrade
 # Install dependencies
 pkg install nodejs termux-api git ripgrep
 
-# Clone and install Supreme Agent from source
+# Clone and install Preme Agent from source
 git clone https://github.com/PrimeIntellect-ai/prime-agent.git
-cd supreme-agent
+cd preme-agent
 npm ci
 
-# Run Supreme Agent
+# Run Preme Agent
 ./prime-agent.sh
 ```
 

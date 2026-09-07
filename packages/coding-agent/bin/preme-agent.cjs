@@ -20,7 +20,7 @@ if (existsSync(sourceCli) && existsSync(tsxCli)) {
   entrypoint = process.execPath;
   args = [bundledCli, ...forwardedArgs];
 } else {
-  console.error("Supreme Agent CLI entrypoint is unavailable. Reinstall the package or restore the local workspace dependencies.");
+  console.error("Preme Agent CLI entrypoint is unavailable. Reinstall the package or restore the local workspace dependencies.");
   process.exit(1);
 }
 

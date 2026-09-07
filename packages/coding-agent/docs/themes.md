@@ -1,4 +1,4 @@
-> Supreme Agent can create themes. Ask it to build one for your setup.
+> Preme Agent can create themes. Ask it to build one for your setup.
 
 # Themes
 
@@ -16,7 +16,7 @@ Themes are JSON files that define colors for the TUI.
 
 ## Locations
 
-Supreme Agent loads themes from:
+Preme Agent loads themes from:
 
 - Built-in: `dark`, `light`
 - Global: `~/.supreme/agent/themes/*.json`
@@ -37,7 +37,7 @@ Select a theme via `/settings` or in `settings.json`:
 }
 ```
 
-On first run, Supreme Agent detects your terminal background and defaults to `dark` or `light`.
+On first run, Preme Agent detects your terminal background and defaults to `dark` or `light`.
 
 ## Creating a Custom Theme
 
@@ -121,7 +121,7 @@ vim ~/.supreme/agent/themes/my-theme.json
 
 3. Select the theme via `/settings`.
 
-**Hot reload:** When you edit the currently active custom theme file, Supreme Agent reloads it automatically for immediate visual feedback.
+**Hot reload:** When you edit the currently active custom theme file, Preme Agent reloads it automatically for immediate visual feedback.
 
 ## Theme Format
 
@@ -278,7 +278,7 @@ Four formats are supported:
 
 ### Terminal Compatibility
 
-Supreme Agent uses 24-bit RGB colors. Most modern terminals support this (iTerm2, Kitty, WezTerm, Windows Terminal, VS Code). For older terminals with only 256-color support, Supreme Agent falls back to the nearest approximation.
+Preme Agent uses 24-bit RGB colors. Most modern terminals support this (iTerm2, Kitty, WezTerm, Windows Terminal, VS Code). For older terminals with only 256-color support, Preme Agent falls back to the nearest approximation.
 
 Check truecolor support:
 

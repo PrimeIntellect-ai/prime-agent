@@ -494,7 +494,7 @@ const envPrefix =
 		.replace(/^_+|_+$/g, "") || "PI";
 export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
 export const APP_NAME: string = piConfigName || "pi";
-export const APP_TITLE: string = "Supreme Agent";
+export const APP_TITLE: string = "Preme Agent";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".supreme/agent";
 export const VERSION: string = pkg.version || "0.0.0";
 

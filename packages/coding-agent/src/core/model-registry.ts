@@ -372,12 +372,12 @@ function readOpenAICodexAccountId(token: string): string | undefined {
 /**
  * The Codex backend gates its model catalog on the reported client version: it answers HTTP 200 with a
  * catalog that grows as the version rises, so a low version yields a silently empty or partial list rather
- * than an error. Supreme Agent's own package version is far below the Codex CLI's version line, so it must
+ * than an error. Preme Agent's own package version is far below the Codex CLI's version line, so it must
  * report a supported Codex client version here instead.
  *
  * Shipping a new Codex model takes two edits, and both are required:
  * 1. Add the model to `codexModels` in `packages/ai/scripts/generate-models.ts` and regenerate. That list is
- *    explicit, not fetched, so an unlisted model does not exist for Supreme Agent at all.
+ *    explicit, not fetched, so an unlisted model does not exist for Preme Agent at all.
  * 2. Raise this constant to a Codex CLI release whose catalog includes that model. `getExecutableModels()`
  *    below intersects the registry with the discovered catalog, so a listed model the catalog omits is
  *    dropped.

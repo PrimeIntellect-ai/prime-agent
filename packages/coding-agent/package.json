@@ -4,14 +4,13 @@
 	"description": "Coding agent CLI with a persistent Python REPL kernel and session management",
 	"type": "module",
 	"piConfig": {
-		"name": "supreme-agent",
+		"name": "preme-agent",
 		"configDir": ".supreme/agent"
 	},
 	"bin": {
-		"supreme": "bin/supreme-agent.cjs",
-		"supreme-agent": "bin/supreme-agent.cjs",
-		"prime-agent": "bin/supreme-agent.cjs",
-		"pi": "bin/supreme-agent.cjs"
+		"preme-agent": "bin/preme-agent.cjs",
+		"prime-agent": "bin/preme-agent.cjs",
+		"pi": "bin/preme-agent.cjs"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",

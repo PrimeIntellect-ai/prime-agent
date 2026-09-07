@@ -73,16 +73,7 @@ function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; pack
 
 function createHomebrewInstall(): { packageDir: string } {
 	const prefix = mkdtempSync(join(tmpdir(), "pi-homebrew-"));
-	const packageDir = join(
-		prefix,
-		"Cellar",
-		"supreme-agent",
-		"0.7.0",
-		"libexec",
-		"lib",
-		"node_modules",
-		"supreme-agent",
-	);
+	const packageDir = join(prefix, "Cellar", "preme-agent", "0.7.0", "libexec", "lib", "node_modules", "preme-agent");
 	mkdirSync(packageDir, { recursive: true });
 	tempDir = prefix;
 	process.env.PI_PACKAGE_DIR = packageDir;
@@ -202,8 +193,8 @@ describe("detectInstallMethod", () => {
 
 		expect(detectInstallMethod()).toBe("homebrew");
 		expect(getSelfUpdateCommand("prime-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade supreme-agent");
-		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade supreme-agent");
+		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade preme-agent");
+		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade preme-agent");
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {
@@ -440,9 +431,9 @@ describe("session paths", () => {
 	});
 
 	test("expands tilde in the session root env var", () => {
-		process.env[ENV_SESSION_DIR] = "~/supreme-agent-sessions";
+		process.env[ENV_SESSION_DIR] = "~/preme-agent-sessions";
 
-		expect(getSessionsDir("/agent")).toBe(join(homedir(), "supreme-agent-sessions"));
+		expect(getSessionsDir("/agent")).toBe(join(homedir(), "preme-agent-sessions"));
 	});
 
 	test("uses the env session root as the default session dir", () => {

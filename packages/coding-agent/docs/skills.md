@@ -1,10 +1,10 @@
-> Supreme Agent can create skills. Ask it to build one for your use case.
+> Preme Agent can create skills. Ask it to build one for your use case.
 
 # Skills
 
-Skills are self-contained capability packages that Supreme Agent loads on demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
+Skills are self-contained capability packages that Preme Agent loads on demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
 
-Supreme Agent implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient. It also supports Python-backed skills: a superset of markdown skills that install Python packages into the persistent Python kernel.
+Preme Agent implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient. It also supports Python-backed skills: a superset of markdown skills that install Python packages into the persistent Python kernel.
 
 ## Table of Contents
 
@@ -12,7 +12,7 @@ Supreme Agent implements the [Agent Skills standard](https://agentskills.io/spec
 - [Built-in Skills](#built-in-skills)
 - [How Skills Work](#how-skills-work)
 - [Python-Backed Skills](#python-backed-skills)
-- [Creating Skills with Supreme Agent](#creating-skills-with-prime-agent)
+- [Creating Skills with Preme Agent](#creating-skills-with-prime-agent)
 - [Skill Commands](#skill-commands)
 - [Skill Structure](#skill-structure)
 - [Frontmatter](#frontmatter)
@@ -24,7 +24,7 @@ Supreme Agent implements the [Agent Skills standard](https://agentskills.io/spec
 
 > **Security:** Skills can instruct the model to perform any action and may include executable code the model invokes. Review skill content before use.
 
-Supreme Agent loads skills from:
+Preme Agent loads skills from:
 
 - Global:
   - `~/.supreme/agent/skills/`
@@ -35,7 +35,7 @@ Supreme Agent loads skills from:
 - Packages: `skills/` directories or `pi.skills` entries in `package.json`
 - Settings: `skills` array with files or directories
 - CLI: `--skill <path>` (repeatable, additive even with `--no-skills`)
-- Built-in: `skills/` shipped with the supreme-agent package (lowest precedence)
+- Built-in: `skills/` shipped with the preme-agent package (lowest precedence)
 
 Discovery rules:
 - In `~/.supreme/agent/skills/` and `.supreme/agent/skills/`, direct root `.md` files are discovered as individual skills
@@ -46,7 +46,7 @@ Disable discovery with `--no-skills` (explicit `--skill` paths still load).
 
 ## Built-in Skills
 
-Supreme Agent ships with built-in skills that load by default:
+Preme Agent ships with built-in skills that load by default:
 
 - `prime-intellect` - Prime Intellect products and workflows via the prime CLI: verifiers environments and the Environments Hub, evaluations (local and hosted), Hosted Training and prime-rl, sandboxes, tunnels, Prime Inference, GPU compute, and storage. Reference docs for each area load on demand from the skill's `references/` directory.
 - `skill-creator` - teaches the agent to create new skills: markdown skill layout, frontmatter rules, placement and precedence, and the full Python-backed skill contract (package layout, `run()` convention, optional CLI, kernel venv behavior) with a working template in `references/python-skills.md`.
@@ -74,7 +74,7 @@ A `SERPER_API_KEY` in the environment, if set, takes precedence over the stored 
 Once loaded, the model can call it directly in the Python kernel by import name:
 
 ```python
-print(await websearch("latest Supreme Agent release"))
+print(await websearch("latest Preme Agent release"))
 ```
 
 Until a key is configured, web search returns a clear message telling the agent
@@ -129,7 +129,7 @@ For project-level Claude Code skills, add to `.supreme/agent/settings.json`:
 
 ## How Skills Work
 
-1. At startup, Supreme Agent scans skill locations and extracts names, descriptions, type, and file locations
+1. At startup, Preme Agent scans skill locations and extracts names, descriptions, type, and file locations
 2. The system prompt includes visible skills in XML format per the [specification](https://agentskills.io/integrate-skills)
 3. When a task matches, the agent uses `ipython` to load the full `SKILL.md` (models don't always do this; use prompting or `/skill:name` to force it)
 4. The agent follows the instructions, using relative paths to reference scripts and assets
@@ -157,7 +157,7 @@ Detection rules:
 - the import name is the skill name with hyphens converted to underscores
 - `src/<import_name>/__init__.py` must exist
 
-For `web-search`, Supreme Agent exposes `web_search` in the Python REPL. If the module defines `run()`, the module is wrapped as an async callable:
+For `web-search`, Preme Agent exposes `web_search` in the Python REPL. If the module defines `run()`, the module is wrapped as an async callable:
 
 ```python
 await web_search("prime agent skills")
@@ -165,7 +165,7 @@ await web_search.run("prime agent skills")
 help(web_search)
 ```
 
-Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.supreme/agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Supreme Agent rebuilds the kernel venv so dependency changes are picked up.
+Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.supreme/agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Preme Agent rebuilds the kernel venv so dependency changes are picked up.
 
 If you set `PRIME_AGENT_KERNEL_PYTHON`, Prime Agent does not install packages into that environment. The Python must already have a current `prime-agent-runtime` and the default runtime packages installed. Missing Python skill imports are disabled with a warning and calling the skill raises a `RuntimeError`.
 
@@ -198,16 +198,16 @@ await web_search("prime agent")
 !web_search "prime agent" --limit 3
 ```
 
-## Creating Skills with Supreme Agent
+## Creating Skills with Preme Agent
 
-Supreme Agent ships with a built-in `skill-creator` skill that teaches the agent both the Agent Skills format and the Python-backed package contract. You can ask for a skill in normal language:
+Preme Agent ships with a built-in `skill-creator` skill that teaches the agent both the Agent Skills format and the Python-backed package contract. You can ask for a skill in normal language:
 
 ```text
 Create a project Python-backed skill named release-audit in
 .supreme/agent/skills/release-audit. It should expose
 await release_audit(repository, target_version), include concise SKILL.md
 instructions, declare its dependencies, and verify the callable in a fresh
-Supreme Agent session.
+Preme Agent session.
 ```
 
 To force the creation workflow explicitly, invoke the built-in skill command:
@@ -224,7 +224,7 @@ Tell the agent three things:
 
 The agent should create `SKILL.md` in both cases. For a Python-backed skill it should also create `pyproject.toml` and `src/<import_name>/__init__.py`, expose a documented callable, and verify that the package imports in the kernel.
 
-Use `/reload` to rediscover new or edited skill metadata. Start a fresh Supreme Agent session after adding a Python-backed skill so kernel setup can install and import the package.
+Use `/reload` to rediscover new or edited skill metadata. Start a fresh Preme Agent session after adding a Python-backed skill so kernel setup can install and import the package.
 
 ### Installed Skills and Continual Harness Skills
 
@@ -335,7 +335,7 @@ description: Helps with PDFs.
 
 ## Validation
 
-Supreme Agent validates skills against the Agent Skills standard. Most issues produce warnings but still load the skill:
+Preme Agent validates skills against the Agent Skills standard. Most issues produce warnings but still load the skill:
 
 - Name doesn't match parent directory
 - Name exceeds 64 characters or contains invalid characters

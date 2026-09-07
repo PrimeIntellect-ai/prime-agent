@@ -1,7 +1,7 @@
 /**
  * Shared confirmation for stopping a running daemon that has live sessions.
  *
- * Both `supreme-agent update --self` and interactive startup (when taking over a
+ * Both `preme-agent update --self` and interactive startup (when taking over a
  * stale-version daemon) need to ask before discarding busy sessions. They keep
  * the same busy-session semantics here and only vary the wording via `copy`.
  *

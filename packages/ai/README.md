@@ -7,13 +7,13 @@
   </a>
 </p>
 
-<h1 align="center">Supreme Agent AI</h1>
+<h1 align="center">Preme Agent AI</h1>
 
 <p align="center">
   LLM provider toolkit.
 </p>
 
-Release docs use the Supreme Agent package name. The source workspace manifest still keeps an inherited package name until the namespace migration is complete.
+Release docs use the Preme Agent package name. The source workspace manifest still keeps an inherited package name until the namespace migration is complete.
 
 Unified LLM API with automatic model discovery, provider configuration, token and cost tracking, and simple context persistence and hand-off to other models mid-session.
 
@@ -399,7 +399,7 @@ All streaming events emitted during assistant message generation:
 | `done` | Stream complete | `reason`: Stop reason ("stop", "length", "toolUse"), `message`: Final assistant message |
 | `error` | Error occurred | `reason`: Error type ("error" or "aborted"), `error`: AssistantMessage with partial content |
 
-Streaming events for different content blocks are not guaranteed to be contiguous. Providers may emit deltas for text, thinking, and tool calls in the same upstream chunk, and Supreme Agent may surface corresponding events interleaved, for example `text_start`, `text_delta`, `toolcall_start`, `text_delta`, `toolcall_delta`. Consumers must use `contentIndex` to associate each delta/end event with its block and must not assume that a block's `*_start`/`*_delta`/`*_end` sequence is uninterrupted by events for other blocks.
+Streaming events for different content blocks are not guaranteed to be contiguous. Providers may emit deltas for text, thinking, and tool calls in the same upstream chunk, and Preme Agent may surface corresponding events interleaved, for example `text_start`, `text_delta`, `toolcall_start`, `text_delta`, `toolcall_delta`. Consumers must use `contentIndex` to associate each delta/end event with its block and must not assume that a block's `*_start`/`*_delta`/`*_end` sequence is uninterrupted by events for other blocks.
 
 ## Image Input
 
@@ -839,7 +839,7 @@ const response = await stream(ollamaModel, context, {
 
 Some OpenAI-compatible servers do not understand the `developer` role used for reasoning-capable models. For those providers, set `compat.supportsDeveloperRole` to `false` so the system prompt is sent as a `system` message instead. If the server also does not support `reasoning_effort`, set `compat.supportsReasoningEffort` to `false` too.
 
-Use model-level `thinkingLevelMap` to describe model-specific thinking controls. Keys are Supreme Agent thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Missing keys use provider defaults, string values are sent to the provider, and `null` marks a level unsupported.
+Use model-level `thinkingLevelMap` to describe model-specific thinking controls. Keys are Preme Agent thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Missing keys use provider defaults, string values are sent to the provider, and `null` marks a level unsupported.
 
 This commonly applies to Ollama, vLLM, SGLang, and similar OpenAI-compatible servers. You can set `compat` at the provider level or per model.
 

@@ -42,7 +42,7 @@ except Exception as _prime_agent_rlm_error:
         def _raise_missing(self):
             raise RuntimeError(
                 "prime-agent-runtime is not installed in this kernel. "
-                "Remove ~/.supreme/agent/kernel-venv so supreme-agent can rebuild it, or set "
+                "Remove ~/.supreme/agent/kernel-venv so preme-agent can rebuild it, or set "
                 "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
             )

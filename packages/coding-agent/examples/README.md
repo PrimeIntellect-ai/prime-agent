@@ -1,6 +1,6 @@
 # Examples
 
-Example code for the Supreme Agent SDK and extension system.
+Example code for the Preme Agent SDK and extension system.
 
 ## Directories
 

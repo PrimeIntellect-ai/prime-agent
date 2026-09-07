@@ -150,7 +150,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	{
 		path: ["update"],
 		usage: "update [--force] [--rollback] [--nightly|--stable]",
-		summary: "Update Supreme Agent",
+		summary: "Update Preme Agent",
 		options: [
 			"--force     Reinstall even if the current version is the latest on the channel",
 			"--rollback  Restore the previous compiled release",

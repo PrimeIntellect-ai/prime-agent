@@ -1,6 +1,6 @@
 # Extension Examples
 
-Example extensions for Supreme Agent.
+Example extensions for Preme Agent.
 
 ## Usage
 
@@ -96,7 +96,7 @@ cp permission-gate.ts ~/.supreme/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `mac-system-theme.ts` | Syncs the Supreme Agent theme with macOS dark/light mode |
+| `mac-system-theme.ts` | Syncs the Preme Agent theme with macOS dark/light mode |
 
 ### Resources
 

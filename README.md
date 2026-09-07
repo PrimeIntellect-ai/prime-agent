@@ -1,139 +1,151 @@
-<p align="center">
-  <a href="https://primeintellect.ai">
-    <picture>
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/40c36e38-c5bd-4c5a-9cb3-f7b902cd155d">
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8">
-      <img alt="Prime Intellect" src="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8" width="312" style="max-width: 100%;">
-    </picture>
-  </a>
-</p>
+# Preme Agent
 
-<h3 align="center">
-Supreme Agent: A Self-Improving RLM Harness
-</h3>
+Preme Agent is an independent fork of [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), rebuilt and maintained in [JonusNattapong/preme-agent](https://github.com/JonusNattapong/preme-agent).
 
-<p align="center">
-  <a href="packages/coding-agent/docs/index.md">Documentation</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a>
-</p>
+It is an open-source coding and research agent for long-running work. The agent combines a persistent Python REPL, recursive subagents, durable sessions, and an extensible terminal interface.
 
-<p align="center">
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  </a>
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml/badge.svg" alt="Build Binaries" />
-  </a>
-  <a href="https://arxiv.org/abs/2608.23552">
-    <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
-  </a>
-</p>
+> This repository is currently developed from source. Release installers and hosted services from the upstream project are not part of this fork.
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/104249?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-104249" target="_blank" rel="noopener noreferrer">
-    <img src="https://trendshift.io/api/badge/repositories/104249" alt="PrimeIntellect-ai%2Fprime-agent | Trendshift" width="250" height="55" />
-  </a>
-</p>
+## Highlights
 
-Supreme Agent is an open-source coding and research agent for general and long-running work. It is designed around two core abstractions:
+- **Persistent Python control environment** for reading files, running commands, editing code, and inspecting data.
+- **Recursive subagents** for parallel or background work.
+- **Durable sessions** that can be resumed, branched, compacted, and shared.
+- **Continual harness state** for prompts, memories, skills, and reusable subagent specifications.
+- **Extensible workflows** through skills, extensions, MCP integrations, themes, and prompt templates.
+- **Multiple execution modes** including interactive TUI, JSON, RPC, and ACP.
+- **Cross-platform source runners** for Windows, macOS, and Linux.
 
-- The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
-- The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Supreme Agent can refine through small, evidence-backed updates, local to the session by default.
+## Requirements
 
-Supreme Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
+- Node.js `22.8.0` or newer
+- npm
+- Python 3.11+ for the managed RLM runtime, or `uv` for automatic runtime setup
+- A supported provider account or API key
 
-- **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
-- **Subagents are built in:** `rlm(...)` spawns real child agents for parallel or background work and returns their results programmatically.
-- **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
-- **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
-- **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
-- **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
-- **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
+## Run from source
 
-## Getting Started
-
-Windows, macOS, and Linux are supported. The release installer below is for macOS or Linux; Windows setup is documented in [Windows Setup](packages/coding-agent/docs/windows.md).
-
-Install the latest stable release on macOS or Linux:
+Clone the fork and install dependencies:
 
 ```bash
-curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+git clone https://github.com/JonusNattapong/preme-agent.git
+cd preme-agent
+npm ci
 ```
 
-The installer requires HTTPS for release downloads, checks the selected archive against the release origin's SHA-256 inventory, installs the `supreme-agent` command, and can prepare the Python runtime used by the agent. The checksum detects corruption or an inconsistent transfer; because the inventory and archive come from the same origin, HTTPS is the authenticity boundary. In this fork, `supreme` and `supreme-agent` are the primary CLI aliases; `prime-agent` and `pi` remain compatibility aliases.
+Run the development version from the project directory you want the agent to work on:
 
-Start Supreme Agent from the repository or directory you want it to work in:
+### macOS / Linux
 
 ```bash
-cd /path/to/project
-supreme-agent
+/path/to/preme-agent/prime-agent.sh
 ```
 
-On first launch, run `/login` to choose a subscription or API-key provider. Supreme Agent works in the current directory and can run commands and modify files there. Use a disposable clone, clean worktree, or another checkpoint you can inspect and restore.
+### Windows PowerShell
 
-> [!WARNING]
-> Supreme Agent executes model-generated Python and project commands with your user permissions. Its worker and kernel processes improve lifecycle isolation and recovery; they are **not** a security sandbox. Review changes and use trusted repositories, instructions, skills, and extensions only. Run untrusted code or instructions in an external sandbox or restricted environment.
+```powershell
+C:\path\to\preme-agent\prime-agent.ps1
+```
 
-Useful commands:
+Both launchers preserve the current working directory. To run the compiled bundle instead:
 
 ```bash
-supreme-agent agents                   # Browse running, idle, and saved sessions
-supreme-agent attach <agent>           # Reattach to a running session
-supreme-agent --resume [path|id]       # Browse sessions or resume one directly
-supreme-agent status                   # Inspect background service state
-supreme-agent doctor [--fix]           # Inspect or repair background services
-supreme-agent update [--force]         # Update Supreme Agent
-supreme-agent shutdown [--force]       # Stop every agent, worker, and background service
+npm run build
+./prime-agent.sh --dist
 ```
 
-## Built for Long-Running Work
-Supreme Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
+On first launch, use `/login` to authenticate, or provide an API key through the environment. For example:
 
-- **Continual Harness:** `/refine` can persist focused, reviewable lessons as supplemental prompts, memories, reusable skill descriptions, or subagent specifications, with recorded refinement history. It does not replace packaging and reviewing new executable skills.
-- **Direct agent-to-agent communication:** running agents and retained subagents can discover one another, exchange messages, and steer active work.
-- **Daemon-backed continuity:** active sessions, Python REPL state, schedules, and subagents keep running when the terminal detaches and can be reattached later.
-- **Heartbeats and schedules:** `/heartbeat`, `rlm_heartbeat`, and `supreme-agent schedule` can re-enter a session periodically or at a specific time.
-- **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
-- **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates. A passed gate checks only what that gate verifies; reaching a limit does not imply task success.
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+./prime-agent.sh
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+.\prime-agent.ps1
+```
+
+## Basic usage
+
+Start an interactive session in any project:
+
+```bash
+/path/to/preme-agent/prime-agent.sh
+```
+
+Useful commands inside the agent:
+
+| Command | Purpose |
+| --- | --- |
+| `/login` | Authenticate with a provider |
+| `/model` | Select a model |
+| `/new` | Start a new session |
+| `/resume` | Browse or resume saved sessions |
+| `/compact` | Compact older context |
+| `/tree` | Navigate session branches |
+| `/settings` | Configure the agent |
+| `/reload` | Reload skills, extensions, prompts, and context files |
+| `/quit` | Exit the session |
+
+Useful CLI commands:
+
+```bash
+preme-agent agents
+preme-agent status
+preme-agent doctor
+preme-agent --resume
+preme-agent shutdown
+```
+
+The source checkout exposes `preme-agent` when linked from `packages/coding-agent`. Compatibility aliases such as `prime-agent` and `pi` may remain in the source tree, but new integrations should use `preme-agent`.
 
 ## Documentation
 
-- [Quickstart](packages/coding-agent/docs/quickstart.md) — install, authenticate, and run a first session
-- [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
-- [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
-- [RLM programming model](packages/coding-agent/docs/rlm.md) — the persistent Python REPL, subagents, skills, and the trust model
-- [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation and integrations
-- [Skills](packages/coding-agent/docs/skills.md) — install and create reusable capabilities
-- [Provider setup](packages/coding-agent/docs/providers.md) — subscription and API-key providers
-- [Architecture overview](packages/coding-agent/docs/architecture.md) — daemon, worker, kernel, and persistence boundaries
-- [Development](packages/coding-agent/docs/development.md) — build and run from source
+- [Quickstart](packages/coding-agent/docs/quickstart.md)
+- [Usage and CLI reference](packages/coding-agent/docs/usage.md)
+- [Provider setup](packages/coding-agent/docs/providers.md)
+- [Sessions and long-running agents](packages/coding-agent/docs/long-running-agents.md)
+- [RLM runtime](packages/coding-agent/docs/rlm-runtime.md)
+- [Skills](packages/coding-agent/docs/skills.md)
+- [Extensions](packages/coding-agent/docs/extensions.md)
+- [MCP integrations](packages/coding-agent/docs/mcp-integrations.md)
+- [Architecture](packages/coding-agent/docs/architecture.md)
+- [Development guide](packages/coding-agent/docs/development.md)
 
-## Contributing
+## Development
 
-Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
+Install dependencies before making changes:
 
-Read the [contribution guidelines](CONTRIBUTING.md) for the full process. Report security vulnerabilities privately by following the [security policy](SECURITY.md).
+```bash
+npm ci
+```
 
-## Acknowledgements
+Run the repository checks:
 
-Our agent and TUI is built on top of [`pi`](https://github.com/earendil-works/pi). We thank the authors of `pi` for their valuable work.
+```bash
+npm run check
+```
+
+Run a focused test from the relevant package when needed:
+
+```bash
+cd packages/coding-agent
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/<file>.test.ts
+```
+
+See [AGENTS.md](AGENTS.md) for repository conventions and validation rules.
+
+## Security
+
+Preme Agent can execute model-generated Python and project commands with your user permissions. It is not a security sandbox. Use trusted repositories, instructions, skills, extensions, and providers. Review changes before using them in production.
+
+## Upstream and attribution
+
+This project is an independent fork. It retains portions of the original Prime Agent codebase and the upstream [pi-mono](https://github.com/earendil-works/pi-mono) lineage. Please see [LICENSE](LICENSE) for licensing and attribution terms.
 
 ## License
 
-Supreme Agent is fully open source and released under the [MIT License](LICENSE).
-
-## Citation
-
-If you use this codebase in your research, please cite Supreme Agent:
-
-```bibtex
-@article{karten2026prime,
-  title={Supreme Agent: A Self-Improving RLM Harness},
-  author={Karten, Seth and Zhang, Alex L. and Thomas, Kevin and Müller, Sebastian and Bakouch, Elie and Auras, Daniel and Senghaas, Mika and Obeid, Fares and Dunas, Konstantin and Hagemann, Johannes and Jaghouar, Sami},
-  journal={arXiv preprint arXiv:2608.23552},
-  year={2026}
-}
-```
-
-Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+Preme Agent is released under the [MIT License](LICENSE).

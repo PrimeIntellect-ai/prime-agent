@@ -573,7 +573,7 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 	if (!shouldInstallUv) {
 		throw new Error(
 			`uv is required to set up the Python kernel. Install uv yourself: ${uvInstallCommand()}, ` +
-				"or set SUPREME_AGENT_INSTALL_UV=1 (or legacy PRIME_AGENT_INSTALL_UV=1) to let supreme-agent run that installer.",
+				"or set SUPREME_AGENT_INSTALL_UV=1 (or legacy PRIME_AGENT_INSTALL_UV=1) to let preme-agent run that installer.",
 		);
 	}
 
@@ -590,7 +590,7 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 		}
 	} catch (error) {
 		throw new Error(
-			`couldn't install uv from astral.sh; install it yourself: ${uvInstallCommand()}, then re-run supreme-agent. ${errorMessage(error)}`,
+			`couldn't install uv from astral.sh; install it yourself: ${uvInstallCommand()}, then re-run preme-agent. ${errorMessage(error)}`,
 		);
 	}
 
@@ -610,9 +610,7 @@ async function confirmUvInstall(): Promise<boolean> {
 
 	const rl = createInterface({ input: stdin, output: stderr });
 	try {
-		const answer = (
-			await rl.question("Supreme Agent needs uv to set up Python. Install uv from astral.sh now? [Y/n] ")
-		)
+		const answer = (await rl.question("Preme Agent needs uv to set up Python. Install uv from astral.sh now? [Y/n] "))
 			.trim()
 			.toLowerCase();
 		return answer !== "n" && answer !== "no";

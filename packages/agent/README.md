@@ -7,13 +7,13 @@
   </a>
 </p>
 
-<h1 align="center">Supreme Agent Core</h1>
+<h1 align="center">Preme Agent Core</h1>
 
 <p align="center">
   Stateful agent runtime.
 </p>
 
-Release docs use the Supreme Agent package names. The source workspace manifests still keep inherited package names until the namespace migration is complete.
+Release docs use the Preme Agent package names. The source workspace manifests still keep inherited package names until the namespace migration is complete.
 
 ## Workspace Package
 

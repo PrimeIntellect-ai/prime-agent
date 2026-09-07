@@ -751,7 +751,7 @@ export class ProviderAuthFlows {
 
 			if (result.source === "manual") {
 				browserAbort.abort();
-				dialog.showProgress("Checking Supreme Agent trace access...");
+				dialog.showProgress("Checking Preme Agent trace access...");
 				const access = await checkPrimeAgentTracesAccess(result.apiKey, resolvePrimeAgentTracesBaseUrl(), {
 					signal: dialog.signal,
 				});
@@ -761,7 +761,7 @@ export class ProviderAuthFlows {
 				}
 				if (!access.ok) {
 					const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-					throw new Error(`Prime API key does not have Supreme Agent trace access (${status}${access.message})`);
+					throw new Error(`Prime API key does not have Preme Agent trace access (${status}${access.message})`);
 				}
 			}
 

@@ -1,9 +1,9 @@
 # MCP Integrations
 
-Connect external services (Linear, Notion, …) to Supreme Agent over the
+Connect external services (Linear, Notion, …) to Preme Agent over the
 [Model Context Protocol](https://modelcontextprotocol.io).
 
-Consistent with Supreme Agent's single-tool design, MCP integrations are **not**
+Consistent with Preme Agent's single-tool design, MCP integrations are **not**
 exposed as new agent tools. Each integration is a [Python-backed skill](skills.md)
 that the model imports and calls from the Python kernel:
 
@@ -76,11 +76,11 @@ Manage generic servers from either the shell (which exits without starting an
 agent) or the TUI. Both surfaces update only `~/.supreme/agent/settings.json`:
 
 ```bash
-supreme-agent mcp add remote --url https://mcp.example.com/mcp --bearer-token-env-var EXAMPLE_TOKEN
-supreme-agent mcp add local --cwd /absolute/path --env TOKEN=EXAMPLE_TOKEN -- node server.js --stdio
-supreme-agent mcp list
-supreme-agent mcp get remote
-supreme-agent mcp remove remote
+preme-agent mcp add remote --url https://mcp.example.com/mcp --bearer-token-env-var EXAMPLE_TOKEN
+preme-agent mcp add local --cwd /absolute/path --env TOKEN=EXAMPLE_TOKEN -- node server.js --stdio
+preme-agent mcp list
+preme-agent mcp get remote
+preme-agent mcp remove remote
 ```
 
 Use the same forms after `/mcp` in the TUI. Add `--oauth` for the existing OAuth
@@ -174,7 +174,7 @@ activate the integration.
 ## Caveats
 
 - Discover before assuming tool names or argument schemas.
-- Generic MCP connections are kernel-local. Separate Supreme Agent sessions use
+- Generic MCP connections are kernel-local. Separate Preme Agent sessions use
   separate connections even when they reference the same user setting.
 - A custom `PRIME_AGENT_KERNEL_PYTHON` must include the current
   `prime-agent-runtime` dependencies.

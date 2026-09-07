@@ -7,7 +7,7 @@
   </a>
 </p>
 
-<h1 align="center">Supreme Agent CLI</h1>
+<h1 align="center">Preme Agent CLI</h1>
 
 <p align="center">
   RLM-native terminal coding and research harness.
@@ -35,7 +35,7 @@ Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mon
   - [MCP Integrations](#mcp-integrations)
   - [Extensions](#extensions)
   - [Themes](#themes)
-  - [Supreme Agent Packages](#supreme-agent-packages)
+  - [Preme Agent Packages](#preme-agent-packages)
 - [Programmatic Usage](#programmatic-usage)
 - [Upstream](#upstream)
 - [CLI Reference](#cli-reference)
@@ -58,27 +58,27 @@ Authenticate with an API key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-supreme-agent
+preme-agent
 ```
 
 Or use your existing subscription:
 
 ```bash
-supreme-agent
+preme-agent
 /login  # Then select provider
 ```
 
-Then just talk to Supreme Agent. By default, Supreme Agent gives the model one tool: `ipython`. The model uses the persistent kernel to read files, run commands, edit code, and inspect data. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [Supreme Agent packages](#supreme-agent-packages).
+Then just talk to Preme Agent. By default, Preme Agent gives the model one tool: `ipython`. The model uses the persistent kernel to read files, run commands, edit code, and inspect data. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [Preme Agent packages](#preme-agent-packages).
 
 The Python kernel runtime is set up automatically on first invocation. On Windows the managed venv uses `~/.supreme/agent/kernel-venv/Scripts/python.exe`; on POSIX it uses `~/.supreme/agent/kernel-venv/bin/python`. Set `PRIME_AGENT_KERNEL_PYTHON` only when you want to use an existing Python environment with `prime-agent-runtime`.
 
-In this fork, `supreme` and `supreme-agent` are the primary CLI names. `supreme-agent` and `pi` remain compatibility aliases.
+In this fork, `supreme` and `preme-agent` are the primary CLI names. `preme-agent` and `pi` remain compatibility aliases.
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
 ## Providers & Models
 
-For each built-in provider, Supreme Agent maintains a list of tool-capable models, updated with every release. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
+For each built-in provider, Preme Agent maintains a list of tool-capable models, updated with every release. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
 
 **Subscriptions:**
 - Anthropic Claude Pro/Max
@@ -176,7 +176,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files (themes hot-reload automatically) |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
-| `/quit` | Quit Supreme Agent |
+| `/quit` | Quit Preme Agent |
 
 Trace uploads use environment or Agent-owned credentials, not live Prime CLI credentials. `/traces login` can reuse a CLI key only after production URL and scope validation. See [trace sharing credentials](docs/providers.md#trace-sharing-credentials).
 
@@ -208,7 +208,7 @@ Submit messages while the agent is working:
 - While browsing, **Enter** applies the edit as steering input and **Alt+Enter** applies it as a follow-up; submitting an empty edit deletes the item
 - **Ctrl+Alt+Up / Ctrl+Alt+Down** move the selected item earlier or later within its queue
 
-On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so Supreme Agent can receive the follow-up shortcut.
+On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so Preme Agent can receive the follow-up shortcut.
 
 Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUpMode` can be `"one-at-a-time"` (default, waits for response) or `"all"` (delivers all queued at once). `transport` selects provider transport preference (`"sse"`, `"websocket"`, or `"auto"`) for providers that support multiple transports.
 
@@ -221,10 +221,10 @@ Sessions are stored as JSONL files with a tree structure. Each entry has an `id`
 Sessions auto-save as flat JSONL files under `~/.supreme/agent/sessions/`. Each session header records its working directory, which the searchable session view uses to identify and open saved sessions.
 
 ```bash
-supreme-agent -c                  # Continue most recent session
-supreme-agent -r [path|id]        # Browse past sessions or resume one directly
-supreme-agent --no-session        # Ephemeral mode (don't save)
-supreme-agent --fork <path|id>    # Fork specific session file or ID into a new session
+preme-agent -c                  # Continue most recent session
+preme-agent -r [path|id]        # Browse past sessions or resume one directly
+preme-agent --no-session        # Ephemeral mode (don't save)
+preme-agent --fork <path|id>    # Fork specific session file or ID into a new session
 ```
 
 Use `/session` in interactive mode to see the current session ID before reusing it with `--resume <id>` or `--fork <id>`.
@@ -268,13 +268,13 @@ See [docs/settings.md](docs/settings.md) for all options.
 
 ### Update checks
 
-Supreme Agent stable builds fetch `https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/latest.json` to check whether a newer version exists. Beta builds fetch `beta.json` and remain on the beta channel. Override the base URL with `PRIME_AGENT_DOWNLOAD_BASE_URL`. Disable version checks with `PI_SKIP_VERSION_CHECK=1`.
+Preme Agent stable builds fetch `https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/latest.json` to check whether a newer version exists. Beta builds fetch `beta.json` and remain on the beta channel. Override the base URL with `PRIME_AGENT_DOWNLOAD_BASE_URL`. Disable version checks with `PI_SKIP_VERSION_CHECK=1`.
 
 Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, including update checks and package update checks.
 
 ## Context Files
 
-Supreme Agent loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
+Preme Agent loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
 - `~/.supreme/agent/AGENTS.md` (global)
 - Parent directories (walking up from cwd)
 - Current directory
@@ -299,11 +299,11 @@ Review this code for bugs, security issues, and performance problems.
 Focus on: {{focus}}
 ```
 
-Place in `~/.supreme/agent/prompts/`, `.supreme/agent/prompts/`, or a [Supreme Agent package](#supreme-agent-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
+Place in `~/.supreme/agent/prompts/`, `.supreme/agent/prompts/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
 
 ### Skills
 
-On-demand capability packages following the [Agent Skills standard](https://agentskills.io). At startup, Supreme Agent gives the model each visible skill's name, type, description, and location. The full `SKILL.md` stays out of context until the model inspects it with `ipython` or you explicitly invoke `/skill:name`.
+On-demand capability packages following the [Agent Skills standard](https://agentskills.io). At startup, Preme Agent gives the model each visible skill's name, type, description, and location. The full `SKILL.md` stays out of context until the model inspects it with `ipython` or you explicitly invoke `/skill:name`.
 
 ```markdown
 <!-- ~/.supreme/agent/skills/my-skill/SKILL.md -->
@@ -319,11 +319,11 @@ description: Use this skill when the user asks about X.
 2. Then that
 ```
 
-Skills can also be Python-backed. A Python skill is a normal skill directory with `SKILL.md` plus a Python package at `src/<import_name>/`. Supreme Agent installs it into the persistent Python kernel and exposes it by import name, so the model can call it directly, inspect it with `help()`, or use any console scripts the skill declares.
+Skills can also be Python-backed. A Python skill is a normal skill directory with `SKILL.md` plus a Python package at `src/<import_name>/`. Preme Agent installs it into the persistent Python kernel and exposes it by import name, so the model can call it directly, inspect it with `help()`, or use any console scripts the skill declares.
 
-Place in `~/.supreme/agent/skills/`, `~/.agents/skills/`, `.supreme/agent/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Supreme Agent package](#supreme-agent-packages) to share with others. See [docs/skills.md](docs/skills.md).
+Place in `~/.supreme/agent/skills/`, `~/.agents/skills/`, `.supreme/agent/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/skills.md](docs/skills.md).
 
-Supreme Agent ships with a built-in `websearch` skill (Google search via the [Serper](https://serper.dev) API). It loads by default; run `/login`, switch to **MCP Connections**, and choose "Serper (web search)" to add your key. Disable it with `bundledSkills.websearch: false`, or override it with your own `websearch` skill in any location above. See [docs/skills.md#built-in-skills](docs/skills.md#built-in-skills).
+Preme Agent ships with a built-in `websearch` skill (Google search via the [Serper](https://serper.dev) API). It loads by default; run `/login`, switch to **MCP Connections**, and choose "Serper (web search)" to add your key. Disable it with `bundledSkills.websearch: false`, or override it with your own `websearch` skill in any location above. See [docs/skills.md#built-in-skills](docs/skills.md#built-in-skills).
 
 ### MCP Integrations
 
@@ -378,7 +378,7 @@ See [docs/mcp-integrations.md](docs/mcp-integrations.md) for the full authoring 
 
 <p align="center"><img src="docs/images/doom-extension.png" alt="Doom Extension" width="600"></p>
 
-TypeScript modules that extend Supreme Agent with custom tools, commands, keyboard shortcuts, event handlers, and UI components.
+TypeScript modules that extend Preme Agent with custom tools, commands, keyboard shortcuts, event handlers, and UI components.
 
 ```typescript
 export default function (pi: ExtensionAPI) {
@@ -388,7 +388,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-The default export can also be `async`. Supreme Agent waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
+The default export can also be `async`. Preme Agent waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
 
 Schedule timers via `ctx.setTimeout`/`ctx.setInterval` (error-isolated, auto-cancelled on unload); raw global timers are unsupported for scheduling extension work.
 
@@ -402,39 +402,39 @@ Schedule timers via `ctx.setTimeout`/`ctx.setInterval` (error-isolated, auto-can
 - Git checkpointing and auto-commit
 - SSH and sandbox execution
 - MCP server integration
-- Make Supreme Agent look like Claude Code
+- Make Preme Agent look like Claude Code
 - Games while waiting (yes, Doom runs)
 - ...anything you can dream up
 
-Place in `~/.supreme/agent/extensions/`, `.supreme/agent/extensions/`, or a [Supreme Agent package](#supreme-agent-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
+Place in `~/.supreme/agent/extensions/`, `.supreme/agent/extensions/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
 ### Themes
 
-Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and Supreme Agent immediately applies changes.
+Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and Preme Agent immediately applies changes.
 
-Place in `~/.supreme/agent/themes/`, `.supreme/agent/themes/`, or a [Supreme Agent package](#supreme-agent-packages) to share with others. See [docs/themes.md](docs/themes.md).
+Place in `~/.supreme/agent/themes/`, `.supreme/agent/themes/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/themes.md](docs/themes.md).
 
-### Supreme Agent Packages
+### Preme Agent Packages
 
 Bundle and share extensions, skills, prompts, and themes via npm or git.
 
-> **Security:** Supreme Agent packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
+> **Security:** Preme Agent packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
 
 ```bash
-supreme-agent package install npm:@foo/prime-agent-tools
-supreme-agent package install npm:@foo/prime-agent-tools@1.2.3  # pinned version
-supreme-agent package install git:github.com/user/repo
-supreme-agent package install git:github.com/user/repo@v1       # tag or commit
-supreme-agent package install git:git@github.com:user/repo
-supreme-agent package install https://github.com/user/repo
-supreme-agent package install ssh://git@github.com/user/repo
-supreme-agent package remove npm:@foo/prime-agent-tools
-supreme-agent package list
-supreme-agent package update                                  # update packages, except pinned versions
-supreme-agent package update npm:@foo/prime-agent-tools       # update one package
-supreme-agent update                                          # update Supreme Agent
-supreme-agent update --force                                  # reinstall Supreme Agent even if current
-supreme-agent config                                          # enable/disable package resources
+preme-agent package install npm:@foo/prime-agent-tools
+preme-agent package install npm:@foo/prime-agent-tools@1.2.3  # pinned version
+preme-agent package install git:github.com/user/repo
+preme-agent package install git:github.com/user/repo@v1       # tag or commit
+preme-agent package install git:git@github.com:user/repo
+preme-agent package install https://github.com/user/repo
+preme-agent package install ssh://git@github.com/user/repo
+preme-agent package remove npm:@foo/prime-agent-tools
+preme-agent package list
+preme-agent package update                                  # update packages, except pinned versions
+preme-agent package update npm:@foo/prime-agent-tools       # update one package
+preme-agent update                                          # update Preme Agent
+preme-agent update --force                                  # reinstall Preme Agent even if current
+preme-agent config                                          # enable/disable package resources
 ```
 
 Packages install to `~/.supreme/agent/git/` (git) or global npm. Use `--local` for project-local installs (`.supreme/agent/git/`, `.supreme/agent/npm/`). Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
@@ -454,7 +454,7 @@ Create a package by adding the inherited `pi` manifest key to `package.json`:
 }
 ```
 
-Without a `pi` manifest, Supreme Agent auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
+Without a `pi` manifest, Preme Agent auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
 
 See [docs/packages.md](docs/packages.md).
 
@@ -485,7 +485,7 @@ See [docs/sdk.md](docs/sdk.md) and [examples/sdk/](examples/sdk/).
 For non-Node.js integrations, use RPC mode over stdin/stdout:
 
 ```bash
-supreme-agent --mode rpc
+preme-agent --mode rpc
 ```
 
 RPC mode uses strict LF-delimited JSONL framing. Clients must split records on `\n` only. Do not use generic line readers like Node `readline`, which also split on Unicode separators inside JSON payloads.
@@ -496,7 +496,7 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 Prime Agent is forked from [pi-mono](https://github.com/badlogic/pi-mono) by Mario Zechner and keeps MIT attribution in the root license.
 
-The package architecture, extension model, and source package names still reflect that upstream lineage while the distributed command and release artifacts are branded for Supreme Agent.
+The package architecture, extension model, and source package names still reflect that upstream lineage while the distributed command and release artifacts are branded for Preme Agent.
 
 ## CLI Reference
 
@@ -504,20 +504,20 @@ The package architecture, extension model, and source package names still reflec
 prime-agent [options] [@files...] [messages...]
 ```
 
-Run `supreme-agent help` for the command list and `supreme-agent help <command>` for details.
+Run `preme-agent help` for the command list and `preme-agent help <command>` for details.
 
 ### Agent Commands
 
 ```bash
-supreme-agent agents                         # Search running, idle, and inactive sessions
-supreme-agent list [--all]                   # List active or saved agents
-supreme-agent attach <agent>                 # Attach the interactive UI
-supreme-agent stop <agent>                   # Stop one agent
-supreme-agent rename <agent> <name>          # Rename an agent
-supreme-agent send <agent> <message>         # Send an agent-to-agent message
-supreme-agent status                         # Show background service status
-supreme-agent doctor [--fix]                 # Inspect or safely clean up background services
-supreme-agent shutdown [--force]             # Stop every agent, worker, and background service
+preme-agent agents                         # Search running, idle, and inactive sessions
+preme-agent list [--all]                   # List active or saved agents
+preme-agent attach <agent>                 # Attach the interactive UI
+preme-agent stop <agent>                   # Stop one agent
+preme-agent rename <agent> <name>          # Rename an agent
+preme-agent send <agent> <message>         # Send an agent-to-agent message
+preme-agent status                         # Show background service status
+preme-agent doctor [--fix]                 # Inspect or safely clean up background services
+preme-agent shutdown [--force]             # Stop every agent, worker, and background service
 ```
 
 `shutdown` asks for confirmation. `shutdown --force` skips confirmation and kills unresponsive workers and their tracked child processes.
@@ -525,9 +525,9 @@ supreme-agent shutdown [--force]             # Stop every agent, worker, and bac
 ### Scheduled Prompts
 
 ```bash
-supreme-agent schedule list [--all] [agent]
-supreme-agent schedule add <agent> <schedule> -- <message>
-supreme-agent schedule cancel <job-id>
+preme-agent schedule list [--all] [agent]
+preme-agent schedule add <agent> <schedule> -- <message>
+preme-agent schedule cancel <job-id>
 ```
 
 Schedules run prompts later or repeatedly. A schedule can be a supported one-time expression such as `in 5m` or a cron expression.
@@ -537,12 +537,12 @@ Schedules run prompts later or repeatedly. A schedule can be a supported one-tim
 Packages bundle capabilities such as extensions, skills, prompts, and themes.
 
 ```bash
-supreme-agent package install <source> [--local]
-supreme-agent package remove <source> [--local]
-supreme-agent package list
-supreme-agent package update [source]
-supreme-agent update [--force]                   # Update Supreme Agent itself
-supreme-agent config                             # Enable/disable package resources
+preme-agent package install <source> [--local]
+preme-agent package remove <source> [--local]
+preme-agent package list
+preme-agent package update [source]
+preme-agent update [--force]                   # Update Preme Agent itself
+preme-agent config                             # Enable/disable package resources
 ```
 
 ### Modes
@@ -554,10 +554,10 @@ supreme-agent config                             # Enable/disable package resour
 | `--mode json` | Output all events as JSON lines (see [docs/json.md](docs/json.md)) |
 | `--mode rpc` | RPC mode for process integration (see [docs/rpc.md](docs/rpc.md)) |
 
-In print mode, Supreme Agent also reads piped stdin and merges it into the initial prompt:
+In print mode, Preme Agent also reads piped stdin and merges it into the initial prompt:
 
 ```bash
-cat README.md | supreme-agent -p "Summarize this text"
+cat README.md | preme-agent -p "Summarize this text"
 ```
 
 ### Model Options
@@ -570,7 +570,7 @@ cat README.md | supreme-agent -p "Summarize this text"
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--models <patterns>` | Comma-separated patterns for Alt+M cycling |
 
-Use `supreme-agent model list [search]` to list available models.
+Use `preme-agent model list [search]` to list available models.
 
 ### Session Options
 
@@ -582,7 +582,7 @@ Use `supreme-agent model list [search]` to list available models.
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
 
-Use `supreme-agent session export <file> [output]` to export a saved session to HTML.
+Use `preme-agent session export <file> [output]` to export a saved session to HTML.
 
 ### Tool Options
 
@@ -642,40 +642,40 @@ Gates run before the continuation, turn, token, and wall-clock limits are evalua
 Prefix files with `@` to include in the message:
 
 ```bash
-supreme-agent @prompt.md "Answer this"
-supreme-agent -p @screenshot.png "What's in this image?"
-supreme-agent @code.ts @test.ts "Review these files"
+preme-agent @prompt.md "Answer this"
+preme-agent -p @screenshot.png "What's in this image?"
+preme-agent @code.ts @test.ts "Review these files"
 ```
 
 ### Examples
 
 ```bash
 # Interactive with initial prompt
-supreme-agent "List all .ts files in src/"
+preme-agent "List all .ts files in src/"
 
 # Non-interactive
-supreme-agent -p "Summarize this codebase"
+preme-agent -p "Summarize this codebase"
 
 # Non-interactive with piped stdin
-cat README.md | supreme-agent -p "Summarize this text"
+cat README.md | preme-agent -p "Summarize this text"
 
 # Different model
-supreme-agent --provider openai --model gpt-4o "Help me refactor"
+preme-agent --provider openai --model gpt-4o "Help me refactor"
 
 # Model with provider prefix (no --provider needed)
-supreme-agent --model openai/gpt-4o "Help me refactor"
+preme-agent --model openai/gpt-4o "Help me refactor"
 
 # Model with thinking level shorthand
-supreme-agent --model sonnet:high "Solve this complex problem"
+preme-agent --model sonnet:high "Solve this complex problem"
 
 # Limit model cycling
-supreme-agent --models "claude-*,gpt-4o"
+preme-agent --models "claude-*,gpt-4o"
 
 # Restrict to the built-in Python REPL tool
-supreme-agent --tools ipython -p "Review the code"
+preme-agent --tools ipython -p "Review the code"
 
 # High thinking level
-supreme-agent --thinking high "Solve this complex problem"
+preme-agent --thinking high "Solve this complex problem"
 ```
 
 ### Environment Variables
@@ -687,18 +687,18 @@ supreme-agent --thinking high "Solve this complex problem"
 | `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Legacy alias for `PRIME_AGENT_SESSION_DIR` |
 | `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
 | `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
-| `PI_SKIP_VERSION_CHECK` | Skip the Supreme Agent version update check at startup. This prevents the release manifest request |
+| `PI_SKIP_VERSION_CHECK` | Skip the Preme Agent version update check at startup. This prevents the release manifest request |
 | `PRIME_AGENT_TELEMETRY` | Override pseudonymous aggregate usage analytics with `1`/`true`/`yes` or `0`/`false`/`no` |
 | `PRIME_AGENT_TELEMETRY_ENDPOINT` | Override the aggregate analytics ingestion endpoint |
 | `DO_NOT_TRACK` | Disable aggregate usage analytics when set to `1`/`true`/`yes` |
-| `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Supreme Agent release manifest and tarball base URL |
+| `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Preme Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing if it has `agent_traces` scope |
 | `PRIME_TEAM_ID` | Override the Prime Inference team request header without changing the saved Agent team |
 | `PRIME_AGENT_INFERENCE_API_BASE_URL` | Override Agent authentication and team API URLs, not model inference URLs; defaults to production |
 | `PRIME_AGENT_INFERENCE_FRONTEND_URL` | Override the Agent login browser frontend; defaults to production |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
-| `PRIME_AGENT_TRACES_BASE_URL` | Override the Supreme Agent trace upload API base URL |
+| `PRIME_AGENT_TRACES_BASE_URL` | Override the Preme Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of auto-bootstrapping `~/.supreme/agent/kernel-venv` |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
@@ -714,6 +714,6 @@ MIT
 
 ## See Also
 
-- [Supreme Agent AI](../ai): Core LLM toolkit
-- [Supreme Agent Core](../agent): Agent framework
-- [Supreme Agent TUI](../tui): Terminal UI components
+- [Preme Agent AI](../ai): Core LLM toolkit
+- [Preme Agent Core](../agent): Agent framework
+- [Preme Agent TUI](../tui): Terminal UI components

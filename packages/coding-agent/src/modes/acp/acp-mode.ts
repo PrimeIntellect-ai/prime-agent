@@ -688,7 +688,7 @@ export async function runAcpModeWithConnection(
 				// the single-session slot) instead of dropping the connection.
 				sessionCapabilities: { close: {} },
 			},
-			agentInfo: { name: "prime-agent", title: "Supreme Agent", version: VERSION },
+			agentInfo: { name: "prime-agent", title: "Preme Agent", version: VERSION },
 			// Advertise prime-agent extras under a namespaced key: ACP reserves
 			// every object root for future protocol fields.
 			_meta: primeAgentMeta({}),

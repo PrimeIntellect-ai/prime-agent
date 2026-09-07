@@ -1,8 +1,8 @@
 # Windows Support
 
-Supreme Agent supports native Windows development and runtime use. The tested path uses Windows 10/11, Node.js 22.8.0 or newer, npm, and Git for Windows.
+Preme Agent supports native Windows development and runtime use. The tested path uses Windows 10/11, Node.js 22.8.0 or newer, npm, and Git for Windows.
 
-In this fork, `supreme` and `supreme-agent` are the primary CLI names. `supreme-agent` and `pi` remain compatibility aliases.
+In this fork, `preme-agent` is the primary CLI name. `prime-agent` and `pi` remain compatibility aliases.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ In this fork, `supreme` and `supreme-agent` are the primary CLI names. `supreme-
 - Git for Windows, which provides Git Bash
 - Internet access on the first kernel bootstrap so `uv` can install Python and runtime packages
 
-Supreme Agent requires a bash-compatible shell on Windows. Checked locations, in order:
+Preme Agent requires a bash-compatible shell on Windows. Checked locations, in order:
 
 1. Custom path from `~/.supreme/agent/settings.json`
 2. Git Bash (`C:\Program Files\Git\bin\bash.exe`)
@@ -24,8 +24,8 @@ For most users, [Git for Windows](https://git-scm.com/download/win) is sufficien
 From PowerShell:
 
 ```powershell
-git clone https://github.com/JonusNattapong/Supreme-agent.git
-cd Supreme-agent
+git clone https://github.com/JonusNattapong/preme-agent.git
+cd preme-agent
 npm ci
 .\prime-agent.ps1
 ```
@@ -40,7 +40,7 @@ npm link
 supreme
 ```
 
-`npm link` exposes `supreme`, `supreme-agent`, `supreme-agent`, and `pi`.
+`npm link` exposes `preme-agent`, `prime-agent`, and `pi`.
 
 ## Python Kernel Bootstrap
 

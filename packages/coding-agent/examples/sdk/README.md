@@ -1,6 +1,6 @@
 # SDK Examples
 
-Programmatic usage of the Supreme Agent SDK via `createAgentSession()` and `createAgentSessionRuntime()`.
+Programmatic usage of the Preme Agent SDK via `createAgentSession()` and `createAgentSessionRuntime()`.
 
 The published TypeScript packages still use inherited `@earendil-works/pi-*`
 identifiers. Those identifiers are API names, not a dependency on the upstream

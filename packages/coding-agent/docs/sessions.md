@@ -1,16 +1,16 @@
 # Sessions
 
-Supreme Agent saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
+Preme Agent saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
 
 ## Session Storage
 
 Sessions auto-save to `~/.supreme/agent/sessions/`. Each session is a JSONL file with a tree structure.
 
 ```bash
-supreme-agent --continue          # Continue the most recent session
-supreme-agent --resume [path|id]  # Browse past sessions or resume one directly
-supreme-agent --no-session        # Ephemeral mode; do not save
-supreme-agent --fork <path|id>    # Fork a session file or partial session ID into a new session
+preme-agent --continue          # Continue the most recent session
+preme-agent --resume [path|id]  # Browse past sessions or resume one directly
+preme-agent --no-session        # Ephemeral mode; do not save
+preme-agent --fork <path|id>    # Fork a session file or partial session ID into a new session
 ```
 
 Use `/session` in interactive mode to see the current session file, session ID, and message count. Use `/usage` for token, cost, and context usage.
@@ -35,9 +35,9 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 
 ## Resuming and Deleting Sessions
 
-`/resume` opens an interactive session picker for the current project. `supreme-agent --resume` opens the same picker at startup, and `supreme-agent --resume <path|id>` resumes a specific session.
+`/resume` opens an interactive session picker for the current project. `preme-agent --resume` opens the same picker at startup, and `preme-agent --resume <path|id>` resumes a specific session.
 
-An invalid ID exits with the closest unambiguous session ID when one is available. To open the picker and send an initial prompt after selecting a session, separate the prompt with `--`: `supreme-agent --resume -- "continue this work"`.
+An invalid ID exits with the closest unambiguous session ID when one is available. To open the picker and send an initial prompt after selecting a session, separate the prompt with `--`: `preme-agent --resume -- "continue this work"`.
 
 In the picker you can:
 
@@ -48,7 +48,7 @@ In the picker you can:
 - rename with Ctrl+R
 - delete with Ctrl+D, then confirm
 
-When available, Supreme Agent uses the `trash` CLI for deletion instead of permanently removing files.
+When available, Preme Agent uses the `trash` CLI for deletion instead of permanently removing files.
 
 ## Naming Sessions
 
@@ -58,7 +58,7 @@ Use `/name <name>` to set a human-readable session name:
 /name Refactor auth module
 ```
 
-Named sessions are easier to find in `/resume` and `supreme-agent --resume`.
+Named sessions are easier to find in `/resume` and `preme-agent --resume`.
 
 ## Branching with `/tree`
 
@@ -122,7 +122,7 @@ Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone`
 
 ## Branch Summaries
 
-When `/tree` switches away from one branch to another, Supreme Agent can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
+When `/tree` switches away from one branch to another, Preme Agent can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
 
 When prompted, choose one of:
 

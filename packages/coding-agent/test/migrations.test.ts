@@ -49,7 +49,7 @@ describe("session migrations", () => {
 	});
 
 	it("copies legacy .prime/agent data into the new .supreme/agent directory", () => {
-		const root = mkdtempSync(join(tmpdir(), "supreme-agent-rebrand-migration-"));
+		const root = mkdtempSync(join(tmpdir(), "preme-agent-rebrand-migration-"));
 		tempDirs.push(root);
 		const legacyDir = join(root, ".prime", "agent");
 		const newDir = join(root, ".supreme", "agent");
@@ -65,7 +65,7 @@ describe("session migrations", () => {
 	});
 
 	it("does not overwrite an existing new config directory", () => {
-		const root = mkdtempSync(join(tmpdir(), "supreme-agent-rebrand-migration-"));
+		const root = mkdtempSync(join(tmpdir(), "preme-agent-rebrand-migration-"));
 		tempDirs.push(root);
 		const legacyDir = join(root, ".prime", "agent");
 		const newDir = join(root, ".supreme", "agent");

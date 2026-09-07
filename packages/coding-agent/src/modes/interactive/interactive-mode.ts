@@ -9247,7 +9247,7 @@ export class InteractiveMode {
 					verb === "removed"
 						? `Removed MCP server "${name}" (${transport}). It is no longer available through mcp.`
 						: usesOAuth
-							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). ${hasMcpProviderRefresh ? "Run" : "Restart Supreme Agent, then run"} /mcp login ${name} to connect.`
+							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). ${hasMcpProviderRefresh ? "Run" : "Restart Preme Agent, then run"} /mcp login ${name} to connect.`
 							: `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). Available next turn through mcp.`;
 				await this.reloadAfterMcpChange(usesOAuth ? successMessage : result.message, successMessage);
 			} else if (result.action === "list") {

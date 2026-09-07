@@ -5,7 +5,7 @@ description: Work with Prime Intellect products via the prime CLI and Python SDK
 
 # Prime Intellect
 
-Prime Intellect is an open superintelligence lab building open-source AGI infrastructure: a platform for RL environments, evaluations, post-training, inference, and globally distributed GPU compute. Supreme Agent (this agent) is built by Prime Intellect, and the `prime` CLI is the default way to interface with every product below.
+Prime Intellect is an open superintelligence lab building open-source AGI infrastructure: a platform for RL environments, evaluations, post-training, inference, and globally distributed GPU compute. Preme Agent (this agent) is built by Prime Intellect, and the `prime` CLI is the default way to interface with every product below.
 
 ## Product Map
 

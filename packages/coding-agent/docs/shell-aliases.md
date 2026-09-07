@@ -1,6 +1,6 @@
 # Shell Aliases
 
-Supreme Agent runs bash in non-interactive mode (`bash -c`), which doesn't expand aliases by default.
+Preme Agent runs bash in non-interactive mode (`bash -c`), which doesn't expand aliases by default.
 
 To enable your shell aliases, add to `~/.supreme/agent/settings.json`:
 
