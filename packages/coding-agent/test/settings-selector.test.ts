@@ -10,6 +10,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 const config: SettingsConfig = {
 	autoCompact: true,
+	compactionMaxContextTokens: undefined,
 	idleEvictionMinutes: 90,
 	showImages: true,
 	autoResizeImages: true,
@@ -38,6 +39,7 @@ const config: SettingsConfig = {
 
 const callbacks: SettingsCallbacks = {
 	onAutoCompactChange: () => {},
+	onCompactionMaxContextTokensChange: () => {},
 	onIdleEvictionMinutesChange: () => {},
 	onShowImagesChange: () => {},
 	onAutoResizeImagesChange: () => {},
