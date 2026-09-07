@@ -181,11 +181,17 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
-const WORKER_CONNECT_TIMEOUT_MS = 30_000;
+// Windows antivirus scanning can delay worker startup beyond 30 seconds.
+const WORKER_CONNECT_TIMEOUT_MS = process.platform === "win32" ? 90_000 : 30_000;
+const WORKER_CONNECT_PROBE_MS = process.platform === "win32" ? 2_000 : 500;
+const WORKER_PROBE_BACKOFF_MIN_MS = 25;
+const WORKER_PROBE_BACKOFF_MAX_MS = process.platform === "win32" ? 2_000 : 25;
 
 /** Per-attempt handshake waits consume the remaining outer connect budget; a smaller fixed clock makes a consistently slow (win32) handshake fail every retry. */
 export function handshakeBudgetMs(deadline: number, now = Date.now()): number {
-	return Math.max(50, deadline - now);
+	const remaining = deadline - now;
+	if (remaining <= 0) throw new DaemonWorkerProbeTimeoutError("Worker connection deadline elapsed");
+	return remaining;
 }
 const ROSTER_WATCHDOG_INTERVAL_MS = 15_000;
 const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
@@ -214,7 +220,8 @@ const STALE_RECLAIM_WAIT_MS = 10_000;
 // Polling loops probe existence cheaply via kill(0); the ps-backed zombie and
 // identity checks are throttled so a wedged worker cannot saturate the
 // supervisor event loop with synchronous subprocess spawns.
-const LIVENESS_IDENTITY_RECHECK_MS = 500;
+// Windows identity lookups launch PowerShell, so recheck less often there.
+const LIVENESS_IDENTITY_RECHECK_MS = process.platform === "win32" ? 3_000 : 500;
 const OWNED_WORKER_DISCONNECT_GRACE_MS = 30_000;
 const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
@@ -3357,11 +3364,12 @@ export class DaemonSupervisor {
 	private async connectWorker(worker: ResidentWorker, timeoutMs: number): Promise<DaemonWorkerClient> {
 		const deadline = Date.now() + timeoutMs;
 		let lastError: unknown;
+		let backoffMs = WORKER_PROBE_BACKOFF_MIN_MS;
 		while (Date.now() < deadline) {
 			await this.assertRecoveryAllowed();
 			const client = new DaemonWorkerClient(worker.descriptor.socketPath);
 			try {
-				await client.connect(Math.min(500, handshakeBudgetMs(deadline)));
+				await client.connect(Math.min(WORKER_CONNECT_PROBE_MS, handshakeBudgetMs(deadline)));
 				await client.waitForHello(handshakeBudgetMs(deadline));
 				// Listen before authenticating: the worker flushes its roster snapshot right after auth succeeds.
 				client.onFrame((frame) => this.handleWorkerFrame(worker, frame, client));
@@ -3400,7 +3408,10 @@ export class DaemonSupervisor {
 				) {
 					throw error;
 				}
-				await delay(25);
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) break;
+				await delay(Math.min(backoffMs, remaining));
+				backoffMs = Math.min(backoffMs * 2, WORKER_PROBE_BACKOFF_MAX_MS);
 			}
 		}
 		throw new DaemonWorkerProbeTimeoutError(`Timed out connecting to daemon session worker: ${String(lastError)}`);
@@ -6404,8 +6415,7 @@ export class DaemonSupervisor {
 			if (directChild) {
 				sigkillSent = directChild.child.kill("SIGKILL");
 			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
-				// Fresh, unthrottled check: the cached verdict may be up to 500ms
-				// old, long enough for the pid to be recycled.
+				// Recheck without the cache: the pid may have been recycled.
 				signalProcessGroupOrProcess(entryPid, "SIGKILL");
 				sigkillSent = true;
 			}
@@ -6518,10 +6528,8 @@ export class DaemonSupervisor {
 				break;
 			}
 			if (!killed && stoppedCanSignal && Date.now() >= sigkillDeadline) {
-				// Fresh, unthrottled identity check right before signalling: the
-				// cached verdict may be up to 500ms old, long enough for the pid
-				// to be recycled by an unrelated process. A transiently
-				// unobservable identity skips this attempt but keeps escalation
+				// Recheck without the cache before signalling a possibly recycled pid.
+				// An unobservable identity skips this attempt but keeps escalation
 				// armed so a wedged worker is still killed on a later pass.
 				const observedNow = processStartId === undefined ? undefined : getProcessStartId(pid);
 				if (processStartId === undefined || observedNow === processStartId) {

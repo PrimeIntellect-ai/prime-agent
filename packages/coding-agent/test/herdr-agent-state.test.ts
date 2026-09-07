@@ -77,7 +77,7 @@ async function startFakeHerdrServer(socketPath: string): Promise<{
 
 	await new Promise<void>((resolve, reject) => {
 		server.on("error", reject);
-		server.listen(socketPath, resolve);
+		server.listen(herdrSocketTarget(socketPath), resolve);
 	});
 
 	const waitForRequests = (count: number, timeoutMs = 3000): Promise<void> => {
@@ -134,6 +134,22 @@ describe("herdrAgentStateExtension", () => {
 				rmSync(path, { recursive: true, force: true });
 			}
 		}
+	});
+
+	it.skipIf(process.platform !== "win32")("reports through a bare Windows named pipe endpoint", async () => {
+		const socketName = `pi-herdr-test-${process.pid}-${Date.now()}.sock`;
+		const { server, requests, waitForRequests } = await startFakeHerdrServer(socketName);
+		cleanupServers.push(server);
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = socketName;
+		process.env.HERDR_PANE_ID = "w1:p1";
+
+		const { pi, handlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
+		await waitForRequests(1);
+		expect(requests[0]?.params.state).toBe("idle");
 	});
 
 	it("registers no handlers when HERDR_ENV is not set", () => {

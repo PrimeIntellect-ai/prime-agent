@@ -1,4 +1,5 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -51,10 +52,31 @@ function isRlmSubagentDisplayEntry(value: unknown): value is RlmSubagentDisplayE
 	);
 }
 
-export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): void {
+function readRlmSubagentDisplayEntrySync(sessionDir: string): RlmSubagentDisplayEntry | undefined {
+	let contents: string;
+	try {
+		contents = readFileSync(rlmSubagentDisplayPath(sessionDir), "utf8");
+	} catch (error) {
+		// An unreadable file may hold a deletion tombstone.
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+		throw error;
+	}
+	try {
+		const parsed = JSON.parse(contents) as unknown;
+		return isRlmSubagentDisplayEntry(parsed) ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+// The daemon supervisor owns all writes synchronously, so the check and rename cannot interleave.
+export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): boolean {
 	const path = rlmSubagentDisplayPath(entry.sessionDir);
+	if (entry.status !== "deleted" && readRlmSubagentDisplayEntrySync(entry.sessionDir)?.status === "deleted") {
+		return false;
+	}
 	mkdirSync(entry.sessionDir, { recursive: true });
-	const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+	const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
 	const handle = openSync(tempPath, "wx", 0o600);
 	try {
 		try {
@@ -69,6 +91,7 @@ export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): vo
 		rmSync(tempPath, { force: true });
 		throw error;
 	}
+	return true;
 }
 
 export async function readRlmSubagentDisplayEntry(sessionDir: string): Promise<RlmSubagentDisplayEntry | undefined> {

@@ -41,7 +41,7 @@ export function expandPath(filePath: string, platform: NodeJS.Platform = process
 	if (normalized === "~") {
 		return os.homedir();
 	}
-	if (normalized.startsWith("~/")) {
+	if (normalized.startsWith("~/") || (platform === "win32" && normalized.startsWith("~\\"))) {
 		return (platform === "win32" ? win32 : posix).join(os.homedir(), normalized.slice(2));
 	}
 	return normalized;

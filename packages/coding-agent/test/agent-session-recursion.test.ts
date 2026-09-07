@@ -3630,6 +3630,52 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("reports one failure per delete attempt and one terminal notice after a successful retry", async () => {
+		const { child: hostedChild, completion: childCompletion, hasStarted } = createAbortInsensitiveChild();
+		const cleanups = [deferred<void>(), deferred<void>(), deferred<void>()];
+		let cleanupAttempts = 0;
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: () => cleanups[cleanupAttempts++]!.promise,
+			},
+		});
+		const spawned = await root.runRlmChild("retry cleanup", { name: "notice-worker" });
+		await waitFor(hasStarted);
+		const internals = root as unknown as InspectableRlmSession;
+		const failures = () =>
+			root.messages.filter((message) => message.role === "custom" && message.customType === "rlm_child_failure");
+		const terminalNotices = () =>
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			);
+
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await Promise.all([root.deleteRlmSubagent(spawned.rlm_child_id), root.deleteRlmSubagent("notice-worker")]);
+			expect(cleanupAttempts).toBe(attempt + 1);
+			cleanups[attempt]!.reject(new Error(`cleanup failure ${attempt + 1}`));
+			await vi.waitFor(() => {
+				expect(failures()).toHaveLength(attempt + 1);
+				expect(internals._deletingRlmChildren.size).toBe(0);
+			});
+			expect(terminalNotices()).toHaveLength(0);
+			expect((await root.listRlmSubagents()).subagents).toEqual([]);
+		}
+
+		await root.deleteRlmSubagent("notice-worker");
+		expect(cleanupAttempts).toBe(3);
+		childCompletion.resolve();
+		cleanups[2]!.resolve();
+		await root.waitForRlmQuiescence();
+		expect(failures()).toHaveLength(2);
+		expect(terminalNotices()).toEqual([
+			expect.objectContaining({ details: expect.objectContaining({ kind: "cancelled" }) }),
+		]);
+		expect(internals._rlmChildCleanupFailures.size).toBe(0);
+		expect(root.getRlmChildSession(spawned.rlm_child_id)).toBeUndefined();
+		await hostedChild.disposeAsync();
+	});
+
 	it("settles a pre-existing deletion cleanup failure during parent disposal", async () => {
 		const { child: hostedChild, completion: childCompletion, hasStarted } = createAbortInsensitiveChild();
 		const disposeHostedChild = vi.spyOn(hostedChild, "disposeAsync");

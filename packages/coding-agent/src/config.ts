@@ -502,7 +502,9 @@ export const ENV_LEGACY_SESSION_DIR = `${envPrefix}_CODING_AGENT_SESSION_DIR`;
 
 export function expandTildePath(path: string, platform: NodeJS.Platform = process.platform): string {
 	if (path === "~") return homedir();
-	if (path.startsWith("~/")) return (platform === "win32" ? win32 : posix).join(homedir(), path.slice(2));
+	if (path.startsWith("~/") || (platform === "win32" && path.startsWith("~\\"))) {
+		return (platform === "win32" ? win32 : posix).join(homedir(), path.slice(2));
+	}
 	return path;
 }
 

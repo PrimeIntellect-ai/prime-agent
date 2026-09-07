@@ -4389,6 +4389,8 @@ describe("daemon worker supervisor monitoring", () => {
 		const now = 1_000_000;
 		expect(handshakeBudgetMs(now + 30_000, now)).toBe(30_000);
 		expect(handshakeBudgetMs(now + 2_500, now)).toBe(2_500);
-		expect(handshakeBudgetMs(now - 1, now)).toBe(50);
+		expect(handshakeBudgetMs(now + 25, now)).toBe(25);
+		expect(() => handshakeBudgetMs(now, now)).toThrow(DaemonWorkerProbeTimeoutError);
+		expect(() => handshakeBudgetMs(now - 1, now)).toThrow(DaemonWorkerProbeTimeoutError);
 	});
 });

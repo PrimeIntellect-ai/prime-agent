@@ -391,6 +391,97 @@ describe("StdinBuffer", () => {
 		});
 	});
 
+	describe("Raw Multiline Paste", () => {
+		let emittedPaste: string[];
+
+		beforeEach(() => {
+			buffer = new StdinBuffer({ timeout: 10 });
+			emittedSequences = [];
+			emittedPaste = [];
+			buffer.on("data", (sequence) => emittedSequences.push(sequence));
+			buffer.on("paste", (data) => emittedPaste.push(data));
+		});
+
+		for (const [name, input] of [
+			["CRLF", "line1\r\nline2"],
+			["LF", "line1\nline2"],
+			["CR", "line1\rline2"],
+			["blank lines", "line1\r\n\r\nline2"],
+			["mixed line endings", "a\rb\nc"],
+			["Unicode", "Hello 世界\n🎉"],
+		] as const) {
+			it(`emits ${name} text in one raw chunk as paste`, () => {
+				processInput(input);
+				assert.deepStrictEqual(emittedPaste, [input]);
+				assert.deepStrictEqual(emittedSequences, []);
+			});
+		}
+
+		for (const input of ["hello\r", "hello\n", "hello\r\n", "\rhello"] as const) {
+			it(`preserves text and Enter regardless of chunk boundary: ${JSON.stringify(input)}`, () => {
+				for (let split = 0; split <= input.length; split++) {
+					buffer.clear();
+					emittedSequences.length = 0;
+					emittedPaste.length = 0;
+					if (split > 0) processInput(input.slice(0, split));
+					if (split < input.length) processInput(input.slice(split));
+					assert.deepStrictEqual(emittedPaste, []);
+					assert.deepStrictEqual(emittedSequences, [...input]);
+				}
+			});
+		}
+
+		it("clears pending Kitty duplicate suppression after raw paste", () => {
+			processInput("\x1b[97u");
+			processInput("a\nb");
+			processInput("a");
+			assert.deepStrictEqual(emittedPaste, ["a\nb"]);
+			assert.deepStrictEqual(emittedSequences, ["\x1b[97u", "a"]);
+			assert.strictEqual(buffer.getBuffer(), "");
+		});
+
+		it("emits multiline Buffer input as paste", () => {
+			processInput(Buffer.from("line1\r\nline2"));
+			assert.deepStrictEqual(emittedPaste, ["line1\r\nline2"]);
+			assert.deepStrictEqual(emittedSequences, []);
+		});
+
+		for (const input of ["\r", "\n", "\r\n", "\r\r\r"] as const) {
+			it(`keeps linebreak-only chunk ${JSON.stringify(input)} as key data`, () => {
+				processInput(input);
+				assert.deepStrictEqual(emittedPaste, []);
+				assert.deepStrictEqual(emittedSequences, [...input]);
+			});
+		}
+
+		it("does not disturb bracketed paste", () => {
+			processInput("\x1b[200~pasted\r\ntext\x1b[201~");
+			assert.deepStrictEqual(emittedPaste, ["pasted\r\ntext"]);
+			assert.deepStrictEqual(emittedSequences, []);
+		});
+
+		it("keeps escape-containing chunks on the escape parser path", () => {
+			processInput("a\x1b[Aline1\r\nline2");
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, [
+				"a",
+				"\x1b[A",
+				"l",
+				"i",
+				"n",
+				"e",
+				"1",
+				"\r",
+				"\n",
+				"l",
+				"i",
+				"n",
+				"e",
+				"2",
+			]);
+		});
+	});
+
 	describe("Destroy", () => {
 		it("should clear buffer on destroy", () => {
 			processInput("\x1b[<35");

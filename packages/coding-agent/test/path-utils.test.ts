@@ -24,6 +24,21 @@ describe("path-utils", () => {
 			expect(expandTildePath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
 		});
 
+		for (const expand of [expandPath, expandTildePath]) {
+			it(`${expand.name} expands a backslash tilde prefix only on Windows`, () => {
+				const input = "~\\Documents\\file.txt";
+				expect(expand(input, "win32")).toBe(win32.join(homedir(), "Documents", "file.txt"));
+				expect(expand(input, "linux")).toBe(input);
+				expect(expand(input, "darwin")).toBe(input);
+				expect(expand(input)).toBe(process.platform === "win32" ? join(homedir(), "Documents", "file.txt") : input);
+			});
+
+			it(`${expand.name} preserves backslashes within POSIX paths`, () => {
+				expect(expand("~/Documents\\file.txt", "linux")).toBe(posix.join(homedir(), "Documents\\file.txt"));
+				expect(expand("~/Documents\\file.txt", "darwin")).toBe(posix.join(homedir(), "Documents\\file.txt"));
+			});
+		}
+
 		it("should normalize Unicode spaces", () => {
 			// Non-breaking space (U+00A0) should become regular space
 			const withNBSP = "file\u00A0name.txt";

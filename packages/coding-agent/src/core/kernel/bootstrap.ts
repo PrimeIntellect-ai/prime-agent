@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -34,6 +34,42 @@ const DEFAULT_RLM_EXTRA_PACKAGES = [
 export const DEFAULT_RLM_EXTRA_UV_ARGS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.uvArg);
 export const DEFAULT_RLM_EXTRA_IMPORT_NAMES = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.importName);
 export const DEFAULT_RLM_EXTRA_IMPORT_LABELS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.promptLabel);
+const WINDOWS_PATHEXT_DEFAULT = [".COM", ".EXE", ".BAT", ".CMD"];
+const WINDOWS_SUPPORTED_EXECUTABLE_EXTENSIONS = new Set(
+	WINDOWS_PATHEXT_DEFAULT.map((extension) => extension.toLowerCase()),
+);
+
+export interface BatchShimInvocation {
+	args: string[];
+	env: NodeJS.ProcessEnv;
+}
+
+/** Build a cmd.exe invocation without embedding user-controlled values in its command string. */
+export function buildBatchShimInvocation(
+	command: string,
+	args: readonly string[],
+	baseEnv: NodeJS.ProcessEnv,
+	token = randomUUID().replaceAll("-", ""),
+): BatchShimInvocation {
+	if (!/^[A-Za-z0-9_]+$/.test(token)) {
+		throw new Error("Windows batch shim token contains unsupported characters");
+	}
+	const values = [command, ...args];
+	if (values.some((value) => /["\0\r\n]/.test(value))) {
+		throw new Error("Windows batch shim paths and arguments cannot contain quotes, NUL, or line breaks");
+	}
+	const env = { ...baseEnv };
+	const variables = values.map((value, index) => {
+		const name = `PRIME_AGENT_BATCH_${token}_${index}`;
+		env[name] = value;
+		return `"%${name}%"`;
+	});
+	return {
+		args: ["/d", "/v:off", "/s", "/c", `"${variables.join(" ")}"`],
+		env,
+	};
+}
+
 const UV_INSTALL_COMMAND = "curl -LsSf https://astral.sh/uv/install.sh | sh";
 const REQUIRED_HARNESS_METHODS = [
 	"create_memory",
@@ -369,11 +405,19 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 	}
 }
 
+function isBatchShim(command: string): boolean {
+	return process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+}
+
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const child = spawnHidden(command, args, {
-			env: process.env,
+		// CPython must read UTF-8 .pth files even under a Windows legacy code page.
+		const env = { ...process.env, ...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}) };
+		const batch = isBatchShim(command) ? buildBatchShimInvocation(command, args, env) : undefined;
+		const child = spawnHidden(batch ? (process.env.ComSpec ?? "cmd.exe") : command, batch?.args ?? args, {
+			env: batch?.env ?? env,
 			stdio: options.stdio ?? "ignore",
+			...(batch ? { windowsVerbatimArguments: true } : {}),
 		});
 		child.on("error", reject);
 		child.on("exit", (code, signal) => {
@@ -491,10 +535,31 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 	}
 }
 
+/** Try a bare command followed by supported PATHEXT extensions in the configured order. */
+export function windowsExecutableCandidates(name: string, pathext: string | undefined): string[] {
+	const extensions = (pathext ?? "")
+		.split(";")
+		.map((ext) => ext.trim().toLowerCase())
+		.filter((ext) => WINDOWS_SUPPORTED_EXECUTABLE_EXTENSIONS.has(ext));
+	const lowerName = name.toLowerCase();
+	if (WINDOWS_PATHEXT_DEFAULT.some((ext) => lowerName.endsWith(ext.toLowerCase()))) {
+		return [name];
+	}
+	const seen = new Set<string>([name.toLowerCase()]);
+	const candidates = [name];
+	for (const ext of extensions.length > 0 ? extensions : WINDOWS_PATHEXT_DEFAULT) {
+		const candidate = `${name}${ext}`;
+		if (seen.has(candidate.toLowerCase())) continue;
+		seen.add(candidate.toLowerCase());
+		candidates.push(candidate);
+	}
+	return candidates;
+}
+
 async function findExecutable(name: string): Promise<string | null> {
 	const pathValue = process.env.PATH;
 	if (!pathValue) return null;
-	const candidates = process.platform === "win32" ? [name, `${name}.exe`] : [name];
+	const candidates = process.platform === "win32" ? windowsExecutableCandidates(name, process.env.PATHEXT) : [name];
 	for (const dir of pathValue.split(path.delimiter)) {
 		if (!dir) continue;
 		for (const candidate of candidates) {
@@ -851,6 +916,11 @@ async function ensureKernelPythonUncached(
 	const override = process.env.PRIME_AGENT_KERNEL_PYTHON;
 	if (override) {
 		const python = path.resolve(expandHome(override));
+		if (isBatchShim(python)) {
+			throw new Error(
+				`PRIME_AGENT_KERNEL_PYTHON must point directly to a Python executable, not a Windows batch shim: ${python}`,
+			);
+		}
 		const missing: string[] = [];
 		if (!(await hasPrimeAgentRuntime(python))) {
 			missing.push(
