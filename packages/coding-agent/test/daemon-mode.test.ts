@@ -8650,6 +8650,40 @@ describe("daemon mode helpers", () => {
 		expect(setRlmMaxDepth).toHaveBeenCalledWith(3, { global: true });
 	});
 
+	it("gets and sets the context limit directly on the active session", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const getContextLimitStatus = vi.fn(() => ({ maxContextTokens: undefined, source: "none" as const }));
+		const setContextLimit = vi.fn(() => ({ maxContextTokens: 100000, source: "chat" as const }));
+		const state = makeState("active-1") as ActiveSessionState;
+		(state.runtime as { session: unknown }).session = { getContextLimitStatus, setContextLimit };
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		const client = makeClient("client-1", state.activeSessionId);
+
+		await expect(
+			internals.handleCommand(client, {
+				type: "get_context_limit_status",
+				activeSessionId: state.activeSessionId,
+			}),
+		).resolves.toMatchObject({ success: true, data: { source: "none" } });
+		await expect(
+			internals.handleCommand(client, {
+				type: "set_context_limit",
+				activeSessionId: state.activeSessionId,
+				maxContextTokens: 100000,
+			}),
+		).resolves.toMatchObject({ success: true, data: { maxContextTokens: 100000, source: "chat" } });
+		expect(setContextLimit).toHaveBeenCalledWith(100000);
+	});
+
 	it.each([
 		{
 			name: "defers busy heartbeat cron jobs instead of queueing a follow-up",

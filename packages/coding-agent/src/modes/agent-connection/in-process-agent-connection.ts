@@ -584,6 +584,14 @@ export class InProcessAgentConnection implements AgentConnection {
 		return this.session.setRlmMaxDepth(maxDepth, options);
 	}
 
+	async getContextLimitStatus() {
+		return this.session.getContextLimitStatus();
+	}
+
+	async setContextLimit(maxContextTokens: number | null) {
+		return this.session.setContextLimit(maxContextTokens);
+	}
+
 	async renameSavedSession(sessionPath: string, name: string): Promise<void> {
 		const trimmedName = name.trim();
 		if (!trimmedName) {

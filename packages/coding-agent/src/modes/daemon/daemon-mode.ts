@@ -353,6 +353,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"set_session_name",
 	"get_rlm_max_depth_status",
 	"set_rlm_max_depth",
+	"get_context_limit_status",
+	"set_context_limit",
 	"rename_saved_session",
 	"delete_saved_session",
 	"get_session_context",
@@ -5251,6 +5253,17 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				const result = await state.runtime.session.setRlmMaxDepth(command.maxDepth, { global: command.global });
 				return success(command.id, "set_rlm_max_depth", result);
+			}
+
+			case "get_context_limit_status": {
+				const state = this.getSessionState(command.activeSessionId);
+				return success(command.id, "get_context_limit_status", state.runtime.session.getContextLimitStatus());
+			}
+
+			case "set_context_limit": {
+				const state = this.getSessionState(command.activeSessionId);
+				const result = state.runtime.session.setContextLimit(command.maxContextTokens);
+				return success(command.id, "set_context_limit", result);
 			}
 
 			case "get_session_context": {

@@ -163,6 +163,11 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
 	});
 
+	it("schema-gates the context limit commands at their introducing revision", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_context_limit_status).toEqual({ minProtocol: 7, minSchemaRevision: 28 });
+		expect(DAEMON_COMMAND_COMPATIBILITY.set_context_limit).toEqual({ minProtocol: 7, minSchemaRevision: 28 });
+	});
+
 	it("schema-gates session commands that carry the telemetry policy", () => {
 		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual([
 			{ minProtocol: 7 },

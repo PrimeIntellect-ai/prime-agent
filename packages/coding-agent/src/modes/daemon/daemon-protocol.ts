@@ -73,8 +73,8 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
-export const DAEMON_SCHEMA_REVISION = 27;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-962b8b4c5e35";
+export const DAEMON_SCHEMA_REVISION = 28;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-bbd9f84b75d3";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -660,6 +660,8 @@ export type DaemonCommand =
 	| { id?: string; type: "set_session_name"; activeSessionId: string; name: string; workerToken?: string }
 	| { id?: string; type: "get_rlm_max_depth_status"; activeSessionId: string }
 	| { id?: string; type: "set_rlm_max_depth"; activeSessionId: string; maxDepth: number; global?: boolean }
+	| { id?: string; type: "get_context_limit_status"; activeSessionId: string }
+	| { id?: string; type: "set_context_limit"; activeSessionId: string; maxContextTokens: number | null }
 	| { id?: string; type: "rename_saved_session"; activeSessionId?: string; sessionPath: string; name: string }
 	| { id?: string; type: "delete_saved_session"; activeSessionId?: string; sessionPath: string }
 	| { id?: string; type: "get_session_context"; activeSessionId: string }
@@ -693,6 +695,7 @@ export interface DaemonCommandCompatibility {
 const LEGACY_DAEMON_COMMAND = { minProtocol: 7 } as const;
 const CURRENT_DAEMON_COMMAND = { minProtocol: 7 } as const;
 const RLM_MAX_DEPTH_COMMAND = { minProtocol: 7, minSchemaRevision: 11 } as const;
+const CONTEXT_LIMIT_COMMAND = { minProtocol: 7, minSchemaRevision: 28 } as const;
 const SESSION_INPUT_ADMISSION_COMMAND = {
 	minProtocol: 7,
 	capability: "session_input_admission",
@@ -837,6 +840,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	set_session_name: LEGACY_DAEMON_COMMAND,
 	get_rlm_max_depth_status: RLM_MAX_DEPTH_COMMAND,
 	set_rlm_max_depth: RLM_MAX_DEPTH_COMMAND,
+	get_context_limit_status: CONTEXT_LIMIT_COMMAND,
+	set_context_limit: CONTEXT_LIMIT_COMMAND,
 	rename_saved_session: LEGACY_DAEMON_COMMAND,
 	delete_saved_session: LEGACY_DAEMON_COMMAND,
 	get_session_context: LEGACY_DAEMON_COMMAND,
@@ -955,6 +960,8 @@ export const DAEMON_COMMAND_PLANE = {
 	set_session_name: "control",
 	get_rlm_max_depth_status: "session",
 	set_rlm_max_depth: "session",
+	get_context_limit_status: "session",
+	set_context_limit: "session",
 	rename_saved_session: "control",
 	delete_saved_session: "control",
 	get_session_context: "session",
@@ -1312,6 +1319,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_last_assistant_text",
 	"get_system_prompt",
 	"get_rlm_max_depth_status",
+	"get_context_limit_status",
 	"get_tool_definition",
 ]);
 

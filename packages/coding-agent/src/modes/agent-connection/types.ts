@@ -5,6 +5,7 @@ import type { AuthSourceToken } from "../../core/auth-storage.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
+import type { ContextLimitStatus } from "../../core/context-limit.js";
 import type { ContextTreeNode } from "../../core/context-tree.js";
 import type {
 	AgentCronJob,
@@ -752,6 +753,8 @@ export interface AgentConnection {
 	setSessionName(name: string): Promise<void>;
 	getRlmMaxDepthStatus(): Promise<RlmMaxDepthStatus>;
 	setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }): Promise<SetRlmMaxDepthResult>;
+	getContextLimitStatus(): Promise<ContextLimitStatus>;
+	setContextLimit(maxContextTokens: number | null): Promise<ContextLimitStatus>;
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;
 	deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult>;
 
