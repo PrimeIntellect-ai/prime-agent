@@ -704,6 +704,8 @@ export class AgentsViewMode implements Component, Focusable {
 	private pendingKillSubagent: PendingKillSubagent | undefined;
 	private renameTarget: { activeSessionId?: string; sessionFile?: string; summary: SessionSummary } | undefined;
 	private actionModeSearchQuery: string | undefined;
+	/** In-flight optimistic renames (sessionId -> name), overlaid on every catalog reconcile until the RPC settles. */
+	private readonly pendingRenames = new Map<string, string>();
 	/** Session the view was entered from; exempt from the empty-session sort demotion. */
 	private readonly anchorSessionId: string | undefined;
 	private readonly inactiveAgentIdentities = new Set<string>();
@@ -1684,19 +1686,18 @@ export class AgentsViewMode implements Component, Focusable {
 		return true;
 	}
 
-	/** Rewrite the catalogs the reconcile reads, so refreshes keep the name until daemon truth arrives. */
+	/** Overlay the pending rename onto pushed roster updates until the RPC settles. */
 	private applyOptimisticSessionName(summary: SessionSummary, name: string): void {
-		this.lastListedSummaries = this.lastListedSummaries.map((entry) =>
-			entry.sessionId === summary.sessionId ? { ...entry, sessionName: name } : entry,
-		);
-		if (summary.sessionFile) {
-			const renamedPath = resolvePath(canonicalizePath(summary.sessionFile));
-			this.savedSessions = this.savedSessions.map((entry) =>
-				resolvePath(canonicalizePath(entry.path)) === renamedPath ? { ...entry, name } : entry,
-			);
-			this.persistentState.savedSessions = this.savedSessions;
-		}
+		this.pendingRenames.set(summary.sessionId, name);
 		this.reconcileCatalogs();
+	}
+
+	private withPendingRenames(summaries: readonly SessionSummary[]): SessionSummary[] {
+		if (this.pendingRenames.size === 0) return [...summaries];
+		return summaries.map((summary) => {
+			const name = this.pendingRenames.get(summary.sessionId);
+			return name === undefined ? summary : { ...summary, sessionName: name };
+		});
 	}
 
 	private async completeRename(summary: SessionSummary, name: string): Promise<void> {
@@ -1721,7 +1722,9 @@ export class AgentsViewMode implements Component, Focusable {
 					: formatError("Failed to rename agent", error),
 			);
 		}
-		// On success this confirms the optimistic name; on failure it reverts it.
+		// The overlay dies with the RPC; the refreshes then confirm the new name
+		// (success) or restore the previous one from daemon truth (failure).
+		this.pendingRenames.delete(summary.sessionId);
 		await this.refreshSessions();
 		this.refreshSavedSessionsIfLoaded();
 	}
@@ -2196,11 +2199,18 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private reconcileCatalogs(): void {
-		const visibleSessions = this.lastListedSummaries.filter((summary) =>
+		const visibleSessions = this.withPendingRenames(this.lastListedSummaries).filter((summary) =>
 			shouldShowAgentsViewSession(summary, this.inactiveAgentIdentities.has(getSummaryIdentity(summary))),
 		);
 		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
-		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.heartbeats);
+		const savedSessions =
+			this.pendingRenames.size === 0
+				? this.savedSessions
+				: this.savedSessions.map((session) => {
+						const name = this.pendingRenames.get(session.id);
+						return name === undefined ? session : { ...session, name };
+					});
+		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, savedSessions, this.heartbeats);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
 		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
 		migrateAgentsViewIdentitySet(this.programShownParents, this.unifiedIndex.byKey);

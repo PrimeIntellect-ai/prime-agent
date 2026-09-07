@@ -345,6 +345,7 @@ describe("#502 unified session view regressions", () => {
 			rows: [],
 			lastListedSummaries: [captured],
 			savedSessions: [],
+			pendingRenames: new Map<string, string>(),
 			persistentState: {},
 			exitRenameMode: vi.fn(),
 			reconcileCatalogs: vi.fn(),

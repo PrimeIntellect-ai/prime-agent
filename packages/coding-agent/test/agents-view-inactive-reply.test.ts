@@ -625,6 +625,7 @@ describe("agents view slash commands", () => {
 			persistentState: {},
 			lastListedSummaries: [live],
 			savedSessions: [],
+			pendingRenames: new Map<string, string>(),
 			reconcileCatalogs: vi.fn(),
 			refreshSessions: vi.fn(async () => true),
 			refreshSavedSessions: vi.fn(async () => true),
@@ -648,7 +649,7 @@ describe("agents view slash commands", () => {
 		await expect(invoke("runAgentsViewCommand", self, { name: "name", args: "Fresh Name" }, live)).resolves.toBe(
 			true,
 		);
-		expect((self.lastListedSummaries as SessionSummary[])[0]?.sessionName).toBe("Fresh Name");
+		expect((self.pendingRenames as Map<string, string>).get(live.sessionId)).toBe("Fresh Name");
 		expect(self.reconcileCatalogs).toHaveBeenCalled();
 		expect(setReplyTarget).toHaveBeenCalledWith(undefined);
 		expect(self.refreshSessions).not.toHaveBeenCalled();
@@ -660,6 +661,8 @@ describe("agents view slash commands", () => {
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
+		// The overlay dies with the settled RPC.
+		expect((self.pendingRenames as Map<string, string>).size).toBe(0);
 
 		// A failed rename surfaces the error and refetches to revert the label.
 		(self.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;

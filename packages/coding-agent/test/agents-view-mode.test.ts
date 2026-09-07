@@ -529,6 +529,8 @@ describe("AgentsViewMode", () => {
 			ui: { requestRender: vi.fn() },
 			setStatusMessage: vi.fn(),
 			withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+			withPendingRenames: (sessions: SessionSummary[]) => sessions,
+			pendingRenames: new Map<string, string>(),
 		});
 		self.reconcileCatalogs = () => invoke("reconcileCatalogs", self);
 		invoke("reconcileCatalogs", self);
@@ -583,6 +585,8 @@ describe("AgentsViewMode", () => {
 			ui: { requestRender: vi.fn() },
 			setStatusMessage: vi.fn(),
 			withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+			withPendingRenames: (sessions: SessionSummary[]) => sessions,
+			pendingRenames: new Map<string, string>(),
 		};
 		invoke("reconcileCatalogs", self);
 		expect(persistentState.scopeRootSummary).toMatchObject({ sessionId: root.sessionId });
@@ -669,6 +673,8 @@ describe("AgentsViewMode", () => {
 				ui: { requestRender: vi.fn() },
 				setStatusMessage: vi.fn(),
 				withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+				withPendingRenames: (sessions: SessionSummary[]) => sessions,
+				pendingRenames: new Map<string, string>(),
 			};
 			invoke("reconcileCatalogs", self);
 			if (expand) {
@@ -990,6 +996,38 @@ describe("AgentsViewMode", () => {
 			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
 			expect(rows).toContain("parent");
 			expect(rows).not.toContain("1234 in");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps an optimistic rename visible across roster pushes until the RPC settles", async () => {
+		const live = summary({ sessionName: "Old Name" });
+		let settle!: (value: { success: boolean; data: unknown }) => void;
+		const request = vi.fn(
+			() =>
+				new Promise((resolve) => {
+					settle = resolve;
+				}),
+		);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		const rowName = () =>
+			(Reflect.get(view, "rows") as AgentsViewRow[]).find((row) => row.summary.sessionId === live.sessionId)?.summary
+				.sessionName;
+		try {
+			Reflect.set(view, "client", { request, isConnected: true });
+			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Fresh Name" }] });
+			invoke("applySessionList", view, [live], true);
+			await invoke("renameSession", view, live, "Fresh Name");
+			expect(rowName()).toBe("Fresh Name");
+			// An unrelated roster push mid-flight must not flicker the old name back.
+			invoke("applySessionList", view, [live, summary({ id: "other", sessionId: "other-session" })], true);
+			expect(rowName()).toBe("Fresh Name");
+			settle({ success: true, data: {} });
+			await new Promise((resolve) => setImmediate(resolve));
+			// Overlay gone; the refreshed roster (daemon truth) carries the name.
+			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
+			expect(rowName()).toBe("Fresh Name");
 		} finally {
 			stopThemeWatcher();
 		}
