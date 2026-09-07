@@ -219,6 +219,76 @@ describe("daemon supervisor prompt admission ownership", () => {
 		await Promise.all([first, second]);
 	});
 
+	it("journals a successful mutation when graceful shutdown begins during dispatch", async () => {
+		const commandJournal = {
+			lookup: vi.fn(() => undefined),
+			begin: vi.fn(() => ({ status: "new" as const })),
+			recordResult: vi.fn(),
+			acknowledge: vi.fn(),
+		};
+		const response = { type: "response", command: "prompt", success: true } as const;
+		let supervisor: SupervisorHarness;
+		supervisor = createHarness({
+			commandJournal,
+			findWorker: vi.fn(async () => ({
+				worker: { descriptor: { lifecycle: "ready", rootActiveSessionId: "session-1" } },
+				summary: { id: "session-1", activeSessionId: "session-1" },
+			})),
+			forwardToWorker: vi.fn(async () => {
+				(supervisor as unknown as { shuttingDown: boolean }).shuttingDown = true;
+				return response;
+			}),
+		});
+		const owner = client("connection-owner");
+		const command = createDaemonCommandEnvelope(
+			{ id: "prompt-1", type: "prompt", activeSessionId: "session-1", message: "hello" },
+			"prompt-1",
+			"logical-client",
+		);
+
+		await supervisor.handleLine(owner, JSON.stringify(command));
+
+		expect(commandJournal.recordResult).toHaveBeenCalledWith("logical-client", "prompt-1", response);
+		expect((supervisor as unknown as { write: ReturnType<typeof vi.fn> }).write).toHaveBeenLastCalledWith(
+			owner,
+			response,
+		);
+	});
+
+	it("does not journal a mutation before an eviction-fence ownership recheck", async () => {
+		const idleEvictionFence = deferred<void>();
+		let ownershipChecks = 0;
+		const commandJournal = {
+			lookup: vi.fn(() => undefined),
+			begin: vi.fn(() => ({ status: "new" as const })),
+			recordResult: vi.fn(),
+			acknowledge: vi.fn(),
+		};
+		const supervisor = createHarness({
+			commandJournal,
+			assertCurrent: vi.fn(async () => {
+				ownershipChecks++;
+				if (ownershipChecks > 1) throw new Error("supervisor ownership changed");
+			}),
+		});
+		(supervisor as unknown as { idleEvictionFence: Promise<void> }).idleEvictionFence = idleEvictionFence.promise;
+		const owner = client("connection-owner");
+		const command = createDaemonCommandEnvelope(
+			{ id: "prompt-1", type: "prompt", activeSessionId: "session-1", message: "hello" },
+			"prompt-1",
+			"logical-client",
+		);
+
+		const pending = supervisor.handleLine(owner, JSON.stringify(command));
+		await waitFor(() => ownershipChecks === 1);
+		expect(commandJournal.begin).not.toHaveBeenCalled();
+		idleEvictionFence.resolve();
+		await pending;
+
+		expect(commandJournal.begin).not.toHaveBeenCalled();
+		expect(commandJournal.recordResult).not.toHaveBeenCalled();
+	});
+
 	it("lets the originating connection cancel before worker lookup starts", async () => {
 		const ready = deferred<void>();
 		const findWorker = vi.fn(async () => {

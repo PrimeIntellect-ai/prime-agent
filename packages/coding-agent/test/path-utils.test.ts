@@ -1,7 +1,8 @@
 import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, posix, resolve, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { expandTildePath } from "../src/config.js";
 import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.js";
 
 describe("path-utils", () => {
@@ -15,6 +16,28 @@ describe("path-utils", () => {
 			const result = expandPath("~/Documents/file.txt");
 			expect(result).not.toContain("~/");
 		});
+
+		it("joins ~/ paths with the platform separator (win32 must not keep the posix slash)", () => {
+			const home = homedir();
+			expect(expandPath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
+			expect(expandPath("~/docs/file.txt", "linux")).toBe(posix.join(home, "docs/file.txt"));
+			expect(expandTildePath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
+		});
+
+		for (const expand of [expandPath, expandTildePath]) {
+			it(`${expand.name} expands a backslash tilde prefix only on Windows`, () => {
+				const input = "~\\Documents\\file.txt";
+				expect(expand(input, "win32")).toBe(win32.join(homedir(), "Documents", "file.txt"));
+				expect(expand(input, "linux")).toBe(input);
+				expect(expand(input, "darwin")).toBe(input);
+				expect(expand(input)).toBe(process.platform === "win32" ? join(homedir(), "Documents", "file.txt") : input);
+			});
+
+			it(`${expand.name} preserves backslashes within POSIX paths`, () => {
+				expect(expand("~/Documents\\file.txt", "linux")).toBe(posix.join(homedir(), "Documents\\file.txt"));
+				expect(expand("~/Documents\\file.txt", "darwin")).toBe(posix.join(homedir(), "Documents\\file.txt"));
+			});
+		}
 
 		it("should normalize Unicode spaces", () => {
 			// Non-breaking space (U+00A0) should become regular space

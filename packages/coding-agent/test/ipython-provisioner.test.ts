@@ -65,8 +65,21 @@ function createBusyKernelContext(
 	return { ctx, setWorkingMessage };
 }
 
-function writeFakeReplRuntime(markerPath: string): string {
+function writeFakeReplRuntime(
+	markerPath: string,
+	options: { gatedExecute?: { startedPath: string; gatePath: string } } = {},
+): string {
 	const python = join(tempDir, "python-repl");
+	const refuse = `emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
+		emit({ event: "done", id: request.id, status: "error" });`;
+	const executeBranch = options.gatedExecute
+		? `fs.writeFileSync(${JSON.stringify(options.gatedExecute.startedPath)}, "1");
+		const gate = setInterval(() => {
+			if (!fs.existsSync(${JSON.stringify(options.gatedExecute.gatePath)})) return;
+			clearInterval(gate);
+			${refuse}
+		}, 10);`
+		: refuse;
 	writeFileSync(
 		python,
 		`#!/usr/bin/env node
@@ -89,8 +102,7 @@ input.on("line", (line) => {
 		return;
 	}
 	if (request.type === "execute") {
-		emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
-		emit({ event: "done", id: request.id, status: "error" });
+		${executeBranch}
 		return;
 	}
 	if (request.type === "shutdown") {
@@ -186,6 +198,35 @@ describe("IpythonKernelProvisioner", () => {
 		expect(provisioner.manager).toBeUndefined();
 	});
 
+	it("skips the snapshot when dispose({ snapshot: false }) aborts a startup in flight", async () => {
+		const marker = join(tempDir, "snapshot-flushed");
+		const executeStarted = join(tempDir, "execute-started");
+		const executeGate = join(tempDir, "execute-gate");
+		const snapshotDir = join(tempDir, "snapshots");
+		mkdirSync(snapshotDir, { recursive: true });
+		const python = writeFakeReplRuntime(marker, {
+			gatedExecute: { startedPath: executeStarted, gatePath: executeGate },
+		});
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
+
+		const started = provisioner.ensure().catch(() => undefined);
+		await vi.waitFor(() => expect(existsSync(executeStarted)).toBe(true));
+		const disposed = provisioner.dispose({ snapshot: false });
+		writeFileSync(executeGate, "1");
+		await Promise.all([disposed, started]);
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	it("dispose({ snapshot: false }) skips the kernel's final snapshot flush", async () => {
+		const { python } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
+		const shutdown = vi.fn(async () => {});
+		Reflect.set(provisioner, "managerPromise", Promise.resolve({ shutdown }));
+
+		await provisioner.dispose({ snapshot: false });
+		expect(shutdown).toHaveBeenCalledWith({ snapshot: false, drainHostRequests: true });
+	});
+
 	it("dispose() before the boot slot prevents the kernel from spawning", async () => {
 		const { python, countRuns } = writeFakePython();
 		let release: () => void = () => {};
@@ -263,6 +304,33 @@ describe("IpythonKernelProvisioner", () => {
 		await expect(provisioner.ensure(undefined, controller.signal)).rejects.toThrow("Python execution aborted");
 		expect(dispose).not.toHaveBeenCalled();
 		expect(provisioner.manager).toBe(manager);
+	});
+
+	function primeKernelMemo(provisioner: IpythonKernelProvisioner, manager: KernelClient) {
+		Object.assign(provisioner as unknown as { managerPromise: Promise<KernelClient>; startedManager: KernelClient }, {
+			managerPromise: Promise.resolve(manager),
+			startedManager: manager,
+		});
+	}
+
+	it("drops a dead kernel memo so ensure() restarts instead of reusing it", async () => {
+		const { python, countRuns } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
+		primeKernelMemo(provisioner, { isRunning: false, isDefunct: true } as unknown as KernelClient);
+
+		await expect(provisioner.ensure()).rejects.toThrow(/Kernel exited before ready/);
+		expect(countRuns()).toBe(1);
+	});
+
+	it("keeps the memo for a kernel that is repairing itself, not defunct", async () => {
+		const { countRuns } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, {});
+		const repairing = { isRunning: false, isDefunct: false } as unknown as KernelClient;
+		primeKernelMemo(provisioner, repairing);
+
+		// A second provisioner kernel during protocol repair would split the snapshot dir.
+		await expect(provisioner.ensure()).resolves.toBe(repairing);
+		expect(countRuns()).toBe(0);
 	});
 
 	it("removes startup progress listeners when an ensure caller is aborted", async () => {

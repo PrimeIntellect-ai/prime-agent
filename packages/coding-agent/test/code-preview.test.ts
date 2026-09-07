@@ -125,6 +125,74 @@ EOF`;
 		expect(previewBashCommand(command)).toEqual({ language: "bash", text: "hello world" });
 	});
 
+	it("routes bash-skill calls with literal commands to the bash preview", () => {
+		expect(previewIpythonCode("r = await bash('git status --porcelain')")).toEqual({
+			language: "bash",
+			text: "git status --porcelain",
+		});
+		const longCommand = `git log --oneline -- ${Array.from({ length: 8 }, (_, i) => `packages/coding-agent/src/dir-${i}`).join(" ")}`;
+		const longPreview = previewIpythonCode(`result = await bash("${longCommand}", timeout=120)`);
+		expect(longPreview.language).toBe("bash");
+		expect(longPreview.text.startsWith("git log --oneline")).toBe(true);
+		const scorer = `import json
+r = await bash('git diff --stat')
+print(r)`;
+		expect(previewIpythonCode(scorer)).toEqual({ language: "bash", text: "git diff --stat" });
+		expect(
+			previewIpythonCode(`r = await bash('curl -H "Authorization: Bearer sec-abc123" https://api.example.com')`)
+				.text,
+		).not.toContain("sec-abc123");
+	});
+
+	it("evaluates bash-skill literals the way python does", () => {
+		const tripleBody = `r = await bash('''
+set -e
+git add packages/foo.ts
+''')`;
+		expect(previewIpythonCode(tripleBody)).toEqual({ language: "bash", text: "git add packages/foo.ts" });
+		expect(previewIpythonCode("r = await bash('printf \"a\\nb\"\\ngit add -A')")).toEqual({
+			language: "bash",
+			text: "git add -A",
+		});
+		expect(previewIpythonCode("r = await bash('echo can\\'t stop')")).toEqual({
+			language: "bash",
+			text: "echo can't stop",
+		});
+		expect(previewIpythonCode('r = await bash("grep -n \\")\\" src.c")')).toEqual({
+			language: "bash",
+			text: 'grep -n ")" src.c',
+		});
+		expect(previewIpythonCode("r = await bash('''echo it\\'''')")).toEqual({ language: "bash", text: "echo it'" });
+		expect(previewIpythonCode("r = await bash(r'grep \\'x\\' f')")).toEqual({
+			language: "bash",
+			text: "grep \\'x\\' f",
+		});
+	});
+
+	it("keeps the python preview when the exact command cannot be known", () => {
+		for (const code of [
+			"r = await bash(cmd)",
+			'r = await bash(f"git checkout {branch}")',
+			"r = await bash('echo ' + name)",
+			"r = await bash('echo hi\n)", // unterminated literal: python syntax error
+			"r = await bash('echo \\x41')", // value-changing escape not computed here
+			"r = await bash('grep \\bword\\b f')",
+		]) {
+			expect(previewIpythonCode(code).language).toBe("python");
+		}
+	});
+
+	it("keeps the python preview for bash-looking text inside a multiline string", () => {
+		expect(previewIpythonCode('doc = """\nbash("git status")\n"""')).toEqual({
+			language: "python",
+			text: 'bash("git status")',
+		});
+		expect(previewIpythonCode(`doc = """usage"""\nr = await bash('git status')`)).toEqual({
+			language: "bash",
+			text: "git status",
+		});
+	});
+
 	it("prefers a later meaningful heredoc over an earlier generic one", () => {
 		const command = `cat <<'CFG'
 key=value

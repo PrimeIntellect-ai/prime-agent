@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
-import type { AssistantMessage, Model } from "../src/types.js";
+import type { AssistantMessage, Context, Model, Usage } from "../src/types.js";
 
 interface CacheControl {
 	type: "ephemeral";
@@ -31,6 +31,15 @@ interface CapturedParams {
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as CapturedParams | undefined,
 }));
+
+const emptyUsage: Usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
@@ -78,6 +87,7 @@ vi.mock("openai", () => {
 async function runCompletion(
 	model: Model<"openai-completions">,
 	options?: { cacheRetention?: "none" | "short" | "long" },
+	messages?: Context["messages"],
 ): Promise<{ params: CapturedParams; result: AssistantMessage }> {
 	const timestamp = Date.now();
 
@@ -85,7 +95,7 @@ async function runCompletion(
 		model,
 		{
 			systemPrompt: "System prompt",
-			messages: [{ role: "user", content: "Hello", timestamp }],
+			messages: messages ?? [{ role: "user", content: "Hello", timestamp }],
 			tools: [
 				{
 					name: "read",
@@ -167,6 +177,38 @@ describe("openai-completions cacheControlFormat", () => {
 		const { params, result } = await runCompletion(model);
 		expectAnthropicCacheMarkers(params);
 		expect(result.usage.cost.cacheWrite).toBeCloseTo((80 * model.cost.cacheWrite) / 1_000_000);
+	});
+
+	it("advances the Anthropic cache marker to a tool result", async () => {
+		const model = getModel("prime-inference", "anthropic/claude-haiku-4.5");
+		const now = Date.now();
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Read the file", timestamp: now },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "file.txt" } }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage,
+				stopReason: "toolUse",
+				timestamp: now + 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "read",
+				content: [{ type: "text", text: "file contents" }],
+				isError: false,
+				timestamp: now + 2,
+			},
+		];
+
+		const { params } = await runCompletion(model, undefined, messages);
+		expect(params.messages.at(-1)).toMatchObject({
+			role: "tool",
+			content: [{ type: "text", text: "file contents", cache_control: { type: "ephemeral" } }],
+		});
 	});
 
 	it("preserves Anthropic-style cache markers for OpenRouter Anthropic models", async () => {

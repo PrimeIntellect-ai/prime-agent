@@ -195,7 +195,7 @@ describe("agents view reply on inactive sessions", () => {
 		expect(self.replyTarget).toBe(newTarget);
 		expect(editor.getText()).toBe("new reply");
 		expect(self.setReplyTarget).not.toHaveBeenCalled();
-		expect(self.refreshSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
+		expect(self.refreshSessions).toHaveBeenCalledWith();
 	});
 
 	it("preserves new text entered while the same reply succeeds", async () => {
@@ -266,7 +266,7 @@ describe("agents view reply on inactive sessions", () => {
 		expect(inactiveAgentIdentities.has("file:/tmp/sessions/saved-1.jsonl")).toBe(remainsInactive);
 		expect(self.refreshSessions).toHaveBeenCalledTimes(remainsInactive ? 0 : 1);
 		if (!remainsInactive) {
-			expect(self.refreshSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
+			expect(self.refreshSessions).toHaveBeenCalledWith();
 		}
 	});
 
@@ -605,32 +605,111 @@ describe("agents view slash commands", () => {
 		expect(openSelected).toHaveBeenCalledTimes(2);
 	});
 
-	it("renames a live target via the rename RPC and refreshes both catalogs", async () => {
+	it("renames a live target via the rename RPC and reapplies the pushed roster", async () => {
 		const live = summary({ activeSessionId: "active-1", lifecycle: "live" });
 		const request = vi.fn(async () => ({ success: true, data: {} }));
 		const editor = editorWithText("/name Fresh Name");
+		const setReplyTarget = vi.fn();
 		const self: Record<string, unknown> = {
 			options: {},
 			requireClient: () => ({ request }),
 			editor,
 			setStatusMessage: vi.fn(),
+			setReplyTarget,
+			persistentState: {},
 			refreshSessions: vi.fn(async () => true),
 			refreshSavedSessions: vi.fn(async () => true),
+			refreshSavedSessionsIfLoaded() {
+				return invoke("refreshSavedSessionsIfLoaded", self);
+			},
 			renameSession(s: unknown, n: string) {
 				return invoke("renameSession", self, s, n);
 			},
-			refreshBothCatalogs() {
-				return invoke("refreshBothCatalogs", self);
-			},
 		};
+		self.replyTarget = { key: "active-1", summary: live };
 
 		await expect(invoke("runAgentsViewCommand", self, { name: "name", args: "Fresh Name" }, live)).resolves.toBe(
 			true,
 		);
 
 		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
-		expect(self.refreshSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
-		expect(self.refreshSavedSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
+		// As in /kill: the completed command returns the composer to the list.
+		expect(setReplyTarget).toHaveBeenCalledWith(undefined);
+		// The push carries renames to the live catalog; the saved catalog refreshes only once it has loaded.
+		expect(self.refreshSessions).toHaveBeenCalledWith();
+		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
+
+		(self.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
+		await expect(invoke("renameSession", self, live, "Fresher Name")).resolves.toBe(true);
+		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
+	});
+
+	it("arms the saved-search fetch once and lets only the current fetch re-arm the latch", async () => {
+		const latchHarness = (text: string, responses: unknown[]) => {
+			const request = vi.fn(async () => responses.shift());
+			const persistentState: Record<string, unknown> = {};
+			const self: Record<string, unknown> = {
+				persistentState,
+				reconnectPromise: undefined,
+				daemonShutdownReceived: false,
+				savedCatalogGeneration: 0,
+				savedCatalogRefreshPending: false,
+				savedCatalogReady: false,
+				savedSessions: [],
+				lastSuccessfulSavedSessions: [],
+				savedSearchFetchStarted: false,
+				selectionAnchorPending: false,
+				reconcileCatalogs: vi.fn(),
+				resolveMissingSelectionAnchor: vi.fn(),
+				rebuildRows: vi.fn(),
+				syncSelectedRowState: vi.fn(),
+				ui: { requestRender: vi.fn() },
+				editor: editorWithText(text),
+				requireClient: () => ({ request }),
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+				refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
+				rearmSavedSearchFetch() {
+					return invoke("rearmSavedSearchFetch", self);
+				},
+				armSavedSearchFetch() {
+					return invoke("armSavedSearchFetch", self);
+				},
+			};
+			const supersede = () =>
+				(self.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({ preserveStatusOnError: true });
+			return { self, persistentState, request, supersede };
+		};
+
+		// An already-loaded shared catalog never refetches.
+		const loaded = latchHarness("needle", []);
+		(loaded.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
+		invoke("armSavedSearchFetch", loaded.self);
+		expect(loaded.request).not.toHaveBeenCalled();
+
+		// Failure ordering: a superseded settle may not disarm; only the current fetch re-arms.
+		let rejectFirst: (error: Error) => void = () => {};
+		let rejectSecond: (error: Error) => void = () => {};
+		const failing = latchHarness("deep search text", [
+			new Promise((_resolve, reject) => {
+				rejectFirst = reject;
+			}),
+			new Promise((_resolve, reject) => {
+				rejectSecond = reject;
+			}),
+		]);
+		invoke("queryChanged", failing.self);
+		invoke("queryChanged", failing.self);
+		expect(failing.request).toHaveBeenCalledTimes(1);
+		const olderFailure = (failing.self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]
+			?.value as Promise<boolean>;
+		const newerFailure = failing.supersede();
+		rejectFirst(new Error("gen1 failed"));
+		await expect(olderFailure).resolves.toBe(false);
+		expect(failing.self.savedSearchFetchStarted).toBe(true);
+		rejectSecond(new Error("gen2 failed"));
+		await expect(newerFailure).resolves.toBe(false);
+		expect(failing.self.savedSearchFetchStarted).toBe(false);
+		expect(failing.persistentState.savedCatalogLoaded).toBeUndefined();
 	});
 
 	it("kills a live target and disarms the composer", async () => {
@@ -643,14 +722,14 @@ describe("agents view slash commands", () => {
 			setStatusMessage: vi.fn(),
 			setReplyTarget,
 			replyTarget: { key: "active-1", summary: live },
-			refreshBothCatalogs: vi.fn(async () => true),
+			refreshSessions: vi.fn(async () => true),
 		};
 
 		await invoke("runAgentsViewCommand", self, { name: "kill", args: "" }, live);
 
 		expect(request).toHaveBeenCalledWith({ type: "kill", activeSessionId: "active-1" });
 		expect(setReplyTarget).toHaveBeenCalledWith(undefined);
-		expect(self.refreshBothCatalogs).toHaveBeenCalled();
+		expect(self.refreshSessions).toHaveBeenCalled();
 
 		// An agent that finished before the RPC still counts as stopped.
 		self.request = undefined;
@@ -677,7 +756,7 @@ describe("agents view slash commands", () => {
 			setStatusMessage: vi.fn(),
 			setReplyTarget,
 			replyTarget: originalTarget,
-			refreshBothCatalogs: vi.fn(async () => true),
+			refreshSessions: vi.fn(async () => true),
 		};
 
 		await invoke("runAgentsViewCommand", self, { name: "kill", args: "" }, live);

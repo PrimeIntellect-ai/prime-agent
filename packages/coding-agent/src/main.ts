@@ -5,7 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type Api, type ImageContent, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
@@ -68,16 +68,26 @@ import {
 	type SessionCwdIssue,
 } from "./core/session-cwd.js";
 import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
-import { SessionManager } from "./core/session-manager.js";
+import {
+	findMostRecentSessionForCwd,
+	getDefaultSessionDir,
+	loadEntriesFromFile,
+	SessionManager,
+} from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
-import { deserializeDaemonError } from "./modes/daemon/daemon-errors.js";
-import { collectDaemonClientEnv, collectDaemonLaunchEnv } from "./modes/daemon/daemon-protocol.js";
+import {
+	DaemonSessionCreateError,
+	deserializeDaemonCreateError,
+	deserializeDaemonError,
+} from "./modes/daemon/daemon-errors.js";
+import { collectDaemonClientEnv, collectDaemonLaunchEnv, type DaemonResponse } from "./modes/daemon/daemon-protocol.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	daemonWorkerInstanceId,
 	isDaemonWorkerProcess,
 	requireDaemonWorkerAuthenticationToken,
 	waitForDaemonWorkerStartupGate,
@@ -450,10 +460,22 @@ function getResumeSelector(parsed: Pick<Args, "resume">): string | undefined {
 	return typeof parsed.resume === "string" ? parsed.resume : undefined;
 }
 
+function readSessionManager(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
+	const entries = loadEntriesFromFile(path);
+	const header = entries.find((entry) => entry.type === "session");
+	const manager = SessionManager.inMemory(
+		cwdOverride ?? header?.cwd ?? process.cwd(),
+		sessionDir ?? dirname(resolve(path)),
+	);
+	manager.setSessionFile(path, entries);
+	return manager;
+}
+
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
+	readOnly = false,
 ): Promise<SessionManager> {
 	const explicitCwdOverride = parsed.cwd ? cwd : undefined;
 
@@ -479,7 +501,9 @@ export async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
+				return readOnly
+					? readSessionManager(resolved.path, sessionDir, explicitCwdOverride)
+					: SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -494,10 +518,15 @@ export async function createSessionManager(
 	}
 
 	if (parsed.continue) {
+		if (readOnly) {
+			const dir = sessionDir ?? getDefaultSessionDir(cwd);
+			const path = findMostRecentSessionForCwd(dir, cwd);
+			return path ? readSessionManager(path, dir, cwd) : SessionManager.inMemory(cwd, dir);
+		}
 		return SessionManager.continueRecent(cwd, sessionDir);
 	}
 
-	return SessionManager.create(cwd, sessionDir);
+	return readOnly ? SessionManager.inMemory(cwd, sessionDir) : SessionManager.create(cwd, sessionDir);
 }
 
 function buildSessionOptions(
@@ -718,7 +747,64 @@ export function resolveRuntimeSessionOptions(
 		rlmSessionDir: runtimeSessionOptions?.rlmSessionDir,
 		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
 		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,
+		semanticParentSessionId: runtimeSessionOptions?.semanticParentSessionId,
+		semanticSpawnedByRequestId: runtimeSessionOptions?.semanticSpawnedByRequestId,
 		subagentRuntimeHost: runtimeSessionOptions?.subagentRuntimeHost,
+	};
+}
+
+/** The production runtime factory: every daemon-hosted and runtime-hosted session is created through this path. */
+export function createDefaultRuntimeFactory(
+	runtimeDefaultSessionConfig: AgentSessionRuntimeConfig,
+	extensionFactories?: ExtensionFactory[],
+): CreateAgentSessionRuntimeFactory {
+	return async ({
+		cwd,
+		agentDir,
+		sessionManager,
+		sessionStartEvent,
+		sessionConfig,
+		sessionOptions: runtimeSessionOptions,
+	}) => {
+		const config = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
+		const prepared = await prepareRuntimeServices({
+			config,
+			cwd,
+			agentDir,
+			sessionManager,
+			extensionFactories,
+			sessionOptionsOverride: runtimeSessionOptions,
+		});
+		const { services, sessionOptions, diagnostics } = prepared;
+		const resolvedSessionOptions = resolveRuntimeSessionOptions(sessionOptions, runtimeSessionOptions);
+
+		const created = await createAgentSessionFromServices({
+			services,
+			sessionManager,
+			sessionStartEvent,
+			...resolvedSessionOptions,
+			// Main agents boot their kernel in the background at session creation;
+			// subagent sessions (rlmDepth > 0) keep the lazy first-call start.
+			prewarmIpythonKernel: true,
+			// Read serializedRefine from the merged runtime config (passed
+			// from the JSON/print client through AgentSessionRuntimeConfig)
+			// so it survives the daemon worker's appMode="daemon" context.
+			serializedRefine: config.serializedRefine ?? false,
+			executionMode: config.executionMode,
+			telemetryDisabled: config.telemetryDisabled,
+			// Only seed initial goal for top-level sessions (rlmDepth 0).
+			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
+		});
+		const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
+		if (created.session.model && cliThinkingOverride) {
+			created.session.setThinkingLevel(created.session.thinkingLevel);
+		}
+
+		return {
+			...created,
+			services,
+			diagnostics,
+		};
 	};
 }
 
@@ -890,6 +976,22 @@ function isUnknownActiveSessionError(message: string): boolean {
 	return message.startsWith("Unknown active session:");
 }
 
+/**
+ * Unknown falls back to the saved-session path (whose create/open route retries recovery); recovering
+ * throws typed so an explicit --attach-agent surfaces the retryable state, not "No active agent found".
+ */
+export function resolveActiveSessionLookupFailure(
+	response: Extract<DaemonResponse, { success: false }>,
+): Error | undefined {
+	if (response.errorInfo?.code === "session_recovering") {
+		return deserializeDaemonError(response);
+	}
+	if (isUnknownActiveSessionError(response.error)) {
+		return undefined;
+	}
+	return new Error(response.error);
+}
+
 async function findActiveDaemonSessionSummary(
 	socketPath: string,
 	selector: string,
@@ -900,10 +1002,11 @@ async function findActiveDaemonSessionSummary(
 	try {
 		const response = await client.request({ type: "get_state", activeSessionId: selector }, 3000);
 		if (!response.success) {
-			if (isUnknownActiveSessionError(response.error)) {
-				return undefined;
+			const failure = resolveActiveSessionLookupFailure(response);
+			if (failure) {
+				throw failure;
 			}
-			throw new Error(response.error);
+			return undefined;
 		}
 		if (!isDaemonSessionSummary(response.data)) {
 			throw new Error("Daemon returned an invalid active session summary");
@@ -918,7 +1021,7 @@ function createSessionManagerForActiveDaemonSummary(summary: SessionSummary, fal
 	const cwd = summary.cwd || fallbackCwd;
 	if (summary.sessionFile) {
 		try {
-			return SessionManager.open(summary.sessionFile, undefined, cwd);
+			return readSessionManager(summary.sessionFile, undefined, cwd);
 		} catch {
 			return SessionManager.inMemory(cwd);
 		}
@@ -1006,7 +1109,7 @@ async function createDaemonClientConnection(options: {
 			launchEnv: collectDaemonLaunchEnv(),
 		});
 		if (!response.success) {
-			throw deserializeDaemonError(response);
+			throw deserializeDaemonCreateError(response);
 		}
 		if (!isDaemonSessionSummary(response.data)) {
 			throw new Error("Daemon returned an invalid create response");
@@ -1222,7 +1325,7 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager = SessionManager.inMemory(cwd);
 	} else {
 		try {
-			sessionManager = await createSessionManager(parsed, cwd, sessionDir);
+			sessionManager = await createSessionManager(parsed, cwd, sessionDir, useDaemonClient);
 		} catch (error) {
 			if (!(error instanceof SessionSelectorError)) {
 				throw error;
@@ -1243,7 +1346,9 @@ export async function main(args: string[], options?: MainOptions) {
 			if (!selectedCwd) {
 				process.exit(0);
 			}
-			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
+			sessionManager = useDaemonClient
+				? readSessionManager(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd)
+				: SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
 		} else {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
 			process.exit(1);
@@ -1268,54 +1373,7 @@ export async function main(args: string[], options?: MainOptions) {
 	// daemon fallback must not seed that goal into unrelated future sessions.
 	const daemonDefaultSessionConfig = daemonServerDefaultSessionConfig(defaultSessionConfig);
 	const runtimeDefaultSessionConfig = appMode === "daemon" ? daemonDefaultSessionConfig : defaultSessionConfig;
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-		cwd,
-		agentDir,
-		sessionManager,
-		sessionStartEvent,
-		sessionConfig,
-		sessionOptions: runtimeSessionOptions,
-	}) => {
-		const config = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
-		const prepared = await prepareRuntimeServices({
-			config,
-			cwd,
-			agentDir,
-			sessionManager,
-			extensionFactories: options?.extensionFactories,
-			sessionOptionsOverride: runtimeSessionOptions,
-		});
-		const { services, sessionOptions, diagnostics } = prepared;
-		const resolvedSessionOptions = resolveRuntimeSessionOptions(sessionOptions, runtimeSessionOptions);
-
-		const created = await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-			...resolvedSessionOptions,
-			// Main agents boot their kernel in the background at session creation;
-			// subagent sessions (rlmDepth > 0) keep the lazy first-call start.
-			prewarmIpythonKernel: true,
-			// Read serializedRefine from the merged runtime config (passed
-			// from the JSON/print client through AgentSessionRuntimeConfig)
-			// so it survives the daemon worker's appMode="daemon" context.
-			serializedRefine: config.serializedRefine ?? false,
-			executionMode: config.executionMode,
-			telemetryDisabled: config.telemetryDisabled,
-			// Only seed initial goal for top-level sessions (rlmDepth 0).
-			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
-		});
-		const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
-		}
-
-		return {
-			...created,
-			services,
-			diagnostics,
-		};
-	};
+	const createRuntime = createDefaultRuntimeFactory(runtimeDefaultSessionConfig, options?.extensionFactories);
 	time("createRuntime");
 	// Daemon mode never uses the bootstrap runtime, so skip the heavy
 	// createAgentSessionRuntime below and start listening immediately; sessions
@@ -1330,6 +1388,7 @@ export async function main(args: string[], options?: MainOptions) {
 				createRuntime,
 				worker: {
 					authenticationToken: requireDaemonWorkerAuthenticationToken(),
+					workerInstanceId: daemonWorkerInstanceId(),
 					restoreActiveSessionId: process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV],
 				},
 			});
@@ -1452,17 +1511,27 @@ export async function main(args: string[], options?: MainOptions) {
 		// no DeferredAgentConnection is needed to avoid creating it up front.
 		const isFreshDefaultSession =
 			!activeDaemonSessionSummary && !getInteractiveDaemonSessionPath(parsed, sessionManager);
-		const { connection, summary } = await createDaemonClientConnection({
-			socketPath: daemonSocketPath,
-			config: defaultSessionConfig,
-			activeSessionId: activeDaemonSessionSummary
-				? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
-				: undefined,
-			sessionPath: getInteractiveDaemonSessionPath(parsed, sessionManager),
-			clientOwned: parsed.noSession,
-			noSession: parsed.noSession,
-			supportsExtensionUi: true,
-		});
+		let connection: DaemonAgentConnection;
+		let summary: SessionSummary;
+		try {
+			({ connection, summary } = await createDaemonClientConnection({
+				socketPath: daemonSocketPath,
+				config: defaultSessionConfig,
+				activeSessionId: activeDaemonSessionSummary
+					? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
+					: undefined,
+				sessionPath: getInteractiveDaemonSessionPath(parsed, sessionManager),
+				clientOwned: parsed.noSession,
+				noSession: parsed.noSession,
+				supportsExtensionUi: true,
+			}));
+		} catch (error) {
+			if (error instanceof DaemonSessionCreateError) {
+				console.error(chalk.red(`Error: ${error.message}`));
+				process.exit(1);
+			}
+			throw error;
+		}
 		const agentConnection: AgentConnection = connection;
 		const attachModelFallbackMessage = isFreshDefaultSession
 			? startupModel.modelFallbackMessage
@@ -1544,7 +1613,7 @@ export async function main(args: string[], options?: MainOptions) {
 				supportsExtensionUi: appMode === "rpc",
 			}));
 		} catch (error) {
-			if (error instanceof SessionAlreadyActiveError) {
+			if (error instanceof SessionAlreadyActiveError || error instanceof DaemonSessionCreateError) {
 				console.error(chalk.red(`Error: ${error.message}`));
 				process.exit(1);
 			}

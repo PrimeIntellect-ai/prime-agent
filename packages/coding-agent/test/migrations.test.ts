@@ -1,9 +1,36 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
-import { migrateLegacySessionDirsToSessionRoot, migrateSessionsFromAgentRoot } from "../src/migrations.js";
+import {
+	migrateAuthToAuthJson,
+	migrateLegacySessionDirsToSessionRoot,
+	migrateSessionsFromAgentRoot,
+} from "../src/migrations.js";
+
+const atomicWriteMock = vi.hoisted(() => ({ error: undefined as Error | undefined }));
+vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/utils/atomic-file.js")>();
+	return {
+		...actual,
+		writeFileAtomicSync: (path: string, data: string, options?: object) => {
+			if (atomicWriteMock.error && path.endsWith("auth.json")) throw atomicWriteMock.error;
+			return actual.writeFileAtomicSync(path, data, options);
+		},
+	};
+});
 
 describe("session migrations", () => {
 	const tempDirs: string[] = [];
@@ -103,5 +130,84 @@ describe("session migrations", () => {
 
 		expect(existsSync(nestedFile)).toBe(true);
 		expect(existsSync(join(sessionsDir, "session-2.jsonl"))).toBe(false);
+	});
+});
+
+describe("auth migration ordering", () => {
+	const tempDirs: string[] = [];
+	const previousAgentDir = process.env[ENV_AGENT_DIR];
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		atomicWriteMock.error = undefined;
+		if (previousAgentDir === undefined) {
+			delete process.env[ENV_AGENT_DIR];
+		} else {
+			process.env[ENV_AGENT_DIR] = previousAgentDir;
+		}
+		for (const dir of tempDirs.splice(0)) {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	function makeAgentDir(): string {
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-"));
+		tempDirs.push(agentDir);
+		process.env[ENV_AGENT_DIR] = agentDir;
+		return agentDir;
+	}
+
+	it("preserves the settings file's own mode when stripping apiKeys", () => {
+		const agentDir = makeAgentDir();
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ theme: "dark", apiKeys: { openai: "sk-key" } }));
+		chmodSync(settingsPath, 0o600);
+
+		migrateAuthToAuthJson();
+
+		expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).apiKeys).toBeUndefined();
+	});
+
+	it("strips apiKeys through a symlinked settings.json without replacing the alias", () => {
+		const agentDir = makeAgentDir();
+		const realSettings = join(agentDir, "dotfiles-settings.json");
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(realSettings, JSON.stringify({ theme: "dark", apiKeys: { openai: "sk-key" } }));
+		symlinkSync(realSettings, settingsPath);
+
+		migrateAuthToAuthJson();
+
+		expect(lstatSync(settingsPath).isSymbolicLink()).toBe(true);
+		expect(JSON.parse(readFileSync(realSettings, "utf-8")).apiKeys).toBeUndefined();
+		expect(JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf-8")).openai.key).toBe("sk-key");
+	});
+
+	it("migrates credentials through a dangling auth.json symlink to its target", () => {
+		const agentDir = makeAgentDir();
+		writeFileSync(join(agentDir, "oauth.json"), JSON.stringify({ anthropic: { access: "token" } }));
+		const target = join(agentDir, "vault-auth.json");
+		symlinkSync(target, join(agentDir, "auth.json"));
+
+		migrateAuthToAuthJson();
+
+		expect(lstatSync(join(agentDir, "auth.json")).isSymbolicLink()).toBe(true);
+		expect(JSON.parse(readFileSync(target, "utf-8")).anthropic.type).toBe("oauth");
+	});
+
+	it("keeps every credential source when the auth.json write fails", () => {
+		const agentDir = makeAgentDir();
+		const oauthPath = join(agentDir, "oauth.json");
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(oauthPath, JSON.stringify({ anthropic: { access: "token" } }));
+		writeFileSync(settingsPath, JSON.stringify({ theme: "dark", apiKeys: { openai: "sk-key" } }));
+		atomicWriteMock.error = new Error("disk full");
+
+		expect(() => migrateAuthToAuthJson()).toThrow("disk full");
+
+		// A crash at the destination write must leave both sources recoverable.
+		expect(existsSync(join(agentDir, "auth.json"))).toBe(false);
+		expect(existsSync(oauthPath)).toBe(true);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).apiKeys).toEqual({ openai: "sk-key" });
 	});
 });

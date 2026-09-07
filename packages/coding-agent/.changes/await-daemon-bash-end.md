@@ -1,1 +1,0 @@
-- Made daemon shutdown wait for Bash completion without polling.

@@ -4,7 +4,7 @@ import type {
 	AgentConnectionSavedSessionScope,
 	AgentConnectionSessionListCallbacks,
 } from "../agent-connection/types.js";
-import type { DaemonClient } from "./daemon-client.js";
+import type { DaemonTransportClient } from "./daemon-client.js";
 import { deserializeDaemonError } from "./daemon-errors.js";
 import type {
 	DaemonCommand,
@@ -19,7 +19,7 @@ export { deserializeSavedSessionInfo } from "./saved-session-info.js";
 export type DaemonSavedSessionCatalogContext = { activeSessionId: string } | { cwd: string; sessionDir?: string };
 
 export async function listDaemonSavedSessions(
-	client: DaemonClient,
+	client: DaemonTransportClient,
 	context: DaemonSavedSessionCatalogContext,
 	scope: AgentConnectionSavedSessionScope,
 	callbacks?: AgentConnectionSessionListCallbacks,
@@ -45,7 +45,7 @@ export async function listDaemonSavedSessions(
 }
 
 export async function renameDaemonSavedSession(
-	client: DaemonClient,
+	client: DaemonTransportClient,
 	context: DaemonSavedSessionCatalogContext,
 	sessionPath: string,
 	name: string,
@@ -61,7 +61,7 @@ export async function renameDaemonSavedSession(
 }
 
 export async function deleteDaemonSavedSession(
-	client: DaemonClient,
+	client: DaemonTransportClient,
 	context: DaemonSavedSessionCatalogContext,
 	sessionPath: string,
 ): Promise<DeleteSessionFileResult> {

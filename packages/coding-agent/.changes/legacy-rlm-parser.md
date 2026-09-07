@@ -1,1 +1,0 @@
-- Fixed passive RLM child metadata recovery from legacy registries without a session directory.

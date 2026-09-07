@@ -13,6 +13,7 @@ import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 
 interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
@@ -32,6 +33,7 @@ interface SupervisorInternals {
 	): void;
 	familyCatalogEntry(summary: SessionSummary): AgentFamilyCatalogEntry;
 	handleCommand(client: object, command: Record<string, unknown>): Promise<unknown>;
+	seedRosterLedger(): Promise<void>;
 }
 
 interface WorkerFixture {
@@ -106,8 +108,9 @@ describe("daemon supervisor passive subagent topology", () => {
 			sessionId: "aaaa6666777788889999dddd",
 		});
 		const resident = worker("first", [child]);
+		seedSupervisorRoster(supervisor, resident);
 
-		expect(supervisor.findSummaryInWorker(resident, "88889999cccc")).toBe(child);
+		expect(supervisor.findSummaryInWorker(resident, "88889999cccc")).toEqual({ ...child, rosterStatus: "idle" });
 	});
 
 	it("rejects an explicit root name that collides with a saved root", async () => {
@@ -136,6 +139,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			},
 			launchWorker,
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(
 			supervisor.createOrReuseWorker("client", { type: "create", name: "duplicate-root" }),
@@ -179,6 +183,7 @@ describe("daemon supervisor passive subagent topology", () => {
 				]),
 			},
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(supervisor.assertSupervisorSavedSessionNameAvailable(forkedPath, "duplicate-root")).rejects.toThrow(
 			"an agent of that name already exists at depth 0 under this parent",
@@ -211,6 +216,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			},
 			launchWorker,
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(
 			supervisor.createOrReuseWorker("client", { type: "create", name: "  duplicate-root  " }),
@@ -247,6 +253,7 @@ describe("daemon supervisor passive subagent topology", () => {
 				list: vi.fn(async () => [target, duplicate]),
 			},
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(supervisor.assertSupervisorSavedSessionNameAvailable(targetPath, "taken")).rejects.toThrow(
 			"an agent of that name already exists at depth 0 under this parent",
@@ -496,6 +503,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
+		seedSupervisorRoster(supervisor, firstWorker, secondWorker);
 		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
 		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
 
@@ -539,6 +547,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			descriptorDir: join(directory, "workers"),
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("owned", ownedWorker);
+		seedSupervisorRoster(supervisor, ownedWorker);
 		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
 		const workerClient = { id: "daemon-client:worker", attachedActiveSessionIds: new Set<string>() };
 
@@ -611,6 +620,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
+		seedSupervisorRoster(supervisor, firstWorker, secondWorker);
 		Object.assign(supervisor, {
 			catalog: {
 				siblings: vi.fn(async () => []),
@@ -798,6 +808,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			supervisor.workers.set("first", first);
 			supervisor.workers.set("second", second);
 			supervisor.workers.set("disconnected", disconnected);
+			seedSupervisorRoster(supervisor, first, second, disconnected);
 			await client.connect();
 
 			await expect(

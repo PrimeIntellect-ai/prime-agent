@@ -1,5 +1,11 @@
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import {
+	completeWithProviderRetry,
+	DEFAULT_PROVIDER_RETRY_POLICY,
+	type ProviderRetryPolicy,
+} from "./provider-retry.js";
+import { unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -45,6 +51,7 @@ export function startSideQuestion(
 	question: string,
 	onEvent: (event: SideQuestionEvent) => void | Promise<void>,
 	previousTurns: SideQuestionTurn[] = [],
+	retry: ProviderRetryPolicy = DEFAULT_PROVIDER_RETRY_POLICY,
 ): SideQuestionRun {
 	const model = parent.state.model;
 	if (!model) {
@@ -89,7 +96,8 @@ export function startSideQuestion(
 		},
 		convertToLlm: parent.convertToLlm,
 		transformContext: parent.transformContext,
-		streamFn: parent.streamFn,
+		// Side questions are excluded from session history; their calls carry no provenance.
+		streamFn: unwrapSemanticEdgeStreamFn(parent.streamFn),
 		getApiKey: parent.getApiKey,
 		onPayload: parent.onPayload,
 		onResponse: parent.onResponse,
@@ -97,13 +105,13 @@ export function startSideQuestion(
 		sessionId: parent.sessionId,
 		thinkingBudgets: parent.thinkingBudgets,
 		transport: "sse",
-		maxRetryDelayMs: parent.maxRetryDelayMs,
 		toolExecution: parent.toolExecution,
 	});
 
 	let answer = "";
 	let abortRequested = false;
 	let started = false;
+	const retryAbortController = new AbortController();
 	const emit = (status: SideQuestionStatus, errorMessage?: string) =>
 		onEvent({ id, question, answer, status, ...(errorMessage ? { errorMessage } : {}) });
 
@@ -128,7 +136,26 @@ export function startSideQuestion(
 				return;
 			}
 			started = true;
-			await sideAgent.prompt(prompt);
+			// Standalone side agents bypass the session auto-retry loop; retry here instead.
+			let promptedOnce = false;
+			await completeWithProviderRetry(
+				async () => {
+					if (promptedOnce) {
+						// Session-loop recovery: drop the failed assistant turn and re-run.
+						sideAgent.state.messages = sideAgent.state.messages.slice(0, -1);
+						await sideAgent.continue();
+					} else {
+						promptedOnce = true;
+						await sideAgent.prompt(prompt);
+					}
+					const last = sideAgent.state.messages.at(-1);
+					if (last?.role !== "assistant") {
+						throw new Error(sideAgent.state.errorMessage || "Side question produced no assistant message");
+					}
+					return last as AssistantMessage;
+				},
+				{ policy: retry, signal: retryAbortController.signal },
+			);
 			if (abortRequested) {
 				await emit("cancelled");
 				return;
@@ -151,6 +178,7 @@ export function startSideQuestion(
 		done,
 		abort() {
 			abortRequested = true;
+			retryAbortController.abort();
 			if (started) {
 				sideAgent.abort();
 			}

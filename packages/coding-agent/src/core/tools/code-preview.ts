@@ -13,6 +13,7 @@ const PYTHON_DEFINITION_PATTERN = /^\s*(?:async\s+def|def|class)\s+/;
 const PYTHON_MAIN_PATTERN = /^\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:/;
 const PYTHON_CONTROL_PATTERN = /^\s*(?:if|elif|else|for|while|with|try|except|finally)\b.*:\s*$/;
 const PYTHON_CALL_PATTERN = /^\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
+const BASH_SKILL_CALL_PATTERN = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?(?:await\s+)?bash\s*\(\s*[rR]?("""|'''|"|')/;
 const PYTHON_LOW_SIGNAL_CALL_PATTERN = /^\s*(?:await\s+)?(?:print|len|str|repr|int|float|list|dict|set|tuple)\s*\(/;
 const PYTHON_ASSIGNMENT_CALL_PATTERN =
 	/^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[^=]+)?\s*=\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
@@ -57,6 +58,7 @@ function redactNoise(text: string): string {
 			/\b((?=\w*(?:token|key|secret|password))[A-Za-z_]\w*)\s*=\s*(?!<redacted>)(?!["'])\S+/gi,
 			"$1=<redacted>",
 		)
+		.replace(/\b(authorization:\s*(?:bearer\s+)?)[^\s"']+/gi, "$1<redacted>")
 		.replace(/(["'])sk-[^"']+\1/g, "$1<redacted>$1")
 		.replace(/(["']).{160,}\1/g, "$1…$1");
 }
@@ -409,6 +411,93 @@ function pythonPreviewIndex(lines: readonly string[], index: number): number {
 	return childIndex === undefined ? index : pythonPreviewIndex(lines, childIndex);
 }
 
+const PYTHON_ESCAPES: Record<string, string> = {
+	"\n": "", // backslash-newline is a line continuation
+	'"': '"',
+	"'": "'",
+	"\\": "\\",
+	n: "\n",
+	r: "\r",
+	t: "\t",
+};
+
+interface PythonStringScan {
+	value: string;
+	end: number;
+	closed: boolean;
+	/** Saw a cooked escape (\x, \u, octal, \a…) whose value is not computed here. */
+	unsupportedEscape: boolean;
+}
+
+// Walks a python string-literal body from just after the opening delimiter,
+// following python's escape rules (in raw strings backslash-quote never closes).
+function scanPythonStringLiteral(code: string, start: number, quote: string, raw: boolean): PythonStringScan {
+	let value = "";
+	let i = start;
+	let unsupportedEscape = false;
+	while (i < code.length) {
+		const char = code[i] ?? "";
+		if (char === "\\" && i + 1 < code.length) {
+			const next = code[i + 1] ?? "";
+			if (!raw && /[xuUN0-7abfv]/.test(next)) {
+				unsupportedEscape = true;
+			}
+			value += raw ? char + next : (PYTHON_ESCAPES[next] ?? char + next);
+			i += 2;
+			continue;
+		}
+		if (code.startsWith(quote, i)) {
+			return { value, end: i + quote.length, closed: true, unsupportedEscape };
+		}
+		if (quote.length === 1 && char === "\n") {
+			break; // single-quoted literals cannot span lines
+		}
+		value += char;
+		i += 1;
+	}
+	return { value, end: i, closed: false, unsupportedEscape };
+}
+
+// True when the lines end inside an unterminated triple-quoted string.
+function endsInsideMultilineString(lines: readonly string[]): boolean {
+	const text = lines.join("\n");
+	let i = 0;
+	while (i < text.length) {
+		const char = text[i] ?? "";
+		if (char === "#") {
+			const newline = text.indexOf("\n", i);
+			if (newline < 0) return false;
+			i = newline + 1;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			const quote = text.startsWith(char.repeat(3), i) ? char.repeat(3) : char;
+			const scan = scanPythonStringLiteral(text, i + quote.length, quote, true);
+			if (!scan.closed && scan.end >= text.length) {
+				return quote.length === 3;
+			}
+			i = scan.end;
+			continue;
+		}
+		i += 1;
+	}
+	return false;
+}
+
+function extractBashSkillCommand(code: string): string | undefined {
+	const match = code.match(BASH_SKILL_CALL_PATTERN);
+	const quote = match?.[1];
+	if (!match || !quote) return undefined;
+	const start = match[0].length;
+	const prefixChar = match[0][start - quote.length - 1];
+	const scan = scanPythonStringLiteral(code, start, quote, prefixChar === "r" || prefixChar === "R");
+	if (!scan.closed || scan.unsupportedEscape) return undefined;
+	const rest = code.slice(scan.end).trimStart();
+	// Require a plain literal first argument; concatenation or other expressions fall back.
+	if (!rest.startsWith(",") && !rest.startsWith(")")) return undefined;
+	return scan.value;
+}
+
 export function previewPythonCode(code: string): CodePreview {
 	const lines = code.split("\n");
 	const paths = pythonPathVars(lines);
@@ -425,6 +514,13 @@ export function previewPythonCode(code: string): CodePreview {
 
 	if (bestIndex !== undefined && bestScore >= 0) {
 		const previewIndex = pythonPreviewIndex(lines, bestIndex);
+		// Extract from the full tail (literals may span lines), unless the chosen line is string text.
+		const bashCommand = endsInsideMultilineString(lines.slice(0, previewIndex))
+			? undefined
+			: extractBashSkillCommand(lines.slice(previewIndex).join("\n"));
+		if (bashCommand) {
+			return previewBashCommand(bashCommand);
+		}
 		return {
 			language: "python",
 			text: descriptor(pythonPreviewLine(lines, previewIndex, paths)),

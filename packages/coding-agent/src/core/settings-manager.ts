@@ -1,9 +1,10 @@
 import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -29,8 +30,7 @@ export interface AutoRefineSettings {
 
 export interface ProviderRetrySettings {
 	timeoutMs?: number; // SDK/provider request timeout in milliseconds
-	maxRetries?: number; // SDK/provider retry attempts
-	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
+	maxRetryDelayMs?: number; // default: 60000 (max server-requested retry delay before failing; 0 disables the cap)
 }
 
 export interface RetrySettings {
@@ -60,8 +60,11 @@ export interface ThinkingBudgetsSettings {
 	high?: number;
 }
 
+export type MermaidRenderingMode = "off" | "final" | "streaming";
+
 export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
+	mermaid?: MermaidRenderingMode; // default: "streaming"
 }
 
 export interface BundledSkillsSettings {
@@ -233,11 +236,23 @@ export class FileSettingsStorage implements SettingsStorage {
 		const maxAttempts = 10;
 		const delayMs = 20;
 		let lastError: unknown;
+		let compromisedError: Error | undefined;
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
-				return lockfile.lockSync(path, { realpath: false });
+				const release = lockfile.lockSync(path, {
+					realpath: false,
+					onCompromised: (error) => {
+						compromisedError ??= error;
+					},
+				});
+				if (compromisedError) {
+					release();
+					throw compromisedError;
+				}
+				return release;
 			} catch (error) {
+				if (compromisedError) throw compromisedError;
 				const code =
 					typeof error === "object" && error !== null && "code" in error
 						? String((error as { code?: unknown }).code)
@@ -267,20 +282,20 @@ export class FileSettingsStorage implements SettingsStorage {
 				release = this.acquireLockSyncWithRetry(path);
 			}
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
-			const next = fn(current);
+			let next = fn(current);
 			if (next !== undefined) {
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
 				if (!release) {
 					release = this.acquireLockSyncWithRetry(path);
+					// The first-write read ran unlocked; a racing first writer may have landed since.
+					if (existsSync(path)) {
+						next = fn(readFileSync(path, "utf-8"));
+					}
 				}
-				const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
-				try {
-					writeFileSync(temporaryPath, next, { encoding: "utf-8", mode: 0o600 });
-					renameSync(temporaryPath, path);
-				} finally {
-					if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+				if (next !== undefined) {
+					writeFileAtomicSync(path, next, { mode: 0o600 });
 				}
 			}
 		} finally {
@@ -460,6 +475,13 @@ export class SettingsManager {
 			(typeof settings.telemetry !== "object" || settings.telemetry === null || Array.isArray(settings.telemetry))
 		) {
 			delete settings.telemetry;
+		}
+
+		if (
+			settings.markdown !== undefined &&
+			(typeof settings.markdown !== "object" || settings.markdown === null || Array.isArray(settings.markdown))
+		) {
+			delete settings.markdown;
 		}
 
 		return settings as Settings;
@@ -929,10 +951,9 @@ export class SettingsManager {
 		};
 	}
 
-	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+	getProviderRetrySettings(): { timeoutMs?: number; maxRetryDelayMs: number } {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
-			maxRetries: this.settings.retry?.provider?.maxRetries,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
 		};
 	}
@@ -1281,6 +1302,18 @@ export class SettingsManager {
 
 	getCodeBlockIndent(): string {
 		return this.settings.markdown?.codeBlockIndent ?? "  ";
+	}
+
+	getMermaidRenderingMode(): MermaidRenderingMode {
+		const mode = this.settings.markdown?.mermaid;
+		return mode === "off" || mode === "final" ? mode : "streaming";
+	}
+
+	setMermaidRenderingMode(mode: MermaidRenderingMode): void {
+		this.globalSettings.markdown ??= {};
+		this.globalSettings.markdown.mermaid = mode;
+		this.markModified("markdown", "mermaid");
+		this.save();
 	}
 
 	getWarnings(): WarningSettings {

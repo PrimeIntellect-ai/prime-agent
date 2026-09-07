@@ -2,12 +2,17 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "../../core/model-registry.js";
+import { completeWithProviderRetry, type ProviderRetryPolicy, providerRetryPolicy } from "../../core/provider-retry.js";
 import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
 const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
+// Idle generations stop retrying (and paying) on unchanged content until the
+// backoff elapses, so transient outages and late credentials still recover.
+const IDLE_GENERATION_ATTEMPT_LIMIT = 3;
+const IDLE_GENERATION_RETRY_BACKOFF_MS = 30 * 60_000;
 
 const SUMMARY_MODEL_PROVIDER = "prime-inference";
 const SUMMARY_MODEL_ID = "qwen/qwen3-30b-a3b-instruct-2507";
@@ -144,12 +149,13 @@ export interface GenerateAgentStatusParams {
 	registry: ModelRegistry;
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
+	retryPolicy?: ProviderRetryPolicy;
 	signal?: AbortSignal;
 }
 
 /** One cheap model call for a fresh status, or undefined if unavailable/empty/failed. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
-	const { registry, messages, isWorking, signal } = params;
+	const { registry, messages, isWorking, retryPolicy, signal } = params;
 	if (messages.length === 0) {
 		return undefined;
 	}
@@ -162,19 +168,24 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 		return undefined;
 	}
 	try {
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt: AGENT_STATUS_SYSTEM_PROMPT,
-				messages: [
+		// One failed attempt would settle an idle session to a stale needs_input verdict.
+		const response = await completeWithProviderRetry(
+			() =>
+				completeSimple(
+					model,
 					{
-						role: "user" as const,
-						content: [{ type: "text" as const, text: buildStatusContext(messages, isWorking) }],
-						timestamp: Date.now(),
+						systemPrompt: AGENT_STATUS_SYSTEM_PROMPT,
+						messages: [
+							{
+								role: "user" as const,
+								content: [{ type: "text" as const, text: buildStatusContext(messages, isWorking) }],
+								timestamp: Date.now(),
+							},
+						],
 					},
-				],
-			},
-			{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+					{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+				),
+			{ policy: retryPolicy, signal },
 		);
 		if (response.stopReason === "error") {
 			return undefined;
@@ -187,14 +198,6 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 	} catch {
 		return undefined;
 	}
-}
-
-/** True when the new status differs enough from the stored one to be worth broadcasting. */
-export function agentStatusChanged(previous: AgentStatus | undefined, next: AgentStatusResult): boolean {
-	if (!previous) {
-		return true;
-	}
-	return previous.summary !== next.summary || previous.taskState !== next.taskState;
 }
 
 function isSessionWorking(state: ActiveSessionState): boolean {
@@ -215,6 +218,11 @@ export class DaemonSessionSummarizer {
 	private readonly inFlight = new Map<string, AbortController>();
 	// Sessions requested while one was running; get one more pass on completion.
 	private readonly rerunRequested = new Set<string>();
+	// Failed idle generations per session, keyed to the settled content they saw.
+	private readonly failedIdleGenerations = new Map<
+		string,
+		{ contentKey: string; attempts: number; lastFailureAt: number }
+	>();
 
 	constructor(
 		private readonly listSessions: () => readonly ActiveSessionState[],
@@ -250,6 +258,7 @@ export class DaemonSessionSummarizer {
 			controller.abort();
 		}
 		this.rerunRequested.clear();
+		this.failedIdleGenerations.clear();
 	}
 
 	/** Drop any pending work for a session that is closing. */
@@ -261,6 +270,7 @@ export class DaemonSessionSummarizer {
 		}
 		this.inFlight.get(activeSessionId)?.abort();
 		this.rerunRequested.delete(activeSessionId);
+		this.failedIdleGenerations.delete(activeSessionId);
 	}
 
 	/** Seed in-memory status from the persisted entry when a session is added. */
@@ -314,6 +324,18 @@ export class DaemonSessionSummarizer {
 		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary) {
 			return;
 		}
+		// The leaf entry id is the branch-tip identity (appends, edits, and branch
+		// navigation all move it; counts and timestamps collide across siblings).
+		const contentKey = `${session.sessionManager.getLeafId() ?? "root"}:${messageCount}`;
+		const failed = this.failedIdleGenerations.get(id);
+		if (
+			!isWorking &&
+			failed?.contentKey === contentKey &&
+			failed.attempts >= IDLE_GENERATION_ATTEMPT_LIMIT &&
+			Date.now() - failed.lastFailureAt < IDLE_GENERATION_RETRY_BACKOFF_MS
+		) {
+			return;
+		}
 		// Include the in-progress message so a long streaming turn gets a live recap.
 		const streaming = isWorking ? session.state.streamingMessage : undefined;
 		const contextMessages = streaming ? [...messages, streaming] : messages;
@@ -325,8 +347,19 @@ export class DaemonSessionSummarizer {
 				registry: session.modelRegistry,
 				messages: contextMessages,
 				isWorking,
+				retryPolicy: providerRetryPolicy(session.settingsManager),
 				signal: controller.signal,
 			});
+			if (generated) {
+				this.failedIdleGenerations.delete(id);
+			} else if (!isWorking && !controller.signal.aborted) {
+				// The aborted check keeps a racing forget() from repopulating the map.
+				this.failedIdleGenerations.set(id, {
+					contentKey,
+					attempts: failed?.contentKey === contentKey ? failed.attempts + 1 : 1,
+					lastFailureAt: Date.now(),
+				});
+			}
 			// A failed classification on an idle session would spin at "working"
 			// forever (the activity axis holds unjudged idle sessions there), so
 			// settle it to needs_input.
@@ -357,14 +390,27 @@ export class DaemonSessionSummarizer {
 				taskState,
 				basedOnMessageCount: messageCount,
 			};
-			const changed = previous?.summary !== status.summary || previous?.taskState !== status.taskState;
+			// An idle settle refreshes the verdict's currency, which drives the roster's
+			// activity axis: it must publish even when the verdict text is unchanged.
+			const changed =
+				previous?.summary !== status.summary ||
+				previous?.taskState !== status.taskState ||
+				(!isWorking && previous?.basedOnMessageCount !== status.basedOnMessageCount);
 			state.summaryState = status;
-			// Persist only settled idle verdicts, never mid-stream.
-			if (!isWorking) {
-				try {
-					session.sessionManager.appendAgentStatus(status);
-				} catch {
-					// best-effort; in-memory status still shows
+			// Persist only settled idle verdicts from real classifications that
+			// differ from the latest persisted entry: idle sweeps must not grow the journal.
+			if (!isWorking && generated) {
+				const persisted = session.sessionManager.getLatestAgentStatus();
+				if (
+					persisted?.summary !== status.summary ||
+					persisted.taskState !== status.taskState ||
+					persisted.basedOnMessageCount !== status.basedOnMessageCount
+				) {
+					try {
+						session.sessionManager.appendAgentStatus(status);
+					} catch {
+						// best-effort; in-memory status still shows
+					}
 				}
 			}
 			if (changed) {

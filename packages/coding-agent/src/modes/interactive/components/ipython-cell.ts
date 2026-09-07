@@ -653,11 +653,12 @@ export class IPythonCellComponent implements Component {
 		for (const message of messages) {
 			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
+			const hint = expandCollapseHint("app.messages.expand", this.state.agentMessagesExpanded === true);
 			if (this.state.agentMessagesExpanded) {
 				this.addBlank(lines, width);
 				this.addPlain(
 					lines,
-					truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"),
+					truncateToWidth(`${agentMessageSummaryLine(label, recipient)} ${hint}`, Math.max(1, width - 1), "…"),
 				);
 				for (const bodyLine of agentMessageBodyLines(message.message, width)) {
 					lines.push(bodyLine);
@@ -668,7 +669,11 @@ export class IPythonCellComponent implements Component {
 			const preview = agentMessagePreview(prefixWidth, message.message);
 			this.addPlain(
 				lines,
-				truncateToWidth(agentMessageSummaryLine(label, recipient, preview), Math.max(1, width - 1), "…"),
+				truncateToWidth(
+					`${agentMessageSummaryLine(label, recipient, preview)} ${hint}`,
+					Math.max(1, width - 1),
+					"…",
+				),
 			);
 		}
 	}

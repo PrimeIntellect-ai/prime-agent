@@ -1,16 +1,8 @@
 import { randomUUID } from "node:crypto";
-import {
-	closeSync,
-	existsSync,
-	fsyncSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import { getSessionArtifactPathForFile } from "./session-manager.js";
 
 export type AgentCronJobStatus = "active" | "paused" | "completed" | "cancelled";
@@ -1499,15 +1491,26 @@ function withCronJobsStateLocks<T>(paths: readonly string[], action: () => T): T
 		for (const path of [...new Set(paths)].sort()) {
 			mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 			let release: (() => void) | undefined;
+			let lockCompromised = false;
 			for (let attempt = 0; attempt < 100; attempt++) {
 				try {
 					release = lockSync(path, {
 						realpath: false,
 						lockfilePath: `${path}.lock`,
 						stale: 30_000,
+						onCompromised: () => {
+							lockCompromised = true;
+						},
 					});
+					if (lockCompromised) {
+						release();
+						throw new Error(`Cron jobs lock compromised: ${path}`);
+					}
 					break;
 				} catch (error) {
+					if (lockCompromised) {
+						throw new Error(`Cron jobs lock compromised: ${path}`);
+					}
 					if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || attempt === 99) {
 						throw error;
 					}
@@ -1547,27 +1550,8 @@ function writeJobsFile(path: string, jobs: readonly AgentCronJob[], mergeCurrent
 }
 
 function writeJobsState(path: string, state: CronJobsState): void {
-	const directory = dirname(path);
-	mkdirSync(directory, { recursive: true, mode: 0o700 });
-	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	const descriptor = openSync(tempPath, "w", 0o600);
-	try {
-		writeFileSync(descriptor, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
-		fsyncSync(descriptor);
-	} finally {
-		closeSync(descriptor);
-	}
-	renameSync(tempPath, path);
-	try {
-		const directoryDescriptor = openSync(directory, "r");
-		try {
-			fsyncSync(directoryDescriptor);
-		} finally {
-			closeSync(directoryDescriptor);
-		}
-	} catch {
-		// Directory fsync is unavailable on some platforms; the atomic rename still protects readers.
-	}
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	writeFileAtomicSync(path, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600, fsync: true, fsyncDir: true });
 }
 
 function claimDueInState(state: CronJobsState, dueAt: Date, claimedAt: Date): AgentCronDispatch[] {

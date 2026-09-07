@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from types import FunctionType, SimpleNamespace
 from unittest import mock
 
 from rlm import bash
@@ -54,6 +55,38 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         handle = bash("echo again")
         awaited = await handle
         self.assertEqual(handle.poll(), awaited)
+
+    def test_construction_cleanup_uses_windows_signal_without_sigkill(self):
+        failure = RuntimeError("task construction failed")
+        loop = mock.Mock()
+        loop.create_task.side_effect = failure
+        bridge = SimpleNamespace(emit=mock.Mock())
+        namespace = dict(bash_module.BashHandle._schedule_background_completion_notice.__globals__)
+
+        def isolated_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if level == 1 and name == "" and fromlist == ("repl",):
+                return SimpleNamespace(repl=bridge)
+            return __import__(name, globals, locals, fromlist, level)
+
+        namespace.update(
+            _IS_POSIX=False,
+            signal=SimpleNamespace(SIGTERM=15),
+            asyncio=SimpleNamespace(get_running_loop=lambda: loop),
+            __builtins__={**vars(__import__("builtins")), "__import__": isolated_import},
+        )
+        schedule = FunctionType(
+            bash_module.BashHandle._schedule_background_completion_notice.__code__, namespace
+        )
+        handle = mock.Mock(_pid=42)
+        with self.assertRaises(RuntimeError) as caught:
+            schedule(handle)
+        self.assertIs(caught.exception, failure)
+        handle.kill.assert_called_once_with(15)
+        handle._notify_background_completion.return_value.close.assert_called_once_with()
+        activity = bridge.emit.call_args_list[0].args[0]
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        self.assertTrue(activity[mime]["active"])
+        bridge.emit.assert_called_with({mime: {**activity[mime], "active": False}})
 
     async def test_status_pipe_survives_high_fds_and_strict_posix_shell(self):
         # Regression: dash rejects multi-digit fds in redirections at parse

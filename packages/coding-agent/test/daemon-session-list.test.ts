@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 import type { RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
+import type { SessionUsageSummary } from "../src/core/usage.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { passivatedWorkerRosterEntry, workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
@@ -55,6 +57,20 @@ describe("buildSessionList", () => {
 			["needs-user", "live", "idle"],
 			["done", "live", "idle"],
 		]);
+	});
+
+	it("counts direct peers separately so the supervisor can add them to its own attachment count", () => {
+		const state = makeState({ activeSessionId: "direct", sessionFile: "/tmp/direct.jsonl" });
+		state.clients.add({ id: "supervisor", authenticationRole: "supervisor" } as unknown as DaemonSocketClient);
+		state.clients.add({ id: "peer", authenticationRole: "session_client" } as unknown as DaemonSocketClient);
+
+		const [summary] = buildSessionList([state], []);
+
+		expect(summary).toMatchObject({ attachedClients: 2, directAttachedClients: 1 });
+		// Passivated roster rows describe a session without a runtime; the live-only count must not survive.
+		expect(
+			passivatedWorkerRosterEntry(workerRosterEntryFromSummary(summary!)).summary.directAttachedClients,
+		).toBeUndefined();
 	});
 
 	it("uses the stable session header time for active rows without a saved catalog entry", () => {
@@ -112,7 +128,17 @@ describe("buildSessionList", () => {
 		expect(summary.lastActivityAt).toBe(new Date(validTimestamp).toISOString());
 	});
 
-	it("keeps a session working while background subagents run", () => {
+	it("publishes own-session usage on active and saved rows", () => {
+		const usage: SessionUsageSummary = { inputTokens: 12437, outputTokens: 1234, cost: 0.42 };
+		const [active, saved] = buildSessionList(
+			[makeState({ activeSessionId: "spender", usage })],
+			[makeSessionInfo({ id: "saved-spender", path: "/tmp/saved-spender.jsonl", usage })],
+		);
+		expect(active?.usage).toEqual(usage);
+		expect(saved?.usage).toEqual(usage);
+	});
+
+	it("keeps background subagents on the wire while the settled parent goes idle", () => {
 		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
 		const entries = buildSessionList(
 			[
@@ -127,7 +153,7 @@ describe("buildSessionList", () => {
 			],
 			[],
 		);
-		expect(entries[0]?.activity).toBe("working");
+		expect(entries[0]?.activity).toBe("idle");
 		expect(entries[0]?.hasRunningRlmChildren).toBe(true);
 	});
 
@@ -230,6 +256,12 @@ describe("buildSessionList", () => {
 
 		expect(summary.sessionActions).toMatchObject({ queuedCount: 0, active: { kind: "turn" } });
 		expect(summary.unfinishedActionCount).toBe(3);
+		expect(summary.activity).toBe("working");
+	});
+
+	it("marks an empty resident session idle instead of holding it at working", () => {
+		const summary = summaryForActiveSession(makeState({ activeSessionId: "empty" }));
+		expect(summary.activity).toBe("idle");
 	});
 
 	it("marks a finished subagent idle instead of holding it at working", () => {
@@ -320,6 +352,24 @@ describe("buildSessionList", () => {
 			["saved-crashed", "saved-crashed", "archived", "idle"],
 		]);
 		expect(entries[0]!.sessionName).toBe("session active-1");
+	});
+
+	it("keeps a resident message-less subagent live while a top-level one stays a draft", () => {
+		const entries = buildSessionList(
+			[
+				makeState({
+					activeSessionId: "child",
+					metadata: { kind: "subagent", createdAt: 1, rlmChildId: "child-1" },
+				}),
+				makeState({ activeSessionId: "top" }),
+			],
+			[],
+		);
+
+		expect(entries.map((entry) => [entry.id, entry.lifecycle])).toEqual([
+			["child", "live"],
+			["top", "draft"],
+		]);
 	});
 
 	it("treats a message-less on-disk active session as a hidden draft", () => {
@@ -584,6 +634,7 @@ interface StateOptions {
 	messages?: AgentMessage[];
 	hasUserContent?: boolean;
 	summaryState?: ActiveSessionState["summaryState"];
+	usage?: SessionUsageSummary;
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
 	unfinishedActionCount?: number;
@@ -635,6 +686,7 @@ function makeState(options: StateOptions): ActiveSessionState {
 				},
 				messages: options.messages ?? ([] as AgentMessage[]),
 				getRlmChildSnapshots: () => options.childSnapshots ?? [],
+				getOwnUsageSummary: () => options.usage,
 				hasRunningRlmChildren: () => options.hasRunningRlmChildren ?? false,
 				hasAcceptedPromptInFlight: options.hasAcceptedPromptInFlight ?? false,
 				unfinishedActionCount: options.unfinishedActionCount ?? (options.hasAcceptedPromptInFlight ? 1 : 0),
@@ -673,6 +725,7 @@ function makeSessionInfo(overrides: Pick<SessionInfo, "path" | "id"> & Partial<S
 		firstMessage: "hello",
 		allMessagesText: "hello world",
 		agentStatus: overrides.agentStatus,
+		usage: overrides.usage,
 	};
 }
 

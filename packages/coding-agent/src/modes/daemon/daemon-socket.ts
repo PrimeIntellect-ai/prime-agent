@@ -13,20 +13,52 @@ const DAEMON_SOCKET_RELEASE_POLL_MS = 25;
 const DAEMON_SOCKET_LOCK_STALE_MS = 5000;
 const DAEMON_SOCKET_LOCK_UPDATE_MS = 1000;
 
+type DaemonSocketCompromiseListener = (error: Error) => void;
+
 export class DaemonSocketPathLease {
 	private released = false;
+	private compromisedError?: Error;
+	private readonly compromiseListeners = new Set<DaemonSocketCompromiseListener>();
 
 	constructor(
 		readonly socketPath: string,
 		private readonly releaseLock: () => Promise<void>,
 	) {}
 
-	async release(): Promise<void> {
-		if (this.released) {
-			return;
+	get compromise(): Error | undefined {
+		return this.compromisedError;
+	}
+
+	onCompromised(listener: DaemonSocketCompromiseListener): () => void {
+		if (this.compromisedError) {
+			this.notifyCompromiseListener(listener, this.compromisedError);
+			return () => {};
 		}
+		this.compromiseListeners.add(listener);
+		return () => this.compromiseListeners.delete(listener);
+	}
+
+	recordCompromise(error: Error): void {
+		if (this.compromisedError) return;
+		this.compromisedError = error;
+		const listeners = [...this.compromiseListeners];
+		this.compromiseListeners.clear();
+		for (const listener of listeners) this.notifyCompromiseListener(listener, error);
+	}
+
+	async release(): Promise<void> {
+		if (this.released) return;
 		this.released = true;
+		this.compromiseListeners.clear();
 		await this.releaseLock();
+	}
+
+	private notifyCompromiseListener(listener: DaemonSocketCompromiseListener, error: Error): void {
+		try {
+			listener(error);
+		} catch {
+			// A lease callback must not rethrow from proper-lockfile's refresh callback.
+		}
 	}
 }
 
@@ -47,10 +79,16 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 	if (process.platform === "win32") {
 		return undefined;
 	}
+	let lease: DaemonSocketPathLease | undefined;
+	let pendingCompromise: Error | undefined;
 	const releaseLock = await lockfile.lock(socketPath, {
 		realpath: false,
 		stale: DAEMON_SOCKET_LOCK_STALE_MS,
 		update: DAEMON_SOCKET_LOCK_UPDATE_MS,
+		onCompromised: (error) => {
+			if (lease) lease.recordCompromise(error);
+			else pendingCompromise = error;
+		},
 		retries: {
 			retries: 600,
 			factor: 1,
@@ -58,7 +96,9 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 			maxTimeout: DAEMON_SOCKET_RELEASE_POLL_MS,
 		},
 	});
-	return new DaemonSocketPathLease(socketPath, releaseLock);
+	lease = new DaemonSocketPathLease(socketPath, releaseLock);
+	if (pendingCompromise) lease.recordCompromise(pendingCompromise);
+	return lease;
 }
 
 export async function prepareDaemonSocketPath(socketPath: string, lease?: DaemonSocketPathLease): Promise<void> {
@@ -69,7 +109,8 @@ export async function prepareDaemonSocketPath(socketPath: string, lease?: Daemon
 	}
 	if (lease) {
 		assertSocketLease(socketPath, lease);
-		await prepareUnixDaemonSocketPath(socketPath);
+		assertSocketLeaseHeld(socketPath, lease);
+		await prepareUnixDaemonSocketPath(socketPath, lease);
 		return;
 	}
 	if (!existsSync(socketPath)) {
@@ -80,13 +121,13 @@ export async function prepareDaemonSocketPath(socketPath: string, lease?: Daemon
 	}
 	const ownedLease = await acquireDaemonSocketPathLease(socketPath);
 	try {
-		await prepareUnixDaemonSocketPath(socketPath);
+		await prepareUnixDaemonSocketPath(socketPath, ownedLease);
 	} finally {
 		await ownedLease?.release();
 	}
 }
 
-async function prepareUnixDaemonSocketPath(socketPath: string): Promise<void> {
+async function prepareUnixDaemonSocketPath(socketPath: string, lease?: DaemonSocketPathLease): Promise<void> {
 	if (!existsSync(socketPath)) {
 		return;
 	}
@@ -131,6 +172,7 @@ async function prepareUnixDaemonSocketPath(socketPath: string): Promise<void> {
 		}
 	}
 
+	if (lease) assertSocketLeaseHeld(socketPath, lease);
 	unlinkSync(socketPath);
 }
 
@@ -159,6 +201,9 @@ export function cleanupDaemonSocketPath(
 	}
 	if (lease) {
 		assertSocketLease(socketPath, lease);
+		if (lease.compromise) {
+			return;
+		}
 		try {
 			cleanupUnixDaemonSocketPath(socketPath, expectedIdentity);
 		} catch {
@@ -167,14 +212,26 @@ export function cleanupDaemonSocketPath(
 		return;
 	}
 	let releaseLock: (() => void) | undefined;
+	let lockCompromised = false;
 	try {
 		releaseLock = lockfile.lockSync(socketPath, {
 			realpath: false,
 			stale: DAEMON_SOCKET_LOCK_STALE_MS,
 			update: DAEMON_SOCKET_LOCK_UPDATE_MS,
+			onCompromised: () => {
+				lockCompromised = true;
+			},
 			retries: 0,
 		});
 	} catch {
+		return;
+	}
+	if (lockCompromised) {
+		try {
+			releaseLock();
+		} catch {
+			// Best effort release.
+		}
 		return;
 	}
 	try {
@@ -210,6 +267,12 @@ function cleanupUnixDaemonSocketPath(socketPath: string, expectedIdentity?: Daem
 function assertSocketLease(socketPath: string, lease: DaemonSocketPathLease): void {
 	if (lease.socketPath !== socketPath) {
 		throw new Error(`Daemon socket lease does not match ${socketPath}`);
+	}
+}
+
+function assertSocketLeaseHeld(socketPath: string, lease: DaemonSocketPathLease): void {
+	if (lease.compromise) {
+		throw new Error(`Daemon socket lease for ${socketPath} was compromised: ${lease.compromise.message}`);
 	}
 }
 

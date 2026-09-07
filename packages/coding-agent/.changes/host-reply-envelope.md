@@ -1,1 +1,0 @@
-- Namespaced kernel host handler results so handler fields cannot overwrite host reply protocol metadata.

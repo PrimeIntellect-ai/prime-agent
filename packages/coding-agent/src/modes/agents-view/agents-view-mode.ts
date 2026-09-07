@@ -29,6 +29,7 @@ import { ensureTool } from "../../utils/tools-manager.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../daemon/daemon-client.js";
+import { DaemonSessionRecoveringError } from "../daemon/daemon-errors.js";
 import {
 	collectDaemonClientEnv,
 	type DaemonClosingReason,
@@ -73,6 +74,7 @@ import {
 	type AgentsViewSelectionKey,
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
+	computeRecursiveRollups,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -81,7 +83,6 @@ import {
 	getAgentsViewSummaryIdentity as getSummaryIdentity,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
-	isSubagentSummary,
 	migrateAgentsViewIdentitySet,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
@@ -96,9 +97,9 @@ import {
 	type UnifiedSessionIndex,
 	type UnifiedSessionRecord,
 } from "./agents-view-state.js";
+import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "./roster-store.js";
 import { matchesSearchText } from "./session-view-search.js";
 
-const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_POLL_INTERVAL_MS = 15000;
 const RECONNECT_TIMEOUT_MS = 120000;
 const RECONNECT_RETRY_MS = 1000;
@@ -159,14 +160,18 @@ export type AgentsViewPersistentState = {
 	pendingExpandedAncestorSessionIds?: string[];
 	expandedSubagentParents?: Set<string>;
 	programShownParents?: Set<string>;
+	inactiveExpanded?: boolean;
 	statusMessage?: string;
 	// Gathered once and reused across agents-view instances so the notices survive
 	// re-entry and render the moment they resolve, even if the first view was left early.
 	startupNotices?: StartupNotices;
 	startupNoticesPromise?: Promise<StartupNotices>;
 	query?: string;
+	rosterClient?: DaemonClient;
+	rosterStore?: AgentsViewRosterStore;
 	savedSessions?: AgentConnectionSavedSessionInfo[];
 	lastSuccessfulSavedSessions?: AgentConnectionSavedSessionInfo[];
+	savedCatalogLoaded?: boolean;
 	lastSuccessfulLiveSummaries?: SessionSummary[];
 	savedCatalogGeneration?: number;
 	heartbeats?: AgentConnectionHeartbeat[];
@@ -273,12 +278,16 @@ export function createInitialAgentsViewPersistentState(
 	options: Pick<AgentsViewModeOptions, "initialScopeKey" | "initialSession">,
 ): AgentsViewPersistentState {
 	const initialSession = options.initialSession;
+	// A scoped view excludes its root from its own rows, so anchoring the
+	// selection on the entered-from chat could never resolve there and would
+	// only arm the pending-anchor state for the whole catalog scan.
+	const seedSelection = initialSession && !options.initialScopeKey;
 	return {
-		...(initialSession
+		...(initialSession ? { backSession: initialSession } : {}),
+		...(seedSelection
 			? {
 					selectedRowIdentity: getSummaryIdentity(initialSession),
 					selectedSessionKey: getAgentsViewSelectionKey(initialSession),
-					backSession: initialSession,
 				}
 			: {}),
 		...(options.initialScopeKey
@@ -339,7 +348,11 @@ async function openAgentsViewSession(
 			return { connection, summary };
 		} catch (error) {
 			client.close();
-			if (!summary.sessionFile || !isUnknownActiveSessionError(error)) {
+			// Recovering takes the saved-session path too; its create/open route retries the recovery.
+			if (
+				!summary.sessionFile ||
+				!(isUnknownActiveSessionError(error) || error instanceof DaemonSessionRecoveringError)
+			) {
 				throw error;
 			}
 			client = await connectAgentsViewDaemonClient(socketPath);
@@ -419,6 +432,22 @@ export async function runAgentsViewMode(options: AgentsViewModeOptions): Promise
 	const persistentState = createInitialAgentsViewPersistentState(options);
 	const promptStashStore = options.promptStashStore ?? new ClientPromptStashStore();
 
+	try {
+		await runAgentsViewLoop(options, persistentState, promptStashStore);
+	} finally {
+		// Close first: the supervisor drops the subscription with the socket.
+		persistentState.rosterClient?.close();
+		await persistentState.rosterStore?.dispose();
+		persistentState.rosterStore = undefined;
+		persistentState.rosterClient = undefined;
+	}
+}
+
+async function runAgentsViewLoop(
+	options: AgentsViewModeOptions,
+	persistentState: AgentsViewPersistentState,
+	promptStashStore: ClientPromptStashStore,
+): Promise<void> {
 	while (true) {
 		const view = new AgentsViewMode(options, persistentState);
 		const viewResult = await view.run();
@@ -629,7 +658,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private reconnectTimedOut = false;
 	private daemonShutdownReceived = false;
 	private resolveRun: ((result: AgentsViewRunResult) => void) | undefined;
-	private pollTimer: NodeJS.Timeout | undefined;
 	private heartbeatPollTimer: NodeJS.Timeout | undefined;
 	private animationTimer: NodeJS.Timeout | undefined;
 	private ctrlCExitHintExpiresAt = 0;
@@ -638,6 +666,8 @@ export class AgentsViewMode implements Component, Focusable {
 	private deleteConfirmTimer: ReturnType<typeof setTimeout> | undefined;
 	private workingIconFrame = 0;
 	private rows: AgentsViewRow[] = [];
+	private allRows: AgentsViewRow[] = [];
+	private showActions = false;
 	private lastListedSummaries: SessionSummary[] = [];
 	private lastVisibleSummaries: SessionSummary[] = [];
 	private savedSessions: AgentConnectionSavedSessionInfo[] = [];
@@ -648,13 +678,9 @@ export class AgentsViewMode implements Component, Focusable {
 	private scopedRecords: UnifiedSessionRecord[] = [];
 	private scopeKey: AgentsViewScopeKey | undefined;
 	private scopeRootSummary: SessionSummary | undefined;
-	private liveCatalogReady = false;
 	private savedCatalogReady = false;
 	private savedCatalogGeneration = 0;
-	private liveCatalogGeneration = 0;
 	private heartbeatCatalogGeneration = 0;
-	private liveCatalogPollPromise: Promise<void> | undefined;
-	private liveCatalogRefreshPending = false;
 	private savedCatalogRefreshPending = false;
 	private expandedSubagentParents = new Set<string>();
 	// Agent row identities whose full spawn program is currently shown.
@@ -678,7 +704,12 @@ export class AgentsViewMode implements Component, Focusable {
 	private pendingKillSubagent: PendingKillSubagent | undefined;
 	private renameTarget: { activeSessionId?: string; sessionFile?: string; summary: SessionSummary } | undefined;
 	private actionModeSearchQuery: string | undefined;
+	/** Session the view was entered from; exempt from the empty-session sort demotion. */
+	private readonly anchorSessionId: string | undefined;
 	private readonly inactiveAgentIdentities = new Set<string>();
+	private rosterStore: AgentsViewRosterStore | undefined;
+	private unsubscribeRosterUpdate: (() => void) | undefined;
+	private savedSearchFetchStarted = false;
 	private statusMessage: string | undefined;
 	private statusMessageTone: "muted" | "error" | "warning" = "muted";
 	private statusMessageSticky = false;
@@ -696,6 +727,7 @@ export class AgentsViewMode implements Component, Focusable {
 				persistentState.backSession ?? options.initialSession,
 			);
 		persistentState.scopeFrames = initialFrames;
+		this.anchorSessionId = (persistentState.backSession ?? options.initialSession)?.sessionId;
 		this.scopeKey = initialFrames.at(-1)?.scope;
 		this.scopeRootSummary = persistentState.scopeRootSummary;
 		this.selectedRowIdentity = persistentState.selectedRowIdentity;
@@ -704,7 +736,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.lastListedSummaries = persistentState.lastSuccessfulLiveSummaries ?? [];
 		this.savedSessions = persistentState.savedSessions ?? [];
 		this.lastSuccessfulSavedSessions = persistentState.lastSuccessfulSavedSessions ?? this.savedSessions;
-		this.savedCatalogReady = persistentState.lastSuccessfulSavedSessions !== undefined;
+		this.savedCatalogReady = persistentState.savedCatalogLoaded === true;
 		this.heartbeats = persistentState.heartbeats ?? [];
 		this.savedCatalogGeneration = persistentState.savedCatalogGeneration ?? 0;
 		this.expandedSubagentParents = persistentState.expandedSubagentParents ?? new Set();
@@ -830,12 +862,19 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	async run(): Promise<AgentsViewRunResult> {
-		this.client = new DaemonClient(this.requireSocketPath());
-		await this.client.connect();
-		this.subscribeToClientClose(this.client);
-		this.unsubscribeClientMessage = this.client.onMessage((message) => {
+		this.persistentState.rosterClient ??= new DaemonClient(this.requireSocketPath());
+		const client = this.persistentState.rosterClient;
+		this.client = client;
+		if (!client.isConnected) await client.reconnect();
+		this.unsubscribeClientMessage = client.onMessage((message) => {
 			if (message.type === "heartbeats_changed") void this.refreshHeartbeats();
 		});
+		this.persistentState.rosterStore ??= new AgentsViewRosterStore();
+		this.rosterStore = this.persistentState.rosterStore;
+		if (!(await this.rosterStore.attach(client))) {
+			throw new Error(STALE_ROSTER_DAEMON_MESSAGE);
+		}
+		this.subscribeToClientClose(client);
 
 		this.ui.addChild(this);
 		this.ui.setFocus(this);
@@ -860,17 +899,21 @@ export class AgentsViewMode implements Component, Focusable {
 		const runPromise = new Promise<AgentsViewRunResult>((resolve) => {
 			this.resolveRun = resolve;
 		});
-		void this.refreshSessions();
-		void this.refreshSavedSessions();
+		this.unsubscribeRosterUpdate = this.rosterStore.onUpdate(() => this.onRosterUpdate());
+		this.applySessionList(this.rosterStore.summaries(), true);
+		this.armSavedSearchFetch();
+		this.resolveMissingSelectionAnchor();
 		void this.refreshHeartbeats();
 		this.loadStartupNotices();
-		this.pollTimer = setInterval(() => this.pollSessions(), POLL_INTERVAL_MS);
-		this.pollTimer.unref?.();
 		this.heartbeatPollTimer = setInterval(() => void this.refreshHeartbeats(), HEARTBEAT_POLL_INTERVAL_MS);
 		this.heartbeatPollTimer.unref?.();
 		this.animationTimer = setInterval(() => {
-			if (!this.rows.some((row) => row.section === "running")) return;
-			this.workingIconFrame += 1;
+			const hasRunning = this.rows.some((row) => row.section === "running");
+			const hasStaleAge = this.rows.some((row) => row.summary.lastHeardFromAt !== undefined);
+			if (!hasRunning && !hasStaleAge) return;
+			// Age labels are baked into rows at build time; ticking them needs a rebuild.
+			if (hasStaleAge) this.rebuildRows();
+			if (hasRunning) this.workingIconFrame += 1;
 			this.ui.requestRender();
 		}, WORKING_ICON_INTERVAL_MS);
 		this.animationTimer.unref?.();
@@ -880,6 +923,12 @@ export class AgentsViewMode implements Component, Focusable {
 
 	handleInput(data: string): void {
 		this.clearStickyStatusMessage();
+		if (this.showActions) {
+			this.showActions = false;
+			this.ui.requestRender();
+			if (this.keybindings.matches(data, "app.shortcuts") || this.keybindings.matches(data, "tui.select.cancel"))
+				return;
+		}
 		if (this.renameTarget) {
 			if (this.keybindings.matches(data, "tui.select.cancel")) {
 				this.exitRenameMode();
@@ -923,6 +972,25 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.editor.getText().length === 0 && this.keybindings.matches(data, "app.agents.program")) {
 			this.cycleProgramForSelected();
 			return;
+		}
+		if (!this.replyTarget && this.editor.getText().length === 0) {
+			if (this.keybindings.matches(data, "app.shortcuts")) {
+				this.showActions = !this.showActions;
+				this.ui.requestRender();
+				return;
+			}
+			if (this.keybindings.matches(data, "app.agents.inactiveCollapse")) {
+				this.persistentState.inactiveExpanded = !this.persistentState.inactiveExpanded;
+				this.rebuildRows();
+				this.syncSelectedRowState();
+				this.ui.requestRender();
+				return;
+			}
+			if (this.keybindings.matches(data, "app.agents.expand")) {
+				const row = this.rows[this.selectedIndex];
+				if (row && row.descendantCount > 0) this.toggleSubagentList(row);
+				return;
+			}
 		}
 		if (!this.replyTarget && this.keybindings.matches(data, "app.agents.open")) {
 			if (this.editor.getText().length === 0 || this.isSearchCursorAtEnd()) {
@@ -1007,8 +1075,6 @@ export class AgentsViewMode implements Component, Focusable {
 		void promise
 			.then((notices) => {
 				this.persistentState.startupNotices = notices;
-				// Best-effort immediate paint; a re-entered instance also picks this up on
-				// its next poll tick since render reads persistentState directly.
 				this.ui.requestRender();
 			})
 			.catch(() => {});
@@ -1227,12 +1293,22 @@ export class AgentsViewMode implements Component, Focusable {
 		this.queryChanged();
 	}
 
+	private armSavedSearchFetch(options: { duringReconnect?: boolean } = {}): void {
+		// The inactive section is catalog-fed, so no query gate: load on view open.
+		if (this.savedSearchFetchStarted || this.persistentState.savedCatalogLoaded === true) {
+			return;
+		}
+		this.savedSearchFetchStarted = true;
+		void this.refreshSavedSessions({ ...options, preserveStatusOnError: true });
+	}
+
 	private queryChanged(): void {
 		this.persistentState.query = this.editor.getText();
+		this.armSavedSearchFetch();
 		this.rebuildRows();
-		// Typing must not claim the visible fallback row while the restored
-		// anchor is still waiting for its catalog row.
-		if (!this.selectionAnchorPending) this.syncSelectedRowState();
+		// Searching is explicit user intent: claim the visible row as the new
+		// anchor even if a remembered one is still waiting for its catalog row.
+		this.syncSelectedRowState();
 		this.ui.requestRender();
 	}
 
@@ -1244,11 +1320,19 @@ export class AgentsViewMode implements Component, Focusable {
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
 	private rebuildRows(): void {
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
-		this.rows = buildAgentsViewRows(
+		this.allRows = buildAgentsViewRows(
 			this.getFilteredRecords(),
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.anchorSessionId,
+		);
+		this.rows = compactSessionRows(
+			this.allRows,
+			this.persistentState.inactiveExpanded === true ||
+				((this.replyTarget || this.renameTarget ? this.actionModeSearchQuery : this.editor.getText()) ?? "").trim()
+					.length > 0,
 		);
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
@@ -1296,7 +1380,7 @@ export class AgentsViewMode implements Component, Focusable {
 						this.setReplyTarget(undefined);
 					}
 					// Keep the send outcome (or sticky cwd notice) that sendReply just surfaced.
-					await this.refreshSessions({ preserveStatusOnError: true });
+					await this.refreshSessions();
 				} else if (this.replyTarget === target && this.editor.getText().length === 0) {
 					this.editor.setText(value);
 				}
@@ -1329,14 +1413,6 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!row?.selectable || this.isPendingDeleteRow(row)) {
 			return;
 		}
-		if (this.selectionAnchorPending) {
-			this.setStatusMessage("Waiting for the selected session to load");
-			return;
-		}
-		if (row.kind === "subagent-summary") {
-			this.toggleSubagentList(row);
-			return;
-		}
 		if (row.kind === "subagent") {
 			this.openSelectedSubagent(row);
 			return;
@@ -1357,16 +1433,12 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private toggleSubagentList(row: AgentsViewRow): void {
-		if (!row.parentIdentity) {
-			return;
-		}
-		if (this.expandedSubagentParents.has(row.parentIdentity)) {
-			this.expandedSubagentParents.delete(row.parentIdentity);
-			// A collapsed agent's revealed program collapses with it, so reopening
-			// starts from the hidden state rather than a stale reveal.
-			this.programShownParents.delete(row.parentIdentity);
+		const target = row.identity;
+		if (this.expandedSubagentParents.has(target)) {
+			this.expandedSubagentParents.delete(target);
+			this.programShownParents.delete(target);
 		} else {
-			this.expandedSubagentParents.add(row.parentIdentity);
+			this.expandedSubagentParents.add(target);
 		}
 		this.rebuildRows();
 		this.syncSelectedRowState();
@@ -1405,7 +1477,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 	/** Whether any subagent under the given agent identity carries spawn code. */
 	private targetHasSpawnCode(target: string): boolean {
-		for (const row of this.rows) {
+		for (const row of this.allRows) {
 			if (row.parentIdentity !== target) {
 				continue;
 			}
@@ -1417,16 +1489,6 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		return false;
-	}
-
-	/** True when the selected row exposes the "show program" affordance. */
-	private selectedRowCanShowProgram(): boolean {
-		const row = this.rows[this.selectedIndex];
-		if (!row) {
-			return false;
-		}
-		const target = row.kind === "agent" ? row.identity : row.parentIdentity;
-		return target !== undefined && this.targetHasSpawnCode(target);
 	}
 
 	private openSelectedSubagent(row: AgentsViewRow): void {
@@ -1624,8 +1686,9 @@ export class AgentsViewMode implements Component, Focusable {
 				this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
 				return false;
 			}
-			const refreshed = await this.refreshBothCatalogs();
-			this.setStatusMessage(refreshed ? `Renamed to ${name}` : `Renamed to ${name}; refresh failed`);
+			await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
+			this.setStatusMessage(`Renamed to ${name}`);
 			return true;
 		} catch (error) {
 			this.setStatusMessage(
@@ -1714,7 +1777,7 @@ export class AgentsViewMode implements Component, Focusable {
 			return true;
 		} catch (error) {
 			this.setStatusMessage(formatError("Failed to send reply", error));
-			if (didResume) await this.refreshSessions({ preserveStatusOnError: true });
+			if (didResume) await this.refreshSessions();
 			return false;
 		}
 	}
@@ -1774,7 +1837,9 @@ export class AgentsViewMode implements Component, Focusable {
 						this.setStatusMessage("Usage: /name <session name>", { tone: "warning" });
 						return false;
 					}
-					return await this.renameSession(target, name);
+					const renamed = await this.renameSession(target, name);
+					if (renamed) disarmIfUnchanged();
+					return renamed;
 				}
 				case "kill": {
 					if (!target.activeSessionId) {
@@ -1791,7 +1856,7 @@ export class AgentsViewMode implements Component, Focusable {
 					}
 					disarmIfUnchanged();
 					this.setStatusMessage("Agent stopped");
-					await this.refreshBothCatalogs();
+					await this.refreshSessions();
 					return true;
 				}
 			}
@@ -1838,10 +1903,10 @@ export class AgentsViewMode implements Component, Focusable {
 			if (this.pendingDeleteAgent?.identity === identity && this.isDeleteConfirmationVisible()) {
 				this.clearDeleteConfirmation({ render: false });
 				try {
+					// Authoritative liveness check; its narrower plain-list verdict stays local.
 					const latest = expectSessionList(
 						requireDaemonData(await this.requireClient().request(createAgentsViewListCommand())),
 					);
-					this.lastListedSummaries = latest;
 					const active = resolveAgentsViewActiveSummaryForPath(row.summary.sessionFile, latest);
 					if (active) {
 						this.pendingDeleteAgent = undefined;
@@ -1861,7 +1926,9 @@ export class AgentsViewMode implements Component, Focusable {
 						return;
 					}
 					this.pendingDeleteAgent = undefined;
-					const refreshed = await this.refreshSavedSessions({ preserveStatusOnError: true });
+					const refreshed =
+						!this.persistentState.savedCatalogLoaded ||
+						(await this.refreshSavedSessions({ preserveStatusOnError: true }));
 					const success = result.method === "trash" ? "Session moved to trash" : "Session deleted";
 					this.setStatusMessage(refreshed ? success : `${success}; refresh failed`);
 				} catch (error) {
@@ -1908,7 +1975,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private async killSubagent(pending: PendingKillSubagent, currentRow: AgentsViewRow): Promise<void> {
-		const running = currentRow.section === "running";
+		const running = hasLiveWork(currentRow);
 		const client = this.requireClient();
 		this.setStatusMessage(running ? "Stopping subagent..." : "Deleting subagent...");
 		try {
@@ -1974,7 +2041,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.showDeleteConfirmation();
 			return;
 		}
-		if (!isRunningSessionSummary(row.summary)) {
+		if (!hasLiveWork(row)) {
 			this.pendingDeleteAgent = {
 				identity,
 				activeSessionId,
@@ -2047,6 +2114,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.selectedActiveSessionId = undefined;
 			this.setStatusMessage("Agent inactive", { render: false });
 			await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
 		} catch (error) {
 			this.setStatusMessage(formatError("Failed to deactivate agent", error));
 		}
@@ -2079,55 +2147,20 @@ export class AgentsViewMode implements Component, Focusable {
 		requireDaemonData(response);
 	}
 
-	private pollSessions(): void {
-		if (this.liveCatalogPollPromise) return;
-		const poll = this.refreshSessions().then(() => undefined);
-		this.liveCatalogPollPromise = poll;
-		void poll.finally(() => {
-			if (this.liveCatalogPollPromise === poll) this.liveCatalogPollPromise = undefined;
-		});
+	private onRosterUpdate(): void {
+		if (this.stopped || !this.rosterStore) return;
+		this.applySessionList(this.rosterStore.summaries(), true);
+		this.resolveMissingSelectionAnchor();
 	}
 
-	private async refreshSessions(options: { preserveStatusOnError?: boolean } = {}): Promise<boolean> {
-		if (this.reconnectPromise || this.daemonShutdownReceived) return false;
-		const generation = ++this.liveCatalogGeneration;
-		this.liveCatalogRefreshPending = true;
-		try {
-			const client = this.requireClient();
-			try {
-				const response = await client.request(createAgentsViewListCommand());
-				if (generation !== this.liveCatalogGeneration) return false;
-				this.liveCatalogReady = true;
-				this.applySessionList(expectSessionList(requireDaemonData(response)), true);
-				return true;
-			} catch (error) {
-				if (generation === this.liveCatalogGeneration) {
-					// A completed failed attempt is still catalog-settled: otherwise a
-					// vanished scope can permanently trap an empty view.
-					this.liveCatalogReady = true;
-					this.reconcileCatalogs();
-					if (!options.preserveStatusOnError && !this.reconnectPromise) {
-						if (client.isConnected) this.setStatusMessage(formatError("Failed to refresh agents", error));
-						else this.startClientReconnect(client, error);
-					}
-				}
-				return false;
-			}
-		} catch (error) {
-			if (generation === this.liveCatalogGeneration) {
-				this.liveCatalogReady = true;
-				this.reconcileCatalogs();
-				if (!options.preserveStatusOnError) {
-					this.setStatusMessage(formatError("Failed to refresh current session", error));
-				}
-			}
-			return false;
-		} finally {
-			if (generation === this.liveCatalogGeneration) {
-				this.liveCatalogRefreshPending = false;
-				this.resolveMissingSelectionAnchor();
-			}
-		}
+	private refreshSavedSessionsIfLoaded(): void {
+		if (this.persistentState.savedCatalogLoaded) void this.refreshSavedSessions({ preserveStatusOnError: true });
+	}
+
+	private async refreshSessions(): Promise<void> {
+		if (this.reconnectPromise || this.daemonShutdownReceived || !this.rosterStore) return;
+		this.applySessionList(this.rosterStore.summaries(), true);
+		this.resolveMissingSelectionAnchor();
 	}
 
 	private applySessionList(sessions: SessionSummary[], successful = false): void {
@@ -2148,7 +2181,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 		const frames = this.persistentState.scopeFrames ?? [];
 		const resolution = resolveAgentsViewScopeFrames(this.unifiedRecords, frames, this.unifiedIndex);
-		if (shouldApplyScopeResolution(resolution.droppedFrames, this.liveCatalogReady, this.savedCatalogReady)) {
+		if (shouldApplyScopeResolution(resolution.droppedFrames, this.savedCatalogReady)) {
 			this.persistentState.scopeFrames = resolution.frames;
 			this.scopeKey = resolution.frames.at(-1)?.scope;
 			this.scopeRootSummary = resolution.root ? summaryForUnifiedRecord(resolution.root) : undefined;
@@ -2159,30 +2192,36 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		this.scopedRecords = scopeToSessionSubtree(this.unifiedRecords, this.scopeKey, this.unifiedIndex);
-		this.rows = buildAgentsViewRows(
+		this.allRows = buildAgentsViewRows(
 			this.getFilteredRecords(),
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.anchorSessionId,
+		);
+		this.rows = compactSessionRows(
+			this.allRows,
+			this.persistentState.inactiveExpanded === true ||
+				((this.replyTarget || this.renameTarget ? this.actionModeSearchQuery : this.editor.getText()) ?? "").trim()
+					.length > 0,
 		);
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
 		this.ui.requestRender();
 	}
 
-	/** A session appears in both catalogs; mutations must refresh both. */
-	private async refreshBothCatalogs(): Promise<boolean> {
-		const results = await Promise.all([
-			this.refreshSessions({ preserveStatusOnError: true }),
-			this.refreshSavedSessions({ preserveStatusOnError: true }),
-		]);
-		return results.every(Boolean);
+	private rearmSavedSearchFetch(): void {
+		if (this.persistentState.savedCatalogLoaded !== true) this.savedSearchFetchStarted = false;
 	}
 
 	private async refreshSavedSessions(
 		options: { duringReconnect?: boolean; preserveStatusOnError?: boolean } = {},
 	): Promise<boolean> {
-		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) return false;
+		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) {
+			this.rearmSavedSearchFetch();
+			return false;
+		}
 		const generation = ++this.savedCatalogGeneration;
 		this.persistentState.savedCatalogGeneration = generation;
 		this.savedCatalogRefreshPending = true;
@@ -2213,6 +2252,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.savedCatalogReady = true;
 			this.persistentState.lastSuccessfulSavedSessions = sessions;
 			this.persistentState.savedSessions = sessions;
+			this.persistentState.savedCatalogLoaded = true;
 			this.reconcileCatalogs();
 			return true;
 		} catch (error) {
@@ -2221,6 +2261,7 @@ export class AgentsViewMode implements Component, Focusable {
 				this.persistentState.savedSessions = successfulSessions;
 				// Treat a terminal failure as settled so scope fallback cannot soft-lock.
 				this.savedCatalogReady = true;
+				this.rearmSavedSearchFetch();
 				this.reconcileCatalogs();
 				if (!options.preserveStatusOnError && !this.reconnectPromise && !this.daemonShutdownReceived) {
 					this.setStatusMessage(formatError("Failed to load saved sessions", error));
@@ -2247,7 +2288,12 @@ export class AgentsViewMode implements Component, Focusable {
 			return true;
 		} catch (error) {
 			if (generation === this.heartbeatCatalogGeneration && !this.reconnectPromise) {
-				this.setStatusMessage(formatError("Failed to refresh heartbeats", error));
+				const client = this.client;
+				if (client && !client.isConnected) {
+					this.startClientReconnect(client, error);
+				} else if (!this.statusMessageSticky) {
+					this.setStatusMessage(formatError("Failed to refresh heartbeats", error));
+				}
 			}
 			return false;
 		}
@@ -2276,11 +2322,9 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private resolveMissingSelectionAnchor(): void {
-		if (!this.selectionAnchorPending || this.liveCatalogRefreshPending || this.savedCatalogRefreshPending) {
+		if (!this.selectionAnchorPending || this.savedCatalogRefreshPending) {
 			return;
 		}
-		// Unblock the fallback row, but keep the anchor identities: a later poll
-		// can still deliver the intended session and re-anchor selection to it.
 		this.selectionAnchorPending = false;
 		const row = this.rows[this.selectedIndex];
 		this.selectedActiveSessionId = row?.selectable ? (row.summary.activeSessionId ?? row.summary.id) : undefined;
@@ -2337,12 +2381,7 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		this.stopped = true;
 		this.savedCatalogGeneration += 1;
-		this.liveCatalogGeneration += 1;
 		this.heartbeatCatalogGeneration += 1;
-		if (this.pollTimer) {
-			clearInterval(this.pollTimer);
-			this.pollTimer = undefined;
-		}
 		if (this.heartbeatPollTimer) {
 			clearInterval(this.heartbeatPollTimer);
 			this.heartbeatPollTimer = undefined;
@@ -2363,7 +2402,8 @@ export class AgentsViewMode implements Component, Focusable {
 		this.unsubscribeClientClose = undefined;
 		this.unsubscribeClientMessage?.();
 		this.unsubscribeClientMessage = undefined;
-		this.client?.close();
+		this.unsubscribeRosterUpdate?.();
+		this.unsubscribeRosterUpdate = undefined;
 		this.client = undefined;
 		this.resolveRun?.(result);
 		this.resolveRun = undefined;
@@ -2415,16 +2455,17 @@ export class AgentsViewMode implements Component, Focusable {
 			try {
 				await this.options.recoverDaemon?.();
 				await client.reconnect(1000);
-				const response = await client.request(createAgentsViewListCommand());
-				const data = requireDaemonData(response);
-				const sessions = expectSessionList(data);
+				if (!this.rosterStore || !(await this.rosterStore.attach(client))) {
+					throw new Error("Daemon lost the agent_roster capability during reconnect");
+				}
 				const heartbeatsRefreshed = await this.refreshHeartbeats({ duringReconnect: true });
 				if (!heartbeatsRefreshed) throw new Error("Heartbeat catalog did not refresh during reconnect");
+				const sessions = this.rosterStore.summaries();
 				this.daemonShutdownReceived = false;
 				this.reconnectTimedOut = false;
 				this.setStatusMessage("Daemon reconnected", { render: false });
 				this.applySessionList(sessions, true);
-				void this.refreshSavedSessions({ duringReconnect: true, preserveStatusOnError: true });
+				this.armSavedSearchFetch({ duringReconnect: true });
 				return;
 			} catch (error) {
 				lastError = error;
@@ -2457,118 +2498,136 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private getAgentCountsText(): string {
-		const counts = countRowsBySection(this.rows);
+		const counts = countRowsBySection(this.allRows);
 		return `${counts.running} running, ${counts.idle} idle, ${counts.inactive} inactive`;
 	}
 
 	private renderSessionRows(width: number, maxRows: number): string[] {
-		if (maxRows <= 0) {
-			return [];
+		if (maxRows <= 0) return [];
+		if (this.showActions) return this.renderActions(width).slice(0, maxRows);
+		const layout = buildCompactAgentsViewLayout(this.rows, width);
+		const displayItems: DisplayItem[] = [];
+		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
+		for (const section of ["running", "idle", "inactive"] as const) {
+			if (counts[section] === 0) continue;
+			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
+			displayItems.push({ type: "heading", section });
+			for (const row of getDisplayRowsForSection(this.rows, section)) {
+				displayItems.push({ type: "row", row });
+				if (
+					(row.kind === "agent" || row.kind === "subagent") &&
+					row.runningSubagentCount > 0 &&
+					!this.expandedSubagentParents.has(row.identity)
+				) {
+					displayItems.push({ type: "running-subagents", row });
+				}
+			}
 		}
-		if (this.rows.length === 0) {
-			return [theme.bold(sectionTitle("running")), theme.fg("dim", "  No sessions match your search.")].slice(
-				0,
-				maxRows,
-			);
+		if (displayItems.length === 0) {
+			return [theme.fg("dim", "No sessions match your search.")];
 		}
-
-		const displayItems = buildDisplayItems(this.rows);
+		// Reserve the shared column header before calculating the selection viewport.
+		const headerRows = maxRows > 1 ? 1 : 0;
+		const visibleRows = maxRows - headerRows;
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
 			(item) => item.type === "row" && item.row.identity === selectedIdentity,
 		);
-		const visibleRows = Math.min(maxRows, this.visibleListRows());
 		const start = Math.max(
 			0,
 			Math.min(displayItems.length - visibleRows, selectedDisplayIndex - Math.floor(visibleRows / 2)),
 		);
-		const showLeadingEllipsis = start > 0;
-		let showTrailingEllipsis = start + visibleRows < displayItems.length;
-		if ((showLeadingEllipsis ? 1 : 0) + (showTrailingEllipsis ? 1 : 0) >= visibleRows) {
-			showTrailingEllipsis = false;
-		}
-		const contentVisibleRows = Math.max(
-			0,
-			visibleRows - (showLeadingEllipsis ? 1 : 0) - (showTrailingEllipsis ? 1 : 0),
-		);
-		const visibleItems = displayItems.slice(start, start + contentVisibleRows);
-		const lines = visibleItems.map((item) => {
-			if (item.type === "spacer") {
-				return "";
+		const showLeadingEllipsis = start > 0 && visibleRows > 1;
+		const showTrailingEllipsis = start + visibleRows < displayItems.length && visibleRows > 2;
+		const contentRows = visibleRows - Number(showLeadingEllipsis) - Number(showTrailingEllipsis);
+		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
+		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
+			if (item.type === "spacer") return "";
+			if (item.type === "running-subagents") {
+				const count = item.row.runningSubagentCount;
+				const indent = "  ".repeat(item.row.depth + 1);
+				return theme.fg(
+					"success",
+					truncateToWidth(`${indent}${count} subagent${count === 1 ? "" : "s"} running`, width),
+				);
 			}
 			if (item.type === "heading") {
-				return theme.bold(sectionTitle(item.section));
+				const collapsed =
+					item.section === "inactive" && !this.rows.some((row) => row.depth === 0 && row.section === "inactive");
+				const prefix = item.section === "inactive" ? `${collapsed ? "▸" : "▾"} ` : "";
+				const hint = item.section === "inactive" ? ` · ${keyText("app.agents.inactiveCollapse")}` : "";
+				return theme.bold(
+					truncateToWidth(`${prefix}${sectionTitle(item.section)} (${counts[item.section]})${hint}`, width),
+				);
 			}
-			if (item.type === "empty") {
-				return theme.fg("dim", "  No agents");
-			}
-			return this.renderRow(item.row, width);
+			return this.renderRow(item.row, width, layout);
 		});
-		if (showLeadingEllipsis) {
-			lines.unshift(theme.fg("dim", "  ..."));
-		}
-		if (showTrailingEllipsis) {
-			lines.push(theme.fg("dim", "  ..."));
-		}
+		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
+		if (showTrailingEllipsis) lines.push(theme.fg("dim", "  ..."));
+		if (headerRows > 0) lines.unshift(theme.fg("muted", layout.legend));
 		return lines;
 	}
 
-	private renderRow(row: AgentsViewRow, width: number): string {
+	private renderRow(
+		row: AgentsViewRow,
+		width: number,
+		layout: AgentsViewUsageLayout = buildCompactAgentsViewLayout(this.rows.length > 0 ? this.rows : [row], width),
+	): string {
 		const selected = row.selectable && row.identity === this.rows[this.selectedIndex]?.identity;
-		if (row.kind === "subagent-code") {
-			return this.renderCodeRow(row);
-		}
-		if (row.kind === "subagent-summary") {
-			const indent = "  ".repeat(row.depth);
-			const hint = row.hasSpawnCode ? theme.fg("dim", ` · ${keyText("app.agents.program")} show program`) : "";
-			const label = `${theme.fg("dim", `${row.expanded ? "▾" : "▸"} ${row.title}`)}${hint}`;
-			const line = padLine(truncateToWidth(`${indent}${label}`, width, ""), width);
-			return selected ? `${SELECTED_ROW_MARKER}${line}` : line;
-		}
+		const markRow = (line: string): string => (selected ? `${SELECTED_ROW_MARKER}${line}` : line);
+		if (row.kind === "subagent-code") return this.renderCodeRow(row);
 		const pendingDelete = row.kind === "agent" && this.isPendingDeleteRow(row);
 		const pendingKill = row.kind === "subagent" && this.isPendingKillSubagentRow(row);
-		const rawIcon = this.getRowIcon(row.section);
-		const icon = this.formatRowIcon(row.section, rawIcon);
-		const indent = "  ".repeat(row.depth);
-		const age = formatSessionDuration(row.summary);
-		const details = row.section === "inactive" ? `${row.summary.messageCount} · ${age}` : age;
-		const detailsWidth = row.section === "inactive" ? Math.max(10, visibleWidth(details)) : 10;
-		const heartbeatBadge = !pendingDelete && !pendingKill ? formatHeartbeatBadge(row.heartbeat) : "";
-		const heartbeatCell = heartbeatBadge ? theme.fg("error", heartbeatBadge) : "";
-		const heartbeatWidth = visibleWidth(heartbeatBadge);
-		const titleWidth = Math.max(
-			0,
-			width -
-				visibleWidth(indent) -
-				visibleWidth(rawIcon) -
-				detailsWidth -
-				2 -
-				(heartbeatWidth > 0 ? heartbeatWidth + 1 : 0),
-		);
-		const title = pendingDelete
-			? this.getPendingDeleteTitle()
-			: pendingKill
-				? `${keyText("app.agents.delete")} again to ${row.section === "running" ? "stop" : "delete"}`
-				: styleRowTitle(row);
-		// Keep stable model information ahead of the variable summary so narrow rows truncate the summary first.
-		const summaryText = !pendingDelete && !pendingKill ? row.summary.summary : undefined;
-		const modelLabel =
-			isSubagentSummary(row.summary) && !pendingDelete && !pendingKill && row.summary.model
-				? `${row.summary.model.provider}/${row.summary.model.id}${row.summary.thinkingLevel && row.summary.thinkingLevel !== "off" ? `:${row.summary.thinkingLevel}` : ""}`
+		const details = layout.details.get(row.identity) ?? "";
+		if (pendingDelete || pendingKill) {
+			const armed = row.summary.hasActiveHeartbeat === true || (row.heartbeat?.activeCount ?? 0) > 0;
+			const title =
+				(armed ? "has an armed heartbeat — " : "") +
+				(pendingDelete
+					? this.getPendingDeleteTitle()
+					: `${keyText("app.agents.delete")} again to ${hasLiveWork(row) ? "stop" : "delete"}`);
+			return markRow(formatTableCell(theme.fg("error", title), width));
+		}
+		const icon = this.formatRowIcon(row.section, this.getRowIcon(row.section));
+		const expand = row.descendantCount > 0 ? (this.expandedSubagentParents.has(row.identity) ? "▾" : "▸") : " ";
+		const badge = formatHeartbeatBadge(row.heartbeat);
+		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
+		const title = `${"  ".repeat(row.depth)}${icon}${expand} ${heartbeat}${styleRowTitle(row)}`;
+		const status =
+			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
+				? row.statusLabel
 				: undefined;
-		const suffixes = [modelLabel, summaryText].filter(
-			(suffix): suffix is string => suffix !== undefined && suffix.length > 0,
-		);
-		const titleContent = suffixes.length > 0 ? `${title} ${theme.fg("dim", `· ${suffixes.join(" · ")}`)}` : title;
-		const titleCell = formatTableCell(titleContent, titleWidth);
+		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
 		const cells = [
-			icon,
-			pendingDelete || pendingKill ? theme.fg("error", titleCell) : titleCell,
-			formatRightTableCell(details, detailsWidth),
+			formatTableCell(title, layout.nameWidth),
+			formatTableCell(theme.fg("muted", formatSessionModel(row.summary)), layout.modelWidth),
 		];
-		const base = `${indent}${cells[0]} ${heartbeatCell ? `${heartbeatCell} ` : ""}${cells[1]} ${cells[2]}`;
-		const line = padLine(truncateToWidth(base, width, ""), width);
-		return selected ? `${SELECTED_ROW_MARKER}${line}` : line;
+		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
+		cells.push(details);
+		return markRow(formatTableCell(cells.join("  "), width));
+	}
+
+	private renderActions(width: number): string[] {
+		const row = this.rows[this.selectedIndex];
+		const actions = [
+			`${keyText("tui.select.confirm")} open   ${keyText("app.agents.open")} open   ${keyText("app.agents.new")} new`,
+			`${keyText("app.agents.expand")} expand/collapse subagents   ${keyText("app.agents.program")} program`,
+			`${keyText("app.agents.inactiveCollapse")} show/hide inactive   ${keyText("app.shortcuts")} close actions`,
+			`${keyText("app.agents.reply")} reply/resume   ${keyText("app.agents.rename")} rename   ${keyText("app.agents.delete")} stop/delete`,
+		];
+		if (row) {
+			const model = row.summary.model;
+			const usage = row.summary.usage;
+			actions.push(
+				"",
+				row.title,
+				`Model: ${model ? `${model.provider}/${model.id}` : "unknown"}${row.summary.thinkingLevel ? ` · ${row.summary.thinkingLevel}` : ""}`,
+				`Directory: ${row.summary.cwd}`,
+				`Tokens: ${usage?.inputTokens ?? 0} in · ${usage?.outputTokens ?? 0} out`,
+				`Cost: $${(usage?.cost ?? 0).toFixed(2)} session · $${row.recursiveCost.toFixed(2)} including subagents`,
+			);
+		}
+		return actions.flatMap((line) => wrapTextWithAnsi(theme.fg("muted", line), width));
 	}
 
 	// Spawn-code rows are read-only context. They render deemphasized — muted
@@ -2650,32 +2709,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.replyTarget) {
 			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
 		}
-		// Replying is reserved for top-level agents; subagents can be stopped or deleted.
-		const selectedRow = this.rows[this.selectedIndex];
-		const selectedAgent = selectedRow?.kind === "agent";
-		const selectedSubagent = selectedRow?.kind === "subagent";
-		const selectedSummary = selectedRow?.kind === "subagent-summary";
-		const hints = [
-			`${keyText("tui.select.up")}/${keyText("tui.select.down")} move`,
-			selectedSummary
-				? `${keyText("tui.select.confirm")} ${selectedRow?.expanded ? "collapse" : "expand"}`
-				: `${keyText("tui.select.confirm")} open`,
-			selectedSummary ? undefined : `${keyText("app.agents.open")} open`,
-			selectedAgent
-				? `${keyText("app.agents.reply")} ${selectedRow?.section === "inactive" ? "resume" : "reply"}`
-				: undefined,
-			`${keyText("app.agents.new")} new`,
-			selectedAgent ? `${keyText("app.agents.rename")} rename` : undefined,
-			selectedAgent
-				? `${keyText("app.agents.delete")} ${selectedRow?.section === "inactive" ? "delete" : "stop/deactivate"}`
-				: undefined,
-			selectedSubagent
-				? `${keyText("app.agents.delete")} ${selectedRow.section === "running" ? "stop" : "delete"}`
-				: undefined,
-			this.selectedRowCanShowProgram() ? `${keyText("app.agents.program")} program` : undefined,
-		]
-			.filter((hint): hint is string => hint !== undefined)
-			.join("   ");
+		const hints = `${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate   ${keyText("tui.select.confirm")} open   ${keyText("app.agents.new")} new   ${keyText("app.shortcuts")} actions`;
 		return truncateToWidth(theme.fg("muted", hints), width);
 	}
 
@@ -2747,27 +2781,15 @@ export class AgentsViewMode implements Component, Focusable {
 type DisplayItem =
 	| { type: "spacer" }
 	| { type: "heading"; section: AgentsViewSection }
-	| { type: "empty"; section: AgentsViewSection }
+	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };
 
-function buildDisplayItems(rows: readonly AgentsViewRow[]): DisplayItem[] {
-	const items: DisplayItem[] = [];
-	const sections: AgentsViewSection[] = ["running", "idle", "inactive"];
-	for (const [index, section] of sections.entries()) {
-		if (index > 0) {
-			items.push({ type: "spacer" });
-		}
-		items.push({ type: "heading", section });
-		const sectionRows = getDisplayRowsForSection(rows, section);
-		if (sectionRows.length === 0) {
-			items.push({ type: "empty", section });
-			continue;
-		}
-		for (const row of sectionRows) {
-			items.push({ type: "row", row });
-		}
-	}
-	return items;
+function compactSessionRows(rows: readonly AgentsViewRow[], showInactive: boolean): AgentsViewRow[] {
+	let visible = true;
+	return rows.filter((row) => {
+		if (row.depth === 0) visible = showInactive || row.section !== "inactive";
+		return visible && row.kind !== "subagent-summary";
+	});
 }
 
 // Nested rows (subagent summaries and expanded subagents) always render in
@@ -2804,8 +2826,52 @@ function rowHasSpawnCode(row: AgentsViewRow): boolean {
 	return typeof code === "string" && code.trim().length > 0;
 }
 
-function isRunningSessionSummary(summary: SessionSummary): boolean {
-	return summary.activity === "working";
+// Destructive actions gate on live work anywhere in the subtree, never on the display section.
+function hasLiveWork(row: AgentsViewRow): boolean {
+	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
+}
+
+export interface AgentsViewUsageLayout {
+	legend: string;
+	details: ReadonlyMap<string, string>;
+	nameWidth: number;
+	modelWidth: number;
+	activityWidth: number;
+}
+
+export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], width = 120): AgentsViewUsageLayout {
+	const sessions = rows.filter((row) => row.kind === "agent" || row.kind === "subagent");
+	const entries = sessions.map((row) => ({
+		identity: row.identity,
+		cost: `$${row.recursiveCost.toFixed(2)}`,
+		age: formatSessionDuration(row.summary),
+	}));
+	const costWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.cost)), 4);
+	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
+	const detailsWidth = costWidth + 2 + ageWidth;
+	const available = Math.max(0, width - detailsWidth - 4);
+	const desiredModelWidth = sessions.reduce(
+		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
+		12,
+	);
+	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
+	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
+	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
+	const detailLine = (cost: string, age: string) => `${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
+	const headings = [formatTableCell("Session", nameWidth), formatTableCell("Model", modelWidth)];
+	if (activityWidth > 0) headings.push(formatTableCell("Activity", activityWidth));
+	headings.push(detailLine("Cost", "Age"));
+	return {
+		legend: formatTableCell(headings.join("  "), width),
+		details: new Map(entries.map((entry) => [entry.identity, detailLine(entry.cost, entry.age)])),
+		nameWidth,
+		modelWidth,
+		activityWidth,
+	};
+}
+
+function padCellStart(value: string, width: number): string {
+	return " ".repeat(Math.max(0, width - visibleWidth(value))) + value;
 }
 
 // Explicit session names read bold so they stand out from fallback titles
@@ -2825,9 +2891,8 @@ function formatTableCell(value: string, width: number): string {
 	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
-function formatRightTableCell(value: string, width: number): string {
-	const truncated = truncateToWidth(value, width, "");
-	return " ".repeat(Math.max(0, width - visibleWidth(truncated))) + truncated;
+function formatSessionModel(summary: SessionSummary): string {
+	return summary.model?.id ?? "-";
 }
 
 function formatSessionDuration(summary: SessionSummary): string {

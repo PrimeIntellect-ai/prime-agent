@@ -1,1 +1,0 @@
-- Removed delayed cancellation callbacks from empty interactive selectors.

@@ -18,6 +18,7 @@ import {
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
+import type { MermaidMarkdownTransform } from "./mermaid.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -27,6 +28,8 @@ const LOGIN_RECOVERY_SUFFIX = `\n\n${LOGIN_RECOVERY_MESSAGE}`;
 export interface AssistantMessageComponentOptions {
 	expanded?: boolean;
 	precededByToolActivity?: boolean;
+	/** Replaces Mermaid code blocks in assistant text (never thinking) with Unicode diagrams. */
+	mermaidTransform?: MermaidMarkdownTransform;
 }
 
 function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
@@ -123,6 +126,8 @@ export class AssistantMessageComponent extends Container {
 	private blockMarkdowns = new Map<number, Markdown>();
 	private lastBlockTexts = new Map<number, string>();
 	private precededByToolActivity: boolean;
+	private mermaidTransform?: MermaidMarkdownTransform;
+	private isStreaming = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -138,6 +143,7 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.expanded = options.expanded ?? false;
 		this.precededByToolActivity = options.precededByToolActivity ?? false;
+		this.mermaidTransform = options.mermaidTransform;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -189,8 +195,9 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
-	updateContent(message: AssistantMessage): void {
+	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
 		this.lastMessage = message;
+		this.isStreaming = isStreaming;
 		this.dirty = true;
 	}
 
@@ -221,6 +228,8 @@ export class AssistantMessageComponent extends Container {
 			`hide:${this.hideThinkingBlock}`,
 			`label:${this.hiddenThinkingLabel}`,
 			`expanded:${this.expanded}`,
+			// In the signature so the streaming->final transition rebuilds (mermaid renders differently).
+			`streaming:${this.isStreaming}`,
 			`stop:${message.stopReason ?? ""}`,
 			`error:${message.errorMessage ?? ""}`,
 		);
@@ -276,7 +285,12 @@ export class AssistantMessageComponent extends Container {
 			if (content?.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme);
+				const mermaidTransform = this.mermaidTransform;
+				const isStreaming = this.isStreaming;
+				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme, undefined, {
+					transform:
+						mermaidTransform && ((md, availableWidth) => mermaidTransform(md, availableWidth, isStreaming)),
+				});
 				this.blockMarkdowns.set(i, markdown);
 				this.lastBlockTexts.set(i, content.text.trim());
 				this.contentContainer.addChild(markdown);

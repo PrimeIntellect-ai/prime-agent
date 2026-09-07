@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -14,6 +13,7 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
+import { isProcessAlive, spawnHidden } from "../utils/child-process.js";
 import { createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
 export const DAEMON_UPDATE_RESTART_COORDINATOR_FLAG = "--internal-update-restart-coordinator";
@@ -324,11 +324,18 @@ function coordinatorRecordPath(registryDir: string, socketPath: string): string 
 
 async function withCoordinatorRegistryGuard<T>(registryDir: string, action: () => T | Promise<T>): Promise<T> {
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+	let compromisedError: Error | undefined;
+	const assertGuardHeld = () => {
+		if (compromisedError) throw new Error(`Coordinator registry guard was compromised: ${compromisedError.message}`);
+	};
 	const release = await lockfile.lock(registryDir, {
 		realpath: false,
 		lockfilePath: resolve(registryDir, ".guard"),
 		stale: COORDINATOR_REGISTRY_LOCK_STALE_MS,
 		update: COORDINATOR_REGISTRY_LOCK_UPDATE_MS,
+		onCompromised: (error) => {
+			compromisedError ??= error;
+		},
 		retries: {
 			retries: COORDINATOR_REGISTRY_LOCK_RETRIES,
 			factor: 1,
@@ -337,19 +344,14 @@ async function withCoordinatorRegistryGuard<T>(registryDir: string, action: () =
 		},
 	});
 	try {
-		return await action();
+		assertGuardHeld();
+		const result = await action();
+		assertGuardHeld();
+		return result;
 	} finally {
-		await release();
+		if (compromisedError) await release().catch(() => undefined);
+		else await release();
 	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-	return true;
 }
 
 function matchesProcessStartId(identity: DaemonUpdateRestartProcessIdentity): boolean {
@@ -545,7 +547,7 @@ export async function launchDaemonUpdateRestartCoordinator(
 		statusPath,
 		...(originActiveSessionId ? [DAEMON_UPDATE_RESTART_ORIGIN_FLAG, originActiveSessionId] : []),
 	]);
-	const child = spawn(launch.command, launch.args, {
+	const child = spawnHidden(launch.command, launch.args, {
 		cwd: options.cwd ?? process.cwd(),
 		detached: true,
 		env: coordinatorEnvironment(agentDir),

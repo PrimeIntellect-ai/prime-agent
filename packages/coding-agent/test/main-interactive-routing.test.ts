@@ -12,6 +12,7 @@ import {
 	type InteractiveDaemonStartupDecision,
 	isClientOwnedDaemonSession,
 	parseAgentsViewCommand,
+	resolveActiveSessionLookupFailure,
 	resolveRuntimeSessionOptions,
 	shouldEnsureDaemonBeforeActiveSessionLookup,
 	shouldEnsureInteractiveDaemonForStartup,
@@ -23,6 +24,7 @@ import {
 	shouldUseDaemonInteractive,
 	shouldUseEphemeralSessionManagerForDaemonInteractive,
 } from "../src/main.js";
+import { DaemonSessionRecoveringError } from "../src/modes/daemon/daemon-errors.js";
 import type { SessionSummary } from "../src/modes/index.js";
 
 describe("interactive startup routing", () => {
@@ -384,6 +386,20 @@ describe("runtime session option resolution", () => {
 		expect(resolved.rlmParentAgent).toBe("parent-worker");
 	});
 
+	test("forwards semantic spawn lineage to the created child session", () => {
+		const resolved = resolveRuntimeSessionOptions(
+			{},
+			{
+				rlmDepth: 1,
+				semanticParentSessionId: "parent-session-id",
+				semanticSpawnedByRequestId: "a".repeat(32),
+			},
+		);
+
+		expect(resolved.semanticParentSessionId).toBe("parent-session-id");
+		expect(resolved.semanticSpawnedByRequestId).toBe("a".repeat(32));
+	});
+
 	test("deep-merges autonomous runtime session overrides", () => {
 		const resolved = resolveRuntimeSessionOptions(
 			{
@@ -433,6 +449,34 @@ describe("runtime session option resolution", () => {
 			maxContinuations: 5,
 			gates: { commands: ["npm test"], maxRetries: 3, timeoutMs: 1000 },
 		});
+	});
+
+	test("classifies active-session lookup failures: recovering is typed, unknown falls back", () => {
+		const recovering = resolveActiveSessionLookupFailure({
+			type: "response",
+			command: "get_state",
+			success: false,
+			error: "Active session active-gap is recovering; retry shortly",
+			errorInfo: { code: "session_recovering", activeSessionId: "active-gap" },
+		});
+		expect(recovering).toBeInstanceOf(DaemonSessionRecoveringError);
+		expect((recovering as DaemonSessionRecoveringError).activeSessionId).toBe("active-gap");
+		expect(
+			resolveActiveSessionLookupFailure({
+				type: "response",
+				command: "get_state",
+				success: false,
+				error: "Unknown active session: active-gap",
+			}),
+		).toBeUndefined();
+		expect(
+			resolveActiveSessionLookupFailure({
+				type: "response",
+				command: "get_state",
+				success: false,
+				error: "socket closed",
+			}),
+		).toBeInstanceOf(Error);
 	});
 });
 

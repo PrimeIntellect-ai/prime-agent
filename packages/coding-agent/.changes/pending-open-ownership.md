@@ -1,1 +1,0 @@
-- Fixed a race where a concurrent open of a session already being opened by another client bypassed the session ownership check instead of failing with session-already-active.

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
@@ -50,6 +51,9 @@ except Exception as _prime_agent_rlm_error:
             self._raise_missing()
 
         async def find_models(self, query="", limit=8):
+            self._raise_missing()
+
+        async def create_session(self, prompt, **kwargs):
             self._raise_missing()
 
         async def list_subagents(self):
@@ -311,6 +315,8 @@ export class IpythonKernelProvisioner {
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
 	private readonly disposeController = new AbortController();
+	/** Snapshot policy of the dispose that aborted a startup, honored by startKernel's failure teardown. */
+	private disposeSnapshot = true;
 
 	constructor(
 		private readonly cwd: string,
@@ -351,7 +357,8 @@ export class IpythonKernelProvisioner {
 	}
 
 	/** Dispose the kernel owned by this provisioner, including one still starting up. */
-	async dispose(): Promise<void> {
+	async dispose(options?: { snapshot?: boolean }): Promise<void> {
+		this.disposeSnapshot = options?.snapshot ?? true;
 		// Drops a still-queued boot out of the semaphore and short-circuits an
 		// in-flight startKernel before it spawns, so a disposed session's boot
 		// doesn't waste a slot during a fan-out.
@@ -362,7 +369,7 @@ export class IpythonKernelProvisioner {
 		if (!pending) return;
 		try {
 			const m = await pending;
-			await m.shutdown({ snapshot: true, drainHostRequests: true });
+			await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
 		} catch {
 			// a failed startup already cleaned up after itself
 		}
@@ -384,6 +391,11 @@ export class IpythonKernelProvisioner {
 	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelClient> {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
+		}
+		// Only a terminally dead kernel drops the memo; a repairing manager (idle/starting) recovers itself.
+		if (this.startedManager?.isDefunct) {
+			this.managerPromise = undefined;
+			this.startedManager = undefined;
 		}
 		let cleanupProgressListener: (() => void) | undefined;
 		if (onProgress && !this.startedManager) {
@@ -471,6 +483,7 @@ export class IpythonKernelProvisioner {
 				snapshot: snapshotDir
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
 					: undefined,
+				stderrLogPath: snapshotDir ? join(snapshotDir, "kernel-stderr.log") : undefined,
 				bootstrapCode,
 			});
 			let pendingRestore: RestoreResult | undefined;
@@ -514,7 +527,7 @@ export class IpythonKernelProvisioner {
 				// surface the failure before the teardown (final snapshot flush included)
 				// finished, or a replacement provisioner gated on this dispose could
 				// race the still-flushing kernel over the same snapshot files.
-				await m.shutdown({ snapshot: true, drainHostRequests: true }).catch(() => undefined);
+				await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true }).catch(() => undefined);
 				throw error;
 			}
 			// Only tell the model what was revived once the kernel is actually usable —

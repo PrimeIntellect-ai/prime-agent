@@ -1,4 +1,6 @@
+import { getModel } from "@earendil-works/pi-ai";
 import { setKeybindings } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
@@ -8,14 +10,20 @@ import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connect
 import {
 	AgentsViewMode,
 	type AgentsViewPersistentState,
+	buildCompactAgentsViewLayout,
 	combineAgentsViewStartupNotices,
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { type AgentsViewRow, resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
+import {
+	type AgentsViewRow,
+	buildAgentsViewRows,
+	reconcileUnifiedSessions,
+	resolveAgentsViewLeftResult,
+} from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
+import { stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
@@ -97,10 +105,17 @@ describe("AgentsViewMode", () => {
 		const self = {
 			editor: { getText: () => "matching query" },
 			persistentState: { query: "" },
+			savedSearchFetchStarted: true,
+			// Searching claims the visible row even while a remembered anchor is
+			// still waiting for its catalog row: user intent supersedes restore.
+			selectionAnchorPending: true,
 			selectedIndex: 4,
 			rebuildRows: vi.fn(),
 			syncSelectedRowState: vi.fn(),
 			ui: { requestRender: vi.fn() },
+			armSavedSearchFetch(): void {
+				invoke("armSavedSearchFetch", self);
+			},
 		};
 
 		invoke("queryChanged", self);
@@ -108,6 +123,79 @@ describe("AgentsViewMode", () => {
 		expect(self.persistentState.query).toBe("matching query");
 		expect(self.rebuildRows).toHaveBeenCalledOnce();
 		expect(self.selectedIndex).toBe(4);
+		expect(self.syncSelectedRowState).toHaveBeenCalledOnce();
+	});
+
+	it("keeps the queried selection when a remembered session arrives later", () => {
+		const remembered = summary({
+			id: "remembered",
+			activeSessionId: "remembered",
+			sessionId: "remembered-session",
+			sessionFile: "/tmp/remembered.jsonl",
+			sessionName: "match remembered",
+		});
+		const fallback = summary({ sessionName: "match fallback" });
+		const persistentState = createInitialAgentsViewPersistentState({ initialSession: remembered });
+		persistentState.savedCatalogLoaded = true;
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+		try {
+			Reflect.set(view, "lastListedSummaries", [fallback]);
+			invoke("reconcileCatalogs", view);
+			expect(Reflect.get(view, "selectionAnchorPending")).toBe(true);
+
+			invoke("setSearchQuery", view, "match");
+			expect(Reflect.get(view, "selectionAnchorPending")).toBe(false);
+			expect(persistentState.selectedSessionKey?.sessionId).toBe(fallback.sessionId);
+
+			Reflect.set(view, "lastListedSummaries", [remembered, fallback]);
+			invoke("reconcileCatalogs", view);
+			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
+			expect(rows[Reflect.get(view, "selectedIndex") as number]?.summary.sessionId).toBe(fallback.sessionId);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("loads the saved catalog on view entry without a search query", () => {
+		const self = {
+			savedSearchFetchStarted: false,
+			persistentState: {},
+			refreshSavedSessions: vi.fn(async () => true),
+		};
+
+		invoke("armSavedSearchFetch", self);
+
+		expect(self.refreshSavedSessions).toHaveBeenCalledOnce();
+		expect(self.savedSearchFetchStarted).toBe(true);
+	});
+
+	it("stops instead of deleting when an idle row's subtree still works", async () => {
+		const request = vi.fn(async () => ({ success: true as const, data: { cancelled: true } }));
+		const self = {
+			requireClient: () => ({ request, supportsServerCapability: () => true }),
+			setStatusMessage: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+		};
+		const idleWithBusyCrew = {
+			kind: "subagent",
+			section: "idle",
+			runningSubagentCount: 1,
+			summary: summary({ id: "crew-parent", activeSessionId: "crew-parent", sessionId: "crew-parent-session" }),
+		};
+
+		await invoke(
+			"killSubagent",
+			self,
+			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "crew-parent-child" },
+			idleWithBusyCrew,
+		);
+
+		expect(request).toHaveBeenCalledWith({
+			type: "cancel_rlm_child",
+			activeSessionId: "root-active",
+			childId: "crew-parent-child",
+		});
+		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_rlm_subagent" }));
 	});
 
 	it("re-resolves subagent state before choosing stop or delete intent", async () => {
@@ -218,7 +306,7 @@ describe("AgentsViewMode", () => {
 			"killSubagent",
 			self,
 			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "passive-child" },
-			{ section: "inactive" },
+			{ section: "inactive", runningSubagentCount: 0, summary: summary() },
 		);
 		expect(request).toHaveBeenCalledWith({
 			type: "cancel_rlm_child",
@@ -431,8 +519,6 @@ describe("AgentsViewMode", () => {
 			heartbeats: [],
 			inactiveAgentIdentities: new Set(),
 			pendingDeleteAgent: undefined,
-			liveCatalogReady: true,
-			liveCatalogRefreshPending: false,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
 			programShownParents: new Set(),
@@ -486,7 +572,6 @@ describe("AgentsViewMode", () => {
 			heartbeats: [],
 			inactiveAgentIdentities: new Set(),
 			pendingDeleteAgent: undefined,
-			liveCatalogReady: true,
 			savedCatalogReady: true,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
@@ -574,7 +659,6 @@ describe("AgentsViewMode", () => {
 				heartbeats: [],
 				inactiveAgentIdentities: new Set(),
 				pendingDeleteAgent: undefined,
-				liveCatalogReady: true,
 				savedCatalogReady: true,
 				expandedSubagentParents,
 				programShownParents: new Set(),
@@ -594,7 +678,7 @@ describe("AgentsViewMode", () => {
 				expect(parentRow?.identity).toBe("session:root-session");
 				expandedSubagentParents.add(parentRow!.identity);
 				invoke("reconcileCatalogs", self);
-				expect(rowsOf(self).some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(true);
+				expect(rowsOf(self).some((row) => row.kind === "subagent")).toBe(true);
 			}
 			// The runtime flushes the session file; the record identity flips to file:.
 			self.lastListedSummaries = [{ ...parent, sessionFile: "/tmp/root.jsonl" }, child];
@@ -607,7 +691,7 @@ describe("AgentsViewMode", () => {
 		expect(
 			expandedRows.find((row) => row.kind === "agent" && row.summary.sessionId === "root-session")?.identity,
 		).toBe("file:/tmp/root.jsonl");
-		expect(expandedRows.some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(true);
+		expect(expandedRows.some((row) => row.kind === "subagent-summary")).toBe(false);
 		expect(expandedRows.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(
 			true,
 		);
@@ -620,7 +704,7 @@ describe("AgentsViewMode", () => {
 		expect(collapsedView.expandedSubagentParents.size).toBe(0);
 	});
 
-	it("toggles subagent list expansion from the summary row", () => {
+	it("toggles subagent list expansion from the parent row", () => {
 		const expandedSubagentParents = new Set(["root-row"]);
 		const programShownParents = new Set(["root-row"]);
 		const persistentState: AgentsViewPersistentState = {
@@ -635,7 +719,7 @@ describe("AgentsViewMode", () => {
 			syncSelectedRowState: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
-		const summaryRow = { kind: "subagent-summary", parentIdentity: "root-row", expanded: true };
+		const summaryRow = { kind: "agent", identity: "root-row", expanded: true };
 
 		invoke("toggleSubagentList", self, summaryRow);
 		expect(expandedSubagentParents.size).toBe(0);
@@ -647,6 +731,377 @@ describe("AgentsViewMode", () => {
 		expect(expandedSubagentParents).toEqual(new Set(["root-row"]));
 		expect(programShownParents.size).toBe(0);
 		expect(self.rebuildRows).toHaveBeenCalledTimes(2);
+	});
+
+	it("renders roster recovery and stale-worker status labels", () => {
+		const rows = buildAgentsViewRows([
+			summary({ id: "recovering", sessionId: "recovering", statusLabel: "recovering" }),
+			summary({
+				id: "stale",
+				sessionId: "stale",
+				lastHeardFromAt: new Date(Date.now() - 60_000).toISOString(),
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+
+		try {
+			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
+			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("shows each session model and aligned total cost including collapsed descendants", () => {
+		const created = new Date(Date.now() - 120_000).toISOString();
+		const parent = summary({
+			id: "spender",
+			activeSessionId: "spender",
+			sessionId: "spender-session",
+			sessionName: "spender",
+			model: { ...getModel("openai", "gpt-4o"), id: "gpt-5.6-sol" },
+			created,
+			summary: "Analyzing runtime composition",
+			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
+		});
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "spender",
+			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
+			created,
+			usage: { inputTokens: 500, outputTokens: 50, cost: 0.68 },
+		});
+		const inactive = summary({
+			id: "saved",
+			activeSessionId: undefined,
+			sessionId: "saved-session",
+			sessionFile: "/tmp/saved.jsonl",
+			rosterStatus: "inactive",
+			created,
+			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
+			usage: { inputTokens: 900, outputTokens: 80, cost: 123.45 },
+		});
+		const rows = buildAgentsViewRows([parent, child, inactive]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		Reflect.set(view, "selectedIndex", -1);
+		try {
+			const parentRow = rows.find((row) => row.summary.sessionId === parent.sessionId)!;
+			const savedRow = rows.find((row) => row.summary.sessionId === inactive.sessionId)!;
+			const render = (row: AgentsViewRow, width: number) =>
+				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
+			const parentLine = render(parentRow, 120);
+			const savedLine = render(savedRow, 120);
+			expect(parentLine).toContain("gpt-5.6-sol");
+			expect(savedLine).toContain("glm-5.2-fast");
+			expect(parentLine).toContain("$1.10");
+			expect(parentLine).not.toContain("$0.42");
+			expect(parentLine).not.toMatch(/[↑↓]/);
+			expect(parentLine).toMatch(/2m\s*$/);
+			expect(parentLine.indexOf("$1.10") + "$1.10".length).toBe(savedLine.indexOf("$123.45") + "$123.45".length);
+			for (const width of [60, 80]) {
+				const narrow = render(parentRow, width);
+				expect(narrow).toContain("gpt-5.6-sol");
+				expect(narrow).toContain("$1.10");
+				expect(narrow).toMatch(/2m\s*$/);
+				expect(narrow.length).toBeLessThanOrEqual(width);
+			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders one column header across status groups without repeating subagent hints", () => {
+		const summaries = [
+			summary({
+				id: "busy",
+				activeSessionId: "busy",
+				sessionId: "busy-session",
+				sessionName: "busy",
+				activity: "working",
+				isStreaming: true,
+			}),
+			summary({
+				id: "idle",
+				activeSessionId: "idle",
+				sessionId: "idle-session",
+				sessionName: "idle",
+				sessionFile: "/tmp/idle.jsonl",
+			}),
+			summary({
+				id: "child",
+				sessionId: "child-session",
+				sessionFile: "/tmp/child.jsonl",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "busy",
+			}),
+		];
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		try {
+			Reflect.set(view, "lastListedSummaries", summaries);
+			invoke("reconcileCatalogs", view);
+			Reflect.set(view, "selectedIndex", -1);
+			Reflect.set(view, "ui", { terminal: { rows: 60 }, requestRender: () => {} });
+			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
+			const lines = rendered.map(stripAnsi);
+			expect(lines.filter((line) => /Model/.test(line) && /Age/i.test(line))).toHaveLength(1);
+			expect(lines.some((line) => line.startsWith("Running"))).toBe(true);
+			expect(lines.some((line) => line.startsWith("Idle"))).toBe(true);
+			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
+			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
+			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
+			for (const line of rendered) {
+				expect(invoke("finalizeRenderedLine", view, line, 120)).not.toContain("\x1b[48");
+			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps collapsed inactive sessions out of navigation and reveals them for search", () => {
+		const live = summary({ sessionName: "live" });
+		const saved = summary({
+			id: "saved",
+			activeSessionId: undefined,
+			sessionId: "saved-session",
+			sessionName: "archive-match",
+			sessionFile: "/tmp/saved.jsonl",
+			rosterStatus: "inactive",
+			lifecycle: "archived",
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
+		try {
+			Reflect.set(view, "lastListedSummaries", [live]);
+			Reflect.set(view, "savedSessions", [
+				{
+					path: saved.sessionFile!,
+					id: saved.sessionId,
+					cwd: saved.cwd,
+					name: saved.sessionName,
+					created: new Date(),
+					modified: new Date(),
+					messageCount: 1,
+					firstMessage: "archive-match",
+					allMessagesText: "archive-match",
+				},
+			]);
+			invoke("reconcileCatalogs", view);
+			expect(rows().map((row) => row.summary.sessionId)).toEqual([live.sessionId]);
+			invoke("moveSelection", view, 1);
+			expect(rows()[Reflect.get(view, "selectedIndex") as number]?.summary.sessionId).toBe(live.sessionId);
+			view.handleInput("\x1bi");
+			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
+			view.handleInput("\x1bi");
+			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
+			invoke("setSearchQuery", view, "archive-match");
+			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
+			invoke("setSearchQuery", view, "");
+			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("opens a parent with Enter and reveals its spawn program only on request", () => {
+		const parent = summary({ sessionName: "parent" });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+			spawnCode: 'await rlm("Inspect the code")',
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
+		try {
+			Reflect.set(view, "lastListedSummaries", [parent, child]);
+			invoke("reconcileCatalogs", view);
+			expect(rows().map((row) => row.kind)).toEqual(["agent"]);
+			const finish = vi.fn();
+			Reflect.set(view, "finish", finish);
+			invoke("openSelected", view);
+			expect(finish).toHaveBeenCalledWith(
+				expect.objectContaining({
+					type: "open",
+					summary: expect.objectContaining({ sessionId: parent.sessionId }),
+				}),
+			);
+			invoke("cycleProgramForSelected", view);
+			expect(rows().some((row) => row.kind === "subagent-code" && row.code === child.spawnCode)).toBe(true);
+			expect(rows().some((row) => row.kind === "subagent" && row.summary.sessionId === child.sessionId)).toBe(true);
+			expect(rows().some((row) => row.kind === "subagent-summary")).toBe(false);
+			invoke("cycleProgramForSelected", view);
+			expect(rows().some((row) => row.kind === "subagent-code")).toBe(false);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps a selection at the end of the list visible when the leading ellipsis is shown", () => {
+		const summaries = Array.from({ length: 12 }, (_, index) =>
+			summary({
+				id: `saved-${index}`,
+				activeSessionId: undefined,
+				sessionId: `saved-${index}-session`,
+				sessionName: `saved-${index}`,
+				sessionFile: `/tmp/saved-${index}.jsonl`,
+				rosterStatus: "inactive" as const,
+				created: `2026-01-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+			}),
+		);
+		const rows = buildAgentsViewRows(summaries);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			Reflect.set(view, "rows", rows);
+			Reflect.set(view, "selectedIndex", rows.length - 1);
+			Reflect.set(view, "ui", { terminal: { rows: 13 }, requestRender: () => {} });
+			const lines = (invoke("renderSessionRows", view, 120, 4) as string[]).map(stripAnsi);
+			expect(lines[1]).toContain("...");
+			expect(lines).toHaveLength(4);
+			const lastTitle = rows.at(-1)!.title;
+			expect(lines.some((line) => line.includes(lastTitle))).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("reveals usage details through actions and closes them before searching", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		try {
+			Reflect.set(view, "lastListedSummaries", [
+				summary({ sessionName: "parent", usage: { inputTokens: 1234, outputTokens: 56, cost: 1.23 } }),
+			]);
+			invoke("reconcileCatalogs", view);
+			view.handleInput("?");
+			const actions = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
+			expect(actions).toContain("1234 in");
+			expect(actions).toContain("$1.23");
+			view.handleInput("p");
+			expect(Reflect.get(view, "showActions")).toBe(false);
+			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
+			expect(rows).toContain("parent");
+			expect(rows).not.toContain("1234 in");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("shows running-subagent counts only while collapsed and work remains", () => {
+		const parent = summary({ sessionName: "parent" });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+			activity: "working",
+			isStreaming: true,
+		});
+		const secondChild = {
+			...child,
+			id: "child-2",
+			activeSessionId: "child-2",
+			sessionId: "child-session-2",
+			sessionFile: "/tmp/child-2.jsonl",
+		};
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
+		const lines = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
+		try {
+			Reflect.set(view, "lastListedSummaries", [parent, child, secondChild]);
+			invoke("reconcileCatalogs", view);
+			expect(rows()).toHaveLength(1);
+			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▸");
+			const collapsed = lines();
+			const parentIndex = collapsed.findIndex((line) => line.includes("parent"));
+			expect(collapsed[parentIndex + 1]).toBe("  2 subagents running");
+			invoke("moveSelection", view, 1);
+			expect(Reflect.get(view, "selectedIndex")).toBe(0);
+			view.handleInput("\x1b[1;3C");
+			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent", "subagent"]);
+			expect(lines().join("\n")).not.toContain("subagents running");
+			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▾");
+			view.handleInput("\x1b[1;3C");
+			expect(rows()).toHaveLength(1);
+			expect(lines()).toContain("  2 subagents running");
+			const idleChild = { ...child, activity: "idle", isStreaming: false };
+			Reflect.set(view, "lastListedSummaries", [parent, idleChild, secondChild]);
+			invoke("reconcileCatalogs", view);
+			expect(lines()).toContain("  1 subagent running");
+			Reflect.set(view, "lastListedSummaries", [
+				parent,
+				idleChild,
+				{ ...secondChild, activity: "idle", isStreaming: false },
+			]);
+			invoke("reconcileCatalogs", view);
+			expect(lines().join("\n")).not.toMatch(/subagents? running/);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("dims a paused-only heartbeat badge and keeps active badges in the error color", () => {
+		const job = (status: "active" | "paused") => ({
+			job: {
+				id: `${status}-job`,
+				status,
+				activeSessionId: "scope-active",
+				sessionId: "scope-session",
+				sessionFile: "/tmp/scope.jsonl",
+				cwd: "/tmp",
+				prompt: "tick",
+				schedule: { kind: "interval" as const, expression: "5m" },
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+				runCount: 0,
+			},
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const [pausedRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("paused")]));
+			Reflect.set(view, "rows", [pausedRow]);
+			const pausedLine = invoke("renderRow", view, pausedRow, 160) as string;
+			expect(pausedLine).toContain(theme.fg("dim", "♥ 1"));
+			expect(pausedRow).toMatchObject({ section: "idle" });
+
+			const [activeRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("active")]));
+			Reflect.set(view, "rows", [activeRow]);
+			const activeLine = invoke("renderRow", view, activeRow, 160) as string;
+			expect(activeLine).toContain(theme.fg("error", "♥ 1"));
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("warns about the armed heartbeat in the delete confirmation", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "deleteConfirmExpiresAt", Date.now() + 10_000);
+		const confirmLine = (row: AgentsViewRow): string => {
+			Reflect.set(view, "rows", [row]);
+			Reflect.set(view, "pendingDeleteAgent", { identity: row.identity, summary: row.summary, stopped: false });
+			return stripAnsi(invoke("renderRow", view, row, 160) as string);
+		};
+
+		try {
+			const [armedRow] = buildAgentsViewRows([summary({ hasActiveHeartbeat: true })]);
+			expect(confirmLine(armedRow!)).toContain("has an armed heartbeat — ");
+			const [plainRow] = buildAgentsViewRows([summary()]);
+			expect(confirmLine(plainRow!)).not.toContain("armed heartbeat");
+			expect(confirmLine(plainRow!)).toContain("again to remove");
+		} finally {
+			stopThemeWatcher();
+		}
 	});
 });
 
@@ -665,7 +1120,19 @@ afterEach(() => {
 });
 
 describe("AgentsViewMode persistent catalog state", () => {
-	it("keeps an initial handoff scope when the first live poll fails after both catalogs settle", async () => {
+	it("treats only a previously loaded saved catalog as settled on mount", () => {
+		const fresh = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const loaded = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+
+		try {
+			expect(Reflect.get(fresh, "savedCatalogReady")).toBe(false);
+			expect(Reflect.get(loaded, "savedCatalogReady")).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("applies an initial handoff scope from the first pushed roster refresh", async () => {
 		const root = summary();
 		const scope = { sessionId: root.sessionId, activeSessionId: root.activeSessionId };
 		const persistentState = createInitialAgentsViewPersistentState({
@@ -674,22 +1141,47 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 		persistentState.lastSuccessfulSavedSessions = [];
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
-		Reflect.set(view, "client", {
-			isConnected: true,
-			request: vi.fn(async () => {
-				throw new Error("transient list failure");
-			}),
-		});
+		Reflect.set(view, "rosterStore", { summaries: () => [root] });
+		Reflect.set(view, "savedCatalogReady", true);
 
 		try {
-			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBe(false);
-			expect(Reflect.get(view, "liveCatalogReady")).toBe(true);
-			expect(Reflect.get(view, "savedCatalogReady")).toBe(true);
+			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: root }]);
 			expect(persistentState.lastSuccessfulLiveSummaries).toEqual([root]);
 		} finally {
 			stopThemeWatcher();
 		}
+	});
+
+	it("re-arms reconnect from the heartbeat poll over a dead socket and never overwrites a sticky notice", async () => {
+		const harness = (isConnected: boolean, statusMessageSticky: boolean) => {
+			const client = {
+				isConnected,
+				request: vi.fn(async () => {
+					throw new Error("heartbeats unavailable");
+				}),
+			};
+			return {
+				client,
+				heartbeatCatalogGeneration: 0,
+				reconnectPromise: undefined,
+				daemonShutdownReceived: false,
+				statusMessageSticky,
+				requireClient: () => client,
+				startClientReconnect: vi.fn(),
+				setStatusMessage: vi.fn(),
+			};
+		};
+
+		const reconnecting = harness(false, false);
+		await expect(invoke("refreshHeartbeats", reconnecting)).resolves.toBe(false);
+		expect(reconnecting.startClientReconnect).toHaveBeenCalledWith(reconnecting.client, expect.any(Error));
+		expect(reconnecting.setStatusMessage).not.toHaveBeenCalled();
+
+		const sticky = harness(true, true);
+		await expect(invoke("refreshHeartbeats", sticky)).resolves.toBe(false);
+		expect(sticky.startClientReconnect).not.toHaveBeenCalled();
+		expect(sticky.setStatusMessage).not.toHaveBeenCalled();
 	});
 
 	it("keeps a live-only scope after a fresh instance's first live poll fails", async () => {
@@ -715,7 +1207,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 
 		try {
-			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBe(false);
+			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([
 				{ scope: { sessionId: root.sessionId, activeSessionId: root.activeSessionId } },
 			]);
@@ -739,7 +1231,6 @@ describe("AgentsViewMode persistent catalog state", () => {
 		);
 		const client = { isConnected: false, reconnect: vi.fn() };
 		Reflect.set(view, "client", client);
-		Reflect.set(view, "liveCatalogReady", true);
 		Reflect.set(view, "savedCatalogReady", true);
 
 		try {
@@ -747,15 +1238,49 @@ describe("AgentsViewMode persistent catalog state", () => {
 			expect(persistentState.scopeFrames).toEqual([frame]);
 			expect(Reflect.get(view, "lastListedSummaries")).toEqual([root]);
 
-			Reflect.set(view, "client", {
-				isConnected: true,
-				request: vi.fn(async () => ({ success: true, data: { sessions: [] } })),
-			});
-			await expect(invoke("refreshSessions", view)).resolves.toBe(true);
+			Reflect.set(view, "client", { isConnected: true });
+			Reflect.set(view, "rosterStore", { summaries: () => [] });
+			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([]);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("applies the roster snapshot produced during reconnect heartbeat refresh", async () => {
+		const beforeRefresh = summary({ id: "before", sessionId: "before" });
+		const afterRefresh = summary({ id: "after", sessionId: "after" });
+		let current = [beforeRefresh];
+		let finishHeartbeatRefresh: (() => void) | undefined;
+		const heartbeatRefresh = new Promise<void>((resolve) => {
+			finishHeartbeatRefresh = resolve;
+		});
+		const client = { reconnect: vi.fn(async () => undefined) };
+		const self = {
+			options: { recoverDaemon: vi.fn(async () => undefined) },
+			client,
+			rosterStore: {
+				attach: vi.fn(async () => true),
+				summaries: vi.fn(() => current),
+			},
+			refreshHeartbeats: vi.fn(async () => {
+				await heartbeatRefresh;
+				return true;
+			}),
+			daemonShutdownReceived: false,
+			reconnectTimedOut: true,
+			setStatusMessage: vi.fn(),
+			applySessionList: vi.fn(),
+			armSavedSearchFetch: vi.fn(),
+		};
+
+		const reconnect = invoke("reconnectClient", self, client, new Error("disconnected")) as Promise<void>;
+		await vi.waitFor(() => expect(self.refreshHeartbeats).toHaveBeenCalledOnce());
+		current = [afterRefresh];
+		finishHeartbeatRefresh?.();
+		await reconnect;
+
+		expect(self.applySessionList).toHaveBeenCalledWith([afterRefresh], true);
 	});
 
 	it("keeps a newly pushed scope and the existing live cache when its first poll fails", async () => {
@@ -780,7 +1305,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 					throw new Error("transient list failure");
 				}),
 			});
-			await expect(invoke("refreshSessions", this, { preserveStatusOnError: true })).resolves.toBe(false);
+			await expect(invoke("refreshSessions", this, { preserveStatusOnError: true })).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: returnedRoot }]);
 			return { type: "exit" };
 		});

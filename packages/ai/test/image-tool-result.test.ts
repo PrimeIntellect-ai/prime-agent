@@ -404,7 +404,7 @@ describe("Tool Results with Images", () => {
 			"claude-sonnet-4 - should handle tool result with only image",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.5");
+				const llm = getModel("github-copilot", "claude-sonnet-4.6");
 				await handleToolWithImageResult(llm, { apiKey: githubCopilotToken });
 			},
 		);
@@ -413,7 +413,7 @@ describe("Tool Results with Images", () => {
 			"claude-sonnet-4 - should handle tool result with text and image",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.5");
+				const llm = getModel("github-copilot", "claude-sonnet-4.6");
 				await handleToolWithTextAndImageResult(llm, { apiKey: githubCopilotToken });
 			},
 		);
