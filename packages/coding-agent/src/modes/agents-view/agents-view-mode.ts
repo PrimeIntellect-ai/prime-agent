@@ -1669,12 +1669,8 @@ export class AgentsViewMode implements Component, Focusable {
 		await this.renameSession(target.summary, name);
 	}
 
-	/**
-	 * Shared by rename mode and /name. The daemon validates a rename against the
-	 * full on-disk family catalog (a second-plus scan on large rosters), so the
-	 * view applies the name optimistically and never blocks input on the
-	 * round-trip; on failure the catalog refetch restores the previous name.
-	 */
+	// Optimistic: the daemon validates renames against a full disk scan, so the
+	// view must never block input on the round-trip.
 	private async renameSession(summary: SessionSummary, name: string): Promise<boolean> {
 		if (!summary.activeSessionId && !summary.sessionFile) {
 			this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
@@ -1686,7 +1682,6 @@ export class AgentsViewMode implements Component, Focusable {
 		return true;
 	}
 
-	/** Overlay the pending rename onto pushed roster updates until the RPC settles. */
 	private applyOptimisticSessionName(summary: SessionSummary, name: string): void {
 		this.pendingRenames.set(summary.sessionId, name);
 		this.reconcileCatalogs();
@@ -1697,9 +1692,7 @@ export class AgentsViewMode implements Component, Focusable {
 		return summaries.map((summary) => {
 			const name = this.pendingRenames.get(summary.sessionId);
 			if (name === undefined) return summary;
-			// Truth carrying the overlay value confirms the rename: the entry
-			// clears itself, so it can never drop early (before the saved refetch
-			// lands) nor outlive a newer rename's overlay (last writer wins).
+			// Truth matching the overlay value confirms it: self-clear, never earlier.
 			if (summary.sessionName === name) {
 				this.pendingRenames.delete(summary.sessionId);
 				return summary;
@@ -1732,11 +1725,7 @@ export class AgentsViewMode implements Component, Focusable {
 					: formatError("Failed to rename agent", error),
 			);
 		}
-		// An overlay entry is cleared only by the actor whose value it holds:
-		// success leaves it for the reconcile to self-clear once refreshed truth
-		// carries the name (the saved refetch can lag for seconds); failure clears
-		// its own entry here so the revert refetch shows through, while a newer
-		// rename's overlay survives a stale settle.
+		// Only the failing owner clears its entry; success waits for truth to match.
 		if (failed && this.pendingRenames.get(summary.sessionId) === name) {
 			this.pendingRenames.delete(summary.sessionId);
 		}

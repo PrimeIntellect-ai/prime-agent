@@ -644,8 +644,7 @@ describe("agents view slash commands", () => {
 		};
 		self.replyTarget = { key: "active-1", summary: live };
 
-		// Submit resolves while the daemon round-trip is still pending: the row
-		// already carries the optimistic name and the composer is disarmed.
+		// Submit resolves while the round-trip is still pending.
 		await expect(invoke("runAgentsViewCommand", self, { name: "name", args: "Fresh Name" }, live)).resolves.toBe(
 			true,
 		);
@@ -655,25 +654,20 @@ describe("agents view slash commands", () => {
 		expect(self.refreshSessions).not.toHaveBeenCalled();
 		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
 
-		// Completion confirms through the catalog refreshes; the saved catalog
-		// refetches only once it has loaded.
 		settle({ success: true, data: {} });
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
-		// Success keeps the overlay until refreshed truth carries the name; the
-		// reconcile self-clears it (pinned against the real view elsewhere).
+		// Success keeps the overlay until truth confirms (real-view pin elsewhere).
 		expect((self.pendingRenames as Map<string, string>).get(live.sessionId)).toBe("Fresh Name");
 		(self.pendingRenames as Map<string, string>).clear();
 
-		// A failed rename surfaces the error and refetches to revert the label.
 		(self.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
 		self.requireClient = () => ({ request: vi.fn(async () => ({ success: false, error: "name taken" })) });
 		await expect(invoke("renameSession", self, live, "Fresher Name")).resolves.toBe(true);
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(self.setStatusMessage).toHaveBeenCalledWith(expect.stringContaining("Failed to rename agent: name taken"));
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
-		// Failure clears its own overlay entry so the revert refetch shows through.
 		expect((self.pendingRenames as Map<string, string>).size).toBe(0);
 	});
 

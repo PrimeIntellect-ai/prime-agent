@@ -1029,7 +1029,6 @@ describe("AgentsViewMode", () => {
 					settles.push(resolve);
 				}),
 		);
-		// inactiveExpanded keeps the saved-only row visible on this branch.
 		const view = new AgentsViewMode(
 			{ config: {}, uiServices: createUiServices() },
 			{ savedCatalogLoaded: true, inactiveExpanded: true },
@@ -1045,12 +1044,10 @@ describe("AgentsViewMode", () => {
 			expect(rowName()).toBe("Old Name");
 			await invoke("renameSession", view, savedSummary, "Fresh Name");
 			expect(rowName()).toBe("Fresh Name");
-			// The rename RPC settles, but the confirming saved refetch is still in
-			// flight: the old name must not flash back meanwhile.
+			// RPC settles while the confirming saved refetch is still in flight.
 			settles.shift()?.({ success: true, data: {} });
 			await new Promise((resolve) => setImmediate(resolve));
 			expect(rowName()).toBe("Fresh Name");
-			// The refetch lands with the renamed entry; truth self-clears the overlay.
 			settles.shift()?.({
 				success: true,
 				data: {
@@ -1091,21 +1088,18 @@ describe("AgentsViewMode", () => {
 			invoke("applySessionList", view, [live], true);
 			await invoke("renameSession", view, live, "Fresh Name");
 			expect(rowName()).toBe("Fresh Name");
-			// An unrelated roster push mid-flight must not flicker the old name back.
+			// Unrelated roster push mid-flight.
 			invoke("applySessionList", view, [live, summary({ id: "other", sessionId: "other-session" })], true);
 			expect(rowName()).toBe("Fresh Name");
-			// A second rename while the first is in flight owns the overlay now.
 			await invoke("renameSession", view, live, "Second Name");
 			expect(rowName()).toBe("Second Name");
-			// The first settle (and its refreshes over stale truth) must not kill
-			// or confirm the newer optimistic name.
+			// The first settle must not kill or confirm the newer name.
 			settles.shift()?.({ success: true, data: {} });
 			await new Promise((resolve) => setImmediate(resolve));
 			expect(rowName()).toBe("Second Name");
 			settles.shift()?.({ success: true, data: {} });
 			await new Promise((resolve) => setImmediate(resolve));
 			expect(rowName()).toBe("Second Name");
-			// Refreshed truth carrying the name self-clears the overlay.
 			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Second Name" }] });
 			await invoke("refreshSessions", view);
 			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
