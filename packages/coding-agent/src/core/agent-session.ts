@@ -2283,7 +2283,9 @@ export class AgentSession {
 			return false;
 		}
 		this._goalAccountedAssistantMessages.add(message);
-		const tokenDelta = goalTokenDeltaForUsage(message.usage);
+		const tokenDelta =
+			goalTokenDeltaForUsage(message.usage) +
+			(message.discardedUsage ? goalTokenDeltaForUsage(message.discardedUsage) : 0);
 		const goal = this._goalWithAccountedWallClock();
 		const nextGoal: GoalState = {
 			...goal,
@@ -12112,11 +12114,14 @@ export class AgentSession {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
 				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalCost += assistantMsg.usage.cost.total;
+				for (const usage of [assistantMsg.usage, assistantMsg.discardedUsage]) {
+					if (!usage) continue;
+					totalInput += usage.input;
+					totalOutput += usage.output;
+					totalCacheRead += usage.cacheRead;
+					totalCacheWrite += usage.cacheWrite;
+					totalCost += usage.cost.total;
+				}
 			}
 		}
 

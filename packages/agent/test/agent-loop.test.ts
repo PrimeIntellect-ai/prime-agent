@@ -2009,7 +2009,9 @@ describe("empty assistant turn retry", () => {
 	it("silently retries empty turns and keeps the transcript clean", async () => {
 		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
 		const thinkingOnly = createAssistantMessage([{ type: "thinking", thinking: "pondering..." }]);
+		thinkingOnly.usage = { ...createUsage(), input: 100, output: 40, cost: { ...createUsage().cost, total: 0.02 } };
 		const whitespaceOnly = createAssistantMessage([{ type: "text", text: "  \n" }]);
+		whitespaceOnly.usage = { ...createUsage(), input: 110, output: 5, cost: { ...createUsage().cost, total: 0.01 } };
 		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
 		const { streamFn, requests } = streamFnReturning([thinkingOnly, whitespaceOnly, goodMessage]);
 		const events: AgentEvent[] = [];
@@ -2034,6 +2036,11 @@ describe("empty assistant turn retry", () => {
 			(event) => event.type === "message_end" && event.message.role === "assistant",
 		);
 		expect(assistantEnds.length).toBe(1);
+		// Discarded attempts were still paid for: their spend rides on the
+		// surviving message separately from its own per-request usage.
+		const survivor = messages.find((message) => message.role === "assistant") as AssistantMessage;
+		expect(survivor.discardedUsage).toMatchObject({ input: 210, output: 45, cost: { total: 0.03 } });
+		expect(survivor.usage.input).toBe(0);
 	});
 
 	it("surfaces an error after three consecutive empty turns", async () => {

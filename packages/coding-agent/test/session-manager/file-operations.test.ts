@@ -761,7 +761,19 @@ describe("session info usage totals", () => {
 			const lines = [
 				{ type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
 				msg("m1", null, "user"),
-				msg("m2", "m1", "assistant", usage(1000, 200, 0.5)),
+				{
+					type: "message",
+					id: "m2",
+					parentId: "m1",
+					message: {
+						role: "assistant",
+						content: "x",
+						timestamp: 1,
+						usage: usage(1000, 200, 0.5),
+						// Spend from discarded empty-turn attempts rides separately.
+						discardedUsage: usage(120, 30, 0.06),
+					},
+				} as const,
 				// On-disk original usage; the loader folds the aggregate below onto it in memory.
 				msg("m3", "m1", "assistant", usage(2000, 300, 1.0)),
 				{
@@ -796,8 +808,8 @@ describe("session info usage totals", () => {
 			const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 
 			const scanned = (await readSessionInfo(file))?.usage;
-			expect(scanned).toMatchObject({ inputTokens: 3220, outputTokens: 528 });
-			expect(scanned?.cost).toBeCloseTo(1.57);
+			expect(scanned).toMatchObject({ inputTokens: 3355, outputTokens: 558 });
+			expect(scanned?.cost).toBeCloseTo(1.63);
 			expect(resident).toEqual(scanned);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
