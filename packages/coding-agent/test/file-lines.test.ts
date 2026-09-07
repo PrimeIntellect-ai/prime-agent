@@ -42,6 +42,18 @@ describe("readLinesAsBuffers", () => {
 		expect((await lines.next()).done).toBe(true);
 	});
 
+	it("passes the byte range through to the underlying read stream", async () => {
+		fsMocks.createReadStream.mockReturnValue(Readable.from([Buffer.from("cd\nef")]));
+
+		const lines: string[] = [];
+		for await (const line of readLinesAsBuffers("/unused", { start: 2, end: 6 })) {
+			lines.push(line.toString("utf8"));
+		}
+
+		expect(fsMocks.createReadStream).toHaveBeenCalledWith("/unused", { start: 2, end: 6 });
+		expect(lines).toEqual(["cd", "ef"]);
+	});
+
 	it("releases pending chunks before yielding an EOF-terminated multi-chunk record", async () => {
 		const chunkSize = 64 * 1024;
 		const firstPart = Buffer.alloc(chunkSize, 0x61);
