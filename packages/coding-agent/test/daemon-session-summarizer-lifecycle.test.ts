@@ -29,6 +29,7 @@ function makeState(
 				sessionManager: {
 					appendAgentStatus: (s: unknown) => appended.push(s),
 					getLatestAgentStatus: () => opts.persisted,
+					getLeafId: () => null,
 				},
 			},
 		},

@@ -1,0 +1,1 @@
+- Fixed session-list refreshes re-reading entire session files on every change: metadata scans now resume from the last scanned byte offset, stop at the file size seen at scan start, and concurrent readers of the same session share one scan.

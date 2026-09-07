@@ -1,0 +1,1 @@
+- Fixed chunked session-snapshot transfers so the transfer id names the exact materialized snapshot cut, and a mismatched or restarted transfer now fails only that transfer (clients resync) instead of bouncing the whole worker channel.
