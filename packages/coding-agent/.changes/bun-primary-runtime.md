@@ -1,2 +1,3 @@
 - Breaking: made compiled Bun binaries the only supported Prime Agent install and update path; removed the Node/npm installer compatibility path.
 - Fixed failed worker startup pipes crashing the daemon.
+- Rejected overlong Unix daemon socket paths before startup, with an error asking for a shorter path.
