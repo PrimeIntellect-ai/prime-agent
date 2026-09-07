@@ -146,6 +146,13 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		);
 	}
 
+	if (depth === 0 && hasIpython) {
+		parts.push(
+			"",
+			"From a daemon-backed depth-0 session, use `await rlm.create_session('task', name='researcher')` to start a separate top-level session. The call returns after the daemon creates the session and accepts its first prompt. Inline and nested sessions cannot use it. `rlm(...)` still creates a child.",
+		);
+	}
+
 	if (allowRecursion && hasIpython) {
 		parts.push(
 			"",

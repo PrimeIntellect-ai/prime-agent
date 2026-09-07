@@ -56,6 +56,7 @@ import {
 } from "../src/modes/daemon/daemon-mode.js";
 import {
 	createDaemonCommandEnvelope,
+	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_PROTOCOL_INFO,
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
@@ -1768,6 +1769,122 @@ describe("daemon mode helpers", () => {
 		} finally {
 			if (previousSupervisorSocket === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("creates and prompts a resident depth-0 session through the supervisor", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pa-root-session-"));
+		const socketPath = join(tempDir, "supervisor.sock");
+		const commands: Array<Record<string, unknown>> = [];
+		const server: Server = createServer((socket) => {
+			socket.on("error", () => undefined);
+			socket.write(
+				`${JSON.stringify({
+					type: "daemon_hello",
+					socketPath,
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaId: DAEMON_SCHEMA_ID,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
+					clientId: "supervisor",
+					serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+				})}
+`,
+			);
+			let buffer = "";
+			socket.on("data", (chunk) => {
+				buffer += chunk.toString();
+				for (;;) {
+					const newline = buffer.indexOf("\n");
+					if (newline === -1) return;
+					const wire = JSON.parse(buffer.slice(0, newline)) as {
+						id: string;
+						command?: Record<string, unknown>;
+						type?: string;
+					};
+					buffer = buffer.slice(newline + 1);
+					const command = wire.command ?? wire;
+					commands.push(command);
+					const type = command.type as string;
+					const data =
+						type === "create"
+							? {
+									id: "new-root-active",
+									activeSessionId: "new-root-active",
+									sessionId: "new-root-session",
+									sessionFile: join(tempDir, "new-root-session.jsonl"),
+									sessionName: "researcher",
+									cwd: join(tempDir, "project"),
+									rlmDepth: 0,
+								}
+							: undefined;
+					socket.write(
+						`${JSON.stringify({ type: "response", id: wire.id, command: type, success: true, data })}
+`,
+					);
+				}
+			});
+		});
+		const previousSupervisorSocket = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		try {
+			await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
+			const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: vi.fn(),
+				worker: { authenticationToken: "worker-token" },
+			});
+			const parent = makeState("parent-root");
+			parent.runtime = {
+				...parent.runtime,
+				runtimeConfig: { sessionDir: join(tempDir, "sessions"), telemetryDisabled: true },
+				services: { agentDir: join(tempDir, "agent") },
+			} as ActiveSessionState["runtime"];
+			const createHost = (
+				daemon as unknown as { createSubagentRuntimeHost(state: ActiveSessionState): SubagentRuntimeHost }
+			).createSubagentRuntimeHost.bind(daemon);
+			const host = createHost(parent);
+			const result = await host.createRlmRootSession?.({
+				prompt: "investigate independently",
+				sessionName: "researcher",
+				cwd: join(tempDir, "project"),
+				model: { provider: "test", id: "model" } as Model<Api>,
+				thinkingLevel: "high",
+			});
+
+			expect(result).toEqual({
+				active_session_id: "new-root-active",
+				session_id: "new-root-session",
+				name: "researcher",
+				session_file: join(tempDir, "new-root-session.jsonl"),
+				model: "test/model",
+			});
+			expect(commands.filter((command) => command.type !== "ack_result")).toEqual([
+				expect.objectContaining({
+					type: "create",
+					lifecycle: "resident",
+					name: "researcher",
+					config: expect.objectContaining({
+						cwd: join(tempDir, "project"),
+						agentDir: join(tempDir, "agent"),
+						sessionDir: join(tempDir, "sessions"),
+						provider: "test",
+						model: "model",
+						thinking: "high",
+						telemetryDisabled: true,
+					}),
+				}),
+				expect.objectContaining({
+					type: "prompt",
+					activeSessionId: "new-root-active",
+					message: "investigate independently",
+					source: "rpc",
+				}),
+			]);
+		} finally {
+			if (previousSupervisorSocket === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
+			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
