@@ -471,6 +471,104 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("host timers", () => {
+		it("reports a throwing ctx timer callback and keeps other extensions' timers running", async () => {
+			const firedMarker = path.join(tempDir, "other-timer-fired");
+			fs.writeFileSync(
+				path.join(extensionsDir, "throwing-timer.ts"),
+				`export default function(pi) {
+					pi.on("context", async (_event, ctx) => {
+						ctx.setTimeout(() => { throw new Error("timer boom"); }, 5);
+					});
+				}`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "healthy-timer.ts"),
+				`import * as fs from "node:fs";
+				export default function(pi) {
+					pi.on("context", async (_event, ctx) => {
+						ctx.setTimeout(() => fs.writeFileSync(${JSON.stringify(firedMarker)}, "fired"), 5);
+					});
+				}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((err) => errors.push(err));
+
+			vi.useFakeTimers();
+			try {
+				await runner.emitContext([]);
+				expect(() => vi.advanceTimersByTime(10)).not.toThrow();
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(errors).toHaveLength(1);
+			expect(errors[0].extensionPath).toContain("throwing-timer");
+			expect(errors[0].event).toBe("setTimeout");
+			expect(errors[0].error).toContain("timer boom");
+			expect(fs.existsSync(firedMarker)).toBe(true);
+		});
+
+		it("cancels pending ctx timers on invalidate so nothing fires after unload", async () => {
+			const firedMarker = path.join(tempDir, "post-unload-fired");
+			fs.writeFileSync(
+				path.join(extensionsDir, "pending-timers.ts"),
+				`import * as fs from "node:fs";
+				export default function(pi) {
+					pi.on("context", async (_event, ctx) => {
+						const fire = () => fs.writeFileSync(${JSON.stringify(firedMarker)}, "fired");
+						ctx.setTimeout(fire, 5);
+						ctx.setInterval(fire, 5);
+					});
+				}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			vi.useFakeTimers();
+			try {
+				await runner.emitContext([]);
+				runner.invalidate();
+				vi.advanceTimersByTime(50);
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(fs.existsSync(firedMarker)).toBe(false);
+		});
+
+		it("clears a pending timer via ctx.clearTimeout", async () => {
+			const firedMarker = path.join(tempDir, "cleared-timer-fired");
+			fs.writeFileSync(
+				path.join(extensionsDir, "clearing-timer.ts"),
+				`import * as fs from "node:fs";
+				export default function(pi) {
+					pi.on("context", async (_event, ctx) => {
+						const handle = ctx.setTimeout(() => fs.writeFileSync(${JSON.stringify(firedMarker)}, "fired"), 5);
+						ctx.clearTimeout(handle);
+					});
+				}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			vi.useFakeTimers();
+			try {
+				await runner.emitContext([]);
+				vi.advanceTimersByTime(50);
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(fs.existsSync(firedMarker)).toBe(false);
+		});
+	});
+
 	describe("message renderers", () => {
 		it("gets message renderer by type", async () => {
 			const extCode = `

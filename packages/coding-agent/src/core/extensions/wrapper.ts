@@ -6,7 +6,7 @@
  */
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { wrapToolDefinition, wrapToolDefinitions } from "../tools/tool-definition-wrapper.js";
+import { wrapToolDefinition } from "../tools/tool-definition-wrapper.js";
 import type { ExtensionRunner } from "./runner.js";
 import type { RegisteredTool } from "./types.js";
 
@@ -22,7 +22,9 @@ function toRunnerGetter(source: RunnerSource): () => ExtensionRunner {
  */
 export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: RunnerSource): AgentTool {
 	const getRunner = toRunnerGetter(runner);
-	return wrapToolDefinition(registeredTool.definition, () => getRunner().createContext());
+	return wrapToolDefinition(registeredTool.definition, () =>
+		getRunner().createContext(registeredTool.sourceInfo.path),
+	);
 }
 
 /**
@@ -30,9 +32,5 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Runne
  * Uses the runner's createContext() for consistent context across tools and event handlers.
  */
 export function wrapRegisteredTools(registeredTools: RegisteredTool[], runner: RunnerSource): AgentTool[] {
-	const getRunner = toRunnerGetter(runner);
-	return wrapToolDefinitions(
-		registeredTools.map((registeredTool) => registeredTool.definition),
-		() => getRunner().createContext(),
-	);
+	return registeredTools.map((registeredTool) => wrapRegisteredTool(registeredTool, runner));
 }

@@ -3146,7 +3146,8 @@ export class InteractiveMode {
 		if (shortcuts.size === 0) return;
 
 		const localSessionHost = this.getLocalSessionHost();
-		const createContext = (): ExtensionContext => ({
+		const createContext = (ownerPath: string): ExtensionContext => ({
+			...extensionRunner.createTimerBindings(ownerPath),
 			ui: this.createExtensionUIContext(),
 			hasUI: true,
 			cwd: this.getCurrentCwd(),
@@ -3178,7 +3179,7 @@ export class InteractiveMode {
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
 			for (const [shortcutStr, shortcut] of shortcuts) {
 				if (matchesKey(data, shortcutStr as KeyId)) {
-					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
+					Promise.resolve(shortcut.handler(createContext(shortcut.extensionPath))).catch((err) => {
 						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
 					});
 					return true;

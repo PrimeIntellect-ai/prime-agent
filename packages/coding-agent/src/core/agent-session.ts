@@ -5169,7 +5169,7 @@ export class AgentSession {
 
 		const command = this._extensionRunner.getCommand(commandName);
 		if (!command) return undefined;
-		const context = this._extensionRunner.createCommandContext();
+		const context = this._extensionRunner.createCommandContext(command.sourceInfo.path);
 		return Promise.resolve()
 			.then(() => command.handler(args, context))
 
