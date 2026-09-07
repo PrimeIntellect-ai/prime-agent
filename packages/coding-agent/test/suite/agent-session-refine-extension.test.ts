@@ -141,21 +141,30 @@ describe("AgentSession session_before_refine extension hook", () => {
 		}
 	});
 
-	it("labels reviewer-triggered refinements as auto in the notice", async () => {
+	it("labels auto- and self-triggered refinements in the notice", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_refine", async () => ({
-						proposal: {
-							summary: "auto summary",
-							rationale: "auto rationale",
-							expectedOutcome: "auto outcome",
-							edits: [
-								{ action: "create" as const, kind: "memory" as const, title: "Auto memory", content: "auto" },
-							],
-						},
-					}));
+					let round = 0;
+					pi.on("session_before_refine", async () => {
+						round += 1;
+						return {
+							proposal: {
+								summary: "auto summary",
+								rationale: "auto rationale",
+								expectedOutcome: "auto outcome",
+								edits: [
+									{
+										action: "create" as const,
+										kind: "memory" as const,
+										title: `Auto memory ${round}`,
+										content: "auto",
+									},
+								],
+							},
+						};
+					});
 				},
 			],
 		});
@@ -165,10 +174,15 @@ describe("AgentSession session_before_refine extension hook", () => {
 
 		await harness.session.refine({ instructions: "capture" }, { trigger: "auto" });
 
-		const notice = harness.session.messages.find(
-			(message) => message.role === "custom" && message.customType === "refinement_notice",
-		);
-		expect(getMessageText(notice)).toMatch(/^\[auto-refinement\]\n\n/);
+		const notices = () =>
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "refinement_notice",
+			);
+		expect(getMessageText(notices().at(-1))).toMatch(/^\[auto-refinement\]\n\n/);
+
+		// Agent-callable refine.run flows carry the explicit self source.
+		await harness.session.refine({ instructions: "capture" }, { source: "self" });
+		expect(getMessageText(notices().at(-1))).toMatch(/^\[self-refinement\]\n\n/);
 	});
 
 	it("skips the refinement round when an extension returns skip", async () => {

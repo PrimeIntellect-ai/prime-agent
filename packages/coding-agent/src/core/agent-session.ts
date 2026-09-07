@@ -7868,7 +7868,8 @@ export class AgentSession {
 		const pending = this._pendingRequestedRefine;
 		if (!pending) return false;
 		this._pendingRequestedRefine = undefined;
-		void this.refine(pending).catch((error) => this._emitRefineFailed(error));
+		// Agent-callable refine.run: the notice must carry the self label.
+		void this.refine(pending, { source: "self" }).catch((error) => this._emitRefineFailed(error));
 		return true;
 	}
 
@@ -8330,7 +8331,7 @@ export class AgentSession {
 			rollbackId?: string;
 			global?: boolean;
 		} = {},
-		internal: { skipAbort?: boolean; trigger?: "manual" | "auto" } = {},
+		internal: { skipAbort?: boolean; trigger?: "manual" | "auto"; source?: RefinementSource } = {},
 	): Promise<RefinementResult> {
 		// Queued /refine executes from the session-input pump between turns;
 		// refine never aborts the agent (planning is backgrounded and the apply
@@ -8423,7 +8424,12 @@ export class AgentSession {
 			if (this._disposed || refineAbort.signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
-			return await this._applyRefine(plan, options, refineAbort, internal.trigger === "auto" ? "auto" : "user");
+			return await this._applyRefine(
+				plan,
+				options,
+				refineAbort,
+				internal.source ?? (internal.trigger === "auto" ? "auto" : "user"),
+			);
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {
