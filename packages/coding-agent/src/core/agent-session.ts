@@ -7709,9 +7709,6 @@ export class AgentSession {
 	}): Promise<CompactionResult> {
 		const { model, apiKey, headers, customInstructions, signal } = options;
 		const settings = this._effectiveCompactionSettings();
-		// The clamp disclosure belongs to the clamp, not the trigger flavor: manual and
-		// model-requested compactions must surface it too, not only threshold checks.
-		this._noteClampedContextCapOnce(settings);
 		const pathEntries = this.sessionManager.getBranch();
 
 		const preparation = prepareCompaction(pathEntries, settings);
@@ -7722,6 +7719,10 @@ export class AgentSession {
 			}
 			throw new CompactionSkippedError("Session is too short to compact — try again once it grows");
 		}
+		// The clamp disclosure belongs to the clamp, not the trigger flavor: manual and
+		// model-requested compactions must surface it too. Emitted only once the
+		// preparation guard passes so it cannot displace an already-compacted leaf.
+		this._noteClampedContextCapOnce(settings);
 
 		let extensionCompaction: CompactionResult | undefined;
 		let fromExtension = false;
