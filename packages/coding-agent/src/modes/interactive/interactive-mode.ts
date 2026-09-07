@@ -5823,6 +5823,10 @@ export class InteractiveMode {
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
+		// Still open here = the previous attempt was discarded without message_end; drop its orphan.
+		if (this.streamingComponent) {
+			this.chatContainer.removeChild(this.streamingComponent);
+		}
 		this.streamingComponent = new AssistantMessageComponent(
 			undefined,
 			this.hideThinkingBlock,

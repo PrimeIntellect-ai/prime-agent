@@ -158,6 +158,25 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});
 
+	test("a superseding message_start replaces a discarded attempt's streaming component", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const thinkingOnly: AssistantMessage = {
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking: "pondering the void" }],
+		};
+
+		// Empty-turn retry discards the attempt without a message_end.
+		await handleEvent.call(fakeThis, { type: "message_start", message: thinkingOnly });
+		await handleEvent.call(fakeThis, { type: "message_start", message: createAssistantMessage("") });
+		await handleEvent.call(fakeThis, { type: "message_end", message: createAssistantMessage("recovered") });
+
+		expect(fakeThis.chatContainer.children).toHaveLength(1);
+		const rendered = renderChat(fakeThis.chatContainer);
+		expect(rendered).toContain("recovered");
+		expect(rendered).not.toContain("pondering the void");
+	});
+
 	test("renders assistant end events when attaching after all updates", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
