@@ -355,6 +355,17 @@ jobs:
           test/daemon-socket.test.ts
           test/exec.test.ts
           test/kernel-bash-shell.test.ts
+          test/windows-process-signal.test.ts
+
+      - name: Test identity-pinned tree signals under Bun and Node
+        working-directory: packages/coding-agent
+        run: |
+          bun ./test/fixtures/windows-process-signal-native.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun build ./test/fixtures/windows-process-signal-native.ts --target=node --external koffi --outfile=./node_modules/.cache/windows-process-signal-native.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/.cache/windows-process-signal-native.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test terminal behavior
         working-directory: packages/tui
