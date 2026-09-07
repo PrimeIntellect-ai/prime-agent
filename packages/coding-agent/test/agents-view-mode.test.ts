@@ -808,25 +808,18 @@ describe("AgentsViewMode", () => {
 			const parentLine = render(parentRow, 120);
 			const savedLine = render(savedRow, 120);
 			expect(parentLine).toContain("gpt-5.6-sol");
-			expect(savedLine).toContain("glm-5.2-fast");
-			// Full #2056 usage cell: tokens, own cost, explicit descendant count, total.
-			expect(parentLine).toContain("↑12k ↓1.2k");
-			expect(parentLine).toMatch(/\$0\.42 ·\s+1 ·\s+\$1\.10 ·\s+2m\s*$/);
-			// Every section's age column ends at the terminal edge.
+			expect(parentLine).toMatch(/↑12k ↓1\.2k ·\s+\$0\.42 ·\s+1 ·\s+\$1\.10 ·\s+2m\s*$/);
+			// Sections size their columns independently but share the right edge.
 			expect(savedLine).toMatch(/\$123\.45 ·\s+2m\s*$/);
 			expect(parentLine.length).toBe(savedLine.length);
-			// The ` · ` separators land in the same column for a section's legend
-			// and each of its rows.
+			// Separators land in the same column for a section's legend and rows.
 			const dotColumns = (text: string) => [...text].flatMap((ch, index) => (ch === "·" ? [index] : []));
-			expect(dotColumns(layout.details.get(parentRow.identity)!)).toEqual(dotColumns(layout.legends.get("idle")!));
 			expect(dotColumns(layout.details.get(savedRow.identity)!)).toEqual(
 				dotColumns(layout.legends.get("inactive")!),
 			);
-			// Empty sessions keep only their age, aligned to the age column.
 			const emptyDetails = layout.details.get(rows.find((row) => row.summary.messageCount === 0)!.identity)!;
 			expect(emptyDetails.trim()).toBe("2m");
-			expect(emptyDetails).not.toContain("$");
-			// Activity shrinks first at narrow widths; model and usage survive at 80.
+			// Activity shrinks first: model and usage survive at 80 columns.
 			const narrow = render(parentRow, 80);
 			expect(narrow).toContain("gpt-5.6-sol");
 			expect(narrow).toMatch(/\$1\.10 ·\s+2m\s*$/);

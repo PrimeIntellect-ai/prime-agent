@@ -2534,8 +2534,7 @@ export class AgentsViewMode implements Component, Focusable {
 				);
 			}
 			if (item.type === "heading") {
-				// The legend is right-aligned to the same edge as the usage cells and
-				// bold like the title, so its columns sit exactly above the rows'.
+				// Right-aligned to the usage cells' edge so legend columns sit above the rows'.
 				const title = `${sectionTitle(item.section)} (${counts[item.section]})`;
 				const legend = layout.legends.get(item.section) ?? "";
 				const gap = width - visibleWidth(title) - visibleWidth(legend);
@@ -2587,8 +2586,7 @@ export class AgentsViewMode implements Component, Focusable {
 		];
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
 		const left = cells.join("  ");
-		// Usage cells right-align to the terminal edge so every section's age
-		// column ends at the same column even when section widths differ.
+		// Right-aligned to the terminal edge: age columns line up across sections.
 		const line = `${left}  ${padCellStart(details, Math.max(0, width - visibleWidth(left) - 2))}`;
 		return markRow(formatTableCell(line, width));
 	}
@@ -2835,28 +2833,21 @@ const AGENTS_VIEW_USAGE_LABELS: AgentsViewUsageParts = {
 const AGENTS_VIEW_USAGE_COLUMNS = Object.keys(AGENTS_VIEW_USAGE_LABELS) as (keyof AgentsViewUsageParts)[];
 
 export interface AgentsViewUsageLayout {
-	/** Usage legend per section, padded to that section's column widths. */
 	legends: ReadonlyMap<AgentsViewSection, string>;
-	/** Usage details per row identity, padded to its section's column widths. */
 	details: ReadonlyMap<string, string>;
 	nameWidth: number;
 	modelWidth: number;
 	activityWidth: number;
-	/** Widest section's usage cell; the left columns size against it. */
 	detailsWidth: number;
 }
 
 /**
- * One shared usage-column layout per section for the header legend and every
- * row: each column is as wide as the section's widest value or its legend
- * label, everything right-aligned, so the ` · ` separators land in the same
- * terminal column for the legend and every row of that section. Empty sessions
- * render only the age, aligned to the age column. The Session/Model/Activity
- * columns on the left size against the widest section; Activity shrinks first.
+ * One usage-column layout per section, shared by the header legend and every
+ * row: column width = max(widest section value, legend label), right-aligned,
+ * so the ` · ` separators align; Activity shrinks first at narrow widths.
  */
 export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], width = 120): AgentsViewUsageLayout {
-	// Nested rows render inside their top-level agent's section block, so group
-	// by the block's section rather than each row's own.
+	// Nested rows render in their top-level agent's section block.
 	const rowsBySection = new Map<AgentsViewSection, AgentsViewRow[]>();
 	let blockSection: AgentsViewSection = "running";
 	for (const row of rows) {
@@ -2886,7 +2877,7 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 		for (const column of AGENTS_VIEW_USAGE_COLUMNS) {
 			let columnWidth = visibleWidth(AGENTS_VIEW_USAGE_LABELS[column]);
 			for (const entry of entries) {
-				// Empty sessions render no usage segment; only their age takes space.
+				// Empty sessions render only their age.
 				if (entry.empty && column !== "age") continue;
 				columnWidth = Math.max(columnWidth, visibleWidth(entry.parts[column]));
 			}

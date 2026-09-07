@@ -504,7 +504,7 @@ describe("#502 unified session view regressions", () => {
 			expect(render(width)).toContain("gpt-5.6-terra");
 			expect(render(width)).toHaveLength(width);
 		}
-		// Below ~70 columns the model column truncates before the usage cell does.
+		// Below ~70 columns the model truncates before the usage cell.
 		expect(render(60)).toContain("gpt-5");
 		expect(render(60)).toHaveLength(60);
 		const narrow = render(100);
