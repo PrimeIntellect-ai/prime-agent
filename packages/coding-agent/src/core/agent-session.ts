@@ -84,6 +84,7 @@ import {
 	type AgentAutonomousStatus,
 	type AutonomousRuntimeState,
 	addAutonomousContinuation,
+	addAutonomousDiscardedUsage,
 	addAutonomousUsage,
 	autonomousStatus,
 	createAutonomousRuntimeState,
@@ -2268,7 +2269,10 @@ export class AgentSession {
 		if (!this._goalState.objective) {
 			return false;
 		}
-		if (message.stopReason === "error" || message.stopReason === "aborted") {
+		// Error/aborted turns are not charged, but their discarded empty-turn
+		// attempts were normal-stop spend and still count.
+		const failedTurn = message.stopReason === "error" || message.stopReason === "aborted";
+		if (failedTurn && !message.discardedUsage) {
 			return false;
 		}
 		if (this._goalAccountedAssistantMessages.has(message)) {
@@ -2284,7 +2288,7 @@ export class AgentSession {
 		}
 		this._goalAccountedAssistantMessages.add(message);
 		const tokenDelta =
-			goalTokenDeltaForUsage(message.usage) +
+			(failedTurn ? 0 : goalTokenDeltaForUsage(message.usage)) +
 			(message.discardedUsage ? goalTokenDeltaForUsage(message.discardedUsage) : 0);
 		const goal = this._goalWithAccountedWallClock();
 		const nextGoal: GoalState = {
@@ -3742,6 +3746,7 @@ export class AgentSession {
 				if (assistantMsg.stopReason !== "error") {
 					addAutonomousUsage(this._autonomousState, assistantMsg.usage);
 				}
+				addAutonomousDiscardedUsage(this._autonomousState, assistantMsg.discardedUsage);
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
 					this._assistantTurnsSinceAutoRefine++;
 					// In serialized mode, kick off background refinement planning
@@ -10907,15 +10912,27 @@ export class AgentSession {
 						emitChildUpdate();
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
-						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
+						const failedTurn = assistant.stopReason === "error" || assistant.stopReason === "aborted";
+						// Failed turns are not attributed, but their discarded empty-turn
+						// attempts were paid normal-stop spend and still are.
+						let attributable: Usage | undefined;
+						if (!failedTurn) {
+							attributable = cloneUsage(assistant.usage);
+							if (assistant.discardedUsage) {
+								addAssistantUsage(attributable, assistant.discardedUsage);
+							}
+						} else if (assistant.discardedUsage) {
+							attributable = cloneUsage(assistant.discardedUsage);
+						}
+						if (attributable) {
 							// Flush before the fold: a persisted aggregate may only include
 							// completions whose childUsage is durable with or before it.
 							flushPendingChildUsageIfStale();
-							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
+							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), attributable);
 							if (parentAssistantForUsage) {
 								const unindexedUsage =
 									this._rlmUnindexedChildUsage.get(parentAssistantForUsage) ?? emptyUsage();
-								addAssistantUsage(unindexedUsage, assistant.usage);
+								addAssistantUsage(unindexedUsage, attributable);
 								this._rlmUnindexedChildUsage.set(parentAssistantForUsage, unindexedUsage);
 								this._ownUsageMemo = undefined;
 								const origin = rlmChildUsageOrigin(child.messages, assistant);
@@ -10929,7 +10946,7 @@ export class AgentSession {
 									pendingChildUsageTimer.unref?.();
 								}
 								const bucket = pendingChildUsage.get(origin) ?? emptyUsage();
-								addAssistantUsage(bucket, assistant.usage);
+								addAssistantUsage(bucket, attributable);
 								pendingChildUsage.set(origin, bucket);
 							}
 						}

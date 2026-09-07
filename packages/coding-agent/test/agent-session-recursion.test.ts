@@ -1424,7 +1424,7 @@ describe("AgentSession rlm recursion", () => {
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			usage: usage(),
+			usage: usage(10, 4),
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
@@ -1444,6 +1444,10 @@ describe("AgentSession rlm recursion", () => {
 		// Session-level auto-retry also retries error turns; disable it so the
 		// child's turn error surfaces immediately instead of after backoff.
 		root.settingsManager.setRetryEnabled(false);
+		// A parent assistant is the attribution target for the child's spend.
+		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+		root.agent.state.messages.push(parentAssistant);
+		root.sessionManager.appendMessage(parentAssistant);
 
 		await root.runRlmChild("empty child", { name: "empty-worker" });
 		await vi.waitFor(() => {
@@ -1458,6 +1462,14 @@ describe("AgentSession rlm recursion", () => {
 				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
 			),
 		).toHaveLength(0);
+		// The two discarded attempts (10 in / 4 out each) were paid spend: they
+		// ride the exhausted error turn's discardedUsage and attribute to the parent.
+		await root.waitForRlmQuiescence();
+		await vi.waitFor(() => {
+			const attribution = root.sessionManager.getEntries().find((entry) => entry.type === "child_usage_attributed");
+			if (!attribution || attribution.type !== "child_usage_attributed") throw new Error("missing attribution");
+			expect(attribution.childUsage).toMatchObject({ input: 20, output: 8 });
+		});
 	});
 
 	it("suppresses a done child's unsettled fallback notice at the cancellation cut", async () => {

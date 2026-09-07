@@ -175,6 +175,14 @@ export function addAutonomousUsage(state: AutonomousRuntimeState, usage: Usage |
 	state.tokensUsed += autonomousTokenDelta(usage);
 }
 
+/** Spend from discarded empty-turn attempts: tokens count, but no turn is consumed. */
+export function addAutonomousDiscardedUsage(state: AutonomousRuntimeState, usage: Usage | undefined): void {
+	if (!state.enabled) {
+		return;
+	}
+	state.tokensUsed += autonomousTokenDelta(usage);
+}
+
 export function addAutonomousContinuation(state: AutonomousRuntimeState): void {
 	if (!state.enabled) {
 		return;

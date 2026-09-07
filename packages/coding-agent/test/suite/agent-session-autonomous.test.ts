@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	addAutonomousUsage,
@@ -129,6 +129,30 @@ describe("AgentSession autonomous mode", () => {
 			turnsUsed: 0,
 			tokensUsed: 0,
 			continuationsUsed: 0,
+		});
+	});
+
+	it("counts discarded empty-turn spend against autonomous token limits without consuming a turn", async () => {
+		const harness = await createHarness({
+			autonomous: { enabled: true, maxTurns: 5 },
+		});
+		harnesses.push(harness);
+		const failed = fauxAssistantMessage("", { stopReason: "error", errorMessage: "empty response" });
+		(failed as AssistantMessage).discardedUsage = {
+			input: 25,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 30,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+		};
+		harness.setResponses([failed]);
+
+		await harness.session.prompt("try once");
+
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			turnsUsed: 0,
+			tokensUsed: 30,
 		});
 	});
 
