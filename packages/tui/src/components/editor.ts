@@ -217,6 +217,10 @@ interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
 	cursorPos?: number;
+	/** Logical source line index this layout line renders. */
+	sourceLine: number;
+	/** Start offset of this layout line's text within the source line. */
+	sourceStart: number;
 }
 
 export interface EditorTheme {
@@ -385,6 +389,8 @@ export class Editor implements Component, Focusable {
 		_layoutLineIndex: number,
 		_lineText: string,
 		_cursorCol: number | undefined,
+		_sourceLine?: number,
+		_sourceStart?: number,
 	): string {
 		return displayText;
 	}
@@ -612,6 +618,8 @@ export class Editor implements Component, Focusable {
 				absoluteLineIndex,
 				layoutLine.text,
 				layoutLine.hasCursor ? layoutLine.cursorPos : undefined,
+				layoutLine.sourceLine,
+				layoutLine.sourceStart,
 			);
 
 			const padding = " ".repeat(Math.max(0, inputWidth - lineVisibleWidth));
@@ -943,6 +951,8 @@ export class Editor implements Component, Focusable {
 				text: "",
 				hasCursor: true,
 				cursorPos: 0,
+				sourceLine: 0,
+				sourceStart: 0,
 			});
 			return layoutLines;
 		}
@@ -959,6 +969,8 @@ export class Editor implements Component, Focusable {
 					text: "",
 					hasCursor: isCurrentLine,
 					cursorPos: isCurrentLine ? 0 : undefined,
+					sourceLine: i,
+					sourceStart: hiddenPrefixLength,
 				});
 				continue;
 			}
@@ -969,11 +981,15 @@ export class Editor implements Component, Focusable {
 						text: displayLine,
 						hasCursor: true,
 						cursorPos: Math.max(0, this.state.cursorCol - hiddenPrefixLength),
+						sourceLine: i,
+						sourceStart: hiddenPrefixLength,
 					});
 				} else {
 					layoutLines.push({
 						text: displayLine,
 						hasCursor: false,
+						sourceLine: i,
+						sourceStart: hiddenPrefixLength,
 					});
 				}
 			} else {
@@ -1011,11 +1027,15 @@ export class Editor implements Component, Focusable {
 							text: chunk.text,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
+							sourceLine: i,
+							sourceStart: hiddenPrefixLength + chunk.startIndex,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
 							hasCursor: false,
+							sourceLine: i,
+							sourceStart: hiddenPrefixLength + chunk.startIndex,
 						});
 					}
 				}

@@ -21,6 +21,7 @@ import {
 	resolveAgentsViewSessionUiServices,
 	shouldReconnectAgentsViewDaemon,
 } from "../src/modes/agents-view/agents-view-mode.js";
+import { summaryForUnifiedRecord } from "../src/modes/agents-view/agents-view-state.js";
 import {
 	type AgentsViewScopeFrame,
 	aggregateSessionHeartbeats,
@@ -70,6 +71,30 @@ function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child", st
 }
 
 describe("agents view state", () => {
+	test("classifies a saved orphan with rlmDepth > 0 as a subagent", () => {
+		const saved = {
+			path: "/tmp/sessions/child.jsonl",
+			id: "child",
+			cwd: "/tmp",
+			rlmDepth: 2,
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 1,
+			firstMessage: "",
+			allMessagesText: "",
+		};
+		const summary = summaryForUnifiedRecord({
+			saved,
+			identity: "child",
+			identityAliases: [],
+			section: "archived",
+			searchableText: "",
+		} as never);
+		// The parent edge can be reconciliation-dropped while the depth survives;
+		// a depth > 0 session must never be presented as top-level.
+		expect(summary.runtimeKind).toBe("subagent");
+	});
+
 	test("classifies sessions by live runtime status at any depth", () => {
 		expect(classifyAgentsViewSession(makeSummary({ isStreaming: true, activity: "working" }))).toBe("running");
 		expect(
@@ -1644,6 +1669,14 @@ describe("agents view state", () => {
 				initialSession: chat,
 			});
 			const handoffFrame = persistentState.scopeFrames?.at(-1);
+
+			// The scope root is never a row of its own children view: seeding it as
+			// the selection anchor would only arm pending-anchor for the whole scan.
+			expect(persistentState.selectedRowIdentity).toBeUndefined();
+			expect(persistentState.selectedSessionKey).toBeUndefined();
+			expect(persistentState.backSession).toBe(chat);
+			const unscoped = createInitialAgentsViewPersistentState({ initialSession: chat });
+			expect(unscoped.selectedRowIdentity).toBeDefined();
 
 			expect(handoffFrame).toEqual({ scope: rootScope, returnChat: chat });
 			expect(createInitialAgentsViewScopeFrames(rootScope, persistentState.backSession)).toEqual([handoffFrame]);

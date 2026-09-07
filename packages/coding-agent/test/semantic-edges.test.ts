@@ -347,20 +347,22 @@ describe("SemanticEdgeRecorder", () => {
 		expect(requestIds).toEqual([originalId, firstId, secondId]);
 	});
 
-	it("newline-terminates a valid unterminated final line before appending", () => {
+	it("treats a valid unterminated final line as uncommitted: skipped on read, truncated on append", () => {
 		const recorder = createRecorder();
-		const firstId = recorder.startTurnRequest();
+		recorder.startTurnRequest();
 		const path = join(tempDir, "semantic-edges.jsonl");
 		const raw = readFileSync(path, "utf8");
 		rmSync(path);
 		appendFileSync(path, raw.slice(0, -1));
 
+		// Tail rule: uncommitted append — see the EventLog module doc.
+		expect(readSemanticEdgeLedger(path).filter((event) => event.type === "request_started")).toEqual([]);
 		const resumed = createRecorder();
 		const secondId = resumed.startTurnRequest();
 		const requestIds = readSemanticEdgeLedger(path)
 			.filter((event) => event.type === "request_started")
 			.map((event) => (event.type === "request_started" ? event.request_id : ""));
-		expect(requestIds).toEqual([firstId, secondId]);
+		expect(requestIds).toEqual([secondId]);
 	});
 
 	it("treats a newline-terminated malformed final line as corruption, not a torn append", () => {

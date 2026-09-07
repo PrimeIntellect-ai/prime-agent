@@ -7,6 +7,7 @@ import {
 	createHerdrAgentStateExtension,
 	hasFileBasedHerdrIntegration,
 	herdrAgentStateExtension,
+	herdrSocketTarget,
 } from "../src/core/extensions/builtin/herdr-agent-state.js";
 import type { ExtensionAPI } from "../src/core/extensions/types.js";
 
@@ -76,7 +77,7 @@ async function startFakeHerdrServer(socketPath: string): Promise<{
 
 	await new Promise<void>((resolve, reject) => {
 		server.on("error", reject);
-		server.listen(socketPath, resolve);
+		server.listen(herdrSocketTarget(socketPath), resolve);
 	});
 
 	const waitForRequests = (count: number, timeoutMs = 3000): Promise<void> => {
@@ -133,6 +134,22 @@ describe("herdrAgentStateExtension", () => {
 				rmSync(path, { recursive: true, force: true });
 			}
 		}
+	});
+
+	it.skipIf(process.platform !== "win32")("reports through a bare Windows named pipe endpoint", async () => {
+		const socketName = `pi-herdr-test-${process.pid}-${Date.now()}.sock`;
+		const { server, requests, waitForRequests } = await startFakeHerdrServer(socketName);
+		cleanupServers.push(server);
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = socketName;
+		process.env.HERDR_PANE_ID = "w1:p1";
+
+		const { pi, handlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
+		await waitForRequests(1);
+		expect(requests[0]?.params.state).toBe("idle");
 	});
 
 	it("registers no handlers when HERDR_ENV is not set", () => {
@@ -490,5 +507,14 @@ describe("herdrAgentStateExtension", () => {
 
 		const seqs = requests.map((r) => r.params.seq as number);
 		expect(seqs[1]).toBeGreaterThan(seqs[0]);
+	});
+});
+
+describe("herdrSocketTarget", () => {
+	it("maps unix-style socket paths into the named-pipe namespace on win32 only", () => {
+		expect(herdrSocketTarget("/tmp/herdr/pane.sock", "win32")).toBe("\\\\.\\pipe\\tmp\\herdr\\pane.sock");
+		expect(herdrSocketTarget("\\\\.\\pipe\\herdr-pane", "win32")).toBe("\\\\.\\pipe\\herdr-pane");
+		expect(herdrSocketTarget("\\\\.\\PIPE\\herdr-pane", "win32")).toBe("\\\\.\\PIPE\\herdr-pane");
+		expect(herdrSocketTarget("/tmp/herdr/pane.sock", "linux")).toBe("/tmp/herdr/pane.sock");
 	});
 });

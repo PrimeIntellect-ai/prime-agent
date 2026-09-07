@@ -10,6 +10,9 @@ import {
 } from "@earendil-works/pi-tui";
 import { GOAL_CONTEXT_CUSTOM_TYPE, type GoalContextDetails } from "../../../core/goals.js";
 import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+	type AsyncBashCompletionDetails,
 	type CustomMessage,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	type HeartbeatPromptDetails,
@@ -21,9 +24,11 @@ import {
 	type RlmChildTerminalNoticeDetails,
 } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { agentMessageSummaryLine } from "./agent-message.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
 type InjectedPromptDetails =
+	| AsyncBashCompletionDetails
 	| GoalContextDetails
 	| HeartbeatPromptDetails
 	| IpythonStateRestoredDetails
@@ -34,7 +39,8 @@ type InjectedPromptMessage = CustomMessage<InjectedPromptDetails>;
 export function isInjectedPromptMessage(message: AgentMessage): message is InjectedPromptMessage {
 	return (
 		message.role === "custom" &&
-		(message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
+		(message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE ||
+			message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
 			message.customType === GOAL_CONTEXT_CUSTOM_TYPE ||
 			message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE ||
 			message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE ||
@@ -124,6 +130,15 @@ export class InjectedPromptMessageComponent extends Container {
 	private headerText(): string {
 		if (this.message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE) {
 			return this.heartbeatHeaderText();
+		}
+		if (this.message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE) {
+			const details = this.message.details as AsyncBashCompletionDetails | undefined;
+			const participant = details ? `pid ${details.pid}` : "bash";
+			const status = details ? `exit ${details.exitCode}` : undefined;
+			const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
+			return (
+				agentMessageSummaryLine(ASYNC_BASH_COMPLETION_PREVIEW_LABEL, participant, status) + theme.fg("dim", hint)
+			);
 		}
 		if (this.message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
 			const details = this.message.details as IpythonStateRestoredDetails | undefined;
