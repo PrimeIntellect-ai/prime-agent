@@ -1,0 +1,1 @@
+- Added completion follow-ups when background kernel `bash()` commands finish so agents can inspect results and continue.

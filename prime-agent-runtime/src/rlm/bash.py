@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import functools
 import json
 import os
 import secrets
@@ -43,11 +44,113 @@ _COMPLETION_SUFFIX = b"\x1f"
 # wait for a confirmed group exit before CancelledError propagates.
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
+_COMPLETION_NOTICE_COMMAND_CAP = 1000
+_ASYNCIO_WRAPPER_CALLBACKS = {
+    ("asyncio.tasks", "gather.<locals>._done_callback"),
+    ("asyncio.tasks", "shield.<locals>._inner_done_callback"),
+    ("asyncio.tasks", "_wait.<locals>._on_completion"),
+    ("asyncio.tasks", "_release_waiter"),
+}
 
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
+
+
+def _current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
+    """Get the creating REPL cell's lifecycle without coupling standalone use to repl."""
+    try:
+        from . import repl
+
+        if repl.is_active():
+            return repl.current_cell_completion_context()
+    except (ImportError, RuntimeError):
+        pass
+    return None
+
+
+def _consume_notice_task(task: asyncio.Task[None]) -> None:
+    """Retrieve detached notifier failures so they never become loop warnings."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _completion_reaches(
+    start: asyncio.Future[Any], targets: tuple[asyncio.Future[Any], ...]
+) -> bool:
+    """Follow asyncio's wrapper and TaskGroup ownership callbacks."""
+    pending = [start]
+    seen_futures: set[int] = set()
+    seen_values: set[int] = set()
+
+    def collect(value: Any, depth: int = 0) -> None:
+        if isinstance(value, asyncio.Future):
+            pending.append(value)
+            return
+        identity = id(value)
+        if depth >= 4 or identity in seen_values:
+            return
+        seen_values.add(identity)
+
+        nested: list[Any] = []
+        if isinstance(value, functools.partial):
+            nested.extend((value.func, value.args, value.keywords))
+        elif isinstance(value, dict):
+            nested.extend(value.keys())
+            nested.extend(value.values())
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            nested.extend(value)
+        else:
+            closure = getattr(value, "__closure__", None) or ()
+            for cell in closure:
+                try:
+                    nested.append(cell.cell_contents)
+                except ValueError:
+                    pass
+            bound_self = getattr(value, "__self__", None)
+            if bound_self is not None:
+                nested.append(bound_self)
+        for item in nested:
+            collect(item, depth + 1)
+
+    while pending:
+        future = pending.pop()
+        if any(future is target for target in targets):
+            return True
+        if id(future) in seen_futures:
+            continue
+        seen_futures.add(id(future))
+        for entry in getattr(future, "_callbacks", None) or ():
+            callback = entry[0] if isinstance(entry, tuple) else entry
+            base = callback.func if isinstance(callback, functools.partial) else callback
+            identity = (getattr(base, "__module__", None), getattr(base, "__qualname__", None))
+            if identity in _ASYNCIO_WRAPPER_CALLBACKS:
+                collect(callback)
+            elif identity == (None, "Task.task_wakeup"):
+                task = getattr(callback, "__self__", None)
+                if isinstance(task, asyncio.Task):
+                    pending.append(task)
+            elif identity == ("asyncio.taskgroups", "TaskGroup._on_task_done"):
+                parent = getattr(getattr(callback, "__self__", None), "_parent_task", None)
+                if isinstance(parent, asyncio.Future):
+                    pending.append(parent)
+    return False
+
+
+def _creating_cell_waits_for(
+    owner: asyncio.Task[Any] | None, awaiter: asyncio.Task[Any] | None
+) -> bool:
+    """Return whether the cell owner directly or transitively waits for awaiter."""
+    if owner is None or awaiter is None:
+        return False
+    if owner is awaiter:
+        return True
+    waiter = getattr(owner, "_fut_waiter", None)
+    targets: tuple[asyncio.Future[Any], ...] = (owner,)
+    if isinstance(waiter, asyncio.Future):
+        targets += (waiter,)
+    return _completion_reaches(awaiter, targets)
 
 
 @dataclass(frozen=True)
@@ -117,6 +220,10 @@ class BashHandle:
 
     def __init__(self, command: str) -> None:
         self.command = command
+        completion_context = _current_cell_completion_context()
+        self._creating_cell_finished = completion_context[0] if completion_context else None
+        self._creating_cell_task = completion_context[1] if completion_context else None
+        self._awaited_by_creating_cell = False
         self._buffer = _BoundedBuffer()
         self._done = threading.Event()
         self._eof = threading.Event()
@@ -235,6 +342,7 @@ class BashHandle:
         threading.Thread(target=self._pump, daemon=True).start()
         threading.Thread(target=self._report, daemon=True).start()
         threading.Thread(target=self._watch, daemon=True).start()
+        self._schedule_background_completion_notice()
 
     @property
     def pid(self) -> int:
@@ -515,6 +623,45 @@ class BashHandle:
                 return
         callback()
 
+    def _schedule_background_completion_notice(self) -> None:
+        cell_finished = self._creating_cell_finished
+        if cell_finished is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._notify_background_completion(cell_finished))
+        task.add_done_callback(_consume_notice_task)
+
+    async def _notify_background_completion(self, cell_finished: asyncio.Event) -> None:
+        result = await self._wait()
+        # The cell may do other work before awaiting this handle. Do not classify
+        # it as detached until that whole cell has crossed its completion barrier.
+        await cell_finished.wait()
+        if self._awaited_by_creating_cell:
+            return
+        try:
+            from . import repl
+
+            if not repl.is_active():
+                return
+            command = self.command
+            if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
+                command = command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
+            await repl.host_request(
+                {
+                    "type": "bash.completed",
+                    "pid": self._pid,
+                    "command": command,
+                    "exitCode": result.exit_code,
+                }
+            )
+        except (OSError, RuntimeError):
+            # Standalone runtimes have no host handler, and teardown can close
+            # the bridge while a process is finishing. Shell results stay usable.
+            return
+
     async def _wait(self) -> BashResult:
         # Asyncio-native wakeup: no executor thread is parked for the command's
         # duration, so many concurrent awaits cannot exhaust the default pool.
@@ -639,6 +786,12 @@ class BashHandle:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
         # as a deliberate background handle whose awaits only wait.
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if _creating_cell_waits_for(self._creating_cell_task, current_task):
+            self._awaited_by_creating_cell = True
         if self._released:
             return self._wait().__await__()
         self._released = True
