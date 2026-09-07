@@ -6,7 +6,12 @@ import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
-import { convertToLlm, HARNESS_DIGEST_CUSTOM_TYPE } from "../../src/core/messages.js";
+import {
+	convertToLlm,
+	createCompactionSummaryMessage,
+	createHarnessDigestMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
+} from "../../src/core/messages.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
@@ -2107,6 +2112,27 @@ describe("Harness digest at cold boundaries", () => {
 				.getEntries()
 				.some((entry) => entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE),
 		).toBe(true);
+	});
+
+	it("prefers the newest digest by timestamp over a retained pre-compaction digest", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const internals = harness.session as unknown as { _latestContextHarnessDigest(): string | undefined };
+		const base = Date.now();
+		// Retained pre-compaction messages follow the compaction head in the array
+		// but are older; the head digest must win the freshness comparison.
+		harness.session.agent.state.messages.push(
+			createCompactionSummaryMessage(
+				"summary",
+				10,
+				new Date(base + 2000).toISOString(),
+				undefined,
+				1,
+				"head digest",
+			),
+			createHarnessDigestMessage("retained digest", base + 1000),
+		);
+		expect(internals._latestContextHarnessDigest()).toBe("head digest");
 	});
 
 	it("resume dedupes identical digests and appends a fresh one when disk state changed", async () => {

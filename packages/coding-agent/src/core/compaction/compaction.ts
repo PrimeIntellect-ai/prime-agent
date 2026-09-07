@@ -13,6 +13,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
 } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
@@ -93,6 +94,11 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 
 function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "compaction") {
+		return undefined;
+	}
+	// Harness digests are mechanical context regenerated on the new compaction
+	// head; they must not consume summarizer input or leak into the summary.
+	if (entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
 		return undefined;
 	}
 	return getMessageFromEntry(entry);

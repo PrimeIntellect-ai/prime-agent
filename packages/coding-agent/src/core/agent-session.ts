@@ -8280,18 +8280,24 @@ export class AgentSession {
 	}
 
 	private _latestContextHarnessDigest(): string | undefined {
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i];
+		// Retained pre-compaction messages are presented AFTER the compaction head,
+		// so array position does not reflect recency; the newest digest is the one
+		// with the greatest timestamp among all in-context digest carriers.
+		let latest: { timestamp: number; digest: string } | undefined;
+		for (const message of this.agent.state.messages) {
+			let digest: string | undefined;
 			if (message.role === "custom" && message.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
-				return (message.details as HarnessDigestDetails | undefined)?.digest;
+				digest = (message.details as HarnessDigestDetails | undefined)?.digest;
+			} else if (message.role === "compactionSummary") {
+				digest = message.harnessDigest;
+			} else {
+				continue;
 			}
-			// Nothing before the compaction head remains in live model context.
-			if (message.role === "compactionSummary") {
-				return message.harnessDigest;
+			if (digest !== undefined && (!latest || message.timestamp >= latest.timestamp)) {
+				latest = { timestamp: message.timestamp, digest };
 			}
 		}
-		return undefined;
+		return latest?.digest;
 	}
 
 	/** Global harness state overlaid with this session's local state, when persisted. */

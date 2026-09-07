@@ -204,11 +204,18 @@ describe("AgentSession compaction characterization", () => {
 			persistSession: true,
 		});
 		harnesses.push(harness);
+		const summarizerInputs: string[] = [];
 		harness.setResponses([
 			fauxAssistantMessage("one response"),
 			fauxAssistantMessage("two response"),
-			fauxAssistantMessage("first summary"),
-			fauxAssistantMessage("first turn summary"),
+			(context) => {
+				summarizerInputs.push(context.messages.map(getMessageText).join("\n"));
+				return fauxAssistantMessage("first summary");
+			},
+			(context) => {
+				summarizerInputs.push(context.messages.map(getMessageText).join("\n"));
+				return fauxAssistantMessage("first turn summary");
+			},
 		]);
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
@@ -241,6 +248,11 @@ describe("AgentSession compaction characterization", () => {
 		expect(head).toMatchObject({ role: "compactionSummary", summary: expect.stringContaining("first summary") });
 		const digest = (head as { harnessDigest?: string }).harnessDigest;
 		expect(digest).toContain("[local:compaction_test_memory] Compaction test memory");
+		// The session-start digest never reaches the summarizer input.
+		expect(summarizerInputs.length).toBeGreaterThan(0);
+		for (const input of summarizerInputs) {
+			expect(input).not.toContain("# Continual Harness State");
+		}
 		// Mechanical attachment: the digest never flows through the summarizer.
 		expect((head as { summary: string }).summary).not.toContain("# Continual Harness State");
 		// Memories-first rendering in LLM context: digest preamble before the summary wrapper.
