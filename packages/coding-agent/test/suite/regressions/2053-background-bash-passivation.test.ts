@@ -75,7 +75,7 @@ describeRuntime("#2053 background kernel bash residency", () => {
 			hostHandlers,
 		});
 		const provisioner = new IpythonKernelProvisioner(harness.tempDir);
-		vi.spyOn(provisioner, "manager", "get").mockReturnValue(manager);
+		Object.defineProperty(provisioner, "manager", { configurable: true, value: manager });
 		internals._ipythonKernelProvisioner = provisioner;
 		return { session, kernel: manager };
 	}
