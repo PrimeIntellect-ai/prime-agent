@@ -12126,23 +12126,37 @@ export class AgentSession {
 		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
 
 		let toolCalls = 0;
-		let totalInput = this._droppedRetryUsage.input;
-		let totalOutput = this._droppedRetryUsage.output;
-		let totalCacheRead = this._droppedRetryUsage.cacheRead;
-		let totalCacheWrite = this._droppedRetryUsage.cacheWrite;
-		let totalCost = this._droppedRetryUsage.cost.total;
+		let totalInput = 0;
+		let totalOutput = 0;
+		let totalCacheRead = 0;
+		let totalCacheWrite = 0;
+		let totalCost = 0;
 
+		const countedSpend = new Set<AssistantMessage>();
+		const addSpend = (assistantMsg: AssistantMessage) => {
+			if (countedSpend.has(assistantMsg)) return;
+			countedSpend.add(assistantMsg);
+			for (const usage of [assistantMsg.usage, ...(assistantMsg.discardedUsage ?? [])]) {
+				totalInput += usage.input;
+				totalOutput += usage.output;
+				totalCacheRead += usage.cacheRead;
+				totalCacheWrite += usage.cacheWrite;
+				totalCost += usage.cost.total;
+			}
+		};
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
 				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				for (const usage of [assistantMsg.usage, ...(assistantMsg.discardedUsage ?? [])]) {
-					totalInput += usage.input;
-					totalOutput += usage.output;
-					totalCacheRead += usage.cacheRead;
-					totalCacheWrite += usage.cacheWrite;
-					totalCost += usage.cost.total;
-				}
+				addSpend(assistantMsg);
+			}
+		}
+		// Persisted-but-not-live spend on this branch (auto-retry drops the failed
+		// carrier from live state; rebuilds and navigation re-derive live from the
+		// branch, so identity dedupe keeps this both branch-scoped and count-once).
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				addSpend(entry.message as AssistantMessage);
 			}
 		}
 
