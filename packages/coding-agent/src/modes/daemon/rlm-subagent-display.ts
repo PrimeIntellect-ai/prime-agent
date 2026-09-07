@@ -1,6 +1,7 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 
 /**
  * Per-child RLM subagent hydration/display metadata.
@@ -51,31 +52,43 @@ function isRlmSubagentDisplayEntry(value: unknown): value is RlmSubagentDisplayE
 	);
 }
 
-export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): void {
-	const path = rlmSubagentDisplayPath(entry.sessionDir);
-	mkdirSync(entry.sessionDir, { recursive: true });
-	const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-	const handle = openSync(tempPath, "wx", 0o600);
+function readRlmSubagentDisplayEntrySync(sessionDir: string): RlmSubagentDisplayEntry | undefined {
+	let contents: string;
 	try {
-		try {
-			writeSync(handle, `${JSON.stringify(entry)}\n`);
-			fsyncSync(handle);
-		} finally {
-			closeSync(handle);
-		}
-		renameSync(tempPath, path);
+		contents = readFileSync(rlmSubagentDisplayPath(sessionDir), "utf8");
 	} catch (error) {
-		// A failed write, fsync, or rename must not leak the temp file.
-		rmSync(tempPath, { force: true });
+		// An unreadable file may hold a deletion tombstone.
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
 		throw error;
+	}
+	try {
+		const parsed = JSON.parse(contents) as unknown;
+		return isRlmSubagentDisplayEntry(parsed) ? parsed : undefined;
+	} catch {
+		return undefined;
 	}
 }
 
-export async function readRlmSubagentDisplayEntry(sessionDir: string): Promise<RlmSubagentDisplayEntry | undefined> {
+// The daemon supervisor owns all writes synchronously, so the check and rename cannot interleave.
+export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): boolean {
+	const path = rlmSubagentDisplayPath(entry.sessionDir);
+	if (entry.status !== "deleted" && readRlmSubagentDisplayEntrySync(entry.sessionDir)?.status === "deleted") {
+		return false;
+	}
+	mkdirSync(entry.sessionDir, { recursive: true });
+	writeFileAtomicSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600, fsync: true });
+	return true;
+}
+
+export async function readRlmSubagentDisplayEntry(
+	sessionDir: string,
+	onReadError?: () => void,
+): Promise<RlmSubagentDisplayEntry | undefined> {
 	let contents: string;
 	try {
 		contents = await readFile(rlmSubagentDisplayPath(sessionDir), "utf8");
 	} catch {
+		onReadError?.();
 		return undefined;
 	}
 	try {

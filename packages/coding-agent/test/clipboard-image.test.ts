@@ -12,9 +12,9 @@ const mocks = vi.hoisted(() => {
 	};
 });
 
-vi.mock("child_process", () => {
+vi.mock("../src/utils/child-process.js", () => {
 	return {
-		spawnSync: mocks.spawnSync,
+		spawnSyncHidden: mocks.spawnSync,
 	};
 });
 

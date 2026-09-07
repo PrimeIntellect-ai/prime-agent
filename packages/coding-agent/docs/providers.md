@@ -1,6 +1,6 @@
 # Providers
 
-Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Its built-in model catalog is updated with each Prime Agent release.
+Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Models for external providers are bundled with each release. Prime Inference models refresh from its `/models` endpoint, with the bundled list and a validated disk cache as fallbacks. Set `PI_OFFLINE=1` to skip network refreshes.
 
 ## Table of Contents
 

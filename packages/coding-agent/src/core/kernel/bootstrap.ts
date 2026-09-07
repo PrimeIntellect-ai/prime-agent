@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -9,6 +8,8 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../../config.js";
+import { isProcessAlive, spawnHidden } from "../../utils/child-process.js";
+import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 9;
@@ -38,6 +39,42 @@ const IS_WINDOWS = process.platform === "win32";
 const UV_INSTALL_COMMAND_POSIX = "curl -LsSf https://astral.sh/uv/install.sh | sh";
 const UV_INSTALL_COMMAND_WINDOWS =
 	'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"';
+const WINDOWS_PATHEXT_DEFAULT = [".COM", ".EXE", ".BAT", ".CMD"];
+const WINDOWS_SUPPORTED_EXECUTABLE_EXTENSIONS = new Set(
+	WINDOWS_PATHEXT_DEFAULT.map((extension) => extension.toLowerCase()),
+);
+
+export interface BatchShimInvocation {
+	args: string[];
+	env: NodeJS.ProcessEnv;
+}
+
+/** Build a cmd.exe invocation without embedding user-controlled values in its command string. */
+export function buildBatchShimInvocation(
+	command: string,
+	args: readonly string[],
+	baseEnv: NodeJS.ProcessEnv,
+	token = randomUUID().replaceAll("-", ""),
+): BatchShimInvocation {
+	if (!/^[A-Za-z0-9_]+$/.test(token)) {
+		throw new Error("Windows batch shim token contains unsupported characters");
+	}
+	const values = [command, ...args];
+	if (values.some((value) => /["\0\r\n]/.test(value))) {
+		throw new Error("Windows batch shim paths and arguments cannot contain quotes, NUL, or line breaks");
+	}
+	const env = { ...baseEnv };
+	const variables = values.map((value, index) => {
+		const name = `PRIME_AGENT_BATCH_${token}_${index}`;
+		env[name] = value;
+		return `"%${name}%"`;
+	});
+	return {
+		args: ["/d", "/v:off", "/s", "/c", `"${variables.join(" ")}"`],
+		env,
+	};
+}
+
 const REQUIRED_HARNESS_METHODS = [
 	"create_memory",
 	"update_memory",
@@ -53,7 +90,7 @@ const REQUIRED_HARNESS_METHODS = [
 	"delete_prompt_note",
 	"record_refinement",
 ];
-const RUNTIME_READY_CHECK = `import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ${JSON.stringify(REQUIRED_HARNESS_METHODS)}; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert hasattr(rlm, 'run'); assert callable(rlm); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')`;
+const RUNTIME_READY_CHECK = `import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ${JSON.stringify(REQUIRED_HARNESS_METHODS)}; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert hasattr(rlm, 'run'); assert callable(rlm); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert callable(rlm.create_session); assert callable(rlm.rlm.create_session); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')`;
 const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
@@ -86,10 +123,6 @@ interface BootstrapVersion {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-function isNodeError(error: unknown, code: string): boolean {
-	return error instanceof Error && "code" in error && error.code === code;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -343,11 +376,6 @@ export function getKernelVenvDir(): string {
 	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
 }
 
-/** Python executable path inside a venv directory, respecting Windows layout. */
-function venvPythonPath(venv: string): string {
-	return IS_WINDOWS ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
-}
-
 function getXdgKernelVenvDir(): string {
 	const dataHome = process.env.XDG_DATA_HOME
 		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
@@ -377,11 +405,19 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 	}
 }
 
+function isBatchShim(command: string): boolean {
+	return process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+}
+
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, {
-			env: process.env,
+		// CPython must read UTF-8 .pth files even under a Windows legacy code page.
+		const env = { ...process.env, ...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}) };
+		const batch = isBatchShim(command) ? buildBatchShimInvocation(command, args, env) : undefined;
+		const child = spawnHidden(batch ? (process.env.ComSpec ?? "cmd.exe") : command, batch?.args ?? args, {
+			env: batch?.env ?? env,
 			stdio: options.stdio ?? "ignore",
+			...(batch ? { windowsVerbatimArguments: true } : {}),
 		});
 		child.on("error", reject);
 		child.on("exit", (code, signal) => {
@@ -448,25 +484,6 @@ function bootstrapLockDir(venv: string): string {
 	return path.join(path.dirname(venv), `${path.basename(venv)}${BOOTSTRAP_LOCK_NAME}`);
 }
 
-function processIsRunning(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return isNodeError(error, "EPERM");
-	}
-}
-
-async function readLockPid(lockDir: string): Promise<number | null> {
-	try {
-		const raw = await readFile(path.join(lockDir, "pid"), "utf8");
-		const pid = Number.parseInt(raw.trim(), 10);
-		return Number.isInteger(pid) && pid > 0 ? pid : null;
-	} catch {
-		return null;
-	}
-}
-
 async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	try {
 		const lockStat = await stat(lockDir);
@@ -481,28 +498,43 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 	await mkdir(path.dirname(lockDir), { recursive: true });
 
 	for (;;) {
-		try {
-			await mkdir(lockDir);
-			await writeFile(path.join(lockDir, "pid"), `${process.pid}\n`, "utf8");
+		const attempt = await tryAcquireDirLock(lockDir, async (ownerPid) =>
+			ownerPid === undefined ? !(await lockMissingPidIsStale(lockDir)) : isProcessAlive(ownerPid),
+		);
+		if (attempt === "acquired") {
 			return () => rm(lockDir, { recursive: true, force: true });
-		} catch (error) {
-			if (!isNodeError(error, "EEXIST")) throw error;
-
-			const pid = await readLockPid(lockDir);
-			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
-				await rm(lockDir, { recursive: true, force: true });
-				continue;
-			}
-
+		}
+		if (attempt === "held") {
 			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
 		}
 	}
 }
 
+/** Try a bare command followed by supported PATHEXT extensions in the configured order. */
+export function windowsExecutableCandidates(name: string, pathext: string | undefined): string[] {
+	const extensions = (pathext ?? "")
+		.split(";")
+		.map((ext) => ext.trim().toLowerCase())
+		.filter((ext) => WINDOWS_SUPPORTED_EXECUTABLE_EXTENSIONS.has(ext));
+	const lowerName = name.toLowerCase();
+	if (WINDOWS_PATHEXT_DEFAULT.some((ext) => lowerName.endsWith(ext.toLowerCase()))) {
+		return [name];
+	}
+	const seen = new Set<string>([name.toLowerCase()]);
+	const candidates = [name];
+	for (const ext of extensions.length > 0 ? extensions : WINDOWS_PATHEXT_DEFAULT) {
+		const candidate = `${name}${ext}`;
+		if (seen.has(candidate.toLowerCase())) continue;
+		seen.add(candidate.toLowerCase());
+		candidates.push(candidate);
+	}
+	return candidates;
+}
+
 async function findExecutable(name: string): Promise<string | null> {
 	const pathValue = process.env.PATH;
 	if (!pathValue) return null;
-	const candidates = process.platform === "win32" ? [name, `${name}.exe`] : [name];
+	const candidates = process.platform === "win32" ? windowsExecutableCandidates(name, process.env.PATHEXT) : [name];
 	for (const dir of pathValue.split(path.delimiter)) {
 		if (!dir) continue;
 		for (const candidate of candidates) {
@@ -727,6 +759,10 @@ async function hashRuntimeSource(sourceDir: string): Promise<string> {
 	return `sha256:${hash.digest("hex")}`;
 }
 
+export function kernelVenvPython(venv: string, platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
+}
+
 async function bootstrapVenv(
 	venv: string,
 	pythonSkills: readonly BootstrapPythonSkill[],
@@ -734,7 +770,7 @@ async function bootstrapVenv(
 ): Promise<void> {
 	await mkdir(path.dirname(venv), { recursive: true });
 	const uv = await ensureUv(options);
-	const python = venvPythonPath(venv);
+	const python = kernelVenvPython(venv);
 	const sourceDir = await resolveRuntimeSourceDir();
 	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
 	const runtimeIdentity = await resolveRuntimeIdentity();
@@ -865,10 +901,15 @@ async function ensureKernelPythonUncached(
 	const override = process.env.PRIME_AGENT_KERNEL_PYTHON;
 	if (override) {
 		const python = path.resolve(expandHome(override));
+		if (isBatchShim(python)) {
+			throw new Error(
+				`PRIME_AGENT_KERNEL_PYTHON must point directly to a Python executable, not a Windows batch shim: ${python}`,
+			);
+		}
 		const missing: string[] = [];
 		if (!(await hasPrimeAgentRuntime(python))) {
 			missing.push(
-				"a current prime-agent-runtime with callable rlm.run, rlm.host_request, and explicit harness CRUD methods",
+				"a current prime-agent-runtime with callable rlm.run, rlm.create_session, rlm.host_request, and explicit harness CRUD methods",
 			);
 		}
 		if (missing.length === 0) {
@@ -891,7 +932,7 @@ async function ensureKernelPythonUncached(
 	}
 
 	const venv = await resolveWritableKernelVenvDir();
-	const python = venvPythonPath(venv);
+	const python = kernelVenvPython(venv);
 	const runtimeIdentity = await resolveRuntimeIdentity();
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 

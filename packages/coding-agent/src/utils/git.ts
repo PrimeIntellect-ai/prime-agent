@@ -1,7 +1,7 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import hostedGitInfo from "hosted-git-info";
+import { spawnSyncHidden } from "./child-process.js";
 
 /**
  * Parsed git URL information.
@@ -249,7 +249,7 @@ export function gitContextsEqual(a: GitContext, b: GitContext): boolean {
 }
 
 function runGit(cwd: string, args: string[]): string | null {
-	const result = spawnSync("git", ["--no-optional-locks", ...args], {
+	const result = spawnSyncHidden("git", ["--no-optional-locks", ...args], {
 		cwd,
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],

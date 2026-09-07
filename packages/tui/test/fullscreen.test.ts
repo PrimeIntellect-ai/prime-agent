@@ -1066,9 +1066,11 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
-	it("ignores clicked hyperlinks with non-http schemes", async () => {
+	it("opens file hyperlinks and ignores unsupported schemes", async () => {
 		const transcript = lines(20);
-		transcript[12] = "\x1b]8;;file:///etc/passwd\x1b\\secrets\x1b]8;;\x1b\\";
+		transcript[12] =
+			"\x1b]8;;file:///tmp/example%20file.txt\x1b\\file\x1b]8;;\x1b\\ " +
+			"\x1b]8;;ssh://example.com\x1b\\remote\x1b]8;;\x1b\\";
 		const { terminal, tui, chat, dock } = setup(transcript);
 		const opened: string[] = [];
 		tui.onOpenUrl = (url) => opened.push(url);
@@ -1077,8 +1079,10 @@ describe("TUI fullscreen mode", () => {
 
 		terminal.sendInput("\x1b[<0;3;1M");
 		terminal.sendInput("\x1b[<0;3;1m");
+		terminal.sendInput("\x1b[<0;7;1M");
+		terminal.sendInput("\x1b[<0;7;1m");
 		await terminal.waitForRender();
-		assert.deepStrictEqual(opened, []);
+		assert.deepStrictEqual(opened, ["file:///tmp/example%20file.txt"]);
 
 		tui.stop();
 	});

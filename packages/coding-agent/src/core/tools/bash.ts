@@ -1,12 +1,11 @@
 import { existsSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { expandCollapseHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
 import { theme } from "../../modes/interactive/theme/theme.js";
-import { waitForChildProcess } from "../../utils/child-process.js";
+import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import {
 	getShellConfig,
 	getShellEnv,
@@ -72,7 +71,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`));
 					return;
 				}
-				const child = spawn(shell, [...args, command], {
+				const child = spawnHidden(shell, [...args, command], {
 					cwd,
 					detached: process.platform !== "win32",
 					env: env ?? getShellEnv(),
@@ -301,7 +300,7 @@ export function createBashToolDefinition(
 				if (!onUpdate || !updateDirty) return;
 				updateDirty = false;
 				lastUpdateAt = Date.now();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
+				const snapshot = output.snapshot();
 				onUpdate({
 					content: [{ type: "text", text: snapshot.content || "" }],
 					details: {
@@ -346,9 +345,9 @@ export function createBashToolDefinition(
 				output.finish();
 				clearUpdateTimer();
 				emitOutputUpdate();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
+				// Snapshot only after the spill settled: the advertised path is terminal.
 				await output.closeTempFile();
-				return snapshot;
+				return output.snapshot();
 			};
 
 			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
@@ -359,13 +358,17 @@ export function createBashToolDefinition(
 					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
 					const endLine = truncation.totalLines;
+					// A degraded spill has no path; never advertise "Full output: undefined".
+					const location = snapshot.fullOutputPath ? `. Full output: ${snapshot.fullOutputPath}` : "";
 					if (truncation.lastLinePartial) {
-						const lastLineSize = formatSize(output.getLastLineBytes());
-						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}]`;
+						// The partial line is the first SHOWN line; trailing blanks can follow it.
+						const lastLineBytes = output.getLastLineBytes();
+						const lineSize = lastLineBytes > 0 ? ` (line is ${formatSize(lastLineBytes)})` : "";
+						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${startLine}${lineSize}${location}]`;
 					} else if (truncation.truncatedBy === "lines") {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}${location}]`;
 					} else {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit)${location}]`;
 					}
 				}
 				return { text, details };
