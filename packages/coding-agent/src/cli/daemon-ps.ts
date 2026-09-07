@@ -19,7 +19,12 @@ import {
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
-import { signalProcessGroupOrProcess } from "../utils/child-process.js";
+import {
+	isProcessAlive,
+	processGroupHasLiveMember,
+	processIdExists,
+	signalProcessGroupIfHeld,
+} from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
 
@@ -1061,34 +1066,47 @@ async function stopTrackedProcess(
 	expectedStartId: string | undefined,
 	assertAdmission: () => Promise<void>,
 ): Promise<boolean> {
-	if (!isProcessAlive(pid)) {
+	if (trackedProcessStopped(pid)) {
 		return true;
 	}
-	if (!expectedStartId || getProcessStartId(pid) !== expectedStartId) {
+	if (!expectedStartId || !trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
 	await assertAdmission();
-	if (getProcessStartId(pid) !== expectedStartId) {
+	if (!trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
-	signalProcessGroupOrProcess(pid, "SIGTERM");
+	signalProcessGroupIfHeld(pid, "SIGTERM");
 	let deadline = Date.now() + 500;
-	while (isProcessAlive(pid) && Date.now() < deadline) {
+	while (!trackedProcessStopped(pid) && Date.now() < deadline) {
 		await delay(25);
 	}
-	if (!isProcessAlive(pid)) {
+	if (trackedProcessStopped(pid)) {
 		return true;
 	}
 	await assertAdmission();
-	if (getProcessStartId(pid) !== expectedStartId) {
+	if (!trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
-	signalProcessGroupOrProcess(pid, "SIGKILL");
+	signalProcessGroupIfHeld(pid, "SIGKILL");
 	deadline = Date.now() + 1000;
-	while (isProcessAlive(pid) && Date.now() < deadline) {
+	while (!trackedProcessStopped(pid) && Date.now() < deadline) {
 		await delay(25);
 	}
-	return !isProcessAlive(pid);
+	return trackedProcessStopped(pid);
+}
+
+/** A GROUP stop completes when the leader is gone AND no live member remains; unreaped zombies do not block it. */
+function trackedProcessStopped(pid: number): boolean {
+	return !isProcessAlive(pid) && !processGroupHasLiveMember(pid);
+}
+
+/** Identity gates guard pid reuse, so they apply only while the leader exists; a pgid cannot be reused while members hold it. */
+function trackedLeaderIdentityCurrent(pid: number, expectedStartId: string): boolean {
+	if (!processIdExists(pid)) {
+		return true;
+	}
+	return getProcessStartId(pid) === expectedStartId;
 }
 
 export async function runReap(json: boolean, force: boolean): Promise<void> {
@@ -1217,15 +1235,6 @@ async function forceKillDaemon(pid: number): Promise<void> {
 		process.kill(pid, "SIGKILL");
 	} catch {
 		// Process already exited between the liveness check and the kill.
-	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
 	}
 }
 

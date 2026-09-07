@@ -9,6 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../../config.js";
+import { isProcessAlive } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
@@ -84,10 +85,6 @@ interface BootstrapVersion {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-function isNodeError(error: unknown, code: string): boolean {
-	return error instanceof Error && "code" in error && error.code === code;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -441,15 +438,6 @@ function bootstrapLockDir(venv: string): string {
 	return path.join(path.dirname(venv), `${path.basename(venv)}${BOOTSTRAP_LOCK_NAME}`);
 }
 
-function processIsRunning(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return isNodeError(error, "EPERM");
-	}
-}
-
 async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	try {
 		const lockStat = await stat(lockDir);
@@ -465,7 +453,7 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 
 	for (;;) {
 		const attempt = await tryAcquireDirLock(lockDir, async (ownerPid) =>
-			ownerPid === undefined ? !(await lockMissingPidIsStale(lockDir)) : processIsRunning(ownerPid),
+			ownerPid === undefined ? !(await lockMissingPidIsStale(lockDir)) : isProcessAlive(ownerPid),
 		);
 		if (attempt === "acquired") {
 			return () => rm(lockDir, { recursive: true, force: true });

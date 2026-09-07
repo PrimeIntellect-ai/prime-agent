@@ -107,6 +107,7 @@ import {
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import { isProcessAlive } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
@@ -847,7 +848,7 @@ export class AgentDaemon {
 		try {
 			for (let attempt = 0; attempt < 3 && !ownsLock; attempt++) {
 				const result = await tryAcquireDirLock(lockDirectory, (ownerPid) =>
-					ownerPid !== undefined ? this.isProcessAlive(ownerPid) : false,
+					ownerPid !== undefined ? isProcessAlive(ownerPid) : false,
 				);
 				if (result === "held") {
 					return;
@@ -895,15 +896,6 @@ export class AgentDaemon {
 				rmSync(lockDirectory, { recursive: true, force: true });
 			}
 			this.supervisorLaunchInProgress = false;
-		}
-	}
-
-	private isProcessAlive(pid: number): boolean {
-		try {
-			process.kill(pid, 0);
-			return true;
-		} catch (error) {
-			return (error as NodeJS.ErrnoException).code === "EPERM";
 		}
 	}
 
