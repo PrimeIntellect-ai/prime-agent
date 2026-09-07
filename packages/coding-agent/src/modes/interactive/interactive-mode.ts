@@ -7565,6 +7565,9 @@ export class InteractiveMode {
 		try {
 			state = await this.agentConnection.getState();
 			this.applyConnectionStateSnapshot(state);
+			// A daemon worker writes settings-file values (e.g. the context cap) in its
+			// own process; re-read so the menu shows what is on disk.
+			await this.settingsManager.reload();
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
