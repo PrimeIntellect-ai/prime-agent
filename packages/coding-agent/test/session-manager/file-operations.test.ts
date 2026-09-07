@@ -771,7 +771,7 @@ describe("session info usage totals", () => {
 						timestamp: 1,
 						usage: usage(1000, 200, 0.5),
 						// Spend from discarded empty-turn attempts rides separately.
-						discardedUsage: usage(120, 30, 0.06),
+						discardedUsage: [usage(120, 30, 0.06)],
 					},
 				} as const,
 				// On-disk original usage; the loader folds the aggregate below onto it in memory.

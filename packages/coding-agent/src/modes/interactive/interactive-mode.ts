@@ -5823,9 +5823,18 @@ export class InteractiveMode {
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
-		// Still open here = the previous attempt was discarded without message_end; drop its orphan.
-		if (this.streamingComponent) {
-			this.chatContainer.removeChild(this.streamingComponent);
+		// Still open here = the previous stream never got a message_end: a discarded
+		// empty attempt (drop it) or a real partial interrupted by a run failure
+		// (finalize in place — never delete visible output).
+		if (this.streamingComponent && this.streamingMessage) {
+			const hadVisibleOutput = this.streamingMessage.content.some(
+				(part) => part.type === "toolCall" || (part.type === "text" && part.text.trim().length > 0),
+			);
+			if (hadVisibleOutput) {
+				this.streamingComponent.updateContent(this.streamingMessage, false);
+			} else {
+				this.chatContainer.removeChild(this.streamingComponent);
+			}
 		}
 		this.streamingComponent = new AssistantMessageComponent(
 			undefined,

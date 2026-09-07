@@ -177,6 +177,31 @@ describe("InteractiveMode streaming events", () => {
 		expect(rendered).not.toContain("pondering the void");
 	});
 
+	test("an interrupted real partial stays visible when a run-failure message supersedes it", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const partial = createAssistantMessage("useful partial output");
+
+		// A listener/iterator exception emits a synthetic failure start without
+		// ending the real partial; its visible output must not be deleted.
+		await handleEvent.call(fakeThis, { type: "message_start", message: partial });
+		await handleEvent.call(fakeThis, {
+			type: "message_update",
+			message: partial,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "useful partial output", partial },
+		});
+		const failure: AssistantMessage = {
+			...createAssistantMessage(""),
+			stopReason: "error",
+			errorMessage: "listener failed",
+		};
+		await handleEvent.call(fakeThis, { type: "message_start", message: failure });
+		await handleEvent.call(fakeThis, { type: "message_end", message: failure });
+
+		expect(fakeThis.chatContainer.children).toHaveLength(2);
+		expect(renderChat(fakeThis.chatContainer)).toContain("useful partial output");
+	});
+
 	test("renders assistant end events when attaching after all updates", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;

@@ -718,8 +718,9 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 				}
 				activeRun.lastAssistant = message;
 				addUsage(activeRun.usage, message.usage);
-				if (message.discardedUsage) {
-					addUsage(activeRun.usage, message.discardedUsage);
+				// One addUsage per discarded attempt keeps modelCallCount = model requests.
+				for (const discarded of message.discardedUsage ?? []) {
+					addUsage(activeRun.usage, discarded);
 				}
 				if (activeRun.currentTurnStartedAt !== undefined) {
 					const latency = Math.max(0, now() - activeRun.currentTurnStartedAt);

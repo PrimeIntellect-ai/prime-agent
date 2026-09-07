@@ -96,6 +96,42 @@ describe("Agent", () => {
 		expect(reasoning).toBe("off");
 	});
 
+	it("carries discarded empty-turn spend onto the run-failure message when a later attempt throws", async () => {
+		let call = 0;
+		const emptyThinking = (): AssistantMessage => ({
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking: "pondering" }],
+			usage: {
+				input: 50,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 60,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.02 },
+			},
+		});
+		const agent = new Agent({
+			streamFn: () => {
+				call += 1;
+				if (call === 2) {
+					throw new Error("stream exploded");
+				}
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: emptyThinking() });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("hello");
+
+		const failure = agent.state.messages.at(-1) as AssistantMessage;
+		expect(failure.stopReason).toBe("error");
+		expect(failure.errorMessage).toContain("stream exploded");
+		expect(failure.discardedUsage).toMatchObject([{ input: 50, output: 10, cost: { total: 0.02 } }]);
+	});
+
 	it("should create an agent instance with custom initial state", () => {
 		const customModel = getModel("openai", "gpt-4o-mini");
 		const agent = new Agent({

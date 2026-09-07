@@ -215,14 +215,16 @@ describe("AgentSession goals", () => {
 		const harness = await createGoalHarness();
 		const exhausted: AssistantMessage = {
 			...fauxAssistantMessage("", { stopReason: "error", errorMessage: "Model returned an empty response" }),
-			discardedUsage: {
-				input: 30,
-				output: 12,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 42,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
-			},
+			discardedUsage: [
+				{
+					input: 30,
+					output: 12,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 42,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+				},
+			],
 		};
 		harness.setResponses([exhausted]);
 

@@ -1299,8 +1299,9 @@ function foldSessionScanLine(acc: SessionScanAccumulator, lineBuffer: Buffer): v
 	const message = (entry as SessionMessageEntry).message;
 	if (message.role === "assistant" && (message as { usage?: Usage }).usage) {
 		acc.assistantUsageById.set(entry.id, (message as { usage: Usage }).usage);
-		const discarded = (message as { discardedUsage?: Usage }).discardedUsage;
-		if (discarded) addAssistantUsage(acc.discardedAttemptUsage, discarded);
+		for (const discarded of (message as { discardedUsage?: Usage[] }).discardedUsage ?? []) {
+			addAssistantUsage(acc.discardedAttemptUsage, discarded);
+		}
 	}
 	if (!isMessageWithContent(message)) return;
 	if (message.role !== "user" && message.role !== "assistant") return;

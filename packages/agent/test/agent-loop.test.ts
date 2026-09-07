@@ -2036,10 +2036,13 @@ describe("empty assistant turn retry", () => {
 			(event) => event.type === "message_end" && event.message.role === "assistant",
 		);
 		expect(assistantEnds.length).toBe(1);
-		// Discarded attempts were still paid for: their spend rides on the
-		// surviving message separately from its own per-request usage.
+		// Discarded attempts were still paid for: their per-request spend rides on
+		// the surviving message separately from its own usage.
 		const survivor = messages.find((message) => message.role === "assistant") as AssistantMessage;
-		expect(survivor.discardedUsage).toMatchObject({ input: 210, output: 45, cost: { total: 0.03 } });
+		expect(survivor.discardedUsage).toMatchObject([
+			{ input: 100, output: 40, cost: { total: 0.02 } },
+			{ input: 110, output: 5, cost: { total: 0.01 } },
+		]);
 		expect(survivor.usage.input).toBe(0);
 	});
 

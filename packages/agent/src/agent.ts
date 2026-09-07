@@ -8,6 +8,7 @@ import {
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
+	type Usage,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
 import type {
@@ -514,6 +515,12 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
+		// The loop attaches spend of discarded empty-turn attempts to the throw
+		// so it is not erased with them (usage is truth about spend, not content).
+		const discardedUsage =
+			typeof error === "object" && error !== null
+				? (error as { discardedUsage?: Usage[] }).discardedUsage
+				: undefined;
 		const failureMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
@@ -521,6 +528,7 @@ export class Agent {
 			provider: this._state.model.provider,
 			model: this._state.model.id,
 			usage: EMPTY_USAGE,
+			...(discardedUsage ? { discardedUsage } : {}),
 			stopReason: aborted ? "aborted" : "error",
 			errorMessage: error instanceof Error ? error.message : String(error),
 			diagnostics: aborted

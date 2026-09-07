@@ -1176,6 +1176,8 @@ export class AgentSession {
 
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** Spend of assistant carriers removed from live state by auto-retry (still in the transcript). */
+	private _droppedRetryUsage: Usage = emptyUsage();
 	/** Bumped by every retry resolution; stale scheduled-continue callbacks check it before touching retry state. */
 	private _retryGeneration = 0;
 	private _retryPromise: Promise<void> | undefined = undefined;
@@ -2287,9 +2289,10 @@ export class AgentSession {
 			return false;
 		}
 		this._goalAccountedAssistantMessages.add(message);
-		const tokenDelta =
-			(failedTurn ? 0 : goalTokenDeltaForUsage(message.usage)) +
-			(message.discardedUsage ? goalTokenDeltaForUsage(message.discardedUsage) : 0);
+		const tokenDelta = (message.discardedUsage ?? []).reduce(
+			(sum, usage) => sum + goalTokenDeltaForUsage(usage),
+			failedTurn ? 0 : goalTokenDeltaForUsage(message.usage),
+		);
 		const goal = this._goalWithAccountedWallClock();
 		const nextGoal: GoalState = {
 			...goal,
@@ -10915,16 +10918,12 @@ export class AgentSession {
 						const failedTurn = assistant.stopReason === "error" || assistant.stopReason === "aborted";
 						// Failed turns are not attributed, but their discarded empty-turn
 						// attempts were paid normal-stop spend and still are.
-						let attributable: Usage | undefined;
-						if (!failedTurn) {
-							attributable = cloneUsage(assistant.usage);
-							if (assistant.discardedUsage) {
-								addAssistantUsage(attributable, assistant.discardedUsage);
-							}
-						} else if (assistant.discardedUsage) {
-							attributable = cloneUsage(assistant.discardedUsage);
+						const attributable = failedTurn ? emptyUsage() : cloneUsage(assistant.usage);
+						for (const discarded of assistant.discardedUsage ?? []) {
+							addAssistantUsage(attributable, discarded);
 						}
-						if (attributable) {
+						const hasAttributableSpend = !failedTurn || (assistant.discardedUsage?.length ?? 0) > 0;
+						if (hasAttributableSpend) {
 							// Flush before the fold: a persisted aggregate may only include
 							// completions whose childUsage is durable with or before it.
 							flushPendingChildUsageIfStale();
@@ -11429,6 +11428,13 @@ export class AgentSession {
 
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+			// The transcript keeps the dropped carrier; the live stats sum reads
+			// state.messages, so its spend must survive the retry drop.
+			const dropped = messages[messages.length - 1] as AssistantMessage;
+			addAssistantUsage(this._droppedRetryUsage, dropped.usage);
+			for (const discarded of dropped.discardedUsage ?? []) {
+				addAssistantUsage(this._droppedRetryUsage, discarded);
+			}
 			this.agent.state.messages = messages.slice(0, -1);
 		}
 
@@ -12120,18 +12126,17 @@ export class AgentSession {
 		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
 
 		let toolCalls = 0;
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
+		let totalInput = this._droppedRetryUsage.input;
+		let totalOutput = this._droppedRetryUsage.output;
+		let totalCacheRead = this._droppedRetryUsage.cacheRead;
+		let totalCacheWrite = this._droppedRetryUsage.cacheWrite;
+		let totalCost = this._droppedRetryUsage.cost.total;
 
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
 				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				for (const usage of [assistantMsg.usage, assistantMsg.discardedUsage]) {
-					if (!usage) continue;
+				for (const usage of [assistantMsg.usage, ...(assistantMsg.discardedUsage ?? [])]) {
 					totalInput += usage.input;
 					totalOutput += usage.output;
 					totalCacheRead += usage.cacheRead;

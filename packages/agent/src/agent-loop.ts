@@ -469,49 +469,37 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
-	let discardedUsage: Usage | undefined;
+	const discardedUsage: Usage[] = [];
 	for (let attempt = 1; ; attempt++) {
-		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
+		let message: AssistantMessage;
+		try {
+			message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
+		} catch (error) {
+			// The run-failure fallback owns the message this throw becomes; the
+			// paid spend of already-discarded attempts must ride along with it.
+			if (discardedUsage.length > 0 && typeof error === "object" && error !== null) {
+				(error as { discardedUsage?: Usage[] }).discardedUsage ??= discardedUsage;
+			}
+			throw error;
+		}
 		// Overflow turns must pass through untouched so compaction recovery can see them.
 		if (isEmptyAssistantTurn(message) && !isContextOverflow(message, config.model.contextWindow)) {
 			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
 				// Neither resent to the provider nor finalized (message_end is what makes a turn durable).
 				context.messages.pop();
-				discardedUsage = sumUsage(discardedUsage, message.usage);
+				discardedUsage.push(message.usage);
 				continue;
 			}
 			message.stopReason = "error";
 			message.errorMessage = `Model returned an empty response (no output content or tool calls) ${MAX_EMPTY_TURN_ATTEMPTS} times in a row`;
 		}
-		if (discardedUsage) {
+		if (discardedUsage.length > 0) {
 			// Paid spend survives the discard; context estimation reads message.usage alone.
 			message.discardedUsage = discardedUsage;
 		}
 		await emit({ type: "message_end", message });
 		return message;
 	}
-}
-
-function sumUsage(target: Usage | undefined, delta: Usage): Usage {
-	const total = target ?? {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	total.input += delta.input;
-	total.output += delta.output;
-	total.cacheRead += delta.cacheRead;
-	total.cacheWrite += delta.cacheWrite;
-	total.totalTokens += delta.totalTokens;
-	total.cost.input += delta.cost.input;
-	total.cost.output += delta.cost.output;
-	total.cost.cacheRead += delta.cost.cacheRead;
-	total.cost.cacheWrite += delta.cost.cacheWrite;
-	total.cost.total += delta.cost.total;
-	return total;
 }
 
 /** Runs one assistant stream and places the final message in context, without emitting message_end. */
