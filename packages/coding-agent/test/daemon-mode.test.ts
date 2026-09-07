@@ -49,6 +49,7 @@ import {
 } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import {
 	AgentDaemon,
 	cancelPendingExtensionUiRequests,
@@ -1796,6 +1797,14 @@ describe("daemon mode helpers", () => {
 			stale: false,
 		},
 		{
+			label: "selected provider alias precedence",
+			provider: "anthropic",
+			configuredProvider: "prime-inference",
+			runtimeKey: "parent-runtime-key",
+			envKey: "parent-env-key",
+			stale: false,
+		},
+		{
 			label: "resolved provider switch",
 			provider: "openai",
 			configuredProvider: "prime-inference",
@@ -1888,6 +1897,8 @@ describe("daemon mode helpers", () => {
 				vi.stubEnv("PRIME_API_KEY", envKey);
 				vi.stubEnv("PRIME_TEAM_ID", "parent-team");
 				vi.stubEnv("OPENAI_API_KEY", "unrelated-provider-key");
+				vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "selected-anthropic-token");
+				vi.stubEnv("ANTHROPIC_API_KEY", "lower-priority-anthropic-key");
 				vi.stubEnv("UNRELATED_SECRET", "unrelated-secret");
 				vi.stubEnv("PATH", `/parent/toolchain:${process.env.PATH}`);
 				const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
@@ -1963,6 +1974,8 @@ describe("daemon mode helpers", () => {
 				);
 				expect(createCommand?.launchEnv).toEqual({
 					PATH: process.env.PATH,
+					...(provider === "openai" ? { OPENAI_API_KEY: "unrelated-provider-key" } : {}),
+					...(provider === "anthropic" ? { ANTHROPIC_OAUTH_TOKEN: "selected-anthropic-token" } : {}),
 					...(provider === "prime-inference"
 						? {
 								...(envKey && !stale && !(runtimeKey && configuredProvider === provider)
@@ -1989,6 +2002,81 @@ describe("daemon mode helpers", () => {
 			}
 		},
 	);
+
+	it("does not prompt or guess a cleanup target after a create response timeout", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pa-root-timeout-"));
+		const socketPath = join(tempDir, "supervisor.sock");
+		const commands: Array<Record<string, unknown>> = [];
+		const server = createServer((socket) => {
+			socket.on("error", () => {});
+			socket.write(
+				`${JSON.stringify({
+					type: "daemon_hello",
+					socketPath,
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaId: DAEMON_SCHEMA_ID,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
+					clientId: "supervisor",
+					serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+				})}\n`,
+			);
+			let buffer = "";
+			socket.on("data", (chunk) => {
+				buffer += chunk.toString();
+				for (;;) {
+					const newline = buffer.indexOf("\n");
+					if (newline === -1) break;
+					const wire = JSON.parse(buffer.slice(0, newline));
+					buffer = buffer.slice(newline + 1);
+					commands.push(wire.command ?? wire);
+				}
+			});
+		});
+		const request = DaemonClient.prototype.request;
+		const requestSpy = vi.spyOn(DaemonClient.prototype, "request").mockImplementation(function (
+			this: DaemonClient,
+			command,
+			timeout,
+			options,
+		) {
+			return request.call(this, command, command.type === "create" ? 20 : timeout, options);
+		});
+		const previousSocket = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		try {
+			await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
+			const daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: vi.fn(),
+				worker: { authenticationToken: "worker-token" },
+			});
+			const parent = makeState("parent-root");
+			parent.runtime = {
+				...parent.runtime,
+				session: { model: { provider: "prime-inference", id: "parent-model" } },
+				services: { agentDir: tempDir, authStorage: AuthStorage.inMemory() },
+			} as ActiveSessionState["runtime"];
+			const host = (
+				daemon as unknown as { createSubagentRuntimeHost(state: ActiveSessionState): SubagentRuntimeHost }
+			).createSubagentRuntimeHost(parent);
+			await expect(
+				host.createRlmRootSession?.({
+					prompt: "do not run without create acknowledgement",
+					cwd: tempDir,
+					model: { provider: "prime-inference", id: "model" } as Model<Api>,
+					thinkingLevel: "off",
+				}),
+			).rejects.toThrow('response to "create"');
+			expect(commands.map((command) => command.type)).toEqual(["create"]);
+			expect(commands[0]).toMatchObject({ lifecycle: "resident" });
+		} finally {
+			requestSpy.mockRestore();
+			if (previousSocket === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSocket;
+			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
 
 	it("lists and role-addresses root siblings hosted by another worker", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {

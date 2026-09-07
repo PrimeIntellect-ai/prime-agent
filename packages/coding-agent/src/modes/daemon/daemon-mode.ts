@@ -2668,12 +2668,10 @@ export class AgentDaemon {
 					? runtimeConfig?.apiKey
 					: undefined;
 			const launchEnv = collectDaemonLaunchEnv({ PATH: process.env.PATH });
-			if (inheritsProvider) {
-				const envKey = authSource === "environment" ? findEnvKeys(options.model.provider)?.[0] : undefined;
-				if (envKey && process.env[envKey]) launchEnv[envKey] = process.env[envKey];
-				if (options.model.provider === "prime-inference" && process.env.PRIME_TEAM_ID !== undefined) {
-					launchEnv.PRIME_TEAM_ID = process.env.PRIME_TEAM_ID;
-				}
+			const envKey = authSource === "environment" ? findEnvKeys(options.model.provider)?.[0] : undefined;
+			if (envKey && process.env[envKey]) launchEnv[envKey] = process.env[envKey];
+			if (options.model.provider === "prime-inference" && process.env.PRIME_TEAM_ID !== undefined) {
+				launchEnv.PRIME_TEAM_ID = process.env.PRIME_TEAM_ID;
 			}
 			const createResponse = await client.request(
 				{
