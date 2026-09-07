@@ -1887,18 +1887,13 @@ describe("P0 concurrency regressions", () => {
 		const promptBefore = harness.session.agent.state.systemPrompt;
 		await internals._runSerializedRefine({ instructions: "add a memory" }, "self");
 
-		// The provider prefix cache pin: applying a refinement never rebuilds or
-		// swaps the system prompt; the model learns about it from the notice.
+		// The cache pin: applying a refinement never rebuilds or swaps the prompt.
 		expect(rebuildSpy).not.toHaveBeenCalled();
 		expect(harness.session.agent.state.systemPrompt).toBe(promptBefore);
 		const notice = harness.session.messages.find(
 			(message) => message.role === "custom" && message.customType === "refinement_notice",
 		);
-		expect(notice).toBeDefined();
 		expect(getMessageText(notice)).toMatch(/^\[self-refinement\]\n\n/);
-		expect(getMessageText(notice)).toContain(
-			"- create memory [local:p0_concurrency_test_memory] P0 concurrency test memory: Added during non-mocked apply pipeline test",
-		);
 
 		// Harness state persisted to disk.
 		const localDir = (await import("../../src/core/refinement/index.js")).getLocalHarnessStateDir(

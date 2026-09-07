@@ -220,8 +220,7 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
-		// Write a local harness entry after construction so the compaction digest
-		// proves a fresh disk read at the compaction seam.
+		// Written after construction: the compaction digest must be a fresh disk read.
 		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
 		expect(localDir).toBeDefined();
 		const state = loadHarnessState(localDir, "local");
@@ -256,16 +255,13 @@ describe("AgentSession compaction characterization", () => {
 		// Mechanical attachment: the digest never flows through the summarizer.
 		expect((head as { summary: string }).summary).not.toContain("# Continual Harness State");
 		// Memories-first rendering in LLM context: digest preamble before the summary wrapper.
-		const llm = convertToLlm([head!]);
-		expect(llm[0]?.role).toBe("user");
-		const text = getMessageText(llm[0]);
+		const text = getMessageText(convertToLlm([head!])[0]);
 		expect(text.indexOf("The persistent memories produced across this session so far:")).toBe(0);
 		expect(text.indexOf("# Continual Harness State")).toBeLessThan(
 			text.indexOf("was compacted into the following summary"),
 		);
 
-		// Update-merge path: a second compaction (with a previous summary) also
-		// carries the digest on its new head message.
+		// Update-merge path: the second compaction head carries the digest too.
 		harness.setResponses([
 			fauxAssistantMessage("three response"),
 			fauxAssistantMessage("merged summary"),

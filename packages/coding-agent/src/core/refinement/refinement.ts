@@ -412,12 +412,7 @@ function compactText(text: string, maxLength: number): string {
 	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
-/**
- * Digest-notation body for in-context refinement notices: the one-line trigger
- * followed by each applied edit in `action kind [scope:id] title: content` shape.
- * Rollback results carry rollback summaries and reverse edits, so they print as
- * rollbacks without special casing.
- */
+/** Notice body in digest notation: trigger line plus applied edits as `action kind [scope:id] title: content`; rollbacks print via their rollback summaries. */
 export function formatRefinementNoticeBody(result: RefinementResult): string {
 	const lines = [compactText(result.summary, DEFAULT_OVERVIEW_CONTENT_LIMIT)];
 	for (const edit of result.appliedEdits) {

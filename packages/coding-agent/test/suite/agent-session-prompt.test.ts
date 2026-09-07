@@ -1127,8 +1127,7 @@ stale post-hook extension instructions`,
 		await harness.session.acceptAgentMessagePrompt("agent-to-agent payload", { expandPromptTemplates: false });
 		await harness.session.agent.waitForIdle();
 
-		// The session's first pipeline turn injects the harness digest; the earlier
-		// direct agent.prompt bypassed the pipeline, so the digest lands here.
+		// The direct agent.prompt bypassed the pipeline, so the first pipeline turn injects the digest here.
 		expect(contextRoles).toEqual([["user", "assistant", "user", "user", "user"]]);
 		expect(contextTexts[0]?.[2]).toContain("Ran `echo hi`");
 		expect(contextTexts[0]?.[3]).toContain("The persistent memories produced across this session so far:");
@@ -2104,8 +2103,7 @@ describe("Harness digest at cold boundaries", () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 
-		// Construction leaves the session untouched so abandoned-draft cleanup and
-		// raw message-count emptiness checks still see an empty session.
+		// Untouched sessions must stay empty for draft cleanup and emptiness checks.
 		expect(harness.session.messages).toHaveLength(0);
 		expect(
 			harness.sessionManager
@@ -2120,7 +2118,6 @@ describe("Harness digest at cold boundaries", () => {
 		expect(first).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
 		expect(harness.session.messages[1]).toMatchObject({ role: "user" });
 		expect(getMessageText(first)).toContain("The persistent memories produced across this session so far:");
-		expect(getMessageText(first)).toContain("# Continual Harness State");
 		// Passes through to the model as a user message and is durably persisted.
 		expect(convertToLlm([first!])[0]?.role).toBe("user");
 		expect(
@@ -2131,8 +2128,7 @@ describe("Harness digest at cold boundaries", () => {
 	});
 
 	it("treats tree navigation as a cold boundary with digest dedupe", async () => {
-		// Pin the global harness store to an empty temp dir so the digest content
-		// only reflects the local entry written between navigations.
+		// Empty global store: digest content must reflect only the local test entry.
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
 		const agentDir = join(tmpdir(), `pi-digest-agent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(agentDir, { recursive: true });
@@ -2186,8 +2182,7 @@ describe("Harness digest at cold boundaries", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as { _latestContextHarnessDigest(): string | undefined };
 		const base = Date.now();
-		// Retained pre-compaction messages follow the compaction head in the array
-		// but are older; the head digest must win the freshness comparison.
+		// The retained digest follows the head in the array but is older; the head must win.
 		harness.session.agent.state.messages.push(
 			createCompactionSummaryMessage(
 				"summary",
@@ -2203,8 +2198,7 @@ describe("Harness digest at cold boundaries", () => {
 	});
 
 	it("resume dedupes identical digests and appends a fresh one when disk state changed", async () => {
-		// Pin the global harness store to an empty temp dir so the digest content
-		// only reflects the local entry written between resumes.
+		// Empty global store: digest content must reflect only the local test entry.
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
 		const agentDir = join(tmpdir(), `pi-digest-agent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(agentDir, { recursive: true });

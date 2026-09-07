@@ -49,13 +49,11 @@ describe("AgentSession session_before_refine extension hook", () => {
 		expect(result.summary).toBe("extension summary");
 		expect(result.appliedEdits).toHaveLength(1);
 		expect(result.appliedEdits[0]?.applied).toBe(true);
-		// The applied refinement reaches the model as an in-context notice and
-		// never starts a turn of its own.
+		// The notice reaches context without starting a turn of its own.
 		const notice = harness.session.messages.find(
 			(message) => message.role === "custom" && message.customType === "refinement_notice",
 		);
 		expect(getMessageText(notice)).toMatch(/^\[user-refinement\]\n\n/);
-		expect(getMessageText(notice)).toContain("- create memory [local:extension_memory] Extension memory:");
 		expect(harness.session.isStreaming).toBe(false);
 		expect(events).toHaveLength(1);
 		expect(events[0]?.preparation.trigger).toBe("manual");

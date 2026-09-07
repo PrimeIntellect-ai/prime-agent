@@ -122,9 +122,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		parentAgent: options.rlmParentAgent,
 	});
 
-	// Appended AFTER the trained buildRlmPrompt prefix, so the model reads when/why
-	// to delegate before matching against the concrete subagent specs delivered
-	// in-context via the harness digest — the same ordering as Claude Code's Agent tool.
+	// Appended AFTER the trained buildRlmPrompt prefix: delegation doctrine precedes the subagent specs delivered via the harness digest.
 	if ((allowRecursion ?? true) && hasIpython) {
 		const visiblePythonSkillNames = new Set(
 			getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName),

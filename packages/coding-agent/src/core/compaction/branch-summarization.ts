@@ -131,7 +131,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 			return entry.message;
 
 		case "custom_message":
-			// Harness digests are mechanical context; keep them out of summarizer input.
+			// Harness digests are regenerated at cold boundaries; never summarizer input.
 			if (entry.customType === HARNESS_DIGEST_CUSTOM_TYPE) return undefined;
 			return createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp);
 

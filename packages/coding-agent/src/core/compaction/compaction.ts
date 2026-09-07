@@ -96,8 +96,7 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 	if (entry.type === "compaction") {
 		return undefined;
 	}
-	// Harness digests are mechanical context regenerated on the new compaction
-	// head; they must not consume summarizer input or leak into the summary.
+	// Harness digests are regenerated on the new compaction head; never summarizer input.
 	if (entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
 		return undefined;
 	}

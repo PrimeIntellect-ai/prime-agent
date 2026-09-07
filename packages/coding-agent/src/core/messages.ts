@@ -443,13 +443,7 @@ export function createRefinementOutcomeMessage(
 	};
 }
 
-/**
- * Model-facing notice for an applied refinement. Unlike the refinement_outcome
- * audit entry, this passes through convertToLlm so the model sees the applied
- * edits in-context without a system-prompt rebuild. display is false because
- * the TUI already renders its refinement block from the refinement_outcome
- * message.
- */
+/** Model-facing refinement notice: passes convertToLlm (unlike the refinement_outcome audit entry); display false because the TUI renders the outcome message. */
 export function createRefinementNoticeMessage(
 	result: RefinementResult,
 	source: RefinementSource,

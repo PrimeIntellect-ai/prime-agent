@@ -6167,8 +6167,7 @@ export class AgentSession {
 						throw new DeferredSessionInputError("Agent became active before session input handoff");
 					}
 					if (this._harnessDigestPending) {
-						// First committed turn of a fresh context: the digest lands
-						// before the prompt as the first context message.
+						// First committed turn of a fresh context: digest precedes the prompt.
 						this._harnessDigestPending = false;
 						this._appendHarnessDigestIfStale();
 					}
@@ -7742,8 +7741,7 @@ export class AgentSession {
 				this._semanticEdges.finishRequest(requestId);
 			}
 			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
-			// Attached mechanically so the post-compaction head message is memories-first;
-			// the digest never flows through the summarizer LLM.
+			// Attached mechanically; the digest never flows through the summarizer LLM.
 			this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
@@ -7876,7 +7874,6 @@ export class AgentSession {
 		const pending = this._pendingRequestedRefine;
 		if (!pending) return false;
 		this._pendingRequestedRefine = undefined;
-		// Agent-callable refine.run: the notice must carry the self label.
 		void this.refine(pending, { source: "self" }).catch((error) => this._emitRefineFailed(error));
 		return true;
 	}
@@ -8266,13 +8263,7 @@ export class AgentSession {
 		});
 	}
 
-	/**
-	 * Deliver the harness digest at cold context boundaries: fresh sessions get it
-	 * as the first context message of their first committed turn (so untouched
-	 * sessions stay empty for draft cleanup and emptiness checks); non-empty
-	 * contexts (resume, tree navigation) append a fresh digest at the tail only
-	 * when the newest digest in live context no longer matches disk state.
-	 */
+	/** Cold-boundary digest delivery: empty contexts defer to the first committed turn (untouched sessions must stay empty); non-empty contexts append only when the newest in-context digest mismatches disk. */
 	private _ensureHarnessDigestContext(): void {
 		if (this.agent.state.messages.length === 0) {
 			this._harnessDigestPending = true;
@@ -8300,9 +8291,7 @@ export class AgentSession {
 	}
 
 	private _latestContextHarnessDigest(): string | undefined {
-		// Retained pre-compaction messages are presented AFTER the compaction head,
-		// so array position does not reflect recency; the newest digest is the one
-		// with the greatest timestamp among all in-context digest carriers.
+		// Retained pre-compaction messages follow the compaction head, so recency is by timestamp, not position.
 		let latest: { timestamp: number; digest: string } | undefined;
 		for (const message of this.agent.state.messages) {
 			let digest: string | undefined;
@@ -8680,9 +8669,7 @@ export class AgentSession {
 				if (!refinementAuditAppendError) throw error;
 			}
 			if (refinementAuditAppendError) throw refinementAuditAppendError.error;
-			// The system prompt intentionally stays byte-identical across refinements
-			// so the provider prefix cache survives; applied edits reach the model
-			// through this in-context notice instead.
+			// The prompt stays byte-identical so the provider prefix cache survives; the notice carries the change.
 			this._recordRefinementNotice(result, source);
 			try {
 				this._emit({ type: "refine_complete", result });
@@ -12135,8 +12122,7 @@ export class AgentSession {
 			this.agent.state.messages = sessionContext.messages;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
-			// Tree navigation rebuilds the context, so it is a cold boundary like
-			// resume: refresh the digest when the branch carries a stale or missing one.
+			// Context rebuild = cold boundary: refresh the digest like resume.
 			this._ensureHarnessDigestContext();
 			this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();
