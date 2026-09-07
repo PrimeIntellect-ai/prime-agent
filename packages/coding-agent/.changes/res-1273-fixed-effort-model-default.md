@@ -1,0 +1,1 @@
+- Fixed switching to a model with no selectable thinking levels (e.g. Kimi K3 on Moonshot) overwriting the saved thinking default with off and leaving thinking disabled after switching away; cycling effort on such a model is now a no-op.
