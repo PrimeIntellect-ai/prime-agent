@@ -57,6 +57,8 @@ checks.pid
 
 When a handle left running beyond its creating cell finishes, Prime Agent sends the agent a follow-up with its PID and exit code. The follow-up asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second completion follow-up.
 
+Awaiting the original handle in its creating cell suppresses the follow-up, even after the command finishes. If an `asyncio.as_completed` wrapper task finishes before the cell starts consuming its result, that cached-result read does not mark the handle as awaited. A completion follow-up can still arrive. Await the original handle in the creating cell to suppress it.
+
 Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
 ### 2. Subagents are native RLM calls

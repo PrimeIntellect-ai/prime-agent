@@ -805,10 +805,13 @@ class BashHandle:
             current_task = None
         if _creating_cell_waits_for(self._creating_cell_task, current_task):
             self._awaited_by_creating_cell = True
-        if self._released:
-            return self._wait().__await__()
+        wait = self._wait() if self._released else self._wait_owned()
         self._released = True
-        return self._wait_owned().__await__()
+        try:
+            return (yield from wait.__await__())
+        finally:
+            if _creating_cell_waits_for(self._creating_cell_task, current_task):
+                self._awaited_by_creating_cell = True
 
     def __repr__(self) -> str:
         state = f"exit_code={self._result.exit_code}" if self._result else "running"

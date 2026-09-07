@@ -778,6 +778,20 @@ class ReplTest(unittest.TestCase):
                 "[(await completed).output for completed in "
                 "asyncio.as_completed([bash('printf as-completed')])]"
             ),
+            "as-completed-delayed-consumer": (
+                "handle = bash('sleep 0.15; printf as-completed-delayed-consumer')\n"
+                "completed = next(iter(asyncio.as_completed([handle])))\n"
+                "await asyncio.sleep(0)\n"
+                "(await completed).output"
+            ),
+            "as-completed-finished-handle": (
+                "handle = bash('printf as-completed-finished-handle')\n"
+                "task = asyncio.ensure_future(handle)\n"
+                "await asyncio.to_thread(handle._done.wait)\n"
+                "await asyncio.sleep(0.01)\n"
+                "assert task.done()\n"
+                "(await handle).output"
+            ),
             "as-completed-nested": (
                 "[(await completed)[0].output for completed in "
                 "asyncio.as_completed([asyncio.shield(asyncio.gather(bash('printf as-completed-nested')))])]"
