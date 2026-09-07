@@ -1,1 +1,0 @@
-- Registered the per-session semantic-edge ledger with the agent-traces outbox as its own kind-tagged entry: durable upload intent at persist, an append-only byte cursor that never re-counts unchanged ledgers, startup catch-up counting, and pruning when a ledger is deleted with its session. No delivery endpoint exists yet, so pending ledgers are counted but never sent.

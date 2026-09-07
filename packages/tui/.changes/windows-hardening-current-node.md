@@ -1,0 +1,1 @@
+- Fixed raw multiline terminal paste being handled as separate key events.

@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as orphanProcessModule from "../src/core/orphan-process-journal.js";
@@ -22,7 +23,7 @@ import {
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSocketPathLease } from "../src/modes/daemon/daemon-socket.js";
-import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { DaemonSupervisor, handshakeBudgetMs } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	DaemonWorkerAuthenticationError,
 	DaemonWorkerClient,
@@ -675,6 +676,66 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(readdirSync(descriptorDir).filter((name) => name.endsWith(".json"))).toEqual([]);
 		const child = workerLaunchTestState.spawned.at(-1)?.child;
 		expect(child?.exitCode !== null || child?.signalCode !== null).toBe(true);
+	});
+
+	it("rejects an asynchronous startup gate write error without an uncaught stream error", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-gate-write-error-"));
+		supervisorRegistryDirs.add(root);
+		const gateError = Object.assign(new Error("startup gate EPIPE"), { code: "EPIPE" });
+		const gate = new Writable({
+			write(_chunk, _encoding, callback) {
+				setImmediate(() => callback(gateError));
+			},
+		});
+		const uncaughtErrors: unknown[] = [];
+		const emit = gate.emit.bind(gate);
+		// Capture the throw from a listener-less error event without crashing the test process.
+		const emitSpy = vi.spyOn(gate, "emit").mockImplementation((event, ...args) => {
+			try {
+				return emit(event, ...args);
+			} catch (error) {
+				uncaughtErrors.push(error);
+				return false;
+			}
+		});
+		const child = Object.assign(new EventEmitter(), {
+			pid: process.pid,
+			exitCode: null as number | null,
+			signalCode: null,
+			stdio: [null, null, null, gate],
+			stderr: null,
+			unref: vi.fn(),
+		});
+		gate.once("close", () => {
+			child.exitCode = 1;
+			child.emit("close", 1, null);
+		});
+		const spawn = vi.spyOn(childProcessModule, "spawnHidden").mockReturnValue(child as unknown as ChildProcess);
+		const connectWorker = vi.fn();
+		const stopWorker = vi.fn(async () => undefined);
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			defaultSessionConfig: { cwd: root, agentDir: root },
+			descriptorDir: join(root, "descriptors"),
+			socketPath: join(root, "supervisor.sock"),
+			workers: new Map(),
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+			persistWorker: vi.fn(),
+			connectWorker,
+			stopWorker,
+			log: vi.fn(),
+		}) as {
+			launchWorker(command: { type: "create" }): Promise<unknown>;
+		};
+		try {
+			await expect(supervisor.launchWorker({ type: "create" })).rejects.toBe(gateError);
+			expect(connectWorker).not.toHaveBeenCalled();
+			expect(stopWorker).toHaveBeenCalledOnce();
+			expect(uncaughtErrors).toEqual([]);
+		} finally {
+			spawn.mockRestore();
+			emitSpy.mockRestore();
+			gate.destroy();
+		}
 	});
 
 	it("fails the create with the spawn error when the worker process cannot be spawned", async () => {
@@ -1797,6 +1858,202 @@ describe("daemon worker supervisor monitoring", () => {
 		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed.jsonl")).rejects.toThrow(
 			/failed worker/,
 		);
+	});
+
+	/** A failed worker whose process identity is verifiably current (this test process). */
+	function retryableWorkerFixture(prefix: string) {
+		const root = {
+			id: `active-${prefix}`,
+			activeSessionId: `active-${prefix}`,
+			sessionId: `session-${prefix}`,
+			cwd: "/tmp",
+		} as SessionSummary;
+		const worker = {
+			descriptor: {
+				workerId: `worker-${prefix}`,
+				rootActiveSessionId: `active-${prefix}`,
+				rootSessionId: `session-${prefix}`,
+				lifecycle: "failed" as string,
+				pid: process.pid,
+				processStartId: getProcessStartId(process.pid),
+				stopRequestedAt: undefined as string | undefined,
+			},
+			client: undefined as { request: ReturnType<typeof vi.fn> } | undefined,
+			recovery: undefined as Promise<void> | undefined,
+			summaries: new Map<string, SessionSummary>(),
+			intentionalStop: false,
+			deferredRecoveryRounds: 0,
+		};
+		return { root, worker };
+	}
+
+	function retrySupervisor(worker: { descriptor: { workerId: string } }, overrides: Record<string, unknown>) {
+		return Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			clients: new Set(),
+			shuttingDown: false,
+			persistWorker: vi.fn(),
+			...overrides,
+		}) as object;
+	}
+
+	it("retries recovery on create reuse for a failed worker with a current process identity", async () => {
+		const { worker } = retryableWorkerFixture("failed-live");
+		worker.deferredRecoveryRounds = 11;
+		const recoverWorker = vi.fn(async () => {
+			worker.descriptor.lifecycle = "ready";
+		});
+		const supervisor = retrySupervisor(worker, {
+			recoverWorker,
+			isWorkerReadyForCreate: (target: typeof worker) => target.descriptor.lifecycle === "ready",
+		}) as unknown as {
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
+		};
+
+		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed-live.jsonl")).resolves.toBe(worker);
+		expect(recoverWorker).toHaveBeenCalledWith(worker);
+		expect(worker.deferredRecoveryRounds).toBe(0);
+	});
+
+	it("recovers a failed identity-current worker when a command is forwarded to it", async () => {
+		const { root, worker } = retryableWorkerFixture("failed-root");
+		const request = vi.fn(async () => ({ type: "response", command: "get_state", success: true, data: root }));
+		const recoverWorker = vi.fn(async () => {
+			worker.descriptor.lifecycle = "ready";
+			worker.client = { request };
+		});
+		const supervisor = retrySupervisor(worker, { recoverWorker }) as unknown as {
+			forwardToWorker(
+				target: typeof worker,
+				command: { type: "get_state"; activeSessionId: string },
+			): Promise<{ success: boolean; data?: SessionSummary }>;
+		};
+
+		const response = await supervisor.forwardToWorker(worker, {
+			type: "get_state",
+			activeSessionId: "active-failed-root",
+		});
+		expect(recoverWorker).toHaveBeenCalledOnce();
+		expect(response.success).toBe(true);
+		expect(response.data?.workerState).toBe("ready");
+	});
+
+	it("joins an in-flight recovery instead of failing a concurrent forwarded command", async () => {
+		const { root, worker } = retryableWorkerFixture("race");
+		const request = vi.fn(async () => ({ type: "response", command: "get_state", success: true, data: root }));
+		const release = createDeferred<void>();
+		const recoverWorker = vi.fn(() => {
+			worker.recovery = release.promise.then(() => {
+				worker.descriptor.lifecycle = "ready";
+				worker.client = { request };
+				worker.recovery = undefined;
+			});
+			return worker.recovery;
+		});
+		const supervisor = retrySupervisor(worker, { recoverWorker }) as unknown as {
+			forwardToWorker(
+				target: typeof worker,
+				command: { type: "get_state"; activeSessionId: string },
+			): Promise<{ success: boolean }>;
+		};
+
+		const first = supervisor.forwardToWorker(worker, { type: "get_state", activeSessionId: "active-race" });
+		await Promise.resolve();
+		const second = supervisor.forwardToWorker(worker, { type: "get_state", activeSessionId: "active-race" });
+		await Promise.resolve();
+		release.resolve();
+		const [firstResponse, secondResponse] = await Promise.all([first, second]);
+		expect(firstResponse.success).toBe(true);
+		expect(secondResponse.success).toBe(true);
+		expect(recoverWorker).toHaveBeenCalledOnce();
+	});
+
+	it("runs at most one recovery ladder for a single attach touch", async () => {
+		const { root, worker } = retryableWorkerFixture("double");
+		worker.summaries.set("active-double", root);
+		// Recovery exhausts and parks the same live worker failed again.
+		const recoverWorker = vi.fn(async () => {
+			worker.descriptor.lifecycle = "failed";
+		});
+		const supervisor = retrySupervisor(worker, { recoverWorker }) as unknown as {
+			attachClient(
+				client: DaemonSocketClient,
+				command: { type: "attach"; activeSessionId: string },
+			): Promise<unknown>;
+		};
+		seedSupervisorRoster(supervisor as object as Parameters<typeof seedSupervisorRoster>[0], worker);
+
+		await expect(
+			supervisor.attachClient({} as DaemonSocketClient, { type: "attach", activeSessionId: "active-double" }),
+		).rejects.toThrow("Session worker is failed");
+		expect(recoverWorker).toHaveBeenCalledOnce();
+	});
+
+	it("does not revive a stop-marked failed worker on attach", async () => {
+		const { worker } = retryableWorkerFixture("stopped");
+		worker.descriptor.stopRequestedAt = new Date().toISOString();
+		worker.intentionalStop = true;
+		const recoverWorker = vi.fn(async () => {});
+		const persistWorker = vi.fn();
+		const supervisor = retrySupervisor(worker, {
+			recoverWorker,
+			persistWorker,
+			findWorkerForClient: vi.fn(async () => {
+				throw new Error("Unknown active session: active-stopped");
+			}),
+		}) as unknown as {
+			attachClient(
+				client: DaemonSocketClient,
+				command: { type: "attach"; activeSessionId: string },
+			): Promise<unknown>;
+		};
+
+		await expect(
+			supervisor.attachClient({} as DaemonSocketClient, { type: "attach", activeSessionId: "active-stopped" }),
+		).rejects.toThrow("Unknown active session: active-stopped");
+		expect(recoverWorker).not.toHaveBeenCalled();
+		expect(persistWorker).not.toHaveBeenCalled();
+		expect(worker.intentionalStop).toBe(true);
+		expect(worker.descriptor.stopRequestedAt).toBeDefined();
+		expect(worker.descriptor.lifecycle).toBe("failed");
+	});
+
+	it("answers a descriptor-known unaddressable root session with a structured recovering error", async () => {
+		const { worker } = retryableWorkerFixture("gap");
+		worker.descriptor.lifecycle = "recovering";
+		const { worker: hexWorker } = retryableWorkerFixture("hex");
+		hexWorker.descriptor.rootActiveSessionId = "00ff77aa11bb22cc";
+		hexWorker.descriptor.rootSessionId = "0123456789abcdef";
+		hexWorker.descriptor.lifecycle = "recovering";
+		const supervisor = retrySupervisor(worker, {
+			matchWorkers: () => [],
+			refreshWorkerSummaries: vi.fn(async () => {}),
+		}) as unknown as { findWorker(selector: string): Promise<unknown> };
+		(supervisor as unknown as { workers: Map<string, unknown> }).workers.set("worker-hex", hexWorker);
+
+		await expect(supervisor.findWorker("active-gap")).rejects.toMatchObject({
+			name: "DaemonSessionRecoveringError",
+			code: "session_recovering",
+			activeSessionId: "active-gap",
+		});
+		// A stable-session-id selector still reports the ACTIVE id on the wire.
+		await expect(supervisor.findWorker("session-gap")).rejects.toMatchObject({
+			code: "session_recovering",
+			activeSessionId: "active-gap",
+		});
+		// Suffix addressing follows the roster rule: an unambiguous hex suffix of a recovering root is recovering.
+		await expect(supervisor.findWorker("77aa11bb22cc")).rejects.toMatchObject({
+			code: "session_recovering",
+			activeSessionId: "00ff77aa11bb22cc",
+		});
+		// Failed workers keep the unknown answer so clients take the create fallback that reclaims them.
+		worker.descriptor.lifecycle = "failed";
+		await expect(supervisor.findWorker("active-gap")).rejects.toThrow("Unknown active session: active-gap");
+		await expect(supervisor.findWorker("missing")).rejects.toThrow("Unknown active session: missing");
 	});
 
 	it("waits for worker recovery before reusing a saved session", async () => {
@@ -4383,5 +4640,14 @@ describe("daemon worker supervisor monitoring", () => {
 
 		await expect(supervisor.prepareUpdateRestartFenced()).rejects.toThrow(/resident-1.*recovering.*disconnected/);
 		expect(requestWorker).not.toHaveBeenCalled();
+	});
+
+	it("derives per-attempt handshake budgets from the remaining outer connect deadline", () => {
+		const now = 1_000_000;
+		expect(handshakeBudgetMs(now + 30_000, now)).toBe(30_000);
+		expect(handshakeBudgetMs(now + 2_500, now)).toBe(2_500);
+		expect(handshakeBudgetMs(now + 25, now)).toBe(25);
+		expect(() => handshakeBudgetMs(now, now)).toThrow(DaemonWorkerProbeTimeoutError);
+		expect(() => handshakeBudgetMs(now - 1, now)).toThrow(DaemonWorkerProbeTimeoutError);
 	});
 });

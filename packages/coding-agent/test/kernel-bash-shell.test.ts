@@ -16,7 +16,7 @@ vi.mock("node:fs", () => {
 const __childProcess = createRequire(import.meta.url)("child_process") as typeof import("child_process");
 vi.mock("child_process", () => ({ ...__childProcess, spawnSync: mocks.spawnSync }));
 
-import { resolveKernelBashShell } from "../src/utils/shell.js";
+import { orderWindowsBashCandidates, resolveKernelBashShell } from "../src/utils/shell.js";
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
@@ -60,3 +60,29 @@ describe("resolveKernelBashShell on win32", () => {
 		expect(mocks.existsSync).not.toHaveBeenCalled();
 	});
 });
+
+it("orderWindowsBashCandidates prefers any other bash over WSL's System32 trampoline, keeping it only as a last resort", () => {
+	const wsl = "C:\\Windows\\System32\\bash.exe";
+	const scoopGitBash = "C:\\Users\\u\\scoop\\shims\\bash.exe";
+	expect(orderWindowsBashCandidates([wsl, scoopGitBash], "C:\\Windows")).toEqual([scoopGitBash, wsl]);
+	expect(orderWindowsBashCandidates([wsl], "C:\\Windows")).toEqual([wsl]);
+	expect(orderWindowsBashCandidates([wsl, scoopGitBash], undefined)).toEqual([wsl, scoopGitBash]);
+});
+
+it.each(["C:\\Windows", "C:\\Windows\\", "C:/Windows/", "c:\\WINDOWS\\\\"])(
+	"normalizes candidate comparisons under %s without changing paths or stable order",
+	(systemRoot) => {
+		const wsl = "C:/Windows/System32/bash.exe";
+		const neighboringDirectory = "C:\\WindowsExtra\\bash.exe";
+		const scoop = "C:\\Users\\u\\scoop\\shims\\bash.exe";
+		const winget = "D:/Git/bin/bash.exe";
+		expect(orderWindowsBashCandidates([wsl, neighboringDirectory, scoop, winget], systemRoot)).toEqual([
+			neighboringDirectory,
+			scoop,
+			winget,
+			wsl,
+		]);
+		const backslashWsl = wsl.replaceAll("/", "\\");
+		expect(orderWindowsBashCandidates([backslashWsl, scoop], systemRoot)).toEqual([scoop, backslashWsl]);
+	},
+);

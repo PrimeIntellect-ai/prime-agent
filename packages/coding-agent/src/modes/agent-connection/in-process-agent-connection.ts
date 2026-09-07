@@ -15,6 +15,7 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
+import { providerRetryPolicy } from "../../core/provider-retry.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
@@ -392,6 +393,7 @@ export class InProcessAgentConnection implements AgentConnection {
 			question,
 			(event) => this.emit({ type: "side_question_event", event }),
 			previousTurns,
+			providerRetryPolicy(this.session.settingsManager),
 		);
 		this.sideQuestionRuns.set(id, run);
 		const removeRun = () => {
@@ -446,10 +448,13 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async setModel(provider: string, modelId: string): Promise<AgentConnectionModel> {
-		const availableModels = await this.session.modelRegistry.refreshAvailableModels();
-		const model = availableModels.find((candidate) => {
-			return candidate.provider === provider && candidate.id === modelId;
-		});
+		const registry = this.session.modelRegistry;
+		const availableModels = await registry.refreshAvailableModels();
+		const model =
+			availableModels.find((candidate) => candidate.provider === provider && candidate.id === modelId) ??
+			// Stale-auth providers are excluded from the available list; the lookup
+			// never mutates stale state (session.setModel owns the clear).
+			(registry.getProviderAuthStatus(provider).source === "stale" ? registry.find(provider, modelId) : undefined);
 		if (!model) {
 			throw new Error(`Model not found: ${provider}/${modelId}`);
 		}
