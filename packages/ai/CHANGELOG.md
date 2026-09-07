@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.3] - 2026-09-06
+
+- Added GPT-6 Astra to the Codex/ChatGPT OAuth catalog with its mandatory-reasoning effort levels, and bumped the Codex discovery client version to 0.153.4 so account discovery lists it (reported by endcycles and api-moose in discussion #2062).
+- Bumped the impersonated client versions: Claude Code 2.1.257 -> 2.1.261 and GitHub Copilot Chat 0.35.0 -> 0.48.1 on VS Code 1.136.1, keeping OAuth traffic accepted as a current client; the Copilot client identity now has a single owner shared by the OAuth flow and the generated catalog headers.
+
+## [0.9.2] - 2026-09-05
+
+- Fixed Claude Fable 5.x failing over Anthropic OAuth with "Claude Code 2.1.75 does not support this model" by bumping the impersonated Claude Code version to 2.1.257 ([#1962](https://github.com/PrimeIntellect-ai/prime-agent/issues/1962))
+- Refreshed the generated model catalog from live provider sources: 41 models added (including claude-fable-5.1, gemini-3.8-flash, and GLM-5.3 across providers) and 17 removed; GitHub Copilot tests now use claude-sonnet-4.6 and gpt-5.3-codex for the models Copilot dropped.
+- Refreshed the generated model catalog (1262 -> 1280 models): added GPT-6 Astra across eight providers with correct Responses routing and thinking levels, restored the Prime Inference Qwen 3.8 Max effort metadata after OpenRouter's route rename, and picked up upstream price and listing updates.
+
 ## [0.9.0] - 2026-09-01
 
 - Refreshed the model catalog from live provider catalogs (pricing updates, new and removed models); fixed OpenCode Go Qwen routes mislabeled as Anthropic and excluded private dev/ Prime Inference routes.
