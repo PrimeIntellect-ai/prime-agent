@@ -72,7 +72,7 @@ function createSession(
 		resourceLoader: createTestResourceLoader(),
 	});
 
-	return { session, sessionManager };
+	return { session, sessionManager, settingsManager };
 }
 
 function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
@@ -156,6 +156,20 @@ describe("AgentSession context limit", () => {
 			const usage = session.getContextUsage();
 			expect(usage?.contextWindow).toBe(50000);
 			expect(usage?.percent).toBe((200 / 50000) * 100);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("writes a global-scope limit to settings without creating a session override", () => {
+		const { session, sessionManager, settingsManager } = createSession();
+
+		try {
+			const status = session.setContextLimit(60000, { scope: "global" });
+			expect(status).toMatchObject({ maxContextTokens: 60000, source: "global" });
+			expect(settingsManager.getCompactionMaxContextTokens()).toEqual({ maxContextTokens: 60000, source: "global" });
+			expect(session.getContextUsage()?.contextWindow).toBe(60000);
+			expect(sessionManager.getBranch().some((entry) => entry.type === "custom")).toBe(false);
 		} finally {
 			session.dispose();
 		}

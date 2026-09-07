@@ -2399,11 +2399,13 @@ export class AgentSession {
 
 	private async _shouldStopForThresholdCompaction(context: ShouldStopAfterTurnContext): Promise<boolean> {
 		this._continueAfterThresholdCompaction = false;
+		// Snapshot the turn's final message before the check runs: bookkeeping the
+		// check appends (e.g. the clamp notice) must not defeat the assistant-last heuristic.
+		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
 		if (this._pendingRequestedCompaction === undefined && !(await this._thresholdCompactionNeeded(context))) {
 			return false;
 		}
 
-		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
 		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
 		this._continueAfterThresholdCompaction ||= lastMessage !== undefined && lastMessage.role !== "assistant";
 		return true;
@@ -8757,7 +8759,6 @@ export class AgentSession {
 		}
 
 		const settings = this._effectiveCompactionSettings();
-		this._noteClampedContextCapOnce(settings);
 		const contextWindow = this.model?.contextWindow ?? 0;
 
 		// Skip overflow check if the message came from a different model.
@@ -8810,6 +8811,10 @@ export class AgentSession {
 		}
 
 		if (!settings.enabled || assistantIsFromBeforeCompaction) return false;
+
+		// Emitted after the overflow/requested early-returns so the notice cannot
+		// displace the trailing assistant message those recovery paths inspect.
+		this._noteClampedContextCapOnce(settings);
 
 		// Case 3: Threshold - context is getting large.
 		// Use the full-session estimate so messages appended after the last successful
@@ -11848,12 +11853,19 @@ export class AgentSession {
 		};
 	}
 
-	setContextLimit(maxContextTokens: number | null): ContextLimitStatus {
+	setContextLimit(
+		maxContextTokens: number | null,
+		options: { scope?: "session" | "global" } = {},
+	): ContextLimitStatus {
 		if (maxContextTokens !== null && !(Number.isSafeInteger(maxContextTokens) && maxContextTokens > 0)) {
 			throw new Error("Context limit must be a positive integer.");
 		}
-		this.sessionManager.appendCustomEntryWithRollback(CONTEXT_LIMIT_STATE_CUSTOM_TYPE, { maxContextTokens });
-		this._sessionMaxContextTokens = maxContextTokens ?? undefined;
+		if (options.scope === "global") {
+			this.settingsManager.setCompactionMaxContextTokens(maxContextTokens ?? undefined);
+		} else {
+			this.sessionManager.appendCustomEntryWithRollback(CONTEXT_LIMIT_STATE_CUSTOM_TYPE, { maxContextTokens });
+			this._sessionMaxContextTokens = maxContextTokens ?? undefined;
+		}
 		return this.getContextLimitStatus();
 	}
 

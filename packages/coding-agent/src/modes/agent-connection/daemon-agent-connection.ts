@@ -1502,11 +1502,12 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 	}
 
-	async setContextLimit(maxContextTokens: number | null) {
+	async setContextLimit(maxContextTokens: number | null, options?: { scope?: "session" | "global" }) {
 		return this.requestData<ContextLimitStatus>({
 			type: "set_context_limit",
 			activeSessionId: this.activeSessionId,
 			maxContextTokens,
+			scope: options?.scope,
 		});
 	}
 

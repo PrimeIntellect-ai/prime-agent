@@ -21,6 +21,7 @@ type SessionWithCompactionInternals = {
 	) => Promise<void>;
 	_runAutoCompaction: (reason: "overflow" | "threshold" | "requested", willRetry: boolean) => Promise<void>;
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	_continueAfterThresholdCompaction: boolean;
 	_persistCompactionOutcome: (
 		reason: "overflow" | "threshold" | "requested",
 		outcome: "skipped" | "cancelled" | "failed",
@@ -1476,6 +1477,42 @@ describe("AgentSession compaction characterization", () => {
 		);
 		expect(spy).toHaveBeenCalledWith("threshold", false);
 		expect(clampNotices()).toHaveLength(1);
+	});
+
+	it("does not let the clamp notice defeat the assistant-last continuation heuristic", async () => {
+		const harness = await createHarness({
+			settings: {
+				compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1000, maxContextTokens: 1 },
+			},
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		const finishedAssistant = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: 1000 + 1000 + 8192 + 1000,
+			timestamp: Date.now(),
+		});
+		const messages: AgentMessage[] = [
+			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
+			finishedAssistant,
+		];
+		harness.session.agent.state.messages = messages;
+
+		const shouldStop = await internals._shouldStopAfterTurn({
+			message: finishedAssistant,
+			toolResults: [],
+			context: { systemPrompt: harness.session.systemPrompt, messages, tools: [] },
+			newMessages: [finishedAssistant],
+		});
+
+		expect(shouldStop).toBe(true);
+		expect(internals._continueAfterThresholdCompaction).toBe(false);
+		expect(
+			harness.session.agent.state.messages.filter(
+				(message) => message.role === "custom" && message.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+			),
+		).toHaveLength(1);
 	});
 
 	it("keeps the turn alive when persisting the clamp notice fails", async () => {

@@ -7608,7 +7608,11 @@ export class InteractiveMode {
 						this.footer.setAutoCompactEnabled(enabled);
 					},
 					onCompactionMaxContextTokensChange: (maxContextTokens) => {
-						this.settingsManager.setCompactionMaxContextTokens(maxContextTokens);
+						void this.agentConnection
+							.setContextLimit(maxContextTokens ?? null, { scope: "global" })
+							.catch((error) => {
+								this.showError(error instanceof Error ? error.message : String(error));
+							});
 					},
 					onIdleEvictionMinutesChange: (value) => {
 						this.settingsManager.setIdleEvictionMinutes(value);

@@ -8681,7 +8681,7 @@ describe("daemon mode helpers", () => {
 				maxContextTokens: 100000,
 			}),
 		).resolves.toMatchObject({ success: true, data: { maxContextTokens: 100000, source: "chat" } });
-		expect(setContextLimit).toHaveBeenCalledWith(100000);
+		expect(setContextLimit).toHaveBeenCalledWith(100000, { scope: undefined });
 	});
 
 	it.each([

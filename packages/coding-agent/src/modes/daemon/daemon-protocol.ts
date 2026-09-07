@@ -74,7 +74,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
 export const DAEMON_SCHEMA_REVISION = 28;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-bbd9f84b75d3";
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-e20d4f9b9c34";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -661,7 +661,13 @@ export type DaemonCommand =
 	| { id?: string; type: "get_rlm_max_depth_status"; activeSessionId: string }
 	| { id?: string; type: "set_rlm_max_depth"; activeSessionId: string; maxDepth: number; global?: boolean }
 	| { id?: string; type: "get_context_limit_status"; activeSessionId: string }
-	| { id?: string; type: "set_context_limit"; activeSessionId: string; maxContextTokens: number | null }
+	| {
+			id?: string;
+			type: "set_context_limit";
+			activeSessionId: string;
+			maxContextTokens: number | null;
+			scope?: "session" | "global";
+	  }
 	| { id?: string; type: "rename_saved_session"; activeSessionId?: string; sessionPath: string; name: string }
 	| { id?: string; type: "delete_saved_session"; activeSessionId?: string; sessionPath: string }
 	| { id?: string; type: "get_session_context"; activeSessionId: string }

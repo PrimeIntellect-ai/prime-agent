@@ -5262,7 +5262,7 @@ export class AgentDaemon {
 
 			case "set_context_limit": {
 				const state = this.getSessionState(command.activeSessionId);
-				const result = state.runtime.session.setContextLimit(command.maxContextTokens);
+				const result = state.runtime.session.setContextLimit(command.maxContextTokens, { scope: command.scope });
 				return success(command.id, "set_context_limit", result);
 			}
 

@@ -754,7 +754,10 @@ export interface AgentConnection {
 	getRlmMaxDepthStatus(): Promise<RlmMaxDepthStatus>;
 	setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }): Promise<SetRlmMaxDepthResult>;
 	getContextLimitStatus(): Promise<ContextLimitStatus>;
-	setContextLimit(maxContextTokens: number | null): Promise<ContextLimitStatus>;
+	setContextLimit(
+		maxContextTokens: number | null,
+		options?: { scope?: "session" | "global" },
+	): Promise<ContextLimitStatus>;
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;
 	deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult>;
 
