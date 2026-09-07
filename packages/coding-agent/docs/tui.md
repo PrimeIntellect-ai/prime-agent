@@ -1,4 +1,4 @@
-> Prime Agent can create TUI components. Ask it to build one for your use case.
+> Supreme Agent can create TUI components. Ask it to build one for your use case.
 
 # TUI Components
 
@@ -248,7 +248,7 @@ md.setText("Updated markdown");
 
 ### Image
 
-Prime Agent shows compact image metadata and does not emit terminal graphics for images.
+Supreme Agent shows compact image metadata and does not emit terminal graphics for images.
 
 ```typescript
 const image = new Image(
@@ -737,7 +737,7 @@ ctx.ui.setStatus("my-ext", undefined);
 
 ### Pattern 4b: Working Indicator Customization
 
-Customize the inline working indicator shown while Prime Agent is streaming a response.
+Customize the inline working indicator shown while Supreme Agent is streaming a response.
 
 ```typescript
 // Static indicator
@@ -757,7 +757,7 @@ ctx.ui.setWorkingIndicator({
 // Hide the indicator entirely
 ctx.ui.setWorkingIndicator({ frames: [] });
 
-// Restore Prime Agent's default spinner
+// Restore Supreme Agent's default spinner
 ctx.ui.setWorkingIndicator();
 ```
 

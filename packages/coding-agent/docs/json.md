@@ -1,10 +1,10 @@
 # JSON Event Stream Mode
 
 ```bash
-prime-agent --mode json "Your prompt"
+supreme-agent --mode json "Your prompt"
 ```
 
-Outputs all session events as JSON lines to stdout. Useful for integrating Prime Agent into other tools or custom UIs.
+Outputs all session events as JSON lines to stdout. Useful for integrating Supreme Agent into other tools or custom UIs.
 
 ## Event Types
 
@@ -78,5 +78,5 @@ Followed by events as they occur:
 ## Example
 
 ```bash
-prime-agent --mode json "List files" 2>/dev/null | jq -c 'select(.type == "message_end")'
+supreme-agent --mode json "List files" 2>/dev/null | jq -c 'select(.type == "message_end")'
 ```

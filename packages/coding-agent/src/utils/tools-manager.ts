@@ -298,7 +298,7 @@ export function formatMissingRipgrepMessage(result: ToolUnavailableResult): stri
 			reason = "Automatic installation was skipped because PI_OFFLINE is enabled.";
 			break;
 		case "manual_install_required":
-			reason = "Prime Agent cannot install this helper automatically in Termux.";
+			reason = "Supreme Agent cannot install this helper automatically in Termux.";
 			break;
 		case "unsupported_platform":
 			reason = `Automatic installation is unavailable for ${result.platform}/${result.architecture}.`;
@@ -306,14 +306,14 @@ export function formatMissingRipgrepMessage(result: ToolUnavailableResult): stri
 		case "download_failed": {
 			const detail = result.detail?.replace(/\s+/g, " ").trim();
 			reason = detail
-				? `Prime Agent could not install it automatically: ${detail}`
-				: "Prime Agent could not install it automatically.";
+				? `Supreme Agent could not install it automatically: ${detail}`
+				: "Supreme Agent could not install it automatically.";
 			break;
 		}
 	}
 
 	return [
-		"ripgrep (rg) is an optional search helper. Without it, model-run file searches may be slower or fail; Prime Agent and subagents remain available.",
+		"ripgrep (rg) is an optional search helper. Without it, model-run file searches may be slower or fail; Supreme Agent and subagents remain available.",
 		reason,
 		getRipgrepInstallHint(result.platform),
 	].join("\n");

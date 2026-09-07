@@ -4,6 +4,7 @@
 
 import chalk from "chalk";
 import {
+	copyFileSync,
 	type Dirent,
 	existsSync,
 	mkdirSync,
@@ -15,6 +16,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "fs";
+import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir, getSessionsDir } from "./config.js";
 import { migrateKeybindingsConfig } from "./core/keybindings.js";
@@ -182,7 +184,7 @@ function isLegacySessionDirName(name: string): boolean {
 /**
  * Migrate legacy per-cwd session directories into the flat session root.
  *
- * Older versions stored sessions under ~/.prime/agent/sessions/--cwd--/*.jsonl.
+ * Older versions stored sessions under ~/.supreme/agent/sessions/--cwd--/*.jsonl.
  * The daemon list/continue paths now scan the flat session root, so move any
  * existing nested JSONL session files up one level.
  */
@@ -440,10 +442,54 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
  *
  * @returns Object with migration results and deprecation warnings
  */
+
+/**
+ * Migrate user data from ~/.supreme/agent to ~/.supreme/agent.
+ *
+ * This runs once on startup when the new ~/.supreme/agent directory does not
+ * yet exist, but the legacy ~/.supreme/agent directory does. All files are
+ * copied so auth, sessions, settings, and extensions survive the rebrand.
+ */
+export function migratePrimeToSupremeDir(
+	legacyDir: string = join(homedir(), ".prime", "agent"),
+	newDir: string = getAgentDir(),
+): void {
+	if (!existsSync(legacyDir)) return;
+	if (existsSync(newDir)) return;
+
+	try {
+		mkdirSync(dirname(newDir), { recursive: true });
+		copyRecursiveSync(legacyDir, newDir);
+	} catch {
+		// Best-effort migration; if it fails, the user still has .supreme/agent
+		// and can manually copy or set PRIME_AGENT_CODING_AGENT_DIR.
+	}
+}
+
+function copyRecursiveSync(src: string, dst: string): void {
+	const entries = readdirSync(src, { withFileTypes: true });
+	mkdirSync(dst, { recursive: true });
+	for (const entry of entries) {
+		const srcPath = join(src, entry.name);
+		const dstPath = join(dst, entry.name);
+		if (entry.isDirectory()) {
+			copyRecursiveSync(srcPath, dstPath);
+		} else {
+			copyFileSync(srcPath, dstPath);
+			try {
+				writeFileSync(dstPath, readFileSync(srcPath), { mode: statSync(srcPath).mode & 0o777 });
+			} catch {
+				// Keep the copied file when metadata cannot be read.
+			}
+		}
+	}
+}
+
 export function runMigrations(cwd: string): {
 	migratedAuthProviders: string[];
 	deprecationWarnings: string[];
 } {
+	migratePrimeToSupremeDir();
 	const migratedAuthProviders = migrateAuthToAuthJson();
 	migrateSessionsFromAgentRoot();
 	migrateLegacySessionDirsToSessionRoot();

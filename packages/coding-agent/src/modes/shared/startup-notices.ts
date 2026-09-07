@@ -14,7 +14,7 @@ import { checkForNewPiVersion } from "../../utils/version-check.js";
 import { theme } from "../interactive/theme/theme.js";
 
 export interface StartupNotices {
-	/** Newer Prime Agent version available, if any. */
+	/** Newer Supreme Agent version available, if any. */
 	newVersion?: string;
 	/** Display names of extensions with available updates. */
 	packageUpdates: string[];

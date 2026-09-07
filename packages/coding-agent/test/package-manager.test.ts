@@ -430,7 +430,7 @@ Content`,
 		});
 
 		it("should not apply parent .gitignore to .pi auto-discovery", async () => {
-			writeFileSync(join(tempDir, ".gitignore"), ".prime/agent\n");
+			writeFileSync(join(tempDir, ".gitignore"), ".supreme/agent\n");
 
 			const skillDir = join(tempDir, ".prime", "agent", "skills", "auto-skill");
 			mkdirSync(skillDir, { recursive: true });

@@ -73,7 +73,7 @@ export class DaemonSocketClosedError extends Error {
 		const reasonDetails = daemonClosingReason ? ` Reason: ${daemonClosingReason}.` : "";
 		const causeDetails = cause ? ` Cause: ${cause}.` : "";
 		super(
-			`Connection to the Prime Agent daemon closed.${reasonDetails}${causeDetails} ${daemonEndpointDetails(socketPath)}`,
+			`Connection to the Supreme Agent daemon closed.${reasonDetails}${causeDetails} ${daemonEndpointDetails(socketPath)}`,
 		);
 		this.name = "DaemonSocketClosedError";
 	}
@@ -87,8 +87,8 @@ export class DaemonCapabilityUnavailableError extends Error {
 	) {
 		super(
 			capability
-				? `The running Prime Agent daemon does not support ${capability}.`
-				: `The running Prime Agent daemon does not support ${command}.`,
+				? `The running Supreme Agent daemon does not support ${capability}.`
+				: `The running Supreme Agent daemon does not support ${command}.`,
 		);
 		this.name = "DaemonCapabilityUnavailableError";
 	}
@@ -186,7 +186,7 @@ export class DaemonClient {
 		}
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
-				`Cannot wait for the Prime Agent daemon handshake because the daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
+				`Cannot wait for the Supreme Agent daemon handshake because the daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
 		return new Promise<DaemonHello>((resolve, reject) => {
@@ -197,7 +197,7 @@ export class DaemonClient {
 					this.helloWaiters.delete(waiter);
 					reject(
 						new Error(
-							`Timed out after ${timeoutMs}ms waiting for the Prime Agent daemon handshake. ${daemonEndpointDetails(this.socketPath)}`,
+							`Timed out after ${timeoutMs}ms waiting for the Supreme Agent daemon handshake. ${daemonEndpointDetails(this.socketPath)}`,
 						),
 					);
 				}, timeoutMs),
@@ -208,7 +208,7 @@ export class DaemonClient {
 
 	async connect(timeoutMs = 3000): Promise<void> {
 		if (this.socket) {
-			throw new Error(`Prime Agent daemon client is already connected. ${daemonEndpointDetails(this.socketPath)}`);
+			throw new Error(`Supreme Agent daemon client is already connected. ${daemonEndpointDetails(this.socketPath)}`);
 		}
 		this.helloMessage = undefined;
 		this.daemonClosingReason = undefined;
@@ -223,7 +223,7 @@ export class DaemonClient {
 				socket.destroy();
 				reject(
 					new Error(
-						`Timed out after ${timeoutMs}ms connecting to the Prime Agent daemon. ${daemonEndpointDetails(this.socketPath)}`,
+						`Timed out after ${timeoutMs}ms connecting to the Supreme Agent daemon. ${daemonEndpointDetails(this.socketPath)}`,
 					),
 				);
 			}, timeoutMs);
@@ -241,7 +241,7 @@ export class DaemonClient {
 				this.clearSocketReference(socket);
 				reject(
 					new Error(
-						`Failed to connect to the Prime Agent daemon: ${error.message}. ${daemonEndpointDetails(this.socketPath)}`,
+						`Failed to connect to the Supreme Agent daemon: ${error.message}. ${daemonEndpointDetails(this.socketPath)}`,
 					),
 				);
 			};
@@ -337,7 +337,7 @@ export class DaemonClient {
 	): Promise<DaemonResponse> {
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
-				`Cannot send daemon command "${command.type}" because the Prime Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
+				`Cannot send daemon command "${command.type}" because the Supreme Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
 		const hello = this.helloMessage ?? (await this.waitForHello());
@@ -379,7 +379,7 @@ export class DaemonClient {
 	): Promise<DaemonResponse> {
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
-				`Cannot send daemon command "${command.type}" because the Prime Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
+				`Cannot send daemon command "${command.type}" because the Supreme Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
 
@@ -428,7 +428,7 @@ export class DaemonClient {
 			this.pendingRequests.delete(id);
 			pending.reject(
 				new Error(
-					`Timed out after ${pending.timeoutMs}ms waiting for the Prime Agent daemon response to "${pending.commandType}". ${daemonEndpointDetails(this.socketPath)}`,
+					`Timed out after ${pending.timeoutMs}ms waiting for the Supreme Agent daemon response to "${pending.commandType}". ${daemonEndpointDetails(this.socketPath)}`,
 				),
 			);
 		}, pending.timeoutMs);
@@ -441,7 +441,7 @@ export class DaemonClient {
 		this.detachReader = undefined;
 		this.rejectAll(
 			new Error(
-				`Prime Agent daemon client closed before the operation completed. ${daemonEndpointDetails(this.socketPath)}`,
+				`Supreme Agent daemon client closed before the operation completed. ${daemonEndpointDetails(this.socketPath)}`,
 			),
 		);
 		this.socket?.end();

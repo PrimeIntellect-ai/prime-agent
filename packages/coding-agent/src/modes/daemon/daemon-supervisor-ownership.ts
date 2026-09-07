@@ -309,13 +309,13 @@ class DaemonShutdownAdmission {
  * per-invocation agent dir.
  */
 function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
-	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? join(homedir(), ".prime", "supervisor-owners");
+	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? join(homedir(), ".supreme", "supervisor-owners");
 }
 
 /** Read-only legacy registry location, disabled when the registry is overridden. */
 /**
  * Pre-move registry location under $TMPDIR, consulted READ-ONLY while daemons
- * from before the ~/.prime move may still be running; gated off whenever the
+ * from before the ~/.supreme move may still be running (legacy ~/.prime); gated off whenever the
  * registry is overridden. Remove after one release.
  */
 function legacyDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string | undefined {

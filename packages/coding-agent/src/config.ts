@@ -494,14 +494,17 @@ const envPrefix =
 		.replace(/^_+|_+$/g, "") || "PI";
 export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
 export const APP_NAME: string = piConfigName || "pi";
-export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
-export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".prime/agent";
+export const APP_TITLE: string = "Supreme Agent";
+export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".supreme/agent";
 export const VERSION: string = pkg.version || "0.0.0";
 
 // e.g., PI_CODING_AGENT_DIR or PRIME_AGENT_CODING_AGENT_DIR
 export const ENV_AGENT_DIR = `${envPrefix}_CODING_AGENT_DIR`;
 export const ENV_SESSION_DIR = `${envPrefix}_SESSION_DIR`;
 export const ENV_LEGACY_SESSION_DIR = `${envPrefix}_CODING_AGENT_SESSION_DIR`;
+export const ENV_AGENT_DIR_LEGACY = "PRIME_AGENT_CODING_AGENT_DIR";
+export const ENV_SESSION_DIR_LEGACY = "PRIME_AGENT_SESSION_DIR";
+export const ENV_LEGACY_SESSION_DIR_LEGACY = "PRIME_AGENT_CODING_AGENT_SESSION_DIR";
 
 export function expandTildePath(path: string, platform: NodeJS.Platform = process.platform): string {
 	if (path === "~") return homedir();
@@ -520,12 +523,12 @@ export function getShareViewerUrl(gistId: string): string {
 }
 
 // =============================================================================
-// User Config Paths (~/.prime/agent/*)
+// User Config Paths (~/.supreme/agent/*)
 // =============================================================================
 
-/** Get the agent config directory (e.g., ~/.prime/agent/) */
+/** Get the agent config directory (e.g., ~/.supreme/agent/) */
 export function getAgentDir(): string {
-	const envDir = process.env[ENV_AGENT_DIR];
+	const envDir = process.env[ENV_AGENT_DIR] ?? process.env[ENV_AGENT_DIR_LEGACY];
 	if (envDir) {
 		return expandTildePath(envDir);
 	}
@@ -537,7 +540,7 @@ export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
-/** Directory where daemon and client diagnostic logs are written (e.g. ~/.prime/agent/logs/). */
+/** Directory where daemon and client diagnostic logs are written (e.g. ~/.supreme/agent/logs/). */
 export function getLogsDir(): string {
 	return join(getAgentDir(), "logs");
 }
@@ -628,7 +631,11 @@ export function getSessionsDir(agentDir: string = getAgentDir()): string {
 }
 
 export function getSessionDirEnvOverride(): string | undefined {
-	const envDir = process.env[ENV_SESSION_DIR] ?? process.env[ENV_LEGACY_SESSION_DIR];
+	const envDir =
+		process.env[ENV_SESSION_DIR] ??
+		process.env[ENV_SESSION_DIR_LEGACY] ??
+		process.env[ENV_LEGACY_SESSION_DIR] ??
+		process.env[ENV_LEGACY_SESSION_DIR_LEGACY];
 	return envDir ? expandTildePath(envDir) : undefined;
 }
 

@@ -2,13 +2,13 @@
 
 Delegate tasks to specialized subprocess agents with isolated context windows.
 
-Prime Agent also provides native recursive delegation through `rlm.spawn()`.
-This extension is a separate example for users who want
+Supreme Agent also provides native recursive delegation through `rlm.call()` and
+`rlm.run_async()`. This extension is a separate example for users who want
 file-defined agent profiles and explicit single, parallel, or chained workflows.
 
 ## Features
 
-- **Isolated context**: Each subagent runs in a separate Prime Agent process
+- **Isolated context**: Each subagent runs in a separate Supreme Agent process
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
@@ -39,30 +39,30 @@ From the repository root, symlink the files:
 
 ```bash
 # Symlink the extension (must be in a subdirectory with index.ts)
-mkdir -p ~/.prime/agent/extensions/subagent
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.prime/agent/extensions/subagent/index.ts
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.prime/agent/extensions/subagent/agents.ts
+mkdir -p ~/.supreme/agent/extensions/subagent
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.supreme/agent/extensions/subagent/index.ts
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.supreme/agent/extensions/subagent/agents.ts
 
 # Symlink agents
-mkdir -p ~/.prime/agent/agents
+mkdir -p ~/.supreme/agent/agents
 for f in packages/coding-agent/examples/extensions/subagent/agents/*.md; do
-  ln -sf "$(pwd)/$f" ~/.prime/agent/agents/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.supreme/agent/agents/$(basename "$f")
 done
 
 # Symlink workflow prompts
-mkdir -p ~/.prime/agent/prompts
+mkdir -p ~/.supreme/agent/prompts
 for f in packages/coding-agent/examples/extensions/subagent/prompts/*.md; do
-  ln -sf "$(pwd)/$f" ~/.prime/agent/prompts/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.supreme/agent/prompts/$(basename "$f")
 done
 ```
 
 ## Security Model
 
-This tool executes a separate Prime Agent subprocess with a delegated system prompt and tool/model configuration.
+This tool executes a separate Supreme Agent subprocess with a delegated system prompt and tool/model configuration.
 
-**Project-local agents** (`.prime/agent/agents/*.md`) are repo-controlled prompts that can instruct the model to run IPython, shell commands, and other tools.
+**Project-local agents** (`.supreme/agent/agents/*.md`) are repo-controlled prompts that can instruct the model to run IPython, shell commands, and other tools.
 
-**Default behavior:** Only loads **user-level agents** from `~/.prime/agent/agents`.
+**Default behavior:** Only loads **user-level agents** from `~/.supreme/agent/agents`.
 
 To enable project-local agents, pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
 
@@ -139,8 +139,8 @@ System prompt for the agent goes here.
 ```
 
 **Locations:**
-- `~/.prime/agent/agents/*.md` - User-level (always loaded)
-- `.prime/agent/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
+- `~/.supreme/agent/agents/*.md` - User-level (always loaded)
+- `.supreme/agent/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 

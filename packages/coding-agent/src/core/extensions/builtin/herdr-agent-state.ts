@@ -3,7 +3,7 @@
  *
  * Reports agent lifecycle state (working/idle/blocked) to the Herdr terminal
  * workspace manager via its Unix socket. This is the in-tree equivalent of
- * the extension that `herdr integration install pi` writes, so Prime Agent
+ * the extension that `herdr integration install pi` writes, so Supreme Agent
  * works inside Herdr panes out of the box without a manual install step.
  *
  * Unlike the file-based integration (re-evaluated per session load by jiti),

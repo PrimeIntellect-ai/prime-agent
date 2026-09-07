@@ -1,6 +1,6 @@
 # RLM Programming Model
 
-Prime Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; the Python REPL is the model-facing programming surface.
+Supreme Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; the Python REPL is the model-facing programming surface.
 
 ## RLM Loop
 
@@ -11,7 +11,7 @@ flowchart LR
     kernel["Persistent Python kernel"]
     data["Files · data · shell commands"]
     skills["Python-backed skills"]
-    children["rlm.spawn(...) child agents"]
+    children["rlm(...) child agents"]
     answer["Answer or next turn"]
 
     task --> parent
@@ -55,18 +55,18 @@ checks = bash("npm test")
 checks.pid
 ```
 
-When an unawaited handle's process group finishes, Prime Agent sends a "Background command finished" notice with its PID and foreground exit code. A busy agent receives it as steering at the next safe turn boundary, without interrupting a running tool. An idle agent resumes to handle it. `await handle` and `handle.poll()` still return the foreground result before shell background jobs finish. The kernel stays resident until the process group is reaped, including for handles awaited in their creating cell. The message asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second notice.
+When an unawaited handle's process group finishes, Supreme Agent sends a "Background command finished" notice with its PID and foreground exit code. A busy agent receives it as steering at the next safe turn boundary, without interrupting a running tool. An idle agent resumes to handle it. `await handle` and `handle.poll()` still return the foreground result before shell background jobs finish. The kernel stays resident until the process group is reaped, including for handles awaited in their creating cell. The message asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second notice.
 
 Reading the finished result withdraws the notice. Any read from a live cell counts -- `await handle`, `handle.poll()`, `handle.output()`, `handle.tail()` -- so a notice that is still queued is dropped and a notice that was not sent yet is never sent. Reads that no cell receives do not count: a detached watcher polling the handle between turns leaves the notice in place, because that notice is the only wake-up an idle session gets, and an `asyncio.as_completed` or `create_task` wrapper that resolves with no live cell waiting for it does not count either. A notice the agent already received is never retracted.
 
-Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
+Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Supreme Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
 ### 2. Subagents are native RLM calls
 
-The `rlm` object is preloaded in the kernel. Spawn a child with `rlm.spawn`, which requires a `name`:
+The `rlm` object is preloaded in the kernel. Spawn a child with `rlm`, which requires a `name`:
 
 ```python
-handle = await rlm.spawn("Review the authentication flow for security issues", name="auth-reviewer")
+handle = await rlm("Review the authentication flow for security issues", name="auth-reviewer")
 print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 ```
 
@@ -75,12 +75,12 @@ The call returns immediately after task admission with a child handle; it never 
 Spawn independent children in separate calls and end the turn instead of awaiting completion:
 
 ```python
-api_review = await rlm.spawn("Review the public API", name="api-reviewer")
-test_review = await rlm.spawn("Review the test coverage", name="test-reviewer")
-integration_audit = await rlm.spawn("Run the slow integration audit", name="integration-audit")
+api_review = await rlm("Review the public API", name="api-reviewer")
+test_review = await rlm("Review the test coverage", name="test-reviewer")
+integration_audit = await rlm("Run the slow integration audit", name="integration-audit")
 ```
 
-Results arrive only through explicit `agent_message` replies or files, never as an `rlm.spawn()` return value. Children reply when an answer is needed:
+Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. Children reply when an answer is needed:
 
 ```python
 await agent_message.send(message, receiver_role="parent")
@@ -118,7 +118,7 @@ The default recursion depth allows a root agent to create children. Raising the 
 
 ### 3. Skills add programmatic capability
 
-Prime Agent supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Prime Agent installs into the kernel environment and exposes by import name.
+Supreme Agent supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Supreme Agent installs into the kernel environment and exposes by import name.
 
 For a skill named `release-audit`, the model can call:
 
@@ -126,7 +126,7 @@ For a skill named `release-audit`, the model can call:
 report = await release_audit(repository=".", target_version="0.4.0")
 ```
 
-This makes Python-backed skills a superset of instruction-only skills: they can provide guidance, scripts, references, dependencies, typed callables, and optional shell commands. They may also call `rlm.spawn(...)` themselves when a capability needs recursive delegation.
+This makes Python-backed skills a superset of instruction-only skills: they can provide guidance, scripts, references, dependencies, typed callables, and optional shell commands. They may also call `rlm(...)` themselves when a capability needs recursive delegation.
 
 Only skill metadata is placed in the startup prompt. The agent loads the full `SKILL.md` when the task matches, then inspects and calls the documented Python API. See [Skills](skills.md) for discovery, packaging, and the built-in skill-creation workflow.
 

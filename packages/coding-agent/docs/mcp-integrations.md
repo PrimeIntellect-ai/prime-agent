@@ -1,9 +1,9 @@
 # MCP Integrations
 
-Connect external services (Linear, Notion, …) to Prime Agent over the
+Connect external services (Linear, Notion, …) to Supreme Agent over the
 [Model Context Protocol](https://modelcontextprotocol.io).
 
-Consistent with Prime Agent's single-tool design, MCP integrations are **not**
+Consistent with Supreme Agent's single-tool design, MCP integrations are **not**
 exposed as new agent tools. Each integration is a [Python-backed skill](skills.md)
 that the model imports and calls from the Python kernel:
 
@@ -39,7 +39,7 @@ Built-in integrations (Linear, Notion) ship **disabled**. Logging in enables the
 - `/mcp` lists integrations and connection status; `/mcp logout <name>`
   disconnects.
 
-Credentials are stored once in `~/.prime/agent/auth.json` under `mcp:<name>`.
+Credentials are stored once in `~/.supreme/agent/auth.json` under `mcp:<name>`.
 Enablement is derived from whether valid credentials exist — there is no separate
 on/off switch.
 
@@ -73,20 +73,20 @@ result = await linear.list_issues(team="Engineering")
 ## Generic MCP servers
 
 Manage generic servers from either the shell (which exits without starting an
-agent) or the TUI. Both surfaces update only `~/.prime/agent/settings.json`:
+agent) or the TUI. Both surfaces update only `~/.supreme/agent/settings.json`:
 
 ```bash
-prime-agent mcp add remote --url https://mcp.example.com/mcp --bearer-token-env-var EXAMPLE_TOKEN
-prime-agent mcp add local --cwd /absolute/path --env TOKEN=EXAMPLE_TOKEN -- node server.js --stdio
-prime-agent mcp list
-prime-agent mcp get remote
-prime-agent mcp remove remote
+supreme-agent mcp add remote --url https://mcp.example.com/mcp --bearer-token-env-var EXAMPLE_TOKEN
+supreme-agent mcp add local --cwd /absolute/path --env TOKEN=EXAMPLE_TOKEN -- node server.js --stdio
+supreme-agent mcp list
+supreme-agent mcp get remote
+supreme-agent mcp remove remote
 ```
 
 Use the same forms after `/mcp` in the TUI. Add `--oauth` for the existing OAuth
 login flow and then use `/mcp login <name>`; use `--force` to replace a complete
 existing entry. Static secret values are not accepted: bearer and stdio secrets
-are environment-variable references. Project `.prime/agent/settings.json` MCP
+are environment-variable references. Project `.supreme/agent/settings.json` MCP
 entries are ignored for execution, so a repository cannot start a local process
 or shadow a user server.
 
@@ -174,7 +174,7 @@ activate the integration.
 ## Caveats
 
 - Discover before assuming tool names or argument schemas.
-- Generic MCP connections are kernel-local. Separate Prime Agent sessions use
+- Generic MCP connections are kernel-local. Separate Supreme Agent sessions use
   separate connections even when they reference the same user setting.
 - A custom `PRIME_AGENT_KERNEL_PYTHON` must include the current
   `prime-agent-runtime` dependencies.

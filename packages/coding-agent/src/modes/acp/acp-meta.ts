@@ -86,7 +86,7 @@ export interface PrimeAgentCwdMeta {
  * whichever prompt happens to be running when an update is delivered. `0`
  * means a session-scoped event with no prompt origin (for example a heartbeat
  * change before the first prompt). `eventSequence` is connection-wide and
- * strictly increases for every update Prime Agent publishes.
+ * strictly increases for every update Supreme Agent publishes.
  */
 export type PrimeAgentEventPhase = "event" | "responseBoundary" | "terminalQuiescence";
 

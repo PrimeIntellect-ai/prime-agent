@@ -4,7 +4,7 @@ import { manifestPathIn, snapshotPathIn } from "../src/core/kernel/state-snapsho
 
 describe("kernel state snapshot paths", () => {
 	it("places snapshot + manifest inside the session artifact directory", () => {
-		const artifactDir = "/home/u/.prime/agent/session-artifacts/abc-123";
+		const artifactDir = "/home/u/.supreme/agent/session-artifacts/abc-123";
 		expect(snapshotPathIn(artifactDir)).toBe(join(artifactDir, "kernel-state.dill"));
 		expect(manifestPathIn(artifactDir)).toBe(join(artifactDir, "kernel-state.json"));
 	});

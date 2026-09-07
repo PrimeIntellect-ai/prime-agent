@@ -1,6 +1,6 @@
 # SDK Examples
 
-Programmatic usage of the Prime Agent SDK via `createAgentSession()` and `createAgentSessionRuntime()`.
+Programmatic usage of the Supreme Agent SDK via `createAgentSession()` and `createAgentSessionRuntime()`.
 
 The published TypeScript packages still use inherited `@earendil-works/pi-*`
 identifiers. Those identifiers are API names, not a dependency on the upstream
@@ -115,7 +115,7 @@ await session.prompt("Hello");
 | `authStorage` | `AuthStorage.create()` | Credential storage |
 | `modelRegistry` | `ModelRegistry.create(authStorage)` | Model registry |
 | `cwd` | `process.cwd()` | Working directory |
-| `agentDir` | `~/.prime/agent` | Config directory |
+| `agentDir` | `~/.supreme/agent` | Config directory |
 | `model` | From settings/first available | Model to use |
 | `thinkingLevel` | From settings/"off" | off, low, medium, high |
 | `tools` | `["ipython"]` | Built-in tools |

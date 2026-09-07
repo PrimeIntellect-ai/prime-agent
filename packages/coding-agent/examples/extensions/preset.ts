@@ -6,8 +6,8 @@
  * and can be activated via CLI flag, /preset command, or Ctrl+Shift+U to cycle.
  *
  * Config files (merged, project takes precedence):
- * - ~/.prime/agent/presets.json (global)
- * - <cwd>/.prime/agent/presets.json (project-local)
+ * - ~/.supreme/agent/presets.json (global)
+ * - <cwd>/.supreme/agent/presets.json (project-local)
  *
  * Example presets.json:
  * ```json
@@ -200,7 +200,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		const presetNames = Object.keys(presets);
 
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.prime/agent/presets.json", "warning");
+			ctx.ui.notify("No presets defined. Add presets to ~/.supreme/agent/presets.json", "warning");
 			return;
 		}
 
@@ -308,7 +308,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 	async function cyclePreset(ctx: ExtensionContext): Promise<void> {
 		const presetNames = getPresetOrder();
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.prime/agent/presets.json", "warning");
+			ctx.ui.notify("No presets defined. Add presets to ~/.supreme/agent/presets.json", "warning");
 			return;
 		}
 

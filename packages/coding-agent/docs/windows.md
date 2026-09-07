@@ -2,7 +2,7 @@
 
 Supreme Agent supports native Windows development and runtime use. The tested path uses Windows 10/11, Node.js 22.8.0 or newer, npm, and Git for Windows.
 
-In this fork, `supreme` and `supreme-agent` are the primary CLI names. `prime-agent` and `pi` remain compatibility aliases.
+In this fork, `supreme` and `supreme-agent` are the primary CLI names. `supreme-agent` and `pi` remain compatibility aliases.
 
 ## Requirements
 
@@ -11,9 +11,9 @@ In this fork, `supreme` and `supreme-agent` are the primary CLI names. `prime-ag
 - Git for Windows, which provides Git Bash
 - Internet access on the first kernel bootstrap so `uv` can install Python and runtime packages
 
-Prime Agent requires a bash-compatible shell on Windows. Checked locations, in order:
+Supreme Agent requires a bash-compatible shell on Windows. Checked locations, in order:
 
-1. Custom path from `~/.prime/agent/settings.json`
+1. Custom path from `~/.supreme/agent/settings.json`
 2. Git Bash (`C:\Program Files\Git\bin\bash.exe`)
 3. `bash.exe` on PATH (Cygwin, MSYS2, or WSL)
 
@@ -40,14 +40,14 @@ npm link
 supreme
 ```
 
-`npm link` exposes `supreme`, `supreme-agent`, `prime-agent`, and `pi`.
+`npm link` exposes `supreme`, `supreme-agent`, `supreme-agent`, and `pi`.
 
 ## Python Kernel Bootstrap
 
 The Python kernel is bootstrapped automatically on first use. Windows virtual environments use:
 
 ```text
-%USERPROFILE%\.prime\agent\kernel-venv\Scripts\python.exe
+%USERPROFILE%\.supreme\agent\kernel-venv\Scripts\python.exe
 ```
 
 The bootstrap uses `uv` and installs `prime-agent-runtime` plus the default Python packages into that environment. `PRIME_AGENT_KERNEL_PYTHON` is optional and should only be set when intentionally using an existing Python environment that already contains the required runtime packages.

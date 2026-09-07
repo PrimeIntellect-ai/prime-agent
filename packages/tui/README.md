@@ -7,13 +7,13 @@
   </a>
 </p>
 
-<h1 align="center">Prime Agent TUI</h1>
+<h1 align="center">Supreme Agent TUI</h1>
 
 <p align="center">
   Terminal UI primitives.
 </p>
 
-Release docs use the Prime Agent package name. The source workspace manifest still keeps an inherited package name until the namespace migration is complete.
+Release docs use the Supreme Agent package name. The source workspace manifest still keeps an inherited package name until the namespace migration is complete.
 
 Minimal terminal UI framework with differential rendering and synchronized output for flicker-free interactive CLI applications.
 
@@ -514,7 +514,7 @@ const spacer = new Spacer(2); // 2 empty lines (default: 1)
 
 ### Image
 
-Renders Kitty or iTerm2 terminal graphics when supported. Set `fallbackOnly: true` to show compact image metadata instead; Prime Agent uses this metadata-only mode.
+Renders Kitty or iTerm2 terminal graphics when supported. Set `fallbackOnly: true` to show compact image metadata instead; Supreme Agent uses this metadata-only mode.
 
 ```typescript
 interface ImageTheme {

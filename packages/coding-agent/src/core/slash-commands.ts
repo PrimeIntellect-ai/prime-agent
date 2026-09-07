@@ -121,7 +121,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logs", description: "Show where daemon and client logs are saved" },
 	{
 		name: "traces",
-		description: "Preview, upload, or configure Prime Agent traces",
+		description: "Preview, upload, or configure Supreme Agent traces",
 		argumentHint: "[status|on|off|preview|upload|upload-current|upload-all|login]",
 	},
 	{ name: "context", description: "Show token, cost, and context usage for agent and sub-agents" },

@@ -1,6 +1,6 @@
 # Providers
 
-Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Models for external providers are bundled with each release. Prime Inference models refresh from its `/models` endpoint, with the bundled list and a validated disk cache as fallbacks. Set `PI_OFFLINE=1` to skip network refreshes.
+Supreme Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Models for external providers are bundled with each release. Prime Inference models refresh from its `/models` endpoint, with the bundled list and a validated disk cache as fallbacks. Set `PI_OFFLINE=1` to skip network refreshes.
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@ Use `/login` in interactive mode, then select a provider:
 - GitHub Copilot
 - xAI Grok (eligible subscriptions)
 
-Use `/logout` to clear credentials. Tokens are stored in `~/.prime/agent/auth.json` and auto-refresh when expired.
+Use `/logout` to clear credentials. Tokens are stored in `~/.supreme/agent/auth.json` and auto-refresh when expired.
 
 ### OpenAI Codex
 
@@ -56,7 +56,7 @@ Use `/login` in interactive mode and select a provider to store an API key in `a
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-prime-agent
+supreme-agent
 ```
 
 | Provider | Environment Variable | `auth.json` key |
@@ -94,7 +94,7 @@ Reference for environment variables and `auth.json` keys: [`env-api-keys.ts`](..
 
 #### Auth File
 
-Store credentials in `~/.prime/agent/auth.json`:
+Store credentials in `~/.supreme/agent/auth.json`:
 
 ```json
 {
@@ -156,7 +156,7 @@ Kilo Code uses the OpenAI-compatible Kilo AI Gateway at `https://api.kilo.ai/api
 
 ### Cline
 
-Cline uses the OpenAI-compatible Cline API at `https://api.cline.bot/api/v1`. Set `CLINE_API_KEY` or store an API key for `cline` via `/login`. Prime Agent ships a documented Cline model snapshot and refreshes the authenticated `/models` catalog during model generation when `CLINE_API_KEY` is available.
+Cline uses the OpenAI-compatible Cline API at `https://api.cline.bot/api/v1`. Set `CLINE_API_KEY` or store an API key for `cline` via `/login`. Supreme Agent ships a documented Cline model snapshot and refreshes the authenticated `/models` catalog during model generation when `CLINE_API_KEY` is available.
 
 ## Cloud Providers
 
@@ -195,14 +195,14 @@ export AWS_REGION=us-west-2
 Also supports ECS task roles (`AWS_CONTAINER_CREDENTIALS_*`) and IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE`).
 
 ```bash
-prime-agent --provider amazon-bedrock --model us.anthropic.claude-sonnet-4-20250514-v1:0
+supreme-agent --provider amazon-bedrock --model us.anthropic.claude-sonnet-4-20250514-v1:0
 ```
 
 Prompt caching is enabled automatically for Claude models whose ID contains a recognizable model name (base models and system-defined inference profiles). For application inference profiles (whose ARNs don't contain the model name), set `AWS_BEDROCK_FORCE_CACHE=1` to enable cache points:
 
 ```bash
 export AWS_BEDROCK_FORCE_CACHE=1
-prime-agent --provider amazon-bedrock --model arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123
+supreme-agent --provider amazon-bedrock --model arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123
 ```
 
 If you are connecting to a Bedrock API proxy, the following environment variables can be used:
@@ -226,7 +226,7 @@ export AWS_BEDROCK_FORCE_HTTP1=1
 export CLOUDFLARE_API_KEY=...           # or use /login
 export CLOUDFLARE_ACCOUNT_ID=...
 export CLOUDFLARE_GATEWAY_ID=...        # create at dash.cloudflare.com → AI → AI Gateway
-prime-agent --provider cloudflare-ai-gateway --model "claude-sonnet-4-5"
+supreme-agent --provider cloudflare-ai-gateway --model "claude-sonnet-4-5"
 ```
 
 Routes to OpenAI and Anthropic through Cloudflare AI Gateway. OpenAI uses the OpenAI passthrough route (`/openai`) with native OpenAI model IDs such as `gpt-5.1`. Anthropic uses the Anthropic passthrough route (`/anthropic`) with native Anthropic model IDs such as `claude-sonnet-4-5`. Cloudflare-hosted `@cf/...` models are available through the separate `cloudflare-workers-ai` provider.
@@ -240,7 +240,7 @@ AI Gateway authentication uses `CLOUDFLARE_API_KEY` as `cf-aig-authorization`. U
 | Stored BYOK | Cloudflare token only | Cloudflare injects provider keys stored in the AI Gateway dashboard |
 | Inline BYOK | Cloudflare token plus upstream `Authorization` header | The request supplies the upstream provider key |
 
-For normal Prime Agent usage, prefer unified billing or stored BYOK. Inline BYOK requires configuring an additional upstream `Authorization` header for the Cloudflare AI Gateway provider, for example via a `models.json` provider/model override.
+For normal Supreme Agent usage, prefer unified billing or stored BYOK. Inline BYOK requires configuring an additional upstream `Authorization` header for the Cloudflare AI Gateway provider, for example via a `models.json` provider/model override.
 
 ### Cloudflare Workers AI
 
@@ -249,10 +249,10 @@ For normal Prime Agent usage, prefer unified billing or stored BYOK. Inline BYOK
 ```bash
 export CLOUDFLARE_API_KEY=...           # or use /login
 export CLOUDFLARE_ACCOUNT_ID=...
-prime-agent --provider cloudflare-workers-ai --model "@cf/moonshotai/kimi-k2.6"
+supreme-agent --provider cloudflare-workers-ai --model "@cf/moonshotai/kimi-k2.6"
 ```
 
-Prime Agent automatically sets `x-session-affinity` for [prefix caching](https://developers.cloudflare.com/workers-ai/features/prompt-caching/) discounts.
+Supreme Agent automatically sets `x-session-affinity` for [prefix caching](https://developers.cloudflare.com/workers-ai/features/prompt-caching/) discounts.
 
 ### Google Vertex AI
 

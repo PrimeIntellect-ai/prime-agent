@@ -17,6 +17,7 @@ import { ENV_AGENT_DIR } from "../src/config.js";
 import {
 	migrateAuthToAuthJson,
 	migrateLegacySessionDirsToSessionRoot,
+	migratePrimeToSupremeDir,
 	migrateSessionsFromAgentRoot,
 } from "../src/migrations.js";
 
@@ -45,6 +46,37 @@ describe("session migrations", () => {
 		for (const dir of tempDirs.splice(0)) {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("copies legacy .prime/agent data into the new .supreme/agent directory", () => {
+		const root = mkdtempSync(join(tmpdir(), "supreme-agent-rebrand-migration-"));
+		tempDirs.push(root);
+		const legacyDir = join(root, ".prime", "agent");
+		const newDir = join(root, ".supreme", "agent");
+		mkdirSync(join(legacyDir, "sessions"), { recursive: true });
+		writeFileSync(join(legacyDir, "auth.json"), '{"openai":{"type":"api_key","key":"secret"}}');
+		writeFileSync(join(legacyDir, "sessions", "session.jsonl"), '{"type":"session","id":"session"}\n');
+
+		migratePrimeToSupremeDir(legacyDir, newDir);
+
+		expect(readFileSync(join(newDir, "auth.json"), "utf8")).toContain("secret");
+		expect(readFileSync(join(newDir, "sessions", "session.jsonl"), "utf8")).toContain("session");
+		expect(existsSync(legacyDir)).toBe(true);
+	});
+
+	it("does not overwrite an existing new config directory", () => {
+		const root = mkdtempSync(join(tmpdir(), "supreme-agent-rebrand-migration-"));
+		tempDirs.push(root);
+		const legacyDir = join(root, ".prime", "agent");
+		const newDir = join(root, ".supreme", "agent");
+		mkdirSync(legacyDir, { recursive: true });
+		mkdirSync(newDir, { recursive: true });
+		writeFileSync(join(legacyDir, "settings.json"), '{"legacy":true}');
+		writeFileSync(join(newDir, "settings.json"), '{"current":true}');
+
+		migratePrimeToSupremeDir(legacyDir, newDir);
+
+		expect(readFileSync(join(newDir, "settings.json"), "utf8")).toBe('{"current":true}');
 	});
 
 	it("moves legacy per-cwd session files into the flat session root", () => {

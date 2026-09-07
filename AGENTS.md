@@ -75,15 +75,15 @@ When closing issues via commit:
 - If the user approves: create a feature branch, pull PR, rebase on main, apply adjustments, commit, merge into main, push, close PR, and leave a comment in the user's tone
 - We work in feature branches until everything is according to the user's requirements. Never merge PRs by yourself.
 
-## Testing Prime Agent Interactive Mode with tmux
+## Testing Supreme Agent Interactive Mode with tmux
 
-To test Prime Agent's TUI in a controlled terminal environment:
+To test Supreme Agent's TUI in a controlled terminal environment:
 
 ```bash
 # Create tmux session with specific dimensions
 tmux new-session -d -s prime-agent-test -x 80 -y 24
 
-# Start Prime Agent from source
+# Start Supreme Agent from source
 tmux send-keys -t prime-agent-test "cd /Users/kevin/pi/prime-agent && ./prime-agent.sh" Enter
 
 # Wait for startup, then capture output

@@ -403,8 +403,8 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate tasks to specialized subagents with isolated context.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			'Default agent scope is "user" (from ~/.prime/agent/agents).',
-			'To enable project-local agents in .prime/agent/agents, set agentScope: "both" (or "project").',
+			'Default agent scope is "user" (from ~/.supreme/agent/agents).',
+			'To enable project-local agents in .supreme/agent/agents, set agentScope: "both" (or "project").',
 		].join(" "),
 		parameters: SubagentParams,
 
