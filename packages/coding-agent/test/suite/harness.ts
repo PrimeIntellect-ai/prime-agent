@@ -15,7 +15,7 @@ import { AgentSession, type AgentSessionEvent, type AutoRefineReviewer } from ".
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { AgentAutonomousConfig } from "../../src/core/autonomous.js";
 import type { ExtensionRunner } from "../../src/core/extensions/index.js";
-import { convertToLlm } from "../../src/core/messages.js";
+import { convertToLlm, HARNESS_DIGEST_CUSTOM_TYPE } from "../../src/core/messages.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import { SessionManager } from "../../src/core/session-manager.js";
@@ -45,6 +45,13 @@ export function getMessageText(message: unknown): string {
 		.filter((part): part is MessageTextPart => part.type === "text")
 		.map((part) => part.text)
 		.join("\n");
+}
+
+/** Session messages without the session-start harness digest injected at construction. */
+export function conversationMessages(source: { messages: AgentMessage[] }): AgentMessage[] {
+	return source.messages.filter(
+		(message) => !(message.role === "custom" && message.customType === HARNESS_DIGEST_CUSTOM_TYPE),
+	);
 }
 
 export function getUserTexts(harness: Harness): string[] {

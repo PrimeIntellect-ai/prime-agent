@@ -13,6 +13,7 @@ import {
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.js";
+import { conversationMessages } from "../harness.js";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {
@@ -196,7 +197,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(replacementSessionFile).not.toBe(oldSessionFile);
 		expect(staleCtxThrows).toBe(true);
 		expect(stalePiThrows).toBe(true);
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
+		expect(conversationMessages(runtime.session).map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:Hello from the new session!",
 			"assistant:hello reply",
 		]);
@@ -227,7 +228,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		await runtime.session.prompt("seed");
 		await runtime.session.prompt("/fork-it");
 
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
+		expect(conversationMessages(runtime.session).map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:seed",
 			"assistant:seed reply",
 			"user:fork callback message",
@@ -264,7 +265,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		await runtime.session.prompt("/switch-it");
 
 		expect(runtime.session.sessionFile).toBe(targetSessionPath);
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
+		expect(conversationMessages(runtime.session).map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:target",
 			"assistant:target reply",
 			"user:switch callback message",

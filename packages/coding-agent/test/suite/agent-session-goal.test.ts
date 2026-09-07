@@ -12,7 +12,7 @@ import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { createTestResourceLoader } from "../utilities.js";
-import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
+import { conversationMessages, createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 
 function assistantWithUsage(message: string | AssistantMessage, usage: Partial<Usage>): AssistantMessage {
 	const base = typeof message === "string" ? fauxAssistantMessage(message) : message;
@@ -645,7 +645,9 @@ describe("AgentSession goals", () => {
 		await harness.session.prompt("/goal clear");
 
 		expect(
-			harness.session.messages.map((message) => (message.role === "custom" ? message.customType : message.role)),
+			conversationMessages(harness.session).map((message) =>
+				message.role === "custom" ? message.customType : message.role,
+			),
 		).toEqual(["session_slash_command", "session_slash_command_result"]);
 		expect(harness.eventsOfType("goal_update").at(-1)?.goal.status).toBe("idle");
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -867,7 +869,9 @@ describe("AgentSession goals", () => {
 		await harness.session.prompt("/goal status");
 
 		expect(
-			harness.session.messages.map((message) => (message.role === "custom" ? message.customType : message.role)),
+			conversationMessages(harness.session).map((message) =>
+				message.role === "custom" ? message.customType : message.role,
+			),
 		).toEqual(["session_slash_command", "session_slash_command_result"]);
 		expect(harness.eventsOfType("goal_update").at(-1)?.goal.status).toBe("idle");
 		expect(harness.getPendingResponseCount()).toBe(1);
