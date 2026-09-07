@@ -606,16 +606,204 @@ describe("hosted RLM run controller", () => {
 		},
 	);
 
-	test("controller copies and freezes nested observation usage", async () => {
-		const usage = { inputTokens: 12, outputTokens: 13 };
-		const snapshot = { ...SNAPSHOT, answerPreview: "work", usage };
-		const run = controller(directPort({ observe: () => Promise.resolve({ ok: true, value: snapshot }) }));
-		const result = value(await run.observe());
-		expect(result).toEqual(snapshot);
-		expect(result).not.toBe(snapshot);
-		expect(result.usage).not.toBe(usage);
-		expect(Object.isFrozen(result)).toBe(true);
-		expect(Object.isFrozen(result.usage)).toBe(true);
+	test("controller copies terminal attribution and freezes nested values", async () => {
+		const terminalUsage = { inputTokens: 10, outputTokens: 11 };
+		const terminal = {
+			status: "completed" as const,
+			durationMs: 12,
+			parentReplyCount: 1,
+			toolUseCount: 2,
+			answerPreview: "done",
+			usage: terminalUsage,
+			lastCommittedRequestId: "request-001",
+		};
+		const terminalRun = controller(
+			directPort({ awaitTerminal: () => Promise.resolve({ ok: true, value: terminal }) }),
+		);
+		await terminalRun.start({ prompt: "go" });
+		const terminalResult = value(await terminalRun.finish());
+		expect(terminalResult).toEqual(terminal);
+		expect(terminalResult).not.toBe(terminal);
+		expect(terminalResult.usage).not.toBe(terminalUsage);
+		expect(Object.keys(terminalResult)).toEqual([
+			"status",
+			"durationMs",
+			"parentReplyCount",
+			"toolUseCount",
+			"answerPreview",
+			"usage",
+			"lastCommittedRequestId",
+		]);
+		expect(Object.isFrozen(terminalResult)).toBe(true);
+		expect(Object.isFrozen(terminalResult.usage)).toBe(true);
+		terminal.lastCommittedRequestId = "request-mutated";
+		terminalUsage.inputTokens = 99;
+		expect(terminalResult.lastCommittedRequestId).toBe("request-001");
+		expect(terminalResult.usage).toEqual({ inputTokens: 10, outputTokens: 11 });
+
+		const observationUsage = { inputTokens: 12, outputTokens: 13 };
+		const snapshot = { ...SNAPSHOT, answerPreview: "work", usage: observationUsage };
+		const observationRun = controller(directPort({ observe: () => Promise.resolve({ ok: true, value: snapshot }) }));
+		const observationResult = value(await observationRun.observe());
+		expect(observationResult).toEqual(snapshot);
+		expect(observationResult).not.toBe(snapshot);
+		expect(observationResult.usage).not.toBe(observationUsage);
+		expect(Object.isFrozen(observationResult)).toBe(true);
+		expect(Object.isFrozen(observationResult.usage)).toBe(true);
+	});
+
+	test.each([
+		"empty",
+		"space",
+		"non-ASCII",
+		"over 128",
+		"accessor",
+		"symbol value",
+		"own symbol key",
+		"cancelled presence",
+		"error presence",
+		"Proxy",
+	])("real port and controller reject terminal attribution case %s without leaks", async (kind) => {
+		const completed: Record<string, unknown> = {
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+		};
+		const probes: Array<() => unknown> = [];
+		let candidate: unknown;
+		if (kind === "empty") candidate = { ...completed, lastCommittedRequestId: "" };
+		else if (kind === "space") candidate = { ...completed, lastCommittedRequestId: "request 001" };
+		else if (kind === "non-ASCII") candidate = { ...completed, lastCommittedRequestId: "réquest-001" };
+		else if (kind === "over 128") candidate = { ...completed, lastCommittedRequestId: "r".repeat(129) };
+		else if (kind === "symbol value") candidate = { ...completed, lastCommittedRequestId: Symbol("request") };
+		else if (kind === "own symbol key") {
+			candidate = { ...completed, lastCommittedRequestId: "request-001", [Symbol("extra")]: true };
+		} else if (kind === "cancelled presence") {
+			candidate = {
+				status: "cancelled",
+				durationMs: 1,
+				parentReplyCount: 0,
+				toolUseCount: 0,
+				errorCode: "CANCELLED",
+				lastCommittedRequestId: "request-001",
+			};
+		} else if (kind === "error presence") {
+			candidate = {
+				status: "error",
+				durationMs: 1,
+				parentReplyCount: 0,
+				toolUseCount: 0,
+				errorCode: "INTERNAL_ERROR",
+				lastCommittedRequestId: "request-001",
+			};
+		} else if (kind === "accessor") {
+			const getter = vi.fn(() => "request-001");
+			probes.push(getter);
+			candidate = completed;
+			Object.defineProperty(completed, "lastCommittedRequestId", { enumerable: true, get: getter });
+		} else {
+			const getter = vi.fn(() => "request-001");
+			const trap = vi.fn(() => {
+				throw new Error("must not inspect Proxy");
+			});
+			Object.defineProperty(completed, "lastCommittedRequestId", { enumerable: true, get: getter });
+			probes.push(getter, trap);
+			candidate = new Proxy(completed, {
+				getOwnPropertyDescriptor: trap,
+				getPrototypeOf: trap,
+				ownKeys: trap,
+			});
+		}
+
+		const runtime = box({ terminal: () => Promise.resolve(candidate) });
+		const listener = vi.fn();
+		const run = controller(runtime.port, listener);
+		expect(value(await run.start({ prompt: "go" }))).toEqual({ code: "ADMITTED" });
+		const result = await run.finish();
+		expect(result).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+		expect(Object.keys(result)).toEqual(["ok", "error"]);
+		expect(JSON.stringify(result)).not.toContain("lastCommittedRequestId");
+		expect(listener).not.toHaveBeenCalled();
+		for (const probe of probes) expect(probe).not.toHaveBeenCalled();
+		expect(runtime.calls).toEqual({
+			start: 1,
+			terminal: 1,
+			abort: 0,
+			observe: 0,
+			subscribe: 1,
+			unsubscribe: 1,
+			close: 1,
+		});
+
+		const directCalls: Calls = {
+			start: 0,
+			terminal: 0,
+			abort: 0,
+			observe: 0,
+			subscribe: 0,
+			unsubscribe: 0,
+			close: 0,
+		};
+		const directPortCandidate = Object.freeze({
+			identity: Object.freeze({ ...IDENTITY }),
+			startInitialTask: () => {
+				directCalls.start += 1;
+				return Promise.resolve({ ok: true, value: { code: "ADMITTED" } });
+			},
+			awaitTerminal: () => {
+				directCalls.terminal += 1;
+				return Promise.resolve({ ok: true, value: candidate });
+			},
+			abort: () => {
+				directCalls.abort += 1;
+				return Promise.resolve({ ok: true, value: { status: "aborted" } });
+			},
+			observe: () => {
+				directCalls.observe += 1;
+				return Promise.resolve({ ok: true, value: SNAPSHOT });
+			},
+			subscribe: () => {
+				directCalls.subscribe += 1;
+				return {
+					ok: true,
+					value: {
+						unsubscribe: () => {
+							directCalls.unsubscribe += 1;
+							return { ok: true };
+						},
+					},
+				};
+			},
+			close: () => {
+				directCalls.close += 1;
+				return Promise.resolve({ ok: true, value: { status: "closed" } });
+			},
+		});
+		const directListener = vi.fn();
+		const directCreated = createHostedRlmRunController({
+			port: directPortCandidate,
+			expectedIdentity: IDENTITY,
+			listener: directListener,
+		});
+		expect(directCreated.ok).toBe(true);
+		if (!directCreated.ok) return;
+		expect(value(await directCreated.value.start({ prompt: "go" }))).toEqual({ code: "ADMITTED" });
+		const directResult = await directCreated.value.finish();
+		expect(directResult).toEqual({ ok: false, error: { code: "CLOSED" } });
+		expect(Object.keys(directResult)).toEqual(["ok", "error"]);
+		expect(JSON.stringify(directResult)).not.toContain("lastCommittedRequestId");
+		expect(directListener).not.toHaveBeenCalled();
+		for (const probe of probes) expect(probe).not.toHaveBeenCalled();
+		expect(directCalls).toEqual({
+			start: 1,
+			terminal: 1,
+			abort: 0,
+			observe: 0,
+			subscribe: 1,
+			unsubscribe: 1,
+			close: 1,
+		});
 	});
 
 	test.each([

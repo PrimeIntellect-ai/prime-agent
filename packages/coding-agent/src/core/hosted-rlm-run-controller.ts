@@ -80,6 +80,7 @@ const TASK_KEYS = Object.freeze([
 	"answerPreview",
 	"errorCode",
 	"usage",
+	"lastCommittedRequestId",
 ]);
 const OBSERVATION_KEYS = Object.freeze([
 	"status",
@@ -260,6 +261,10 @@ function boundedString(raw: unknown, maximum: number): raw is string {
 	return typeof raw === "string" && raw.length > 0 && raw.length <= maximum;
 }
 
+function boundedPrintableAscii(raw: unknown): raw is string {
+	return typeof raw === "string" && /^[!-~]{1,128}$/.test(raw);
+}
+
 function safeInteger(raw: unknown): number | null {
 	if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) return null;
 	return raw;
@@ -332,34 +337,31 @@ function taskResult(raw: unknown): HostedRlmTaskResult | null {
 		parsedUsage = usage(record.usage);
 		if (parsedUsage === null) return null;
 	}
+	const hasLastCommittedRequestId = Object.hasOwn(record, "lastCommittedRequestId");
+	let lastCommittedRequestId: string | null = null;
+	if (hasLastCommittedRequestId) {
+		const candidate = record.lastCommittedRequestId;
+		if (!boundedPrintableAscii(candidate)) return null;
+		lastCommittedRequestId = candidate;
+	}
 	if (record.status === "completed") {
 		if (hasError) return null;
-		if (answerPreview !== null && parsedUsage !== null) {
-			return Object.freeze({
-				status: "completed",
-				durationMs,
-				parentReplyCount,
-				toolUseCount,
-				answerPreview,
-				usage: parsedUsage,
-			});
-		}
-		if (answerPreview !== null) {
-			return Object.freeze({
-				status: "completed",
-				durationMs,
-				parentReplyCount,
-				toolUseCount,
-				answerPreview,
-			});
-		}
-		if (parsedUsage !== null) {
-			return Object.freeze({ status: "completed", durationMs, parentReplyCount, toolUseCount, usage: parsedUsage });
-		}
-		return Object.freeze({ status: "completed", durationMs, parentReplyCount, toolUseCount });
+		const result: {
+			status: "completed";
+			durationMs: number;
+			parentReplyCount: number;
+			toolUseCount: number;
+			answerPreview?: string;
+			usage?: Readonly<{ inputTokens: number; outputTokens: number }>;
+			lastCommittedRequestId?: string;
+		} = { status: "completed", durationMs, parentReplyCount, toolUseCount };
+		if (answerPreview !== null) result.answerPreview = answerPreview;
+		if (parsedUsage !== null) result.usage = parsedUsage;
+		if (lastCommittedRequestId !== null) result.lastCommittedRequestId = lastCommittedRequestId;
+		return Object.freeze(result);
 	}
 	if (record.status === "cancelled") {
-		if (hasAnswer || record.errorCode !== "CANCELLED") return null;
+		if (hasAnswer || hasLastCommittedRequestId || record.errorCode !== "CANCELLED") return null;
 		if (parsedUsage !== null) {
 			return Object.freeze({
 				status: "cancelled",
@@ -378,7 +380,7 @@ function taskResult(raw: unknown): HostedRlmTaskResult | null {
 			errorCode: "CANCELLED",
 		});
 	}
-	if (record.status !== "error" || hasAnswer || !hasError) return null;
+	if (record.status !== "error" || hasAnswer || hasLastCommittedRequestId || !hasError) return null;
 	if (
 		record.errorCode !== "TIMEOUT" &&
 		record.errorCode !== "ADMISSION_FAILED" &&

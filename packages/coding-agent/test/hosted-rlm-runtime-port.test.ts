@@ -477,16 +477,26 @@ describe("hosted runtime port contract", () => {
 	});
 
 	test.each([
-		["completed base", { status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 }],
+		[
+			"completed base",
+			{
+				lastCommittedRequestId: "!~",
+				toolUseCount: 0,
+				parentReplyCount: 0,
+				durationMs: 1,
+				status: "completed",
+			},
+		],
 		[
 			"completed options",
 			{
-				status: "completed",
-				durationMs: 2,
-				parentReplyCount: 1,
-				toolUseCount: 3,
-				answerPreview: "ok",
+				lastCommittedRequestId: "r".repeat(128),
 				usage: { inputTokens: 4, outputTokens: 5 },
+				answerPreview: "ok",
+				toolUseCount: 3,
+				parentReplyCount: 1,
+				durationMs: 2,
+				status: "completed",
 			},
 		],
 		[
@@ -504,13 +514,164 @@ describe("hosted runtime port contract", () => {
 				usage: { inputTokens: 6, outputTokens: 7 },
 			},
 		],
-	])("accepts task result variant %s", async (_name, candidate) => {
+	])("accepts task result variant %s", async (name, candidate) => {
 		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
 		await box.port.startInitialTask({ prompt: "go" });
 		const result = ok(await box.port.awaitTerminal());
 		expect(result).toEqual(candidate);
+		expect(result).not.toBe(candidate);
 		expect(Object.isFrozen(result)).toBe(true);
 		if ("usage" in result) expect(Object.isFrozen(result.usage)).toBe(true);
+		if (name === "completed base") {
+			expect(Object.keys(result)).toEqual([
+				"status",
+				"durationMs",
+				"parentReplyCount",
+				"toolUseCount",
+				"lastCommittedRequestId",
+			]);
+		}
+		if (name === "completed options") {
+			expect(Object.keys(result)).toEqual([
+				"status",
+				"durationMs",
+				"parentReplyCount",
+				"toolUseCount",
+				"answerPreview",
+				"usage",
+				"lastCommittedRequestId",
+			]);
+		}
+	});
+
+	test("accepts a one-character terminal attribution", async () => {
+		const candidate = {
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+			lastCommittedRequestId: "!",
+		};
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		expect(ok(await box.port.awaitTerminal())).toEqual(candidate);
+	});
+
+	test("keeps terminal attribution optional when the completed result omits it", async () => {
+		const candidate = { status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 };
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		const result = ok(await box.port.awaitTerminal());
+		expect(result).toEqual(candidate);
+		expect(Object.hasOwn(result, "lastCommittedRequestId")).toBe(false);
+	});
+
+	test("copies terminal attribution and freezes nested values against source mutation", async () => {
+		const usage = { inputTokens: 8, outputTokens: 9 };
+		const candidate = {
+			status: "completed",
+			durationMs: 5,
+			parentReplyCount: 2,
+			toolUseCount: 4,
+			answerPreview: "complete",
+			usage,
+			lastCommittedRequestId: "request-001",
+		};
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		const result = ok(await box.port.awaitTerminal());
+		expect(result).not.toBe(candidate);
+		expect(result.usage).not.toBe(usage);
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(Object.isFrozen(result.usage)).toBe(true);
+		candidate.lastCommittedRequestId = "request-mutated";
+		usage.inputTokens = 99;
+		expect(result.lastCommittedRequestId).toBe("request-001");
+		expect(result.usage).toEqual({ inputTokens: 8, outputTokens: 9 });
+	});
+
+	test("rejects a Proxy raw terminal result without invoking traps or getters", async () => {
+		const getter = vi.fn(() => "request-001");
+		const trap = vi.fn(() => {
+			throw new Error("must not inspect Proxy");
+		});
+		const target: Record<string, unknown> = {
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+		};
+		Object.defineProperty(target, "lastCommittedRequestId", { enumerable: true, get: getter });
+		const candidate = new Proxy(target, {
+			getOwnPropertyDescriptor: trap,
+			getPrototypeOf: trap,
+			ownKeys: trap,
+		});
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		expect(await box.port.awaitTerminal()).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+		expect(getter).not.toHaveBeenCalled();
+		expect(trap).not.toHaveBeenCalled();
+		expect(box.calls.close).toBe(1);
+	});
+
+	test("rejects an unknown extra terminal accessor without invoking its getter", async () => {
+		const getter = vi.fn(() => true);
+		const candidate: Record<string, unknown> = {
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+			lastCommittedRequestId: "request-001",
+		};
+		Object.defineProperty(candidate, "extra", { enumerable: true, get: getter });
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		expect(await box.port.awaitTerminal()).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+		expect(getter).not.toHaveBeenCalled();
+		expect(box.calls.close).toBe(1);
+	});
+
+	test("rejects a terminal attribution accessor without invoking it", async () => {
+		const trap = vi.fn(() => "request-001");
+		const candidate: Record<string, unknown> = {
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+		};
+		Object.defineProperty(candidate, "lastCommittedRequestId", { enumerable: true, get: trap });
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		expect(await box.port.awaitTerminal()).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+		expect(trap).not.toHaveBeenCalled();
+	});
+
+	test("rejects an own symbol on an attributed terminal result", async () => {
+		const candidate = {
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+			lastCommittedRequestId: "request-001",
+			[Symbol("extra")]: true,
+		};
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		expect(await box.port.awaitTerminal()).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+	});
+
+	test("rejects a non-enumerable terminal attribution", async () => {
+		const candidate: Record<string, unknown> = {
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+		};
+		Object.defineProperty(candidate, "lastCommittedRequestId", { value: "request-001" });
+		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+		await box.port.startInitialTask({ prompt: "go" });
+		expect(await box.port.awaitTerminal()).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
 	});
 
 	test.each([
@@ -550,6 +711,74 @@ describe("hosted runtime port contract", () => {
 		const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
 		await box.port.startInitialTask({ prompt: "go" });
 		expect(await box.port.awaitTerminal()).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+		expect(box.calls.close).toBe(1);
+	});
+
+	test("rejects malformed task result variants", async () => {
+		const completed = { status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 };
+		const candidates: readonly unknown[] = [
+			{ ...completed, errorCode: "TIMEOUT" },
+			{
+				status: "cancelled",
+				durationMs: 1,
+				parentReplyCount: 0,
+				toolUseCount: 0,
+				errorCode: "CANCELLED",
+				answerPreview: "bad",
+			},
+			{ status: "cancelled", durationMs: 1, parentReplyCount: 0, toolUseCount: 0, errorCode: "TIMEOUT" },
+			{
+				status: "error",
+				durationMs: 1,
+				parentReplyCount: 0,
+				toolUseCount: 0,
+				errorCode: "INTERNAL_ERROR",
+				answerPreview: "bad",
+			},
+			{ status: "error", durationMs: 1, parentReplyCount: 0, toolUseCount: 0, errorCode: "CANCELLED" },
+			{ ...completed, durationMs: -1 },
+			{ status: "completed", parentReplyCount: 0, toolUseCount: 0 },
+			{ ...completed, lastCommittedRequestId: undefined },
+			{ ...completed, lastCommittedRequestId: "" },
+			{ ...completed, lastCommittedRequestId: "request 001" },
+			{ ...completed, lastCommittedRequestId: "request\n001" },
+			{ ...completed, lastCommittedRequestId: "réquest-001" },
+			{ ...completed, lastCommittedRequestId: "r".repeat(129) },
+			{ ...completed, lastCommittedRequestId: 1 },
+			{ ...completed, lastCommittedRequestId: Symbol("request") },
+			{
+				status: "cancelled",
+				durationMs: 1,
+				parentReplyCount: 0,
+				toolUseCount: 0,
+				errorCode: "CANCELLED",
+				lastCommittedRequestId: "request-001",
+			},
+			{
+				status: "error",
+				durationMs: 1,
+				parentReplyCount: 0,
+				toolUseCount: 0,
+				errorCode: "INTERNAL_ERROR",
+				lastCommittedRequestId: "request-001",
+			},
+			{ ...completed, lastCommittedRequestId: "request-001", extra: true },
+		];
+		for (const candidate of candidates) {
+			const box = harness({ awaitTerminal: () => Promise.resolve(candidate) });
+			await box.port.startInitialTask({ prompt: "go" });
+			expect(await box.port.awaitTerminal()).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+			expect(box.calls.close).toBe(1);
+		}
+	});
+
+	test("rejects terminal attribution in a raw observation without leaking it", async () => {
+		const candidate = { ...SNAPSHOT, lastCommittedRequestId: "request-001" };
+		const box = harness({ observe: () => Promise.resolve(candidate) });
+		const result = await box.port.observe();
+		expect(result).toEqual({ ok: false, error: { code: "MALFORMED_RESULT" } });
+		expect(Object.hasOwn(result, "lastCommittedRequestId")).toBe(false);
+		expect(JSON.stringify(result)).not.toContain("request-001");
 		expect(box.calls.close).toBe(1);
 	});
 
@@ -597,6 +826,24 @@ describe("hosted runtime port contract", () => {
 		expect(Object.isFrozen(events[0])).toBe(true);
 	});
 
+	test.each([
+		["agent_start", { type: "agent_start" }],
+		["agent_end", { type: "agent_end" }],
+		["waiting", { type: "waiting" }],
+		["writing", { type: "writing", answerPreview: "draft" }],
+		["executing", { type: "executing", toolName: "bash" }],
+		[
+			"child_update",
+			{ type: "child_update", status: "running", toolUseCount: 2, parentReplyCount: 1, answerPreview: "child" },
+		],
+	])("rejects terminal attribution in event variant %s without listener delivery", (_name, candidate) => {
+		const box = harness();
+		const listener = vi.fn();
+		expect(box.port.subscribe(listener).ok).toBe(true);
+		box.emit({ ...candidate, lastCommittedRequestId: "request-001" });
+		expect(listener).not.toHaveBeenCalled();
+		expect(box.calls.close).toBe(1);
+	});
 	test.each([
 		["null", null],
 		["extra", { unsubscribe: () => ({ status: "unsubscribed" }), extra: true }],
