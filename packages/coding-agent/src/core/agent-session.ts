@@ -7708,8 +7708,11 @@ export class AgentSession {
 		signal: AbortSignal;
 	}): Promise<CompactionResult> {
 		const { model, apiKey, headers, customInstructions, signal } = options;
-		const pathEntries = this.sessionManager.getBranch();
 		const settings = this._effectiveCompactionSettings();
+		// The clamp disclosure belongs to the clamp, not the trigger flavor: manual and
+		// model-requested compactions must surface it too, not only threshold checks.
+		this._noteClampedContextCapOnce(settings);
+		const pathEntries = this.sessionManager.getBranch();
 
 		const preparation = prepareCompaction(pathEntries, settings);
 		if (!preparation) {

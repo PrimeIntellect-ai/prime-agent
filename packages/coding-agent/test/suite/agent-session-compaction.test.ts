@@ -1479,6 +1479,48 @@ describe("AgentSession compaction characterization", () => {
 		expect(clampNotices()).toHaveLength(1);
 	});
 
+	it("surfaces the clamp notice once for manual-only compaction usage", async () => {
+		const harness = await createHarness({
+			settings: {
+				compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 },
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "summary from extension",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		harness.session.setContextLimit(1000);
+		await harness.session.compact();
+
+		const notices = harness.sessionManager
+			.getEntries()
+			.filter(
+				(entry) => entry.type === "custom_message" && entry.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+			);
+		expect(notices).toHaveLength(1);
+
+		await harness.session.prompt("three");
+		await harness.session.compact();
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter(
+					(entry) => entry.type === "custom_message" && entry.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+				),
+		).toHaveLength(1);
+	});
+
 	it("does not let the clamp notice defeat the assistant-last continuation heuristic", async () => {
 		const harness = await createHarness({
 			settings: {
