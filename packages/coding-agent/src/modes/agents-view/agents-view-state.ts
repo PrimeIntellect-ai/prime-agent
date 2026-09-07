@@ -77,6 +77,8 @@ export interface AgentsViewRow {
 	selectable: boolean;
 	runningSubagentCount: number;
 	recursiveCost: number;
+	/** Total descendant sessions (resident + passive) under this row. */
+	descendantCount: number;
 	/** Unique selection identity for this row. */
 	identity: string;
 	/** Identity of the agent row this row is nested under. */
@@ -108,6 +110,12 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 		return false;
 	}
 	return summary.lifecycle === "live";
+}
+
+// TODO(unify: #2055): replace with the shared user-content rule once it lands;
+// session summaries only carry message counts today.
+export function isEmptyAgentsViewSession(summary: SessionSummary): boolean {
+	return summary.messageCount === 0;
 }
 
 export function sectionTitle(section: AgentsViewSection): string {
@@ -421,11 +429,19 @@ export interface UnifiedSessionIndex {
 	childrenByParent: Map<UnifiedSessionRecord, UnifiedSessionRecord[]>;
 }
 
-// Rolls costs over the UNFILTERED hierarchy: filters must never change a row's total.
-export function computeRecursiveCosts(
+export interface AgentsViewRecursiveRollup {
+	/** Own cost plus every descendant's cost. */
+	cost: number;
+	/** Total descendant sessions (resident + passive) under this record. */
+	descendantCount: number;
+}
+
+// Rolls costs and descendant counts over the UNFILTERED hierarchy: filters must
+// never change a row's totals.
+export function computeRecursiveRollups(
 	records: readonly UnifiedSessionRecord[],
 	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
-): ReadonlyMap<UnifiedSessionRecord, number> {
+): ReadonlyMap<UnifiedSessionRecord, AgentsViewRecursiveRollup> {
 	const order = records.filter((record) => {
 		const parent = findParentRecord(record, index.byKey);
 		return !parent || parent === record;
@@ -435,16 +451,35 @@ export function computeRecursiveCosts(
 			order.push(child);
 		}
 	}
-	const costs = new Map<UnifiedSessionRecord, number>();
+	const rollups = new Map<UnifiedSessionRecord, AgentsViewRecursiveRollup>();
 	for (let position = order.length - 1; position >= 0; position--) {
 		const record = order[position]!;
-		let total = record.daemon?.usage?.cost ?? record.saved?.usage?.cost ?? 0;
+		let cost = record.daemon?.usage?.cost ?? record.saved?.usage?.cost ?? 0;
+		let descendantCount = 0;
 		for (const child of index.childrenByParent.get(record) ?? []) {
-			total += costs.get(child) ?? 0;
+			if (!isSubagentDescendantRecord(child, record)) continue;
+			const childRollup = rollups.get(child);
+			cost += childRollup?.cost ?? 0;
+			descendantCount += 1 + (childRollup?.descendantCount ?? 0);
 		}
-		costs.set(record, total);
+		rollups.set(record, { cost, descendantCount });
 	}
-	return costs;
+	return rollups;
+}
+
+/**
+ * Rollups follow agent lineage only. A branched/forked session links to its
+ * source through parentSession but keeps the source's rlmDepth: it is a
+ * sibling chat, not a descendant, and its copied transcript would double-book
+ * the source's totals. Spawned subagents carry runtimeKind (resident) or a
+ * deeper rlmDepth (saved) and do roll up.
+ */
+function isSubagentDescendantRecord(child: UnifiedSessionRecord, parent: UnifiedSessionRecord): boolean {
+	if (child.daemon) {
+		return isSubagentSummary(child.daemon);
+	}
+	const childDepth = child.saved?.rlmDepth ?? 0;
+	return childDepth > (parent.daemon?.rlmDepth ?? parent.saved?.rlmDepth ?? 0);
 }
 
 export function buildUnifiedSessionIndex(records: readonly UnifiedSessionRecord[]): UnifiedSessionIndex {
@@ -697,7 +732,8 @@ export function buildAgentsViewRows(
 	expandedSubagentParents: ReadonlySet<string> = new Set(),
 	programShownParents: ReadonlySet<string> = new Set(),
 	scope?: AgentsViewScopeKey,
-	recursiveCosts?: ReadonlyMap<UnifiedSessionRecord, number>,
+	recursiveRollups?: ReadonlyMap<UnifiedSessionRecord, AgentsViewRecursiveRollup>,
+	anchorSessionId?: string,
 ): AgentsViewRow[] {
 	const inputs = summariesOrRecords.map((input) =>
 		isUnifiedSessionRecord(input) ? { summary: summaryForUnifiedRecord(input), record: input } : { summary: input },
@@ -726,6 +762,7 @@ export function buildAgentsViewRows(
 			selectable: true,
 			runningSubagentCount: 0,
 			recursiveCost: summary.usage?.cost ?? 0,
+			descendantCount: 0,
 			identity: record?.identity ?? getAgentsViewSummaryIdentity(summary),
 			...(record ? { record, heartbeat: record.heartbeat } : {}),
 		}),
@@ -745,6 +782,13 @@ export function buildAgentsViewRows(
 			row.kind = "agent";
 			continue;
 		}
+		// One definition of "child" with the rollup walk: a branched/forked
+		// session links to its source but is a top-level chat in its own right,
+		// so it must not nest (nor count in the expander) while #sub excludes it.
+		if (row.record && parent.record && !isSubagentDescendantRecord(row.record, parent.record)) {
+			row.kind = "agent";
+			continue;
+		}
 		nestedRows.add(row);
 		const siblings = childrenByParent.get(parent) ?? [];
 		siblings.push(row);
@@ -761,16 +805,20 @@ export function buildAgentsViewRows(
 		const row = tallyOrder[index]!;
 		let count = 0;
 		let descendantsCost = 0;
+		let descendants = 0;
 		for (const child of childrenByParent.get(row) ?? []) {
 			count += (child.section === "running" ? 1 : 0) + child.runningSubagentCount;
 			descendantsCost += child.recursiveCost;
+			descendants += 1 + child.descendantCount;
 		}
 		row.runningSubagentCount = count;
-		row.recursiveCost =
-			(row.record ? recursiveCosts?.get(row.record) : undefined) ?? (row.summary.usage?.cost ?? 0) + descendantsCost;
+		const rollup = row.record ? recursiveRollups?.get(row.record) : undefined;
+		row.recursiveCost = rollup?.cost ?? (row.summary.usage?.cost ?? 0) + descendantsCost;
+		row.descendantCount = rollup?.descendantCount ?? descendants;
 	}
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
+	const compareRows = (a: AgentsViewRow, b: AgentsViewRow): number => compareAgentsViewRows(a, b, anchorSessionId);
 	const flattened: AgentsViewRow[] = [];
 	const emit = (row: MutableAgentsViewRow, depth: number): void => {
 		row.depth = depth;
@@ -786,7 +834,7 @@ export function buildAgentsViewRows(
 			return;
 		}
 		const showProgram = programShownParents.has(row.identity);
-		const groups = groupChildrenBySpawnCode(children.sort(compareAgentsViewRows));
+		const groups = groupChildrenBySpawnCode(children.sort(compareRows));
 		for (const [groupIndex, group] of groups.entries()) {
 			if (showProgram && group.spawnCode) {
 				for (const codeRow of buildSpawnCodeRows(row, group.spawnCode, depth + 1, groupIndex)) {
@@ -801,7 +849,7 @@ export function buildAgentsViewRows(
 	};
 	const scopedRootRow = scopeRoot ? baseRows.find((row) => row.summary === scopeRoot.summary) : undefined;
 	const visibleRoots = scopedRootRow ? roots.filter((row) => row !== scopedRootRow) : roots;
-	for (const root of visibleRoots.sort(compareAgentsViewRows)) {
+	for (const root of visibleRoots.sort(compareRows)) {
 		emit(root, 0);
 	}
 	return flattened;
@@ -846,6 +894,7 @@ function createSubagentSummaryRow(
 		selectable: true,
 		runningSubagentCount: running,
 		recursiveCost: 0,
+		descendantCount: 0,
 		identity: `subagents:${parent.identity}`,
 		parentIdentity: parent.identity,
 		hasSpawnCode,
@@ -901,6 +950,7 @@ function buildSpawnCodeRows(
 		selectable: false,
 		runningSubagentCount: 0,
 		recursiveCost: 0,
+		descendantCount: 0,
 		identity: `code:${parent.identity}:${groupIndex}:${lineIndex}`,
 		parentIdentity: parent.identity,
 		code,
@@ -916,10 +966,14 @@ function buildSpawnCodeRows(
 	return [makeRow("", "pad-top"), ...lines, makeRow("", "pad-bottom")];
 }
 
-function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow): number {
+function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow, anchorSessionId?: string): number {
 	const sectionDiff = sectionRank(a.section) - sectionRank(b.section);
 	if (sectionDiff !== 0) {
 		return sectionDiff;
+	}
+	const emptyDiff = emptySessionRank(a, anchorSessionId) - emptySessionRank(b, anchorSessionId);
+	if (emptyDiff !== 0) {
+		return emptyDiff;
 	}
 	if (a.section === "inactive") {
 		const heartbeatDiff =
@@ -947,6 +1001,16 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow): number {
 		return titleDiff;
 	}
 	return a.summary.sessionId.localeCompare(b.summary.sessionId);
+}
+
+// Message-less sessions sink to the bottom of their section, except the session
+// the view was entered from: it keeps its recency slot so opening the agents
+// view from a fresh chat doesn't catapult that chat to the bottom.
+function emptySessionRank(row: AgentsViewRow, anchorSessionId: string | undefined): number {
+	if (!isEmptyAgentsViewSession(row.summary) || row.summary.sessionId === anchorSessionId) {
+		return 0;
+	}
+	return 1;
 }
 
 function buildRowKeyMap(rows: readonly MutableAgentsViewRow[]): Map<string, MutableAgentsViewRow> {

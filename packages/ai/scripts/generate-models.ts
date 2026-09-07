@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
@@ -63,12 +64,7 @@ interface AiGatewayModel {
 	};
 }
 
-const COPILOT_STATIC_HEADERS = {
-	"User-Agent": "GitHubCopilotChat/0.35.0",
-	"Editor-Version": "vscode/1.107.0",
-	"Editor-Plugin-Version": "copilot-chat/0.35.0",
-	"Copilot-Integration-Id": "vscode-chat",
-} as const;
+const COPILOT_STATIC_HEADERS = COPILOT_CLIENT_HEADERS;
 
 const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
@@ -209,10 +205,12 @@ const PRIME_INFERENCE_FEATURED_MODELS = new Set([
 	"z-ai/glm-5.2",
 ]);
 
-// Prime ids whose OpenRouter listing uses a different id. Empty today — Prime
-// currently publishes ids that match OpenRouter's, but HF-style ids show up
-// whenever a new route is added, so the mapping stays.
-const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {};
+// Prime ids whose OpenRouter listing uses a different id (e.g. after an
+// OpenRouter route rename); metadata lookups resolve through this mapping.
+const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {
+	// OpenRouter renamed its route to the dated id; Prime still serves the undated one.
+	"qwen/qwen3.8-max": "qwen/qwen3.8-max-0902",
+};
 
 // Conservative fallbacks for catalog models with no OpenRouter match and no
 // override above: an under-declared window degrades gracefully, an
@@ -299,6 +297,18 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (model.id.includes("gpt-5.6")) {
 		mergeThinkingLevelMap(model, { minimal: null, max: "max" });
+	}
+	// gpt-6 reasoning is mandatory with no minimal effort; xhigh/max are supported (OpenRouter capability data).
+	if (model.id.includes("gpt-6")) {
+		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
+	}
+	if (
+		(model.api === "openai-responses" ||
+			model.api === "azure-openai-responses" ||
+			model.api === "openai-codex-responses") &&
+		model.id.startsWith("gpt-6")
+	) {
+		mergeThinkingLevelMap(model, { off: null });
 	}
 	// Per-family effort support per the Anthropic effort docs. Opus 4.6 / Sonnet 4.6
 	// have no xhigh; Fable 5 / Mythos 5 / Mythos Preview think every turn (off: null).
@@ -773,10 +783,22 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 
 			// Convert pricing from $/token to $/million tokens. OpenRouter uses
 			// negative values as a placeholder for unknown pricing (e.g. auto-beta).
-			const inputCost = Math.max(0, parseFloat(model.pricing?.prompt || "0")) * 1_000_000;
-			const outputCost = Math.max(0, parseFloat(model.pricing?.completion || "0")) * 1_000_000;
-			const cacheReadCost = Math.max(0, parseFloat(model.pricing?.input_cache_read || "0")) * 1_000_000;
-			const cacheWriteCost = Math.max(0, parseFloat(model.pricing?.input_cache_write || "0")) * 1_000_000;
+			// Time-windowed tariff overrides (utc_start/utc_end) make the top-level
+			// price clock-dependent (e.g. Tencent Hy3 peak/off-peak); commit the peak
+			// rate so cost accounting never undercounts and regens stay hour-independent.
+			const timeWindowedTariffs = (Array.isArray(model.pricing?.overrides) ? model.pricing.overrides : []).filter(
+				(override: any) => typeof override?.utc_start === "number",
+			);
+			const peakPrice = (field: string): number =>
+				Math.max(
+					0,
+					parseFloat(model.pricing?.[field] || "0"),
+					...timeWindowedTariffs.map((override: any) => parseFloat(override?.[field] || "0")),
+				) * 1_000_000;
+			const inputCost = peakPrice("prompt");
+			const outputCost = peakPrice("completion");
+			const cacheReadCost = peakPrice("input_cache_read");
+			const cacheWriteCost = peakPrice("input_cache_write");
 			const reasoningCapabilities = getOpenRouterReasoningCapabilities(model);
 
 			const normalizedModel: Model<any> = {
@@ -1371,8 +1393,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// Copilot proxies Claude via the Anthropic Messages API
 				const isCopilotClaude = modelId.startsWith("claude-");
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
+				// gpt-5/gpt-6 models require responses API, others use completions
+				const needsResponsesApi =
+					modelId.startsWith("gpt-5") || modelId.startsWith("gpt-6") || modelId.startsWith("oswe");
 
 				const api: Api = isCopilotClaude
 					? "anthropic-messages"
@@ -2085,6 +2108,18 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},

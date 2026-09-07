@@ -32,6 +32,7 @@ export type {
 export { DaemonAgentConnection, InProcessAgentConnection } from "./agent-connection/index.js";
 export { type AgentsViewModeOptions, runAgentsViewMode } from "./agents-view/agents-view-mode.js";
 export {
+	type AgentsViewRecursiveRollup,
 	type AgentsViewRow,
 	type AgentsViewScopeFrame,
 	type AgentsViewScopeKey,
@@ -41,7 +42,7 @@ export {
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
-	computeRecursiveCosts,
+	computeRecursiveRollups,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -49,6 +50,7 @@ export {
 	getAgentsViewSessionTitle,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
+	isEmptyAgentsViewSession,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 	resolveAgentsViewScopeFrames,
