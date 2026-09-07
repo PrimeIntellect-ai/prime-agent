@@ -2900,10 +2900,10 @@ export class AgentSession {
 		const cap = resolveContextCap(settings);
 		if (!cap?.clamped) return;
 		this._contextCapClampNoticeShown = true;
-		// A resumed session rebuilds its messages from the branch; an existing notice means it was already shown.
-		const alreadyNoticed = this.agent.state.messages.some(
-			(message) => message.role === "custom" && message.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
-		);
+		// A resumed session already showed the notice if the branch carries one, even when compaction dropped it from the rebuilt messages.
+		const alreadyNoticed = this.sessionManager
+			.getBranch()
+			.some((entry) => entry.type === "custom_message" && entry.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE);
 		if (alreadyNoticed) return;
 		const notice: CustomMessage = {
 			role: "custom",
