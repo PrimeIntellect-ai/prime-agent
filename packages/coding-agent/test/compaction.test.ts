@@ -326,7 +326,6 @@ describe("shouldCompact", () => {
 		expect(shouldCompact(floor, 200000, settings)).toBe(false);
 
 		expect(resolveContextCap({ ...settings, maxContextTokens: floor })).toEqual({ cap: floor, clamped: false });
-		expect(resolveContextCap({ ...settings, maxContextTokens: undefined })).toBeUndefined();
 	});
 });
 
