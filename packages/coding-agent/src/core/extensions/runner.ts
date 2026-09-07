@@ -258,7 +258,9 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
-	private hostTimers = new Set<ReturnType<typeof setTimeout>>();
+	// Weak tracking: a timer cancelled via the global clearTimeout/clearInterval is dropped by GC instead of retained until unload; pending timers stay reachable through Node's active-timer list.
+	private hostTimers = new Set<WeakRef<ReturnType<typeof setTimeout>>>();
+	private hostTimerRefs = new WeakMap<ReturnType<typeof setTimeout>, WeakRef<ReturnType<typeof setTimeout>>>();
 
 	constructor(
 		extensions: Extension[],
@@ -484,7 +486,10 @@ export class ExtensionRunner {
 	): void {
 		if (this.staleMessage) return;
 		this.staleMessage = message;
-		for (const handle of this.hostTimers) clearTimeout(handle);
+		for (const ref of this.hostTimers) {
+			const handle = ref.deref();
+			if (handle) clearTimeout(handle);
+		}
 		this.hostTimers.clear();
 	}
 
@@ -532,7 +537,7 @@ export class ExtensionRunner {
 		const run = () => {
 			// A fired timeout is dead: clearTimeout makes handle.refresh() a permanent no-op, so nothing revives it past unload.
 			if (kind === "setTimeout") {
-				this.hostTimers.delete(handle);
+				this.untrackHostTimer(handle);
 				clearTimeout(handle);
 			}
 			try {
@@ -545,8 +550,19 @@ export class ExtensionRunner {
 			}
 		};
 		const handle = kind === "setTimeout" ? setTimeout(run, ms) : setInterval(run, ms);
-		this.hostTimers.add(handle);
+		for (const ref of this.hostTimers) {
+			if (!ref.deref()) this.hostTimers.delete(ref);
+		}
+		const ref = new WeakRef(handle);
+		this.hostTimers.add(ref);
+		this.hostTimerRefs.set(handle, ref);
 		return handle;
+	}
+
+	private untrackHostTimer(handle: ReturnType<typeof setTimeout>): void {
+		const ref = this.hostTimerRefs.get(handle);
+		if (ref) this.hostTimers.delete(ref);
+		this.hostTimerRefs.delete(handle);
 	}
 
 	private emitHostTimerError(kind: "setTimeout" | "setInterval", ownerPath: string | undefined, err: unknown): void {
@@ -560,7 +576,7 @@ export class ExtensionRunner {
 
 	private clearHostTimer(handle: ReturnType<typeof setTimeout> | undefined): void {
 		if (handle === undefined) return;
-		this.hostTimers.delete(handle);
+		this.untrackHostTimer(handle);
 		clearTimeout(handle);
 	}
 
