@@ -88,6 +88,7 @@ import {
 	resolveHeartbeatStreamingBehavior,
 	shouldDeferHeartbeatCronJob,
 } from "../../core/cron-jobs.js";
+import { resolveProviderModelSelection } from "../../core/model-resolver.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
@@ -5152,9 +5153,7 @@ export class AgentDaemon {
 				const session = state.runtime.session;
 				const availableModels = await session.modelRegistry.refreshAvailableModels();
 				const model =
-					availableModels.find(
-						(candidate) => candidate.provider === command.provider && candidate.id === command.modelId,
-					) ??
+					resolveProviderModelSelection(availableModels, command.provider, command.modelId, session.model) ??
 					// Stale-auth providers are excluded from the available list; the lookup
 					// never mutates stale state (session.setModel owns the clear).
 					(session.modelRegistry.getProviderAuthStatus(command.provider).source === "stale"

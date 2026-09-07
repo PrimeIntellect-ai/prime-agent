@@ -215,6 +215,38 @@ describe("InProcessAgentConnection", () => {
 		expect(session.session.refreshModelMetadata).toHaveBeenCalledTimes(2);
 	});
 
+	it("switches to an uncatalogued model id on the current provider", async () => {
+		const session = createFakeSession("custom-model", []);
+		const base = getModel("openai", "gpt-5.1");
+		if (!base) throw new Error("Missing OpenAI test model");
+		const currentModel = {
+			...base,
+			provider: "cline",
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			baseUrl: "https://api.cline.bot/api/v1",
+		};
+		const setModel = vi.fn(async () => {});
+		Object.assign(session.session, {
+			model: currentModel,
+			setModel,
+			modelRegistry: { refreshAvailableModels: async () => [currentModel] },
+		});
+		const connection = new InProcessAgentConnection(asRuntime(new FakeRuntime(session.session)));
+
+		const selected = await connection.setModel("cline", "z-ai/glm-5.3-flash");
+
+		expect(selected).toMatchObject({
+			provider: "cline",
+			id: "z-ai/glm-5.3-flash",
+			baseUrl: "https://api.cline.bot/api/v1",
+		});
+		expect(setModel).toHaveBeenCalledWith(expect.objectContaining({ provider: "cline", id: "z-ai/glm-5.3-flash" }));
+		await expect(connection.setModel("openrouter", "z-ai/glm-5.3-flash")).rejects.toThrow(
+			"Model not found: openrouter/z-ai/glm-5.3-flash",
+		);
+	});
+
 	it("exposes serializable tool metadata without local execution or renderer callbacks", async () => {
 		const session = createFakeSession("tools", []);
 		const runtime = new FakeRuntime(session.session);

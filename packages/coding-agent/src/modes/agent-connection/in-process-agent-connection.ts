@@ -15,6 +15,7 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
+import { resolveProviderModelSelection } from "../../core/model-resolver.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
@@ -457,7 +458,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		const registry = this.session.modelRegistry;
 		const availableModels = await registry.refreshAvailableModels();
 		const model =
-			availableModels.find((candidate) => candidate.provider === provider && candidate.id === modelId) ??
+			resolveProviderModelSelection(availableModels, provider, modelId, this.session.model) ??
 			// Stale-auth providers are excluded from the available list; the lookup
 			// never mutates stale state (session.setModel owns the clear).
 			(registry.getProviderAuthStatus(provider).source === "stale" ? registry.find(provider, modelId) : undefined);

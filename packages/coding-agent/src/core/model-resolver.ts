@@ -197,6 +197,41 @@ function buildFallbackModel(provider: string, modelId: string, availableModels: 
 	};
 }
 
+/**
+ * Resolve a runtime model switch without treating the provider catalog as an allowlist.
+ * Unknown ids are only synthesized for the provider that is already active, so a
+ * model id cannot implicitly switch transports or bypass another provider's auth.
+ */
+export function resolveProviderModelSelection(
+	availableModels: ReadonlyArray<Model<Api>>,
+	provider: string,
+	modelId: string,
+	currentModel: Model<Api> | undefined,
+): Model<Api> | undefined {
+	const trimmedModelId = modelId.trim();
+	if (!trimmedModelId) return undefined;
+
+	const exact = availableModels.find(
+		(candidate) => candidate.provider === provider && candidate.id === trimmedModelId,
+	);
+	if (exact) return exact;
+
+	if (!currentModel || currentModel.provider !== provider || provider === "prime-inference") {
+		return undefined;
+	}
+
+	return {
+		...currentModel,
+		id: trimmedModelId,
+		name: trimmedModelId,
+		input: [...currentModel.input],
+		cost: { ...currentModel.cost },
+		...(currentModel.compat ? { compat: { ...currentModel.compat } } : {}),
+		...(currentModel.thinkingLevelMap ? { thinkingLevelMap: { ...currentModel.thinkingLevelMap } } : {}),
+		...(currentModel.headers ? { headers: { ...currentModel.headers } } : {}),
+	};
+}
+
 function findPreferredDefaultModel(availableModels: Model<Api>[]): Model<Api> | undefined {
 	const primeInferenceDefault = availableModels.find(
 		(model) => model.provider === "prime-inference" && model.id === PRIME_INFERENCE_DEFAULT_MODEL_ID,
