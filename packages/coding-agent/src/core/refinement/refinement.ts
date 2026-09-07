@@ -412,6 +412,28 @@ function compactText(text: string, maxLength: number): string {
 	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+/**
+ * Digest-notation body for in-context refinement notices: the one-line trigger
+ * followed by each applied edit in `action kind [scope:id] title: content` shape.
+ * Rollback results carry rollback summaries and reverse edits, so they print as
+ * rollbacks without special casing.
+ */
+export function formatRefinementNoticeBody(result: RefinementResult): string {
+	const lines = [compactText(result.summary, DEFAULT_OVERVIEW_CONTENT_LIMIT)];
+	for (const edit of result.appliedEdits) {
+		if (!edit.applied) continue;
+		const entry = edit.after ?? edit.before;
+		const scope = entry?.scope ?? result.scope ?? "local";
+		lines.push(
+			`- ${edit.action} ${edit.kind} [${scope}:${edit.id}] ${entry?.title ?? edit.id}: ${compactText(
+				entry?.content ?? "",
+				DEFAULT_OVERVIEW_CONTENT_LIMIT,
+			)}`,
+		);
+	}
+	return lines.join("\n");
+}
+
 export function formatHarnessStateForPrompt(
 	state: HarnessState,
 	options: {

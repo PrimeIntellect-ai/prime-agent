@@ -73,6 +73,8 @@ export interface HarnessOptions {
 	agentMessageController?: AgentSessionMessageController;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	persistSession?: boolean;
+	/** Resume over an existing session file, mirroring production rehydration. */
+	existingSessionFile?: string;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
 	autonomous?: AgentAutonomousConfig;
@@ -118,9 +120,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = options.persistSession
-		? SessionManager.create(tempDir, join(tempDir, "sessions"))
-		: SessionManager.inMemory();
+	const sessionManager = options.existingSessionFile
+		? SessionManager.open(options.existingSessionFile)
+		: options.persistSession
+			? SessionManager.create(tempDir, join(tempDir, "sessions"))
+			: SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -179,6 +183,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			return runner.emitContext(messages);
 		},
 	});
+	if (options.existingSessionFile) {
+		agent.state.messages = sessionManager.buildSessionContext().messages;
+	}
 	const extensionsResult = options.extensionFactories
 		? await createTestExtensionsResult(options.extensionFactories, tempDir)
 		: undefined;

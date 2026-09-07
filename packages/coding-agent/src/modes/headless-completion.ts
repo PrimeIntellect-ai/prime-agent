@@ -11,6 +11,7 @@ import {
 	type CompactionOutcomeMessage,
 	isCompactionOutcomeMessage,
 	isSessionSlashCommandResultMessage,
+	REFINEMENT_NOTICE_CUSTOM_TYPE,
 	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	type SessionSlashCommandResultMessage,
 } from "../core/messages.js";
@@ -41,7 +42,8 @@ export function selectHeadlessTerminalResult(messages: readonly AgentMessage[]):
 		if (
 			message.role === "custom" &&
 			(message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
-				message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE)
+				message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE ||
+				message.customType === REFINEMENT_NOTICE_CUSTOM_TYPE)
 		) {
 			index--;
 			continue;

@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, type Harness } from "./harness.js";
+import { createHarness, getMessageText, type Harness } from "./harness.js";
 
 type SerializedInternals = {
 	_shouldStopAfterTurn(context: {
@@ -12,7 +12,7 @@ type SerializedInternals = {
 		newMessages: unknown[];
 	}): Promise<boolean>;
 	_runSerializedRefineCheckpoint(): Promise<void>;
-	_runSerializedRefine(options: { instructions?: string; global?: boolean }): Promise<void>;
+	_runSerializedRefine(options: { instructions?: string; global?: boolean }, source: "auto" | "self"): Promise<void>;
 	_consumeSerializedBackgroundPlan(consume: (result: unknown) => Promise<boolean>): Promise<string>;
 	_runSerializedAutoRefineReview(reason: "turn_interval" | "compact", branchVersion: number): Promise<void>;
 	_consumePendingRequestedRefine(): boolean;
@@ -1612,7 +1612,7 @@ describe("Serialized refine review-fix regressions", () => {
 		await internals._drainPendingRefinementForDisposal();
 
 		expect(runSpy).toHaveBeenCalledTimes(1);
-		expect(runSpy).toHaveBeenCalledWith(options);
+		expect(runSpy).toHaveBeenCalledWith(options, "self");
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 	});
 });
@@ -1823,11 +1823,11 @@ describe("P0 concurrency regressions", () => {
 		expect(applySpy).not.toHaveBeenCalled();
 	});
 
-	it("non-mocked apply pipeline: harness state persisted, prompt rebuilt, refine_complete emitted", async () => {
+	it("non-mocked apply pipeline: harness state persisted, prompt untouched, notice emitted", async () => {
 		// This test does NOT mock _applyRefine. It uses a faux planRefine
 		// mock but lets the real _applyRefine run, which calls
-		// applyRefinementProposal, saveHarnessState, _rebuildSystemPrompt,
-		// and emits refine_complete.
+		// applyRefinementProposal, saveHarnessState, appends the in-context
+		// refinement notice, and emits refine_complete.
 		const reviewer = vi.fn(async () => ({
 			shouldRefine: true,
 			rationale: "test",
@@ -1884,10 +1884,21 @@ describe("P0 concurrency regressions", () => {
 		});
 
 		// Run the serialized refine (real _applyRefine runs).
-		await internals._runSerializedRefine({ instructions: "add a memory" });
+		const promptBefore = harness.session.agent.state.systemPrompt;
+		await internals._runSerializedRefine({ instructions: "add a memory" }, "self");
 
-		// _rebuildSystemPrompt was called by _applyRefine.
-		expect(rebuildSpy).toHaveBeenCalledTimes(1);
+		// The provider prefix cache pin: applying a refinement never rebuilds or
+		// swaps the system prompt; the model learns about it from the notice.
+		expect(rebuildSpy).not.toHaveBeenCalled();
+		expect(harness.session.agent.state.systemPrompt).toBe(promptBefore);
+		const notice = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "refinement_notice",
+		);
+		expect(notice).toBeDefined();
+		expect(getMessageText(notice)).toMatch(/^\[self-refinement\]\n\n/);
+		expect(getMessageText(notice)).toContain(
+			"- create memory [local:p0_concurrency_test_memory] P0 concurrency test memory: Added during non-mocked apply pipeline test",
+		);
 
 		// Harness state persisted to disk.
 		const localDir = (await import("../../src/core/refinement/index.js")).getLocalHarnessStateDir(
@@ -2018,7 +2029,7 @@ describe("P0 concurrency regressions", () => {
 		});
 
 		// Start the serialized refine — begins background planning.
-		const refinePromise = internals._runSerializedRefine({ instructions: "update shared memory" });
+		const refinePromise = internals._runSerializedRefine({ instructions: "update shared memory" }, "self");
 
 		// Wait for planning to start.
 		await planStartedPromise;
@@ -2174,7 +2185,7 @@ describe("P0 concurrency regressions", () => {
 			},
 		);
 
-		const refine = internals._runSerializedRefine({ instructions: "cancel direct plan" });
+		const refine = internals._runSerializedRefine({ instructions: "cancel direct plan" }, "self");
 		await vi.waitFor(() => expect(planSignal).toBeDefined());
 		expect(internals._serializedPlanInFlight).toBeUndefined();
 		expect(internals._refinePlanInFlight).toBeDefined();
@@ -2212,7 +2223,7 @@ describe("P0 concurrency regressions", () => {
 		});
 		const applyRefine = vi.spyOn(internals, "_applyRefine").mockResolvedValue(emptyRefinementResult());
 
-		const directRefine = internals._runSerializedRefine({ instructions: "direct" });
+		const directRefine = internals._runSerializedRefine({ instructions: "direct" }, "self");
 		await vi.waitFor(() => expect(internals._refinePlanInFlight).toBeDefined());
 
 		const publicRefine = harness.session.refine({ instructions: "public" });
@@ -2287,7 +2298,7 @@ describe("P0 concurrency regressions", () => {
 
 		await internals._runSerializedRefineCheckpoint();
 
-		expect(run).toHaveBeenCalledWith({ instructions: "latest" });
+		expect(run).toHaveBeenCalledWith({ instructions: "latest" }, "self");
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 	});
 

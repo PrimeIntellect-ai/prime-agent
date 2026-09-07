@@ -4,9 +4,11 @@ import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
+import { convertToLlm, HARNESS_DIGEST_CUSTOM_TYPE } from "../../src/core/messages.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
+import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
@@ -99,8 +101,9 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.prompt("hi");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-		expect(getMessageText(harness.session.messages[0]!)).toBe("hi");
+		// The leading custom message is the session-start harness digest.
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "user", "assistant"]);
+		expect(getMessageText(harness.session.messages[1]!)).toBe("hi");
 		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(harness.eventsOfType("session_action_update")).toEqual([]);
 	});
@@ -224,13 +227,14 @@ describe("AgentSession prompt characterization", () => {
 
 		expect(toolRuns).toEqual(["hello"]);
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"custom",
 			"user",
 			"assistant",
 			"toolResult",
 			"assistant",
 		]);
-		expect(harness.session.messages[2]?.role).toBe("toolResult");
-		expect(harness.session.messages[3]?.role).toBe("assistant");
+		expect(harness.session.messages[3]?.role).toBe("toolResult");
+		expect(harness.session.messages[4]?.role).toBe("assistant");
 	});
 
 	it("executes multiple tool calls from one response and continues with a single follow-up response", async () => {
@@ -278,11 +282,12 @@ describe("AgentSession prompt characterization", () => {
 
 		harness.setResponses([
 			(context) => {
-				const user = context.messages.find((message) => message.role === "user");
-				sawImage =
-					user?.role === "user" &&
-					typeof user.content !== "string" &&
-					user.content.some((part) => part.type === "image");
+				sawImage = context.messages.some(
+					(message) =>
+						message.role === "user" &&
+						typeof message.content !== "string" &&
+						message.content.some((part) => part.type === "image"),
+				);
 				return fauxAssistantMessage("ok");
 			},
 		]);
@@ -335,7 +340,7 @@ describe("AgentSession prompt characterization", () => {
 
 		harness.setResponses([
 			(context) => {
-				const user = context.messages.find((message) => message.role === "user");
+				const user = context.messages.filter((message) => message.role === "user").at(-1);
 				expandedPrompt = user ? getMessageText(user) : "";
 				return fauxAssistantMessage("ok");
 			},
@@ -370,7 +375,7 @@ describe("AgentSession prompt characterization", () => {
 
 		harness.setResponses([
 			(context) => {
-				const user = context.messages.find((message) => message.role === "user");
+				const user = context.messages.filter((message) => message.role === "user").at(-1);
 				expandedPrompt = user ? getMessageText(user) : "";
 				return fauxAssistantMessage("ok");
 			},
@@ -401,7 +406,7 @@ describe("AgentSession prompt characterization", () => {
 		await harness.session.prompt("/testcmd hello world");
 
 		expect(commandRuns).toEqual(["hello world"]);
-		expect(harness.session.messages).toEqual([]);
+		expect(harness.session.messages.filter((message) => message.role !== "custom")).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
@@ -413,8 +418,8 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.sendUserMessage("from extension");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-		expect(getMessageText(harness.session.messages[0]!)).toBe("from extension");
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "user", "assistant"]);
+		expect(getMessageText(harness.session.messages[1]!)).toBe("from extension");
 	});
 
 	it("rejects an aborted prompt while streaming instead of enqueueing it", async () => {
@@ -1117,9 +1122,9 @@ stale post-hook extension instructions`,
 		await harness.session.acceptAgentMessagePrompt("agent-to-agent payload", { expandPromptTemplates: false });
 		await harness.session.agent.waitForIdle();
 
-		expect(contextRoles).toEqual([["user", "assistant", "user", "user"]]);
-		expect(contextTexts[0]?.[2]).toContain("Ran `echo hi`");
-		expect(contextTexts[0]?.[3]).toBe("agent-to-agent payload");
+		expect(contextRoles).toEqual([["user", "user", "assistant", "user", "user"]]);
+		expect(contextTexts[0]?.[3]).toContain("Ran `echo hi`");
+		expect(contextTexts[0]?.[4]).toBe("agent-to-agent payload");
 		expect(harness.session.hasPendingBashMessages).toBe(false);
 	});
 
@@ -2064,5 +2069,98 @@ stale post-hook extension instructions`,
 		harness.setResponses([fauxAssistantMessage("clean after")]);
 		await harness.session.prompt("normal prompt");
 		expect(getAssistantTexts(harness)).toContain("clean after");
+	});
+});
+
+describe("Harness digest at cold boundaries", () => {
+	const harnesses: Harness[] = [];
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		while (harnesses.length > 0) {
+			harnesses.pop()?.cleanup();
+		}
+		while (tempDirs.length > 0) {
+			const dir = tempDirs.pop();
+			if (dir) rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	function digestMessages(harness: Harness) {
+		return harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === HARNESS_DIGEST_CUSTOM_TYPE,
+		);
+	}
+
+	it("injects the digest as the first context message of a fresh session", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+
+		const first = harness.session.messages[0];
+		expect(first).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
+		expect(getMessageText(first)).toContain("The persistent memories produced across this session so far:");
+		expect(getMessageText(first)).toContain("# Continual Harness State");
+		// Passes through to the model as a user message and is durably persisted.
+		expect(convertToLlm([first!])[0]?.role).toBe("user");
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE),
+		).toBe(true);
+	});
+
+	it("resume dedupes identical digests and appends a fresh one when disk state changed", async () => {
+		// Pin the global harness store to an empty temp dir so the digest content
+		// only reflects the local entry written between resumes.
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		const agentDir = join(tmpdir(), `pi-digest-agent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(agentDir, { recursive: true });
+		tempDirs.push(agentDir);
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = agentDir;
+		onTestFinished(() => {
+			if (previousAgentDir === undefined) delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			else process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+		});
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("hi")]);
+		await harness.session.prompt("hello");
+		const sessionFile = harness.sessionManager.getSessionFile();
+		expect(sessionFile).toBeDefined();
+		harness.session.dispose();
+
+		// Identical disk state: repeated resumes must not stack digest copies.
+		const resumed = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(resumed);
+		expect(digestMessages(resumed).length).toBe(1);
+		resumed.session.dispose();
+
+		// Stale digest: the local harness changed on disk since the last injection.
+		const localDir = getLocalHarnessStateDir(resumed.sessionManager.getSessionArtifactDir());
+		expect(localDir).toBeDefined();
+		const state = loadHarnessState(localDir, "local");
+		state.entries.memory.resume_test_memory = {
+			id: "resume_test_memory",
+			kind: "memory",
+			title: "Resume test memory",
+			content: "Written between resumes.",
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-09-07T00:00:00.000Z",
+			updated_at: "2026-09-07T00:00:00.000Z",
+			version: 1,
+		};
+		saveHarnessState(localDir!, state);
+
+		const resumedStale = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(resumedStale);
+		const digests = digestMessages(resumedStale);
+		expect(digests.length).toBe(2);
+		expect(resumedStale.session.messages.at(-1)).toBe(digests.at(-1));
+		expect(getMessageText(digests.at(-1))).toContain("[local:resume_test_memory] Resume test memory");
 	});
 });
