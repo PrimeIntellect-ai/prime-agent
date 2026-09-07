@@ -2667,7 +2667,7 @@ export class AgentDaemon {
 				(runtimeConfig?.provider ?? parentState.runtime.session.model?.provider) === options.model.provider
 					? runtimeConfig?.apiKey
 					: undefined;
-			const launchEnv: Record<string, string> = {};
+			const launchEnv = collectDaemonLaunchEnv({ PATH: process.env.PATH });
 			if (inheritsProvider) {
 				const envKey = authSource === "environment" ? findEnvKeys(options.model.provider)?.[0] : undefined;
 				if (envKey && process.env[envKey]) launchEnv[envKey] = process.env[envKey];
@@ -2679,7 +2679,7 @@ export class AgentDaemon {
 				{
 					type: "create",
 					lifecycle: "resident",
-					...(inheritsProvider ? { launchEnv: collectDaemonLaunchEnv(launchEnv) } : {}),
+					launchEnv,
 					...(options.sessionName ? { name: options.sessionName } : {}),
 					config: {
 						cwd: options.cwd,

@@ -49,6 +49,7 @@ _ASYNCIO_WRAPPER_CALLBACKS = {
     ("asyncio.tasks", "gather.<locals>._done_callback"),
     ("asyncio.tasks", "shield.<locals>._inner_done_callback"),
     ("asyncio.tasks", "_wait.<locals>._on_completion"),
+    ("asyncio.tasks", "as_completed.<locals>._on_completion"),
     ("asyncio.tasks", "_release_waiter"),
 }
 
@@ -94,7 +95,9 @@ def _completion_reaches(
         seen_values.add(identity)
 
         nested: list[Any] = []
-        if isinstance(value, functools.partial):
+        if isinstance(value, asyncio.Queue):
+            pending.extend(value._getters)
+        elif isinstance(value, functools.partial):
             nested.extend((value.func, value.args, value.keywords))
         elif isinstance(value, dict):
             nested.extend(value.keys())
@@ -127,6 +130,8 @@ def _completion_reaches(
             identity = (getattr(base, "__module__", None), getattr(base, "__qualname__", None))
             if identity in _ASYNCIO_WRAPPER_CALLBACKS:
                 collect(callback)
+            elif identity == ("asyncio.tasks", "_AsCompletedIterator._handle_completion"):
+                collect(base.__self__._done)
             elif identity == (None, "Task.task_wakeup"):
                 task = getattr(callback, "__self__", None)
                 if isinstance(task, asyncio.Task):

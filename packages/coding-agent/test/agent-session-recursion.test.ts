@@ -3200,6 +3200,37 @@ describe("AgentSession rlm recursion", () => {
 		expect(createRlmRootSession).toHaveBeenCalledOnce();
 	});
 
+	it("does not create a root session after disposal during name preflight", async () => {
+		let releaseName: () => void = () => {};
+		const nameGate = new Promise<void>((resolve) => {
+			releaseName = resolve;
+		});
+		const createRlmRootSession = vi.fn(async () => ({
+			active_session_id: "new-root",
+			session_id: "new-session",
+			name: "researcher",
+			session_file: join(tempDir, "new-session.jsonl"),
+			model: `${model.provider}/${model.id}`,
+		}));
+		const root = createSession({
+			agentMessageController: {
+				assertSessionNameAvailable: () => nameGate,
+				listAgents: async () => ({ current: { activeSessionId: "root", sessionId: "session" }, agents: [] }),
+				sendAgentMessage: vi.fn(),
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: vi.fn(),
+				createRlmRootSession,
+				deleteRlmSubagentRuntime: vi.fn(),
+			},
+		});
+		const creating = root.createRlmSession("independent task", { name: "researcher" });
+		root.dispose();
+		releaseName();
+		await expect(creating).rejects.toThrow("disposed");
+		expect(createRlmRootSession).not.toHaveBeenCalled();
+	});
+
 	it("keeps top-level session creation unavailable to nested or inline sessions", async () => {
 		const createRlmRootSession = vi.fn();
 		const nested = createSession({

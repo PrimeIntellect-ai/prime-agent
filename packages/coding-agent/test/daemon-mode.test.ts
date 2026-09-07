@@ -1889,6 +1889,7 @@ describe("daemon mode helpers", () => {
 				vi.stubEnv("PRIME_TEAM_ID", "parent-team");
 				vi.stubEnv("OPENAI_API_KEY", "unrelated-provider-key");
 				vi.stubEnv("UNRELATED_SECRET", "unrelated-secret");
+				vi.stubEnv("PATH", `/parent/toolchain:${process.env.PATH}`);
 				const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
 					defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
 					createRuntime: vi.fn(),
@@ -1955,20 +1956,22 @@ describe("daemon mode helpers", () => {
 				]);
 				const createCommand = commands.find((command) => command.type === "create");
 				expect(createCommand).toBeDefined();
+				expect((createCommand?.launchEnv as Record<string, string> | undefined)?.PATH).toBe(process.env.PATH);
 				const config = createCommand?.config as Record<string, unknown>;
 				expect(config.apiKey).toBe(
 					provider === "prime-inference" && provider === configuredProvider && !stale ? runtimeKey : undefined,
 				);
-				expect(createCommand?.launchEnv).toEqual(
-					provider === "prime-inference"
+				expect(createCommand?.launchEnv).toEqual({
+					PATH: process.env.PATH,
+					...(provider === "prime-inference"
 						? {
 								...(envKey && !stale && !(runtimeKey && configuredProvider === provider)
 									? { PRIME_API_KEY: envKey }
 									: {}),
 								PRIME_TEAM_ID: "parent-team",
 							}
-						: undefined,
-				);
+						: {}),
+				});
 				if (provider === "prime-inference") {
 					const childAuth = AuthStorage.inMemory(
 						{},

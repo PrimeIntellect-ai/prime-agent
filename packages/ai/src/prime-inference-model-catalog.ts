@@ -37,13 +37,17 @@ export function parsePrimeInferenceModelCatalog(
 	const seen = new Set<string>();
 	for (const item of value.data) {
 		if (!isRecord(item) || typeof item.id !== "string" || !item.id || item.id.length > 1_024) continue;
+		if (/[\u0000-\u001f\u007f-\u009f]/.test(item.id)) continue;
 		if (seen.has(item.id)) throw new Error(`Duplicate Prime Inference model ${item.id}`);
 		const pricing = isRecord(item.pricing) ? item.pricing : {};
 		const input = nonNegativeNumber(pricing.input_usd_per_mtok);
 		const output = nonNegativeNumber(pricing.output_usd_per_mtok);
 		if (input === undefined || output === undefined) continue;
 
-		const name = typeof item.display_name === "string" ? item.display_name.trim() : "";
+		const name =
+			typeof item.display_name === "string"
+				? item.display_name.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim()
+				: "";
 		const specs = isRecord(item.specs) ? item.specs : {};
 		const modalities = isRecord(specs.modalities) ? specs.modalities : {};
 		const inputModalities =

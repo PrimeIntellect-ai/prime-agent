@@ -1,6 +1,6 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
 import { createHarness, type Harness } from "../harness.js";
@@ -41,6 +41,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -295,6 +296,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		const harness = await createHarness(privateModelHarnessOptions);
 		harnesses.push(harness);
 		const registry = harness.session.modelRegistry;
+		vi.spyOn(harness.authStorage, "getProviderHeaders").mockReturnValue({ "X-Prime-Team-ID": "test-team" });
 		lockOutProvider(harness, "prime-inference");
 		const privateModel = harness.models.find((model) => model.id === "internal/private-model");
 		expect(privateModel).toBeDefined();
@@ -303,8 +305,12 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		await expect(harness.session.setModel(privateModel!)).rejects.toThrow("not available");
 		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({ source: "stale" });
 
-		const internals = registry as unknown as { authorizedPrivatePrimeInferenceModelIds: Set<string> };
+		const internals = registry as unknown as {
+			authorizedPrivatePrimeInferenceModelIds: Set<string>;
+			authorizedPrivatePrimeInferenceTeamId: string | undefined;
+		};
 		internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
+		internals.authorizedPrivatePrimeInferenceTeamId = "test-team";
 		// Refreshes during the stale window run keyless; they must preserve the
 		// cached entitlements the explicit re-selection validates against.
 		await registry.refreshAvailableModels();

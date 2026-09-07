@@ -66,6 +66,33 @@ describe("Prime Inference model catalog", () => {
 		]);
 	});
 
+	test("rejects control-bearing IDs without rewriting Unicode model identities", () => {
+		const pricing = { input_usd_per_mtok: 1, output_usd_per_mtok: 2 };
+		const id = "vendor/模型-é";
+		const controls = Array.from({ length: 33 }, (_, i) => String.fromCharCode(i + 0x7f)).concat(
+			Array.from({ length: 32 }, (_, i) => String.fromCharCode(i)),
+		);
+		const models = parsePrimeInferenceModelCatalog(
+			response({ id, pricing }, ...controls.map((control) => ({ id: `${id}${control}`, pricing }))),
+		);
+		expect(models.map((model) => model.id)).toEqual([id]);
+	});
+
+	test("removes display-name terminal controls while preserving Unicode", () => {
+		const pricing = { input_usd_per_mtok: 1, output_usd_per_mtok: 2 };
+		const controls =
+			Array.from({ length: 32 }, (_, i) => String.fromCharCode(i)).join("") +
+			Array.from({ length: 33 }, (_, i) => String.fromCharCode(i + 0x7f)).join("");
+		const models = parsePrimeInferenceModelCatalog(
+			response(
+				{ id: "unicode", display_name: ` 模型 é 👩‍💻${controls} `, pricing },
+				{ id: "fallback", display_name: controls, pricing },
+			),
+		);
+		expect(models[0].name).toBe("模型 é 👩‍💻");
+		expect(models[1]).not.toHaveProperty("name");
+	});
+
 	test("rejects empty and duplicate catalogs", () => {
 		expect(() => parsePrimeInferenceModelCatalog(response())).toThrow(/empty/);
 		const model = { id: "duplicate", pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 } };

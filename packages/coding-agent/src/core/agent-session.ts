@@ -11157,6 +11157,9 @@ export class AgentSession {
 		}
 		const thinkingLevel =
 			requestedThinkingLevel ?? (clampThinkingLevel(modelSelection.model, this.thinkingLevel) as ThinkingLevel);
+		if (this._disposed || this._disposing) {
+			throw new Error("Cannot create a top-level session after the current session was disposed");
+		}
 		return host.createRlmRootSession({
 			prompt,
 			sessionName,

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { startsAgentRun } from "../src/core/agent-messages.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	convertToLlm,
@@ -25,6 +26,11 @@ describe("async bash completion", () => {
 				timestamp: message.timestamp,
 			},
 		]);
+	});
+
+	it("starts a new agent run for a background completion follow-up", () => {
+		const message = createAsyncBashCompletionMessage({ pid: 42, command: "long-running-tool", exitCode: 0 });
+		expect(startsAgentRun(message)).toBe(true);
 	});
 
 	it("validates and forwards kernel completion payloads", async () => {

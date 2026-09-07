@@ -774,6 +774,14 @@ class ReplTest(unittest.TestCase):
             "wait-for": "(await asyncio.wait_for(bash('printf wait-for'), 1)).output",
             "shield": "(await asyncio.shield(bash('printf shield'))).output",
             "nested": "(await asyncio.shield(asyncio.gather(bash('printf nested'))))[0].output",
+            "as-completed": (
+                "[(await completed).output for completed in "
+                "asyncio.as_completed([bash('printf as-completed')])]"
+            ),
+            "as-completed-nested": (
+                "[(await completed)[0].output for completed in "
+                "asyncio.as_completed([asyncio.shield(asyncio.gather(bash('printf as-completed-nested')))])]"
+            ),
             "wait": "\n".join(
                 [
                     "handle = bash('printf wait')",
@@ -786,6 +794,11 @@ class ReplTest(unittest.TestCase):
             "task-group-gather": task_group("task-group-gather", "(await asyncio.gather(handle))[0]"),
             "task-group-shield": task_group("task-group-shield", "await asyncio.shield(handle)"),
         }
+        if sys.version_info >= (3, 13):
+            snippets["as-completed-async"] = (
+                "[completed.result().output async for completed in "
+                "asyncio.as_completed([bash('printf as-completed-async')])]"
+            )
         for label, snippet in snippets.items():
             with self.subTest(label=label):
                 completed = self.repl.execute(
@@ -798,6 +811,45 @@ class ReplTest(unittest.TestCase):
                 if request is not None:
                     reply_ok(self.repl, request)
                 self.assertIsNone(request)
+
+    def test_as_completed_outside_creating_cell_keeps_one_bash_completion(self):
+        snippets = {
+            "no-await": (
+                "iterator = asyncio.as_completed([handle])\n"
+                "next(iterator).close()\n"
+                "await asyncio.sleep(0.05)"
+            ),
+            "detached": (
+                "async def consume():\n"
+                "    for completed in asyncio.as_completed([handle]):\n"
+                "        await completed\n"
+                "consumer = asyncio.create_task(consume())\n"
+                "await asyncio.sleep(0.05)"
+            ),
+            "later-cell": "iterator = asyncio.as_completed([handle])",
+        }
+        for label, snippet in snippets.items():
+            with self.subTest(label=label):
+                command = f"printf {label}"
+                events = self.repl.execute(
+                    f"as-completed-{label}",
+                    f"from rlm import bash\nimport asyncio\nhandle = bash({command!r})\n{snippet}",
+                )
+                if label == "later-cell":
+                    events += self.repl.execute(
+                        "as-completed-later-await",
+                        "for completed in iterator:\n    await completed",
+                    )
+                events += self.repl.execute(
+                    f"as-completed-{label}-probe", "await asyncio.sleep(0.05)"
+                )
+                requests = [event for event in events if event.get("event") == "host_request"]
+                for request in requests:
+                    reply_ok(self.repl, request)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]["data"]["type"], "bash.completed")
+                self.assertEqual(requests[0]["data"]["command"], command)
+                self.assertFalse(any(event.get("event") == "error" for event in events))
 
     def test_background_task_await_does_not_suppress_bash_completion(self):
         code = "\n".join(

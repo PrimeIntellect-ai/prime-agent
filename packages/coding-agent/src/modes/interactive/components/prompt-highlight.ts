@@ -1,9 +1,10 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { type ThemeColor, theme } from "../theme/theme.js";
 
-const ARG_TOKEN_PATTERN = /@"[^"\n]*"|@[^\s\x1b]+|--[A-Za-z0-9][A-Za-z0-9-]*/g;
+const ARG_TOKEN_PATTERN = /@"[^"\n]*"|@(?:\\[^\s\x1b]|[^\s\x1b|])+|--[A-Za-z0-9][A-Za-z0-9-]*/g;
 /** Also matches a bare `--` end-of-options separator; only used for argument-taking slash commands. */
-const ARG_TOKEN_PATTERN_WITH_SEPARATOR = /@"[^"\n]*"|@[^\s\x1b]+|--[A-Za-z0-9][A-Za-z0-9-]*|--(?=\s|$)/g;
+const ARG_TOKEN_PATTERN_WITH_SEPARATOR =
+	/@"[^"\n]*"|@(?:\\[^\s\x1b]|[^\s\x1b|])+|--[A-Za-z0-9][A-Za-z0-9-]*|--(?=\s|$)/g;
 const FG_SGR_PATTERN = /\x1b\[(?:0|39|3[0-7]|9[0-7]|38;[0-9;]+)m/g;
 /** Escape sequences the editor splices into displayed text (cursor highlight, IME marker). */
 const CURSOR_ESCAPE_PATTERN = /\x1b\[[0-9;]*m|\x1b_[^\x07]*\x07/g;

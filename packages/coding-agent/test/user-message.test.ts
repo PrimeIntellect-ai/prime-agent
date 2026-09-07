@@ -187,6 +187,27 @@ describe("UserMessageComponent", () => {
 		expect(contents).toContain("two");
 	});
 
+	test.each(["@src/foo.ts", '@"src/a|b.ts"', "@src/a\\|b.ts", "@src/a\\\\", "@src/a\\\\\\|b.ts"])(
+		"preserves table cells and copied paths for %s",
+		(path) => {
+			initTheme("dark");
+			const component = new UserMessageComponent(`| alpha | beta |\n| --- | --- |\n| ${path}|two |`);
+			const rendered = component.render(80).join("\n");
+			expect(component.getSelectionRegions().map((region) => region.content)).toEqual([
+				"alpha",
+				"beta",
+				path,
+				"two",
+			]);
+			expect(rendered).toContain(theme.fg("success", path));
+			for (const includeBareSeparator of [false, true]) {
+				expect(styleArgumentTokens(`${path}|two`, undefined, includeBareSeparator)).toBe(
+					`${theme.fg("success", path)}|two`,
+				);
+			}
+		},
+	);
+
 	test("renders a literal mask-range character before an @token uncorrupted", () => {
 		initTheme("dark");
 		const plain = new UserMessageComponent("\uE000 check @foo")
