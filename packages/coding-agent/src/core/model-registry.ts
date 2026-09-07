@@ -477,14 +477,22 @@ export class ModelRegistry {
 		this.providerRequestConfigs.clear();
 		this.modelRequestHeaders.clear();
 		this.lastProviderAuthSourceTokens.clear();
-		this.authorizedPrivatePrimeInferenceModelIds.clear();
-		this.authorizedPrivatePrimeInferenceTeamId = undefined;
 		this.explicitPrivatePrimeInferenceModelIds.clear();
 		this.loadError = undefined;
 
 		// Credentials may have been written by another process (e.g. the UI
 		// process saving a login while the session lives in the daemon).
 		this.authStorage.reload();
+		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
+		// Direct refreshes must preserve same-team stale recovery, but invalidate changed auth immediately.
+		if (
+			this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source !== "stale" ||
+			!teamId ||
+			teamId !== this.authorizedPrivatePrimeInferenceTeamId
+		) {
+			this.authorizedPrivatePrimeInferenceModelIds.clear();
+			this.authorizedPrivatePrimeInferenceTeamId = undefined;
+		}
 		resetApiProviders();
 		resetOAuthProviders();
 		// reset drops everything but model-provider built-ins; re-add MCP integrations
