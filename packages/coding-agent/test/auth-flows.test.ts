@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Api, getModels, type Model } from "@earendil-works/pi-ai";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
@@ -49,7 +50,7 @@ function createFakeTui(overlays: Component[] = []): TUI {
 	} as unknown as TUI;
 }
 
-function createHost(authStorage: AuthStorage): {
+function createHost(authStorage: AuthStorage, models: Model<Api>[] = []): {
 	host: ProviderAuthFlowsHost;
 	statusMessages: string[];
 	errorMessages: string[];
@@ -63,7 +64,7 @@ function createHost(authStorage: AuthStorage): {
 	const modelRegistry = {
 		authStorage,
 		refresh: vi.fn(),
-		getAll: () => [],
+		getAll: () => models,
 		getProviderDisplayName: (providerId: string) => providerId,
 		getProviderAuthStatus: (providerId: string) => authStorage.getAuthStatus(providerId),
 	} as unknown as ModelRegistry;
@@ -170,6 +171,17 @@ describe("ProviderAuthFlows", () => {
 		}
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
+	});
+
+	it("offers Kilo Code and Cline as API-key login providers before credentials are configured", () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const models = [...getModels("kilocode"), ...getModels("cline")] as Model<Api>[];
+		const { host } = createHost(authStorage, models);
+
+		const providerIds = new ProviderAuthFlows(host).getLoginProviderOptions("api_key").map((provider) => provider.id);
+
+		expect(providerIds).toContain("kilocode");
+		expect(providerIds).toContain("cline");
 	});
 
 	it.each(["services", "sdk"])("imports CLI credentials through default %s", async (factory) => {

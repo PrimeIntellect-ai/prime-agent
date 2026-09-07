@@ -13,12 +13,12 @@ const forwardedArgs = process.argv.slice(2);
 let entrypoint;
 let args;
 
-if (existsSync(bundledCli)) {
-  entrypoint = process.execPath;
-  args = [bundledCli, ...forwardedArgs];
-} else if (existsSync(sourceCli) && existsSync(tsxCli)) {
+if (existsSync(sourceCli) && existsSync(tsxCli)) {
   entrypoint = process.execPath;
   args = [tsxCli, sourceCli, ...forwardedArgs];
+} else if (existsSync(bundledCli)) {
+  entrypoint = process.execPath;
+  args = [bundledCli, ...forwardedArgs];
 } else {
   console.error("Supreme Agent CLI entrypoint is unavailable. Reinstall the package or restore the local workspace dependencies.");
   process.exit(1);
