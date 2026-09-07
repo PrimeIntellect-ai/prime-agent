@@ -1001,13 +1001,84 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("keeps an optimistic rename visible across roster pushes until the RPC settles", async () => {
-		const live = summary({ sessionName: "Old Name" });
-		let settle!: (value: { success: boolean; data: unknown }) => void;
+	it("holds a renamed inactive session's name until the slow saved refetch confirms it", async () => {
+		const savedInfo = {
+			path: "/tmp/saved.jsonl",
+			id: "saved-session",
+			cwd: "/tmp",
+			name: "Old Name",
+			created: new Date(),
+			modified: new Date(),
+			messageCount: 3,
+			firstMessage: "hi",
+			allMessagesText: "hi",
+		};
+		const savedSummary = summary({
+			id: "saved",
+			activeSessionId: undefined,
+			sessionId: "saved-session",
+			sessionName: "Old Name",
+			sessionFile: "/tmp/saved.jsonl",
+			rosterStatus: "inactive",
+			lifecycle: "archived",
+		});
+		const settles: Array<(value: { success: boolean; data: unknown }) => void> = [];
 		const request = vi.fn(
 			() =>
 				new Promise((resolve) => {
-					settle = resolve;
+					settles.push(resolve);
+				}),
+		);
+		// inactiveExpanded keeps the saved-only row visible on this branch.
+		const view = new AgentsViewMode(
+			{ config: {}, uiServices: createUiServices() },
+			{ savedCatalogLoaded: true, inactiveExpanded: true },
+		);
+		const rowName = () =>
+			(Reflect.get(view, "rows") as AgentsViewRow[]).find((row) => row.summary.sessionId === savedSummary.sessionId)
+				?.summary.sessionName;
+		try {
+			Reflect.set(view, "client", { request, isConnected: true });
+			Reflect.set(view, "rosterStore", { summaries: () => [] });
+			Reflect.set(view, "savedSessions", [savedInfo]);
+			invoke("reconcileCatalogs", view);
+			expect(rowName()).toBe("Old Name");
+			await invoke("renameSession", view, savedSummary, "Fresh Name");
+			expect(rowName()).toBe("Fresh Name");
+			// The rename RPC settles, but the confirming saved refetch is still in
+			// flight: the old name must not flash back meanwhile.
+			settles.shift()?.({ success: true, data: {} });
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(rowName()).toBe("Fresh Name");
+			// The refetch lands with the renamed entry; truth self-clears the overlay.
+			settles.shift()?.({
+				success: true,
+				data: {
+					sessions: [
+						{
+							...savedInfo,
+							name: "Fresh Name",
+							created: savedInfo.created.toISOString(),
+							modified: savedInfo.modified.toISOString(),
+						},
+					],
+				},
+			});
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(rowName()).toBe("Fresh Name");
+			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps an optimistic rename visible across roster pushes until the RPC settles", async () => {
+		const live = summary({ sessionName: "Old Name" });
+		const settles: Array<(value: { success: boolean; data: unknown }) => void> = [];
+		const request = vi.fn(
+			() =>
+				new Promise((resolve) => {
+					settles.push(resolve);
 				}),
 		);
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
@@ -1016,18 +1087,29 @@ describe("AgentsViewMode", () => {
 				.sessionName;
 		try {
 			Reflect.set(view, "client", { request, isConnected: true });
-			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Fresh Name" }] });
+			Reflect.set(view, "rosterStore", { summaries: () => [live] });
 			invoke("applySessionList", view, [live], true);
 			await invoke("renameSession", view, live, "Fresh Name");
 			expect(rowName()).toBe("Fresh Name");
 			// An unrelated roster push mid-flight must not flicker the old name back.
 			invoke("applySessionList", view, [live, summary({ id: "other", sessionId: "other-session" })], true);
 			expect(rowName()).toBe("Fresh Name");
-			settle({ success: true, data: {} });
+			// A second rename while the first is in flight owns the overlay now.
+			await invoke("renameSession", view, live, "Second Name");
+			expect(rowName()).toBe("Second Name");
+			// The first settle (and its refreshes over stale truth) must not kill
+			// or confirm the newer optimistic name.
+			settles.shift()?.({ success: true, data: {} });
 			await new Promise((resolve) => setImmediate(resolve));
-			// Overlay gone; the refreshed roster (daemon truth) carries the name.
+			expect(rowName()).toBe("Second Name");
+			settles.shift()?.({ success: true, data: {} });
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(rowName()).toBe("Second Name");
+			// Refreshed truth carrying the name self-clears the overlay.
+			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Second Name" }] });
+			await invoke("refreshSessions", view);
 			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
-			expect(rowName()).toBe("Fresh Name");
+			expect(rowName()).toBe("Second Name");
 		} finally {
 			stopThemeWatcher();
 		}

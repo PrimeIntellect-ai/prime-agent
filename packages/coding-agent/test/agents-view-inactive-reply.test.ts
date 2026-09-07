@@ -661,8 +661,10 @@ describe("agents view slash commands", () => {
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
-		// The overlay dies with the settled RPC.
-		expect((self.pendingRenames as Map<string, string>).size).toBe(0);
+		// Success keeps the overlay until refreshed truth carries the name; the
+		// reconcile self-clears it (pinned against the real view elsewhere).
+		expect((self.pendingRenames as Map<string, string>).get(live.sessionId)).toBe("Fresh Name");
+		(self.pendingRenames as Map<string, string>).clear();
 
 		// A failed rename surfaces the error and refetches to revert the label.
 		(self.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
@@ -671,6 +673,8 @@ describe("agents view slash commands", () => {
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(self.setStatusMessage).toHaveBeenCalledWith(expect.stringContaining("Failed to rename agent: name taken"));
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
+		// Failure clears its own overlay entry so the revert refetch shows through.
+		expect((self.pendingRenames as Map<string, string>).size).toBe(0);
 	});
 
 	it("arms the saved-search fetch once and lets only the current fetch re-arm the latch", async () => {

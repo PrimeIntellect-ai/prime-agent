@@ -1696,11 +1696,20 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.pendingRenames.size === 0) return [...summaries];
 		return summaries.map((summary) => {
 			const name = this.pendingRenames.get(summary.sessionId);
-			return name === undefined ? summary : { ...summary, sessionName: name };
+			if (name === undefined) return summary;
+			// Truth carrying the overlay value confirms the rename: the entry
+			// clears itself, so it can never drop early (before the saved refetch
+			// lands) nor outlive a newer rename's overlay (last writer wins).
+			if (summary.sessionName === name) {
+				this.pendingRenames.delete(summary.sessionId);
+				return summary;
+			}
+			return { ...summary, sessionName: name };
 		});
 	}
 
 	private async completeRename(summary: SessionSummary, name: string): Promise<void> {
+		let failed = false;
 		try {
 			if (summary.activeSessionId) {
 				requireDaemonData(
@@ -1716,15 +1725,21 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 			this.setStatusMessage(`Renamed to ${name}`);
 		} catch (error) {
+			failed = true;
 			this.setStatusMessage(
 				isUnknownDaemonCommandError(error, "rename")
 					? "Failed to rename: the daemon is running an older build; restart the daemon and try again"
 					: formatError("Failed to rename agent", error),
 			);
 		}
-		// The overlay dies with the RPC; the refreshes then confirm the new name
-		// (success) or restore the previous one from daemon truth (failure).
-		this.pendingRenames.delete(summary.sessionId);
+		// An overlay entry is cleared only by the actor whose value it holds:
+		// success leaves it for the reconcile to self-clear once refreshed truth
+		// carries the name (the saved refetch can lag for seconds); failure clears
+		// its own entry here so the revert refetch shows through, while a newer
+		// rename's overlay survives a stale settle.
+		if (failed && this.pendingRenames.get(summary.sessionId) === name) {
+			this.pendingRenames.delete(summary.sessionId);
+		}
 		await this.refreshSessions();
 		this.refreshSavedSessionsIfLoaded();
 	}
@@ -2208,7 +2223,12 @@ export class AgentsViewMode implements Component, Focusable {
 				? this.savedSessions
 				: this.savedSessions.map((session) => {
 						const name = this.pendingRenames.get(session.id);
-						return name === undefined ? session : { ...session, name };
+						if (name === undefined) return session;
+						if (session.name === name) {
+							this.pendingRenames.delete(session.id);
+							return session;
+						}
+						return { ...session, name };
 					});
 		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, savedSessions, this.heartbeats);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
