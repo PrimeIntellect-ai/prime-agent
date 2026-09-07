@@ -2760,8 +2760,7 @@ type DisplayItem =
 	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };
 
-// Summary rows fold into the running-subagents display items; session rows
-// themselves always render — inactive included, search is the filter.
+// Summary rows fold into the running-subagents display items.
 function compactSessionRows(rows: readonly AgentsViewRow[]): AgentsViewRow[] {
 	return rows.filter((row) => row.kind !== "subagent-summary");
 }

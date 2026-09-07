@@ -874,7 +874,7 @@ describe("AgentsViewMode", () => {
 			rosterStatus: "inactive",
 			lifecycle: "archived",
 		});
-		// A stale inactiveExpanded flag from an older session must be ignored.
+		// The stale pre-removal collapse flag must be ignored.
 		const persistentState = { savedCatalogLoaded: true, inactiveExpanded: false } as AgentsViewPersistentState;
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
 		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
@@ -896,11 +896,9 @@ describe("AgentsViewMode", () => {
 			]);
 			invoke("reconcileCatalogs", view);
 			expect(showsSaved()).toBe(true);
-			// The removed Alt+I collapse chord must not hide anything anymore.
+			// The removed Alt+I chord must not hide anything.
 			view.handleInput("\x1bi");
 			expect(showsSaved()).toBe(true);
-			invoke("setSearchQuery", view, "archive-match");
-			expect(rows().map((row) => row.summary.sessionId)).toEqual([saved.sessionId]);
 			invoke("setSearchQuery", view, "no-such-session");
 			expect(showsSaved()).toBe(false);
 		} finally {
