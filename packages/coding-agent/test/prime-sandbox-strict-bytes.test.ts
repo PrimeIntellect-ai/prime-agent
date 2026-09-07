@@ -262,6 +262,94 @@ process.stdout.write(JSON.stringify({ validCopy, authenticCopy, freshCopy, proxy
 		);
 	});
 
+	it("ignores post-import Object.prototype descriptor pollution without weakening rejection or cleanup", () => {
+		const script = `const NativeObject = globalThis.Object;
+const NativeReflect = globalThis.Reflect;
+const nativeApply = NativeReflect.apply;
+const nativeDefineProperty = NativeObject.defineProperty;
+const nativeDeleteProperty = NativeReflect.deleteProperty;
+const nativeGetOwnPropertyDescriptor = NativeObject.getOwnPropertyDescriptor;
+const nativeGetPrototypeOf = NativeObject.getPrototypeOf;
+const NativeBytes = globalThis.Uint8Array;
+const NativeArrayBuffer = globalThis.ArrayBuffer;
+const nativeBytesPrototype = NativeBytes.prototype;
+const nativeArrayBufferPrototype = NativeArrayBuffer.prototype;
+const nativeTypedArrayPrototype = nativeApply(nativeGetPrototypeOf, NativeObject, [nativeBytesPrototype]);
+const typedBufferDescriptor = nativeApply(nativeGetOwnPropertyDescriptor, NativeObject, [nativeTypedArrayPrototype, "buffer"]);
+const globalBytesDescriptor = nativeApply(nativeGetOwnPropertyDescriptor, NativeObject, [globalThis, "Uint8Array"]);
+const objectDescriptorDescriptor = nativeApply(nativeGetOwnPropertyDescriptor, NativeObject, [NativeObject, "getOwnPropertyDescriptor"]);
+const allocations = [];
+const validSource = new NativeBytes([11, 22, 33]);
+const lateSource = new NativeBytes([7, 8, 9]);
+function TrackedBytes(length) {
+ const value = new NativeBytes(length);
+ allocations.push(value);
+ return value;
+}
+function instrumentedDescriptor(target, name) {
+ const descriptor = nativeApply(nativeGetOwnPropertyDescriptor, NativeObject, [target, name]);
+ if (target === lateSource && name === "2") return { value: 999, writable: true, enumerable: true, configurable: true };
+ return descriptor;
+}
+const poisonState = { reads: 0 };
+function poison() { poisonState.reads += 1; return undefined; }
+function dataDescriptor(value) {
+ const descriptor = NativeObject.create(null);
+ descriptor.value = value;
+ descriptor.writable = true;
+ descriptor.enumerable = true;
+ descriptor.configurable = true;
+ return descriptor;
+}
+function getterDescriptor(getter) {
+ const descriptor = NativeObject.create(null);
+ descriptor.get = getter;
+ descriptor.enumerable = true;
+ descriptor.configurable = true;
+ return descriptor;
+}
+nativeApply(nativeDefineProperty, NativeObject, [TrackedBytes, "prototype", { value: nativeBytesPrototype }]);
+nativeApply(nativeDefineProperty, NativeObject, [globalThis, "Uint8Array", { value: TrackedBytes, configurable: true, writable: true }]);
+nativeApply(nativeDefineProperty, NativeObject, [NativeObject, "getOwnPropertyDescriptor", { value: instrumentedDescriptor, configurable: true, writable: true }]);
+const codec = await import("./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-strict-bytes.ts?prototype-descriptor-pollution");
+const fields = ["get", "set", "value", "writable", "enumerable", "configurable"];
+const cases = fields.map((field) => [field]);
+cases.push(fields);
+const checks = [];
+for (const names of cases) {
+ for (const name of names) nativeApply(nativeDefineProperty, NativeObject, [NativeObject.prototype, name, getterDescriptor(poison)]);
+ const valid = codec.copySandboxStrictBytes(validSource, 3);
+ const validBuffer = valid.ok ? nativeApply(typedBufferDescriptor.get, valid.value, []) : undefined;
+ const sourceBuffer = nativeApply(typedBufferDescriptor.get, validSource, []);
+ const validCopy = valid.ok && valid.value[0] === 11 && valid.value[1] === 22 && valid.value[2] === 33;
+ const freshAuthentic = valid.ok && valid.value !== validSource && validBuffer !== sourceBuffer && nativeApply(nativeGetPrototypeOf, NativeObject, [valid.value]) === nativeBytesPrototype && nativeApply(nativeGetPrototypeOf, NativeObject, [validBuffer]) === nativeArrayBufferPrototype;
+ const fake = NativeObject.create(nativeBytesPrototype);
+ nativeApply(nativeDefineProperty, NativeObject, [fake, "0", dataDescriptor(1)]);
+ const accessor = NativeObject.create(nativeBytesPrototype);
+ nativeApply(nativeDefineProperty, NativeObject, [accessor, "0", getterDescriptor(poison)]);
+ const fakeRejected = !codec.copySandboxStrictBytes(fake, 1).ok;
+ const accessorRejected = !codec.copySandboxStrictBytes(accessor, 1).ok;
+ const beforeLate = allocations.length;
+ const late = codec.copySandboxStrictBytes(lateSource, 3);
+ const lateAllocation = allocations[beforeLate];
+ const cleanupZeroed = !late.ok && allocations.length === beforeLate + 1 && lateAllocation[0] === 0 && lateAllocation[1] === 0 && lateAllocation[2] === 0;
+ checks.push(validCopy && freshAuthentic && fakeRejected && accessorRejected && cleanupZeroed && poisonState.reads === 0);
+ for (const name of names) nativeApply(nativeDeleteProperty, NativeReflect, [NativeObject.prototype, name]);
+}
+nativeApply(nativeDefineProperty, NativeObject, [globalThis, "Uint8Array", globalBytesDescriptor]);
+nativeApply(nativeDefineProperty, NativeObject, [NativeObject, "getOwnPropertyDescriptor", objectDescriptorDescriptor]);
+process.stdout.write(JSON.stringify({ cases: checks.length, passed: checks.every(Boolean) }));`;
+		const repositoryRoot = resolve(import.meta.dirname, "../../..");
+		const result = spawnSync(process.execPath, ["-e", script], {
+			cwd: repositoryRoot,
+			encoding: "utf8",
+			timeout: 30_000,
+		});
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(result.stdout).toBe('{"cases":7,"passed":true}');
+	});
+
 	it("performs one canonical name read and descriptor read per byte", () => {
 		const script = `const NativeObject = globalThis.Object;
 const NativeReflect = globalThis.Reflect;

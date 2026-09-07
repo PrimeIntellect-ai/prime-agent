@@ -1,7 +1,10 @@
 import { types } from "node:util";
 
-const reflectApply = Reflect.apply;
+const reflectObject = Reflect;
+const reflectApply = reflectObject.apply;
+const reflectGet = reflectObject.get;
 const objectConstructor = Object;
+const objectHasOwn = objectConstructor.hasOwn;
 const getPrototypeOf = objectConstructor.getPrototypeOf;
 const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
 const getOwnPropertyNames = objectConstructor.getOwnPropertyNames;
@@ -24,10 +27,25 @@ const maximumStrictByteLength = 1_048_576;
 
 type CapturedGetter = (target: unknown) => unknown;
 
+const missingOwnDataProperty = reflectApply(freezeObject, objectConstructor, [{}]);
+const invalidOwnDataProperty = reflectApply(freezeObject, objectConstructor, [{}]);
+
+function readOwnDataProperty(target: object, name: string): unknown {
+	let descriptor: PropertyDescriptor | undefined;
+	try {
+		descriptor = reflectApply(getOwnPropertyDescriptor, objectConstructor, [target, name]);
+	} catch {
+		return invalidOwnDataProperty;
+	}
+	if (descriptor === undefined) return missingOwnDataProperty;
+	if (!reflectApply(objectHasOwn, objectConstructor, [descriptor, "value"])) return invalidOwnDataProperty;
+	return reflectApply(reflectGet, reflectObject, [descriptor, "value", descriptor]);
+}
+
 function captureGetter(prototype: object, name: string): CapturedGetter | undefined {
 	const descriptor = reflectApply(getOwnPropertyDescriptor, objectConstructor, [prototype, name]);
 	if (descriptor === undefined) return undefined;
-	const getter: unknown = descriptor.get;
+	const getter = readOwnDataProperty(descriptor, "get");
 	if (typeof getter !== "function") return undefined;
 	return (target: unknown): unknown => reflectApply(getter, target, []);
 }
@@ -35,7 +53,7 @@ function captureGetter(prototype: object, name: string): CapturedGetter | undefi
 function captureTypedArrayZeroer(prototype: object): CapturedGetter | undefined {
 	const descriptor = reflectApply(getOwnPropertyDescriptor, objectConstructor, [prototype, "fill"]);
 	if (descriptor === undefined) return undefined;
-	const method: unknown = descriptor.value;
+	const method = readOwnDataProperty(descriptor, "value");
 	if (typeof method !== "function") return undefined;
 	return (target: unknown): unknown => reflectApply(method, target, [0]);
 }
@@ -180,11 +198,18 @@ export function copySandboxStrictBytes(input: unknown, maxBytes: number): Sandbo
 			return discardOwnedCopy(copy);
 		}
 		if (descriptor === undefined) return discardOwnedCopy(copy);
-		if (descriptor.get !== undefined || descriptor.set !== undefined) return discardOwnedCopy(copy);
-		if (descriptor.writable !== true || descriptor.enumerable !== true || descriptor.configurable !== true) {
+		if (
+			readOwnDataProperty(descriptor, "get") !== missingOwnDataProperty ||
+			readOwnDataProperty(descriptor, "set") !== missingOwnDataProperty
+		)
 			return discardOwnedCopy(copy);
-		}
-		const byte: unknown = descriptor.value;
+		if (
+			readOwnDataProperty(descriptor, "writable") !== true ||
+			readOwnDataProperty(descriptor, "enumerable") !== true ||
+			readOwnDataProperty(descriptor, "configurable") !== true
+		)
+			return discardOwnedCopy(copy);
+		const byte = readOwnDataProperty(descriptor, "value");
 		if (
 			typeof byte !== "number" ||
 			!reflectApply(numberIsInteger, numberConstructor, [byte]) ||
