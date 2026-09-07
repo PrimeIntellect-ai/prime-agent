@@ -1,4 +1,5 @@
 import { getSupportedThinkingLevels } from "../src/models.js";
+import { supportsAdaptiveThinking } from "../src/providers/anthropic.js";
 import { getCompat } from "../src/providers/openai-completions.js";
 import type { Api, Model } from "../src/types.js";
 
@@ -103,6 +104,14 @@ export function validateModelCatalog(catalog: CatalogLike): string[] {
 	for (const [provider, models] of Object.entries(catalog)) {
 		for (const model of Object.values(models)) {
 			if (!model.thinkingLevelMap || !model.reasoning) continue;
+			if (model.api === "anthropic-messages" && !supportsAdaptiveThinking(model.id)) {
+				const clamped = ["xhigh", "max"].filter((level) => model.thinkingLevelMap?.[level] != null);
+				if (clamped.length > 0) {
+					violations.push(
+						`${provider}/${model.id}: thinkingLevelMap offers [${clamped.join(",")}] but the budget path serializes them as high`,
+					);
+				}
+			}
 			if (model.api === "openai-completions" && !effortIsSendable(model)) {
 				const levels = selectableLevels(model);
 				if (levels.length > 0) {

@@ -4,6 +4,7 @@ import { writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { supportsAdaptiveThinking } from "../src/providers/anthropic.js";
 import { getCompat } from "../src/providers/openai-completions.js";
 import {
 	CODEX_SMALLER_WINDOW_VERIFIED,
@@ -2271,6 +2272,17 @@ async function generateModels() {
 
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
+	}
+
+	// Non-adaptive anthropic-messages rows express thinking as budget tokens, where xhigh/max clamp to high;
+	// null those entries so the UI never offers a level that serializes identically to high.
+	for (const model of allModels) {
+		if (model.api !== "anthropic-messages" || !model.reasoning || !model.thinkingLevelMap) continue;
+		if (supportsAdaptiveThinking(model.id)) continue;
+		const phantom = ["xhigh", "max"].filter((level) => model.thinkingLevelMap?.[level] != null);
+		if (phantom.length === 0) continue;
+		console.log(`Nulling budget-clamped thinking levels on ${model.provider}/${model.id}: ${phantom.join(", ")}`);
+		model.thinkingLevelMap = { ...model.thinkingLevelMap, ...Object.fromEntries(phantom.map((level) => [level, null])) };
 	}
 
 	// Family maps can land on transports that never send reasoning effort; null them so the UI offers nothing the request drops.

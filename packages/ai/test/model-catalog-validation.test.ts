@@ -75,6 +75,19 @@ describe("model catalog validation", () => {
 			["moonshotai/model-z: thinkingLevelMap offers [max] but the transport cannot send reasoning effort"],
 		],
 		[
+			"budget-clamped levels on a non-adaptive anthropic-messages row",
+			catalogOf(
+				row({
+					id: "kimi-x",
+					provider: "kimi-coding",
+					api: "anthropic-messages",
+					reasoning: true,
+					thinkingLevelMap: { off: null, low: "low", high: "high", max: "max" },
+				}),
+			),
+			["kimi-coding/kimi-x: thinkingLevelMap offers [max] but the budget path serializes them as high"],
+		],
+		[
 			"nothing when maps differ only in off-level support",
 			catalogOf(
 				row({

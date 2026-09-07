@@ -4301,7 +4301,7 @@ export const MODELS = {
 			provider: "fireworks",
 			baseUrl: "https://api.fireworks.ai/inference",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -4455,7 +4455,7 @@ export const MODELS = {
 			provider: "fireworks",
 			baseUrl: "https://api.fireworks.ai/inference",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 4.5,
@@ -6939,7 +6939,7 @@ export const MODELS = {
 			baseUrl: "https://api.kimi.com/coding",
 			headers: {"User-Agent":"KimiCLI/1.5"},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -6958,7 +6958,7 @@ export const MODELS = {
 			baseUrl: "https://api.kimi.com/coding",
 			headers: {"User-Agent":"KimiCLI/1.5"},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -20232,7 +20232,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -20250,7 +20250,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 4.5,
@@ -20778,7 +20778,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -20796,7 +20796,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -20814,7 +20814,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3.5,
@@ -20832,7 +20832,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 21,
@@ -20850,7 +20850,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -20868,7 +20868,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3.5,
@@ -20886,7 +20886,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -20904,7 +20904,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -20922,7 +20922,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.75,
@@ -20940,7 +20940,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
@@ -20958,7 +20958,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.19999999999999998,
@@ -20976,7 +20976,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 30,
@@ -20994,7 +20994,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -21012,7 +21012,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 12.5,
@@ -21030,7 +21030,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":null},
 			input: ["text", "image"],
 			cost: {
 				input: 30,
@@ -21048,7 +21048,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"xhigh":null,"minimal":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.19999999999999998,
@@ -21066,7 +21066,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"xhigh":null,"minimal":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.39999999999999997,
@@ -21084,7 +21084,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"xhigh":null,"minimal":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -21102,7 +21102,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"xhigh":null,"minimal":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 4,
@@ -21120,7 +21120,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"xhigh":null,"minimal":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -21138,7 +21138,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"xhigh":null,"minimal":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 4,
@@ -21156,7 +21156,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -21174,7 +21174,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 20,
