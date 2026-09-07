@@ -1069,6 +1069,72 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("keeps the optimistic name when the saved scan confirms before the roster does", async () => {
+		const savedInfo = {
+			path: "/tmp/dual.jsonl",
+			id: "dual-session",
+			cwd: "/tmp",
+			name: "Old Name",
+			created: new Date(),
+			modified: new Date(),
+			messageCount: 3,
+			firstMessage: "hi",
+			allMessagesText: "hi",
+		};
+		const live = summary({
+			id: "dual",
+			activeSessionId: "dual",
+			sessionId: "dual-session",
+			sessionName: "Old Name",
+			sessionFile: "/tmp/dual.jsonl",
+		});
+		const settles: Array<(value: { success: boolean; data: unknown }) => void> = [];
+		const request = vi.fn(
+			() =>
+				new Promise((resolve) => {
+					settles.push(resolve);
+				}),
+		);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		const rowName = () =>
+			(Reflect.get(view, "rows") as AgentsViewRow[]).find((row) => row.summary.sessionId === live.sessionId)?.summary
+				.sessionName;
+		try {
+			Reflect.set(view, "client", { request, isConnected: true });
+			Reflect.set(view, "rosterStore", { summaries: () => [live] });
+			Reflect.set(view, "savedSessions", [savedInfo]);
+			invoke("applySessionList", view, [live], true);
+			await invoke("renameSession", view, live, "Fresh Name");
+			settles.shift()?.({ success: true, data: {} });
+			await new Promise((resolve) => setImmediate(resolve));
+			// The saved scan already carries the renamed file while the roster is
+			// stale: rows display daemon-first, so the overlay must survive.
+			settles.shift()?.({
+				success: true,
+				data: {
+					sessions: [
+						{
+							...savedInfo,
+							name: "Fresh Name",
+							created: savedInfo.created.toISOString(),
+							modified: savedInfo.modified.toISOString(),
+						},
+					],
+				},
+			});
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(rowName()).toBe("Fresh Name");
+			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(1);
+			// The roster push lands with the name; the overlay self-clears.
+			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Fresh Name" }] });
+			await invoke("refreshSessions", view);
+			expect(rowName()).toBe("Fresh Name");
+			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("keeps an optimistic rename visible across roster pushes until the RPC settles", async () => {
 		const live = summary({ sessionName: "Old Name" });
 		const settles: Array<(value: { success: boolean; data: unknown }) => void> = [];

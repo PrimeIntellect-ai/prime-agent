@@ -2207,18 +2207,20 @@ export class AgentsViewMode implements Component, Focusable {
 			shouldShowAgentsViewSession(summary, this.inactiveAgentIdentities.has(getSummaryIdentity(summary))),
 		);
 		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
-		const savedSessions =
-			this.pendingRenames.size === 0
-				? this.savedSessions
-				: this.savedSessions.map((session) => {
-						const name = this.pendingRenames.get(session.id);
-						if (name === undefined) return session;
-						if (session.name === name) {
-							this.pendingRenames.delete(session.id);
-							return session;
-						}
-						return { ...session, name };
-					});
+		let savedSessions = this.savedSessions;
+		if (this.pendingRenames.size > 0) {
+			const rosterSessionIds = new Set(this.lastListedSummaries.map((summary) => summary.sessionId));
+			savedSessions = this.savedSessions.map((session) => {
+				const name = this.pendingRenames.get(session.id);
+				if (name === undefined) return session;
+				if (session.name === name) {
+					// Rows display daemon-first, so a roster-resident session confirms there.
+					if (!rosterSessionIds.has(session.id)) this.pendingRenames.delete(session.id);
+					return session;
+				}
+				return { ...session, name };
+			});
+		}
 		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, savedSessions, this.heartbeats);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
 		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
