@@ -1,0 +1,1 @@
+- Added Kilo Code and Cline to built-in provider selection with default models and API-key login support.

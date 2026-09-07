@@ -77,6 +77,16 @@ const KIMI_STATIC_HEADERS = {
 
 const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
+const KILO_GATEWAY_BASE_URL = "https://api.kilo.ai/api/gateway";
+const CLINE_API_BASE_URL = "https://api.cline.bot/api/v1";
+const CLINE_FALLBACK_MODEL_ALIASES: ReadonlyArray<readonly [string, string]> = [
+	["anthropic/claude-sonnet-4.6", "anthropic/claude-sonnet-4.6"],
+	["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4.6"],
+	["google/gemini-2.5-pro", "google/gemini-2.5-pro"],
+	["deepseek/deepseek-chat", "deepseek/deepseek-chat"],
+	["minimax/minimax-m2.5", "minimax/minimax-m2.5"],
+	["openai/gpt-4o", "openai/gpt-4o"],
+];
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
@@ -699,6 +709,150 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 		console.error("Failed to fetch OpenRouter models:", error);
 		return [];
 	}
+}
+function getExistingGatewayModels(provider: "kilocode" | "cline"): Model<any>[] {
+	const providers = EXISTING_MODELS as unknown as Record<string, Record<string, Model<any>>>;
+	return Object.values(providers[provider] ?? {}).map((model) => ({
+		...model,
+		input: [...model.input],
+		cost: { ...model.cost },
+		...(model.compat ? { compat: { ...model.compat } } : {}),
+		...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
+	}));
+}
+
+function gatewayPricePerMillion(value: unknown): number {
+	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseFloat(value) : 0;
+	return Number.isFinite(parsed) ? Math.max(0, parsed) * 1_000_000 : 0;
+}
+
+async function fetchKiloModels(): Promise<Model<any>[]> {
+	try {
+		console.log("Fetching models from Kilo AI Gateway...");
+		const response = await fetch(`${KILO_GATEWAY_BASE_URL}/models`);
+		if (!response.ok) {
+			throw new Error(`Kilo model catalog returned HTTP ${response.status}`);
+		}
+		const data = await response.json();
+		const items = isRecord(data) && Array.isArray(data.data) ? data.data : [];
+		const models: Model<any>[] = [];
+
+		for (const item of items) {
+			if (!isRecord(item) || typeof item.id !== "string") continue;
+			const supportedParameters = Array.isArray(item.supported_parameters)
+				? item.supported_parameters.filter((value): value is string => typeof value === "string")
+				: [];
+			if (!supportedParameters.includes("tools") || item.id.endsWith(":batch")) continue;
+
+			const architecture = isRecord(item.architecture) ? item.architecture : {};
+			const inputModalities = Array.isArray(architecture.input_modalities) ? architecture.input_modalities : [];
+			const input: ("text" | "image")[] = inputModalities.includes("image") ? ["text", "image"] : ["text"];
+			const pricing = isRecord(item.pricing) ? item.pricing : {};
+			const topProvider = isRecord(item.top_provider) ? item.top_provider : {};
+			const reasoningCapabilities = getOpenRouterReasoningCapabilities(item);
+			const contextWindow = getOptionalNumber(item.context_length) ?? getOptionalNumber(topProvider.context_length) ?? 4096;
+			const maxTokens = Math.min(
+				getOptionalNumber(topProvider.max_completion_tokens) ?? getOptionalNumber(item.max_tokens) ?? 4096,
+				contextWindow,
+			);
+
+			models.push({
+				id: item.id,
+				name: typeof item.name === "string" && item.name ? item.name : item.id,
+				api: "openai-completions",
+				provider: "kilocode",
+				baseUrl: KILO_GATEWAY_BASE_URL,
+				reasoning: supportedParameters.includes("reasoning") || supportedParameters.includes("include_reasoning"),
+				...(reasoningCapabilities?.thinkingLevelMap
+					? { thinkingLevelMap: reasoningCapabilities.thinkingLevelMap }
+					: {}),
+				input,
+				cost: {
+					input: gatewayPricePerMillion(pricing.prompt),
+					output: gatewayPricePerMillion(pricing.completion),
+					cacheRead: gatewayPricePerMillion(pricing.input_cache_read),
+					cacheWrite: gatewayPricePerMillion(pricing.input_cache_write),
+				},
+				contextWindow,
+				maxTokens,
+				compat: {
+					supportsStore: false,
+					supportsDeveloperRole: false,
+					maxTokensField: "max_tokens",
+					thinkingFormat: "openrouter",
+					supportsStrictMode: false,
+					...(reasoningCapabilities?.supportsReasoningEffort === false
+						? { supportsReasoningEffort: false }
+						: {}),
+				},
+			});
+		}
+
+		if (models.length === 0) throw new Error("Kilo model catalog returned no tool-capable models");
+		console.log(`Fetched ${models.length} tool-capable models from Kilo AI Gateway`);
+		return models;
+	} catch (error) {
+		console.error("Failed to fetch Kilo models; keeping the existing snapshot:", error);
+		return getExistingGatewayModels("kilocode");
+	}
+}
+
+async function fetchClineModels(openRouterModels: Model<any>[]): Promise<Model<any>[]> {
+	const aliases = new Map<string, string>(CLINE_FALLBACK_MODEL_ALIASES);
+	const apiKey = process.env.CLINE_API_KEY?.trim();
+	if (apiKey) {
+		try {
+			console.log("Fetching models from Cline API...");
+			const response = await fetch(`${CLINE_API_BASE_URL}/models`, {
+				headers: { Authorization: `Bearer ${apiKey}` },
+			});
+			if (!response.ok) {
+				throw new Error(`Cline model catalog returned HTTP ${response.status}`);
+			}
+			const data = await response.json();
+			const items = isRecord(data) && Array.isArray(data.data) ? data.data : [];
+			for (const item of items) {
+				if (!isRecord(item) || typeof item.id !== "string") continue;
+				aliases.set(item.id, item.id === "anthropic/claude-sonnet-4-6" ? "anthropic/claude-sonnet-4.6" : item.id);
+			}
+		} catch (error) {
+			console.error("Failed to refresh Cline model ids; using the built-in snapshot:", error);
+		}
+	}
+
+	const openRouterById = new Map(openRouterModels.map((model) => [model.id, model]));
+	const models: Model<any>[] = [];
+	for (const [clineId, sourceId] of aliases) {
+		const source = openRouterById.get(sourceId);
+		if (!source) continue;
+		models.push({
+			...source,
+			id: clineId,
+			provider: "cline",
+			baseUrl: CLINE_API_BASE_URL,
+			input: [...source.input],
+			cost:
+				clineId === "minimax/minimax-m2.5"
+					? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+					: { ...source.cost },
+			compat: {
+				...(source.compat ?? {}),
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: false,
+				supportsUsageInStreaming: false,
+				maxTokensField: "max_tokens",
+				supportsStrictMode: false,
+			},
+		});
+	}
+
+	if (models.length > 0) {
+		console.log(`Loaded ${models.length} Cline API models`);
+		return models;
+	}
+	console.error("Cline fallback metadata was unavailable; keeping the existing snapshot");
+	return getExistingGatewayModels("cline");
 }
 
 async function fetchAiGatewayModels(): Promise<Model<any>[]> {
@@ -1471,10 +1625,12 @@ async function generateModels() {
 	// AI Gateway: OpenAI-compatible catalog with tool-capable models
 	const modelsDevModels = await loadModelsDevData();
 	const openRouterModels = await fetchOpenRouterModels();
+	const kiloModels = await fetchKiloModels();
+	const clineModels = await fetchClineModels(openRouterModels);
 	const aiGatewayModels = await fetchAiGatewayModels();
 
 	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels].filter(
+	const allModels = [...modelsDevModels, ...openRouterModels, ...kiloModels, ...clineModels, ...aiGatewayModels].filter(
 		(model) =>
 			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
 	);

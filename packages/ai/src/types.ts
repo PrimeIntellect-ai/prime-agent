@@ -31,6 +31,8 @@ export type KnownProvider =
 	| "groq"
 	| "cerebras"
 	| "openrouter"
+	| "kilocode"
+	| "cline"
 	| "vercel-ai-gateway"
 	| "zai"
 	| "mistral"

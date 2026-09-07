@@ -35,6 +35,8 @@ if ($NoEnv) {
     "CEREBRAS_API_KEY",
     "XAI_API_KEY",
     "OPENROUTER_API_KEY",
+    "KILO_API_KEY",
+    "CLINE_API_KEY",
     "ZAI_API_KEY",
     "MISTRAL_API_KEY",
     "MINIMAX_API_KEY",

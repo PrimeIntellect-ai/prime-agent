@@ -1,0 +1,1 @@
+- Added Kilo Code and Cline as built-in OpenAI-compatible providers with API-key discovery and model catalogs.

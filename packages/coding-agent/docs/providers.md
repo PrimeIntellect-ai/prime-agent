@@ -74,6 +74,8 @@ prime-agent
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` (+ `CLOUDFLARE_ACCOUNT_ID`) | `cloudflare-workers-ai` |
 | xAI | `XAI_API_KEY` | `xai` |
 | OpenRouter | `OPENROUTER_API_KEY` | `openrouter` |
+| Kilo Code | `KILO_API_KEY` | `kilocode` |
+| Cline | `CLINE_API_KEY` | `cline` |
 | Vercel AI Gateway | `AI_GATEWAY_API_KEY` | `vercel-ai-gateway` |
 | ZAI | `ZAI_API_KEY` | `zai` |
 | OpenCode Zen | `OPENCODE_API_KEY` | `opencode` |
@@ -147,6 +149,14 @@ For deliberate development or test use, `PRIME_AGENT_INFERENCE_API_BASE_URL` ove
 ### Trace sharing credentials
 
 Trace sharing remains opt-in. Normal uploads use explicit environment or Agent-owned credentials, never a live CLI credential fallback. `/traces login` can reuse a CLI key only after the same production URL checks and production validation, including the required `agent_traces` scope. The trace API defaults to `https://api.primeintellect.ai`; only the trace-specific `PRIME_AGENT_TRACES_BASE_URL` overrides that default, not CLI URLs or `PRIME_API_BASE_URL`. Explicit trace login does not reuse CLI credentials when its resolved trace API destination is nonproduction.
+
+### Kilo Code
+
+Kilo Code uses the OpenAI-compatible Kilo AI Gateway at `https://api.kilo.ai/api/gateway`. Set `KILO_API_KEY` or store an API key for `kilocode` via `/login`. The built-in model catalog is generated from Kilo's public `/models` endpoint.
+
+### Cline
+
+Cline uses the OpenAI-compatible Cline API at `https://api.cline.bot/api/v1`. Set `CLINE_API_KEY` or store an API key for `cline` via `/login`. Prime Agent ships a documented Cline model snapshot and refreshes the authenticated `/models` catalog during model generation when `CLINE_API_KEY` is available.
 
 ## Cloud Providers
 
