@@ -1,0 +1,1 @@
+- Fixed `Input.setValue` leaving the cursor at the start, which made typing after a pre-filled value prepend instead of append.
