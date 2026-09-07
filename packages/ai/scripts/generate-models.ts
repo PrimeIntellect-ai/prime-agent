@@ -4,6 +4,12 @@ import { writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { getCompat } from "../src/providers/openai-completions.js";
+import {
+	CODEX_SMALLER_WINDOW_VERIFIED,
+	copilotModelApi,
+	validateModelCatalog,
+} from "./validate-model-catalog.js";
 import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
@@ -96,9 +102,9 @@ const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 const KIMI_K3_THINKING_LEVEL_MAP = {
 	off: null,
 	minimal: null,
-	low: null,
+	low: "low",
 	medium: null,
-	high: null,
+	high: "high",
 	xhigh: null,
 	max: "max",
 } as const;
@@ -1257,17 +1263,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
 
-				// Copilot proxies Claude via the Anthropic Messages API
-				const isCopilotClaude = modelId.startsWith("claude-");
-				// gpt-5/gpt-6 models require responses API, others use completions
-				const needsResponsesApi =
-					modelId.startsWith("gpt-5") || modelId.startsWith("gpt-6") || modelId.startsWith("oswe");
-
-				const api: Api = isCopilotClaude
-					? "anthropic-messages"
-					: needsResponsesApi
-						? "openai-responses"
-						: "openai-completions";
+				// Unclassified families still ship a row so validation reports them by name instead of silently misrouting.
+				const api: Api = copilotModelApi(modelId) ?? "openai-completions";
 
 				const anthropicCompat =
 					api === "anthropic-messages" ? getAnthropicMessagesCompat("github-copilot", modelId) : undefined;
@@ -1453,6 +1450,14 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						maxTokens: m.limit?.output || 4096,
 					});
 				}
+			}
+		}
+
+		// models.dev rows occasionally carry an output limit above the context window; clamp to keep the pair coherent.
+		for (const model of models) {
+			if (model.maxTokens > model.contextWindow) {
+				console.log(`Clamping ${model.provider}/${model.id} maxTokens ${model.maxTokens} -> ${model.contextWindow}`);
+				model.maxTokens = model.contextWindow;
 			}
 		}
 
@@ -2014,6 +2019,15 @@ async function generateModels() {
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
+	// 272k was measured on the 2026-01 generation; models the API side serves at 1M+ accept it on the
+	// ChatGPT backend too, except rows with an upstream-verified smaller window.
+	for (const codexModel of codexModels) {
+		if (CODEX_SMALLER_WINDOW_VERIFIED.has(codexModel.id)) continue;
+		const openaiTwin = allModels.find((m) => m.provider === "openai" && m.id === codexModel.id);
+		if (openaiTwin && openaiTwin.contextWindow >= 1_000_000) {
+			codexModel.contextWindow = openaiTwin.contextWindow;
+		}
+	}
 	allModels.push(...codexModels);
 
 	// Add missing Grok models
@@ -2259,6 +2273,20 @@ async function generateModels() {
 		applyThinkingLevelMetadata(model);
 	}
 
+	// Family maps can land on transports that never send reasoning effort; null them so the UI offers nothing the request drops.
+	for (const model of allModels) {
+		if (model.api !== "openai-completions" || !model.reasoning || !model.thinkingLevelMap) continue;
+		const compat = getCompat(model as Model<"openai-completions">);
+		if (compat.thinkingFormat !== "openai" || compat.supportsReasoningEffort) continue;
+		const selectable = Object.entries(model.thinkingLevelMap).filter(([, mapped]) => mapped !== null);
+		if (selectable.length === 0) continue;
+		console.log(
+			`Nulling unsendable thinking levels on ${model.provider}/${model.id}: ${selectable.map(([level]) => level).join(", ")}`,
+		);
+		// All levels explicitly null: absent keys read as supported at runtime.
+		model.thinkingLevelMap = { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null };
+	}
+
 	// Group by provider and deduplicate by model ID
 	const providers: Record<string, Record<string, Model<Api>>> = {};
 	for (const model of allModels) {
@@ -2270,6 +2298,14 @@ async function generateModels() {
 		if (!providers[model.provider][model.id]) {
 			providers[model.provider][model.id] = model;
 		}
+	}
+
+	const violations = validateModelCatalog(providers);
+	if (violations.length > 0) {
+		for (const violation of violations) {
+			console.error(`Catalog validation: ${violation}`);
+		}
+		throw new Error(`Model catalog validation failed with ${violations.length} violation(s); not writing catalog`);
 	}
 
 	// Generate TypeScript file. JSON string literals prevent remote catalog
@@ -2294,4 +2330,7 @@ async function generateModels() {
 }
 
 // Run the generator
-generateModels().catch(console.error);
+generateModels().catch((error) => {
+	console.error(error);
+	process.exitCode = 1;
+});
