@@ -6640,8 +6640,7 @@ export class AgentSession {
 			queuedAgentMessagePreview,
 		);
 		const activeProjection = visibleSessionActionProjection(this._actionStore.activeActions());
-		// Same preview projection the lanes use: these turns left the queue but have
-		// not started, and their own pre-turn compaction can hold them there.
+		// Lane-preview projection for pump-owned turns that have not started; their own pre-turn compaction can hold them here.
 		const preparing = activeProjection
 			.filter(
 				(action) =>

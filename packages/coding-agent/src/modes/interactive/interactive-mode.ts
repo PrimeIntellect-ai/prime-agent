@@ -7501,10 +7501,7 @@ export class InteractiveMode {
 		// their own container below the execution indicator and recap.
 		this.queuedMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
-		// Selected turns leave the queued lanes while they prepare, but their prompts
-		// have not started (pre-turn compaction can hold a whole "all"-mode batch
-		// there for a long time), so the snapshot's preparing previews keep them
-		// visible. Older daemons only publish the first one via active.label.
+		// Pump-owned turns that have not started stay visible here; older daemons publish only the first via active.label.
 		const sessionActions = this.connectionState?.sessionActions;
 		const startingTurns =
 			sessionActions?.preparing ??
