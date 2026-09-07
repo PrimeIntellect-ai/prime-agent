@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -228,5 +230,59 @@ describe("AgentSession dynamic tool registration", () => {
 		}
 
 		session.dispose();
+	});
+
+	it("keeps session_start ctx timers running across a runtime-only MCP set change", async () => {
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const sessionManager = SessionManager.inMemory();
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		let ticks = 0;
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						ctx.setInterval(() => {
+							ticks++;
+						}, 5);
+					});
+				},
+			],
+		});
+		await resourceLoader.reload();
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager,
+			sessionManager,
+			authStorage,
+			resourceLoader,
+		});
+		Reflect.set(session, "_mcpManager", new McpManager({ authStorage }));
+
+		vi.useFakeTimers();
+		try {
+			await session.bindExtensions({});
+			await vi.advanceTimersByTimeAsync(20);
+			const ticksBeforeRebuild = ticks;
+
+			session.replaceAcpMcpServers(
+				[{ name: "task", type: "http", url: "https://task.example/mcp", headers: {} }],
+				"owner-a",
+			);
+			await vi.advanceTimersByTimeAsync(50);
+			expect(ticks).toBeGreaterThan(ticksBeforeRebuild);
+
+			session.dispose();
+			const ticksAtDispose = ticks;
+			await vi.advanceTimersByTimeAsync(200);
+			expect(ticks).toBe(ticksAtDispose);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

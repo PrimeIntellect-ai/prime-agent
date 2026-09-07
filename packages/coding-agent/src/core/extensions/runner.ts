@@ -480,6 +480,17 @@ export class ExtensionRunner {
 		}
 	}
 
+	/** True when this runner was built from exactly this extensions load (identity check). */
+	builtFromSameExtensions(extensions: Extension[]): boolean {
+		return this.extensions === extensions;
+	}
+
+	/** Runtime-only rebuilds keep the same extension world: share the previous runner's live timer registry so already-scheduled (and old-ctx-scheduled) timers stay owned and unload still cancels them. */
+	adoptHostTimers(previous: ExtensionRunner): void {
+		this.hostTimers = previous.hostTimers;
+		this.hostTimerRefs = previous.hostTimerRefs;
+	}
+
 	/** Runner-local retirement for runner replacement: ctx goes stale and no host timer outlives the runner, while the runtime object stays live for the replacement runner (it may be shared or reused). */
 	retire(
 		message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
@@ -550,9 +561,7 @@ export class ExtensionRunner {
 			}
 		};
 		const handle = kind === "setTimeout" ? setTimeout(run, ms) : setInterval(run, ms);
-		for (const ref of this.hostTimers) {
-			if (!ref.deref()) this.hostTimers.delete(ref);
-		}
+		// No sweep here: dead WeakRef shells from globally cleared timers are tiny and freed at unload; sweeping per schedule would be quadratic.
 		const ref = new WeakRef(handle);
 		this.hostTimers.add(ref);
 		this.hostTimerRefs.set(handle, ref);
