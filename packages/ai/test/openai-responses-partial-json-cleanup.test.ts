@@ -57,6 +57,10 @@ async function* createFunctionCallEvents(argumentsJson: string): AsyncIterable<R
 			arguments: argumentsJson,
 		},
 	} as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: { id: "resp_test", status: "completed" },
+	} as ResponseStreamEvent;
 }
 
 describe("openai responses partialJson cleanup", () => {

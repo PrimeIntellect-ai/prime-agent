@@ -276,6 +276,7 @@ export async function processResponsesStream<TApi extends Api>(
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
+	let receivedTerminalEvent = false;
 
 	for await (const event of openaiStream) {
 		if (event.type === "response.created") {
@@ -469,7 +470,8 @@ export async function processResponsesStream<TApi extends Api>(
 				currentBlock = null;
 				stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 			}
-		} else if (event.type === "response.completed") {
+		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
+			receivedTerminalEvent = true;
 			const response = event.response;
 			if (response?.id) {
 				output.responseId = response.id;
@@ -494,10 +496,21 @@ export async function processResponsesStream<TApi extends Api>(
 				options.applyServiceTierPricing(output.usage, serviceTier);
 			}
 			output.stopReason = mapStopReason(response?.status);
+			if (event.type === "response.incomplete" || response?.status === "incomplete") {
+				const reason = response?.incomplete_details?.reason;
+				output.stopReason = reason === "content_filter" ? "error" : "length";
+				output.stopReasonRaw = reason ?? "incomplete";
+				if (reason === "content_filter") {
+					throw new StreamFailureError("Response blocked by provider safety filters (content_filter)", {
+						kind: "safety",
+						providerErrorType: reason,
+					});
+				}
+			}
 			if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 				output.stopReason = "toolUse";
 			}
-			if (output.stopReason === "error" && response?.status) {
+			if (output.stopReason === "error" && response?.status && !output.stopReasonRaw) {
 				output.stopReasonRaw = response.status;
 			}
 		} else if (event.type === "error") {
@@ -519,6 +532,12 @@ export async function processResponsesStream<TApi extends Api>(
 				providerErrorType,
 			});
 		}
+	}
+	if (!receivedTerminalEvent) {
+		throw new StreamFailureError("OpenAI Responses stream ended before a terminal event", {
+			kind: "malformed_response",
+			providerErrorType: "missing_terminal_event",
+		});
 	}
 }
 

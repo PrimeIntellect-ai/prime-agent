@@ -1,0 +1,2 @@
+- Fixed missing usage and incorrect success reporting for incomplete OpenAI Responses streams, including content-filtered responses.
+- Fixed OpenAI Responses streams reporting success when they end without a terminal event.
