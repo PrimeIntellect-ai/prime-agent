@@ -158,32 +158,19 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});
 
-	test("a superseding message_start replaces a discarded attempt's streaming component", async () => {
+	test("a superseding message_start drops a discarded empty attempt but keeps an interrupted real partial", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+
+		// Empty-turn retry: the thinking-only attempt is discarded without a message_end.
 		const thinkingOnly: AssistantMessage = {
 			...createAssistantMessage(""),
 			content: [{ type: "thinking", thinking: "pondering the void" }],
 		};
-
-		// Empty-turn retry discards the attempt without a message_end.
 		await handleEvent.call(fakeThis, { type: "message_start", message: thinkingOnly });
-		await handleEvent.call(fakeThis, { type: "message_start", message: createAssistantMessage("") });
-		await handleEvent.call(fakeThis, { type: "message_end", message: createAssistantMessage("recovered") });
 
-		expect(fakeThis.chatContainer.children).toHaveLength(1);
-		const rendered = renderChat(fakeThis.chatContainer);
-		expect(rendered).toContain("recovered");
-		expect(rendered).not.toContain("pondering the void");
-	});
-
-	test("an interrupted real partial stays visible when a run-failure message supersedes it", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		// Run failure mid-stream: the superseding synthetic failure must not delete visible output.
 		const partial = createAssistantMessage("useful partial output");
-
-		// A listener/iterator exception emits a synthetic failure start without
-		// ending the real partial; its visible output must not be deleted.
 		await handleEvent.call(fakeThis, { type: "message_start", message: partial });
 		await handleEvent.call(fakeThis, {
 			type: "message_update",
@@ -198,8 +185,11 @@ describe("InteractiveMode streaming events", () => {
 		await handleEvent.call(fakeThis, { type: "message_start", message: failure });
 		await handleEvent.call(fakeThis, { type: "message_end", message: failure });
 
+		// One component per surviving stream: the discarded attempt is gone, the partial is not.
 		expect(fakeThis.chatContainer.children).toHaveLength(2);
-		expect(renderChat(fakeThis.chatContainer)).toContain("useful partial output");
+		const rendered = renderChat(fakeThis.chatContainer);
+		expect(rendered).not.toContain("pondering the void");
+		expect(rendered).toContain("useful partial output");
 	});
 
 	test("renders assistant end events when attaching after all updates", async () => {

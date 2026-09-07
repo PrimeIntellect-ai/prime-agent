@@ -2269,8 +2269,7 @@ export class AgentSession {
 		if (!this._goalState.objective) {
 			return false;
 		}
-		// Error/aborted turns are not charged, but their discarded empty-turn
-		// attempts were normal-stop spend and still count.
+		// Discarded attempts were normal-stop spend: charged even when the turn itself failed.
 		const failedTurn = message.stopReason === "error" || message.stopReason === "aborted";
 		if (failedTurn && !message.discardedUsage) {
 			return false;
@@ -10914,8 +10913,7 @@ export class AgentSession {
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
 						const failedTurn = assistant.stopReason === "error" || assistant.stopReason === "aborted";
-						// Failed turns are not attributed, but their discarded empty-turn
-						// attempts were paid normal-stop spend and still are.
+						// Discarded attempts were paid normal-stop spend: attributed even on failed turns.
 						const attributable = failedTurn ? emptyUsage() : cloneUsage(assistant.usage);
 						for (const discarded of assistant.discardedUsage ?? []) {
 							addAssistantUsage(attributable, discarded);
@@ -12142,11 +12140,8 @@ export class AgentSession {
 				addSpend(assistantMsg);
 			}
 		}
-		// Persisted-but-not-live spend since the latest compaction (auto-retry
-		// drops the failed carrier from live state). Rebuilds and navigation
-		// re-derive live from these same entry objects, so the identity dedupe
-		// keeps this branch-scoped and count-once; pre-compaction spend stays
-		// out, matching this stats view's live-context contract.
+		// Persisted-but-not-live spend since the latest compaction (auto-retry drops the failed
+		// carrier from live state); identity dedupe keeps it branch-scoped and count-once.
 		const branch = this.sessionManager.getBranch();
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];

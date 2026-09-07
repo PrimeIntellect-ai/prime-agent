@@ -5823,9 +5823,8 @@ export class InteractiveMode {
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
-		// Still open here = the previous stream never got a message_end: a discarded
-		// empty attempt (drop it) or a real partial interrupted by a run failure
-		// (finalize in place — never delete visible output).
+		// Still open = no message_end yet: drop a discarded empty attempt's component,
+		// but finalize an interrupted real partial in place (never delete visible output).
 		if (this.streamingComponent && this.streamingMessage) {
 			const hadVisibleOutput = this.streamingMessage.content.some(
 				(part) => part.type === "toolCall" || (part.type === "text" && part.text.trim().length > 0),

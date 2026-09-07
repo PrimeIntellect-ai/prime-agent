@@ -452,11 +452,7 @@ async function runLoop(
 
 const MAX_EMPTY_TURN_ATTEMPTS = 3;
 
-/**
- * Owned carrier for a throw that interrupts empty-turn retries: the paid spend
- * of already-discarded attempts rides with the original failure (`cause`),
- * whatever was thrown — primitives and frozen errors included.
- */
+/** Wraps a throw that interrupts empty-turn retries so the discarded attempts' paid spend rides with the original failure (`cause`). */
 export class EmptyTurnRetryFailure extends Error {
 	readonly discardedAttempts: Usage[];
 

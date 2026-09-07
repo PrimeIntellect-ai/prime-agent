@@ -515,8 +515,7 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
-		// Unwrap the loop's owned carrier: discarded empty-turn spend rides the
-		// wrapper; everything else (message, classification) uses the original.
+		// Unwrap the loop's carrier: spend rides the wrapper, classification uses the cause.
 		let discardedUsage: Usage[] | undefined;
 		if (error instanceof EmptyTurnRetryFailure) {
 			discardedUsage = error.discardedAttempts;
