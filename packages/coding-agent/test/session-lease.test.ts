@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
@@ -116,6 +116,22 @@ describe("session leases", () => {
 		lease?.release();
 	});
 
+	it("never reclaims a lease whose owner file cannot be read", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "unreadable.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		// owner.json as a directory: every read fails with a non-ENOENT error, the
+		// same shape as a transient EPERM/EBUSY on Windows. That may be a LIVE
+		// lease, so acquisition must fail instead of destroying it.
+		mkdirSync(join(lockDirectory, "owner.json"), { recursive: true });
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("intruder"))).toThrow(
+			"Could not acquire session lease",
+		);
+		expect(existsSync(join(lockDirectory, "owner.json"))).toBe(true);
+	});
+
 	it("reports guard contention as a coordination failure", () => {
 		const agentDir = createTempDir();
 		const sessionPath = canonicalSessionPath(join(agentDir, "session.jsonl"));
@@ -129,6 +145,8 @@ describe("session leases", () => {
 			stale: 5000,
 		});
 
+		// Keep the owner fresh while exercising the bounded synchronous retry count.
+		const wait = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
 		try {
 			let thrown: unknown;
 			try {
@@ -140,6 +158,7 @@ describe("session leases", () => {
 			expect(thrown).not.toBeInstanceOf(SessionAlreadyActiveError);
 			expect((thrown as Error).message).toContain("Could not coordinate session lease");
 		} finally {
+			wait.mockRestore();
 			release();
 		}
 	});

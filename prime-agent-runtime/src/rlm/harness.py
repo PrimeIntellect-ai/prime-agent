@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, Literal
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
@@ -295,8 +297,21 @@ class HarnessState:
             },
             "refinements": [asdict(event) for event in self.refinements],
         }
-        with self.file_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        # Atomic replace on the real file: aliases survive, readers never see a torn file.
+        target_path = Path(os.path.realpath(self.file_path))
+        temp_path = target_path.with_name(f"{target_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            mode = stat.S_IMODE(os.stat(target_path).st_mode)
+        except FileNotFoundError:
+            mode = 0o600
+        try:
+            # The temp carries its final mode from creation: no umask-open window.
+            descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(temp_path, target_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
         self._loaded_mtime = self._disk_mtime()
         return self
 

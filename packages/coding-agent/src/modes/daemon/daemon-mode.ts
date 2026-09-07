@@ -8,7 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -107,6 +107,7 @@ import {
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
 	createAgentConnectionCommands,
@@ -845,41 +846,13 @@ export class AgentDaemon {
 		let ownsLock = false;
 		try {
 			for (let attempt = 0; attempt < 3 && !ownsLock; attempt++) {
-				const token = randomUUID();
-				const candidateDirectory = `${lockDirectory}.candidate-${process.pid}-${token}`;
-				mkdirSync(candidateDirectory, { mode: 0o700 });
-				writeFileSync(join(candidateDirectory, "pid"), `${process.pid}\n`, {
-					mode: 0o600,
-				});
-				try {
-					renameSync(candidateDirectory, lockDirectory);
-					ownsLock = true;
-					break;
-				} catch (error) {
-					rmSync(candidateDirectory, { recursive: true, force: true });
-					const code = (error as NodeJS.ErrnoException).code;
-					if (code !== "EEXIST" && code !== "ENOTEMPTY") {
-						throw error;
-					}
-					let ownerPid: number | undefined;
-					try {
-						ownerPid = Number(readFileSync(join(lockDirectory, "pid"), "utf8").trim());
-					} catch {
-						// An invalid owner is reclaimed atomically below.
-					}
-					if (ownerPid && this.isProcessAlive(ownerPid)) {
-						return;
-					}
-					const staleDirectory = `${lockDirectory}.stale-${process.pid}-${token}`;
-					try {
-						renameSync(lockDirectory, staleDirectory);
-						rmSync(staleDirectory, { recursive: true, force: true });
-					} catch (reclaimError) {
-						if ((reclaimError as NodeJS.ErrnoException).code !== "ENOENT") {
-							throw reclaimError;
-						}
-					}
+				const result = await tryAcquireDirLock(lockDirectory, (ownerPid) =>
+					ownerPid !== undefined ? this.isProcessAlive(ownerPid) : false,
+				);
+				if (result === "held") {
+					return;
 				}
+				ownsLock = result === "acquired";
 			}
 			if (!ownsLock) {
 				return;
