@@ -982,9 +982,11 @@ export class AgentDaemon {
 	private readLegacyRlmSubagentRegistry(
 		path: string,
 		throwOnReadError = false,
+		onReadError?: () => void,
 	): Promise<LegacyRlmSubagentRegistryEntry[]> {
 		return readLegacyRlmSubagentRegistryFile(path, {
 			throwOnReadError,
+			onReadError,
 			log: (message) => this.log(message),
 		});
 	}
@@ -1168,6 +1170,7 @@ export class AgentDaemon {
 		edge: RlmLedgerEdge,
 		parent: { sessionId: string; sessionFile: string },
 		legacyRegistryCache?: Map<string, Promise<LegacyRlmSubagentRegistryEntry[]>>,
+		onReadError?: (path: string) => void,
 	): Promise<PassiveRlmSubagentEntry> {
 		const edgeChild = canonicalSessionPath(edge.child);
 		const base = {
@@ -1201,7 +1204,9 @@ export class AgentDaemon {
 			status: source.status,
 			createdAt: source.createdAt,
 		});
-		const display = await readRlmSubagentDisplayEntry(dirname(edge.child));
+		const display = await readRlmSubagentDisplayEntry(dirname(edge.child), () =>
+			onReadError?.(rlmSubagentDisplayPath(dirname(edge.child))),
+		);
 		if (display && display.childId === edge.childId) {
 			// A display-file child was ledger-spawned: the edge depth is real.
 			return { ...metadataFields(display), rlmDepth: edge.depth };
@@ -1209,7 +1214,7 @@ export class AgentDaemon {
 		const registryPath = this.legacyRlmSubagentRegistryPath(parent.sessionFile, parent.sessionId);
 		let registryRead = legacyRegistryCache?.get(registryPath);
 		if (!registryRead) {
-			registryRead = this.readLegacyRlmSubagentRegistry(registryPath);
+			registryRead = this.readLegacyRlmSubagentRegistry(registryPath, false, () => onReadError?.(registryPath));
 			legacyRegistryCache?.set(registryPath, registryRead);
 		}
 		const legacy = (await registryRead).find((entry) => entry.childId === edge.childId);
@@ -1386,7 +1391,10 @@ export class AgentDaemon {
 				// daemon keys by resolve(): work with the writer-recorded path from
 				// the metadata entry so passive rows keep matching residency,
 				// opens, and passivation bookkeeping.
-				const entry = await this.passiveRlmSubagentEntryForEdge(edge, parent, legacyRegistryCache);
+				const entry = await this.passiveRlmSubagentEntryForEdge(edge, parent, legacyRegistryCache, (path) => {
+					// A present metadata file may recover without a stat change.
+					if (inputStats.get(resolve(path)) !== "absent") degraded = true;
+				});
 				const sessionKey = resolve(entry.sessionFile);
 				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
 				visited.add(sessionKey);

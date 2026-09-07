@@ -20,6 +20,7 @@ import {
 } from "../src/core/agent-messages.js";
 import { AgentSession, type RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { computeOwnAndTotalUsage } from "../src/core/context-tree.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
 import { convertToLlm } from "../src/core/messages.js";
@@ -30,7 +31,7 @@ import {
 	createRlmRunHostHandler,
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager, type SettingsStorage } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
@@ -2505,6 +2506,90 @@ describe("AgentSession rlm recursion", () => {
 		expect(attribution.childUsage.input).toBe(7);
 		expect(attribution.childUsage.output).toBe(3);
 		expect(attribution.aggregateUsage.cost.total).toBe(10);
+	});
+
+	it("keeps a sibling's pending usage out of durable parent aggregates", async () => {
+		const gates = new Map([
+			["A", deferred<void>()],
+			["B", deferred<void>()],
+		]);
+		const started = new Set<string>();
+		const root = createSession({
+			customTools: [
+				{
+					name: "hold",
+					description: "Wait for release",
+					label: "hold",
+					parameters: Type.Object({ child: Type.String() }),
+					execute: async (_toolCallId: string, params: { child: string }) => {
+						started.add(params.child);
+						await gates.get(params.child)!.promise;
+						return { content: [{ type: "text" as const, text: "released" }], details: {} };
+					},
+				},
+			],
+			streamFn: (_model, context) => {
+				const stream = createAssistantMessageEventStream();
+				const child = userText(context);
+				const finished = context.messages.some((message) => message.role === "toolResult") || !gates.has(child);
+				queueMicrotask(() => {
+					const message = finished
+						? assistantMessage("done", usage(0, 0))
+						: {
+								...assistantMessage("", child === "A" ? usage(7, 3) : usage(11, 5)),
+								content: [
+									{ type: "toolCall" as const, id: `hold-${child}`, name: "hold", arguments: { child } },
+								],
+								stopReason: "toolUse" as const,
+							};
+					stream.push({ type: "done", reason: finished ? "stop" : "toolUse", message });
+				});
+				return stream;
+			},
+		});
+		const parentAssistant = assistantMessage("running ipython", usage(2, 1));
+		root.agent.state.messages.push(parentAssistant);
+		root.sessionManager.appendMessage(parentAssistant);
+		const sessionFile = root.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Missing parent session file");
+		const children: AgentSession[] = [];
+		const attributions = () =>
+			root.sessionManager.getEntries().filter((entry) => entry.type === "child_usage_attributed");
+		const expectDurableOwnUsage = async () => {
+			const reopened = SessionManager.open(sessionFile, join(tempDir, "sessions"));
+			const entries = reopened.getEntries();
+			const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
+			expect(ownUsage.input).toBe(2);
+			expect(ownUsage.output).toBe(1);
+			expect(ownUsage.cost.total).toBe(3);
+			expect((await readSessionInfo(sessionFile))?.usage).toEqual({ inputTokens: 2, outputTokens: 1, cost: 3 });
+		};
+		try {
+			for (const name of ["A", "B"]) {
+				const admitted = await root.runRlmChild(name);
+				const child = root.getRlmChildSession(admitted.rlm_child_id);
+				if (!child) throw new Error("Missing child session");
+				children.push(child);
+			}
+			await waitFor(() => started.size === 2);
+			expect(parentAssistant.usage.cost.total).toBe(29);
+			expect(attributions()).toHaveLength(0);
+			gates.get("A")!.resolve();
+			await waitFor(() => attributions().length === 1);
+			expect(attributions()[0]?.aggregateUsage.cost.total).toBe(13);
+			expect(parentAssistant.usage.cost.total).toBe(29);
+			expect(parentAssistant.usage.totalTokens).toBe(3);
+			await expectDurableOwnUsage();
+			gates.get("B")!.resolve();
+			await waitFor(() => attributions().length === 2);
+			expect(attributions().map((entry) => entry.aggregateUsage.cost.total)).toEqual([13, 29]);
+			expect(parentAssistant.usage.cost.total).toBe(29);
+			expect(parentAssistant.usage.totalTokens).toBe(3);
+			await expectDurableOwnUsage();
+		} finally {
+			for (const gate of gates.values()) gate.resolve();
+			await Promise.all(children.map((child) => child.agent.waitForIdle()));
+		}
 	});
 
 	it("coalesces the admitted task's tool-loop turns into one flushed spawn-usage attribution", async () => {

@@ -58,11 +58,15 @@ export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): vo
 	writeFileAtomicSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600, fsync: true });
 }
 
-export async function readRlmSubagentDisplayEntry(sessionDir: string): Promise<RlmSubagentDisplayEntry | undefined> {
+export async function readRlmSubagentDisplayEntry(
+	sessionDir: string,
+	onReadError?: () => void,
+): Promise<RlmSubagentDisplayEntry | undefined> {
 	let contents: string;
 	try {
 		contents = await readFile(rlmSubagentDisplayPath(sessionDir), "utf8");
 	} catch {
+		onReadError?.();
 		return undefined;
 	}
 	try {

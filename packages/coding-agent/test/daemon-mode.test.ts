@@ -10,9 +10,12 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -4500,6 +4503,76 @@ describe("daemon mode helpers", () => {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it.each(["display", "legacy"] as const)(
+		"retries a transient %s metadata read failure without a stat change",
+		async (source) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-read-retry-"));
+			const readFile = fsPromises.readFile;
+			let readSpy: ReturnType<typeof vi.spyOn> | undefined;
+			try {
+				const { fixture, internals } = makePassiveMemoHarness(tempDir);
+				await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+				// Seed the ledger before failing optional metadata reads.
+				await internals.listPassiveRlmSubagents();
+				const metadata = {
+					type: "rlm_subagent",
+					childId: fixture.childId,
+					sessionName: "spawn-worker",
+					sessionDir: fixture.childSessionDir,
+					sessionFile: fixture.childSessionFile,
+					rlmDepth: 1,
+					rlmMaxDepth: 7,
+					prompt: "recover the original task",
+					model: { provider: "test-provider", modelId: "test-model" },
+					status: "running",
+					createdAt: 1,
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				};
+				const metadataPath =
+					source === "display"
+						? join(fixture.childSessionDir, "rlm-subagent.json")
+						: join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
+				writeFileSync(metadataPath, `${JSON.stringify(metadata)}\n`);
+				const before = statSync(metadataPath);
+				let metadataReads = 0;
+				readSpy = vi.spyOn(fsPromises, "readFile").mockImplementation((...args) => {
+					if (
+						typeof args[0] === "string" &&
+						canonicalSessionPath(args[0]) === canonicalSessionPath(metadataPath) &&
+						++metadataReads === 1
+					) {
+						return Promise.reject(
+							Object.assign(new Error("transient metadata read failure"), { code: "EACCES" }),
+						);
+					}
+					return readFile(...args);
+				});
+				syncBuiltinESMExports();
+
+				const fallback = await internals.listPassiveRlmSubagents();
+				expect(fallback.find(({ entry }) => entry.childId === fixture.childId)?.entry.status).toBe("completed");
+				expect(metadataReads).toBe(1);
+				const recovered = await internals.listPassiveRlmSubagents();
+				expect(recovered.find(({ entry }) => entry.childId === fixture.childId)?.entry).toMatchObject({
+					prompt: metadata.prompt,
+					model: metadata.model,
+					rlmDepth: 1,
+					rlmMaxDepth: 7,
+					status: "running",
+				});
+				expect(metadataReads).toBe(2);
+				const after = statSync(metadataPath);
+				expect([after.size, after.mtimeMs, after.ino]).toEqual([before.size, before.mtimeMs, before.ino]);
+				expect(await internals.listPassiveRlmSubagents()).toBe(recovered);
+				expect(metadataReads).toBe(2);
+			} finally {
+				readSpy?.mockRestore();
+				syncBuiltinESMExports();
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("keeps the memo across appends to a resident child's transcript", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-resident-append-"));
