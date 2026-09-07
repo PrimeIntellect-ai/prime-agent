@@ -108,30 +108,25 @@ while True:
         time.sleep(60)
     if opcode == 0xFE:
         if MODE == "delayed-header-payload":
-            stat_payload = valid_stat()
-            time.sleep(1.8)
-            os.write(1, struct.pack(">BI", 0, len(stat_payload)))
-            time.sleep(1.8)
-            os.write(1, stat_payload)
+            time.sleep(3.2)
+            os.write(1, struct.pack(">BI", 3, 0))
             continue
-        if MODE == "open-error" or MODE == "open-error-descendant":
+        if MODE == "open-error" or MODE == "open-error-descendant" or MODE == "lock-error-hung":
             if MODE == "open-error-descendant":
                 child = os.fork()
                 if child == 0:
                     signal.signal(signal.SIGTERM, signal.SIG_IGN)
                     while True:
                         time.sleep(60)
-            send(1, struct.pack(">i", 13))
+            send(1, b"\x01")
             continue
-        send(0, valid_stat())
+        if MODE == "ready-malformed":
+            send(3, b"x")
+        else:
+            send(3)
         if MODE == "drain-error":
             os.close(1)
             time.sleep(60)
-    elif opcode == 64:
-        if MODE == "lock-error-hung":
-            send(1, struct.pack(">i", 11))
-        else:
-            send(0)
     elif opcode == 255:
         if MODE == "quit-malformed":
             send(0, b"x")
@@ -153,7 +148,7 @@ while True:
             send(0)
             sys.exit(0)
         if MODE == "quit-close-error":
-            send(1, struct.pack(">i", 5))
+            send(1, b"\x07")
             sys.exit(1)
         send(0)
         if MODE == "nonzero-exit":
@@ -219,8 +214,7 @@ describe("real helper lifecycle", () => {
 	it("enters dispatch, opens the root, locks it, acknowledges QUIT, and exits zero", () => {
 		const root = freshSessionRoot();
 		const pathPayload = new TextEncoder().encode(root);
-		const lockPayload = new Uint8Array(4);
-		const input = Buffer.concat([frame(0xfe, pathPayload), frame(64, lockPayload), frame(255, new Uint8Array(0))]);
+		const input = Buffer.concat([frame(0xfe, pathPayload), frame(255, new Uint8Array(0))]);
 		const result = spawnSync(PYTHON, [HELPER], {
 			input,
 			maxBuffer: 2_097_152,
@@ -231,8 +225,7 @@ describe("real helper lifecycle", () => {
 		expect(result.signal).toBeNull();
 		const responses = readFrames(result.stdout);
 		expect(responses).toEqual([
-			{ status: 0, payloadLength: 72 },
-			{ status: 0, payloadLength: 0 },
+			{ status: 3, payloadLength: 0 },
 			{ status: 0, payloadLength: 0 },
 		]);
 	});
@@ -246,7 +239,7 @@ describe("real helper lifecycle", () => {
 			timeout: 5000,
 		});
 		expect(oldOpcode.status).toBe(0);
-		expect(readFrames(oldOpcode.stdout)).toEqual([{ status: 1, payloadLength: 4 }]);
+		expect(readFrames(oldOpcode.stdout)).toEqual([{ status: 2, payloadLength: 1 }]);
 
 		const duplicate = spawnSync(PYTHON, [HELPER], {
 			input: Buffer.concat([frame(0xfe, pathPayload), frame(0xfe, pathPayload)]),
@@ -255,8 +248,8 @@ describe("real helper lifecycle", () => {
 		});
 		expect(duplicate.status).toBe(0);
 		expect(readFrames(duplicate.stdout)).toEqual([
-			{ status: 0, payloadLength: 72 },
-			{ status: 1, payloadLength: 4 },
+			{ status: 3, payloadLength: 0 },
+			{ status: 2, payloadLength: 1 },
 		]);
 	});
 
@@ -267,19 +260,18 @@ describe("real helper lifecycle", () => {
 			timeout: 5000,
 		});
 		expect(result.status).toBe(0);
-		expect(readFrames(result.stdout)).toEqual([{ status: 1, payloadLength: 4 }]);
+		expect(readFrames(result.stdout)).toEqual([{ status: 2, payloadLength: 1 }]);
 	});
 
 	it("returns EIO and exits nonzero when a tracked descriptor cannot close", () => {
 		const code = [
 			"import runpy, sys",
 			"namespace = runpy.run_path(sys.argv[1])",
-			"closed = namespace['_cmd_quit']({0: -1}, 1)",
-			"sys.exit(9 if closed else 1)",
+			"sys.exit(9 if namespace['_close_all']({-1: -1}) else 1)",
 		].join("\n");
 		const result = spawnSync(PYTHON, ["-c", code, HELPER], { maxBuffer: 1024, timeout: 5000 });
 		expect(result.status).toBe(1);
-		expect(readFrames(result.stdout)).toEqual([{ status: 1, payloadLength: 4 }]);
+		expect(result.stdout.byteLength).toBe(0);
 	});
 });
 
@@ -349,6 +341,10 @@ describe("hostile helper lifecycle", () => {
 	it("caps a stderr flood", async () => {
 		expect(await verifyWithFixture("stderr-flood")).toBe(false);
 	}, 12_000);
+
+	it("rejects a non-empty READY response", async () => {
+		expect(await verifyWithFixture("ready-malformed")).toBe(false);
+	});
 
 	it("rejects a malformed QUIT response", async () => {
 		expect(await verifyWithFixture("quit-malformed")).toBe(false);
@@ -421,7 +417,7 @@ describe("hostile helper lifecycle", () => {
 });
 
 describe("module export and import inventory", () => {
-	it("authority and core export exactly the expected public surface", async () => {
+	it("keeps the narrow lifecycle core surface while transaction integration remains blocked", async () => {
 		const authMod = await import("../src/modes/daemon/sandbox/prime-workspace-authority.js");
 		const coreMod = await import("../src/modes/daemon/sandbox/prime-workspace-helper-core.js");
 		expect(Object.keys(authMod).sort()).toEqual(["verifyWorkspaceRootLifecycle"]);

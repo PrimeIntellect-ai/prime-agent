@@ -2,7 +2,7 @@
  * Package-internal workspace process lifecycle implementation.
  * Extracted from prime-workspace-authority.ts for process-core separation.
  *
- * This file MUST NOT be imported by any file except the two authorized
+ * This file MUST NOT be imported outside the two authorized
  * wrapper modules: prime-workspace-authority.ts and prime-workspace-sync-v21.ts.
  *
  * @packageDocumentation
@@ -35,10 +35,9 @@ const GROUP_POLL_COUNT = 10;
 const DRAIN_GRACE_MS = 2000;
 
 const OPEN_ROOT = 0xfe;
-const FLOCK_EX_NB = 0x40;
 const QUIT = 0xff;
 const RESPONSE_OK = 0x00;
-const RESPONSE_ERROR = 0x01;
+const RESPONSE_READY = 0x03;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const SAFE_USERNAME_RE = /^[a-zA-Z0-9._-]+$/;
 
@@ -325,10 +324,16 @@ async function readFrame(
 		zeroBuffer(header);
 	}
 	if (payloadLength > MAX_PAYLOAD) return null;
-	if (expectedPayload !== undefined && status === RESPONSE_OK && payloadLength !== expectedPayload) return null;
-	if (payloadLength === 0) return Object.freeze({ status, payload: new Uint8Array(0) });
+	if (payloadLength === 0) {
+		if (expectedPayload !== undefined && expectedPayload !== 0) return null;
+		return Object.freeze({ status, payload: new Uint8Array(0) });
+	}
 	const payload = await readExactBytes(collector, payloadLength, deadline);
 	if (payload === null) return null;
+	if (expectedPayload !== undefined && payloadLength !== expectedPayload) {
+		zeroBuffer(payload);
+		return null;
+	}
 	return Object.freeze({ status, payload });
 }
 
@@ -427,10 +432,6 @@ function writeFrame(
 	});
 }
 
-interface ErrnoResult {
-	readonly errno: number;
-}
-
 async function sendForResult(
 	stdin: Writable,
 	stdout: OutputCollector,
@@ -439,25 +440,13 @@ async function sendForResult(
 	payload: Uint8Array,
 	deadlineMs: number,
 	expectedPayload?: number,
-): Promise<Uint8Array | ErrnoResult | null> {
+	expectedStatus = RESPONSE_OK,
+): Promise<Uint8Array | null> {
 	const deadline = CAPTURED_PERFORMANCE_NOW() + deadlineMs;
 	if (!(await writeFrame(stdin, writeState, opcode, payload, deadline))) return null;
 	const response = await readFrame(stdout, deadline, expectedPayload);
 	if (response === null) return null;
-	if (response.status === RESPONSE_ERROR) {
-		if (response.payload.byteLength !== 4) {
-			zeroBuffer(response.payload);
-			return null;
-		}
-		const errno = new DataView(
-			response.payload.buffer,
-			response.payload.byteOffset,
-			response.payload.byteLength,
-		).getInt32(0, false);
-		zeroBuffer(response.payload);
-		return Object.freeze({ errno });
-	}
-	if (response.status !== RESPONSE_OK) {
+	if (response.status !== expectedStatus) {
 		zeroBuffer(response.payload);
 		return null;
 	}
@@ -733,20 +722,6 @@ async function cleanupProcess(processState: HelperProcess): Promise<boolean> {
 	return clean;
 }
 
-interface RootStat {
-	readonly mode: number;
-	readonly nlink: number;
-	readonly uid: number;
-}
-
-function parseRootStat(data: Uint8Array): RootStat | null {
-	if (data.byteLength !== 72) return null;
-	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-	const mode = view.getUint32(16, false);
-	if ((mode & 0o170000) !== 0o40000) return null;
-	return Object.freeze({ mode, nlink: view.getUint32(20, false), uid: view.getUint32(24, false) });
-}
-
 export async function verifyWorkspaceRootLifecycleInternal(rootPathRaw: unknown): Promise<WorkspaceVerificationResult> {
 	if (!isSessionRoot(rootPathRaw)) return failResult("OPEN_ROOT_FAILED");
 	const spawnAttempt = await spawnHelper();
@@ -756,7 +731,7 @@ export async function verifyWorkspaceRootLifecycleInternal(rootPathRaw: unknown)
 	}
 
 	const pathBytes = new TextEncoder().encode(rootPathRaw);
-	let openResult: Uint8Array | ErrnoResult | null;
+	let openResult: Uint8Array | null;
 	try {
 		openResult = await sendForResult(
 			processState.stdin,
@@ -765,46 +740,16 @@ export async function verifyWorkspaceRootLifecycleInternal(rootPathRaw: unknown)
 			OPEN_ROOT,
 			pathBytes,
 			OP_DEADLINE_MS,
-			72,
+			0,
+			RESPONSE_READY,
 		);
 	} finally {
 		zeroBuffer(pathBytes);
 	}
-	if (openResult === null || !(openResult instanceof Uint8Array)) {
+	if (openResult === null || !(openResult instanceof Uint8Array) || openResult.byteLength !== 0) {
+		if (openResult !== null) zeroBuffer(openResult);
 		return (await cleanupProcess(processState)) ? failResult("OPEN_ROOT_FAILED") : failResult("HELPER_FAILED");
 	}
-	const rootStat = parseRootStat(openResult);
 	zeroBuffer(openResult);
-	if (rootStat === null || (rootStat.mode & 0o777) !== 0o700 || rootStat.nlink < 2) {
-		return (await cleanupProcess(processState)) ? failResult("OPEN_ROOT_FAILED") : failResult("HELPER_FAILED");
-	}
-	const getuid = process.getuid;
-	if (getuid === undefined) {
-		return (await cleanupProcess(processState)) ? failResult("INTERNAL_ERROR") : failResult("HELPER_FAILED");
-	}
-	if (rootStat.uid !== getuid()) {
-		return (await cleanupProcess(processState)) ? failResult("OPEN_ROOT_FAILED") : failResult("HELPER_FAILED");
-	}
-
-	const flockPayload = new Uint8Array(4);
-	let lockResult: Uint8Array | ErrnoResult | null;
-	try {
-		new DataView(flockPayload.buffer).setUint32(0, 0, false);
-		lockResult = await sendForResult(
-			processState.stdin,
-			processState.stdout,
-			processState.writeState,
-			FLOCK_EX_NB,
-			flockPayload,
-			OP_DEADLINE_MS,
-			0,
-		);
-	} finally {
-		zeroBuffer(flockPayload);
-	}
-	if (lockResult === null || !(lockResult instanceof Uint8Array)) {
-		return (await cleanupProcess(processState)) ? failResult("LOCK_FAILED") : failResult("HELPER_FAILED");
-	}
-	zeroBuffer(lockResult);
 	return (await cleanupProcess(processState)) ? okResult() : failResult("HELPER_FAILED");
 }
