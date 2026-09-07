@@ -559,10 +559,8 @@ export class ExtensionRunner {
 				clearTimeout(handle);
 			}
 			try {
-				const result = callback();
-				if (result instanceof Promise) {
-					result.catch((err) => host.current.emitHostTimerError(kind, ownerPath, err));
-				}
+				// Promise.resolve is thenable-safe: rejections from cross-realm promises and userland thenables land in the boundary instead of an unhandled rejection.
+				Promise.resolve(callback()).catch((err) => host.current.emitHostTimerError(kind, ownerPath, err));
 			} catch (err) {
 				host.current.emitHostTimerError(kind, ownerPath, err);
 			}

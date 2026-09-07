@@ -479,6 +479,8 @@ describe("ExtensionRunner", () => {
 				`export default function(pi) {
 					pi.on("context", async (_event, ctx) => {
 						ctx.setTimeout(() => { throw new Error("timer boom"); }, 5);
+						// Userland thenable (not a native Promise): its rejection must land in the boundary too.
+						ctx.setTimeout(() => ({ then(_resolve, reject) { reject(new Error("thenable boom")); } }), 5);
 					});
 				}`,
 			);
@@ -500,15 +502,17 @@ describe("ExtensionRunner", () => {
 			vi.useFakeTimers();
 			try {
 				await runner.emitContext([]);
-				expect(() => vi.advanceTimersByTime(10)).not.toThrow();
+				await expect(vi.advanceTimersByTimeAsync(10)).resolves.not.toThrow();
 			} finally {
 				vi.useRealTimers();
 			}
 
-			expect(errors).toHaveLength(1);
-			expect(errors[0].extensionPath).toContain("throwing-timer");
-			expect(errors[0].event).toBe("setTimeout");
-			expect(errors[0].error).toContain("timer boom");
+			expect(errors).toHaveLength(2);
+			for (const error of errors) {
+				expect(error.extensionPath).toContain("throwing-timer");
+				expect(error.event).toBe("setTimeout");
+			}
+			expect(errors.map((error) => error.error).sort()).toEqual(["thenable boom", "timer boom"]);
 			expect(fs.existsSync(firedMarker)).toBe(true);
 		});
 
