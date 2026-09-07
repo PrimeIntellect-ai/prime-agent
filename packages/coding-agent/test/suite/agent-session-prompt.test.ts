@@ -2127,6 +2127,45 @@ describe("Harness digest at cold boundaries", () => {
 		).toBe(true);
 	});
 
+	it("strips the digest with a cleared first turn and re-delivers it on the next turn", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const agentMessageId = "agentmsg_digest_clear";
+		const agentPrompt = `Agent-to-agent message received.\nSource: agent_message\nTo: T, active t, session s\nMessage id: ${agentMessageId}\n\nagent text`;
+		harness.setResponses([fauxAssistantMessage("never delivered")]);
+		let markAdmitted = () => {};
+		const admitted = new Promise<void>((resolve) => {
+			markAdmitted = resolve;
+		});
+		let releaseAdmission = () => {};
+		const admissionGate = new Promise<void>((resolve) => {
+			releaseAdmission = resolve;
+		});
+		let unsubscribe = () => {};
+		unsubscribe = harness.session.agent.subscribe(async (event) => {
+			if (event.type !== "agent_start") return;
+			unsubscribe();
+			markAdmitted();
+			await admissionGate;
+		});
+
+		const accepted = harness.session.acceptAgentMessagePrompt(agentPrompt, { expandPromptTemplates: false });
+		const acceptedRejection = expect(accepted).rejects.toThrow("cleared before delivery");
+		await admitted;
+		harness.session.clearQueuedUserMessagesMatching((text) => text.includes(agentMessageId));
+		releaseAdmission();
+		await acceptedRejection;
+		await harness.session.agent.waitForIdle();
+
+		// The cleared first turn takes its digest with it: the session is empty again.
+		expect(harness.session.messages).toHaveLength(0);
+
+		harness.setResponses([fauxAssistantMessage("hi")]);
+		await harness.session.prompt("hello");
+		expect(digestMessages(harness)).toHaveLength(1);
+		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
+	});
+
 	it("treats tree navigation as a cold boundary with digest dedupe", async () => {
 		// Empty global store: digest content must reflect only the local test entry.
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;

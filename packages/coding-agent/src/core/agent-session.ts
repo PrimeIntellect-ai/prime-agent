@@ -6166,13 +6166,17 @@ export class AgentSession {
 					) {
 						throw new DeferredSessionInputError("Agent became active before session input handoff");
 					}
-					if (this._harnessDigestPending) {
-						// First committed turn of a fresh context: digest precedes the prompt.
-						this._harnessDigestPending = false;
-						this._appendHarnessDigestIfStale();
-					}
 					if (executionPolicy.nextTurnContextTiming === "commit") {
 						nextTurnMessages = this._takePendingNextTurnMessages();
+					}
+					if (this._harnessDigestPending && executionPolicy.nextTurnContextTiming !== "skip") {
+						// The first-turn digest rides the turn's delivery records so a
+						// cancelled first turn strips it with the rest of the turn.
+						this._harnessDigestPending = false;
+						const digest = this._harnessDigest();
+						if (this._latestContextHarnessDigest() !== digest) {
+							nextTurnMessages = [createHarnessDigestMessage(digest), ...nextTurnMessages];
+						}
 					}
 					const contextRecords = nextTurnMessages.map((message) =>
 						this._createDeliveryRecord(turns[0].id, "next_turn", message),
