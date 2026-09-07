@@ -128,9 +128,7 @@ export interface DaemonTransportClient {
 }
 
 const DEFAULT_DAEMON_REQUEST_TIMEOUT_MS = 30_000;
-/** Windows AV/EDR real-time scanning can delay session-worker startup to 30-50s.
- *  Only the session-create request waits longer on win32; every other command
- *  keeps the 30s default so unrelated requests are not extended. */
+// Windows worker startup can exceed 30 seconds under antivirus scanning.
 const WINDOWS_DAEMON_CREATE_TIMEOUT_MS = 120_000;
 
 function defaultDaemonRequestTimeout(command: DaemonCommandBody): number {

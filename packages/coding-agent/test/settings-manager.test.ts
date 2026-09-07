@@ -575,17 +575,17 @@ describe("SettingsManager", () => {
 			await manager.flush();
 
 			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"))).toMatchObject({ theme: "atomic" });
-			expect(readdirSync(agentDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+			expect(readdirSync(agentDir)).toEqual(["settings.json"]);
 		});
 
-		it.skipIf(process.platform === "win32")("preserves existing POSIX permissions", async () => {
+		it.skipIf(process.platform === "win32")("makes existing POSIX settings files private", async () => {
 			const settingsPath = join(agentDir, "settings.json");
 			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }), { mode: 0o644 });
 			chmodSync(settingsPath, 0o644);
 			const manager = SettingsManager.create(projectDir, agentDir);
 			manager.setTheme("saved");
 			await manager.flush();
-			expect(statSync(settingsPath).mode & 0o777).toBe(0o644);
+			expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
 		});
 
 		it.skipIf(process.platform === "win32")("creates private POSIX settings files", async () => {
@@ -604,7 +604,7 @@ describe("SettingsManager", () => {
 					theme: `cycle-${index}`,
 				});
 			}
-			expect(readdirSync(agentDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+			expect(readdirSync(agentDir)).toEqual(["settings.json"]);
 		});
 	});
 });

@@ -1,9 +1,8 @@
 import { existsSync } from "node:fs";
 import { delimiter, win32 } from "node:path";
-import { spawnSync } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
-import { signalProcessGroupOrProcess } from "./child-process.js";
+import { signalProcessGroupOrProcess, spawnSyncHidden } from "./child-process.js";
 
 export interface ShellConfig {
 	shell: string;
@@ -18,20 +17,34 @@ function windowsGitBashPaths(): string[] {
 	].map((directory) => win32.join(directory, "Git", "bin", "bash.exe"));
 }
 
+/**
+ * Find bash executable on Unix PATH
+ */
 function findBashOnPath(): string | null {
+	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
 	try {
-		const result = spawnSync("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
+		const result = spawnSyncHidden("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
 		if (result.status === 0 && result.stdout) {
-			return result.stdout.trim().split(/\r?\n/)[0] || null;
+			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
+			if (firstMatch) {
+				return firstMatch;
+			}
 		}
 	} catch {
-		// Fall through to sh.
+		// Ignore errors
 	}
 	return null;
 }
 
-/** Resolve the configured shell without selecting WSL, Cygwin, or MSYS2 implicitly. */
+/**
+ * Resolve shell configuration based on platform and an optional explicit shell path.
+ * Resolution order:
+ * 1. User-specified shellPath
+ * 2. On Windows: Git Bash in system installation locations only
+ * 3. On Unix: /bin/bash, then bash on PATH, then fallback to sh
+ */
 export function getShellConfig(customShellPath?: string): ShellConfig {
+	// 1. Check user-specified shell path
 	if (customShellPath) {
 		if (existsSync(customShellPath)) {
 			return { shell: customShellPath, args: ["-c"] };
@@ -53,16 +66,30 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 		);
 	}
 
+	// Unix: try /bin/bash, then bash on PATH, then fallback to sh
 	if (existsSync("/bin/bash")) {
 		return { shell: "/bin/bash", args: ["-c"] };
 	}
+
 	const bashOnPath = findBashOnPath();
-	return bashOnPath ? { shell: bashOnPath, args: ["-c"] } : { shell: "sh", args: ["-c"] };
+	if (bashOnPath) {
+		return { shell: bashOnPath, args: ["-c"] };
+	}
+
+	return { shell: "sh", args: ["-c"] };
 }
 
+// Hardcoded literals: ProgramFiles env vars are ambient attacker-influenceable
+// input, the same trust-laundering class as PATH.
+const WINDOWS_GIT_BASH_PATHS = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe"];
+
 /**
- * Absolute default shell for the persistent kernel. An explicit shellPath wins.
- * Windows defaults only to canonical Git for Windows locations.
+ * Absolute default shell for the kernel's bash(): explicit shellPath wins; POSIX
+ * uses /bin/bash else /bin/sh (absolute, never PATH — the kernel inherits a
+ * user-influenced PATH); win32 uses only the canonical Git Bash install paths,
+ * never PATH (a repo-controlled PATH/where.exe must not pick the kernel shell).
+ * undefined = no shell found: kernel startup must not fail, bash() raises its
+ * teaching error.
  */
 export function resolveKernelBashShell(customShellPath?: string): string | undefined {
 	const explicit = customShellPath?.trim();
@@ -72,7 +99,12 @@ export function resolveKernelBashShell(customShellPath?: string): string | undef
 	if (process.platform !== "win32") {
 		return existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
 	}
-	return windowsGitBashPaths().find((shellPath) => existsSync(shellPath));
+	for (const path of WINDOWS_GIT_BASH_PATHS) {
+		if (existsSync(path)) {
+			return path;
+		}
+	}
+	return undefined;
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {

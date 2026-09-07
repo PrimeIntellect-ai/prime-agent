@@ -350,12 +350,14 @@ jobs:
         working-directory: packages/coding-agent
         run: >-
           bun test --isolate --timeout 120000
+          test/atomic-persistence.test.ts
           test/bash-close-hang-windows.test.ts
           test/child-process.test.ts
           test/command-recovery-journal.test.ts
           test/config-windows-hardening.test.ts
           test/daemon-command.test.ts
           test/daemon-socket.test.ts
+          test/daemon-supervisor-eviction.test.ts
           test/daemon-worker-connect.test.ts
           test/exec.test.ts
           test/frontmatter.test.ts
@@ -365,7 +367,6 @@ jobs:
           test/kernel-windows-process.test.ts
           test/path-utils.test.ts
           test/rlm-subagent-display.test.ts
-          test/rlm-subagent-display-windows.test.ts
           test/session-lease.test.ts
           test/settings-manager.test.ts
           test/settings-manager-bug.test.ts
@@ -377,7 +378,7 @@ jobs:
         run: >-
           bun test --isolate --timeout 120000
           --test-name-pattern
-          "emits exactly one failure notice per delete retry|keeps a child live when its durable deletion boundary cannot be read|reconciles a stale display status|uses the persistent artifact dir and sets RLM_SESSION_DIR"
+          "reports one failure per delete attempt and one terminal notice after a successful retry|keeps a child live when its durable deletion boundary cannot be read|reconciles a stale display status|uses the persistent artifact dir and sets RLM_SESSION_DIR"
           test/agent-session-recursion.test.ts
           test/daemon-mode.test.ts
 
@@ -404,11 +405,15 @@ jobs:
           PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
         run: bun src/core/kernel/bootstrap-cli.ts
 
-      - name: Test Python batch shim overrides
+      - name: Test session-owned Python scratch directories
         working-directory: packages/coding-agent
         env:
-          PRIME_AGENT_TEST_KERNEL_PYTHON: ${{ runner.temp }}\Prime Agent ø\kernel-venv\Scripts\python.exe
-        run: bun test --isolate --timeout 120000 test/kernel-python-shim.test.ts
+          PRIME_AGENT_BASH_SHELL: C:\Program Files\Git\bin\bash.exe
+          PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
+        run: >-
+          bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 120000
+          --test-name-pattern "isolates real Python temporary files in long parent and child scratch directories|preserves captured daemon locations in a nested scratch host"
+          test/agent-session-recursion.test.ts
 
       - name: Test persistent CPython kernel behavior
         working-directory: packages/coding-agent

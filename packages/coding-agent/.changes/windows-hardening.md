@@ -1,1 +1,3 @@
-- Fixed Windows daemon startup delays, session and bootstrap lock races, RLM deletion races, Git Bash selection, durable settings writes, multiline paste handling, path normalization, and session scratch isolation.
+- Added session-owned scratch directories while preserving inherited daemon and worker socket locations.
+- Required an explicit shellPath for Windows shells outside Git Bash installation directories.
+- Fixed worker shutdown races when the client disconnects or is replaced.

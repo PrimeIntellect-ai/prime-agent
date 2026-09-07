@@ -170,6 +170,45 @@ describe("daemon worker shutdown connection race", () => {
 		expect(worker.client).toBeUndefined();
 		expect(supervisor.workers.has(worker.descriptor.workerId)).toBe(false);
 	});
+
+	it.each([false, true])("preserves a replacement client during shutdown (archive=%s)", async (archive) => {
+		const supervisor = makeSupervisor();
+		const worker = makeWorker("replaced", []);
+		worker.descriptor.pid = 2_000_000_000;
+		worker.stopRevision = 0;
+		worker.transcriptCaches = new Map();
+		worker.snapshotCache = new Map();
+		supervisor.workers.set(worker.descriptor.workerId, worker);
+		vi.spyOn(supervisor, "persistWorker").mockImplementation(() => {});
+		const client = worker.client!;
+		const replacement = makeWorker("replacement", []).client!;
+		let finishShutdown!: () => void;
+		const shutdownResponse = new Promise<ReturnType<typeof success>>((resolve) => {
+			finishShutdown = () => resolve(success(undefined, "shutdown"));
+		});
+		client.request.mockReturnValue(shutdownResponse);
+		client.requestWorker.mockReturnValue(shutdownResponse);
+
+		const stopping = supervisor.stopWorkerUntracked(worker, false, false, archive);
+		try {
+			expect(archive ? client.requestWorker : client.request).toHaveBeenCalledWith(
+				{ type: archive ? "worker_archive_and_shutdown" : "shutdown" },
+				5000,
+			);
+			worker.client = replacement;
+			worker.descriptor.pid++;
+			finishShutdown();
+
+			await expect(stopping).rejects.toThrow("was relaunched during stop");
+			expect(client.close).toHaveBeenCalledOnce();
+			expect(replacement.close).not.toHaveBeenCalled();
+			expect(worker.client).toBe(replacement);
+			expect(supervisor.workers.get(worker.descriptor.workerId)).toBe(worker);
+		} finally {
+			finishShutdown();
+			await stopping.catch(() => {});
+		}
+	});
 });
 
 describe("daemon supervisor whole-tree eviction", () => {

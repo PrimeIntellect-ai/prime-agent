@@ -1,4 +1,6 @@
+import * as ai from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { DaemonSessionSummarizer } from "../src/modes/daemon/daemon-session-summarizer.js";
 
@@ -23,9 +25,11 @@ function makeState(
 				messages: Array.from({ length: opts.messages ?? 2 }, () => ({ role: "user", content: "hi" })),
 				state: { streamingMessage: undefined },
 				modelRegistry: {},
+				settingsManager: SettingsManager.inMemory(),
 				sessionManager: {
 					appendAgentStatus: (s: unknown) => appended.push(s),
 					getLatestAgentStatus: () => opts.persisted,
+					getLeafId: () => null,
 				},
 			},
 		},
@@ -37,6 +41,48 @@ function makeState(
 describe("DaemonSessionSummarizer lifecycle", () => {
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	test.each([
+		{ enabled: false, maxRetries: 3 },
+		{ enabled: true, maxRetries: 0 },
+	])("honors session retry settings %j on a transient summary failure", async (retry) => {
+		vi.useFakeTimers();
+		const model = ai.getModel("openai", "gpt-4o-mini");
+		const complete = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: "503 Service Unavailable",
+			diagnostics: [{ type: "provider_stream_failure", timestamp: 0, details: { kind: "server_error" } }],
+			timestamp: 0,
+		});
+		const state = makeState();
+		Object.assign(state.runtime.session, { settingsManager: SettingsManager.inMemory({ retry }) });
+		Object.assign(state.runtime.session.modelRegistry, {
+			find: () => model,
+			hasConfiguredAuth: () => true,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
+		});
+		const summarizer = new DaemonSessionSummarizer(() => [state]);
+
+		summarizer.notifyActivity(state);
+		await vi.runAllTimersAsync();
+
+		expect(complete).toHaveBeenCalledOnce();
+		expect(state.summaryState).toMatchObject({ summary: "", taskState: "needs_input", basedOnMessageCount: 2 });
 	});
 
 	test("runs the model call after the settle debounce and records the verdict", async () => {

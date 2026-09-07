@@ -1,6 +1,13 @@
-import type { Model } from "@earendil-works/pi-ai";
+import { isPrivatePrimeInferenceModelId, type Model } from "@earendil-works/pi-ai";
+import {
+	buildPrimeInferenceModels,
+	fetchPrimeInferenceModelCatalog,
+	PRIME_INFERENCE_BASE_URL,
+	PrimeInferenceCatalogRequestError,
+} from "./prime-inference-model-catalog.js";
 
-export const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
+export { PRIME_INFERENCE_BASE_URL };
+
 const PRIVATE_MODEL_REFRESH_TIMEOUT_MS = 10_000;
 
 const PRIVATE_PRIME_INFERENCE_MODELS: readonly Model<"openai-completions">[] = [
@@ -24,7 +31,7 @@ const PRIVATE_PRIME_INFERENCE_MODELS: readonly Model<"openai-completions">[] = [
 ];
 
 export function isPrivatePrimeInferenceModel(model: Pick<Model<string>, "provider" | "id">): boolean {
-	return model.provider === "prime-inference" && model.id.startsWith("internal/");
+	return model.provider === "prime-inference" && isPrivatePrimeInferenceModelId(model.id);
 }
 
 export function getPrivatePrimeInferenceModels(): Model<"openai-completions">[] {
@@ -36,42 +43,46 @@ export function getPrivatePrimeInferenceModels(): Model<"openai-completions">[] 
 	}));
 }
 
-export async function fetchAuthorizedPrivatePrimeInferenceModelIds(
+export async function fetchAuthorizedPrivatePrimeInferenceModels(
 	apiKey: string,
 	teamHeaders: Record<string, string>,
+	publicModelIds: ReadonlySet<string>,
 	fetchFn: typeof fetch = fetch,
 	timeoutMs: number = PRIVATE_MODEL_REFRESH_TIMEOUT_MS,
-): Promise<Set<string>> {
-	if (!teamHeaders["X-Prime-Team-ID"]) {
-		return new Set();
+): Promise<Model<"openai-completions">[]> {
+	if (!teamHeaders["X-Prime-Team-ID"]) return [];
+	try {
+		const { payload, entries } = await fetchPrimeInferenceModelCatalog({
+			fetchFn,
+			timeoutMs,
+			allowEmpty: true,
+			headers: { ...teamHeaders, Authorization: `Bearer ${apiKey}` },
+		});
+		const publicIds = new Set([...publicModelIds].map((id) => id.toLowerCase()));
+		const bundledPrivateModels = getPrivatePrimeInferenceModels();
+		const bundledById = new Map(bundledPrivateModels.map((model) => [model.id.toLowerCase(), model]));
+		const entriesById = new Map(entries.map((entry) => [entry.id.toLowerCase(), entry]));
+		const data =
+			payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data) ? payload.data : [];
+		const privateEntries = data.flatMap((item) => {
+			if (!item || typeof item !== "object" || !("id" in item) || typeof item.id !== "string") return [];
+			const id = item.id.toLowerCase();
+			if (publicIds.has(id) || !isPrivatePrimeInferenceModelId(id)) return [];
+			const parsed = entriesById.get(id);
+			if (parsed) return [parsed];
+			const template = bundledById.get(id);
+			return template ? [{ id: item.id, input: template.cost.input, output: template.cost.output }] : [];
+		});
+		return (
+			buildPrimeInferenceModels(bundledPrivateModels, privateEntries, {
+				includePrivate: true,
+				minimumModels: 0,
+			}) ?? []
+		);
+	} catch (error) {
+		if (error instanceof PrimeInferenceCatalogRequestError && (error.status === 401 || error.status === 403)) {
+			return [];
+		}
+		throw error;
 	}
-
-	const response = await fetchFn(`${PRIME_INFERENCE_BASE_URL}/models`, {
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			...teamHeaders,
-		},
-		signal: AbortSignal.timeout(timeoutMs),
-	});
-	if (response.status === 401 || response.status === 403) {
-		return new Set();
-	}
-	if (!response.ok) {
-		throw new Error(`Prime Inference model catalog request failed with status ${response.status}`);
-	}
-
-	const payload = (await response.json()) as unknown;
-	if (!payload || typeof payload !== "object" || !("data" in payload) || !Array.isArray(payload.data)) {
-		throw new Error("Prime Inference model catalog response is invalid");
-	}
-
-	const knownPrivateIds = new Set(PRIVATE_PRIME_INFERENCE_MODELS.map((model) => model.id));
-	return new Set(
-		payload.data.flatMap((entry) => {
-			if (!entry || typeof entry !== "object" || !("id" in entry) || typeof entry.id !== "string") {
-				return [];
-			}
-			return knownPrivateIds.has(entry.id) ? [entry.id] : [];
-		}),
-	);
 }

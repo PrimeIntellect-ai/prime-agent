@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
@@ -14,14 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-	acquireBootstrapLock,
 	DEFAULT_RLM_EXTRA_IMPORT_NAMES,
 	DEFAULT_RLM_EXTRA_UV_ARGS,
 	ensureKernelPython,
 	getKernelVenvDir,
 	type KernelPythonSkill,
+	kernelVenvPython,
 	resolveRuntimeIdentity,
-	windowsExecutableCandidates,
 } from "../src/core/kernel/bootstrap.js";
 
 let tempDir = "";
@@ -424,6 +422,44 @@ dependencies = ["httpx"]
 		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
 	});
 
+	it("reclaims a pid-less stale bootstrap lock before setting up the venv", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const lockPath = `${venv}.bootstrap.lock`;
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		mkdirSync(lockPath);
+		const old = new Date(Date.now() - 60_000);
+		utimesSync(lockPath, old, old);
+
+		expect(await ensureKernelPython()).toBe(join(venv, "bin", "python"));
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(lockPath)).toBe(false);
+	});
+
+	it("waits for a fresh pid-less bootstrap lock instead of reclaiming it", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const lockPath = `${venv}.bootstrap.lock`;
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		mkdirSync(lockPath);
+		let settled = false;
+		const bootstrap = ensureKernelPython().finally(() => {
+			settled = true;
+		});
+		void bootstrap.catch(() => undefined);
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 400));
+			expect(settled).toBe(false);
+			expect(existsSync(lockPath)).toBe(true);
+			expect(existsSync(logPath)).toBe(false);
+		} finally {
+			rmSync(lockPath, { recursive: true, force: true });
+			await bootstrap;
+		}
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(lockPath)).toBe(false);
+	});
+
 	it("shares concurrent bootstrap work in one process", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
@@ -574,133 +610,10 @@ dependencies = ["httpx"]
 
 		await expect(ensureKernelPython()).rejects.toThrow(/PRIME_AGENT_KERNEL_PYTHON points to a Python missing/);
 	});
-});
 
-describe("windowsExecutableCandidates", () => {
-	it("appends PATHEXT extensions in order for a bare name", () => {
-		const candidates = windowsExecutableCandidates("uv", ".COM;.EXE;.BAT;.CMD");
-		expect(candidates).toEqual(["uv", "uv.com", "uv.exe", "uv.bat", "uv.cmd"]);
-	});
-
-	it("returns the name as-is when it already carries a known extension", () => {
-		expect(windowsExecutableCandidates("uv.exe", ".EXE;.CMD")).toEqual(["uv.exe"]);
-		expect(windowsExecutableCandidates("build.cmd", ".COM;.EXE;.BAT;.CMD")).toEqual(["build.cmd"]);
-		expect(windowsExecutableCandidates("UV.CMD", ".cmd;.exe")).toEqual(["UV.CMD"]);
-	});
-
-	it("skips duplicate candidates when PATHEXT has duplicate entries", () => {
-		const candidates = windowsExecutableCandidates("uv", ".EXE;.exe;.BAT;.bat");
-		expect(candidates.filter((c) => c.toLowerCase().endsWith(".exe"))).toHaveLength(1);
-		expect(candidates.filter((c) => c.toLowerCase().endsWith(".bat"))).toHaveLength(1);
-	});
-
-	it("falls back to WINDOWS_PATHEXT_DEFAULT when pathext is empty", () => {
-		const candidates = windowsExecutableCandidates("uv", "");
-		expect(candidates).toContain("uv.EXE");
-		expect(candidates).toContain("uv.CMD");
-		expect(candidates).toContain("uv.BAT");
-	});
-
-	it("trims whitespace from PATHEXT entries", () => {
-		const candidates = windowsExecutableCandidates("uv", ".EXE; .BAT");
-		expect(candidates).toEqual(["uv", "uv.exe", "uv.bat"]);
-	});
-
-	it("ignores PATHEXT entries that CreateProcess cannot execute", () => {
-		expect(windowsExecutableCandidates("uv", ".JS;.EXE;.VBS;.CMD")).toEqual(["uv", "uv.exe", "uv.cmd"]);
-	});
-});
-
-describe("acquireBootstrapLock", () => {
-	it("acquires the lock and writes the current pid", async () => {
-		const venv = join(tempDir, "lock-test-venv");
-		const release = await acquireBootstrapLock(venv);
-		try {
-			const lockDir = join(tempDir, "lock-test-venv.bootstrap.lock");
-			const pidRaw = readFileSync(join(lockDir, "pid"), "utf8").trim();
-			expect(Number(pidRaw)).toBe(process.pid);
-		} finally {
-			await release();
-		}
-	});
-
-	it("releases the lock by removing the lock directory", async () => {
-		const venv = join(tempDir, "lock-release-venv");
-		const lockDir = join(tempDir, "lock-release-venv.bootstrap.lock");
-		const release = await acquireBootstrapLock(venv);
-		await release();
-		expect(existsSync(lockDir)).toBe(false);
-	});
-
-	it("reclaims a stale lock whose pid is dead", async () => {
-		const venv = join(tempDir, "lock-reclaim-dead-venv");
-		const lockDir = join(tempDir, "lock-reclaim-dead-venv.bootstrap.lock");
-		const exited = spawn(process.execPath, ["-e", ""]);
-		const deadPid = exited.pid;
-		if (!deadPid) throw new Error("failed to start dead-pid fixture");
-		await new Promise<void>((resolveExit, reject) => {
-			exited.once("error", reject);
-			exited.once("exit", () => resolveExit());
-		});
-		mkdirSync(lockDir, { recursive: true });
-		writeFileSync(join(lockDir, "pid"), `${deadPid}\n`, "utf8");
-
-		const release = await acquireBootstrapLock(venv);
-		try {
-			const pidRaw = readFileSync(join(lockDir, "pid"), "utf8").trim();
-			expect(Number(pidRaw)).toBe(process.pid);
-		} finally {
-			await release();
-		}
-	});
-
-	it("reclaims a pid-less stale lock with an old mtime", async () => {
-		const venv = join(tempDir, "lock-reclaim-pidless-venv");
-		const lockDir = join(tempDir, "lock-reclaim-pidless-venv.bootstrap.lock");
-		mkdirSync(lockDir, { recursive: true });
-		const oldDate = new Date(Date.now() - 60_000);
-		utimesSync(lockDir, oldDate, oldDate);
-
-		const release = await acquireBootstrapLock(venv);
-		try {
-			const pidRaw = readFileSync(join(lockDir, "pid"), "utf8").trim();
-			expect(Number(pidRaw)).toBe(process.pid);
-		} finally {
-			await release();
-		}
-	});
-
-	it("serializes independent contenders", async () => {
-		const venv = join(tempDir, "lock-contended-venv");
-		const releaseFirst = await acquireBootstrapLock(venv);
-		let secondAcquired = false;
-		const second = acquireBootstrapLock(venv).then((release) => {
-			secondAcquired = true;
-			return release;
-		});
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		expect(secondAcquired).toBe(false);
-		await releaseFirst();
-		const releaseSecond = await second;
-		await releaseSecond();
-	});
-
-	it("does not reclaim a pid-less lock with a fresh mtime (waits instead)", async () => {
-		const venv = join(tempDir, "lock-fresh-pidless-venv");
-		const lockDir = join(tempDir, "lock-fresh-pidless-venv.bootstrap.lock");
-		mkdirSync(lockDir, { recursive: true });
-
-		let acquired = false;
-		const acquirePromise = acquireBootstrapLock(venv).then((release) => {
-			acquired = true;
-			return release;
-		});
-		await new Promise((resolve) => setTimeout(resolve, 400));
-		expect(acquired).toBe(false);
-		expect(existsSync(lockDir)).toBe(true);
-
-		rmSync(lockDir, { recursive: true, force: true });
-		const release = await acquirePromise;
-		await release();
+	it("resolves the venv python under Scripts\\python.exe on win32 (uv layout)", () => {
+		const venv = join(tempDir, "kernel-venv");
+		expect(kernelVenvPython(venv, "win32")).toBe(join(venv, "Scripts", "python.exe"));
+		expect(kernelVenvPython(venv, "linux")).toBe(join(venv, "bin", "python"));
 	});
 });

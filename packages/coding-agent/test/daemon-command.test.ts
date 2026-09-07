@@ -49,9 +49,7 @@ const daemonClientMock = vi.hoisted(() => {
 
 		async connect(): Promise<void> {
 			behavior.connectAttempts++;
-			// connectFails means ALL attempts fail (for tests that never want connection).
 			if (behavior.connectFails) throw new Error("mock connect failed");
-			// connectRetriesBeforeSuccess: fail the first N attempts, then succeed.
 			if (
 				behavior.connectRetriesBeforeSuccess > 0 &&
 				behavior.connectAttempts <= behavior.connectRetriesBeforeSuccess
@@ -115,13 +113,10 @@ vi.mock("../src/modes/daemon/daemon-client.js", () => ({
 
 const spawnMock = vi.hoisted(() => {
 	const calls: string[][] = [];
-	const optionsCalls: Record<string, unknown>[] = [];
 	return {
 		calls,
-		optionsCalls,
 		mockSpawn: (...args: unknown[]) => {
 			calls.push(args[1] as string[]);
-			optionsCalls.push((args[2] ?? {}) as Record<string, unknown>);
 			return {
 				unref: () => {},
 				kill: () => {},
@@ -490,8 +485,7 @@ describe("daemon command", () => {
 	});
 
 	it("does not leak --goal/--goal-token-budget into daemon startup args", async () => {
-		// Force the first connect attempt to fail so runStart enters the spawn path,
-		// then let subsequent attempts succeed so the retry loop exits quickly.
+		// Fail once to exercise spawn, then let the startup retry succeed.
 		daemonClientMock.behavior.connectRetriesBeforeSuccess = 1;
 		spawnMock.calls.length = 0;
 
@@ -537,40 +531,6 @@ describe("daemon command", () => {
 		await handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "second"]);
 		const secondConfig = daemonClientMock.instances.at(-1)?.requests[0]?.config;
 		expect(secondConfig?.initialGoal).toBeUndefined();
-	});
-});
-
-describe("daemon background spawn windowsHide on win32", () => {
-	const OriginalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
-	beforeEach(() => {
-		daemonClientMock.behavior.connectFails = false;
-		daemonClientMock.behavior.connectRetriesBeforeSuccess = 1;
-		daemonClientMock.behavior.connectAttempts = 0;
-		spawnMock.calls.length = 0;
-		spawnMock.optionsCalls.length = 0;
-		vi.spyOn(console, "log").mockImplementation(() => {});
-	});
-	afterEach(() => {
-		if (OriginalPlatform) {
-			Object.defineProperty(process, "platform", OriginalPlatform);
-		}
-		vi.restoreAllMocks();
-	});
-
-	it("passes windowsHide:true in spawn options on win32", async () => {
-		Object.defineProperty(process, "platform", { value: "win32" });
-		await handleDaemonCommand(["daemon", "--socket", "/tmp/pa-win32.sock", "start"]);
-
-		expect(spawnMock.calls.length).toBe(1);
-		expect(spawnMock.optionsCalls[0]?.windowsHide).toBe(true);
-	});
-
-	it("does not pass windowsHide:true in spawn options on non-win32", async () => {
-		Object.defineProperty(process, "platform", { value: "darwin" });
-		await handleDaemonCommand(["daemon", "--socket", "/tmp/pa-nonwin32.sock", "start"]);
-
-		expect(spawnMock.calls.length).toBe(1);
-		expect(spawnMock.optionsCalls[0]?.windowsHide).toBe(false);
 	});
 });
 

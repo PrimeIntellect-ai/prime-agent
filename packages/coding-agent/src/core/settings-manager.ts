@@ -1,22 +1,10 @@
-import { randomUUID } from "node:crypto";
 import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
-import {
-	closeSync,
-	existsSync,
-	fchmodSync,
-	fsyncSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	statSync,
-	unlinkSync,
-	writeFileSync,
-} from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -42,8 +30,7 @@ export interface AutoRefineSettings {
 
 export interface ProviderRetrySettings {
 	timeoutMs?: number; // SDK/provider request timeout in milliseconds
-	maxRetries?: number; // SDK/provider retry attempts
-	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
+	maxRetryDelayMs?: number; // default: 60000 (max server-requested retry delay before failing; 0 disables the cap)
 }
 
 export interface RetrySettings {
@@ -236,70 +223,6 @@ export interface SettingsError {
 	error: Error;
 }
 
-const ATOMIC_RENAME_MAX_RETRIES = 8;
-const ATOMIC_RENAME_BASE_DELAY_MS = 10;
-
-function isTransientSettingsRenameError(error: unknown): boolean {
-	if (process.platform !== "win32") return false;
-	const code = (error as NodeJS.ErrnoException).code;
-	return code === "EBUSY" || code === "EPERM" || code === "EACCES";
-}
-
-function syncSettingsDirectory(path: string): void {
-	if (process.platform === "win32") return;
-	const descriptor = openSync(path, "r");
-	try {
-		fsyncSync(descriptor);
-	} finally {
-		closeSync(descriptor);
-	}
-}
-
-function replaceSettingsFileAtomically(path: string, data: string): void {
-	const directory = dirname(path);
-	let mode = 0o600;
-	try {
-		mode = statSync(path).mode & 0o777;
-	} catch {
-		// New settings files remain private by default.
-	}
-	const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
-	let descriptor: number | undefined;
-	try {
-		descriptor = openSync(temporaryPath, "wx", mode);
-		writeFileSync(descriptor, data, { encoding: "utf-8" });
-		fchmodSync(descriptor, mode);
-		fsyncSync(descriptor);
-		closeSync(descriptor);
-		descriptor = undefined;
-
-		const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
-		for (let attempt = 1; ; attempt++) {
-			try {
-				renameSync(temporaryPath, path);
-				syncSettingsDirectory(directory);
-				return;
-			} catch (error) {
-				if (!isTransientSettingsRenameError(error) || attempt >= ATOMIC_RENAME_MAX_RETRIES) throw error;
-				Atomics.wait(sleepBuffer, 0, 0, ATOMIC_RENAME_BASE_DELAY_MS * attempt);
-			}
-		}
-	} finally {
-		if (descriptor !== undefined) {
-			try {
-				closeSync(descriptor);
-			} catch {
-				// The write error remains authoritative.
-			}
-		}
-		try {
-			if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
-		} catch {
-			// A later save can ignore an abandoned unique temp file.
-		}
-	}
-}
-
 export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
@@ -359,15 +282,21 @@ export class FileSettingsStorage implements SettingsStorage {
 				release = this.acquireLockSyncWithRetry(path);
 			}
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
-			const next = fn(current);
+			let next = fn(current);
 			if (next !== undefined) {
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
 				if (!release) {
 					release = this.acquireLockSyncWithRetry(path);
+					// The first-write read ran unlocked; a racing first writer may have landed since.
+					if (existsSync(path)) {
+						next = fn(readFileSync(path, "utf-8"));
+					}
 				}
-				replaceSettingsFileAtomically(path, next);
+				if (next !== undefined) {
+					writeFileAtomicSync(path, next, { mode: 0o600 });
+				}
 			}
 		} finally {
 			if (release) {
@@ -1022,10 +951,9 @@ export class SettingsManager {
 		};
 	}
 
-	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+	getProviderRetrySettings(): { timeoutMs?: number; maxRetryDelayMs: number } {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
-			maxRetries: this.settings.retry?.provider?.maxRetries,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
 		};
 	}

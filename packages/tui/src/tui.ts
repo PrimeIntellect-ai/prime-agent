@@ -768,7 +768,7 @@ export class TUI extends Container {
 		let href: string;
 		try {
 			const parsed = new URL(url);
-			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+			if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "file:") return;
 			href = parsed.href;
 		} catch {
 			return;
@@ -787,7 +787,7 @@ export class TUI extends Container {
 							href,
 						]
 					: ["xdg-open", href];
-		execFile(command, args, () => {});
+		execFile(command, args, { windowsHide: true }, () => {});
 	}
 
 	private copySelection(text: string): void {

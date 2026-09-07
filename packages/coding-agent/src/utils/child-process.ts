@@ -1,9 +1,78 @@
-import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import {
+	type ChildProcess,
+	type ExecFileException,
+	type ExecFileOptionsWithStringEncoding,
+	type ExecFileSyncOptions,
+	type ExecFileSyncOptionsWithStringEncoding,
+	type ExecSyncOptions,
+	type ExecSyncOptionsWithStringEncoding,
+	execFile,
+	execFileSync,
+	execSync,
+	type SpawnOptions,
+	type SpawnSyncOptions,
+	type SpawnSyncOptionsWithStringEncoding,
+	type SpawnSyncReturns,
+	spawn,
+	spawnSync,
+} from "node:child_process";
 import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename } from "node:path";
 
 const EXIT_STDIO_GRACE_MS = 100;
+
+/** windowsHide for every non-interactive spawn (console children of a windowless parent flash a fresh console on Windows); only spawns that intentionally hand the user a console call node:child_process directly. */
+export function spawnHidden(command: string, args: readonly string[], options: SpawnOptions = {}): ChildProcess {
+	return spawn(command, args, { ...options, windowsHide: true });
+}
+
+export function spawnSyncHidden(
+	command: string,
+	args: readonly string[],
+	options: SpawnSyncOptionsWithStringEncoding,
+): SpawnSyncReturns<string>;
+export function spawnSyncHidden(
+	command: string,
+	args?: readonly string[],
+	options?: SpawnSyncOptions,
+): SpawnSyncReturns<Buffer>;
+export function spawnSyncHidden(
+	command: string,
+	args: readonly string[] = [],
+	options: SpawnSyncOptions = {},
+): SpawnSyncReturns<string | Buffer> {
+	return spawnSync(command, args, { ...options, windowsHide: true });
+}
+
+export function execSyncHidden(command: string, options: ExecSyncOptionsWithStringEncoding): string;
+export function execSyncHidden(command: string, options?: ExecSyncOptions): Buffer;
+export function execSyncHidden(command: string, options: ExecSyncOptions = {}): string | Buffer {
+	return execSync(command, { ...options, windowsHide: true });
+}
+
+export function execFileHidden(
+	file: string,
+	args: readonly string[],
+	options: ExecFileOptionsWithStringEncoding,
+	callback: (error: ExecFileException | null, stdout: string, stderr: string) => void,
+): ChildProcess {
+	return execFile(file, args, { ...options, windowsHide: true }, callback);
+}
+
+export function execFileSyncHidden(
+	file: string,
+	args: readonly string[],
+	options: ExecFileSyncOptionsWithStringEncoding,
+): string;
+export function execFileSyncHidden(file: string, args?: readonly string[], options?: ExecFileSyncOptions): Buffer;
+export function execFileSyncHidden(
+	file: string,
+	args: readonly string[] = [],
+	options: ExecFileSyncOptions = {},
+): string | Buffer {
+	return execFileSync(file, args, { ...options, windowsHide: true });
+}
 
 const WINDOWS_SHELL_COMMANDS = new Set(["npm", "npx", "pnpm", "yarn", "yarnpkg", "corepack"]);
 
@@ -39,7 +108,7 @@ export function isZombieProcess(pid: number): boolean {
 		// Fall through to the portable process listing used on macOS and BSD.
 	}
 	try {
-		const state = execFileSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
+		const state = execFileSyncHidden("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
 		return state.startsWith("Z");
 	} catch {
 		return false;
@@ -49,6 +118,53 @@ export function isZombieProcess(pid: number): boolean {
 /** True only for a process that is actually running: zombies do not count. */
 export function isProcessAlive(pid: number): boolean {
 	return processIdExists(pid) && !isZombieProcess(pid);
+}
+
+/** True while the group has any member left, zombies included; a group can outlive its leader. */
+export function processGroupExists(pgid: number): boolean {
+	if (process.platform === "win32") {
+		return false;
+	}
+	try {
+		process.kill(-pgid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** True while the group has a RUNNING member; unreaped zombies have exited and must not block a group stop. */
+export function processGroupHasLiveMember(pgid: number): boolean {
+	if (!processGroupExists(pgid)) {
+		return false;
+	}
+	try {
+		const listing = execFileSync("ps", ["-A", "-o", "pgid=", "-o", "stat="], { encoding: "utf8" });
+		for (const line of listing.split("\n")) {
+			const fields = line.trim().split(/\s+/);
+			if (fields.length < 2) continue;
+			if (Number(fields[0]) === pgid && !fields[1]!.startsWith("Z")) {
+				return true;
+			}
+		}
+		return false;
+	} catch {
+		// Unverifiable listing reads alive: callers keep escalating instead of dropping records over live descendants.
+		return true;
+	}
+}
+
+/**
+ * Signal the group only while it is provably still the target: the leader process (even a zombie)
+ * anchors its pgid against reuse; once the leader is gone, a live member must hold the pgid at
+ * signal time, narrowing reuse exposure to the inherent kill() TOCTOU of any single-pid signal.
+ */
+export function signalProcessGroupIfHeld(pgid: number, signal: NodeJS.Signals): boolean {
+	if (!processIdExists(pgid) && !processGroupHasLiveMember(pgid)) {
+		return false;
+	}
+	signalProcessGroupOrProcess(pgid, signal);
+	return true;
 }
 
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
@@ -64,9 +180,8 @@ export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals)
 		try {
 			const args = ["/PID", String(pid), "/T"];
 			if (signal === "SIGKILL") args.push("/F");
-			const taskkill = spawn("taskkill", args, {
+			const taskkill = spawnHidden("taskkill", args, {
 				stdio: "ignore",
-				windowsHide: true,
 				detached: true,
 			});
 			taskkill.once("error", fallback);

@@ -2,10 +2,14 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 
-export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
+import { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
+import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "./daemon-worker-protocol.js";
+
+export { normalizeSocketPath };
+export const DAEMON_SOCKET_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SOCKET_DIR";
 
 const DAEMON_SOCKET_MODE = 0o600;
 const DAEMON_SOCKET_DIR_MODE = 0o700;
@@ -112,13 +116,27 @@ export function windowsNamedPipeUserScope(): string {
 }
 
 export function defaultDaemonSocketPath(): string {
+	const inherited = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+	if (inherited) return normalizeSocketPath(inherited);
 	if (process.platform === "win32") {
 		return `\\\\.\\pipe\\prime-agent-daemon-${windowsNamedPipeUserScope()}`;
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
 
+function assertDaemonSocketPathLength(socketPath: string): void {
+	if (process.platform === "win32") return;
+	const bytes = Buffer.byteLength(socketPath, "utf8");
+	const maxBytes = process.platform === "linux" ? 107 : 103;
+	if (bytes > maxBytes) {
+		throw new Error(
+			`Daemon socket path is too long (${bytes} bytes; maximum ${maxBytes} on ${process.platform}). Use a shorter socket path or TMPDIR: ${socketPath}`,
+		);
+	}
+}
+
 export async function acquireDaemonSocketPathLease(socketPath: string): Promise<DaemonSocketPathLease | undefined> {
+	assertDaemonSocketPathLength(socketPath);
 	ensureDefaultDaemonSocketDir(socketPath);
 	if (process.platform === "win32") {
 		// Use a file-based lock for Windows named pipes since proper-lockfile
@@ -168,6 +186,7 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 }
 
 export async function prepareDaemonSocketPath(socketPath: string, lease?: DaemonSocketPathLease): Promise<void> {
+	assertDaemonSocketPathLength(socketPath);
 	ensureDefaultDaemonSocketDir(socketPath);
 
 	if (process.platform === "win32") {
@@ -352,6 +371,11 @@ function assertSocketLeaseHeld(socketPath: string, lease: DaemonSocketPathLease)
 }
 
 export function defaultDaemonSocketDir(): string {
+	const inherited = process.env[DAEMON_SOCKET_DIR_ENV];
+	if (inherited) {
+		if (!isAbsolute(inherited)) throw new Error("Inherited daemon socket directory must be absolute");
+		return resolve(inherited);
+	}
 	const suffix =
 		process.platform === "win32"
 			? windowsNamedPipeUserScope()

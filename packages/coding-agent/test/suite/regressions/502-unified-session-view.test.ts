@@ -1,6 +1,7 @@
 import stripAnsi from "strip-ansi";
 import { describe, expect, test, vi } from "vitest";
 import { AgentsViewMode } from "../../../src/modes/agents-view/agents-view-mode.js";
+import { buildUnifiedSessionIndex } from "../../../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createDeferred as deferred } from "../scheduling.js";
@@ -304,7 +305,7 @@ describe("#502 unified session view regressions", () => {
 		expect(harness.setStatusMessage).not.toHaveBeenCalled();
 	});
 
-	test("a missing selection anchor blocks open only until both catalogs settle", () => {
+	test("a pending selection anchor never blocks opening the visible row", () => {
 		const finish = vi.fn();
 		const fallback = summary("fallback");
 		const harness = {
@@ -314,21 +315,26 @@ describe("#502 unified session view regressions", () => {
 			selectedActiveSessionId: undefined as string | undefined,
 			selectedRowIdentity: "identity-intended",
 			rows: [{ selectable: true, kind: "agent", summary: fallback }],
+			unifiedRecords: [],
+			unifiedIndex: buildUnifiedSessionIndex([]),
 			isPendingDeleteRow: () => false,
 			setStatusMessage: vi.fn(),
 			finish,
 		};
 
+		// Enter acts on the row under the cursor even while the anchor waits.
 		privateMethod<(this: typeof harness) => void>("openSelected").call(harness);
-		expect(finish).not.toHaveBeenCalled();
+		expect(finish).toHaveBeenCalledWith(expect.objectContaining({ type: "open", summary: fallback }));
+		expect(harness.setStatusMessage).not.toHaveBeenCalled();
+
+		// Untouched, the anchor restore still waits for the saved catalog...
 		privateMethod<(this: typeof harness) => void>("resolveMissingSelectionAnchor").call(harness);
 		expect(harness.selectionAnchorPending).toBe(true);
 		harness.savedCatalogRefreshPending = false;
 		privateMethod<(this: typeof harness) => void>("resolveMissingSelectionAnchor").call(harness);
-		// Open unblocks on the visible fallback row...
 		expect(harness.selectionAnchorPending).toBe(false);
 		expect(harness.selectedActiveSessionId).toBe(fallback.activeSessionId ?? fallback.id);
-		// ...but the restored anchor identity survives so a late poll can still re-anchor.
+		// ...and the restored anchor identity survives so a late poll can still re-anchor.
 		expect(harness.selectedRowIdentity).toBe("identity-intended");
 	});
 	test("rename uses the captured row after refresh removes it", async () => {
@@ -409,7 +415,8 @@ describe("#502 unified session view regressions", () => {
 		expect(filtered.map((record) => record.identity)).toEqual(["match"]);
 	});
 
-	test("inactive rows give usage and age their full responsive cell", () => {
+	test("inactive rows keep total cost and age visible in a narrow row", () => {
+		initTheme("dark");
 		const inactive = {
 			kind: "agent" as const,
 			section: "inactive" as const,
@@ -446,10 +453,10 @@ describe("#502 unified session view regressions", () => {
 				50,
 			),
 		);
-		expect(rendered).toMatch(/↑0\s+↓0 ·\s+\$0\.00 ·\s+0 ·\s+\$0\.00 ·\s+2h\s*$/);
+		expect(rendered).toMatch(/\$0\.00\s+2h\s*$/);
 	});
 
-	test("scoped subagent rows keep model and effort ahead of summaries", () => {
+	test("rows keep compact model IDs visible on every row kind", () => {
 		initTheme("dark");
 		const subagent = {
 			// Direct children in a scoped Agents View render as agent rows while
@@ -492,25 +499,42 @@ describe("#502 unified session view regressions", () => {
 			);
 
 		const full = render(160);
-		expect(full).toContain(
-			"Inspect agents view · prime-inference/gpt-5.6-terra:high · Investigate a variable background status",
-		);
+		expect(full).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+Investigate a variable background status/);
+		for (const width of [60, 80, 120]) {
+			expect(render(width)).toContain("gpt-5.6-terra");
+			expect(render(width)).toHaveLength(width);
+		}
 		const narrow = render(100);
-		expect(narrow).toContain("prime-inference/gpt-5.6-terra:high");
-		expect(narrow).not.toContain("Investigate a variable background status");
+		expect(narrow).toContain("gpt-5.6-terra");
+		expect(narrow).not.toContain("prime-inference/");
 
 		subagent.summary.summary = "";
-		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
 
 		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
 		subagent.summary.runtimeKind = undefined;
 		subagent.summary.rlmChildId = "effort-child";
-		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
 
 		subagent.summary.thinkingLevel = "off";
 		subagent.summary.summary = "A later summary";
-		expect(render(120)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
+		expect(render(120)).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+A later summary/);
 		expect(render(120)).not.toContain(":off");
+
+		// Top-level sessions show the same label; the model cell is not subagent-only.
+		subagent.summary.runtimeKind = "top-level";
+		subagent.summary.rlmChildId = undefined;
+		expect(render(120)).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+A later summary/);
+
+		// Pending delete replaces the suffixes, model label included.
+		const pendingDelete = { ...harness, isPendingDeleteRow: () => true, getPendingDeleteTitle: () => "delete?" };
+		expect(
+			stripAnsi(
+				privateMethod<(this: typeof pendingDelete, row: typeof subagent, width: number) => string>(
+					"renderRow",
+				).call(pendingDelete, subagent, 120),
+			),
+		).not.toContain("gpt-5.6-terra");
 
 		expect(render(20)).toHaveLength(20);
 	});

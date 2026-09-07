@@ -1,1 +1,2 @@
 - Added native Windows installation, release archives, process cleanup, daemon named-pipe coordination, CPython bootstrap, and CI coverage without requiring WSL.
+- Fixed a cross-platform race where a message to a passivating subagent could fail before its runtime reopened.

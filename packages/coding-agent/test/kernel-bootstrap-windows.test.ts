@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildBatchShimInvocation } from "../src/core/kernel/bootstrap.js";
+import { buildBatchShimInvocation, windowsExecutableCandidates } from "../src/core/kernel/bootstrap.js";
 
 let tempDir = "";
 
@@ -36,9 +36,13 @@ describe("buildBatchShimInvocation", () => {
 		expect(invocation.env.PRIME_AGENT_BATCH_testtoken_2).toBe("%PATH%");
 	});
 
-	it("rejects values that cannot be represented safely", () => {
-		expect(() => buildBatchShimInvocation("uv.cmd", ['a"b'], {}, "testtoken")).toThrow(/cannot contain/);
-		expect(() => buildBatchShimInvocation("uv.cmd", ["line\nbreak"], {}, "testtoken")).toThrow(/cannot contain/);
+	it.each(['a"b', "line\nbreak", "line\rbreak", "null\0byte"])("rejects unsafe command or argument %j", (value) => {
+		expect(() => buildBatchShimInvocation("uv.cmd", [value], {}, "testtoken")).toThrow(/cannot contain/);
+		expect(() => buildBatchShimInvocation(value, [], {}, "testtoken")).toThrow(/cannot contain/);
+	});
+
+	it("rejects tokens that could alter the cmd.exe command string", () => {
+		expect(() => buildBatchShimInvocation("uv.cmd", [], {}, "bad%PATH%")).toThrow(/unsupported characters/);
 	});
 });
 
@@ -46,13 +50,13 @@ describe("batch shim round-trip (Windows only)", () => {
 	it.skipIf(process.platform !== "win32")(
 		"passes metacharacter arguments exactly through cmd /s /c + .cmd shim",
 		async () => {
-			const shimDir = join(tempDir, "roundtrip-shim");
+			const shimDir = join(tempDir, "工具 & shims!");
 			mkdirSync(shimDir, { recursive: true });
 			const shimPath = join(shimDir, "capture.cmd");
 			const captureJs = join(shimDir, "capture.cjs");
 			const outPath = join(shimDir, "args.json");
 
-			// Bun/Node.js capture script: writes its argv (slice(2)) as JSON.
+			// Capture the arguments received by Node.
 			writeFileSync(
 				captureJs,
 				[
@@ -77,6 +81,8 @@ describe("batch shim round-trip (Windows only)", () => {
 				"pipe|char",
 				"less<than",
 				"greater>than",
+				"",
+				"工具",
 				"(parens)",
 				")closeParen(",
 			];
@@ -101,4 +107,41 @@ describe("batch shim round-trip (Windows only)", () => {
 			expect(actual).toEqual(testArgs);
 		},
 	);
+});
+
+describe("windowsExecutableCandidates", () => {
+	it("appends PATHEXT extensions in order for a bare name", () => {
+		const candidates = windowsExecutableCandidates("uv", ".COM;.EXE;.BAT;.CMD");
+		expect(candidates).toEqual(["uv", "uv.com", "uv.exe", "uv.bat", "uv.cmd"]);
+	});
+
+	it("returns the name as-is when it already carries a known extension", () => {
+		expect(windowsExecutableCandidates("uv.exe", ".EXE;.CMD")).toEqual(["uv.exe"]);
+		expect(windowsExecutableCandidates("build.cmd", ".COM;.EXE;.BAT;.CMD")).toEqual(["build.cmd"]);
+		expect(windowsExecutableCandidates("UV.CMD", ".cmd;.exe")).toEqual(["UV.CMD"]);
+		expect(windowsExecutableCandidates("uv.exe", ".CMD")).toEqual(["uv.exe"]);
+		expect(windowsExecutableCandidates("uv.exe", undefined)).toEqual(["uv.exe"]);
+	});
+
+	it("skips duplicate candidates when PATHEXT has duplicate entries", () => {
+		const candidates = windowsExecutableCandidates("uv", ".EXE;.exe;.BAT;.bat");
+		expect(candidates.filter((c) => c.toLowerCase().endsWith(".exe"))).toHaveLength(1);
+		expect(candidates.filter((c) => c.toLowerCase().endsWith(".bat"))).toHaveLength(1);
+	});
+
+	it("falls back to WINDOWS_PATHEXT_DEFAULT when pathext is empty", () => {
+		const candidates = windowsExecutableCandidates("uv", "");
+		expect(candidates).toContain("uv.EXE");
+		expect(candidates).toContain("uv.CMD");
+		expect(candidates).toContain("uv.BAT");
+	});
+
+	it("trims whitespace from PATHEXT entries", () => {
+		const candidates = windowsExecutableCandidates("uv", ".EXE; .BAT");
+		expect(candidates).toEqual(["uv", "uv.exe", "uv.bat"]);
+	});
+
+	it("ignores PATHEXT entries that CreateProcess cannot execute", () => {
+		expect(windowsExecutableCandidates("uv", ".JS;.EXE;.VBS;.CMD")).toEqual(["uv", "uv.exe", "uv.cmd"]);
+	});
 });

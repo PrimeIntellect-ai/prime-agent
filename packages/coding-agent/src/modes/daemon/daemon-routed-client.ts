@@ -241,8 +241,8 @@ export async function createDaemonSessionTransport(
 		}
 		direct = new DaemonWorkerClient(ticket.socketPath);
 		await direct.connect(1000);
-		await direct.waitForHello(1000);
-		await direct.authenticatePeer(ticket, 1000);
+		await direct.waitForHello();
+		await direct.authenticatePeer(ticket);
 		return new DaemonRoutedClient(supervisor, direct);
 	} catch {
 		direct?.close();

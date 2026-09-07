@@ -1,0 +1,2 @@
+- Added `rlm.create_session(...)` so daemon-backed root agents can start separate top-level sessions.
+- Preserved active same-provider credentials when creating a sibling session without storing them in daemon descriptors.

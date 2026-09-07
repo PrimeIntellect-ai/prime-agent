@@ -1,13 +1,25 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+	acquireDaemonSocketPathLease,
 	cleanupDaemonSocketPath,
+	DAEMON_SOCKET_DIR_ENV,
 	DaemonSocketPathLease,
+	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
 	endDaemonSocketAfterFlush,
 	getDaemonSocketIdentity,
@@ -15,6 +27,7 @@ import {
 	prepareDaemonSocketPath,
 	windowsNamedPipeUserScope,
 } from "../src/modes/daemon/daemon-socket.js";
+import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("endDaemonSocketAfterFlush", () => {
 	it("delivers queued bytes before closing the socket", async () => {
@@ -37,6 +50,197 @@ describe("endDaemonSocketAfterFlush", () => {
 		});
 		await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 		expect(received).toBe("daemon_closing\n");
+	});
+});
+
+describe.each([
+	{ platform: "darwin", limit: 103 },
+	{ platform: "linux", limit: 107 },
+])("Unix socket bind path length on $platform", ({ platform, limit }) => {
+	function socketPathWithBytes(directory: string, byteLength: number, encoding: string): string {
+		const stemBytes = byteLength - Buffer.byteLength(join(directory, ".sock"));
+		const stem =
+			encoding === "multibyte"
+				? "é".repeat(Math.floor(stemBytes / 2)) + "x".repeat(stemBytes % 2)
+				: "x".repeat(stemBytes);
+		return join(directory, `${stem}.sock`);
+	}
+
+	it.each(["ascii", "multibyte"])("accepts the exact byte boundary for %s paths", async (encoding) => {
+		const root = mkdtempSync(join(tmpdir(), "pa-len-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		let lease: DaemonSocketPathLease | undefined;
+		try {
+			Object.defineProperty(process, "platform", { value: platform });
+			vi.stubEnv("TMPDIR", root);
+			const socketPath = socketPathWithBytes(defaultDaemonSocketDir(), limit, encoding);
+			expect(Buffer.byteLength(socketPath)).toBe(limit);
+			lease = await acquireDaemonSocketPathLease(socketPath);
+			expect(lease?.socketPath).toBe(socketPath);
+			expect(existsSync(`${socketPath}.lock`)).toBe(true);
+			await expect(prepareDaemonSocketPath(socketPath, lease)).resolves.toBeUndefined();
+			expect(existsSync(socketPath)).toBe(false);
+			await lease?.release();
+			expect(existsSync(`${socketPath}.lock`)).toBe(false);
+		} finally {
+			await lease?.release();
+			vi.unstubAllEnvs();
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{ operation: "acquire", encoding: "ascii" },
+		{ operation: "prepare", encoding: "ascii" },
+		{ operation: "acquire", encoding: "multibyte" },
+		{ operation: "prepare", encoding: "multibyte" },
+	])("rejects an overlong $encoding path before $operation side effects", async ({ operation, encoding }) => {
+		const root = mkdtempSync(join(tmpdir(), "pa-len-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		let lease: DaemonSocketPathLease | undefined;
+		try {
+			Object.defineProperty(process, "platform", { value: platform });
+			vi.stubEnv("TMPDIR", root);
+			const socketDir = defaultDaemonSocketDir();
+			const socketPath = socketPathWithBytes(socketDir, limit + 1, encoding);
+			expect(Buffer.byteLength(socketPath)).toBe(limit + 1);
+			if (encoding === "multibyte") expect(socketPath.length).toBeLessThan(limit);
+			let error: unknown;
+			try {
+				if (operation === "acquire") lease = await acquireDaemonSocketPathLease(socketPath);
+				else await prepareDaemonSocketPath(socketPath);
+			} catch (caught) {
+				error = caught;
+			}
+			expect(existsSync(socketDir)).toBe(false);
+			expect(existsSync(`${socketPath}.lock`)).toBe(false);
+			expect(existsSync(socketPath)).toBe(false);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toMatch(/socket path.*too long/i);
+			expect((error as Error).message).toContain(`${limit + 1} bytes`);
+			expect((error as Error).message).toContain(`maximum ${limit} on ${platform}`);
+		} finally {
+			await lease?.release();
+			vi.unstubAllEnvs();
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("still cleans up an existing overlong path without applying bind validation", () => {
+		const root = mkdtempSync(join(tmpdir(), "pa-len-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		try {
+			Object.defineProperty(process, "platform", { value: platform });
+			const socketPath = socketPathWithBytes(root, limit + 1, "ascii");
+			writeFileSync(socketPath, "stale socket record");
+			const identity = getDaemonSocketIdentity(socketPath);
+			expect(readFileSync(socketPath, "utf8")).toBe("stale socket record");
+			cleanupDaemonSocketPath(socketPath, identity);
+			expect(existsSync(socketPath)).toBe(false);
+			expect(existsSync(`${socketPath}.lock`)).toBe(false);
+		} finally {
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("inherited daemon runtime locations", () => {
+	it("normalizes the inherited directory and keeps leases outside nested scratch directories", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pa-runtime-"));
+		const runtimeDir = join(root, "runtime");
+		let lease: DaemonSocketPathLease | undefined;
+		try {
+			vi.stubEnv(DAEMON_SOCKET_DIR_ENV, `${runtimeDir}/../runtime/`);
+			vi.stubEnv(DAEMON_WORKER_SUPERVISOR_SOCKET_ENV, undefined);
+			for (const generation of ["child", "grandchild"]) {
+				const scratch = join(root, generation, "long-session-artifact-path".repeat(5), "tmp");
+				for (const name of ["TMPDIR", "TMP", "TEMP"]) vi.stubEnv(name, scratch);
+				expect(defaultDaemonSocketDir()).toBe(runtimeDir);
+				const socketPath = defaultDaemonSocketPath();
+				if (process.platform !== "win32") expect(socketPath).toBe(join(runtimeDir, "daemon.sock"));
+				lease = await acquireDaemonSocketPathLease(socketPath);
+				expect(readdirSync(runtimeDir)).toHaveLength(1);
+				expect(existsSync(scratch)).toBe(false);
+				await lease?.release();
+				expect(readdirSync(runtimeDir)).toEqual([]);
+				vi.stubEnv(DAEMON_SOCKET_DIR_ENV, defaultDaemonSocketDir());
+				vi.stubEnv(DAEMON_WORKER_SUPERVISOR_SOCKET_ENV, socketPath);
+			}
+		} finally {
+			await lease?.release();
+			vi.unstubAllEnvs();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a relative inherited directory before creating a socket or lock", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pa-runtime-"));
+		try {
+			vi.stubEnv(DAEMON_SOCKET_DIR_ENV, "relative-runtime");
+			expect(() => defaultDaemonSocketDir()).toThrow("Inherited daemon socket directory must be absolute");
+			await expect(acquireDaemonSocketPathLease(join(root, "daemon.sock"))).rejects.toThrow(
+				"Inherited daemon socket directory must be absolute",
+			);
+			expect(readdirSync(root)).toEqual([]);
+		} finally {
+			vi.unstubAllEnvs();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the default Windows named pipe and maps its lease beneath the per-user directory", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pa-runtime-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		let lease: DaemonSocketPathLease | undefined;
+		try {
+			Object.defineProperty(process, "platform", { value: "win32" });
+			vi.stubEnv(DAEMON_SOCKET_DIR_ENV, undefined);
+			vi.stubEnv(DAEMON_WORKER_SUPERVISOR_SOCKET_ENV, undefined);
+			vi.stubEnv("TMPDIR", root);
+			const runtimeDir = join(root, `prime-agent-${windowsNamedPipeUserScope()}`);
+			const socketPath = defaultDaemonSocketPath();
+			expect(socketPath).toBe(String.raw`\\.\pipe\prime-agent-daemon-${windowsNamedPipeUserScope()}`);
+			expect(defaultDaemonSocketDir()).toBe(runtimeDir);
+			lease = await acquireDaemonSocketPathLease(socketPath);
+			const lockNames = readdirSync(runtimeDir);
+			expect(lockNames).toHaveLength(1);
+			expect(lockNames[0]).toMatch(/^pipe-[0-9a-f]{24}\.lock$/);
+			await lease?.release();
+			expect(readdirSync(runtimeDir)).toEqual([]);
+
+			vi.stubEnv(DAEMON_SOCKET_DIR_ENV, runtimeDir);
+			vi.stubEnv(DAEMON_WORKER_SUPERVISOR_SOCKET_ENV, socketPath.toUpperCase());
+			vi.stubEnv("TMPDIR", join(root, "nested-scratch"));
+			expect(defaultDaemonSocketPath()).toBe(socketPath);
+			lease = await acquireDaemonSocketPathLease(defaultDaemonSocketPath());
+			expect(readdirSync(runtimeDir)).toEqual(lockNames);
+			expect(existsSync(join(root, "nested-scratch"))).toBe(false);
+		} finally {
+			await lease?.release();
+			vi.unstubAllEnvs();
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses the inherited Unix endpoint without relocating the runtime directory", () => {
+		const root = mkdtempSync(join(tmpdir(), "pa-runtime-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		try {
+			Object.defineProperty(process, "platform", { value: "linux" });
+			vi.stubEnv(DAEMON_SOCKET_DIR_ENV, join(root, "runtime"));
+			vi.stubEnv(DAEMON_WORKER_SUPERVISOR_SOCKET_ENV, `${root}/custom/../supervisor.sock`);
+			expect(defaultDaemonSocketPath()).toBe(join(root, "supervisor.sock"));
+			expect(defaultDaemonSocketDir()).toBe(join(root, "runtime"));
+			expect(readdirSync(root)).toEqual([]);
+		} finally {
+			vi.unstubAllEnvs();
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

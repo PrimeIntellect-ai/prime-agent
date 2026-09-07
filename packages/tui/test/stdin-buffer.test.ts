@@ -431,6 +431,15 @@ describe("StdinBuffer", () => {
 			});
 		}
 
+		it("clears pending Kitty duplicate suppression after raw paste", () => {
+			processInput("\x1b[97u");
+			processInput("a\nb");
+			processInput("a");
+			assert.deepStrictEqual(emittedPaste, ["a\nb"]);
+			assert.deepStrictEqual(emittedSequences, ["\x1b[97u", "a"]);
+			assert.strictEqual(buffer.getBuffer(), "");
+		});
+
 		it("emits multiline Buffer input as paste", () => {
 			processInput(Buffer.from("line1\r\nline2"));
 			assert.deepStrictEqual(emittedPaste, ["line1\r\nline2"]);

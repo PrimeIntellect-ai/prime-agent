@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
+import { getProcessStartId } from "../src/core/session-lease.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { windowsNamedPipeUserScope } from "../src/modes/daemon/daemon-socket.js";
+import { isProcessAlive, signalProcessGroupOrProcess } from "../src/utils/child-process.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
 
@@ -17,7 +19,7 @@ const cliPath = resolve(__dirname, "../src/cli.ts");
 
 const tempDirs: string[] = [];
 const children: ChildProcess[] = [];
-const workerPids = new Set<number>();
+const workerIdentities = new Map<number, string>();
 const childDiagnostics = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
 
 /** Unique per-run socket: a named pipe on win32, a unix socket under the temp dir elsewhere. */
@@ -41,28 +43,8 @@ async function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<voi
 	});
 }
 
-/** Best-effort process-tree kill: taskkill on win32, process group SIGTERM elsewhere. */
 async function killProcessTree(pid: number): Promise<void> {
-	if (process.platform === "win32") {
-		await new Promise<void>((resolveKill) => {
-			const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-				stdio: "ignore",
-				windowsHide: true,
-			});
-			killer.once("error", () => resolveKill());
-			killer.once("exit", () => resolveKill());
-		});
-		return;
-	}
-	try {
-		process.kill(-pid, "SIGTERM");
-	} catch {
-		try {
-			process.kill(pid, "SIGTERM");
-		} catch {
-			// Already gone.
-		}
-	}
+	signalProcessGroupOrProcess(pid, process.platform === "win32" ? "SIGKILL" : "SIGTERM");
 }
 
 async function connectDaemon(
@@ -152,7 +134,8 @@ describe("daemon lifecycle through the supervisor-worker handshake", () => {
 			const activeSessionId = summary?.activeSessionId ?? summary?.id;
 			expect(activeSessionId).toBeTruthy();
 			if (summary?.workerPid) {
-				workerPids.add(summary.workerPid);
+				const startId = getProcessStartId(summary.workerPid);
+				if (startId !== undefined) workerIdentities.set(summary.workerPid, startId);
 			}
 
 			// 4. List sessions and confirm the created session is visible.
@@ -202,11 +185,13 @@ afterEach(async () => {
 		}
 	}
 	await Promise.all([...children].map((child) => waitForExit(child).catch(() => undefined)));
-	for (const pid of workerPids) {
-		await killProcessTree(pid).catch(() => undefined);
+	for (const [pid, startId] of workerIdentities) {
+		if (isProcessAlive(pid) && getProcessStartId(pid) === startId) {
+			await killProcessTree(pid).catch(() => undefined);
+		}
 	}
 	children.length = 0;
-	workerPids.clear();
+	workerIdentities.clear();
 	for (const directory of tempDirs.splice(0)) {
 		rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 	}

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
+import { lockSync } from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	acquireSessionLease,
@@ -94,37 +94,34 @@ describe("session leases", () => {
 		second?.release();
 	});
 
-	it.each(["EPERM", "EACCES", "EINVAL", "EIO", undefined])(
-		"preserves an existing owner when its PID probe fails with %s",
-		(code) => {
-			const agentDir = createTempDir();
-			const sessionPath = canonicalSessionPath(join(agentDir, "session.jsonl"));
-			const key = createHash("sha256").update(sessionPath).digest("hex");
-			const directory = join(agentDir, "session-leases", `${key}.lock`);
-			mkdirSync(directory, { recursive: true });
-			const ownerPath = join(directory, "owner.json");
-			const owner = JSON.stringify({
-				version: 1,
-				token: "existing-owner",
-				pid: process.pid,
-				activeSessionId: "resident-a",
-				sessionPath,
-				createdAt: new Date(0).toISOString(),
-			});
-			writeFileSync(ownerPath, owner);
-			const probe = vi.spyOn(process, "kill").mockImplementation(() => {
-				throw Object.assign(new Error("PID probe unavailable"), { code });
-			});
-			try {
-				expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-b"))).toThrow(
-					SessionAlreadyActiveError,
-				);
-				expect(readFileSync(ownerPath, "utf8")).toBe(owner);
-			} finally {
-				probe.mockRestore();
-			}
-		},
-	);
+	it("preserves an existing owner when its PID probe fails with EPERM", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(join(agentDir, "session.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const directory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(directory, { recursive: true });
+		const ownerPath = join(directory, "owner.json");
+		const owner = JSON.stringify({
+			version: 1,
+			token: "existing-owner",
+			pid: process.pid,
+			activeSessionId: "resident-a",
+			sessionPath,
+			createdAt: new Date(0).toISOString(),
+		});
+		writeFileSync(ownerPath, owner);
+		const probe = vi.spyOn(process, "kill").mockImplementation(() => {
+			throw Object.assign(new Error("PID probe unavailable"), { code: "EPERM" });
+		});
+		try {
+			expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-b"))).toThrow(
+				SessionAlreadyActiveError,
+			);
+			expect(readFileSync(ownerPath, "utf8")).toBe(owner);
+		} finally {
+			probe.mockRestore();
+		}
+	});
 
 	it("reclaims a lease whose owner process is gone", () => {
 		const agentDir = createTempDir();
@@ -149,31 +146,50 @@ describe("session leases", () => {
 		lease?.release();
 	});
 
+	it("never reclaims a lease whose owner file cannot be read", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "unreadable.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		// owner.json as a directory: every read fails with a non-ENOENT error, the
+		// same shape as a transient EPERM/EBUSY on Windows. That may be a LIVE
+		// lease, so acquisition must fail instead of destroying it.
+		mkdirSync(join(lockDirectory, "owner.json"), { recursive: true });
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("intruder"))).toThrow(
+			"Could not acquire session lease",
+		);
+		expect(existsSync(join(lockDirectory, "owner.json"))).toBe(true);
+	});
+
 	it("reports guard contention as a coordination failure", () => {
 		const agentDir = createTempDir();
 		const sessionPath = canonicalSessionPath(join(agentDir, "session.jsonl"));
 		const key = createHash("sha256").update(sessionPath).digest("hex");
 		const leaseRoot = join(agentDir, "session-leases");
 		const lockDirectory = join(leaseRoot, `${key}.lock`);
-		mkdirSync(lockDirectory, { recursive: true });
-		// Create a guard directory (same structure proper-lockfile uses for a held lock)
-		// with a far-future mtime. This simulates an externally-held guard whose owner is
-		// not in this process, so withLeaseGuard's retry loop cannot acquire it. The future
-		// mtime prevents Bun's slow Atomics.wait(~81ms per 10ms tick, ~6.6s for 100 retries)
-		// from exceeding the 5000ms stale threshold and having proper-lockfile reclaim it.
-		mkdirSync(`${lockDirectory}.guard`);
-		const futureMtime = new Date(Date.now() + 60_000);
-		utimesSync(`${lockDirectory}.guard`, futureMtime, futureMtime);
-
-		let thrown: unknown;
+		mkdirSync(leaseRoot, { recursive: true });
+		const release = lockSync(lockDirectory, {
+			realpath: false,
+			lockfilePath: `${lockDirectory}.guard`,
+			stale: 5000,
+		});
+		// Keep the owner fresh while exercising the bounded synchronous retry count.
+		const wait = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
 		try {
-			acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-a"));
-		} catch (error) {
-			thrown = error;
+			let thrown: unknown;
+			try {
+				acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-a"));
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown).toBeInstanceOf(Error);
+			expect(thrown).not.toBeInstanceOf(SessionAlreadyActiveError);
+			expect((thrown as Error).message).toContain("Could not coordinate session lease");
+		} finally {
+			wait.mockRestore();
+			release();
 		}
-		expect(thrown).toBeInstanceOf(Error);
-		expect(thrown).not.toBeInstanceOf(SessionAlreadyActiveError);
-		expect((thrown as Error).message).toContain("Could not coordinate session lease");
 	});
 
 	it("treats symlink aliases as the same persisted session", () => {

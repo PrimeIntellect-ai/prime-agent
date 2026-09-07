@@ -1,3 +1,5 @@
+import type * as ChildProcess from "node:child_process";
+import type * as Fs from "node:fs";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -6,13 +8,13 @@ const mocks = vi.hoisted(() => ({
 	spawnSync: vi.fn(),
 }));
 
-const __fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+const __fs = createRequire(import.meta.url)("node:fs") as typeof Fs;
 vi.mock("node:fs", () => {
 	mocks.existsSync.mockImplementation(__fs.existsSync);
 	return { ...__fs, existsSync: mocks.existsSync };
 });
 
-const __childProcess = createRequire(import.meta.url)("child_process") as typeof import("child_process");
+const __childProcess = createRequire(import.meta.url)("child_process") as typeof ChildProcess;
 vi.mock("child_process", () => ({ ...__childProcess, spawnSync: mocks.spawnSync }));
 
 import { getShellConfig, resolveKernelBashShell } from "../src/utils/shell.js";
@@ -48,12 +50,13 @@ describe("getShellConfig on win32", () => {
 	it.each([
 		["ProgramFiles", "D:\\Applications ø", "D:\\Applications ø\\Git\\bin\\bash.exe"],
 		["ProgramFiles(x86)", "E:\\Apps (x86)", "E:\\Apps (x86)\\Git\\bin\\bash.exe"],
-	])("uses relocated %s for both command and kernel shells", (variable, directory, gitBash) => {
+	])("uses relocated %s for command shells without changing kernel trust", (variable, directory, gitBash) => {
 		stubWin32();
 		process.env[variable] = directory;
 		mocks.existsSync.mockImplementation((path: string) => path === gitBash);
 		expect(getShellConfig()).toEqual({ shell: gitBash, args: ["-c"] });
-		expect(resolveKernelBashShell()).toBe(gitBash);
+		expect(resolveKernelBashShell()).toBeUndefined();
+		expect(resolveKernelBashShell(gitBash)).toBe(gitBash);
 		expect(mocks.spawnSync).not.toHaveBeenCalled();
 	});
 
@@ -92,8 +95,6 @@ describe("getShellConfig on win32", () => {
 	it("never searches PATH for Cygwin, MSYS2, or WSL bash", () => {
 		stubWin32();
 		mocks.existsSync.mockReturnValue(false);
-		// Even if 'where bash.exe' would find something on PATH, findBashOnPath
-		// returns null on win32 — only canonical Git Bash paths are accepted.
 		mocks.spawnSync.mockReturnValue({
 			status: 0,
 			stdout: "C:\\cygwin64\\bin\\bash.exe",

@@ -20,10 +20,13 @@ function createProbe() {
 		assertRecoveryAllowed: async () => {},
 		supervisorAuthenticationClaim: () => ({}),
 	}) as { connectWorker(candidate: typeof worker, timeout: number): Promise<DaemonWorkerClient> };
-	return { worker, connect: () => supervisor.connectWorker(worker, 100) };
+	return { worker, connect: (timeout = 100) => supervisor.connectWorker(worker, timeout) };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+	vi.restoreAllMocks();
+	vi.useRealTimers();
+});
 
 describe("daemon worker connection deadline", () => {
 	it.each(["hello", "authentication"])("bounds %s by time remaining after earlier stages", async (stage) => {
@@ -78,5 +81,28 @@ describe("daemon worker connection deadline", () => {
 		if (stage === "connect") expect(waitForHello).not.toHaveBeenCalled();
 		expect(authenticate).not.toHaveBeenCalled();
 		expect(close).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("daemon worker probe retries", () => {
+	it("keeps the platform retry cadence and bounds the last delay by the deadline", async () => {
+		vi.useFakeTimers();
+		const started = Date.now();
+		const attempts: number[] = [];
+		vi.spyOn(DaemonWorkerClient.prototype, "connect").mockImplementation(async () => {
+			attempts.push(Date.now() - started);
+			throw new Error("pipe not ready");
+		});
+		const probe = createProbe();
+		const failure = probe.connect(100);
+		void failure.catch(() => {});
+		// Settle each retry at its exact boundary rather than crossing it in a larger timer step.
+		for (let elapsed = 0; elapsed < 100; elapsed += 25) {
+			await vi.advanceTimersByTimeAsync(25);
+		}
+		await expect(failure).rejects.toBeInstanceOf(DaemonWorkerProbeTimeoutError);
+		expect(attempts).toEqual(process.platform === "win32" ? [0, 25, 75] : [0, 25, 50, 75]);
+		expect(Date.now() - started).toBe(100);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });
