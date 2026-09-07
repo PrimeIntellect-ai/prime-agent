@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { types } from "node:util";
 import {
 	Agent,
 	type AgentContext,
@@ -160,6 +161,13 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
+import { createHostedRlmRunController, type HostedRlmRunController } from "./hosted-rlm-run-controller.js";
+import type {
+	HostedRlmAdmissionResult,
+	HostedRlmPortResult,
+	HostedRlmRuntimeEvent,
+	HostedRlmTaskResult,
+} from "./hosted-rlm-runtime-port.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
@@ -213,17 +221,20 @@ import {
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import {
-	type CreateRlmSubagentRuntimeOptions,
+	type CreateHostedRlmSubagentRuntimeOptions,
+	type CreateLocalRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
 	createRlmFindModelsHostHandler,
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	type HostedRlmSpawnHandle,
 	type HostedRlmSubagentRegistryEntry,
 	INVALID_SUBAGENT_RUNTIME_ERROR,
 	type LocalRlmSpawnHandle,
 	type LocalRlmSubagentRegistryEntry,
+	normalizeHostedRlmAllocationResult,
 	normalizeRequestedRlmSandbox,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
@@ -233,6 +244,7 @@ import {
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
+	type RlmSpawnHandle,
 	type RlmSubagentRegistryEntry,
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
@@ -853,6 +865,27 @@ interface AgentMessageDeferred {
 	reject: (error: Error) => void;
 }
 
+interface HostedRlmAllocationDeferred {
+	promise: Promise<Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }>>;
+	resolve: (result: Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }>) => void;
+}
+
+function createHostedRlmAllocationDeferred(): HostedRlmAllocationDeferred {
+	let resolveResult: HostedRlmAllocationDeferred["resolve"] = () => undefined;
+	const promise = new HostedNativePromise<Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }>>(
+		(resolve) => {
+			resolveResult = resolve;
+		},
+	);
+	HostedDefineProperty(promise, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	return { promise, resolve: resolveResult };
+}
+
 interface AgentMessageOutcome {
 	delivery?: AgentMessageDeferred;
 	completion?: AgentMessageDeferred;
@@ -926,6 +959,7 @@ interface RlmChildRunBase {
 	durationMs?: number;
 	answerPreview?: string;
 	toolUseCount: number;
+	tokenCount?: number;
 	activity?: RlmChildAgentActivity;
 	error?: string;
 	abort: () => void;
@@ -962,11 +996,33 @@ export interface LocalRlmChildRun extends RlmChildRunBase {
 	session?: AgentSession;
 }
 
+interface HostedRlmRuntimeAuthority {
+	readonly runtime: unknown;
+	deletionSettlement?: Promise<boolean>;
+	deleted?: boolean;
+}
+
 /** Hosted RLM child run with immutable execution context and no local session. */
 export interface HostedRlmChildRun extends RlmChildRunBase {
 	readonly activeSessionId: string;
 	readonly sessionId: string;
 	readonly location: Readonly<{ type: "hosted"; readonly execution: Readonly<{ readonly type: "prime-sandbox" }> }>;
+	runtime?: unknown;
+	runtimeAuthorities: HostedRlmRuntimeAuthority[];
+	controller?: HostedRlmRunController;
+	cancelAllocation?: () => void;
+	published?: boolean;
+	parentAssistantForUsage?: AssistantMessage;
+	usageAttributed?: boolean;
+	semanticReturnRecorded?: boolean;
+	lateCleanupSettlements?: Set<Promise<boolean>>;
+	abortSettlement?: Promise<boolean>;
+	closeSettlement?: Promise<boolean>;
+	releaseSettlement?: Promise<boolean>;
+	hostDeletionSettlement?: Promise<boolean>;
+	lifecycleSettlement?: Promise<void>;
+	lifecycleObserver?: Promise<void>;
+	parentReplyCount: number;
 	/** Hosted runs never have a local AgentSession. */
 	session?: never;
 }
@@ -991,6 +1047,377 @@ const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
+
+function isBoundedHostedRlmMetadata(value: string, maximum: number): boolean {
+	if (value.length === 0 || value.length > maximum) return false;
+	for (let index = 0; index < value.length; index += 1) {
+		const code = value.charCodeAt(index);
+		if (code < 0x21 || code > 0x7e) return false;
+	}
+	return true;
+}
+
+const HostedNativePromise = Promise;
+const HostedNativeThen = Promise.prototype.then;
+const HostedPromisePrototype = Promise.prototype;
+const HostedPromiseSpecies = Symbol.species;
+const HostedReflectApply = Reflect.apply;
+const HostedObjectFreeze = Object.freeze;
+const HostedObjectIs = Object.is;
+const HostedGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const HostedGetPrototypeOf = Object.getPrototypeOf;
+const HostedIsExtensible = Object.isExtensible;
+const HostedDefineProperty = Object.defineProperty;
+const HostedDeleteProperty = Reflect.deleteProperty;
+const HostedIsProxy = types.isProxy;
+const HostedIsPromise = types.isPromise;
+const HostedPromiseConstructorDescriptor = HostedObjectFreeze(
+	HostedGetOwnPropertyDescriptor(HostedPromisePrototype, "constructor"),
+);
+const HostedPromiseThenDescriptor = HostedObjectFreeze(HostedGetOwnPropertyDescriptor(HostedPromisePrototype, "then"));
+const HostedPromiseSpeciesDescriptor = HostedObjectFreeze(
+	HostedGetOwnPropertyDescriptor(HostedNativePromise, HostedPromiseSpecies),
+);
+const HostedSafeSpeciesConstructor = HostedObjectFreeze(
+	HostedDefineProperty(Object.create(null), HostedPromiseSpecies, {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	}),
+);
+
+function sameHostedDescriptor(left: PropertyDescriptor | undefined, right: PropertyDescriptor | undefined): boolean {
+	if (left === undefined || right === undefined) return left === right;
+	return (
+		left.value === right.value &&
+		left.get === right.get &&
+		left.set === right.set &&
+		left.writable === right.writable &&
+		left.enumerable === right.enumerable &&
+		left.configurable === right.configurable
+	);
+}
+
+function observePoisonedHostedInternalPromise(raw: Promise<unknown>): void {
+	const original = HostedGetOwnPropertyDescriptor(raw, "constructor");
+	let normalized = false;
+	try {
+		if (original === undefined || original.configurable) {
+			HostedDefineProperty(raw, "constructor", {
+				value: HostedSafeSpeciesConstructor,
+				writable: true,
+				enumerable: false,
+				configurable: true,
+			});
+			normalized = true;
+		} else {
+			return;
+		}
+		HostedReflectApply(HostedNativeThen, raw, [() => undefined, () => undefined]);
+	} catch {
+		return;
+	} finally {
+		if (normalized) {
+			try {
+				if (original === undefined) HostedDeleteProperty(raw, "constructor");
+				else HostedDefineProperty(raw, "constructor", original);
+			} catch {
+				// The promise remains observed with the safe species constructor.
+			}
+		}
+	}
+}
+
+function hostedPromiseIntrinsicsIntact(): boolean {
+	return (
+		sameHostedDescriptor(
+			HostedGetOwnPropertyDescriptor(HostedPromisePrototype, "constructor"),
+			HostedPromiseConstructorDescriptor,
+		) &&
+		sameHostedDescriptor(
+			HostedGetOwnPropertyDescriptor(HostedPromisePrototype, "then"),
+			HostedPromiseThenDescriptor,
+		) &&
+		sameHostedDescriptor(
+			HostedGetOwnPropertyDescriptor(HostedNativePromise, HostedPromiseSpecies),
+			HostedPromiseSpeciesDescriptor,
+		)
+	);
+}
+
+function resolveHostedBoolean(value: boolean): Promise<boolean> {
+	const promise = new HostedNativePromise<boolean>((resolve) => resolve(value));
+	HostedDefineProperty(promise, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	return promise;
+}
+
+function resolveHostedVoid(): Promise<void> {
+	const promise = new HostedNativePromise<void>((resolve) => resolve());
+	HostedDefineProperty(promise, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	return promise;
+}
+
+function createHostedBooleanDeferred(): Readonly<{
+	promise: Promise<boolean>;
+	resolve: (value: boolean) => void;
+}> {
+	let resolveDeferred = (_value: boolean): void => undefined;
+	const promise = new HostedNativePromise<boolean>((resolve) => {
+		resolveDeferred = resolve;
+	});
+	HostedDefineProperty(promise, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	return HostedObjectFreeze({ promise, resolve: resolveDeferred });
+}
+
+function forwardHostedBoolean(source: Promise<boolean>, resolve: (value: boolean) => void): void {
+	if (!hostedPromiseIntrinsicsIntact()) {
+		resolve(false);
+		return;
+	}
+	try {
+		HostedReflectApply(HostedNativeThen, source, [resolve, () => resolve(false)]);
+	} catch {
+		resolve(false);
+	}
+}
+
+function afterHostedBooleanSettlement(settlement: Promise<boolean>, next: () => Promise<boolean>): Promise<boolean> {
+	const deferred = createHostedBooleanDeferred();
+	if (!hostedPromiseIntrinsicsIntact()) {
+		deferred.resolve(false);
+		return deferred.promise;
+	}
+	const continueWithNext = (): void => {
+		let nextSettlement: Promise<boolean>;
+		try {
+			nextSettlement = next();
+		} catch {
+			deferred.resolve(false);
+			return;
+		}
+		forwardHostedBoolean(nextSettlement, deferred.resolve);
+	};
+	try {
+		HostedReflectApply(HostedNativeThen, settlement, [continueWithNext, continueWithNext]);
+	} catch {
+		deferred.resolve(false);
+	}
+	return deferred.promise;
+}
+
+function everyHostedBoolean(values: readonly Promise<boolean>[]): Promise<boolean> {
+	let resolveObserver = (_value: boolean): void => undefined;
+	const observer = new HostedNativePromise<boolean>((resolve) => {
+		resolveObserver = resolve;
+	});
+	HostedDefineProperty(observer, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	if (values.length === 0) {
+		resolveObserver(true);
+		return observer;
+	}
+	let remaining = values.length;
+	let succeeded = true;
+	for (const value of values) {
+		if (!hostedPromiseIntrinsicsIntact()) {
+			resolveObserver(false);
+			return observer;
+		}
+		try {
+			HostedReflectApply(HostedNativeThen, value, [
+				(result: boolean) => {
+					succeeded = succeeded && result;
+					remaining -= 1;
+					if (remaining === 0) resolveObserver(succeeded);
+				},
+				() => {
+					succeeded = false;
+					remaining -= 1;
+					if (remaining === 0) resolveObserver(false);
+				},
+			]);
+		} catch {
+			succeeded = false;
+			remaining -= 1;
+			if (remaining === 0) resolveObserver(false);
+		}
+	}
+	return observer;
+}
+
+function raceHostedAdmission(
+	admission: Promise<HostedRlmPortResult<HostedRlmAdmissionResult>>,
+	cancellation: Promise<Readonly<{ ok: false }>>,
+): Promise<HostedRlmPortResult<HostedRlmAdmissionResult> | Readonly<{ ok: false }>> {
+	let resolveObserver = (_value: HostedRlmPortResult<HostedRlmAdmissionResult> | Readonly<{ ok: false }>): void =>
+		undefined;
+	let settled = false;
+	const observer = new HostedNativePromise<HostedRlmPortResult<HostedRlmAdmissionResult> | Readonly<{ ok: false }>>(
+		(resolve) => {
+			resolveObserver = resolve;
+		},
+	);
+	HostedDefineProperty(observer, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	const fail = (): void => {
+		if (settled) return;
+		settled = true;
+		resolveObserver(HostedObjectFreeze({ ok: false }));
+	};
+	const finish = (value: HostedRlmPortResult<HostedRlmAdmissionResult> | Readonly<{ ok: false }>): void => {
+		if (settled) return;
+		settled = true;
+		resolveObserver(value);
+	};
+	if (!hostedPromiseIntrinsicsIntact()) {
+		fail();
+		return observer;
+	}
+	try {
+		HostedReflectApply(HostedNativeThen, admission, [finish, fail]);
+		HostedReflectApply(HostedNativeThen, cancellation, [finish, fail]);
+	} catch {
+		fail();
+	}
+	return observer;
+}
+
+function raceHostedCloseOrDeletion(
+	close: Promise<boolean>,
+	deletion: Promise<void>,
+): Promise<Readonly<{ closed: boolean; deleted: boolean; poisoned: boolean }>> {
+	let resolveObserver = (_value: Readonly<{ closed: boolean; deleted: boolean; poisoned: boolean }>): void =>
+		undefined;
+	let settled = false;
+	const observer = new HostedNativePromise<Readonly<{ closed: boolean; deleted: boolean; poisoned: boolean }>>(
+		(resolve) => {
+			resolveObserver = resolve;
+		},
+	);
+	HostedDefineProperty(observer, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	const finish = (closed: boolean, deleted: boolean, poisoned: boolean): void => {
+		if (settled) return;
+		settled = true;
+		resolveObserver(HostedObjectFreeze({ closed, deleted, poisoned }));
+	};
+	if (!hostedPromiseIntrinsicsIntact()) {
+		finish(false, false, true);
+		return observer;
+	}
+	try {
+		HostedReflectApply(HostedNativeThen, close, [
+			(closed: boolean) => finish(closed, false, false),
+			() => finish(false, false, false),
+		]);
+		HostedReflectApply(HostedNativeThen, deletion, [
+			() => finish(false, true, false),
+			() => finish(false, true, false),
+		]);
+	} catch {
+		finish(false, false, true);
+	}
+	return observer;
+}
+
+function observeHostedHostVoidPromise(raw: unknown): Promise<boolean> {
+	let resolveObserver = (_succeeded: boolean): void => undefined;
+	let settled = false;
+	const observer = new HostedNativePromise<boolean>((resolve) => {
+		resolveObserver = resolve;
+	});
+	HostedDefineProperty(observer, "constructor", {
+		value: HostedNativePromise,
+		writable: false,
+		enumerable: false,
+		configurable: false,
+	});
+	const finish = (succeeded: boolean): void => {
+		if (settled) return;
+		settled = true;
+		resolveObserver(succeeded);
+	};
+	try {
+		if (
+			typeof raw !== "object" ||
+			raw === null ||
+			HostedIsProxy(raw) ||
+			!HostedIsPromise(raw) ||
+			!hostedPromiseIntrinsicsIntact()
+		) {
+			finish(false);
+			return observer;
+		}
+		const originalConstructor = HostedGetOwnPropertyDescriptor(raw, "constructor");
+		let normalized = false;
+		if (originalConstructor === undefined) {
+			if (HostedIsExtensible(raw)) {
+				HostedDefineProperty(raw, "constructor", {
+					value: HostedNativePromise,
+					writable: true,
+					enumerable: false,
+					configurable: true,
+				});
+				normalized = true;
+			} else if (HostedGetPrototypeOf(raw) !== HostedPromisePrototype) {
+				finish(false);
+				return observer;
+			}
+		} else if (originalConstructor.configurable) {
+			HostedDefineProperty(raw, "constructor", {
+				value: HostedNativePromise,
+				writable: true,
+				enumerable: false,
+				configurable: true,
+			});
+			normalized = true;
+		} else if (!("value" in originalConstructor) || originalConstructor.value !== HostedNativePromise) {
+			finish(false);
+			return observer;
+		}
+		let tail: unknown;
+		try {
+			tail = HostedReflectApply(HostedNativeThen, raw, [() => finish(true), () => finish(false)]);
+		} finally {
+			if (normalized) {
+				if (originalConstructor === undefined) HostedDeleteProperty(raw, "constructor");
+				else HostedDefineProperty(raw, "constructor", originalConstructor);
+			}
+		}
+		if (typeof tail !== "object" || tail === null || HostedIsProxy(tail) || !HostedIsPromise(tail)) finish(false);
+	} catch {
+		finish(false);
+	}
+	return observer;
+}
 
 function autoRefineInstructions(reason: AutoRefineReason, review: AutoRefineReview): string {
 	const detail = review.instructions
@@ -1233,11 +1660,13 @@ export class AgentSession {
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
+	private _hostedRlmDisposalSettlement?: Promise<boolean>;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
 	private _abandonedRlmQuiescenceChildIds = new Set<string>();
 	private _rlmQuiescenceWaitAborts = new Set<AbortController>();
 	private _pendingRlmSubagentSessionNames = new Set<string>();
+	private _pendingHostedRlmChildRuns = new Map<string, HostedRlmChildRun>();
 	// Inline mode keeps finished child sessions so the inspector can still read them;
 	// the daemon does the same by leaving the child session resident in its registry.
 	private _rlmChildSessions = new Map<string, RetainedRlmChild>();
@@ -4134,9 +4563,23 @@ export class AgentSession {
 	private async _disposeAsyncOnce(kernelSnapshot: boolean): Promise<void> {
 		// Flush kernels/traces for both still-running and retained children; the sync
 		// dispose() below only tears them down synchronously.
+		for (const run of [...this._pendingHostedRlmChildRuns.values()]) {
+			if (!this._cancelPendingHostedRlmRun(run, "Parent session disposed")) {
+				run.deletionRunFinished = true;
+				this._ensureHostedRlmRunDeletionCleanup(run, true);
+			}
+			await run.deletionCleanupObserver;
+		}
 		for (const run of [...this._activeRlmChildRuns.values()]) {
-			let childSession: AgentSession | undefined;
-			if (isLocalRlmChildRun(run)) childSession = run.session;
+			if (!isLocalRlmChildRun(run)) {
+				run.suppressTerminalNotice = true;
+				if (!run.detachedDeletion) run.detachedDeletion = this._hostedRlmRegistryEntry(run);
+				run.deletionRunFinished = true;
+				this._ensureHostedRlmRunDeletionCleanup(run, true);
+				await run.deletionCleanupObserver;
+				continue;
+			}
+			const childSession = run.session;
 			if (!childSession) continue;
 			if (run.detachedDeletion) {
 				run.suppressTerminalNotice = true;
@@ -4161,7 +4604,25 @@ export class AgentSession {
 			await session.disposeAsync().catch(() => undefined);
 		}
 		this._rlmChildSessions.clear();
-		this._rlmChildCleanupFailures.clear();
+		let hostedDisposalOwned = false;
+		const runtimeHost = this._subagentRuntimeHost;
+		if (runtimeHost?.disposeRlmSubagentRuntimes) {
+			let disposalActual: unknown;
+			try {
+				disposalActual = runtimeHost.disposeRlmSubagentRuntimes();
+			} catch {
+				disposalActual = undefined;
+			}
+			const disposalSettlement = observeHostedHostVoidPromise(disposalActual);
+			this._hostedRlmDisposalSettlement = disposalSettlement;
+			hostedDisposalOwned = await this._hostedRlmDisposalSettlement;
+		}
+		if (hostedDisposalOwned) this._pendingHostedRlmChildRuns.clear();
+		for (const childId of this._rlmChildCleanupFailures.keys()) {
+			if (hostedDisposalOwned || !this._pendingHostedRlmChildRuns.has(childId)) {
+				this._rlmChildCleanupFailures.delete(childId);
+			}
+		}
 		this._deletedRlmChildIds.clear();
 		try {
 			await this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot });
@@ -4223,7 +4684,9 @@ export class AgentSession {
 				session.dispose();
 			}
 			this._rlmChildSessions.clear();
-			this._rlmChildCleanupFailures.clear();
+			for (const childId of this._rlmChildCleanupFailures.keys()) {
+				if (!this._pendingHostedRlmChildRuns.has(childId)) this._rlmChildCleanupFailures.delete(childId);
+			}
 			this._deletedRlmChildIds.clear();
 			this._pendingNextTurnMessages = [];
 			const deliveryError = new Error("Session disposed before prompt delivery.");
@@ -9650,7 +10113,7 @@ export class AgentSession {
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
 		spawnedByRequestId?: string;
-	}): CreateRlmSubagentRuntimeOptions {
+	}): CreateLocalRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
 			id: options.id,
@@ -9676,8 +10139,7 @@ export class AgentSession {
 		};
 	}
 
-	private async _createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
-		if (options.sandbox === true) throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
+	private async _createRlmSubagentRuntime(options: CreateLocalRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
 		if (this._subagentRuntimeHost) {
 			return await this._subagentRuntimeHost.createRlmSubagentRuntime(options);
 		}
@@ -9685,8 +10147,7 @@ export class AgentSession {
 		return this._createInlineRlmSubagentRuntime(options);
 	}
 
-	private _createInlineRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): RlmSubagentRuntime {
-		if (options.sandbox === true) throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
+	private _createInlineRlmSubagentRuntime(options: CreateLocalRlmSubagentRuntimeOptions): RlmSubagentRuntime {
 		const childSessionManager = SessionManager.create(this._cwd, options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			childSessionManager.newSession({
@@ -9767,9 +10228,31 @@ export class AgentSession {
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
+		for (const run of this._pendingHostedRlmChildRuns.values()) {
+			this._cancelPendingHostedRlmRun(run, reason);
+		}
 		for (const run of this._activeRlmChildRuns.values()) {
 			this._cancelRlmChildRun(run, reason);
 		}
+	}
+
+	private _cancelPendingHostedRlmRun(run: HostedRlmChildRun, reason: string): boolean {
+		if (run.status !== "queued") return false;
+		run.status = "cancelled";
+		run.error = reason;
+		run.suppressTerminalNotice = true;
+		run.publication.reject(new Error(reason));
+		run.cancelAllocation?.();
+		run.detachedDeletion = this._hostedRlmRegistryEntry(run);
+		run.deletionRunFinished = true;
+		this._ensureHostedRlmRunDeletionCleanup(run, true);
+		return true;
+	}
+
+	private _cancelHostedRlmRunCleanup(run: HostedRlmChildRun): void {
+		run.detachedDeletion = this._hostedRlmRegistryEntry(run);
+		run.deletionRunFinished = true;
+		this._ensureHostedRlmRunDeletionCleanup(run, true);
 	}
 
 	private _cancelRlmChildRun(run: RlmChildRun, reason: string): boolean {
@@ -9781,6 +10264,7 @@ export class AgentSession {
 		run.error = reason;
 		run.publication.reject(new Error(reason));
 		run.abort();
+		if (!isLocalRlmChildRun(run)) this._cancelHostedRlmRunCleanup(run);
 		// Surface the cancellation immediately; the run's own terminal update is
 		// delayed indefinitely when the child is stuck mid-stream, which is
 		// exactly when users reach for the kill.
@@ -9958,7 +10442,31 @@ export class AgentSession {
 		return "not_found";
 	}
 
+	private _deletePendingHostedRlmRun(run: HostedRlmChildRun): RlmDeleteSubagentResult {
+		const subagent = this._hostedRlmRegistryEntry(run);
+		run.deletionReservation = createAgentMessageDeferred();
+		if (!this._cancelPendingHostedRlmRun(run, "Deleted by parent orchestrator")) {
+			run.detachedDeletion = subagent;
+			run.deletionRunFinished = true;
+			this._ensureHostedRlmRunDeletionCleanup(run, true);
+		}
+		this._deletedRlmChildIds.add(run.id);
+		return { subagent };
+	}
+
 	async deleteRlmSubagent(target: string): Promise<RlmDeleteSubagentResult> {
+		const pendingHosted = [...this._rlmSubtreeSessions()]
+			.flatMap((session) => [...session._pendingHostedRlmChildRuns.values()].map((run) => ({ session, run })))
+			.filter(({ run }) => this._rlmSubagentMatchesTarget(this._hostedRlmRegistryEntry(run), target));
+		const pendingIds = new Set(pendingHosted.map(({ run }) => run.id));
+		if (pendingIds.size > 1) {
+			throw new Error(`RLM subagent selector "${target}" is ambiguous in the current parent session`);
+		}
+		if (pendingHosted[0]) {
+			const { session, run } = pendingHosted[0];
+			return session._deletePendingHostedRlmRun(run);
+		}
+
 		const inFlight = [...this._deletingRlmChildren.values()].filter(({ subagent }) =>
 			this._rlmSubagentMatchesTarget(subagent, target),
 		);
@@ -9977,7 +10485,7 @@ export class AgentSession {
 			...inFlight.map(({ subagent }) => subagent.rlm_child_id),
 			...localMatches.map((subagent) => subagent.rlm_child_id),
 		]);
-		if (matchingChildIds.size > 1 || localMatches.length > 1) {
+		if (matchingChildIds.size > 1) {
 			throw new Error(`RLM subagent selector "${target}" is ambiguous in the current parent session`);
 		}
 		if (inFlight[0]) {
@@ -10101,6 +10609,10 @@ export class AgentSession {
 
 	private async _finishRlmRunDeletion(run: RlmChildRun): Promise<void> {
 		await run.completeDeletion?.();
+		if (!isLocalRlmChildRun(run)) {
+			this._pendingHostedRlmChildRuns.delete(run.id);
+			this._pendingRlmSubagentSessionNames.delete(run.sessionName);
+		}
 		if (this._activeRlmChildRuns.get(run.id) === run) {
 			this._removeRlmSubagentTracking(run.id, run);
 		}
@@ -10201,10 +10713,9 @@ export class AgentSession {
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run) {
 			if (run.deletionCleanupFailed) {
-				// Reset retry coordination only after selector preflight reaches the
-				// resolved child. A failed preflight must leave the prior retry boundary
-				// intact so a later call can acquire it.
-				run.deletionCleanupFailed = false;
+				// Local retry setup consumes the marker here. Hosted cleanup consumes it
+				// when it snapshots retry mode so abort and close are not replayed.
+				if (isLocalRlmChildRun(run)) run.deletionCleanupFailed = false;
 				run.deletionReservation = createAgentMessageDeferred();
 			}
 			// The detached task remains the sole lifecycle owner. Mark deletion before
@@ -10215,6 +10726,17 @@ export class AgentSession {
 				run.deletionNeedsCompletionNotice = true;
 			} else {
 				this._emitRlmSubagentRemoval(subagent);
+			}
+			if (!isLocalRlmChildRun(run)) {
+				run.deletionRunFinished = true;
+				if (run.settled) {
+					run.settlement = createAgentMessageDeferred();
+					run.settled = false;
+					this._unsettledRlmChildRuns.add(run);
+				}
+				this._ensureHostedRlmRunDeletionCleanup(run, true);
+				this._deletedRlmChildIds.add(childId);
+				return { subagent };
 			}
 			let liveSession: AgentSession | undefined;
 			if (isLocalRlmChildRun(run)) liveSession = run.session;
@@ -10333,11 +10855,12 @@ export class AgentSession {
 				activeSessionId: run.activeSessionId,
 				sessionName: run.sessionName,
 				model: `${run.model.provider}/${run.model.id}`,
-				label: rlmChildLabel(run.prompt),
+				label: run.sessionName,
 				status: run.status,
 				durationMs: run.durationMs,
 				answerPreview: run.answerPreview,
 				toolUseCount: run.toolUseCount > 0 ? run.toolUseCount : undefined,
+				tokenCount: run.tokenCount,
 				execution: run.location.execution,
 				activity: run.activity,
 				error: run.error,
@@ -10399,6 +10922,7 @@ export class AgentSession {
 
 	private _isUnboundTerminalRlmChildRun(run: RlmChildRun): boolean {
 		if (isLocalRlmChildRun(run) && (run.session !== undefined || this._rlmChildSessions.has(run.id))) return false;
+		if (!isLocalRlmChildRun(run) && !run.settled) return false;
 		return run.status === "done" || run.status === "error" || run.status === "cancelled";
 	}
 
@@ -10540,11 +11064,18 @@ export class AgentSession {
 	 */
 	cancelRlmChildRun(childId: string, reason = "Cancelled by user"): boolean {
 		for (const session of this._rlmSubtreeSessions()) {
+			const pendingHosted = session._pendingHostedRlmChildRuns.get(childId);
+			if (pendingHosted && session._cancelPendingHostedRlmRun(pendingHosted, reason)) return true;
 			const run = session._activeRlmChildRuns.get(childId);
 			if (run) {
 				if (run.status !== "running" && run.status !== "queued" && !run.settled) {
 					if (session._sessionInputPumpSuspended) session._abandonRlmRunForQuiescence(run);
 					else run.suppressTerminalNotice = true;
+					if (!isLocalRlmChildRun(run)) {
+						run.detachedDeletion = session._hostedRlmRegistryEntry(run);
+						run.deletionRunFinished = true;
+						session._ensureHostedRlmRunDeletionCleanup(run, true);
+					}
 					return true;
 				}
 				// The abort cascade never reaches running work retained under a settled descendant.
@@ -10594,6 +11125,9 @@ export class AgentSession {
 	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
 		let cancelled = false;
 		for (const session of this._rlmSubtreeSessions()) {
+			for (const run of session._pendingHostedRlmChildRuns.values()) {
+				if (session._cancelPendingHostedRlmRun(run, reason)) cancelled = true;
+			}
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (session._cancelRlmChildRun(run, reason)) cancelled = true;
 			}
@@ -10683,23 +11217,817 @@ export class AgentSession {
 		return { model };
 	}
 
+	private _hostedRlmEvent(run: HostedRlmChildRun, event: HostedRlmRuntimeEvent): void {
+		if (!run.published) return;
+		if (event.type === "agent_start") {
+			run.activity = { kind: "waiting" };
+		} else if (event.type === "agent_end") {
+			run.activity = undefined;
+		} else if (event.type === "waiting") {
+			run.activity = { kind: "waiting" };
+		} else if (event.type === "writing") {
+			run.answerPreview = event.answerPreview;
+			run.activity = { kind: "writing" };
+		} else if (event.type === "executing") {
+			run.toolUseCount += 1;
+			run.activity = { kind: "executing", toolName: event.toolName };
+		} else {
+			run.toolUseCount = Math.max(run.toolUseCount, event.toolUseCount);
+			run.parentReplyCount = Math.max(run.parentReplyCount, event.parentReplyCount);
+			if (event.answerPreview !== undefined) run.answerPreview = event.answerPreview;
+			if (event.status === "running" && run.published && run.status === "queued") run.status = "running";
+		}
+		run.emitUpdate?.();
+	}
+
+	private _requestHostedRlmAbort(run: HostedRlmChildRun): Promise<boolean> {
+		if (run.abortSettlement) return run.abortSettlement;
+		const controller = run.controller;
+		if (!controller) {
+			const pending = resolveHostedBoolean(false);
+			run.abortSettlement = pending;
+			return pending;
+		}
+		const actual = controller.requestAbort();
+		if (!hostedPromiseIntrinsicsIntact()) {
+			const failed = resolveHostedBoolean(false);
+			run.abortSettlement = failed;
+			return failed;
+		}
+		const observed: Promise<boolean> = HostedReflectApply(HostedNativeThen, actual, [
+			(result: HostedRlmPortResult<unknown>) => result.ok,
+			() => false,
+		]);
+		run.abortSettlement = observed;
+		return observed;
+	}
+
+	private _closeHostedRlmController(run: HostedRlmChildRun): Promise<boolean> {
+		if (run.closeSettlement) return run.closeSettlement;
+		const controller = run.controller;
+		if (!controller) {
+			const pending = resolveHostedBoolean(true);
+			run.closeSettlement = pending;
+			return pending;
+		}
+		const actual = controller.close();
+		if (!hostedPromiseIntrinsicsIntact()) {
+			const failed = resolveHostedBoolean(false);
+			run.closeSettlement = failed;
+			return failed;
+		}
+		const observed: Promise<boolean> = HostedReflectApply(HostedNativeThen, actual, [
+			(result: HostedRlmPortResult<unknown>) => result.ok,
+			() => false,
+		]);
+		run.closeSettlement = observed;
+		return observed;
+	}
+
+	private _hostedRlmRegistryEntry(run: HostedRlmChildRun): HostedRlmSubagentRegistryEntry {
+		return {
+			rlm_child_id: run.id,
+			active_session_id: run.activeSessionId,
+			session_id: run.sessionId,
+			session_name: run.sessionName,
+			status: run.status === "done" ? "completed" : run.status === "error" ? "error" : "running",
+			execution: run.location.execution,
+		};
+	}
+
+	private _retainHostedRuntimeAuthority(run: HostedRlmChildRun, runtime: unknown): HostedRlmRuntimeAuthority {
+		for (const authority of run.runtimeAuthorities) {
+			if (HostedObjectIs(authority.runtime, runtime)) return authority;
+		}
+		const authority: HostedRlmRuntimeAuthority = { runtime };
+		run.runtimeAuthorities.push(authority);
+		return authority;
+	}
+
+	private _deleteHostedRuntimeAuthority(
+		run: HostedRlmChildRun,
+		authority: HostedRlmRuntimeAuthority,
+	): Promise<boolean> {
+		if (authority.deleted) return resolveHostedBoolean(true);
+		if (authority.deletionSettlement) return authority.deletionSettlement;
+		const host = this._subagentRuntimeHost;
+		if (!host?.deleteHostedRlmSubagentRuntime) return resolveHostedBoolean(false);
+		let deletionActual: unknown;
+		try {
+			deletionActual = host.deleteHostedRlmSubagentRuntime(run.id, authority.runtime);
+		} catch {
+			return resolveHostedBoolean(false);
+		}
+		const settlement = observeHostedHostVoidPromise(deletionActual);
+		authority.deletionSettlement = settlement;
+		if (!hostedPromiseIntrinsicsIntact()) {
+			authority.deletionSettlement = undefined;
+			return settlement;
+		}
+		HostedReflectApply(HostedNativeThen, settlement, [
+			(deleted: boolean) => {
+				if (deleted) authority.deleted = true;
+				else authority.deletionSettlement = undefined;
+			},
+			() => {
+				authority.deletionSettlement = undefined;
+			},
+		]);
+		return settlement;
+	}
+
+	private _deleteHostedRlmRuntime(run: HostedRlmChildRun): Promise<boolean> {
+		const releaseSettlement = run.releaseSettlement;
+		if (releaseSettlement) {
+			return afterHostedBooleanSettlement(releaseSettlement, () => this._deleteHostedRlmRuntimeAfterRelease(run));
+		}
+		return this._deleteHostedRlmRuntimeAfterRelease(run);
+	}
+
+	private _deleteHostedRlmRuntimeAfterRelease(run: HostedRlmChildRun): Promise<boolean> {
+		if (run.runtimeAuthorities.length > 0) {
+			const deletions = run.runtimeAuthorities.map((authority) =>
+				this._deleteHostedRuntimeAuthority(run, authority),
+			);
+			return everyHostedBoolean(deletions);
+		}
+		if (run.hostDeletionSettlement) return run.hostDeletionSettlement;
+		const host = this._subagentRuntimeHost;
+		if (!host?.deleteHostedRlmSubagentRuntime) return resolveHostedBoolean(false);
+		let deletionActual: unknown;
+		try {
+			deletionActual = host.deleteHostedRlmSubagentRuntime(run.id);
+		} catch {
+			return resolveHostedBoolean(false);
+		}
+		const settlement = observeHostedHostVoidPromise(deletionActual);
+		run.hostDeletionSettlement = settlement;
+		if (!hostedPromiseIntrinsicsIntact()) {
+			run.hostDeletionSettlement = undefined;
+			return settlement;
+		}
+		HostedReflectApply(HostedNativeThen, settlement, [
+			(deleted: boolean) => {
+				if (!deleted) run.hostDeletionSettlement = undefined;
+			},
+			() => {
+				run.hostDeletionSettlement = undefined;
+			},
+		]);
+		return settlement;
+	}
+
+	private _deleteLateHostedRuntime(run: HostedRlmChildRun, runtime: unknown): void {
+		const authority = this._retainHostedRuntimeAuthority(run, runtime);
+		const cleanup = this._deleteHostedRuntimeAuthority(run, authority);
+		run.lateCleanupSettlements ??= new Set<Promise<boolean>>();
+		run.lateCleanupSettlements.add(cleanup);
+		if (!hostedPromiseIntrinsicsIntact()) {
+			run.deletionCleanupFailed = true;
+			this._pendingHostedRlmChildRuns.set(run.id, run);
+			this._rlmChildCleanupFailures.set(run.id, this._hostedRlmRegistryEntry(run));
+			return;
+		}
+		HostedReflectApply(HostedNativeThen, cleanup, [
+			(deleted: boolean) => {
+				if (deleted) return;
+				run.deletionCleanupFailed = true;
+				this._pendingHostedRlmChildRuns.set(run.id, run);
+				this._rlmChildCleanupFailures.set(run.id, this._hostedRlmRegistryEntry(run));
+			},
+			() => {
+				run.deletionCleanupFailed = true;
+				this._pendingHostedRlmChildRuns.set(run.id, run);
+				this._rlmChildCleanupFailures.set(run.id, this._hostedRlmRegistryEntry(run));
+			},
+		]);
+	}
+
+	private _ensureHostedRlmRunDeletionCleanup(
+		run: HostedRlmChildRun,
+		deleteBeforeControllerClose = false,
+	): Promise<void> {
+		if (run.deletionCleanup) return run.deletionCleanup;
+		let abortSucceeded = true;
+		let closeSucceeded = true;
+		let deletionSucceeded = true;
+		const cleanup = (async (): Promise<void> => {
+			if (run.controller) {
+				if (deleteBeforeControllerClose) {
+					// Start both controller lanes, but do not make exact host deletion wait for
+					// a hostile provider Promise. The controller continues to observe them.
+					void this._requestHostedRlmAbort(run);
+					void this._closeHostedRlmController(run);
+				} else {
+					abortSucceeded = await this._requestHostedRlmAbort(run);
+					closeSucceeded = await this._closeHostedRlmController(run);
+				}
+			}
+			deletionSucceeded = await this._deleteHostedRlmRuntime(run);
+			if (!deletionSucceeded || (!deleteBeforeControllerClose && (!abortSucceeded || !closeSucceeded))) {
+				throw new Error("Hosted RLM runtime deletion failed");
+			}
+		})();
+		run.deletionCleanup = cleanup;
+		if (!hostedPromiseIntrinsicsIntact()) {
+			run.deletionCleanup = undefined;
+			if (!abortSucceeded) run.abortSettlement = undefined;
+			if (!closeSucceeded) run.closeSettlement = undefined;
+			if (!deletionSucceeded) run.hostDeletionSettlement = undefined;
+			run.deletionCleanupFailed = true;
+			this._pendingHostedRlmChildRuns.set(run.id, run);
+			this._rlmChildCleanupFailures.set(run.id, this._hostedRlmRegistryEntry(run));
+			run.deletionReservation.resolve();
+			const failedObserver = resolveHostedBoolean(false);
+			run.deletionCleanupObserver = failedObserver;
+			observePoisonedHostedInternalPromise(cleanup);
+			return cleanup;
+		}
+		const observer = cleanup.then(
+			async () => {
+				run.deletionCleanupFailed = false;
+				this._rlmChildCleanupFailures.delete(run.id);
+				if (run.deletionRunFinished) await this._finishRlmRunDeletion(run);
+				return true;
+			},
+			async () => {
+				run.deletionCleanup = undefined;
+				run.deletionCleanupObserver = undefined;
+				if (!abortSucceeded) run.abortSettlement = undefined;
+				if (!closeSucceeded) run.closeSettlement = undefined;
+				if (!deletionSucceeded) run.hostDeletionSettlement = undefined;
+				run.deletionCleanupFailed = true;
+				this._pendingHostedRlmChildRuns.set(run.id, run);
+				this._rlmChildCleanupFailures.set(run.id, this._hostedRlmRegistryEntry(run));
+				run.deletionReservation.resolve();
+				if (!run.suppressTerminalNotice && !this._disposed && !this._disposing) {
+					await this._deferRlmTerminalNotice(
+						createRlmChildFailureMessage({
+							childId: run.id,
+							sessionName: run.sessionName,
+							error: `Deletion cleanup failed; retry rlm.delete_subagent("${run.id}") before completion`,
+						}),
+					);
+				}
+				return false;
+			},
+		);
+		run.deletionCleanupObserver = observer;
+		return cleanup;
+	}
+
+	private _retainHostedRlmLifecycleFailure(run: HostedRlmChildRun): void {
+		run.status = "error";
+		run.error = "Hosted RLM lifecycle bookkeeping failed";
+		run.activity = undefined;
+		run.emitUpdate?.();
+		if (!run.detachedDeletion) run.detachedDeletion = this._hostedRlmRegistryEntry(run);
+		run.deletionRunFinished = true;
+		try {
+			this._ensureHostedRlmRunDeletionCleanup(run, true);
+		} catch {
+			run.deletionCleanupFailed = true;
+			this._pendingHostedRlmChildRuns.set(run.id, run);
+			this._rlmChildCleanupFailures.set(run.id, this._hostedRlmRegistryEntry(run));
+			run.deletionReservation.resolve();
+		}
+	}
+
+	private _observeHostedRlmLifecycle(run: HostedRlmChildRun, owner: Promise<void>): Promise<void> {
+		if (!hostedPromiseIntrinsicsIntact()) {
+			observePoisonedHostedInternalPromise(owner);
+			this._retainHostedRlmLifecycleFailure(run);
+			return resolveHostedVoid();
+		}
+		try {
+			const observer: Promise<void> = HostedReflectApply(HostedNativeThen, owner, [
+				() => undefined,
+				() => this._retainHostedRlmLifecycleFailure(run),
+			]);
+			HostedDefineProperty(observer, "constructor", {
+				value: HostedNativePromise,
+				writable: false,
+				enumerable: false,
+				configurable: false,
+			});
+			return observer;
+		} catch {
+			observePoisonedHostedInternalPromise(owner);
+			this._retainHostedRlmLifecycleFailure(run);
+			return resolveHostedVoid();
+		}
+	}
+
+	private async _finishHostedRlmRun(
+		run: HostedRlmChildRun,
+		options: CreateHostedRlmSubagentRuntimeOptions,
+		terminal: Promise<HostedRlmPortResult<HostedRlmTaskResult>>,
+		startedAt: number,
+	): Promise<void> {
+		let result: HostedRlmTaskResult | undefined;
+		try {
+			const outcome = await terminal;
+			if (outcome.ok) result = outcome.value;
+		} catch {
+			result = undefined;
+		}
+		try {
+			if (result) {
+				run.durationMs = result.durationMs;
+				run.toolUseCount = Math.max(run.toolUseCount, result.toolUseCount);
+				run.parentReplyCount = Math.max(run.parentReplyCount, result.parentReplyCount);
+				if (result.answerPreview !== undefined) run.answerPreview = result.answerPreview;
+				if (result.usage !== undefined) {
+					run.tokenCount = result.usage.inputTokens + result.usage.outputTokens;
+					if (!run.usageAttributed) {
+						run.usageAttributed = true;
+						const childUsage: Usage = {
+							input: result.usage.inputTokens,
+							output: result.usage.outputTokens,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: result.usage.inputTokens + result.usage.outputTokens,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						};
+						const parentAssistant = run.parentAssistantForUsage;
+						attributeChildUsage(parentAssistant?.usage ?? emptyUsage(), childUsage);
+						if (parentAssistant) {
+							const parentEntry = this._findAssistantEntryForMessage(parentAssistant);
+							if (parentEntry) {
+								this.sessionManager.appendChildUsageAttribution(
+									parentEntry.id,
+									childUsage,
+									parentAssistant.usage,
+									"spawn_task",
+								);
+							}
+						}
+					}
+				}
+				if (result.status === "completed" && run.status !== "cancelled") {
+					run.status = "done";
+					if (result.lastCommittedRequestId !== undefined && !run.semanticReturnRecorded) {
+						run.semanticReturnRecorded = true;
+						this._semanticEdges.recordChildReturned(run.sessionId, result.lastCommittedRequestId);
+					}
+				} else if (result.status === "cancelled") {
+					run.status = "cancelled";
+					run.error = "Hosted RLM task was cancelled";
+				} else if (run.status !== "cancelled") {
+					run.status = "error";
+					run.error = "Hosted RLM task failed";
+				}
+			} else if (run.status !== "cancelled") {
+				run.status = "error";
+				run.error = "Hosted RLM terminal result failed";
+			}
+		} catch {
+			run.status = "error";
+			run.error = "Hosted RLM lifecycle bookkeeping failed";
+		}
+		if (run.durationMs === undefined) run.durationMs = Date.now() - startedAt;
+		run.activity = undefined;
+		run.emitUpdate?.();
+
+		try {
+			if (run.detachedDeletion) {
+				run.deletionRunFinished = true;
+				this._ensureHostedRlmRunDeletionCleanup(run, true);
+				return;
+			}
+
+			const releaseStatus = run.status === "done" ? "done" : run.status === "cancelled" ? "cancelled" : "error";
+			const closeSettlement = this._closeHostedRlmController(run);
+			const closeOrDeletion = await raceHostedCloseOrDeletion(closeSettlement, run.settlement.promise);
+			if (closeOrDeletion.deleted) return;
+			if (closeOrDeletion.poisoned) {
+				run.detachedDeletion = this._hostedRlmRegistryEntry(run);
+				run.deletionRunFinished = true;
+				this._ensureHostedRlmRunDeletionCleanup(run, true);
+				return;
+			}
+			const closed = closeOrDeletion.closed;
+			if (!closed) run.closeSettlement = undefined;
+			if (run.detachedDeletion) {
+				run.deletionRunFinished = true;
+				this._ensureHostedRlmRunDeletionCleanup(run, true);
+				return;
+			}
+			const host = this._subagentRuntimeHost;
+			let released = false;
+			if (host && run.runtime !== undefined) {
+				const releaseHosted = host.releaseHostedRlmSubagentRuntime;
+				if (releaseHosted) {
+					if (run.detachedDeletion) {
+						run.deletionRunFinished = true;
+						this._ensureHostedRlmRunDeletionCleanup(run, true);
+						return;
+					}
+					const releaseDeferred = createHostedBooleanDeferred();
+					run.releaseSettlement = releaseDeferred.promise;
+					if (run.detachedDeletion) {
+						releaseDeferred.resolve(false);
+						run.deletionRunFinished = true;
+						this._ensureHostedRlmRunDeletionCleanup(run, true);
+						return;
+					}
+					let releaseActual: unknown;
+					try {
+						releaseActual = HostedReflectApply(releaseHosted, host, [run.runtime, options, releaseStatus]);
+					} catch {
+						releaseActual = undefined;
+					}
+					const deletionRequestedAfterDispatch = run.detachedDeletion !== undefined;
+					forwardHostedBoolean(observeHostedHostVoidPromise(releaseActual), releaseDeferred.resolve);
+					if (deletionRequestedAfterDispatch) {
+						run.deletionRunFinished = true;
+						this._ensureHostedRlmRunDeletionCleanup(run, true);
+						return;
+					}
+					released = await releaseDeferred.promise;
+					if (run.detachedDeletion) {
+						run.deletionRunFinished = true;
+						this._ensureHostedRlmRunDeletionCleanup(run, true);
+						return;
+					}
+				} else {
+					released = await this._deleteHostedRlmRuntime(run);
+				}
+			}
+			if (!released || !closed) {
+				run.status = "error";
+				run.error = "Hosted RLM runtime release failed";
+				run.deletionCleanupFailed = true;
+				run.detachedDeletion = this._hostedRlmRegistryEntry(run);
+				this._rlmChildCleanupFailures.set(run.id, run.detachedDeletion);
+				run.emitUpdate?.();
+				return;
+			}
+
+			if (!run.suppressTerminalNotice) {
+				if (run.status === "done" && run.parentReplyCount === 0) {
+					await this._deferRlmTerminalNotice(
+						createRlmChildTerminalNoticeMessage({
+							kind: "completed_without_reply",
+							childId: run.id,
+							sessionName: run.sessionName,
+							lastAssistantTextPreview: run.answerPreview,
+						}),
+					);
+				} else if (run.status === "error") {
+					await this._deferRlmTerminalNotice(
+						createRlmChildFailureMessage({
+							childId: run.id,
+							sessionName: run.sessionName,
+							error: run.error ?? "Hosted RLM task failed",
+						}),
+					);
+				} else if (run.status === "cancelled") {
+					await this._deferRlmTerminalNotice(
+						createRlmChildTerminalNoticeMessage({
+							kind: "cancelled",
+							childId: run.id,
+							sessionName: run.sessionName,
+							reason: run.error,
+						}),
+					);
+				}
+			}
+			if (this._activeRlmChildRuns.get(run.id) === run) this._activeRlmChildRuns.delete(run.id);
+			run.settled = true;
+			run.settlement.resolve();
+			this._unsettledRlmChildRuns.delete(run);
+			this._maybeResumeGoalContinuationAfterRlmWork();
+		} catch {
+			this._retainHostedRlmLifecycleFailure(run);
+		}
+	}
+
+	private _requestHostedRlmAllocation(
+		run: HostedRlmChildRun,
+		host: SubagentRuntimeHost,
+		createHosted: NonNullable<SubagentRuntimeHost["createHostedRlmSubagentRuntime"]>,
+		options: CreateHostedRlmSubagentRuntimeOptions,
+	): Promise<Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }>> {
+		const allocation = createHostedRlmAllocationDeferred();
+		let createReturned = false;
+		let callbackClaimed = false;
+		let completed = false;
+		let primaryHasRuntime = false;
+		let primaryRuntime: unknown;
+		let buffered: Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }> | undefined;
+		const deleteDistinctLateRuntime = (
+			result: Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }>,
+		): void => {
+			if (result.ok && (!primaryHasRuntime || !HostedObjectIs(primaryRuntime, result.runtime))) {
+				this._deleteLateHostedRuntime(run, result.runtime);
+			}
+		};
+		const complete = (result: Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }>): void => {
+			if (completed) {
+				deleteDistinctLateRuntime(result);
+				return;
+			}
+			completed = true;
+			allocation.resolve(result);
+		};
+		run.cancelAllocation = (): void => complete(HostedObjectFreeze({ ok: false }));
+		const settle = (raw: unknown): void => {
+			const normalized = normalizeHostedRlmAllocationResult(raw) ?? HostedObjectFreeze({ ok: false });
+			if (callbackClaimed || completed) {
+				deleteDistinctLateRuntime(normalized);
+				return;
+			}
+			callbackClaimed = true;
+			if (normalized.ok) {
+				primaryHasRuntime = true;
+				primaryRuntime = normalized.runtime;
+			}
+			if (createReturned) complete(normalized);
+			else buffered = normalized;
+		};
+		try {
+			createHosted.call(host, options, settle);
+			createReturned = true;
+			if (buffered) complete(buffered);
+		} catch {
+			createReturned = true;
+			if (buffered?.ok) this._deleteLateHostedRuntime(run, buffered.runtime);
+			complete(HostedObjectFreeze({ ok: false }));
+		}
+		return allocation.promise;
+	}
+
+	private async _failHostedRlmBeforeAdmission(run: HostedRlmChildRun, errorMessage: string): Promise<never> {
+		if (run.status !== "cancelled") {
+			run.status = "error";
+			run.error = errorMessage;
+			run.publication.reject(new Error(errorMessage));
+		}
+		run.deletionRunFinished = true;
+		this._ensureHostedRlmRunDeletionCleanup(run, true);
+		await run.deletionCleanupObserver;
+		throw new Error(run.status === "cancelled" ? (run.error ?? "Hosted RLM task was cancelled") : errorMessage);
+	}
+
+	private async _startHostedRlmChildRun(
+		prompt: string,
+		kwargSnapshot: ReturnType<typeof snapshotRlmRunKwargs>,
+		spawnCode: string | undefined,
+		spawnedByRequestId: string | undefined,
+		parentAssistantForUsage: AssistantMessage | undefined,
+	): Promise<HostedRlmSpawnHandle> {
+		const host = this._subagentRuntimeHost;
+		const createHosted = host?.createHostedRlmSubagentRuntime;
+		if (!host || !createHosted || !host.deleteHostedRlmSubagentRuntime) {
+			throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
+		}
+		if (prompt.length === 0 || prompt.length > 32_768) throw new Error("Hosted RLM task input is invalid");
+		if (spawnCode !== undefined && (spawnCode.length === 0 || spawnCode.length > 4_096)) {
+			throw new Error("Hosted RLM task input is invalid");
+		}
+		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(kwargSnapshot.name);
+		const requestedModel = normalizeRequestedRlmSubagentModel(kwargSnapshot.model);
+		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(kwargSnapshot.thinking);
+		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
+		if (this._rlmDepth >= this._rlmMaxDepth) {
+			throw new Error(
+				`RLM recursion depth limit reached (RLM_DEPTH=${this._rlmDepth}, RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
+			);
+		}
+		if (requestedSessionName) {
+			if (this._pendingRlmSubagentSessionNames.has(requestedSessionName)) {
+				throw new Error(formatAgentSessionNameUnavailable(requestedSessionName, this._rlmDepth + 1));
+			}
+			this._pendingRlmSubagentSessionNames.add(requestedSessionName);
+		}
+		let run: HostedRlmChildRun | undefined;
+		try {
+			if (requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(requestedSessionName, true);
+			const modelSelection = await this._resolveRlmSubagentModel(requestedModel);
+			const auth = await this._modelRegistry.getApiKeyAndHeaders(modelSelection.model);
+			if (!auth.ok) throw new Error("Hosted RLM model authentication preflight failed");
+			const parentActiveSessionId = (await this._currentActiveSessionId()) ?? this.sessionId;
+			if (requestedThinkingLevel !== undefined) {
+				const supported = getSupportedThinkingLevels(modelSelection.model);
+				if (!supported.includes(requestedThinkingLevel)) {
+					throw new Error(
+						`Requested thinking level "${requestedThinkingLevel}" is not supported by model "${modelSelection.model.provider}/${modelSelection.model.id}"; supported levels: ${supported.join(", ")}`,
+					);
+				}
+			}
+			if (this._disposed || this._disposing)
+				throw new Error("Cannot spawn a subagent after its parent was disposed");
+
+			const modelSelector = `${modelSelection.model.provider}/${modelSelection.model.id}`;
+			const inheritedThinkingLevel = clampThinkingLevel(modelSelection.model, this.thinkingLevel);
+			const thinkingLevel: ThinkingLevel = requestedThinkingLevel ?? inheritedThinkingLevel;
+			const serviceTier =
+				this.serviceTier === "priority" && !supportsFastMode(modelSelection.model) ? "default" : this.serviceTier;
+			const scopedModels = HostedObjectFreeze(
+				this._scopedModels.map((entry) => {
+					const selector = `${entry.model.provider}/${entry.model.id}`;
+					if (entry.thinkingLevel === undefined) return HostedObjectFreeze({ modelSelector: selector });
+					return HostedObjectFreeze({ modelSelector: selector, thinkingLevel: entry.thinkingLevel });
+				}),
+			);
+			const activeToolNames = HostedObjectFreeze(this.getActiveToolNames());
+			const allowedToolNames = this._allowedToolNames
+				? HostedObjectFreeze(Array.from(this._allowedToolNames))
+				: undefined;
+			const childId = `sub-${randomUUID()}`;
+			const sessionId = randomUUID();
+			const activeSessionId = randomUUID();
+			const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName("", childId);
+			if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+			const metadataValues = [
+				this.sessionId,
+				parentActiveSessionId,
+				childId,
+				sessionId,
+				activeSessionId,
+				sessionName,
+				modelSelector,
+			];
+			if (spawnedByRequestId !== undefined) metadataValues.push(spawnedByRequestId);
+			if (
+				metadataValues.some((value) => !isBoundedHostedRlmMetadata(value, 128)) ||
+				scopedModels.length > 64 ||
+				activeToolNames.length > 512 ||
+				(allowedToolNames?.length ?? 0) > 512 ||
+				!scopedModels.every((entry) => isBoundedHostedRlmMetadata(entry.modelSelector, 128)) ||
+				!activeToolNames.every((name) => isBoundedHostedRlmMetadata(name, 128)) ||
+				allowedToolNames?.every((name) => isBoundedHostedRlmMetadata(name, 128)) === false
+			) {
+				throw new Error("Hosted RLM selector metadata is invalid");
+			}
+			const options: CreateHostedRlmSubagentRuntimeOptions = HostedObjectFreeze({
+				sandbox: true,
+				id: childId,
+				sessionId,
+				activeSessionId,
+				parentSessionId: this.sessionId,
+				parentActiveSessionId,
+				sessionName,
+				modelSelector,
+				thinkingLevel,
+				serviceTier,
+				spawnedByRequestId,
+				scopedModels,
+				activeToolNames,
+				allowedToolNames,
+				includeGoals: this._includeGoals,
+				includeCompactSkill: this._includeCompactSkill,
+				rlmDepth: this._rlmDepth + 1,
+				rlmMaxDepth: this._rlmMaxDepth,
+				rlmParentNodeId: childId,
+			});
+			const execution: Readonly<{ readonly type: "prime-sandbox" }> = HostedObjectFreeze({ type: "prime-sandbox" });
+			const hostedRun: HostedRlmChildRun = {
+				id: childId,
+				prompt,
+				sessionName,
+				activeSessionId,
+				sessionId,
+				location: HostedObjectFreeze({ type: "hosted", execution }),
+				model: modelSelection.model,
+				status: "queued",
+				toolUseCount: 0,
+				parentReplyCount: 0,
+				runtimeAuthorities: [],
+				parentAssistantForUsage,
+				settled: false,
+				abort: noopRlmChildAbort,
+				publication: createAgentMessageDeferred(),
+				settlement: createAgentMessageDeferred(),
+				deletionReservation: createAgentMessageDeferred(),
+			};
+			run = hostedRun;
+			const emitChildUpdate = (): void => {
+				if (!hostedRun.published) return;
+				const child = this._rlmChildSnapshotForRun(hostedRun);
+				const serialized = JSON.stringify(child);
+				if (serialized === hostedRun.lastEmittedUpdate) return;
+				hostedRun.lastEmittedUpdate = serialized;
+				this._emit({ type: "rlm_child_update", child });
+			};
+			hostedRun.emitUpdate = emitChildUpdate;
+			this._pendingHostedRlmChildRuns.set(childId, hostedRun);
+
+			const allocation = await this._requestHostedRlmAllocation(hostedRun, host, createHosted, options);
+			const rawRuntime = allocation.ok
+				? allocation.runtime
+				: await this._failHostedRlmBeforeAdmission(hostedRun, "Hosted RLM runtime creation failed");
+			hostedRun.runtime = rawRuntime;
+			this._retainHostedRuntimeAuthority(hostedRun, rawRuntime);
+			if (hostedRun.status === "cancelled") {
+				await this._failHostedRlmBeforeAdmission(hostedRun, hostedRun.error ?? "Hosted RLM task was cancelled");
+			}
+			const expectedIdentity = HostedObjectFreeze({ childId, sessionId, sessionName, modelSelector });
+			const runtime = normalizeRlmSubagentRuntime(
+				rawRuntime,
+				(value): value is AgentSession => isAgentSessionInstance(value),
+				expectedIdentity,
+			);
+			const hostedRuntime =
+				runtime && "hostedPort" in runtime
+					? runtime
+					: await this._failHostedRlmBeforeAdmission(hostedRun, INVALID_SUBAGENT_RUNTIME_ERROR);
+			const controllerResult = createHostedRlmRunController({
+				port: hostedRuntime.hostedPort,
+				expectedIdentity,
+				listener: (event: HostedRlmRuntimeEvent): void => this._hostedRlmEvent(hostedRun, event),
+			});
+			const controller = controllerResult.ok
+				? controllerResult.value
+				: await this._failHostedRlmBeforeAdmission(hostedRun, "Hosted RLM controller creation failed");
+			hostedRun.controller = controller;
+			hostedRun.abort = (): void => {
+				this._requestHostedRlmAbort(hostedRun);
+			};
+			const startedAt = Date.now();
+			const admissionPromise =
+				spawnCode === undefined ? controller.start({ prompt }) : controller.start({ prompt, spawnCode });
+			let cancelAdmission = (): void => undefined;
+			const admissionCancellation = new HostedNativePromise<Readonly<{ ok: false }>>((resolve) => {
+				cancelAdmission = () => resolve(HostedObjectFreeze({ ok: false }));
+			});
+			HostedDefineProperty(admissionCancellation, "constructor", {
+				value: HostedNativePromise,
+				writable: false,
+				enumerable: false,
+				configurable: false,
+			});
+			hostedRun.cancelAllocation = cancelAdmission;
+			if (hostedRun.status === "cancelled") {
+				cancelAdmission();
+				this._cancelHostedRlmRunCleanup(hostedRun);
+			}
+			const admission = await raceHostedAdmission(admissionPromise, admissionCancellation);
+			if (!admission.ok || hostedRun.status === "cancelled") {
+				await this._failHostedRlmBeforeAdmission(
+					hostedRun,
+					hostedRun.status === "cancelled"
+						? (hostedRun.error ?? "Hosted RLM task was cancelled")
+						: "Hosted RLM task admission failed",
+				);
+			}
+			hostedRun.cancelAllocation = undefined;
+			this._pendingHostedRlmChildRuns.delete(childId);
+			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
+			hostedRun.published = true;
+			hostedRun.status = "running";
+			this._activeRlmChildRuns.set(childId, hostedRun);
+			this._unsettledRlmChildRuns.add(hostedRun);
+			hostedRun.publication.resolve();
+			emitChildUpdate();
+			const terminal = controller.finish();
+			const owner = this._finishHostedRlmRun(hostedRun, options, terminal, startedAt);
+			hostedRun.lifecycleSettlement = owner;
+			hostedRun.lifecycleObserver = this._observeHostedRlmLifecycle(hostedRun, owner);
+			return HostedObjectFreeze({
+				rlm_child_id: childId,
+				name: sessionName,
+				model: modelSelector,
+				execution,
+			});
+		} finally {
+			if (requestedSessionName && (!run || run.published || !run.deletionCleanupFailed)) {
+				this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
+			}
+		}
+	}
+
 	private async _startRlmChildRun(
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
-	): Promise<LocalRlmSpawnHandle> {
+	): Promise<RlmSpawnHandle> {
 		// Snapshot before any await: the spawning request is the turn whose tool call is
 		// executing now. A spawn arriving outside an active run (a detached kernel task
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
 		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
 		const kwargSnapshot = snapshotRlmRunKwargs(kwargs);
 		const requestedSandbox = normalizeRequestedRlmSandbox(kwargSnapshot.sandbox);
+		if (
+			requestedSandbox &&
+			(!this._subagentRuntimeHost?.createHostedRlmSubagentRuntime ||
+				!this._subagentRuntimeHost.deleteHostedRlmSubagentRuntime)
+		) {
+			throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
+		}
 		const unsupportedKwargs = [...kwargSnapshot.unsupported];
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
 		}
 		if (requestedSandbox) {
-			throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
+			return this._startHostedRlmChildRun(
+				prompt,
+				kwargSnapshot,
+				spawnCode,
+				spawnedByRequestId,
+				this._findLastAssistantMessage(),
+			);
 		}
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(kwargSnapshot.name);
 		const requestedModel = normalizeRequestedRlmSubagentModel(kwargSnapshot.model);
@@ -10780,7 +12108,7 @@ export class AgentSession {
 			// blocked and run.abort was still a no-op.
 			if (run.status === "cancelled") run.abort();
 		};
-		const subagentOptions: CreateRlmSubagentRuntimeOptions = {
+		const subagentOptions: CreateLocalRlmSubagentRuntimeOptions = {
 			...this._createRlmSubagentRuntimeOptions({
 				id: childNodeId,
 				prompt,
@@ -11101,11 +12429,23 @@ export class AgentSession {
 		};
 	}
 
+	runRlmChild(prompt: string): Promise<LocalRlmSpawnHandle>;
+	runRlmChild(
+		prompt: string,
+		kwargs: Record<string, unknown> & Readonly<{ sandbox?: false }>,
+		spawnCode?: string,
+	): Promise<LocalRlmSpawnHandle>;
+	runRlmChild(
+		prompt: string,
+		kwargs: Record<string, unknown> & Readonly<{ sandbox: true }>,
+		spawnCode?: string,
+	): Promise<HostedRlmSpawnHandle>;
+	runRlmChild(prompt: string, kwargs: Record<string, unknown>, spawnCode?: string): Promise<RlmSpawnHandle>;
 	async runRlmChild(
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
-	): Promise<LocalRlmSpawnHandle> {
+	): Promise<RlmSpawnHandle> {
 		return this._startRlmChildRun(prompt, kwargs, spawnCode);
 	}
 

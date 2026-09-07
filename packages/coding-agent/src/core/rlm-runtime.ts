@@ -261,9 +261,10 @@ export type RlmRunKwargsSnapshot = Readonly<{
 export function snapshotRlmRunKwargs(value: unknown): RlmRunKwargsSnapshot {
 	let keys: readonly (string | symbol)[];
 	try {
-		if (typeof value !== "object" || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
+		if (typeof value !== "object" || value === null || types.isProxy(value)) {
 			throw new Error("invalid");
 		}
+		if (Object.getPrototypeOf(value) !== Object.prototype) throw new Error("invalid");
 		keys = Reflect.ownKeys(value);
 	} catch {
 		throw new Error("rlm.run kwargs are invalid");
@@ -296,14 +297,13 @@ export function snapshotRlmRunKwargs(value: unknown): RlmRunKwargsSnapshot {
 	return Object.freeze({ name, model, thinking, sandbox, unsupported: Object.freeze(unsupported) });
 }
 
-export interface CreateRlmSubagentRuntimeOptions {
+export interface CreateLocalRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
 	id: string;
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
-	/** Reserved fail-closed request marker. Local runtimes must reject it. */
-	sandbox?: true;
+	sandbox?: false;
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;
@@ -324,24 +324,109 @@ export interface CreateRlmSubagentRuntimeOptions {
 	onSessionPublished?: (session: AgentSession) => void;
 }
 
+export interface HostedRlmScopedModelSelector {
+	readonly modelSelector: string;
+	readonly thinkingLevel?: ThinkingLevel;
+}
+
+/** Credential-free, path-free data copied across the hosted allocation boundary. */
+export interface CreateHostedRlmSubagentRuntimeOptions {
+	readonly sandbox: true;
+	readonly id: string;
+	readonly sessionId: string;
+	readonly activeSessionId: string;
+	readonly parentSessionId: string;
+	readonly parentActiveSessionId: string;
+	readonly sessionName: string;
+	readonly modelSelector: string;
+	readonly thinkingLevel: ThinkingLevel;
+	readonly serviceTier: ServiceTier;
+	readonly spawnedByRequestId?: string;
+	readonly scopedModels: readonly HostedRlmScopedModelSelector[];
+	readonly activeToolNames: readonly string[];
+	readonly allowedToolNames?: readonly string[];
+	readonly includeGoals: boolean;
+	readonly includeCompactSkill: boolean;
+	readonly rlmDepth: number;
+	readonly rlmMaxDepth: number;
+	readonly rlmParentNodeId: string;
+}
+
+export type CreateRlmSubagentRuntimeOptions =
+	| CreateLocalRlmSubagentRuntimeOptions
+	| CreateHostedRlmSubagentRuntimeOptions;
+
+export type HostedRlmAllocationSettlement = (result: unknown) => void;
+
 export interface SubagentRuntimeHost {
-	createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
+	createRlmSubagentRuntime(options: CreateLocalRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
+	createHostedRlmSubagentRuntime?(
+		options: CreateHostedRlmSubagentRuntimeOptions,
+		settle: HostedRlmAllocationSettlement,
+	): void;
 	/** Persist host-owned completion before the child becomes passivation-eligible. */
 	completeRlmSubagentRuntime?(childId: string, runtime: RlmSubagentRuntime): boolean | Promise<boolean>;
-	/** Release a host-owned child after its detached initial task settles. */
+	/** Release a local host-owned child after its detached initial task settles. */
 	releaseRlmSubagentRuntime?: (
 		runtime: RlmSubagentRuntime,
 		options: CreateRlmSubagentRuntimeOptions,
 		status: "done" | "error" | "cancelled",
 	) => Promise<void>;
-	/** Close or remove the host-owned child; runtime is absent when a persisted child is still passive. */
+	/** Release an exact hosted allocation token after its detached initial task settles. */
+	releaseHostedRlmSubagentRuntime?: (
+		runtime: unknown,
+		options: CreateHostedRlmSubagentRuntimeOptions,
+		status: "done" | "error" | "cancelled",
+	) => Promise<void>;
+	/** Close or remove a local host-owned child. */
 	deleteRlmSubagentRuntime(childId: string, runtime?: RlmSubagentRuntime): Promise<void>;
-	disposeRlmSubagentRuntimes?(): Promise<void>;
+	/** Close or remove an exact hosted allocation token. */
+	deleteHostedRlmSubagentRuntime?(childId: string, runtime?: unknown): Promise<void>;
+	disposeRlmSubagentRuntimes?(): unknown;
 }
 
 // ---------------------------------------------------------------------------
 // Exact-boundary normalizer for RlmSubagentRuntime
 // ---------------------------------------------------------------------------
+
+const HostedAllocationObjectFreeze = Object.freeze;
+const HostedAllocationGetPrototypeOf = Object.getPrototypeOf;
+const HostedAllocationIsFrozen = Object.isFrozen;
+const HostedAllocationOwnKeys = Reflect.ownKeys;
+const HostedAllocationGetOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
+const HostedAllocationObjectPrototype = Object.prototype;
+const HostedAllocationIsProxy = types.isProxy;
+
+export type NormalizedHostedRlmAllocationResult = Readonly<{ ok: true; runtime: unknown }> | Readonly<{ ok: false }>;
+
+/** Snapshot one untrusted hosted-allocation callback result without invoking accessors. */
+export function normalizeHostedRlmAllocationResult(raw: unknown): NormalizedHostedRlmAllocationResult | null {
+	if (typeof raw !== "object" || raw === null || HostedAllocationIsProxy(raw)) return null;
+	try {
+		if (HostedAllocationGetPrototypeOf(raw) !== HostedAllocationObjectPrototype || !HostedAllocationIsFrozen(raw))
+			return null;
+		const keys = HostedAllocationOwnKeys(raw);
+		const descriptors = HostedAllocationGetOwnPropertyDescriptors(raw);
+		const okDescriptor = descriptors.ok;
+		if (!okDescriptor || !("value" in okDescriptor) || !okDescriptor.enumerable) return null;
+		if (okDescriptor.value === false) {
+			if (keys.length !== 1 || keys[0] !== "ok") return null;
+			return HostedAllocationObjectFreeze({ ok: false });
+		}
+		if (
+			okDescriptor.value !== true ||
+			keys.length !== 2 ||
+			!((keys[0] === "ok" && keys[1] === "runtime") || (keys[0] === "runtime" && keys[1] === "ok"))
+		) {
+			return null;
+		}
+		const runtimeDescriptor = descriptors.runtime;
+		if (!runtimeDescriptor || !("value" in runtimeDescriptor) || !runtimeDescriptor.enumerable) return null;
+		return HostedAllocationObjectFreeze({ ok: true, runtime: runtimeDescriptor.value });
+	} catch {
+		return null;
+	}
+}
 
 export interface NormalizedHostedIdentityMatch {
 	readonly childId: string;
