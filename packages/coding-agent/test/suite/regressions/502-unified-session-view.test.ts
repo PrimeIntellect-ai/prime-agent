@@ -343,17 +343,25 @@ describe("#502 unified session view regressions", () => {
 		const harness = {
 			renameTarget: { activeSessionId: captured.activeSessionId, summary: captured },
 			rows: [],
+			lastListedSummaries: [captured],
+			savedSessions: [],
+			persistentState: {},
 			exitRenameMode: vi.fn(),
+			reconcileCatalogs: vi.fn(),
 			setStatusMessage: vi.fn(),
 			refreshSessions: vi.fn(async () => true),
+			refreshSavedSessionsIfLoaded: vi.fn(),
 			requireClient: () => ({ request }),
 			renameSession: Reflect.get(AgentsViewMode.prototype, "renameSession"),
+			applyOptimisticSessionName: Reflect.get(AgentsViewMode.prototype, "applyOptimisticSessionName"),
+			completeRename: Reflect.get(AgentsViewMode.prototype, "completeRename"),
 		};
 
 		await privateMethod<(this: typeof harness, value: string) => Promise<void>>("confirmRename").call(
 			harness,
 			"Renamed",
 		);
+		await new Promise((resolve) => setImmediate(resolve));
 
 		expect(request).toHaveBeenCalledWith({
 			type: "rename",

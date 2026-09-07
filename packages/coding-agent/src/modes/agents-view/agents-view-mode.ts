@@ -1667,37 +1667,63 @@ export class AgentsViewMode implements Component, Focusable {
 		await this.renameSession(target.summary, name);
 	}
 
-	/** Shared by rename mode and /name: rename, refresh both catalogs, report. */
+	/**
+	 * Shared by rename mode and /name. The daemon validates a rename against the
+	 * full on-disk family catalog (a second-plus scan on large rosters), so the
+	 * view applies the name optimistically and never blocks input on the
+	 * round-trip; on failure the catalog refetch restores the previous name.
+	 */
 	private async renameSession(summary: SessionSummary, name: string): Promise<boolean> {
-		this.setStatusMessage("Renaming agent...");
+		if (!summary.activeSessionId && !summary.sessionFile) {
+			this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
+			return false;
+		}
+		this.applyOptimisticSessionName(summary, name);
+		this.setStatusMessage(`Renaming to ${name}...`);
+		void this.completeRename(summary, name);
+		return true;
+	}
+
+	/** Rewrite the catalogs the reconcile reads, so refreshes keep the name until daemon truth arrives. */
+	private applyOptimisticSessionName(summary: SessionSummary, name: string): void {
+		this.lastListedSummaries = this.lastListedSummaries.map((entry) =>
+			entry.sessionId === summary.sessionId ? { ...entry, sessionName: name } : entry,
+		);
+		if (summary.sessionFile) {
+			const renamedPath = resolvePath(canonicalizePath(summary.sessionFile));
+			this.savedSessions = this.savedSessions.map((entry) =>
+				resolvePath(canonicalizePath(entry.path)) === renamedPath ? { ...entry, name } : entry,
+			);
+			this.persistentState.savedSessions = this.savedSessions;
+		}
+		this.reconcileCatalogs();
+	}
+
+	private async completeRename(summary: SessionSummary, name: string): Promise<void> {
 		try {
 			if (summary.activeSessionId) {
 				requireDaemonData(
 					await this.requireClient().request({ type: "rename", activeSessionId: summary.activeSessionId, name }),
 				);
-			} else if (summary.sessionFile) {
+			} else {
 				await renameDaemonSavedSession(
 					this.requireClient(),
 					this.getSavedSessionCatalogContext(),
-					summary.sessionFile,
+					summary.sessionFile!,
 					name,
 				);
-			} else {
-				this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
-				return false;
 			}
-			await this.refreshSessions();
-			this.refreshSavedSessionsIfLoaded();
 			this.setStatusMessage(`Renamed to ${name}`);
-			return true;
 		} catch (error) {
 			this.setStatusMessage(
 				isUnknownDaemonCommandError(error, "rename")
 					? "Failed to rename: the daemon is running an older build; restart the daemon and try again"
 					: formatError("Failed to rename agent", error),
 			);
-			return false;
 		}
+		// On success this confirms the optimistic name; on failure it reverts it.
+		await this.refreshSessions();
+		this.refreshSavedSessionsIfLoaded();
 	}
 
 	private findSummaryByActiveSessionId(activeSessionId: string): SessionSummary | undefined {
