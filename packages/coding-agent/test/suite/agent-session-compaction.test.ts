@@ -249,14 +249,13 @@ describe("AgentSession compaction characterization", () => {
 		]);
 	});
 
-	it("keeps a message queued during compaction visible in the action snapshot", async () => {
+	async function createGatedCompactionHarness(options: Parameters<typeof createHarness>[0]) {
 		let releaseCompaction: () => void = () => {};
 		const compactionGate = new Promise<void>((resolve) => {
 			releaseCompaction = resolve;
 		});
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
-			persistSession: true,
+			...options,
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async () => {
@@ -266,6 +265,14 @@ describe("AgentSession compaction characterization", () => {
 			],
 		});
 		harnesses.push(harness);
+		return { harness, releaseCompaction };
+	}
+
+	it("keeps a message queued during compaction visible in the action snapshot", async () => {
+		const { harness, releaseCompaction } = await createGatedCompactionHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			persistSession: true,
+		});
 		harness.setResponses([
 			fauxAssistantMessage("first response"),
 			fauxAssistantMessage("model-generated summary"),
@@ -279,43 +286,27 @@ describe("AgentSession compaction characterization", () => {
 			streamingBehavior: "steer",
 			queueIfBusy: true,
 		});
-		await vi.waitFor(() =>
-			expect(harness.session.getSessionActionSnapshot()).toMatchObject({
-				queuedCount: 1,
-				steering: ["queued during compaction"],
-			}),
-		);
-		expect(harness.session.isCompacting).toBe(true);
 		// The TUI renders from the emitted event, not the pull snapshot.
-		const updates = harness.eventsOfType("session_action_update");
-		expect(updates[updates.length - 1]).toMatchObject({
-			actions: { queuedCount: 1, steering: ["queued during compaction"] },
+		await vi.waitFor(() => {
+			const updates = harness.eventsOfType("session_action_update");
+			expect(updates[updates.length - 1]).toMatchObject({
+				actions: { queuedCount: 1, steering: ["queued during compaction"] },
+			});
 		});
+		expect(harness.session.isCompacting).toBe(true);
 		releaseCompaction();
 		await Promise.all([compacting, queued]);
 	});
 
 	it("keeps a queued message visible while its own pre-turn compaction runs", async () => {
-		let releaseCompaction: () => void = () => {};
-		const compactionGate = new Promise<void>((resolve) => {
-			releaseCompaction = resolve;
-		});
 		let releaseTurn: () => void = () => {};
 		const turnGate = new Promise<void>((resolve) => {
 			releaseTurn = resolve;
 		});
-		const harness = await createHarness({
+		const { harness, releaseCompaction } = await createGatedCompactionHarness({
 			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
 			models: [{ id: "faux-1", contextWindow: 200_000 }],
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async () => {
-						await compactionGate;
-					});
-				},
-			],
 		});
-		harnesses.push(harness);
 		harness.setResponses([
 			async () => {
 				await turnGate;
@@ -341,8 +332,7 @@ describe("AgentSession compaction characterization", () => {
 				"also queued before compaction",
 			]),
 		);
-		// Hold the pump across the boundary so the context growth lands after the
-		// run and before the queued turns' preparation, like a big final tool result.
+		// Hold the pump so the context growth lands between the run and the queued turns' preparation.
 		const pause = harness.session.acquireQueuedWorkPause();
 		releaseTurn();
 		await running;
@@ -354,10 +344,7 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: Date.now(),
 		});
 		pause.release();
-		// The all-mode batch's own pre-turn compaction now runs while it prepares.
-		// The lanes are empty by design (preparing turns are pump-owned), so the
-		// preparing previews must carry EVERY batched message, with the same
-		// preview strings the lanes showed, for the whole compaction window.
+		// The batch's own pre-turn compaction empties the lanes; preparing must carry every lane preview through it.
 		await vi.waitFor(() => expect(harness.session.isCompacting).toBe(true), { timeout: 3000 });
 		expect(harness.session.getSessionActionSnapshot()).toMatchObject({
 			steering: [],

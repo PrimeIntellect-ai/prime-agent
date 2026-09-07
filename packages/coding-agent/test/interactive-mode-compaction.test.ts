@@ -183,7 +183,6 @@ describe("InteractiveMode compaction events", () => {
 		};
 		updatePendingMessagesDisplay.call(preparing);
 		const preparingRender = stripAnsi(queuedMessagesContainer.render(80).join("\n"));
-		// Every batched preview renders, with the lane preview strings verbatim.
 		expect(preparingRender).toContain("Starting: queued before compaction");
 		expect(preparingRender).toContain("Agent message received: also queued");
 
