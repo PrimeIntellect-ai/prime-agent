@@ -1,2 +1,2 @@
-- Added completion follow-ups when background kernel `bash()` commands finish so agents can inspect results and continue.
-- Kept sessions resident until background shell commands finish and their notifications are accepted.
+- Added steering Shell messages when background kernel `bash()` process groups finish so agents can inspect results at the next safe turn boundary without interrupting running tools.
+- Kept sessions resident while background shell process groups run and completion delivery is pending.

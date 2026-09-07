@@ -112,7 +112,7 @@ import {
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
-import { isProcessAlive, spawnHidden } from "../../utils/child-process.js";
+import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
@@ -886,15 +886,48 @@ export class AgentDaemon {
 				env: environment,
 				stdio: "ignore",
 			});
+			const childExited = waitForChildProcess(child);
+			void childExited.catch(() => undefined);
 			child.unref();
 			const deadline = Date.now() + 10_000;
 			while (!this.shuttingDown && Date.now() < deadline) {
-				if (await this.canConnectToSupervisor(supervisorSocketPath)) {
-					this.log(`launched replacement supervisor on ${supervisorSocketPath}`);
+				if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+					await childExited;
+					return;
+				}
+				for (const [client, boundClaim] of this.supervisorClaims) {
+					const { claim } = boundClaim;
+					if (
+						claim.supervisorSocketPath !== supervisorSocketPath ||
+						!client.authenticated ||
+						client.socket.destroyed
+					)
+						continue;
+					try {
+						await this.assertSupervisorClaimCurrent(claim);
+					} catch {
+						continue;
+					}
+					if (
+						this.shuttingDown ||
+						Date.now() >= deadline ||
+						this.supervisorClaims.get(client) !== boundClaim ||
+						!client.authenticated ||
+						client.socket.destroyed
+					)
+						continue;
+					if (claim.supervisorPid === child.pid) {
+						this.log(`launched replacement supervisor on ${supervisorSocketPath}`);
+						return;
+					}
+					if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+					await waitForPromptAdmission(childExited, AbortSignal.timeout(Math.max(1, deadline - Date.now())));
+					this.log(`stopped losing replacement supervisor ${child.pid} on ${supervisorSocketPath}`);
 					return;
 				}
 				await delay(50);
 			}
+			this.log(`replacement supervisor ${child.pid} left running without a current authenticated supervisor`);
 		} catch (error) {
 			this.log(`failed to launch replacement supervisor: ${String(error)}`);
 		} finally {

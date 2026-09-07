@@ -166,6 +166,8 @@ import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+	type AsyncBashCompletionDetails,
 	type BashExecutionMessage,
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
@@ -764,6 +766,12 @@ function queuedAgentMessagePreview(action: QueuedSessionAction): string {
 	if (payload.customMessage && isAgentSessionMessage(payload.customMessage)) {
 		return `${AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL}: ${payload.customMessage.details.message}`;
 	}
+	if (payload.customMessage?.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE) {
+		const details = payload.customMessage.details as AsyncBashCompletionDetails | undefined;
+		return details
+			? `${ASYNC_BASH_COMPLETION_PREVIEW_LABEL}: pid ${details.pid}, exit ${details.exitCode}`
+			: ASYNC_BASH_COMPLETION_PREVIEW_LABEL;
+	}
 	return payload.preview ?? payload.text;
 }
 
@@ -842,7 +850,7 @@ function injectedMessagePreviewLabel(message: CustomMessage): string | undefined
 		case HEARTBEAT_PROMPT_CUSTOM_TYPE:
 			return HEARTBEAT_PROMPT_PREVIEW_LABEL;
 		case ASYNC_BASH_COMPLETION_CUSTOM_TYPE:
-			return "Async shell completed";
+			return ASYNC_BASH_COMPLETION_PREVIEW_LABEL;
 		case GOAL_CONTEXT_CUSTOM_TYPE:
 			return GOAL_CONTEXT_PREVIEW_LABEL;
 		default:
@@ -9434,7 +9442,7 @@ export class AgentSession {
 					let admissionCommitted = false;
 					try {
 						await this._promptInjectedMessage(message.content, message, {
-							streamingBehavior: "followUp",
+							streamingBehavior: "steer",
 							queueIfBusy: true,
 							resumeIfIdle: true,
 							returnAfterAccepted: true,
