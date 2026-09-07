@@ -241,6 +241,7 @@ class BashHandle:
         self._reaped = False
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
+        self._reap_callback: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
         self._kill_lock = threading.Lock()
@@ -522,6 +523,10 @@ class BashHandle:
             if not _IS_POSIX:
                 # Reaped: pid fallbacks are gone, so the handle may finally close.
                 cast("_winjob.JobProcess", self._proc).close()
+        with self._callback_lock:
+            callback, self._reap_callback = self._reap_callback, None
+        if callback is not None:
+            callback()
         if delivered:
             _record_journal(self._pid, active=False)
         with _live_lock:
@@ -641,7 +646,14 @@ class BashHandle:
         activity = {"id": secrets.token_hex(16), "pid": self._pid, "active": True}
         # Publish synchronously before bash() returns and the creating cell can end.
         repl.emit({"application/vnd.prime-agent.bash-activity+json": activity})
-        task = loop.create_task(self._notify_background_completion(cell_finished, activity))
+        notice = self._notify_background_completion(cell_finished, activity)
+        try:
+            task = loop.create_task(notice)
+        except BaseException:
+            self.kill(signal.SIGKILL)
+            notice.close()
+            repl.emit({"application/vnd.prime-agent.bash-activity+json": {**activity, "active": False}})
+            raise
         task.add_done_callback(_consume_notice_task)
 
     async def _notify_background_completion(
@@ -651,6 +663,7 @@ class BashHandle:
 
         try:
             result = await self._wait()
+            await self._wait_reaped()
             # The cell may do other work before awaiting this handle. Do not classify
             # it as detached until that whole cell has crossed its completion barrier.
             await cell_finished.wait()
@@ -659,7 +672,7 @@ class BashHandle:
             command = self.command
             if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
                 command = command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
-            await repl.host_request(
+            reply = await repl.host_request(
                 {
                     "type": "bash.completed",
                     "pid": self._pid,
@@ -667,13 +680,39 @@ class BashHandle:
                     "exitCode": result.exit_code,
                 }
             )
+            if not isinstance(reply, dict) or reply.get("status") != "ok":
+                sys.stderr.write(
+                    f"Background bash completion follow-up for pid {self._pid} was not accepted. "
+                    "Inspect the saved handle with poll(), output(), or tail().\n"
+                )
         except (OSError, RuntimeError):
             # Standalone runtimes have no host handler, and teardown can close
             # the bridge while a process is finishing. Shell results stay usable.
             return
         finally:
-            # Keep the kernel resident until the completion follow-up is accepted.
+            # Reap and deliver (or report rejection) before releasing kernel residency.
             repl.emit({"application/vnd.prime-agent.bash-activity+json": {**activity, "active": False}})
+
+    async def _wait_reaped(self) -> None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+
+        def wake() -> None:
+            try:
+                loop.call_soon_threadsafe(lambda: future.done() or future.set_result(None))
+            except RuntimeError:
+                pass
+
+        with self._callback_lock:
+            if self._reaped:
+                return
+            self._reap_callback = wake
+        try:
+            await future
+        finally:
+            with self._callback_lock:
+                if self._reap_callback is wake:
+                    self._reap_callback = None
 
     async def _wait(self) -> BashResult:
         # Asyncio-native wakeup: no executor thread is parked for the command's
@@ -803,14 +842,20 @@ class BashHandle:
             current_task = asyncio.current_task()
         except RuntimeError:
             current_task = None
-        if _creating_cell_waits_for(self._creating_cell_task, current_task):
-            self._awaited_by_creating_cell = True
-        wait = self._wait() if self._released else self._wait_owned()
+        creating_cell_waited = _creating_cell_waits_for(self._creating_cell_task, current_task)
+        owned = not self._released
+        wait = self._wait_owned() if owned else self._wait()
         self._released = True
+        completed = False
         try:
-            return (yield from wait.__await__())
+            result = yield from wait.__await__()
+            completed = True
+            return result
         finally:
-            if _creating_cell_waits_for(self._creating_cell_task, current_task):
+            if (completed or owned) and (
+                creating_cell_waited
+                or _creating_cell_waits_for(self._creating_cell_task, current_task)
+            ):
                 self._awaited_by_creating_cell = True
 
     def __repr__(self) -> str:

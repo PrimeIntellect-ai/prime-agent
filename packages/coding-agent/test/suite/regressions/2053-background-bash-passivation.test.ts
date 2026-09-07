@@ -57,8 +57,9 @@ describeRuntime("#2053 background kernel bash residency", () => {
 
 	async function start(
 		beforeCompletion?: () => Promise<void>,
+		withConfiguredAuth = true,
 	): Promise<{ session: AgentSession; kernel: ReplKernelManager }> {
-		harness = await createHarness({ tools: [], rlmDepth: 1 });
+		harness = await createHarness({ tools: [], rlmDepth: 1, withConfiguredAuth });
 		const session = harness.session;
 		const internals = session as unknown as KernelSession;
 		const hostHandlers = internals._createKernelHostHandlers();
@@ -147,6 +148,67 @@ describeRuntime("#2053 background kernel bash residency", () => {
 		expect(result.result).toContain("done");
 		await vi.waitFor(() => expect(passivationAllowed(session)).toBe(true));
 		expect(session.messages).toEqual([]);
+	});
+
+	it("defers one completion across admission pauses without issuing another host request", async () => {
+		const beforeCompletion = vi.fn(async () => {});
+		const { session, kernel } = await start(beforeCompletion);
+		const firstPause = session.acquireSessionInputPause();
+		const secondPause = session.acquireSessionInputPause();
+		try {
+			await kernel.execute("from rlm import bash\nhandle = bash('printf done')");
+			await vi.waitFor(() => expect(session.hasPendingAdmissionWaiters).toBe(true));
+			expect(kernel.hasBackgroundWork).toBe(true);
+			expect(session.messages).toEqual([]);
+			firstPause.release();
+			await kernel.execute("42");
+			expect(session.hasPendingAdmissionWaiters).toBe(true);
+			expect(kernel.hasBackgroundWork).toBe(true);
+			harness!.setResponses([fauxAssistantMessage("Completion accepted after pause.")]);
+			secondPause.release();
+			await vi.waitFor(() => expect(session.getLastAssistantText()).toBe("Completion accepted after pause."));
+			await session.waitForIdle();
+			await vi.waitFor(() => expect(kernel.hasBackgroundWork).toBe(false));
+			expect(beforeCompletion).toHaveBeenCalledTimes(1);
+			expect(
+				session.messages.filter(
+					(message) => message.role === "custom" && message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+				),
+			).toHaveLength(1);
+		} finally {
+			firstPause.release();
+			secondPause.release();
+		}
+	});
+
+	it("stops waiting for admission when the session is disposed", async () => {
+		const beforeCompletion = vi.fn(async () => {});
+		const { session, kernel } = await start(beforeCompletion);
+		const pause = session.acquireSessionInputPause();
+		try {
+			await kernel.execute("from rlm import bash\nhandle = bash('printf done')");
+			await vi.waitFor(() => expect(session.hasPendingAdmissionWaiters).toBe(true));
+			session.dispose();
+			await vi.waitFor(() => expect(session.hasPendingAdmissionWaiters).toBe(false));
+			await vi.waitFor(() => expect(kernel.hasBackgroundWork).toBe(false));
+			expect(beforeCompletion).toHaveBeenCalledTimes(1);
+			expect(session.messages).toEqual([]);
+		} finally {
+			pause.release();
+		}
+	});
+
+	it("reports a terminal readiness failure without retrying or retaining completed work", async () => {
+		const beforeCompletion = vi.fn(async () => {});
+		const { session, kernel } = await start(beforeCompletion, false);
+		await kernel.execute("from rlm import bash\nhandle = bash('printf done')");
+		await vi.waitFor(() => expect(beforeCompletion).toHaveBeenCalledTimes(1));
+		await vi.waitFor(() => expect(kernel.hasBackgroundWork).toBe(false));
+		expect(session.messages).toEqual([]);
+		const nextCell = await kernel.execute("handle.poll().exit_code");
+		expect(nextCell.result).toBe("0");
+		expect(nextCell.backgroundOutput).toContain("was not accepted");
+		expect(beforeCompletion).toHaveBeenCalledTimes(1);
 	});
 
 	it("holds residency until the completion follow-up is accepted", async () => {

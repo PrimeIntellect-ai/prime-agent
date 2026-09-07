@@ -55,7 +55,7 @@ checks = bash("npm test")
 checks.pid
 ```
 
-When a handle left running beyond its creating cell finishes, Prime Agent sends the agent a follow-up with its PID and exit code. The follow-up asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second completion follow-up.
+When an unawaited handle's process group finishes, Prime Agent sends the agent a follow-up with its PID and foreground exit code. `await handle` and `handle.poll()` still return the foreground result before shell background jobs finish. The kernel stays resident until the process group is reaped, including for handles awaited in their creating cell. The follow-up asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second completion follow-up.
 
 Awaiting the original handle in its creating cell suppresses the follow-up, even after the command finishes. If an `asyncio.as_completed` wrapper task finishes before the cell starts consuming its result, that cached-result read does not mark the handle as awaited. A completion follow-up can still arrive. Await the original handle in the creating cell to suppress it.
 

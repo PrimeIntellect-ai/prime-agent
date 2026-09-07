@@ -653,6 +653,8 @@ interface PreparedPromptPreparation {
 
 class DeferredSessionInputError extends Error {}
 
+class SessionInputAdmissionPausedError extends Error {}
+
 function oncePreflight(
 	preflightResult: ((success: boolean, queued?: boolean) => void) | undefined,
 ): (success: boolean, queued?: boolean) => void {
@@ -5661,7 +5663,9 @@ export class AgentSession {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
 		if (this._sessionInputAdmissionPauses.size > 0) {
-			throw new Error("Cannot admit a session action while session input admission is paused.");
+			throw new SessionInputAdmissionPausedError(
+				"Cannot admit a session action while session input admission is paused.",
+			);
 		}
 		if (this._sessionInputPumpSuspended) {
 			throw new Error("Cannot admit a session action while queued session input is suspended.");
@@ -5685,7 +5689,9 @@ export class AgentSession {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
 		if (this._sessionInputAdmissionPauses.size > 0) {
-			throw new Error("Cannot admit a session action while session input admission is paused.");
+			throw new SessionInputAdmissionPausedError(
+				"Cannot admit a session action while session input admission is paused.",
+			);
 		}
 		if (
 			options.restore !== true &&
@@ -9423,13 +9429,28 @@ export class AgentSession {
 			})),
 			"bash.completed": createAsyncBashCompletionHostHandler(async (details) => {
 				const message = createAsyncBashCompletionMessage(details);
-				await this._promptInjectedMessage(message.content, message, {
-					streamingBehavior: "followUp",
-					queueIfBusy: true,
-					resumeIfIdle: true,
-					returnAfterAccepted: true,
-					suppressAutonomousContinuation: true,
-				});
+				const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+				while (true) {
+					let admissionCommitted = false;
+					try {
+						await this._promptInjectedMessage(message.content, message, {
+							streamingBehavior: "followUp",
+							queueIfBusy: true,
+							resumeIfIdle: true,
+							returnAfterAccepted: true,
+							suppressAutonomousContinuation: true,
+							admissionCommitted: () => {
+								admissionCommitted = true;
+							},
+						});
+						return;
+					} catch (error) {
+						if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
+						while (this._sessionInputAdmissionPauses.size > 0 && !disposeSignal.aborted) {
+							await this._waitForSessionActivityChange(disposeSignal);
+						}
+					}
+				}
 			}),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),

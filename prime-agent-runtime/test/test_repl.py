@@ -890,6 +890,138 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(request["data"]["pid"], pid)
         reply_ok(self.repl, request)
 
+    def test_bash_activity_and_notice_wait_for_group_reap(self):
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        for awaited in (False, True):
+            with self.subTest(awaited=awaited):
+                events = self.repl.execute(
+                    "group-start",
+                    "from rlm import bash\nimport asyncio\n"
+                    "handle = bash('sleep 30 &')\n"
+                    + ("await handle\n" if awaited else "")
+                    + "await asyncio.wait_for(handle._wait(), 3)\nhandle._group_alive()",
+                )
+                self.assertEqual(one(events, "result")["text"], "True")
+                self.assertIsNone(one(events, "host_request"))
+                self.assertFalse(
+                    any(event.get("data", {}).get(mime, {}).get("active") is False for event in events)
+                )
+                events += self.repl.execute("group-stop", "handle.kill()")
+                requests = []
+                cursor = 0
+                while True:
+                    for event in events[cursor:]:
+                        if event.get("event") == "host_request":
+                            requests.append(event)
+                            reply_ok(self.repl, event)
+                    cursor = len(events)
+                    if any(event.get("data", {}).get(mime, {}).get("active") is False for event in events):
+                        break
+                    events.append(self.repl.read_event())
+                self.assertEqual(len(requests), 0 if awaited else 1)
+                checked = self.repl.execute(
+                    "group-reaped", "await asyncio.wait_for(handle._wait_reaped(), 1)\nhandle._reaped"
+                )
+                self.assertEqual(one(checked, "result")["text"], "True")
+
+    def test_cancelled_released_bash_await_keeps_completion_notice(self):
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        for released in (False, True):
+            with self.subTest(released=released):
+                events = self.repl.execute(
+                    "cancel-start",
+                    "from rlm import bash\nimport asyncio\n"
+                    "handle = bash('sleep 0.15; printf finished')\n"
+                    + ("handle.pid\n" if released else "")
+                    + "try:\n    await asyncio.wait_for(handle, 0.01)\n"
+                    "except TimeoutError:\n    pass\nhandle._group_alive()",
+                )
+                self.assertEqual(one(events, "result")["text"], str(released))
+                requests = []
+                cursor = 0
+                while True:
+                    for event in events[cursor:]:
+                        if event.get("event") == "host_request":
+                            requests.append(event)
+                            reply_ok(self.repl, event)
+                    cursor = len(events)
+                    if any(event.get("data", {}).get(mime, {}).get("active") is False for event in events):
+                        break
+                    events.append(self.repl.read_event())
+                self.assertEqual(len(requests), 1 if released else 0)
+                checked = self.repl.execute("cancel-result", "handle.poll().output")
+                self.assertEqual(one(checked, "result")["text"], "'finished'" if released else "''")
+
+    def test_interrupt_during_bash_notifier_construction_rolls_back_activity(self):
+        code = "\n".join(
+            [
+                "from rlm import bash, repl as bridge",
+                "import sys, threading, asyncio, inspect",
+                "def stop_at_notice_construction(frame, event, arg):",
+                "    coro = frame.f_locals.get('coro')",
+                "    if (event == 'call' and frame.f_code.co_name == 'create_task'",
+                "            and getattr(getattr(coro, 'cr_code', None), 'co_name', None)",
+                "            == '_notify_background_completion'):",
+                "        globals()['unscheduled_notice'] = coro",
+                "        globals()['interrupted_handle'] = coro.cr_frame.f_locals['self']",
+                "        bridge.emit({'application/json': {'at_notice_create_task': True}})",
+                "        threading.Event().wait(10)",
+                "    return stop_at_notice_construction",
+                "sys.settrace(stop_at_notice_construction)",
+                "handle = bash('sleep 30')",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "construct", "code": code})
+        events = []
+        while True:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("data", {}).get("application/json", {}).get("at_notice_create_task"):
+                break
+        self.repl.send({"type": "interrupt", "id": "construct"})
+        events += self.repl.until_done("construct")
+        self.assertEqual(one(events, "done")["status"], "error")
+        self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        activity = [event["data"][mime] for event in events if mime in event.get("data", {})]
+        self.assertEqual([item["active"] for item in activity], [True, False])
+        self.assertEqual(activity[0]["id"], activity[1]["id"])
+        checked = self.repl.execute(
+            "construct-check",
+            "sys.settrace(None)\n"
+            "assert await interrupted_handle._await_group_death(3)\n"
+            "(inspect.getcoroutinestate(unscheduled_notice), interrupted_handle._reap_callback, "
+            "interrupted_handle._group_alive())",
+        )
+        self.assertEqual(one(checked, "result")["text"], "('CORO_CLOSED', None, False)")
+
+    def test_rejected_bash_completion_reports_safe_stderr_and_releases_activity(self):
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        for reply in ({"status": "error", "error": "secret-host-error"}, {}, {"status": "ok"}):
+            with self.subTest(reply=reply):
+                events = self.repl.execute(
+                    "ack-start", "from rlm import bash\nhandle = bash('printf secret-command')"
+                )
+                request = wait_for_host_request(self.repl, events)
+                self.repl.send({"type": "host_reply", "id": request["id"], "data": reply})
+                after = []
+                while not any(
+                    event.get("data", {}).get(mime, {}).get("active") is False for event in after
+                ):
+                    after.append(self.repl.read_event())
+                diagnostic = stream_text(after, "stderr")
+                if reply.get("status") == "ok":
+                    self.assertEqual(diagnostic, "")
+                else:
+                    self.assertEqual(
+                        diagnostic,
+                        f"Background bash completion follow-up for pid {request['data']['pid']} "
+                        "was not accepted. Inspect the saved handle with poll(), output(), or tail().\n",
+                    )
+                self.assertIsNone(one(after, "host_request"))
+                checked = self.repl.execute("ack-check", "handle._reaped, handle.poll().exit_code")
+                self.assertEqual(one(checked, "result")["text"], "(True, 0)")
+
     def test_reused_request_id_does_not_capture_old_cell_bash_completion(self):
         setup = "\n".join(
             [
