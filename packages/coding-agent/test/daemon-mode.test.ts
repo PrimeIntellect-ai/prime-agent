@@ -75,8 +75,26 @@ import { activeActivityForSession, type SessionSummary } from "../src/modes/daem
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
 import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
+import * as themeModule from "../src/modes/interactive/theme/theme.js";
 
 describe("daemon mode helpers", () => {
+	it("initializes the headless theme for hosted extensions", () => {
+		const initSpy = vi.spyOn(themeModule, "initTheme");
+		try {
+			new AgentDaemon("/tmp/unused-daemon.sock", {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				createRuntime: vi.fn(),
+			});
+			// Watcher off: the worker has no TTY and must not hold a theme file watcher.
+			expect(initSpy).toHaveBeenCalledOnce();
+			expect(initSpy.mock.calls[0]?.[1]).toBe(false);
+			// ctx.ui.theme hands extensions this proxy; the first access must not throw.
+			expect(() => themeModule.theme.fg("dim", "worker")).not.toThrow();
+		} finally {
+			initSpy.mockRestore();
+		}
+	});
+
 	it("preserves envelope client identity while registering prompt admission", () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },

@@ -1,0 +1,1 @@
+- Fixed daemon session workers crashing when a hosted extension touched `ctx.ui.theme` (theme was never initialized in the worker process); workers now initialize the settings theme headlessly at startup, without a theme file watcher.

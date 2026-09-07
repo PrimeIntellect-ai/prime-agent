@@ -111,6 +111,7 @@ import {
 } from "../../core/session-manager.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { SettingsManager } from "../../core/settings-manager.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
@@ -123,6 +124,7 @@ import {
 import { createAgentConnectionToolDefinition } from "../agent-connection/tool-definition.js";
 import type { AgentConnectionHeartbeat, AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
+import { initTheme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import { encodePrivateFrame, PrivateFrameDecoder } from "../session-worker/private-framing.js";
 import {
@@ -595,6 +597,13 @@ export class AgentDaemon {
 			throw new Error("Daemon config is missing agentDir");
 		}
 		this.agentDir = options.defaultSessionConfig.agentDir;
+		// Hosted extensions receive ctx.ui.theme; without a process-level init the
+		// first theme access throws and the uncaught handler kills the worker.
+		// Headless process: no theme file watcher.
+		initTheme(
+			SettingsManager.create(options.defaultSessionConfig.cwd ?? process.cwd(), this.agentDir).getTheme(),
+			false,
+		);
 		this.cronStore = options.worker
 			? AgentCronJobStore.forSessionArtifacts()
 			: new AgentCronJobStore(getCronJobsPath(this.agentDir));
