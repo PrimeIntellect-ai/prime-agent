@@ -13,6 +13,7 @@ import {
 	connectAndActivateSandboxRuntime,
 	proxyNextSandboxInference,
 	SandboxHomeRuntimeConnection,
+	upgradeSandboxHomeRuntimeConnectionToV31,
 } from "../src/modes/daemon/sandbox/prime-sandbox-home-connection.js";
 import {
 	decodeSandboxInferenceReply,
@@ -114,11 +115,19 @@ async function setup() {
 describe("Home-private sandbox runtime connection", () => {
 	test("keeps the endpoint private while completing native handshake and activation", async () => {
 		const state = await setup();
-		let finishRuntime: ((value: boolean) => void) | undefined;
-		const runtimeDone = new Promise<boolean>((resolve) => {
-			finishRuntime = resolve;
-		});
+		const runtimeFinish: Array<(value: boolean) => void> = [];
+		const runtimeDone: Array<Promise<boolean>> = [];
+		let connectionIndex = 0;
+		function finishRuntime(index: number, value: boolean): void {
+			const fn = runtimeFinish[index];
+			if (fn !== undefined) fn(value);
+		}
 		const listener = await listenSandboxRuntimeTcp(async (io) => {
+			const index = connectionIndex;
+			connectionIndex += 1;
+			runtimeDone[index] = new Promise<boolean>((resolve) => {
+				runtimeFinish[index] = resolve;
+			});
 			const handshake = await performSandboxRuntimeHandshake(
 				io,
 				state.runtimeIdentity,
@@ -126,80 +135,95 @@ describe("Home-private sandbox runtime connection", () => {
 				state.protocolNonce,
 			);
 			if (!handshake.ok) {
-				finishRuntime?.(false);
+				finishRuntime(index, false);
 				return;
 			}
 			const frame = await readFrame(io);
 			if (frame === undefined) {
-				finishRuntime?.(false);
+				finishRuntime(index, false);
 				return;
 			}
 			const activated = await acceptSandboxRuntimeActivation(handshake.channel, frame);
 			if (!activated.ok) {
-				finishRuntime?.(false);
+				finishRuntime(index, false);
 				return;
 			}
 			const written = await io.writeExact(activated.value.ackFrame, 3_000);
 			if (!written) {
-				finishRuntime?.(false);
+				finishRuntime(index, false);
 				return;
 			}
-			const request = encodeSandboxInferenceRequest(1n, "prime-inference/test-model", "private prompt");
-			if (!request.ok) {
-				finishRuntime?.(false);
-				return;
-			}
-			const requestFrame = await encryptSandboxTransportFrame(handshake.channel, 0n, request.value);
-			request.value.fill(0);
-			if (!requestFrame.ok || !(await io.writeExact(requestFrame.value, 3_000))) {
-				if (requestFrame.ok) requestFrame.value.fill(0);
-				finishRuntime?.(false);
-				return;
-			}
-			requestFrame.value.fill(0);
-			const ackFrame = await readFrame(io);
-			if (ackFrame === undefined) {
-				finishRuntime?.(false);
-				return;
-			}
-			const ackPlaintext = await decryptSandboxTransportFrame(handshake.channel, ackFrame);
-			ackFrame.fill(0);
-			if (!ackPlaintext.ok || ackPlaintext.value.streamId !== 0n) {
-				finishRuntime?.(false);
-				return;
-			}
-			const ack = decodeSandboxRequestDeliveryAck(ackPlaintext.value.plaintext);
-			ackPlaintext.value.plaintext.fill(0);
-			if (!ack.ok || ack.value !== 1n) {
-				finishRuntime?.(false);
-				return;
-			}
-			const replyFrame = await readFrame(io);
-			if (replyFrame === undefined) {
-				finishRuntime?.(false);
-				return;
-			}
-			const replyPlaintext = await decryptSandboxTransportFrame(handshake.channel, replyFrame);
-			replyFrame.fill(0);
-			if (!replyPlaintext.ok || replyPlaintext.value.streamId !== 0n) {
-				finishRuntime?.(false);
-				return;
-			}
-			const reply = decodeSandboxInferenceReply(replyPlaintext.value.plaintext);
-			replyPlaintext.value.plaintext.fill(0);
-			if (
-				!reply.ok ||
-				!reply.value.ok ||
-				reply.value.requestId !== 1n ||
-				reply.value.text !== "home model response"
-			) {
-				finishRuntime?.(false);
-				return;
+			if (index === 0) {
+				const request = encodeSandboxInferenceRequest(1n, "prime-inference/test-model", "private prompt");
+				if (!request.ok) {
+					finishRuntime(index, false);
+					return;
+				}
+				const requestFrame = await encryptSandboxTransportFrame(handshake.channel, 0n, request.value);
+				request.value.fill(0);
+				if (!requestFrame.ok || !(await io.writeExact(requestFrame.value, 3_000))) {
+					if (requestFrame.ok) requestFrame.value.fill(0);
+					finishRuntime(index, false);
+					return;
+				}
+				requestFrame.value.fill(0);
+				const ackFrame = await readFrame(io);
+				if (ackFrame === undefined) {
+					finishRuntime(index, false);
+					return;
+				}
+				const ackPlaintext = await decryptSandboxTransportFrame(handshake.channel, ackFrame);
+				ackFrame.fill(0);
+				if (!ackPlaintext.ok || ackPlaintext.value.streamId !== 0n) {
+					finishRuntime(index, false);
+					return;
+				}
+				const ack = decodeSandboxRequestDeliveryAck(ackPlaintext.value.plaintext);
+				ackPlaintext.value.plaintext.fill(0);
+				if (!ack.ok || ack.value !== 1n) {
+					finishRuntime(index, false);
+					return;
+				}
+				const replyFrame = await readFrame(io);
+				if (replyFrame === undefined) {
+					finishRuntime(index, false);
+					return;
+				}
+				const replyPlaintext = await decryptSandboxTransportFrame(handshake.channel, replyFrame);
+				replyFrame.fill(0);
+				if (!replyPlaintext.ok || replyPlaintext.value.streamId !== 0n) {
+					finishRuntime(index, false);
+					return;
+				}
+				const reply = decodeSandboxInferenceReply(replyPlaintext.value.plaintext);
+				replyPlaintext.value.plaintext.fill(0);
+				if (
+					!reply.ok ||
+					!reply.value.ok ||
+					reply.value.requestId !== 1n ||
+					reply.value.text !== "home model response"
+				) {
+					finishRuntime(index, false);
+					return;
+				}
+				const appData = new TextEncoder().encode("hello stream 1");
+				const appFrame = await encryptSandboxTransportFrame(handshake.channel, 1n, appData);
+				appData.fill(0);
+				if (!appFrame.ok) {
+					finishRuntime(index, false);
+					return;
+				}
+				const appWritten = await io.writeExact(appFrame.value, 3_000);
+				appFrame.value.fill(0);
+				if (!appWritten) {
+					finishRuntime(index, false);
+					return;
+				}
 			}
 			await io.waitClosed();
 			closeSandboxRuntimeActivation(activated.value.activation);
 			closeSandboxTransportChannel(handshake.channel);
-			finishRuntime?.(true);
+			finishRuntime(index, true);
 		});
 		if (!listener.ok) throw new Error("listen failed");
 		let stage = 0;
@@ -255,15 +279,98 @@ describe("Home-private sandbox runtime connection", () => {
 		expect(Object.hasOwn(connected.value, "host")).toBe(false);
 		expect(Object.hasOwn(connected.value, "port")).toBe(false);
 		let proxied: Readonly<{ model: string; input: string }> = Object.freeze({ model: "", input: "" });
+		let busyUpgradeResult: ReturnType<typeof upgradeSandboxHomeRuntimeConnectionToV31> | undefined;
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(connected.value, "wrong-model")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
 		expect(
 			await proxyNextSandboxInference(connected.value, async (request) => {
 				proxied = request;
+				busyUpgradeResult = upgradeSandboxHomeRuntimeConnectionToV31(connected.value, "prime-inference/test-model");
 				return Object.freeze({ ok: true, text: "home model response" });
 			}),
 		).toEqual({ ok: true, value: true });
 		expect(proxied).toEqual({ model: "prime-inference/test-model", input: "private prompt" });
-		expect(await closeSandboxHomeRuntimeConnection(connected.value)).toEqual({ ok: true, value: true });
-		expect(await runtimeDone).toBe(true);
+		expect(busyUpgradeResult).toEqual({ ok: false, code: "ALREADY_CONSUMED" });
+		const upgrade = upgradeSandboxHomeRuntimeConnectionToV31(connected.value, "prime-inference/test-model");
+		expect(upgrade.ok).toBe(true);
+		if (!upgrade.ok) return;
+		expect(Object.isFrozen(upgrade)).toBe(true);
+		expect(Object.isFrozen(upgrade.value)).toBe(true);
+		expect(Reflect.ownKeys(upgrade.value)).toEqual(["send", "registerInbound", "close"]);
+		expect(Object.keys(upgrade.value)).toEqual(["send", "registerInbound", "close"]);
+		expect(JSON.stringify(upgrade.value)).toBe("{}");
+		expect(await closeSandboxHomeRuntimeConnection(connected.value)).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(
+			await proxyNextSandboxInference(connected.value, async () => Object.freeze({ ok: true, text: "x" })),
+		).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(connected.value, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		let inboundStreamId: number | undefined;
+		let inboundBytes: Uint8Array | undefined;
+		let inboundResolve: (() => void) | undefined;
+		const inboundReceived = new Promise<void>((resolve) => {
+			inboundResolve = resolve;
+		});
+		expect(
+			upgrade.value.registerInbound(
+				Object.freeze((s: number, d: Uint8Array) => {
+					inboundStreamId = s;
+					inboundBytes = new Uint8Array(d);
+					if (inboundResolve !== undefined) inboundResolve();
+				}),
+			),
+		).toEqual({ code: "REGISTERED" });
+		await inboundReceived;
+		expect(inboundStreamId).toBe(1);
+		expect(new TextDecoder().decode(inboundBytes)).toBe("hello stream 1");
+		const closeResult = await upgrade.value.close();
+		expect(closeResult.code).toBe("CLOSED");
+		expect(await runtimeDone[0]).toBe(true);
+		let trapCount = 0;
+		const forged = new Proxy(Object.freeze({}), {
+			get() {
+				trapCount += 1;
+				return undefined;
+			},
+			has() {
+				trapCount += 1;
+				return false;
+			},
+			set() {
+				trapCount += 1;
+				return true;
+			},
+		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(forged, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(trapCount).toBe(0);
+		const secondConnected = await connectAndActivateSandboxRuntime(
+			provider.value,
+			state.homeIdentity,
+			readiness.value,
+			"prime-inference/test-model",
+		);
+		expect(secondConnected.ok).toBe(true);
+		if (!secondConnected.ok) return;
+		const closePromise = closeSandboxHomeRuntimeConnection(secondConnected.value);
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(secondConnected.value, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(await closePromise).toEqual({ ok: true, value: true });
+		expect(await runtimeDone[1]).toBe(true);
 		expect(await provider.value.unexposeAndProveAbsent()).toEqual({ ok: true });
 		expect(await provider.value.close()).toEqual({ ok: true });
 		expect(await closeSandboxTcpListener(listener.value)).toEqual({ ok: true, value: true });
@@ -366,5 +473,71 @@ describe("Home-private sandbox runtime connection", () => {
 			ok: false,
 			code: "READINESS_INVALID",
 		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(null, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(Object.freeze({}), "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(Symbol("x"), 42)).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(Object.freeze({}), "")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(Object.freeze({}), null)).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(upgradeSandboxHomeRuntimeConnectionToV31(Object.freeze({}), undefined)).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+	});
+
+	test("bounded mutation: captured freeze and apply survive global replacement", async () => {
+		const originalFreeze = Object.freeze;
+		const originalCall = Function.prototype.call;
+		let result: ReturnType<typeof upgradeSandboxHomeRuntimeConnectionToV31>;
+		let mutatedCallCount = 0;
+		try {
+			Object.defineProperty(Object, "freeze", {
+				value: (x: unknown) => x,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+			Object.defineProperty(Function.prototype, "call", {
+				value: () => {
+					mutatedCallCount += 1;
+				},
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+			result = upgradeSandboxHomeRuntimeConnectionToV31(Object.freeze({}), "prime-inference/test-model");
+		} finally {
+			Object.defineProperty(Object, "freeze", {
+				value: originalFreeze,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+			Object.defineProperty(Function.prototype, "call", {
+				value: originalCall,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
+		expect(result).toEqual({ ok: false, code: "INPUT_INVALID" });
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(mutatedCallCount).toBe(0);
+		expect(Object.freeze).toBe(originalFreeze);
+		expect(Function.prototype.call).toBe(originalCall);
 	});
 });
