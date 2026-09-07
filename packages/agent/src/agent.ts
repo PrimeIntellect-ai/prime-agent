@@ -10,7 +10,7 @@ import {
 	type Transport,
 	type Usage,
 } from "@earendil-works/pi-ai";
-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import { EmptyTurnRetryFailure, runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -515,12 +515,13 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
-		// The loop attaches spend of discarded empty-turn attempts to the throw
-		// so it is not erased with them (usage is truth about spend, not content).
-		const discardedUsage =
-			typeof error === "object" && error !== null
-				? (error as { discardedUsage?: Usage[] }).discardedUsage
-				: undefined;
+		// Unwrap the loop's owned carrier: discarded empty-turn spend rides the
+		// wrapper; everything else (message, classification) uses the original.
+		let discardedUsage: Usage[] | undefined;
+		if (error instanceof EmptyTurnRetryFailure) {
+			discardedUsage = error.discardedAttempts;
+			error = error.cause;
+		}
 		const failureMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],

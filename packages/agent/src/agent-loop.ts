@@ -452,6 +452,21 @@ async function runLoop(
 
 const MAX_EMPTY_TURN_ATTEMPTS = 3;
 
+/**
+ * Owned carrier for a throw that interrupts empty-turn retries: the paid spend
+ * of already-discarded attempts rides with the original failure (`cause`),
+ * whatever was thrown — primitives and frozen errors included.
+ */
+export class EmptyTurnRetryFailure extends Error {
+	readonly discardedAttempts: Usage[];
+
+	constructor(cause: unknown, discardedAttempts: Usage[]) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		this.name = "EmptyTurnRetryFailure";
+		this.discardedAttempts = discardedAttempts;
+	}
+}
+
 /** No tool calls and no visible text on a normal stop: completion here would silently abandon the task. Error/abort/length turns are signals of their own. */
 function isEmptyAssistantTurn(message: AssistantMessage): boolean {
 	if (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "length") {
@@ -475,12 +490,7 @@ async function streamAssistantResponse(
 		try {
 			message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
 		} catch (error) {
-			// The run-failure fallback owns the message this throw becomes; the
-			// paid spend of already-discarded attempts must ride along with it.
-			if (discardedUsage.length > 0 && typeof error === "object" && error !== null) {
-				(error as { discardedUsage?: Usage[] }).discardedUsage ??= discardedUsage;
-			}
-			throw error;
+			throw discardedUsage.length > 0 ? new EmptyTurnRetryFailure(error, discardedUsage) : error;
 		}
 		// Overflow turns must pass through untouched so compaction recovery can see them.
 		if (isEmptyAssistantTurn(message) && !isContextOverflow(message, config.model.contextWindow)) {
