@@ -258,9 +258,12 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
-	// Weak tracking: a timer cancelled via the global clearTimeout/clearInterval is dropped by GC instead of retained until unload; pending timers stay reachable through Node's active-timer list.
-	private hostTimers = new Set<WeakRef<ReturnType<typeof setTimeout>>>();
-	private hostTimerRefs = new WeakMap<ReturnType<typeof setTimeout>, WeakRef<ReturnType<typeof setTimeout>>>();
+	// One host object handed runner-to-runner on adoption, so error reporting and scheduling authority always follow the adopting runner. Weak tracking: a timer cancelled via the global clearTimeout/clearInterval is dropped by GC instead of retained until unload; pending timers stay reachable through Node's active-timer list.
+	private timerHost: {
+		current: ExtensionRunner;
+		timers: Set<WeakRef<ReturnType<typeof setTimeout>>>;
+		refs: WeakMap<ReturnType<typeof setTimeout>, WeakRef<ReturnType<typeof setTimeout>>>;
+	};
 
 	constructor(
 		extensions: Extension[],
@@ -269,6 +272,7 @@ export class ExtensionRunner {
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
 	) {
+		this.timerHost = { current: this, timers: new Set(), refs: new WeakMap() };
 		this.extensions = extensions;
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
@@ -485,10 +489,10 @@ export class ExtensionRunner {
 		return this.extensions === extensions;
 	}
 
-	/** Runtime-only rebuilds keep the same extension world: share the previous runner's live timer registry so already-scheduled (and old-ctx-scheduled) timers stay owned and unload still cancels them. */
+	/** Runtime-only rebuilds keep the same extension world: take over the previous runner's timer host so already-scheduled (and old-ctx-scheduled) timers report through, and are gated by, the adopting runner. */
 	adoptHostTimers(previous: ExtensionRunner): void {
-		this.hostTimers = previous.hostTimers;
-		this.hostTimerRefs = previous.hostTimerRefs;
+		this.timerHost = previous.timerHost;
+		this.timerHost.current = this;
 	}
 
 	/** Runner-local retirement for runner replacement: ctx goes stale and no host timer outlives the runner, while the runtime object stays live for the replacement runner (it may be shared or reused). */
@@ -497,11 +501,11 @@ export class ExtensionRunner {
 	): void {
 		if (this.staleMessage) return;
 		this.staleMessage = message;
-		for (const ref of this.hostTimers) {
+		for (const ref of this.timerHost.timers) {
 			const handle = ref.deref();
 			if (handle) clearTimeout(handle);
 		}
-		this.hostTimers.clear();
+		this.timerHost.timers.clear();
 	}
 
 	private assertActive(): void {
@@ -545,6 +549,9 @@ export class ExtensionRunner {
 		callback: () => void | Promise<void>,
 		ms: number,
 	): ReturnType<typeof setTimeout> {
+		// Scheduling authority is the current host owner: a ctx captured before a reload cannot arm work for an unloaded extension world.
+		this.timerHost.current.assertActive();
+		const host = this.timerHost;
 		const run = () => {
 			// A fired timeout is dead: clearTimeout makes handle.refresh() a permanent no-op, so nothing revives it past unload.
 			if (kind === "setTimeout") {
@@ -554,26 +561,27 @@ export class ExtensionRunner {
 			try {
 				const result = callback();
 				if (result instanceof Promise) {
-					result.catch((err) => this.emitHostTimerError(kind, ownerPath, err));
+					result.catch((err) => host.current.emitHostTimerError(kind, ownerPath, err));
 				}
 			} catch (err) {
-				this.emitHostTimerError(kind, ownerPath, err);
+				host.current.emitHostTimerError(kind, ownerPath, err);
 			}
 		};
 		const handle = kind === "setTimeout" ? setTimeout(run, ms) : setInterval(run, ms);
 		// No sweep here: dead WeakRef shells from globally cleared timers are tiny and freed at unload; sweeping per schedule would be quadratic.
 		const ref = new WeakRef(handle);
-		this.hostTimers.add(ref);
-		this.hostTimerRefs.set(handle, ref);
+		host.timers.add(ref);
+		host.refs.set(handle, ref);
 		return handle;
 	}
 
 	private untrackHostTimer(handle: ReturnType<typeof setTimeout>): void {
-		const ref = this.hostTimerRefs.get(handle);
-		if (ref) this.hostTimers.delete(ref);
-		this.hostTimerRefs.delete(handle);
+		const ref = this.timerHost.refs.get(handle);
+		if (ref) this.timerHost.timers.delete(ref);
+		this.timerHost.refs.delete(handle);
 	}
 
+	// Instance method invoked via timerHost.current so adopted timers report through the runner that owns the live error listener.
 	private emitHostTimerError(kind: "setTimeout" | "setInterval", ownerPath: string | undefined, err: unknown): void {
 		this.emitError({
 			extensionPath: ownerPath ?? "unknown",

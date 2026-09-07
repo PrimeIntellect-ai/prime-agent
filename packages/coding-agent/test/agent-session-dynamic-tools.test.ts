@@ -5,6 +5,7 @@ import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import type { ExtensionContext } from "../src/core/extensions/types.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
@@ -237,6 +238,8 @@ describe("AgentSession dynamic tool registration", () => {
 		const sessionManager = SessionManager.inMemory();
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		let ticks = 0;
+		let scheduled = false;
+		let capturedCtx: ExtensionContext | undefined;
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
 			agentDir,
@@ -244,6 +247,9 @@ describe("AgentSession dynamic tool registration", () => {
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_start", (_event, ctx) => {
+						capturedCtx = ctx;
+						if (scheduled) return;
+						scheduled = true;
 						ctx.setInterval(() => {
 							ticks++;
 						}, 5);
@@ -269,6 +275,7 @@ describe("AgentSession dynamic tool registration", () => {
 			await session.bindExtensions({});
 			await vi.advanceTimersByTimeAsync(20);
 			const ticksBeforeRebuild = ticks;
+			const preRebuildCtx = capturedCtx;
 
 			session.replaceAcpMcpServers(
 				[{ name: "task", type: "http", url: "https://task.example/mcp", headers: {} }],
@@ -277,12 +284,15 @@ describe("AgentSession dynamic tool registration", () => {
 			await vi.advanceTimersByTimeAsync(50);
 			expect(ticks).toBeGreaterThan(ticksBeforeRebuild);
 
-			session.dispose();
-			const ticksAtDispose = ticks;
+			await session.reload();
+			const ticksAtReload = ticks;
 			await vi.advanceTimersByTimeAsync(200);
-			expect(ticks).toBe(ticksAtDispose);
+			expect(ticks).toBe(ticksAtReload);
+			expect(() => preRebuildCtx?.setTimeout(() => undefined, 5)).toThrow(/stale/);
 		} finally {
 			vi.useRealTimers();
 		}
+
+		session.dispose();
 	});
 });

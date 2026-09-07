@@ -512,6 +512,49 @@ describe("ExtensionRunner", () => {
 			expect(fs.existsSync(firedMarker)).toBe(true);
 		});
 
+		it("reports a throwing adopted timer callback through the adopting runner", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "adopted-throwing-timer.ts"),
+				`export default function(pi) {
+					pi.on("context", async (_event, ctx) => {
+						ctx.setTimeout(() => { throw new Error("adopted boom"); }, 5);
+					});
+				}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const oldRunner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const newRunner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const oldErrors: string[] = [];
+			const newErrors: string[] = [];
+			oldRunner.onError((err) => oldErrors.push(err.error));
+			newRunner.onError((err) => newErrors.push(err.error));
+
+			vi.useFakeTimers();
+			try {
+				await oldRunner.emitContext([]);
+				newRunner.adoptHostTimers(oldRunner);
+				vi.advanceTimersByTime(10);
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(oldErrors).toEqual([]);
+			expect(newErrors).toEqual(["adopted boom"]);
+		});
+
 		it("cancels pending ctx timers on invalidate so nothing fires after unload", async () => {
 			const firedMarker = path.join(tempDir, "post-unload-fired");
 			fs.writeFileSync(
