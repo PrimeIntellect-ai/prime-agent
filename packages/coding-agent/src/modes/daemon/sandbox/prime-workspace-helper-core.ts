@@ -10,9 +10,11 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { platform } from "node:os";
-import { dirname, isAbsolute, join, normalize } from "node:path";
+import { dirname, isAbsolute, normalize, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -23,6 +25,9 @@ const CAPTURED_OBJECT_HAS_OWN = Object.hasOwn;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
 const CAPTURED_PROCESS_KILL = process.kill.bind(process);
 
+const HELPER_NAME = "ws-posix-helper.py";
+const HELPER_SIZE = 144628;
+const HELPER_DIGEST = "0241c6ddd8de0072bb5b6f7896899767cdde5b4902654f883bb92435fac78fb2";
 const HEADER_SIZE = 5;
 const MAX_PAYLOAD = 1_048_576;
 const MAX_STREAM_BYTES = MAX_PAYLOAD + HEADER_SIZE * 3;
@@ -511,8 +516,88 @@ function resolvedPythonPath(): string {
 	return platform() === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
 }
 
-function resolvedHelperPath(): string {
-	return join(dirname(fileURLToPath(import.meta.url)), "ws-posix-helper.py");
+interface ValidatedHelper {
+	readonly fd: number;
+	readonly scriptName: string;
+}
+
+function sameStat(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.uid === right.uid &&
+		left.gid === right.gid &&
+		left.mode === right.mode &&
+		left.nlink === right.nlink &&
+		left.size === right.size &&
+		left.isFile() === right.isFile()
+	);
+}
+
+function validateHelper(): ValidatedHelper | undefined {
+	let anchorPath: string | undefined;
+	let candidate: string | undefined;
+	let scriptName: string | undefined;
+	const url = import.meta.url;
+	const virtual = url.includes("$bunfs") || url.includes("~BUN") || url.includes("%7EBUN");
+	try {
+		if (virtual) {
+			anchorPath = process.execPath;
+			candidate = resolve(dirname(process.execPath), HELPER_NAME);
+		} else {
+			const modulePath = fileURLToPath(url);
+			anchorPath = modulePath;
+			const directory = normalize(dirname(modulePath));
+			const slashDirectory = directory.replaceAll("\\", "/");
+			let layouts = 0;
+			if (slashDirectory.endsWith("/src/modes/daemon/sandbox")) layouts += 1;
+			if (slashDirectory.endsWith("/dist/modes/daemon/sandbox")) layouts += 1;
+			if (slashDirectory.endsWith("/dist/bundle")) layouts += 1;
+			if (layouts !== 1) return undefined;
+			candidate = resolve(directory, HELPER_NAME);
+		}
+		scriptName =
+			process.platform === "darwin" ? "/dev/fd/3" : process.platform === "linux" ? "/proc/self/fd/3" : undefined;
+		if (anchorPath === undefined || candidate === undefined || scriptName === undefined) return undefined;
+		const anchor = lstatSync(anchorPath);
+		const pathStat = lstatSync(candidate);
+		if (typeof process.geteuid !== "function") return undefined;
+		const closeOnExec = process.platform === "darwin" ? 0x01000000 : 0x00080000;
+		const fd = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | closeOnExec);
+		let keep = false;
+		try {
+			const before = fstatSync(fd);
+			if (pathStat.dev !== before.dev || pathStat.ino !== before.ino) return undefined;
+			if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o7777) !== 0o644) return undefined;
+			if ((before.mode & 0o7000) !== 0 || (before.mode & 0o022) !== 0) return undefined;
+			const euid = process.geteuid();
+			if ((before.uid !== euid && before.uid !== 0) || before.uid !== anchor.uid || before.gid !== anchor.gid)
+				return undefined;
+			if (before.size !== HELPER_SIZE) return undefined;
+			const hash = createHash("sha256");
+			const buffer = new Uint8Array(65_536);
+			let position = 0;
+			try {
+				while (position < before.size) {
+					const wanted = Math.min(buffer.byteLength, before.size - position);
+					const count = readSync(fd, buffer, 0, wanted, position);
+					if (count <= 0 || count > wanted) return undefined;
+					hash.update(buffer.subarray(0, count));
+					position += count;
+				}
+				if (position !== before.size || hash.digest("hex") !== HELPER_DIGEST) return undefined;
+			} finally {
+				zeroBuffer(buffer);
+			}
+			if (!sameStat(before, fstatSync(fd))) return undefined;
+			keep = true;
+			return Object.freeze({ fd, scriptName });
+		} finally {
+			if (!keep) closeSync(fd);
+		}
+	} catch {
+		return undefined;
+	}
 }
 
 function errorCode(error: unknown): string | null {
@@ -616,16 +701,31 @@ interface SpawnAttempt {
 }
 
 async function spawnHelper(): Promise<SpawnAttempt> {
+	const candidate = validateHelper();
+	if (candidate === undefined) return Object.freeze({ processState: null, cleanupComplete: true });
+	const validated: ValidatedHelper = candidate;
+	let descriptorOpen = true;
+	function closeDescriptor(): boolean {
+		if (!descriptorOpen) return true;
+		try {
+			closeSync(validated.fd);
+			descriptorOpen = false;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	let child: ChildProcess;
 	try {
-		child = spawn(resolvedPythonPath(), [resolvedHelperPath()], {
+		child = spawn(resolvedPythonPath(), [validated.scriptName], {
 			cwd: "/",
 			detached: true,
 			env: {},
-			stdio: ["pipe", "pipe", "pipe"],
+			stdio: ["pipe", "pipe", "pipe", validated.fd],
 		});
 	} catch {
-		return Object.freeze({ processState: null, cleanupComplete: true });
+		return Object.freeze({ processState: null, cleanupComplete: closeDescriptor() });
 	}
 	const childState = watchChild(child);
 	const stdin = child.stdin;
@@ -639,8 +739,11 @@ async function spawnHelper(): Promise<SpawnAttempt> {
 	if (!childState.spawned && !childState.spawnError && !childState.closed) {
 		await boundedEventWait(child, "spawn", OP_DEADLINE_MS, "error", "close");
 	}
+	const descriptorClosed = closeDescriptor();
 
 	if (
+		!descriptorClosed ||
+		!childState.spawned ||
 		childState.spawnError ||
 		childState.closed ||
 		pgid <= 0 ||
@@ -652,7 +755,7 @@ async function spawnHelper(): Promise<SpawnAttempt> {
 		writeState === null
 	) {
 		const cleanupComplete = await finishFailedSpawn(child, childState, stdin, writeState, stdout, stderr, pgid);
-		return Object.freeze({ processState: null, cleanupComplete });
+		return Object.freeze({ processState: null, cleanupComplete: descriptorClosed && cleanupComplete });
 	}
 
 	const processState = Object.freeze({ child, childState, stdin, writeState, stdout, stderr, pgid });

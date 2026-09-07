@@ -1,9 +1,25 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import {
+	chmodSync,
+	closeSync,
+	constants,
+	fstatSync,
+	linkSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyWorkspaceRootLifecycle } from "../src/modes/daemon/sandbox/prime-workspace-authority.js";
 
@@ -176,16 +192,48 @@ while True:
 `;
 }
 
-function createHarness(mode: string, missingPython: boolean, uncertainProbe: boolean): string {
-	const directory = mkdtempSync(join(tmpdir(), "workspace-authority-"));
-	fixtureDirectories.push(directory);
-	writeFileSync(join(directory, "ws-posix-helper.py"), fixtureSource(mode), { mode: 0o700 });
+function createHarness(
+	mode: string,
+	missingPython: boolean,
+	uncertainProbe: boolean,
+	layout: "src" | "unbundled" | "bundle" | "invalid" = "src",
+	hostileSwap = false,
+): string {
+	const fixtureRoot = mkdtempSync(join(tmpdir(), "workspace-authority-"));
+	fixtureDirectories.push(fixtureRoot);
+	const directory =
+		layout === "src"
+			? join(fixtureRoot, "src", "modes", "daemon", "sandbox")
+			: layout === "unbundled"
+				? join(fixtureRoot, "dist", "modes", "daemon", "sandbox")
+				: layout === "bundle"
+					? join(fixtureRoot, "dist", "bundle")
+					: join(fixtureRoot, "invalid-layout");
+	mkdirSync(directory, { recursive: true });
+	const helperSource = fixtureSource(mode);
+	writeFileSync(join(directory, "ws-posix-helper.py"), helperSource, { mode: 0o644 });
 	writeFileSync(join(directory, "prime-workspace-authority-types.ts"), readFileSync(AUTHORITY_TYPES, "utf8"));
 	let coreSource = readFileSync(AUTHORITY_CORE, "utf8");
+	coreSource = coreSource.replace(
+		"const HELPER_SIZE = 144628;",
+		`const HELPER_SIZE = ${Buffer.byteLength(helperSource)};`,
+	);
+	coreSource = coreSource.replace(
+		'const HELPER_DIGEST = "0241c6ddd8de0072bb5b6f7896899767cdde5b4902654f883bb92435fac78fb2";',
+		`const HELPER_DIGEST = "${createHash("sha256").update(helperSource).digest("hex")}";`,
+	);
+	if (hostileSwap) {
+		const helperPath = JSON.stringify(join(directory, "ws-posix-helper.py"));
+		const displacedPath = JSON.stringify(join(directory, "validated-helper.py"));
+		coreSource = `import { renameSync as hostileRenameSync, writeFileSync as hostileWriteFileSync } from "node:fs";\n${coreSource}`;
+		coreSource = coreSource.replace(
+			"const validated: ValidatedHelper = candidate;",
+			`const validated: ValidatedHelper = candidate;\n\thostileRenameSync(${helperPath}, ${displacedPath});\n\thostileWriteFileSync(${helperPath}, "raise SystemExit(91)\\n", { mode: 0o644 });`,
+		);
+	}
 	if (missingPython) {
 		const missingPath = JSON.stringify(join(directory, "missing-python"));
-		coreSource = coreSource.replace('"/opt/homebrew/bin/python3"', missingPath);
-		coreSource = coreSource.replace('"/usr/local/bin/python3"', missingPath);
+		coreSource = coreSource.replace("spawn(resolvedPythonPath(),", `spawn(${missingPath},`);
 	}
 	if (uncertainProbe) {
 		coreSource = coreSource.replace("CAPTURED_PROCESS_KILL(-pgid, 0);", "CAPTURED_PROCESS_KILL(1, 0);");
@@ -202,9 +250,8 @@ process.stdout.write(JSON.stringify(result));
 	return join(directory, "runner.ts");
 }
 
-function verifyResultWithFixture(mode: string, missingPython = false, uncertainProbe = false): string {
+function runFixture(runner: string): string {
 	const root = freshSessionRoot();
-	const runner = createHarness(mode, missingPython, uncertainProbe);
 	const result = spawnSync(process.execPath, [runner, root], {
 		cwd: dirname(runner),
 		env: process.env,
@@ -213,6 +260,10 @@ function verifyResultWithFixture(mode: string, missingPython = false, uncertainP
 	});
 	if (result.error !== undefined) return "PROCESS_ERROR";
 	return result.stdout.toString("utf8");
+}
+
+function verifyResultWithFixture(mode: string, missingPython = false, uncertainProbe = false): string {
+	return runFixture(createHarness(mode, missingPython, uncertainProbe));
 }
 
 function verifyWithFixture(mode: string): boolean {
@@ -237,6 +288,47 @@ process.stdout.write(JSON.stringify({ result, frozen: Object.isFrozen(result) })
 	});
 	if (result.error !== undefined) return "PROCESS_ERROR";
 	return result.stdout.toString("utf8");
+}
+
+async function collectFdSpawn(
+	python: string,
+	args: string[],
+	fd: number,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+	return await new Promise((resolveResult, reject) => {
+		const child = spawn(python, args, { cwd: "/", env: {}, detached: true, stdio: ["ignore", "pipe", "pipe", fd] });
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			stdout += chunk;
+		});
+		child.stderr?.on("data", (chunk: string) => {
+			stderr += chunk;
+		});
+		const timer = setTimeout(() => {
+			if (child.pid !== undefined) {
+				try {
+					process.kill(-child.pid, "SIGTERM");
+				} catch {}
+				setTimeout(() => {
+					try {
+						process.kill(-(child.pid ?? 0), "SIGKILL");
+					} catch {}
+				}, 250);
+			}
+			reject(new Error("fd spawn timeout"));
+		}, 5000);
+		child.once("error", (error) => {
+			clearTimeout(timer);
+			reject(error);
+		});
+		child.once("close", (code, signal) => {
+			clearTimeout(timer);
+			resolveResult({ code, signal, stdout, stderr });
+		});
+	});
 }
 
 afterEach(() => {
@@ -484,6 +576,127 @@ describe("V25 recovery trigger integration", () => {
 		expect(recoveryResultWithFixture("recover-finalized")).toBe(
 			'{"result":{"outcome":"UNCERTAIN","reason":"RECOVERY_UNCERTAIN"},"frozen":true}',
 		);
+	});
+});
+
+describe("fd-bound packaged helper resolver", () => {
+	it("accepts the exact source, unbundled, and bundle layouts", () => {
+		for (const layout of ["src", "unbundled", "bundle"] as const) {
+			expect(runFixture(createHarness("zero-exit", false, false, layout))).toBe('{"ok":true}');
+		}
+	});
+
+	it("rejects a module outside every exact noncompiled layout", () => {
+		expect(runFixture(createHarness("zero-exit", false, false, "invalid"))).toBe(
+			'{"ok":false,"code":"HELPER_FAILED"}',
+		);
+	});
+
+	it("rejects missing, altered, symlinked, hard-linked, and wrong-mode helpers", () => {
+		const mutations: ((helper: string) => void)[] = [
+			(helper) => rmSync(helper),
+			(helper) => {
+				const bytes = readFileSync(helper);
+				bytes[0] ^= 1;
+				writeFileSync(helper, bytes);
+			},
+			(helper) => {
+				const outside = join(dirname(dirname(dirname(dirname(dirname(helper))))), "outside-helper.py");
+				writeFileSync(outside, readFileSync(helper), { mode: 0o644 });
+				rmSync(helper);
+				symlinkSync(outside, helper);
+			},
+			(helper) => linkSync(helper, `${helper}.second-link`),
+			(helper) => chmodSync(helper, 0o600),
+		];
+		for (const mutate of mutations) {
+			const runner = createHarness("zero-exit", false, false);
+			mutate(join(dirname(runner), "ws-posix-helper.py"));
+			expect(runFixture(runner)).toBe('{"ok":false,"code":"HELPER_FAILED"}');
+		}
+	});
+
+	it("executes the validated fd after hostile pathname replacement before spawn", () => {
+		const runner = createHarness("zero-exit", false, false, "src", true);
+		expect(runFixture(runner)).toBe('{"ok":true}');
+		expect(readFileSync(join(dirname(runner), "ws-posix-helper.py"), "utf8")).toContain("SystemExit(91)");
+	});
+
+	it("proves positional hashing, unchanged fstat, shared offset zero, and full fd3 execution", async () => {
+		const temporary = mkdtempSync(join(tmpdir(), "workspace-fd-gate-"));
+		fixtureDirectories.push(temporary);
+		const candidate = join(temporary, "gate.py");
+		const displaced = join(temporary, "validated.py");
+		const original = Buffer.from(
+			"import os,sys\nassert os.getpid()>1\nassert sys.version_info.major==3\nprint('BOUND')\n",
+		);
+		writeFileSync(candidate, original, { mode: 0o644 });
+		const closeOnExec = process.platform === "darwin" ? 0x01000000 : 0x00080000;
+		const fd = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | closeOnExec);
+		try {
+			const before = fstatSync(fd);
+			const hash = createHash("sha256");
+			const buffer = Buffer.alloc(17);
+			const ranges: [number, number][] = [];
+			let position = 0;
+			while (position < before.size) {
+				const wanted = Math.min(buffer.byteLength, before.size - position);
+				const count = readSync(fd, buffer, 0, wanted, position);
+				expect(count).toBeGreaterThan(0);
+				ranges.push([position, position + count]);
+				hash.update(buffer.subarray(0, count));
+				position += count;
+			}
+			expect(ranges[0]?.[0]).toBe(0);
+			for (let index = 1; index < ranges.length; index += 1) expect(ranges[index]?.[0]).toBe(ranges[index - 1]?.[1]);
+			expect(ranges.at(-1)?.[1]).toBe(before.size);
+			expect(hash.digest("hex")).toBe(createHash("sha256").update(original).digest("hex"));
+			const after = fstatSync(fd);
+			for (const key of ["dev", "ino", "uid", "gid", "mode", "nlink", "size"] as const)
+				expect(after[key]).toBe(before[key]);
+			expect(after.isFile()).toBe(before.isFile());
+			const python = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+			const offset = await collectFdSpawn(python, ["-c", "import os;print(os.lseek(3,0,1))"], fd);
+			expect(offset).toEqual({ code: 0, signal: null, stdout: "0\n", stderr: "" });
+			renameSync(candidate, displaced);
+			writeFileSync(candidate, "raise SystemExit(91)\n", { mode: 0o644 });
+			const descriptorPath = process.platform === "darwin" ? "/dev/fd/3" : "/proc/self/fd/3";
+			const executed = await collectFdSpawn(python, [descriptorPath], fd);
+			expect(executed).toEqual({ code: 0, signal: null, stdout: "BOUND\n", stderr: "" });
+		} finally {
+			closeSync(fd);
+		}
+	});
+
+	it("uses compiled executable adjacency rather than its virtual module URL", () => {
+		const runner = createHarness("zero-exit", false, false);
+		const fixtureRoot = resolve(dirname(runner), "../../../..");
+		const compiledDir = join(fixtureRoot, "compiled");
+		mkdirSync(compiledDir);
+		const binary = join(compiledDir, "workspace-resolver");
+		const built = spawnSync(process.execPath, ["build", "--compile", runner, "--outfile", binary], {
+			encoding: "utf8",
+			timeout: 30_000,
+		});
+		expect(built.status, built.stderr).toBe(0);
+		writeFileSync(
+			join(compiledDir, "ws-posix-helper.py"),
+			readFileSync(join(dirname(runner), "ws-posix-helper.py")),
+			{
+				mode: 0o644,
+			},
+		);
+		const root = freshSessionRoot();
+		const result = spawnSync(binary, [root], { cwd: "/", env: {}, encoding: "utf8", timeout: 20_000 });
+		expect(result.status, result.stderr).toBe(0);
+		expect(result.stdout).toBe('{"ok":true}');
+	});
+
+	it("pins both accepted platform Python paths and rejects ambiguous layout counts", () => {
+		const source = readFileSync(AUTHORITY_CORE, "utf8");
+		expect(source).toContain('platform() === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3"');
+		expect(source).toContain("if (layouts !== 1) return undefined;");
+		expect(source).toContain('url.includes("$bunfs") || url.includes("~BUN") || url.includes("%7EBUN")');
 	});
 });
 
