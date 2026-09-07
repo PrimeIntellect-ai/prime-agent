@@ -3650,7 +3650,14 @@ describe("daemon mode helpers", () => {
 			client.transport = "private-framed";
 			const result = {
 				activeSessionId: state.activeSessionId,
-				snapshot: { summary: {}, state: {}, messages: [] },
+				snapshot: {
+					activeSessionId: state.activeSessionId,
+					summary: {},
+					state: {},
+					messages: [],
+					lastEventSequence: 0,
+					lastEventCursor: { generation: state.eventGeneration, sequence: 0 },
+				},
 				lastEventSequence: 0,
 			} as unknown as DaemonAttachResult;
 			const streamWorkerSnapshot = vi.fn(async () => undefined);
@@ -3717,9 +3724,12 @@ describe("daemon mode helpers", () => {
 			const result = {
 				activeSessionId: state.activeSessionId,
 				snapshot: {
+					activeSessionId: state.activeSessionId,
 					summary: {},
 					state: {},
 					messages: [{ role: "user", content: "x".repeat(4 * 1024 * 1024 + 1), timestamp: 0 }],
+					lastEventSequence: 0,
+					lastEventCursor: { generation: state.eventGeneration, sequence: 0 },
 				},
 				lastEventSequence: 0,
 			} as unknown as DaemonAttachResult;

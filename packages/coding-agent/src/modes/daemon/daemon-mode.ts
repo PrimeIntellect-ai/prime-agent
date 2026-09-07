@@ -3921,7 +3921,7 @@ export class AgentDaemon {
 					});
 				}
 				if (streamsSnapshot) {
-					const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = snapshotTransferId(result.snapshot);
 					let transcript: SnapshotTranscriptChunkSource;
 					try {
 						transcript = createSnapshotTranscriptChunks({
@@ -6639,10 +6639,9 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
 	): void {
-		const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
 		// Mark before the registry read so later events queue behind this snapshot.
 		const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
-		void this.prepareReplacementSnapshot(client, state, message, snapshotId, snapshotSignal).catch((error) => {
+		void this.prepareReplacementSnapshot(client, state, message, snapshotSignal).catch((error) => {
 			finishClientSnapshotStreaming(client, state.activeSessionId);
 			this.log(`could not prepare replacement snapshot: ${String(error)}`);
 			if (!client.socket.destroyed && this.sessions.get(state.activeSessionId) === state) {
@@ -6660,13 +6659,13 @@ export class AgentDaemon {
 		client: DaemonSocketClient,
 		state: ActiveSessionState,
 		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
-		snapshotId: string,
 		snapshotSignal: AbortSignal,
 	): Promise<void> {
 		const result = await this.createAttachResult(client, state, {
 			type: "attach",
 			activeSessionId: state.activeSessionId,
 		});
+		const snapshotId = snapshotTransferId(result.snapshot);
 		if (this.sessions.get(state.activeSessionId) !== state) {
 			finishClientSnapshotStreaming(client, state.activeSessionId);
 			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
@@ -7068,7 +7067,7 @@ export class AgentDaemon {
 							),
 						});
 					}
-					const snapshotId = `${activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = snapshotTransferId(result.snapshot);
 					const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
 					let transcript: SnapshotTranscriptChunkSource;
 					try {
@@ -7349,6 +7348,16 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"session_info_changed",
 	"thinking_level_changed",
 ]);
+
+/**
+ * The transfer id must name the cursor observed at materialization, not the live session cursor:
+ * events appended in between would let two different byte streams share one snapshot id.
+ */
+function snapshotTransferId(snapshot: DaemonSessionSnapshot): string {
+	// createSessionSnapshot always sets lastEventCursor; it is optional only on the wire.
+	const cursor = snapshot.lastEventCursor!;
+	return `${snapshot.activeSessionId}-${cursor.generation}-${cursor.sequence}`;
+}
 
 function hasDaemonOutboundActiveSessionId(
 	message: DaemonOutbound,
