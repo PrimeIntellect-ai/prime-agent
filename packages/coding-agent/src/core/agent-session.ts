@@ -94,13 +94,17 @@ import {
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
 	COMPACT_SKILL_NAME,
+	CONTEXT_CAP_FLOOR_MARGIN,
 	type CompactionResult,
+	type CompactionSettings,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	compactionTriggerTokens,
 	estimateContextTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	resolveContextCap,
 	serializeConversation,
 	shouldCompact,
 } from "./compaction/index.js";
@@ -914,8 +918,10 @@ type GoalSlashCommand =
 
 type AutonomousSlashCommand = { kind: "status" } | { kind: "on" } | { kind: "off" };
 
+import type { ContextLimitSource, ContextLimitStatus } from "./context-limit.js";
 import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
+export type { ContextLimitSource, ContextLimitStatus } from "./context-limit.js";
 export type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
 interface PersistedRlmMaxDepthState {
@@ -980,6 +986,18 @@ interface RlmSubagentModelSelection {
 
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
+const CONTEXT_LIMIT_STATE_CUSTOM_TYPE = "context_limit_state";
+export const CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE = "context_cap_clamp_notice";
+
+interface PersistedContextLimitState {
+	maxContextTokens: number | null;
+}
+
+function isPersistedContextLimitState(data: unknown): data is PersistedContextLimitState {
+	if (typeof data !== "object" || data === null) return false;
+	const value = (data as { maxContextTokens?: unknown }).maxContextTokens;
+	return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value > 0);
+}
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1237,6 +1255,8 @@ export class AgentSession {
 	private readonly _configuredRlmMaxDepth: number | undefined;
 	private _rlmMaxDepth: number;
 	private _rlmMaxDepthSource: RlmMaxDepthSource;
+	private _sessionMaxContextTokens: number | undefined;
+	private _contextCapClampNoticeShown = false;
 	private _rlmSessionDir?: string;
 	private readonly _semanticEdges: SemanticEdgeRecorder;
 	private _rlmParentNodeId?: string;
@@ -1345,6 +1365,7 @@ export class AgentSession {
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
+		this._sessionMaxContextTokens = this._loadPersistedContextLimit();
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
@@ -1693,6 +1714,21 @@ export class AgentSession {
 		return undefined;
 	}
 
+	private _loadPersistedContextLimit(): number | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (
+				entry.type === "custom" &&
+				entry.customType === CONTEXT_LIMIT_STATE_CUSTOM_TYPE &&
+				isPersistedContextLimitState(entry.data)
+			) {
+				return entry.data.maxContextTokens ?? undefined;
+			}
+		}
+		return undefined;
+	}
+
 	private _resolveRlmMaxDepth(): {
 		maxDepth: number;
 		source: RlmMaxDepthSource;
@@ -1762,6 +1798,10 @@ export class AgentSession {
 		this._goalState = this._loadPersistedGoalState();
 		this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
 		this._emitGoalUpdate();
+	}
+
+	private _reloadContextLimitFromBranch(): void {
+		this._sessionMaxContextTokens = this._loadPersistedContextLimit();
 	}
 
 	private _reloadRlmMaxDepthFromBranch(): void {
@@ -2846,9 +2886,38 @@ export class AgentSession {
 		}
 	}
 
-	private async _thresholdCompactionNeeded(context: ShouldStopAfterTurnContext): Promise<boolean> {
+	/** Compaction settings with the session /context-limit override applied over project/global settings. */
+	private _effectiveCompactionSettings(): CompactionSettings {
 		const settings = this.settingsManager.getCompactionSettings();
+		if (this._sessionMaxContextTokens !== undefined) {
+			return { ...settings, maxContextTokens: this._sessionMaxContextTokens };
+		}
+		return settings;
+	}
+
+	private _noteClampedContextCapOnce(settings: CompactionSettings): void {
+		if (this._contextCapClampNoticeShown || !settings.enabled) return;
+		const cap = resolveContextCap(settings);
+		if (!cap?.clamped) return;
+		this._contextCapClampNoticeShown = true;
+		const notice: CustomMessage = {
+			role: "custom",
+			customType: CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+			content: `Configured context limit of ${settings.maxContextTokens} tokens is below keepRecentTokens (${settings.keepRecentTokens}) + reserveTokens (${settings.reserveTokens}) + ${CONTEXT_CAP_FLOOR_MARGIN}, which would make compaction thrash. Using ${cap.cap} tokens instead.`,
+			display: true,
+			details: undefined,
+			timestamp: Date.now(),
+		};
+		this.sessionManager.appendCustomMessageEntry(notice.customType, notice.content, notice.display, notice.details);
+		this.agent.state.messages.push(notice);
+		this._emit({ type: "message_start", message: notice });
+		this._emit({ type: "message_end", message: notice });
+	}
+
+	private async _thresholdCompactionNeeded(context: ShouldStopAfterTurnContext): Promise<boolean> {
+		const settings = this._effectiveCompactionSettings();
 		if (!settings.enabled) return false;
+		this._noteClampedContextCapOnce(settings);
 
 		const contextWindow = this.model?.contextWindow ?? 0;
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
@@ -3108,10 +3177,7 @@ export class AgentSession {
 						reason: "no active turn; compaction can only be requested while a turn is running",
 					};
 				}
-				const preparation = prepareCompaction(
-					this.sessionManager.getBranch(),
-					this.settingsManager.getCompactionSettings(),
-				);
+				const preparation = prepareCompaction(this.sessionManager.getBranch(), this._effectiveCompactionSettings());
 				if (!preparation) {
 					const lastEntry = this.sessionManager.getBranch().at(-1);
 					return {
@@ -7627,7 +7693,7 @@ export class AgentSession {
 	}): Promise<CompactionResult> {
 		const { model, apiKey, headers, customInstructions, signal } = options;
 		const pathEntries = this.sessionManager.getBranch();
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._effectiveCompactionSettings();
 
 		const preparation = prepareCompaction(pathEntries, settings);
 		if (!preparation) {
@@ -8676,7 +8742,8 @@ export class AgentSession {
 			if (skipAbortedCheck) return false;
 		}
 
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._effectiveCompactionSettings();
+		this._noteClampedContextCapOnce(settings);
 		const contextWindow = this.model?.contextWindow ?? 0;
 
 		// Skip overflow check if the message came from a different model.
@@ -11746,6 +11813,36 @@ export class AgentSession {
 		return { maxDepth: this._rlmMaxDepth, source: this._rlmMaxDepthSource };
 	}
 
+	getContextLimitStatus(): ContextLimitStatus {
+		const settings = this._effectiveCompactionSettings();
+		const source: ContextLimitSource =
+			this._sessionMaxContextTokens !== undefined
+				? "chat"
+				: (this.settingsManager.getCompactionMaxContextTokens()?.source ?? "none");
+		const cap = resolveContextCap(settings);
+		const contextWindow = this.model?.contextWindow ?? 0;
+		return {
+			contextWindow,
+			reserveTokens: settings.reserveTokens,
+			maxContextTokens: settings.maxContextTokens,
+			source,
+			effectiveCap: cap?.cap,
+			clamped: cap?.clamped ?? false,
+			compactAt: contextWindow > 0 ? compactionTriggerTokens(contextWindow, settings) : null,
+			contextTokens: this.getContextUsage()?.tokens ?? null,
+			enabled: settings.enabled,
+		};
+	}
+
+	setContextLimit(maxContextTokens: number | null): ContextLimitStatus {
+		if (maxContextTokens !== null && !(Number.isSafeInteger(maxContextTokens) && maxContextTokens > 0)) {
+			throw new Error("Context limit must be a positive integer.");
+		}
+		this.sessionManager.appendCustomEntryWithRollback(CONTEXT_LIMIT_STATE_CUSTOM_TYPE, { maxContextTokens });
+		this._sessionMaxContextTokens = maxContextTokens ?? undefined;
+		return this.getContextLimitStatus();
+	}
+
 	async setRlmMaxDepth(maxDepth: number, options: { global?: boolean } = {}): Promise<SetRlmMaxDepthResult> {
 		if (!isNonNegativeInteger(maxDepth)) {
 			throw new Error("RLM max depth must be a non-negative integer.");
@@ -12033,6 +12130,7 @@ export class AgentSession {
 			this._restoreLateIpythonSentAgentMessages();
 			this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();
+			this._reloadContextLimitFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
 			await this._extensionRunner.emit({
@@ -12131,8 +12229,11 @@ export class AgentSession {
 		const model = this.model;
 		if (!model) return undefined;
 
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return undefined;
+		const modelWindow = model.contextWindow ?? 0;
+		if (modelWindow <= 0) return undefined;
+		// A context-limit cap shrinks the window the usage indicator reports against.
+		const cap = resolveContextCap(this._effectiveCompactionSettings());
+		const contextWindow = cap ? Math.min(modelWindow, cap.cap) : modelWindow;
 
 		// After compaction, the last assistant usage reflects pre-compaction context size.
 		// We can only trust usage from an assistant that responded after the latest compaction.

@@ -8,6 +8,7 @@ import {
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE } from "../../src/core/agent-session.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
@@ -1446,6 +1447,35 @@ describe("AgentSession compaction characterization", () => {
 		await sessionInternals._checkCompaction(errorAssistant);
 
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+	});
+
+	it("clamps a sub-floor context cap and emits the clamp notice exactly once", async () => {
+		const harness = await createHarness({
+			settings: {
+				compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1000, maxContextTokens: 1 },
+			},
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		const spy = vi.spyOn(internals, "_runAutoCompaction").mockResolvedValue();
+		const floor = 1000 + 1000 + 8192;
+		const clampNotices = () =>
+			harness.session.agent.state.messages.filter(
+				(message) => message.role === "custom" && message.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+			);
+
+		await internals._checkCompaction(
+			createAssistant(harness, { stopReason: "stop", totalTokens: floor, timestamp: Date.now() }),
+		);
+		expect(spy).not.toHaveBeenCalled();
+		expect(clampNotices()).toHaveLength(1);
+
+		await internals._checkCompaction(
+			createAssistant(harness, { stopReason: "stop", totalTokens: floor + 1, timestamp: Date.now() }),
+		);
+		expect(spy).toHaveBeenCalledWith("threshold", false);
+		expect(clampNotices()).toHaveLength(1);
 	});
 
 	it("does not trigger threshold compaction below the threshold or when disabled", async () => {

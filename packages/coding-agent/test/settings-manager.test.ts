@@ -185,6 +185,33 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("compaction max context tokens", () => {
+		it("prefers the project cap over the global cap and reports its source", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { maxContextTokens: 80000 } }));
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ compaction: { maxContextTokens: 50000 } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getCompactionMaxContextTokens()).toEqual({ maxContextTokens: 50000, source: "project" });
+			expect(manager.getCompactionSettings().maxContextTokens).toBe(50000);
+		});
+
+		it("falls back to the global cap and to undefined when unset", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getCompactionMaxContextTokens()).toBeUndefined();
+			expect(manager.getCompactionSettings().maxContextTokens).toBeUndefined();
+
+			manager.setCompactionMaxContextTokens(80000);
+			expect(manager.getCompactionMaxContextTokens()).toEqual({ maxContextTokens: 80000, source: "global" });
+
+			manager.setCompactionMaxContextTokens(undefined);
+			expect(manager.getCompactionMaxContextTokens()).toBeUndefined();
+		});
+	});
+
 	describe("onboardingShown", () => {
 		it("defaults to false and persists globally", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
