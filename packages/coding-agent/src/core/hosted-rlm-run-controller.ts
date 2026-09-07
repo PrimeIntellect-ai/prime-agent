@@ -1,19 +1,17 @@
 import { types } from "node:util";
-import {
-	createHostedRlmRuntimePort,
-	type HostedRlmAbortResult,
-	type HostedRlmObservationSnapshot,
-	type HostedRlmPortResult,
-	type HostedRlmRuntimeEvent,
-	type HostedRlmRuntimeIdentity,
-	type HostedRlmRuntimePort,
-	type HostedRlmTaskResult,
-	type HostedRlmUnsubscribeResult,
+import type {
+	HostedRlmAbortResult,
+	HostedRlmAdmissionResult,
+	HostedRlmCloseResult,
+	HostedRlmObservationSnapshot,
+	HostedRlmPortErrorCode,
+	HostedRlmPortResult,
+	HostedRlmRuntimeEvent,
+	HostedRlmRuntimeIdentity,
+	HostedRlmRuntimePort,
+	HostedRlmTaskResult,
+	HostedRlmUnsubscribeResult,
 } from "./hosted-rlm-runtime-port.js";
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 export interface HostedRlmRunControllerInput {
 	readonly port: HostedRlmRuntimePort;
@@ -23,61 +21,89 @@ export interface HostedRlmRunControllerInput {
 
 export type CreateHostedRlmRunControllerResult =
 	| Readonly<{ ok: true; value: HostedRlmRunController }>
-	| Readonly<{
-			ok: false;
-			code: "IDENTITY_MISMATCH" | "INVALID_INPUT" | "CLEANUP_UNCERTAIN";
-	  }>;
+	| Readonly<{ ok: false; code: "IDENTITY_MISMATCH" | "INVALID_INPUT" | "CLEANUP_UNCERTAIN" }>;
 
 export interface HostedRlmRunController {
 	readonly identity: HostedRlmRuntimeIdentity;
-	readonly start: (input: { prompt: string; spawnCode?: string }) => Promise<HostedRlmPortResult<HostedRlmTaskResult>>;
+	readonly start: (input: {
+		prompt: string;
+		spawnCode?: string;
+	}) => Promise<HostedRlmPortResult<HostedRlmAdmissionResult>>;
 	readonly requestAbort: () => Promise<HostedRlmPortResult<HostedRlmAbortResult>>;
 	readonly finish: () => Promise<HostedRlmPortResult<HostedRlmTaskResult>>;
 	readonly observe: () => Promise<HostedRlmPortResult<HostedRlmObservationSnapshot>>;
+	readonly close: () => Promise<HostedRlmPortResult<HostedRlmCloseResult>>;
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+type ExactRecord = { readonly [key: string]: unknown };
+type Semantic =
+	| HostedRlmAdmissionResult
+	| HostedRlmAbortResult
+	| HostedRlmCloseResult
+	| HostedRlmObservationSnapshot
+	| HostedRlmTaskResult;
+type Parser<T extends Semantic> = (raw: unknown) => T | null;
 
-const PORT_KEYS = new Set(["identity", "startInitialTask", "abort", "observe", "subscribe"]);
-const IDENTITY_KEYS = new Set(["childId", "sessionId", "sessionName", "modelSelector"]);
-const UNSUBSCRIBE_KEYS = new Set(["unsubscribe"]);
+const NativePromise = Promise;
+const NativeThen = Promise.prototype.then;
+const NativePromisePrototype = Promise.prototype;
+const NativePromiseConstructorDescriptor = freezeDescriptor(
+	Object.getOwnPropertyDescriptor(Promise.prototype, "constructor"),
+);
+const NativeSpeciesDescriptor = freezeDescriptor(Object.getOwnPropertyDescriptor(Promise, Symbol.species));
 
-const OPERATION_TIMEOUT_MS = 30_000;
+const INPUT_KEYS = Object.freeze(["port", "expectedIdentity", "listener"]);
+const PORT_KEYS = Object.freeze([
+	"identity",
+	"startInitialTask",
+	"awaitTerminal",
+	"abort",
+	"observe",
+	"subscribe",
+	"close",
+]);
+const IDENTITY_KEYS = Object.freeze(["childId", "sessionId", "sessionName", "modelSelector"]);
+const START_KEYS = Object.freeze(["prompt", "spawnCode"]);
+const SUBSCRIBE_OK_KEYS = Object.freeze(["ok", "value"]);
+const UNSUBSCRIBE_KEYS = Object.freeze(["unsubscribe"]);
+const RESULT_OK_KEYS = Object.freeze(["ok", "value"]);
+const RESULT_ERROR_KEYS = Object.freeze(["ok", "error"]);
+const ERROR_KEYS = Object.freeze(["code"]);
+const STATUS_KEYS = Object.freeze(["status"]);
+const CODE_KEYS = Object.freeze(["code"]);
+const USAGE_KEYS = Object.freeze(["inputTokens", "outputTokens"]);
+const TASK_KEYS = Object.freeze([
+	"status",
+	"durationMs",
+	"parentReplyCount",
+	"toolUseCount",
+	"answerPreview",
+	"errorCode",
+	"usage",
+]);
+const OBSERVATION_KEYS = Object.freeze([
+	"status",
+	"messageCount",
+	"toolUseCount",
+	"agentRunning",
+	"parentReplyCount",
+	"answerPreview",
+	"usage",
+]);
+const EVENT_KEYS = Object.freeze(["type", "answerPreview", "toolName", "status", "toolUseCount", "parentReplyCount"]);
+const MAX_IDENTIFIER_LENGTH = 128;
+const MAX_PROMPT_LENGTH = 32_768;
+const MAX_SPAWN_CODE_LENGTH = 4_096;
+const MAX_ANSWER_PREVIEW_LENGTH = 2_048;
+const MAX_TOOL_NAME_LENGTH = 256;
+const MAX_EVENT_BUFFER = 16;
+const CONTROL_TIMEOUT_MS = 30_000;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function isNonProxyFunction(value: unknown): value is (...args: unknown[]) => unknown {
-	if (typeof value !== "function") return false;
-	try {
-		return !types.isProxy(value);
-	} catch {
-		return false;
-	}
+function freezeDescriptor(raw: PropertyDescriptor | undefined): Readonly<PropertyDescriptor> | undefined {
+	return raw === undefined ? undefined : Object.freeze(raw);
 }
 
-function isNativePromise(value: unknown): value is Promise<unknown> {
-	if (typeof value !== "object" || value === null) return false;
-	try {
-		if (types.isProxy(value)) return false;
-	} catch {
-		return false;
-	}
-	if (!types.isPromise(value)) return false;
-	try {
-		if (Object.getPrototypeOf(value) !== Promise.prototype) return false;
-	} catch {
-		return false;
-	}
-	if (Object.getOwnPropertyNames(value).length > 0) return false;
-	if (Object.getOwnPropertySymbols(value).length > 0) return false;
-	return true;
-}
-
-function exactRecord(raw: unknown, keys: ReadonlySet<string>): { readonly [key: string]: unknown } | null {
+function exactRecord(raw: unknown, keys: readonly string[], allowMissing: boolean): ExactRecord | null {
 	if (typeof raw !== "object" || raw === null) return null;
 	try {
 		if (types.isProxy(raw)) return null;
@@ -87,514 +113,891 @@ function exactRecord(raw: unknown, keys: ReadonlySet<string>): { readonly [key: 
 	try {
 		if (Object.getPrototypeOf(raw) !== Object.prototype) return null;
 		if (Object.getOwnPropertySymbols(raw).length !== 0) return null;
-		const names = Object.getOwnPropertyNames(raw);
-		if (names.length !== keys.size) return null;
-		if (names.some((n) => !keys.has(n))) return null;
-		const descs = Object.getOwnPropertyDescriptors(raw);
+		const descriptors = Object.getOwnPropertyDescriptors(raw);
+		const names = Object.getOwnPropertyNames(descriptors);
+		if (!allowMissing && names.length !== keys.length) return null;
+		const copy: { [key: string]: unknown } = {};
 		for (const name of names) {
-			const d = descs[name];
-			if (!d || !("value" in d) || !d.enumerable) return null;
+			if (!keys.includes(name)) return null;
+			const descriptor = descriptors[name];
+			if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) return null;
+			copy[name] = descriptor.value;
 		}
-		const result: { [key: string]: unknown } = {};
-		for (const name of names) result[name] = descs[name].value;
-		return result;
+		return copy;
 	} catch {
 		return null;
 	}
 }
 
-function isBoundedPrintableIdentifier(value: unknown): value is string {
-	if (typeof value !== "string") return false;
-	if (value.length === 0 || value.length > 128) return false;
-	return /^[a-zA-Z0-9_./:-]{1,128}$/.test(value);
+function isFunction(raw: unknown): raw is (input: unknown) => unknown {
+	if (typeof raw !== "function") return false;
+	try {
+		return !types.isProxy(raw);
+	} catch {
+		return false;
+	}
 }
 
-function extractIdentity(raw: unknown): HostedRlmRuntimeIdentity | null {
-	const rec = exactRecord(raw, IDENTITY_KEYS);
-	if (!rec) return null;
-	const childId = rec.childId;
-	const sessionId = rec.sessionId;
-	const sessionName = rec.sessionName;
-	const modelSelector = rec.modelSelector;
+function sameDescriptor(left: PropertyDescriptor | undefined, right: PropertyDescriptor | undefined): boolean {
+	if (left === undefined || right === undefined) return left === right;
+	return (
+		left.value === right.value &&
+		left.get === right.get &&
+		left.set === right.set &&
+		left.writable === right.writable &&
+		left.enumerable === right.enumerable &&
+		left.configurable === right.configurable
+	);
+}
+
+function isBrandedPromise(raw: unknown): raw is Promise<unknown> {
+	if (typeof raw !== "object" || raw === null) return false;
+	try {
+		return !types.isProxy(raw) && types.isPromise(raw);
+	} catch {
+		return false;
+	}
+}
+
+function isNativePromise(raw: unknown): raw is Promise<unknown> {
+	if (!isBrandedPromise(raw)) return false;
+	try {
+		if (Object.getPrototypeOf(raw) !== NativePromisePrototype) return false;
+		if (!Object.isExtensible(raw)) return false;
+		if (Object.getOwnPropertyNames(raw).length !== 0) return false;
+		if (Object.getOwnPropertySymbols(raw).length !== 0) return false;
+		if (
+			!sameDescriptor(
+				Object.getOwnPropertyDescriptor(NativePromisePrototype, "constructor"),
+				NativePromiseConstructorDescriptor,
+			)
+		)
+			return false;
+		if (!sameDescriptor(Object.getOwnPropertyDescriptor(NativePromise, Symbol.species), NativeSpeciesDescriptor)) {
+			return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Promise.prototype.then reads `actual.constructor` before it installs a rejection
+ * handler. Temporarily normalizing that property is the only local way to observe a
+ * branded subclass or configurable constructor accessor without running supplier code.
+ * A supplier that returns an already-rejected non-normalizable Promise, for example, one
+ * with a non-configurable hostile own constructor or an untrusted inherited constructor
+ * path, must attach its own rejection handler before returning it. JavaScript has no
+ * local API that can do so without invoking the hostile constructor path.
+ */
+function safelyObservePromise(
+	actual: Promise<unknown>,
+	fulfilled: (value: unknown) => void,
+	rejected: () => void,
+): Promise<unknown> | null {
+	let original: PropertyDescriptor | undefined;
+	let normalized = false;
+	try {
+		if (
+			!sameDescriptor(
+				Object.getOwnPropertyDescriptor(NativePromisePrototype, "constructor"),
+				NativePromiseConstructorDescriptor,
+			) ||
+			!sameDescriptor(Object.getOwnPropertyDescriptor(NativePromise, Symbol.species), NativeSpeciesDescriptor)
+		)
+			return null;
+		original = Object.getOwnPropertyDescriptor(actual, "constructor");
+		if (original === undefined) {
+			if (!Object.isExtensible(actual)) {
+				if (Object.getPrototypeOf(actual) !== NativePromisePrototype) return null;
+			} else {
+				Object.defineProperty(actual, "constructor", {
+					value: NativePromise,
+					writable: true,
+					enumerable: false,
+					configurable: true,
+				});
+				normalized = true;
+			}
+		} else if (original.configurable) {
+			Object.defineProperty(actual, "constructor", {
+				value: NativePromise,
+				writable: true,
+				enumerable: false,
+				configurable: true,
+			});
+			normalized = true;
+		} else if (!("value" in original) || original.value !== NativePromise) {
+			return null;
+		}
+		const tail = Reflect.apply(NativeThen, actual, [fulfilled, rejected]);
+		if (normalized) {
+			if (original === undefined) Reflect.deleteProperty(actual, "constructor");
+			else Object.defineProperty(actual, "constructor", original);
+			normalized = false;
+		}
+		return isBrandedPromise(tail) ? tail : null;
+	} catch {
+		if (normalized) {
+			try {
+				if (original === undefined) Reflect.deleteProperty(actual, "constructor");
+				else Object.defineProperty(actual, "constructor", original);
+			} catch {
+				return null;
+			}
+		}
+		return null;
+	}
+}
+
+function boundedIdentifier(raw: unknown): raw is string {
+	if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_IDENTIFIER_LENGTH) return false;
+	return /^[a-zA-Z0-9_./:-]{1,128}$/.test(raw);
+}
+
+function boundedString(raw: unknown, maximum: number): raw is string {
+	return typeof raw === "string" && raw.length > 0 && raw.length <= maximum;
+}
+
+function safeInteger(raw: unknown): number | null {
+	if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) return null;
+	return raw;
+}
+
+function identity(raw: unknown): HostedRlmRuntimeIdentity | null {
+	const record = exactRecord(raw, IDENTITY_KEYS, false);
+	if (record === null) return null;
+	const childId = record.childId;
+	const sessionId = record.sessionId;
+	const sessionName = record.sessionName;
+	const modelSelector = record.modelSelector;
 	if (
-		!isBoundedPrintableIdentifier(childId) ||
-		!isBoundedPrintableIdentifier(sessionId) ||
-		!isBoundedPrintableIdentifier(sessionName) ||
-		!isBoundedPrintableIdentifier(modelSelector)
+		!boundedIdentifier(childId) ||
+		!boundedIdentifier(sessionId) ||
+		!boundedIdentifier(sessionName) ||
+		!boundedIdentifier(modelSelector)
 	)
 		return null;
 	return Object.freeze({ childId, sessionId, sessionName, modelSelector });
 }
 
-function readOwnValue(obj: unknown, key: string): unknown {
-	if (typeof obj !== "object" || obj === null) return undefined;
-	try {
-		if (types.isProxy(obj)) return undefined;
-	} catch {
-		return undefined;
-	}
-	try {
-		const d = Object.getOwnPropertyDescriptor(obj, key);
-		if (!d || !("value" in d) || !d.enumerable) return undefined;
-		return d.value;
-	} catch {
-		return undefined;
-	}
+function usage(raw: unknown): Readonly<{ inputTokens: number; outputTokens: number }> | null {
+	const record = exactRecord(raw, USAGE_KEYS, false);
+	if (record === null) return null;
+	const inputTokens = safeInteger(record.inputTokens);
+	const outputTokens = safeInteger(record.outputTokens);
+	if (inputTokens === null || outputTokens === null) return null;
+	return Object.freeze({ inputTokens, outputTokens });
 }
 
-function readOwnFunction(obj: unknown, key: string): ((...args: unknown[]) => unknown) | undefined {
-	const raw = readOwnValue(obj, key);
-	if (typeof raw !== "function") return undefined;
-	try {
-		if (types.isProxy(raw)) return undefined;
-	} catch {
-		return undefined;
-	}
-	return (...args: unknown[]): unknown => Reflect.apply(raw, obj, args);
+function admission(raw: unknown): HostedRlmAdmissionResult | null {
+	const record = exactRecord(raw, CODE_KEYS, false);
+	if (record === null || record.code !== "ADMITTED") return null;
+	return Object.freeze({ code: "ADMITTED" });
 }
 
-/** Safely observe a native Promise via Reflect.apply(Promise.prototype.then, ...)
- *  with bound timeout. Returns {ok:true, value} on fulfillment or
- *  {ok:false, error:{code:"CALL_UNCERTAIN"}} on rejection/timeout. */
-function observePromise(rawPromise: unknown, timeoutMs: number): Promise<HostedRlmPortResult<unknown>> {
-	return new Promise<HostedRlmPortResult<unknown>>((resolve) => {
-		let settled = false;
-		const timer = setTimeout(() => {
-			if (settled) return;
-			settled = true;
-			resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
-		}, timeoutMs);
-
-		const onFulfilled = (value: unknown): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			resolve(Object.freeze({ ok: true as const, value }));
-		};
-
-		const onRejected = (): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
-		};
-
-		Reflect.apply(Promise.prototype.then, rawPromise, [onFulfilled, onRejected]);
-	});
-}
-
-/** Descriptor-parse a public port result ({ok:true,value} or {ok:false,error}).
- *  Returns {ok:true, rawValue} for the success case, or null for any
- *  non-ok/malformed case. Does NOT accept the undocumented three-key arm. */
-function tryPortOkValue(raw: unknown): { ok: true; rawValue: unknown } | null {
-	const withValue = exactRecord(raw, new Set(["ok", "value"]));
-	if (withValue) {
-		if (withValue.ok === true) return { ok: true, rawValue: withValue.value };
-		return null;
-	}
-	const withError = exactRecord(raw, new Set(["ok", "error"]));
-	if (withError) {
-		return null;
-	}
+function abortResult(raw: unknown): HostedRlmAbortResult | null {
+	const record = exactRecord(raw, STATUS_KEYS, false);
+	if (record === null) return null;
+	if (record.status === "aborted") return Object.freeze({ status: "aborted" });
+	if (record.status === "already_terminal") return Object.freeze({ status: "already_terminal" });
 	return null;
 }
 
-/** Validate that a public port's unsubscribe result is exact {ok:true} (1 key)
- *  or {ok:false,error} (2 keys). Returns true for {ok:true}. */
-function isPublicUnsubOk(raw: unknown): boolean {
-	const okOnly = exactRecord(raw, new Set(["ok"]));
-	if (okOnly && okOnly.ok === true) return true;
-	return false;
+function closeResult(raw: unknown): HostedRlmCloseResult | null {
+	const record = exactRecord(raw, STATUS_KEYS, false);
+	if (record === null || record.status !== "closed") return null;
+	return Object.freeze({ status: "closed" });
 }
 
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
+function taskResult(raw: unknown): HostedRlmTaskResult | null {
+	const record = exactRecord(raw, TASK_KEYS, true);
+	if (record === null) return null;
+	const durationMs = safeInteger(record.durationMs);
+	const parentReplyCount = safeInteger(record.parentReplyCount);
+	const toolUseCount = safeInteger(record.toolUseCount);
+	if (durationMs === null || parentReplyCount === null || toolUseCount === null) return null;
+	const hasAnswer = Object.hasOwn(record, "answerPreview");
+	let answerPreview: string | null = null;
+	if (hasAnswer) {
+		const candidate = record.answerPreview;
+		if (!boundedString(candidate, MAX_ANSWER_PREVIEW_LENGTH)) return null;
+		answerPreview = candidate;
+	}
+	const hasError = Object.hasOwn(record, "errorCode");
+	const hasUsage = Object.hasOwn(record, "usage");
+	let parsedUsage: Readonly<{ inputTokens: number; outputTokens: number }> | null = null;
+	if (hasUsage) {
+		parsedUsage = usage(record.usage);
+		if (parsedUsage === null) return null;
+	}
+	if (record.status === "completed") {
+		if (hasError) return null;
+		if (answerPreview !== null && parsedUsage !== null) {
+			return Object.freeze({
+				status: "completed",
+				durationMs,
+				parentReplyCount,
+				toolUseCount,
+				answerPreview,
+				usage: parsedUsage,
+			});
+		}
+		if (answerPreview !== null) {
+			return Object.freeze({
+				status: "completed",
+				durationMs,
+				parentReplyCount,
+				toolUseCount,
+				answerPreview,
+			});
+		}
+		if (parsedUsage !== null) {
+			return Object.freeze({ status: "completed", durationMs, parentReplyCount, toolUseCount, usage: parsedUsage });
+		}
+		return Object.freeze({ status: "completed", durationMs, parentReplyCount, toolUseCount });
+	}
+	if (record.status === "cancelled") {
+		if (hasAnswer || record.errorCode !== "CANCELLED") return null;
+		if (parsedUsage !== null) {
+			return Object.freeze({
+				status: "cancelled",
+				durationMs,
+				parentReplyCount,
+				toolUseCount,
+				errorCode: "CANCELLED",
+				usage: parsedUsage,
+			});
+		}
+		return Object.freeze({
+			status: "cancelled",
+			durationMs,
+			parentReplyCount,
+			toolUseCount,
+			errorCode: "CANCELLED",
+		});
+	}
+	if (record.status !== "error" || hasAnswer || !hasError) return null;
+	if (
+		record.errorCode !== "TIMEOUT" &&
+		record.errorCode !== "ADMISSION_FAILED" &&
+		record.errorCode !== "INTERNAL_ERROR"
+	)
+		return null;
+	if (parsedUsage !== null) {
+		return Object.freeze({
+			status: "error",
+			durationMs,
+			parentReplyCount,
+			toolUseCount,
+			errorCode: record.errorCode,
+			usage: parsedUsage,
+		});
+	}
+	return Object.freeze({
+		status: "error",
+		durationMs,
+		parentReplyCount,
+		toolUseCount,
+		errorCode: record.errorCode,
+	});
+}
+
+function runtimeStatus(raw: unknown): HostedRlmObservationSnapshot["status"] | null {
+	if (raw === "queued") return "queued";
+	if (raw === "running") return "running";
+	if (raw === "completed") return "completed";
+	if (raw === "cancelled") return "cancelled";
+	if (raw === "error") return "error";
+	return null;
+}
+
+function observation(raw: unknown): HostedRlmObservationSnapshot | null {
+	const record = exactRecord(raw, OBSERVATION_KEYS, true);
+	if (record === null) return null;
+	const status = runtimeStatus(record.status);
+	const messageCount = safeInteger(record.messageCount);
+	const toolUseCount = safeInteger(record.toolUseCount);
+	const parentReplyCount = safeInteger(record.parentReplyCount);
+	if (
+		status === null ||
+		messageCount === null ||
+		toolUseCount === null ||
+		parentReplyCount === null ||
+		typeof record.agentRunning !== "boolean"
+	)
+		return null;
+	if (status !== "running" && record.agentRunning) return null;
+	const hasAnswer = Object.hasOwn(record, "answerPreview");
+	let answerPreview: string | null = null;
+	if (hasAnswer) {
+		const candidate = record.answerPreview;
+		if (!boundedString(candidate, MAX_ANSWER_PREVIEW_LENGTH)) return null;
+		answerPreview = candidate;
+	}
+	const hasUsage = Object.hasOwn(record, "usage");
+	let parsedUsage: Readonly<{ inputTokens: number; outputTokens: number }> | null = null;
+	if (hasUsage) {
+		parsedUsage = usage(record.usage);
+		if (parsedUsage === null) return null;
+	}
+	if (answerPreview !== null && parsedUsage !== null) {
+		return Object.freeze({
+			status,
+			messageCount,
+			toolUseCount,
+			agentRunning: record.agentRunning,
+			parentReplyCount,
+			answerPreview,
+			usage: parsedUsage,
+		});
+	}
+	if (answerPreview !== null) {
+		return Object.freeze({
+			status,
+			messageCount,
+			toolUseCount,
+			agentRunning: record.agentRunning,
+			parentReplyCount,
+			answerPreview,
+		});
+	}
+	if (parsedUsage !== null) {
+		return Object.freeze({
+			status,
+			messageCount,
+			toolUseCount,
+			agentRunning: record.agentRunning,
+			parentReplyCount,
+			usage: parsedUsage,
+		});
+	}
+	return Object.freeze({
+		status,
+		messageCount,
+		toolUseCount,
+		agentRunning: record.agentRunning,
+		parentReplyCount,
+	});
+}
+
+function runtimeEvent(raw: unknown): HostedRlmRuntimeEvent | null {
+	const record = exactRecord(raw, EVENT_KEYS, true);
+	if (record === null || typeof record.type !== "string") return null;
+	const count = Object.getOwnPropertyNames(record).length;
+	if (record.type === "agent_start" && count === 1) return Object.freeze({ type: "agent_start" });
+	if (record.type === "agent_end" && count === 1) return Object.freeze({ type: "agent_end" });
+	if (record.type === "waiting" && count === 1) return Object.freeze({ type: "waiting" });
+	const answerPreview = record.answerPreview;
+	if (record.type === "writing" && count === 2 && boundedString(answerPreview, MAX_ANSWER_PREVIEW_LENGTH)) {
+		return Object.freeze({ type: "writing", answerPreview });
+	}
+	const toolName = record.toolName;
+	if (record.type === "executing" && count === 2 && boundedString(toolName, MAX_TOOL_NAME_LENGTH)) {
+		return Object.freeze({ type: "executing", toolName });
+	}
+	if (record.type !== "child_update" || (count !== 4 && count !== 5)) return null;
+	const status = runtimeStatus(record.status);
+	const toolUseCount = safeInteger(record.toolUseCount);
+	const parentReplyCount = safeInteger(record.parentReplyCount);
+	if (status === null || toolUseCount === null || parentReplyCount === null) return null;
+	if (count === 5) {
+		if (!boundedString(answerPreview, MAX_ANSWER_PREVIEW_LENGTH)) return null;
+		return Object.freeze({ type: "child_update", status, toolUseCount, parentReplyCount, answerPreview });
+	}
+	return Object.freeze({ type: "child_update", status, toolUseCount, parentReplyCount });
+}
+
+function portError(raw: unknown): HostedRlmPortErrorCode | null {
+	const record = exactRecord(raw, ERROR_KEYS, false);
+	if (record === null) return null;
+	if (record.code === "CLOSED") return "CLOSED";
+	if (record.code === "INVALID_ARGUMENT") return "INVALID_ARGUMENT";
+	if (record.code === "CALL_UNCERTAIN") return "CALL_UNCERTAIN";
+	if (record.code === "MALFORMED_RESULT") return "MALFORMED_RESULT";
+	if (record.code === "CLEANUP_UNCERTAIN") return "CLEANUP_UNCERTAIN";
+	return null;
+}
+
+function publicResult<T extends Semantic>(raw: unknown, parser: Parser<T>): HostedRlmPortResult<T> | null {
+	const okRecord = exactRecord(raw, RESULT_OK_KEYS, false);
+	if (okRecord !== null) {
+		if (okRecord.ok !== true) return null;
+		const value = parser(okRecord.value);
+		return value === null ? null : Object.freeze({ ok: true, value });
+	}
+	const errorRecord = exactRecord(raw, RESULT_ERROR_KEYS, false);
+	if (errorRecord === null || errorRecord.ok !== false) return null;
+	const code = portError(errorRecord.error);
+	return code === null ? null : failure(code);
+}
+
+function failure<T>(code: HostedRlmPortErrorCode): HostedRlmPortResult<T> {
+	return Object.freeze({ ok: false, error: Object.freeze({ code }) });
+}
+
+function resolved<T>(value: HostedRlmPortResult<T>): Promise<HostedRlmPortResult<T>> {
+	return new NativePromise((resolve) => resolve(value));
+}
+
+function frozenStartInput(raw: unknown): Readonly<{ prompt: string; spawnCode?: string }> | null {
+	const record = exactRecord(raw, START_KEYS, true);
+	if (record === null || !boundedString(record.prompt, MAX_PROMPT_LENGTH)) return null;
+	const names = Object.getOwnPropertyNames(record);
+	if (names.length === 1 && !Object.hasOwn(record, "spawnCode")) return Object.freeze({ prompt: record.prompt });
+	if (names.length !== 2 || !boundedString(record.spawnCode, MAX_SPAWN_CODE_LENGTH)) return null;
+	return Object.freeze({ prompt: record.prompt, spawnCode: record.spawnCode });
+}
+
+function unsubscribeResult(raw: unknown): HostedRlmUnsubscribeResult | null {
+	const okRecord = exactRecord(raw, Object.freeze(["ok"]), false);
+	if (okRecord !== null && okRecord.ok === true) return Object.freeze({ ok: true });
+	const errorRecord = exactRecord(raw, RESULT_ERROR_KEYS, false);
+	if (errorRecord === null || errorRecord.ok !== false) return null;
+	const nested = exactRecord(errorRecord.error, ERROR_KEYS, false);
+	if (nested === null || nested.code !== "UNSUBSCRIBE_UNCERTAIN") return null;
+	return Object.freeze({ ok: false, error: Object.freeze({ code: "UNSUBSCRIBE_UNCERTAIN" }) });
+}
 
 export function createHostedRlmRunController(input: unknown): CreateHostedRlmRunControllerResult {
-	// Single descriptor pass for optional-listener validation
-	const input3 = exactRecord(input, new Set(["port", "expectedIdentity", "listener"]));
-	let inputRecord: { [key: string]: unknown };
-	let hasListener: boolean;
-	if (input3) {
-		inputRecord = input3;
-		hasListener = true;
-	} else {
-		const input2 = exactRecord(input, new Set(["port", "expectedIdentity"]));
-		if (!input2) return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
-		inputRecord = input2;
-		hasListener = false;
+	const inputRecord = exactRecord(input, INPUT_KEYS, true);
+	if (inputRecord === null) return Object.freeze({ ok: false, code: "INVALID_INPUT" });
+	const inputNames = Object.getOwnPropertyNames(inputRecord);
+	if (inputNames.length !== 2 && inputNames.length !== 3) {
+		return Object.freeze({ ok: false, code: "INVALID_INPUT" });
 	}
-
-	const rawPort = inputRecord.port;
-	const rawExpected = inputRecord.expectedIdentity;
-
-	// Validate port
-	const portRecord = exactRecord(rawPort, PORT_KEYS);
-	if (!portRecord) return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
-
-	const portIdentity = extractIdentity(portRecord.identity);
-	if (!portIdentity) return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
-
+	if (!Object.hasOwn(inputRecord, "port") || !Object.hasOwn(inputRecord, "expectedIdentity")) {
+		return Object.freeze({ ok: false, code: "INVALID_INPUT" });
+	}
+	const portRecord = exactRecord(inputRecord.port, PORT_KEYS, false);
+	if (portRecord === null) return Object.freeze({ ok: false, code: "INVALID_INPUT" });
+	const portIdentity = identity(portRecord.identity);
+	const expectedIdentity = identity(inputRecord.expectedIdentity);
+	if (portIdentity === null || expectedIdentity === null) {
+		return Object.freeze({ ok: false, code: "INVALID_INPUT" });
+	}
 	const rawStart = portRecord.startInitialTask;
+	const rawTerminal = portRecord.awaitTerminal;
 	const rawAbort = portRecord.abort;
 	const rawObserve = portRecord.observe;
 	const rawSubscribe = portRecord.subscribe;
-
+	const rawClose = portRecord.close;
 	if (
-		!isNonProxyFunction(rawStart) ||
-		!isNonProxyFunction(rawAbort) ||
-		!isNonProxyFunction(rawObserve) ||
-		!isNonProxyFunction(rawSubscribe)
+		!isFunction(rawStart) ||
+		!isFunction(rawTerminal) ||
+		!isFunction(rawAbort) ||
+		!isFunction(rawObserve) ||
+		!isFunction(rawSubscribe) ||
+		!isFunction(rawClose)
 	)
-		return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
-
-	// Validate expectedIdentity
-	const expectedIdentity = extractIdentity(rawExpected);
-	if (!expectedIdentity) return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
-
-	// Exact identity match
+		return Object.freeze({ ok: false, code: "INVALID_INPUT" });
+	const startMethod = rawStart;
+	const terminalMethod = rawTerminal;
+	const abortMethod = rawAbort;
+	const observeMethod = rawObserve;
+	const subscribeMethod = rawSubscribe;
+	const closeMethod = rawClose;
 	if (
 		portIdentity.childId !== expectedIdentity.childId ||
 		portIdentity.sessionId !== expectedIdentity.sessionId ||
 		portIdentity.sessionName !== expectedIdentity.sessionName ||
 		portIdentity.modelSelector !== expectedIdentity.modelSelector
 	)
-		return Object.freeze({
-			ok: false as const,
-			code: "IDENTITY_MISMATCH" as const,
-		});
-
-	// Validate listener function once
-	let capturedListener: ((rawEvent: unknown) => void) | undefined;
-	if (hasListener) {
-		const lr = inputRecord.listener;
-		if (!isNonProxyFunction(lr)) return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
-		capturedListener = (rawEvent: unknown) => {
-			try {
-				Reflect.apply(lr, undefined, [rawEvent]);
-			} catch {
-				/* listener throw isolated */
-			}
+		return Object.freeze({ ok: false, code: "IDENTITY_MISMATCH" });
+	let listener: ((event: HostedRlmRuntimeEvent) => void) | null = null;
+	if (inputNames.length === 3) {
+		if (!isFunction(inputRecord.listener)) return Object.freeze({ ok: false, code: "INVALID_INPUT" });
+		const supplied = inputRecord.listener;
+		listener = (event: HostedRlmRuntimeEvent): void => {
+			Reflect.apply(supplied, undefined, [event]);
 		};
 	}
 
-	// -----------------------------------------------------------------------
-	// Adapter for createHostedRlmRuntimePort
-	// -----------------------------------------------------------------------
-	// Track subscribe backout outcome to distinguish INVALID_INPUT from
-	// CLEANUP_UNCERTAIN at the factory level.
-	let subscribeBackoutFailed = false;
-
-	const adapterStart = (taskInput: unknown): unknown => {
-		let rawResult: unknown;
-		try {
-			rawResult = Reflect.apply(rawStart, rawPort, [taskInput]);
-		} catch {
-			return safeUnwrapRejected();
-		}
-		return safeUnwrapPortPromise(rawResult, OPERATION_TIMEOUT_MS);
-	};
-
-	const adapterAbort = (): unknown => {
-		let rawResult: unknown;
-		try {
-			rawResult = Reflect.apply(rawAbort, rawPort, []);
-		} catch {
-			return safeUnwrapRejected();
-		}
-		return safeUnwrapPortPromise(rawResult, OPERATION_TIMEOUT_MS);
-	};
-
-	const adapterObserve = (): unknown => {
-		let rawResult: unknown;
-		try {
-			rawResult = Reflect.apply(rawObserve, rawPort, []);
-		} catch {
-			return safeUnwrapRejected();
-		}
-		return safeUnwrapPortPromise(rawResult, OPERATION_TIMEOUT_MS);
-	};
-
-	const adapterSubscribe = (callback: unknown): unknown => {
-		let rawResult: unknown;
-		try {
-			rawResult = Reflect.apply(rawSubscribe, rawPort, [callback]);
-		} catch {
-			subscribeBackoutFailed = true;
-			return null;
-		}
-		// Preliminarily acquire nested close before exact validation
-		const rawOuterValue = readOwnValue(rawResult, "value");
-		let prelimUnsub: (() => unknown) | undefined;
-		if (rawOuterValue !== undefined) {
-			const rawUnsubFn = readOwnFunction(rawOuterValue, "unsubscribe");
-			if (rawUnsubFn !== undefined) {
-				prelimUnsub = rawUnsubFn;
-			}
-		}
-
-		// Validate outer exactness -- only {ok,value} or {ok,error} arms.
-		const okValueRecord = exactRecord(rawResult, new Set(["ok", "value"]));
-		const okErrorRecord = okValueRecord ? null : exactRecord(rawResult, new Set(["ok", "error"]));
-		const outerRecord = okValueRecord ?? okErrorRecord;
-		if (!outerRecord || outerRecord.ok !== true) {
-			if (!okErrorRecord || okErrorRecord.ok !== false) backoutOrFlag(prelimUnsub);
-			return null;
-		}
-
-		const rawValue = outerRecord.value;
-
-		// Validate inner exact {unsubscribe}
-		const innerRecord = exactRecord(rawValue, UNSUBSCRIBE_KEYS);
-		if (!innerRecord) {
-			backoutOrFlag(prelimUnsub);
-			return null;
-		}
-
-		const publicUnsub = innerRecord.unsubscribe;
-		if (!isNonProxyFunction(publicUnsub)) {
-			backoutOrFlag(prelimUnsub);
-			return null;
-		}
-
-		// Wrap the public unsubscribe to translate {ok:true} -> {status:"unsubscribed"}
-		// so createHostedRlmRuntimePort's tryStatus validation succeeds.
-		const wrappedUnsub = (): unknown => {
-			let publicResult: unknown;
-			try {
-				publicResult = Reflect.apply(publicUnsub, rawValue, []);
-			} catch {
-				subscribeBackoutFailed = true;
-				throw new Error();
-			}
-			if (isPublicUnsubOk(publicResult)) {
-				return Object.freeze({ status: "unsubscribed" as const });
-			}
-			subscribeBackoutFailed = true;
-			return Object.freeze({ status: "unknown" as const });
-		};
-		return Object.freeze({ unsubscribe: wrappedUnsub });
-
-		// --- inner helper ---
-		function backoutOrFlag(prelim: (() => unknown) | undefined): void {
-			if (!prelim) {
-				subscribeBackoutFailed = true;
-				return;
-			}
-			let raw: unknown;
-			try {
-				raw = prelim();
-			} catch {
-				subscribeBackoutFailed = true;
-				return;
-			}
-			if (!isPublicUnsubOk(raw)) subscribeBackoutFailed = true;
-		}
-	};
-
-	const rawAdapter: { [key: string]: unknown } = {
-		identity: portIdentity,
-		startInitialTask: adapterStart,
-		abort: adapterAbort,
-		observe: adapterObserve,
-		subscribe: adapterSubscribe,
-	};
-
-	const factoryResult = createHostedRlmRuntimePort(rawAdapter);
-	if (!factoryResult.ok) {
-		// Factory failed before subscribe was called on the adapter,
-		// so subscribeBackoutFailed is still false here.
-		return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
-	}
-
-	const internalPort = factoryResult.value;
-
-	// -----------------------------------------------------------------------
-	// Controller lifecycle state
-	// -----------------------------------------------------------------------
-
+	const owner = inputRecord.port;
+	const tails: Promise<unknown>[] = [];
 	let started = false;
-	let startPromise: Promise<HostedRlmPortResult<HostedRlmTaskResult>> | null = null;
 	let finishStarted = false;
-	let finished = false;
-	let abortAdmitted = false;
+	let startPromise: Promise<HostedRlmPortResult<HostedRlmAdmissionResult>> | null = null;
 	let abortPromise: Promise<HostedRlmPortResult<HostedRlmAbortResult>> | null = null;
 	let finishPromise: Promise<HostedRlmPortResult<HostedRlmTaskResult>> | null = null;
-	let unsubscribed = false;
+	let finishResolve: ((value: HostedRlmPortResult<HostedRlmTaskResult>) => void) | null = null;
+	let finishSettled = false;
+	let closePromise: Promise<HostedRlmPortResult<HostedRlmCloseResult>> | null = null;
+	let terminalDispatched = false;
+	let unsubscribe: (() => unknown) | null = null;
+	let unsubscribeResultValue: HostedRlmUnsubscribeResult | null = null;
+	let closed = false;
+	let explicitlyClosed = false;
 
-	let subUnsubscribe: (() => HostedRlmUnsubscribeResult) | null = null;
-
-	// Always subscribe before start — internal no-op listener when user provides none
-	const internalListener = (event: HostedRlmRuntimeEvent): void => {
-		if (capturedListener) {
-			capturedListener(event);
-		}
-	};
-
-	// Subscribe now — this calls adapterSubscribe, which may set
-	// subscribeBackoutFailed if inner validation fails and backout is uncertain.
-	const subResult = internalPort.subscribe(internalListener);
-	if (!subResult.ok || subscribeBackoutFailed) {
-		if (subscribeBackoutFailed) {
-			return Object.freeze({
-				ok: false as const,
-				code: "CLEANUP_UNCERTAIN" as const,
-			});
-		}
-		return Object.freeze({ ok: false as const, code: "INVALID_INPUT" as const });
+	function apply(method: (input: unknown) => unknown, args: unknown[]): unknown {
+		return Reflect.apply(method, owner, args);
 	}
 
-	subUnsubscribe = subResult.value.unsubscribe;
-
-	function start(input: { prompt: string; spawnCode?: string }): Promise<HostedRlmPortResult<HostedRlmTaskResult>> {
-		if (finishStarted) {
-			return Promise.resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
+	function consumeSubscription(): boolean {
+		if (unsubscribeResultValue !== null) return unsubscribeResultValue.ok;
+		const method = unsubscribe;
+		unsubscribe = null;
+		if (method === null) {
+			unsubscribeResultValue = Object.freeze({ ok: false, error: Object.freeze({ code: "UNSUBSCRIBE_UNCERTAIN" }) });
+			return false;
 		}
-		if (started) {
-			return Promise.resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
-		}
-		if (startPromise) return startPromise;
-		started = true;
+		let rawResult: unknown;
 		try {
-			startPromise = internalPort.startInitialTask(input);
+			rawResult = method();
 		} catch {
-			startPromise = Promise.resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
+			unsubscribeResultValue = Object.freeze({ ok: false, error: Object.freeze({ code: "UNSUBSCRIBE_UNCERTAIN" }) });
+			return false;
 		}
-		return startPromise;
+		const parsed = unsubscribeResult(rawResult);
+		if (parsed === null) {
+			unsubscribeResultValue = Object.freeze({ ok: false, error: Object.freeze({ code: "UNSUBSCRIBE_UNCERTAIN" }) });
+			return false;
+		}
+		unsubscribeResultValue = parsed;
+		return parsed.ok;
+	}
+
+	function settleFinish(result: HostedRlmPortResult<HostedRlmTaskResult>, requireCleanup: boolean): void {
+		if (finishSettled) return;
+		finishSettled = true;
+		const resolve = finishResolve;
+		finishResolve = null;
+		if (resolve === null) return;
+		if (requireCleanup && !consumeSubscription()) {
+			resolve(failure("CLEANUP_UNCERTAIN"));
+			return;
+		}
+		resolve(result);
+	}
+
+	function watch<T extends Semantic>(
+		rawPromise: unknown,
+		parser: Parser<T>,
+		timeoutMs: number | null,
+		timeoutCode: HostedRlmPortErrorCode,
+		fatal: boolean,
+	): Promise<HostedRlmPortResult<T>> {
+		if (!isBrandedPromise(rawPromise)) {
+			if (fatal) beginClose();
+			return resolved(failure(timeoutCode));
+		}
+		const actual = rawPromise;
+		let resolveOperation: (value: HostedRlmPortResult<T>) => void = () => undefined;
+		const observer = new NativePromise<HostedRlmPortResult<T>>((resolve) => {
+			resolveOperation = resolve;
+		});
+		tails.push(actual, observer);
+		const acceptable = isNativePromise(actual);
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		const fulfilled = (value: unknown): void => {
+			if (settled) return;
+			settled = true;
+			if (timer !== null) clearTimeout(timer);
+			const parsed = publicResult(value, parser);
+			if (parsed === null) {
+				if (fatal) beginClose();
+				resolveOperation(failure(timeoutCode));
+				return;
+			}
+			resolveOperation(parsed);
+		};
+		const rejected = (): void => {
+			if (settled) return;
+			settled = true;
+			if (timer !== null) clearTimeout(timer);
+			if (fatal) beginClose();
+			resolveOperation(failure(timeoutCode));
+		};
+		const tail = safelyObservePromise(actual, fulfilled, rejected);
+		if (tail !== null) tails.push(tail);
+		if (!acceptable || tail === null) {
+			settled = true;
+			if (fatal) beginClose();
+			resolveOperation(failure(timeoutCode));
+			return observer;
+		}
+		if (timeoutMs !== null) {
+			timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				if (fatal) beginClose();
+				resolveOperation(failure(timeoutCode));
+			}, timeoutMs);
+		}
+		return observer;
+	}
+
+	function beginClose(): Promise<HostedRlmPortResult<HostedRlmCloseResult>> {
+		if (closePromise !== null) return closePromise;
+		let resolveClose: (value: HostedRlmPortResult<HostedRlmCloseResult>) => void = () => undefined;
+		closePromise = new NativePromise((resolve) => {
+			resolveClose = resolve;
+		});
+		const sharedClose = closePromise;
+		closed = true;
+		consumeSubscription();
+		if (finishPromise !== null) settleFinish(failure("CLOSED"), false);
+		let rawPromise: unknown;
+		try {
+			rawPromise = apply(closeMethod, []);
+		} catch {
+			resolveClose(failure("CLEANUP_UNCERTAIN"));
+			return sharedClose;
+		}
+		const observed = watch(rawPromise, closeResult, CONTROL_TIMEOUT_MS, "CLEANUP_UNCERTAIN", false);
+		const fulfilled = (result: HostedRlmPortResult<HostedRlmCloseResult>): void => resolveClose(result);
+		const rejected = (): void => resolveClose(failure("CLEANUP_UNCERTAIN"));
+		try {
+			const tail = Reflect.apply(NativeThen, observed, [fulfilled, rejected]);
+			if (isNativePromise(tail)) tails.push(observed, sharedClose, tail);
+			else resolveClose(failure("CLEANUP_UNCERTAIN"));
+		} catch {
+			resolveClose(failure("CLEANUP_UNCERTAIN"));
+		}
+		return sharedClose;
+	}
+
+	let registering = true;
+	let invalidEvent = false;
+	const eventBuffer: unknown[] = [];
+	const deliverEvent = (event: HostedRlmRuntimeEvent): void => {
+		if (closed || listener === null) return;
+		try {
+			listener(event);
+		} catch {
+			beginClose();
+		}
+	};
+	const eventListener = (rawEvent: unknown): void => {
+		if (closed || invalidEvent) return;
+		if (registering) {
+			if (eventBuffer.length === MAX_EVENT_BUFFER) {
+				invalidEvent = true;
+				return;
+			}
+			eventBuffer.push(rawEvent);
+			return;
+		}
+		const event = runtimeEvent(rawEvent);
+		if (event === null) {
+			invalidEvent = true;
+			beginClose();
+			return;
+		}
+		deliverEvent(event);
+	};
+	let rawSubscription: unknown;
+	try {
+		rawSubscription = apply(subscribeMethod, [eventListener]);
+	} catch {
+		registering = false;
+		beginClose();
+		return Object.freeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
+	}
+	const subscriptionOuter = exactRecord(rawSubscription, SUBSCRIBE_OK_KEYS, false);
+	if (subscriptionOuter === null || subscriptionOuter.ok !== true) {
+		registering = false;
+		beginClose();
+		return Object.freeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
+	}
+	const subscriptionInner = exactRecord(subscriptionOuter.value, UNSUBSCRIBE_KEYS, false);
+	if (subscriptionInner === null || !isFunction(subscriptionInner.unsubscribe)) {
+		registering = false;
+		beginClose();
+		return Object.freeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
+	}
+	const tokenOwner = subscriptionOuter.value;
+	const unsubscribeMethod = subscriptionInner.unsubscribe;
+	unsubscribe = (): unknown => Reflect.apply(unsubscribeMethod, tokenOwner, []);
+	registering = false;
+	if (invalidEvent) {
+		beginClose();
+		return Object.freeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
+	}
+	const decodedEvents: HostedRlmRuntimeEvent[] = [];
+	for (const rawEvent of eventBuffer) {
+		const event = runtimeEvent(rawEvent);
+		if (event === null) {
+			invalidEvent = true;
+			beginClose();
+			return Object.freeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
+		}
+		decodedEvents.push(event);
+	}
+	for (const event of decodedEvents) {
+		if (closed) break;
+		deliverEvent(event);
+	}
+	if (closed) return Object.freeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
+
+	function start(inputValue: {
+		prompt: string;
+		spawnCode?: string;
+	}): Promise<HostedRlmPortResult<HostedRlmAdmissionResult>> {
+		if (closed) return resolved(failure("CLOSED"));
+		if (finishStarted) return resolved(failure("CALL_UNCERTAIN"));
+		const validated = frozenStartInput(inputValue);
+		if (validated === null) {
+			beginClose();
+			return resolved(failure("INVALID_ARGUMENT"));
+		}
+		if (started) return resolved(failure("CALL_UNCERTAIN"));
+		started = true;
+		let resolveStart: (value: HostedRlmPortResult<HostedRlmAdmissionResult>) => void = () => undefined;
+		startPromise = new NativePromise((resolve) => {
+			resolveStart = resolve;
+		});
+		const sharedStart = startPromise;
+		tails.push(sharedStart);
+		let rawPromise: unknown;
+		try {
+			rawPromise = apply(startMethod, [validated]);
+		} catch {
+			beginClose();
+			resolveStart(failure("CALL_UNCERTAIN"));
+			return sharedStart;
+		}
+		const observed = watch(rawPromise, admission, CONTROL_TIMEOUT_MS, "CALL_UNCERTAIN", true);
+		const fulfilled = (result: HostedRlmPortResult<HostedRlmAdmissionResult>): void => resolveStart(result);
+		const rejected = (): void => {
+			beginClose();
+			resolveStart(failure("CALL_UNCERTAIN"));
+		};
+		try {
+			const tail = Reflect.apply(NativeThen, observed, [fulfilled, rejected]);
+			if (isNativePromise(tail)) tails.push(observed, tail);
+			else rejected();
+		} catch {
+			rejected();
+		}
+		return sharedStart;
 	}
 
 	function requestAbort(): Promise<HostedRlmPortResult<HostedRlmAbortResult>> {
-		if (finished) {
-			return Promise.resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
-		}
-		if (finishStarted) {
-			return Promise.resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
-		}
-		if (!started) {
-			// Not started yet: return fresh failure each time (no caching)
-			return Promise.resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
-		}
-		if (abortPromise) return abortPromise;
-		abortAdmitted = true;
+		if (abortPromise !== null) return abortPromise;
+		if (explicitlyClosed) return resolved(failure("CLOSED"));
+		if (!started) return resolved(failure("CALL_UNCERTAIN"));
+		let resolveAbort: (value: HostedRlmPortResult<HostedRlmAbortResult>) => void = () => undefined;
+		abortPromise = new NativePromise((resolve) => {
+			resolveAbort = resolve;
+		});
+		const sharedAbort = abortPromise;
+		let rawPromise: unknown;
 		try {
-			abortPromise = internalPort.abort();
+			rawPromise = apply(abortMethod, []);
 		} catch {
-			abortPromise = Promise.resolve(
-				Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				}),
-			);
+			beginClose();
+			resolveAbort(failure("CALL_UNCERTAIN"));
+			return sharedAbort;
 		}
-		return abortPromise;
+		const observed = watch(rawPromise, abortResult, CONTROL_TIMEOUT_MS, "CALL_UNCERTAIN", true);
+		const fulfilled = (result: HostedRlmPortResult<HostedRlmAbortResult>): void => resolveAbort(result);
+		const rejected = (): void => {
+			beginClose();
+			resolveAbort(failure("CALL_UNCERTAIN"));
+		};
+		try {
+			const tail = Reflect.apply(NativeThen, observed, [fulfilled, rejected]);
+			if (isNativePromise(tail)) tails.push(observed, sharedAbort, tail);
+			else rejected();
+		} catch {
+			rejected();
+		}
+		return sharedAbort;
 	}
 
 	function finish(): Promise<HostedRlmPortResult<HostedRlmTaskResult>> {
-		if (finishPromise) return finishPromise;
+		if (finishPromise !== null) return finishPromise;
 		finishStarted = true;
-
-		finishPromise = (async (): Promise<HostedRlmPortResult<HostedRlmTaskResult>> => {
-			// Await start result if start was initiated
-			let taskResult: HostedRlmPortResult<HostedRlmTaskResult> | null = null;
-			if (startPromise) {
-				taskResult = await startPromise;
+		finishPromise = new NativePromise((resolve) => {
+			finishResolve = resolve;
+		});
+		const sharedFinish = finishPromise;
+		tails.push(sharedFinish);
+		const finishWith = (result: HostedRlmPortResult<HostedRlmTaskResult>): void => {
+			settleFinish(result, true);
+		};
+		const dispatchTerminal = (): void => {
+			if (finishSettled || terminalDispatched) return;
+			if (closed) {
+				settleFinish(failure("CLOSED"), false);
+				return;
 			}
-
-			// If abort was admitted, await it. Even if abort is uncertain,
-			// we must still attempt unsubscribe (do not early-return).
-			let abortCertain = true;
-			if (abortAdmitted && abortPromise) {
-				try {
-					const aa = await abortPromise;
-					if (!aa.ok) abortCertain = false;
-				} catch {
-					abortCertain = false;
-				}
+			terminalDispatched = true;
+			let rawPromise: unknown;
+			try {
+				rawPromise = apply(terminalMethod, []);
+			} catch {
+				beginClose();
+				finishWith(failure("CALL_UNCERTAIN"));
+				return;
 			}
-
-			// Unsubscribe exactly once
-			if (!unsubscribed) {
-				unsubscribed = true;
-				if (subUnsubscribe) {
-					const unsubResult = subUnsubscribe();
-					if (!unsubResult.ok) {
-						finished = true;
-						return Object.freeze({
-							ok: false as const,
-							error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-						});
-					}
-				}
+			const terminal = watch(rawPromise, taskResult, null, "CALL_UNCERTAIN", true);
+			const fulfilled = (result: HostedRlmPortResult<HostedRlmTaskResult>): void => finishWith(result);
+			const rejected = (): void => {
+				beginClose();
+				finishWith(failure("CALL_UNCERTAIN"));
+			};
+			try {
+				const tail = Reflect.apply(NativeThen, terminal, [fulfilled, rejected]);
+				if (isNativePromise(tail)) tails.push(terminal, tail);
+				else rejected();
+			} catch {
+				rejected();
 			}
-
-			finished = true;
-
-			if (!abortCertain) {
-				return Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				});
+		};
+		if (closed) {
+			settleFinish(failure("CLOSED"), false);
+			return sharedFinish;
+		}
+		if (!started || startPromise === null) {
+			finishWith(failure("CALL_UNCERTAIN"));
+			return sharedFinish;
+		}
+		const admissionPromise = startPromise;
+		const admitted = (result: HostedRlmPortResult<HostedRlmAdmissionResult>): void => {
+			if (finishSettled) return;
+			if (closed) {
+				settleFinish(failure("CLOSED"), false);
+				return;
 			}
-
-			if (!taskResult) {
-				// finish without start — no meaningful task result available.
-				// Subscription was cleaned up above, terminal is set.
-				return Object.freeze({
-					ok: false as const,
-					error: Object.freeze({ code: "CALL_UNCERTAIN" as const }),
-				});
+			if (!result.ok) {
+				finishWith(failure(result.error.code));
+				return;
 			}
-
-			if (!taskResult.ok) return taskResult;
-			return taskResult;
-		})();
-
-		return finishPromise;
+			dispatchTerminal();
+		};
+		const rejected = (): void => {
+			beginClose();
+			finishWith(failure("CALL_UNCERTAIN"));
+		};
+		try {
+			const tail = Reflect.apply(NativeThen, admissionPromise, [admitted, rejected]);
+			if (isNativePromise(tail)) tails.push(admissionPromise, tail);
+			else rejected();
+		} catch {
+			rejected();
+		}
+		return sharedFinish;
 	}
 
 	function observe(): Promise<HostedRlmPortResult<HostedRlmObservationSnapshot>> {
-		return internalPort.observe();
+		if (closed) return resolved(failure("CLOSED"));
+		let rawPromise: unknown;
+		try {
+			rawPromise = apply(observeMethod, []);
+		} catch {
+			beginClose();
+			return resolved(failure("CALL_UNCERTAIN"));
+		}
+		return watch(rawPromise, observation, CONTROL_TIMEOUT_MS, "CALL_UNCERTAIN", true);
+	}
+
+	function close(): Promise<HostedRlmPortResult<HostedRlmCloseResult>> {
+		explicitlyClosed = true;
+		return beginClose();
 	}
 
 	const controller: HostedRlmRunController = Object.freeze({
@@ -603,45 +1006,7 @@ export function createHostedRlmRunController(input: unknown): CreateHostedRlmRun
 		requestAbort,
 		finish,
 		observe,
+		close,
 	});
-
-	return Object.freeze({ ok: true as const, value: controller });
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/** Returns a rejected promise whose rejection is handled by observePromise
- *  inside createHostedRlmRuntimePort, producing CALL_UNCERTAIN. */
-function safeUnwrapRejected(): Promise<never> {
-	return new Promise<never>((_resolve, reject) => {
-		reject(new Error());
-	});
-}
-
-/** Safely unwrap a public port result promise into a raw inner value.
- *  Validates native Promise, observes via Reflect.apply, descriptor-parses
- *  public result, returns raw value. Never calls .then, never uses in,
- *  never casts. */
-function safeUnwrapPortPromise(rawPromise: unknown, timeoutMs: number): Promise<unknown> {
-	return new Promise<unknown>((resolve, reject) => {
-		if (!isNativePromise(rawPromise)) {
-			reject(new Error());
-			return;
-		}
-		const observed = observePromise(rawPromise, timeoutMs);
-		observed.then((portResult) => {
-			if (!portResult.ok) {
-				reject(new Error());
-				return;
-			}
-			const parsed = tryPortOkValue(portResult.value);
-			if (!parsed) {
-				reject(new Error());
-				return;
-			}
-			resolve(parsed.rawValue);
-		});
-	});
+	return Object.freeze({ ok: true, value: controller });
 }

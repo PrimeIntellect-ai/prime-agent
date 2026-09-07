@@ -26,6 +26,40 @@ function isAgentSession(value: unknown): value is AgentSession {
 	return !!d && "value" in d && typeof d.value === "function";
 }
 
+function makeHostedPortMethods() {
+	return {
+		startInitialTask: vi.fn(() => Promise.resolve(Object.freeze({ code: "ADMITTED" as const }))),
+		awaitTerminal: vi.fn(() =>
+			Promise.resolve(
+				Object.freeze({
+					status: "completed" as const,
+					durationMs: 1,
+					parentReplyCount: 0,
+					toolUseCount: 0,
+				}),
+			),
+		),
+		abort: vi.fn(() => Promise.resolve(Object.freeze({ status: "aborted" as const }))),
+		observe: vi.fn(() =>
+			Promise.resolve(
+				Object.freeze({
+					status: "running" as const,
+					messageCount: 0,
+					toolUseCount: 0,
+					agentRunning: true,
+					parentReplyCount: 0,
+				}),
+			),
+		),
+		subscribe: vi.fn(() =>
+			Object.freeze({
+				unsubscribe: vi.fn(() => Object.freeze({ status: "unsubscribed" as const })),
+			}),
+		),
+		close: vi.fn(() => Promise.resolve(Object.freeze({ status: "closed" as const }))),
+	};
+}
+
 function makeHostedPort(): unknown {
 	return {
 		identity: {
@@ -34,10 +68,7 @@ function makeHostedPort(): unknown {
 			sessionName: "worker",
 			modelSelector: "provider/model",
 		},
-		startInitialTask: vi.fn(),
-		abort: vi.fn(),
-		observe: vi.fn(),
-		subscribe: vi.fn(),
+		...makeHostedPortMethods(),
 	};
 }
 
@@ -147,16 +178,121 @@ describe("RlmSubagentRuntime normalizeLocalArm", () => {
 });
 
 describe("RlmSubagentRuntime normalizeHostedArm", () => {
-	test("accepts a plain { hostedPort } with valid port shape", () => {
+	test("accepts a plain { hostedPort } with the exact ordered seven-member shape", () => {
 		const r = hosted();
 		expect("hostedPort" in r).toBe(true);
 		expect("session" in r).toBe(false);
+		if ("hostedPort" in r) {
+			expect(Object.keys(r.hostedPort)).toEqual([
+				"identity",
+				"startInitialTask",
+				"awaitTerminal",
+				"abort",
+				"observe",
+				"subscribe",
+				"close",
+			]);
+			for (const method of [
+				"startInitialTask",
+				"awaitTerminal",
+				"abort",
+				"observe",
+				"subscribe",
+				"close",
+			] as const) {
+				expect(typeof r.hostedPort[method]).toBe("function");
+			}
+		}
+	});
+
+	test("captures all six raw methods before later raw-port mutation", async () => {
+		const methods = makeHostedPortMethods();
+		const raw = {
+			identity: {
+				childId: "child-1",
+				sessionId: "session-1",
+				sessionName: "worker",
+				modelSelector: "provider/model",
+			},
+			...methods,
+		};
+		const r = normalizeRlmSubagentRuntime({ hostedPort: raw }, isAgentSession, makeHostedIdentity());
+		expect(r).not.toBeNull();
+		if (r === null || !("hostedPort" in r)) throw new Error("expected hosted port");
+
+		const replacements = makeHostedPortMethods();
+		Object.assign(raw, replacements);
+		const admitted = await r.hostedPort.startInitialTask({ prompt: "task" });
+		const terminal = await r.hostedPort.awaitTerminal();
+		const aborted = await r.hostedPort.abort();
+		const observed = await r.hostedPort.observe();
+		const subscription = r.hostedPort.subscribe(() => undefined);
+		const closed = await r.hostedPort.close();
+
+		expect(admitted).toEqual({ ok: true, value: { code: "ADMITTED" } });
+		expect(terminal).toEqual({
+			ok: true,
+			value: { status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 },
+		});
+		expect(aborted).toEqual({ ok: true, value: { status: "aborted" } });
+		expect(observed).toEqual({
+			ok: true,
+			value: {
+				status: "running",
+				messageCount: 0,
+				toolUseCount: 0,
+				agentRunning: true,
+				parentReplyCount: 0,
+			},
+		});
+		expect(subscription.ok).toBe(true);
+		if (subscription.ok) expect(subscription.value.unsubscribe()).toEqual({ ok: true });
+		expect(closed).toEqual({ ok: true, value: { status: "closed" } });
+		for (const method of Object.values(methods)) expect(method).toHaveBeenCalledTimes(1);
+		for (const method of Object.values(replacements)) expect(method).not.toHaveBeenCalled();
+	});
+
+	test("keeps ADMITTED admission separate from the terminal task result", async () => {
+		const methods = makeHostedPortMethods();
+		const raw = {
+			identity: {
+				childId: "child-1",
+				sessionId: "session-1",
+				sessionName: "worker",
+				modelSelector: "provider/model",
+			},
+			...methods,
+		};
+		const r = normalizeRlmSubagentRuntime({ hostedPort: raw }, isAgentSession, makeHostedIdentity());
+		if (r === null || !("hostedPort" in r)) throw new Error("expected hosted port");
+
+		const admission = await r.hostedPort.startInitialTask({ prompt: "long-running task" });
+		expect(admission).toEqual({ ok: true, value: { code: "ADMITTED" } });
+		expect(Object.isFrozen(admission)).toBe(true);
+		if (admission.ok) {
+			expect(Object.isFrozen(admission.value)).toBe(true);
+			expect("status" in admission.value).toBe(false);
+		}
+		expect(methods.awaitTerminal).not.toHaveBeenCalled();
+
+		const terminal = await r.hostedPort.awaitTerminal();
+		expect(terminal).toEqual({
+			ok: true,
+			value: { status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 },
+		});
+		expect(Object.isFrozen(terminal)).toBe(true);
+		if (terminal.ok) {
+			expect(Object.isFrozen(terminal.value)).toBe(true);
+			expect("code" in terminal.value).toBe(false);
+		}
+		expect(methods.startInitialTask).toHaveBeenCalledTimes(1);
+		expect(methods.awaitTerminal).toHaveBeenCalledTimes(1);
 	});
 
 	test("rejects a Proxy-wrapped { hostedPort }", () => {
 		const raw = { hostedPort: makeHostedPort() };
 		const proxy = new Proxy(raw, {});
-		expect(normalizeRlmSubagentRuntime(proxy, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(proxy, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects an accessor descriptor on hostedPort", () => {
@@ -165,7 +301,7 @@ describe("RlmSubagentRuntime normalizeHostedArm", () => {
 			enumerable: true,
 			get: () => makeHostedPort(),
 		});
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects a non-enumerable hostedPort", () => {
@@ -174,29 +310,60 @@ describe("RlmSubagentRuntime normalizeHostedArm", () => {
 			value: makeHostedPort(),
 			enumerable: false,
 		});
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects Symbol-keyed hostedPort", () => {
 		const raw = { [Symbol("h")]: makeHostedPort(), hostedPort: makeHostedPort() };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects extra keys alongside hostedPort", () => {
 		const raw = { hostedPort: makeHostedPort(), extra: true };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects if hostedPort itself is a Proxy", () => {
 		const raw = { hostedPort: new Proxy(Object(makeHostedPort()), {}) };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects if hostedPort has extra keys", () => {
 		const port: Record<string, unknown> = Object(makeHostedPort());
 		port.extra = "bad";
 		const raw = { hostedPort: port };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
+	});
+
+	test("rejects an extra legacy hostedPort method even when all seven members are valid", () => {
+		const port = { ...(makeHostedPort() as Record<string, unknown>), legacyStop: vi.fn() };
+		expect(normalizeRlmSubagentRuntime({ hostedPort: port }, isAgentSession, makeHostedIdentity())).toBeNull();
+	});
+
+	test("rejects a hostedPort missing awaitTerminal", () => {
+		const port: Record<string, unknown> = Object(makeHostedPort());
+		delete port.awaitTerminal;
+		expect(normalizeRlmSubagentRuntime({ hostedPort: port }, isAgentSession, makeHostedIdentity())).toBeNull();
+	});
+
+	test("rejects a hostedPort missing close", () => {
+		const port: Record<string, unknown> = Object(makeHostedPort());
+		delete port.close;
+		expect(normalizeRlmSubagentRuntime({ hostedPort: port }, isAgentSession, makeHostedIdentity())).toBeNull();
+	});
+
+	test("rejects a non-function awaitTerminal", () => {
+		const port: Record<string, unknown> = Object(makeHostedPort());
+		port.awaitTerminal = Promise.resolve(
+			Object.freeze({ status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 }),
+		);
+		expect(normalizeRlmSubagentRuntime({ hostedPort: port }, isAgentSession, makeHostedIdentity())).toBeNull();
+	});
+
+	test("rejects a non-function close", () => {
+		const port: Record<string, unknown> = Object(makeHostedPort());
+		port.close = Promise.resolve(Object.freeze({ status: "closed" }));
+		expect(normalizeRlmSubagentRuntime({ hostedPort: port }, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects if hostedPort identity has extra keys", () => {
@@ -205,7 +372,7 @@ describe("RlmSubagentRuntime normalizeHostedArm", () => {
 		identity.extra = "bad";
 		port.identity = identity;
 		const raw = { hostedPort: port };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects if hostedPort identity is missing keys", () => {
@@ -214,17 +381,17 @@ describe("RlmSubagentRuntime normalizeHostedArm", () => {
 		delete identity.modelSelector;
 		port.identity = identity;
 		const raw = { hostedPort: port };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects null hostedPort value", () => {
 		const raw = { hostedPort: null };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("rejects primitive hostedPort value", () => {
 		const raw = { hostedPort: "bad" };
-		expect(normalizeRlmSubagentRuntime(raw, isAgentSession)).toBeNull();
+		expect(normalizeRlmSubagentRuntime(raw, isAgentSession, makeHostedIdentity())).toBeNull();
 	});
 
 	test("frozen normalized hosted arm", () => {
@@ -252,6 +419,28 @@ describe("normalizeRlmSubagentRuntime expectedHostedIdentity", () => {
 				sessionId: "session-1",
 			}),
 		).toBeNull();
+	});
+
+	test("rejects identity mismatch before any hosted method has effects", () => {
+		const methods = makeHostedPortMethods();
+		const raw = {
+			identity: {
+				childId: "child-1",
+				sessionId: "session-1",
+				sessionName: "worker",
+				modelSelector: "provider/model",
+			},
+			...methods,
+		};
+		expect(
+			normalizeRlmSubagentRuntime({ hostedPort: raw }, isAgentSession, {
+				childId: "wrong",
+				sessionName: "worker",
+				modelSelector: "provider/model",
+				sessionId: "session-1",
+			}),
+		).toBeNull();
+		for (const method of Object.values(methods)) expect(method).not.toHaveBeenCalled();
 	});
 
 	test("matches sessionName", () => {
@@ -418,10 +607,7 @@ describe("local host hosted-arm rejection", () => {
 				sessionName: "worker",
 				modelSelector: "provider/model",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort }, (v): v is never => typeof v === "object" && v !== null);
 		expect(r).toBeNull();
@@ -435,10 +621,7 @@ describe("local host hosted-arm rejection", () => {
 				sessionName: "worker",
 				modelSelector: "provider/model",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const hostedRuntime = normalizeRlmSubagentRuntime(
 			{ hostedPort },
@@ -456,10 +639,7 @@ describe("local host hosted-arm rejection", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v: unknown): _v is never => false, {
 			childId: "c1",
@@ -479,10 +659,7 @@ describe("local host hosted-arm rejection", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		expect(normalizeRlmSubagentRuntime({ hostedPort: port }, (_v: unknown): _v is never => false, {})).toBeNull();
 	});
@@ -546,10 +723,7 @@ describe("AgentSessionRuntime-host regression (full-runtime rejection)", () => {
 				sessionName: "worker",
 				modelSelector: "provider/model",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const hostedRuntime = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, {
 			childId: "child-1",
@@ -580,10 +754,7 @@ describe("AgentSessionRuntime-host regression (full-runtime rejection)", () => {
 				sessionName: "worker",
 				modelSelector: "provider/model",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const hostedRuntime = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, {
 			childId: "child-local",
@@ -697,10 +868,7 @@ describe("malformed Proxy / revoked / fake collision cleanup", () => {
 		const raw = {
 			hostedPort: {
 				identity: identityProxy,
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		expect(normalizeRlmSubagentRuntime(raw, (_v): _v is never => false)).toBeNull();
@@ -718,10 +886,7 @@ describe("malformed Proxy / revoked / fake collision cleanup", () => {
 				sessionName: "worker",
 				modelSelector: "provider/model",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const hostedRuntime = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, {
 			childId: "child-collide",
@@ -806,10 +971,7 @@ describe("AgentSessionRuntime-host regression for delete rejection", () => {
 				sessionName: "worker",
 				modelSelector: "provider/model",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const result = localDeleteValidation({ hostedPort: port });
 		expect(result.thrown).toBe(true);
@@ -865,10 +1027,7 @@ describe("expectedHostedIdentity strict validation", () => {
 		const raw = {
 			hostedPort: {
 				identity: identityProxy,
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		expect(
@@ -887,10 +1046,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, {
@@ -928,10 +1084,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, identity);
@@ -955,10 +1108,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, proxy);
@@ -981,10 +1131,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, identity);
@@ -1006,10 +1153,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, identity);
@@ -1033,10 +1177,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, identity);
@@ -1062,10 +1203,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, identity);
@@ -1085,10 +1223,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		const r = normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, identity);
@@ -1104,10 +1239,7 @@ describe("expectedHostedIdentity strict validation", () => {
 					sessionName: "w",
 					modelSelector: "p/m",
 				},
-				startInitialTask: vi.fn(),
-				abort: vi.fn(),
-				observe: vi.fn(),
-				subscribe: vi.fn(),
+				...makeHostedPortMethods(),
 			},
 		};
 		expect(normalizeRlmSubagentRuntime(raw, (_v): _v is never => false, undefined)).toBeNull();
@@ -1128,10 +1260,7 @@ describe("expectedHostedIdentity ALL FOUR required keys", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identity);
 		expect(r).toBeNull();
@@ -1150,10 +1279,7 @@ describe("expectedHostedIdentity ALL FOUR required keys", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identity);
 		expect(r).toBeNull();
@@ -1172,10 +1298,7 @@ describe("expectedHostedIdentity ALL FOUR required keys", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identity);
 		expect(r).toBeNull();
@@ -1194,10 +1317,7 @@ describe("expectedHostedIdentity ALL FOUR required keys", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identity);
 		expect(r).toBeNull();
@@ -1219,10 +1339,7 @@ describe("expectedHostedIdentity printable ASCII validation", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identity);
 		expect(r).toBeNull();
@@ -1242,10 +1359,7 @@ describe("expectedHostedIdentity printable ASCII validation", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		identityWithControl.childId = "c\u0001";
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identityWithControl);
@@ -1266,10 +1380,7 @@ describe("expectedHostedIdentity printable ASCII validation", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		identityWithHigh.childId = "caf\u00e9";
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identityWithHigh);
@@ -1290,10 +1401,7 @@ describe("expectedHostedIdentity printable ASCII validation", () => {
 				sessionName: "w",
 				modelSelector: "p/m",
 			},
-			startInitialTask: vi.fn(),
-			abort: vi.fn(),
-			observe: vi.fn(),
-			subscribe: vi.fn(),
+			...makeHostedPortMethods(),
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identity);
 		expect(r).not.toBeNull();

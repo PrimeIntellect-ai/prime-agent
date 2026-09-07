@@ -1,21 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { createHostedRlmRunController, type HostedRlmRunController } from "../src/core/hosted-rlm-run-controller.js";
 import {
-	type CreateHostedRlmRunControllerResult,
-	createHostedRlmRunController,
-	type HostedRlmRunController,
-} from "../src/core/hosted-rlm-run-controller.js";
-import type {
-	HostedRlmObservationSnapshot,
-	HostedRlmPortResult,
-	HostedRlmRuntimeEvent,
-	HostedRlmRuntimeIdentity,
-	HostedRlmTaskResult,
+	createHostedRlmRuntimePort,
+	type HostedRlmPortResult,
+	type HostedRlmRuntimeIdentity,
+	type HostedRlmRuntimePort,
 } from "../src/core/hosted-rlm-runtime-port.js";
-import { createHostedRlmRuntimePort } from "../src/core/hosted-rlm-runtime-port.js";
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
 
 const IDENTITY: HostedRlmRuntimeIdentity = {
 	childId: "child-001",
@@ -23,1346 +13,746 @@ const IDENTITY: HostedRlmRuntimeIdentity = {
 	sessionName: "reviewer",
 	modelSelector: "prime-inference/deepseek/deepseek-v4-flash",
 };
-
-const TASK: HostedRlmTaskResult = {
+const TASK = Object.freeze({
 	status: "completed",
-	durationMs: 15,
-	parentReplyCount: 2,
-	toolUseCount: 3,
+	durationMs: 42_000,
+	parentReplyCount: 1,
+	toolUseCount: 2,
 	answerPreview: "done",
-	usage: { inputTokens: 11, outputTokens: 7 },
-};
-
-const SNAPSHOT: HostedRlmObservationSnapshot = {
+});
+const SNAPSHOT = Object.freeze({
 	status: "running",
-	messageCount: 4,
-	toolUseCount: 3,
+	messageCount: 2,
+	toolUseCount: 1,
 	agentRunning: true,
-	parentReplyCount: 2,
-	answerPreview: "work",
-	usage: { inputTokens: 9, outputTokens: 5 },
-};
+	parentReplyCount: 0,
+});
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function success<T>(result: HostedRlmPortResult<T>): T {
-	if (!result.ok) throw new Error(result.error.code);
-	return result.value;
-}
-
-function expectUncertain<T>(result: HostedRlmPortResult<T>): void {
-	expect(result).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
-}
-
-function makePortResult(ok: true, value: unknown): unknown;
-function makePortResult(ok: false, error: { code: string }): unknown;
-function makePortResult(ok: boolean, valueOrError: unknown): unknown {
-	if (ok) return { ok: true, value: valueOrError };
-	return { ok: false, error: valueOrError };
-}
-
-interface HarnessCalls {
+type Deferred = { promise: Promise<unknown>; resolve: (value: unknown) => void };
+type Calls = {
 	start: number;
+	terminal: number;
 	abort: number;
 	observe: number;
 	subscribe: number;
 	unsubscribe: number;
-}
+	close: number;
+};
+type Overrides = {
+	start?: () => unknown;
+	terminal?: () => unknown;
+	abort?: () => unknown;
+	observe?: () => unknown;
+	close?: () => unknown;
+};
 
-interface Harness {
-	port: Record<string, unknown>;
-	getCalls: () => HarnessCalls;
-	emit: (event: HostedRlmRuntimeEvent) => void;
-}
-
-/** Build a Record-based public port whose subscribe results and unsubscribe
- *  returns match the HOSTED PORT CONTRACT: subscribe returns
- *  {ok:true, value:{unsubscribe: fn}} where fn() returns {ok:true}. */
-function makePort(
-	config: {
-		startResult?: unknown;
-		startDelay?: number;
-		abortResult?: unknown;
-		subscribeResult?: unknown;
-		unsubscribeResult?: unknown;
-	} = {},
-): Harness {
-	const calls: HarnessCalls = { start: 0, abort: 0, observe: 0, subscribe: 0, unsubscribe: 0 };
-	let callback: ((event: HostedRlmRuntimeEvent) => void) | undefined;
-
-	const startResult = config.startResult !== undefined ? config.startResult : makePortResult(true, TASK);
-	const startDelay = config.startDelay ?? 0;
-	const abortResult =
-		config.abortResult !== undefined ? config.abortResult : makePortResult(true, { status: "aborted" });
-
-	const unsubFn = (): unknown => {
-		calls.unsubscribe += 1;
-		if (config.unsubscribeResult !== undefined) return config.unsubscribeResult;
-		return { ok: true };
-	};
-
-	const subscribeFn = (): unknown => {
-		if (config.subscribeResult !== undefined) return config.subscribeResult;
-		return {
-			ok: true,
-			value: { unsubscribe: unsubFn },
-		};
-	};
-
-	const port: Record<string, unknown> = {
-		identity: { ...IDENTITY },
-		startInitialTask(_input: unknown): unknown {
-			calls.start += 1;
-			if (startDelay > 0) return new Promise((r) => setTimeout(r, startDelay)).then(() => startResult);
-			return Promise.resolve(startResult);
-		},
-		abort(): unknown {
-			calls.abort += 1;
-			return Promise.resolve(abortResult);
-		},
-		observe(): unknown {
-			calls.observe += 1;
-			return Promise.resolve(makePortResult(true, SNAPSHOT));
-		},
-		subscribe(listener: unknown): unknown {
-			calls.subscribe += 1;
-			if (typeof listener === "function") {
-				const cb = (event: HostedRlmRuntimeEvent) => {
-					Reflect.apply(listener, undefined, [event]);
-				};
-				callback = cb;
-			}
-			return subscribeFn();
-		},
-	};
-
-	return {
-		port,
-		getCalls: () => ({ ...calls }),
-		emit: (event) => {
-			if (callback) callback(event);
-		},
-	};
-}
-
-function createController(
-	overrides: { port?: Record<string, unknown>; expectedIdentity?: HostedRlmRuntimeIdentity; listener?: unknown } = {},
-): HostedRlmRunController {
-	const port = overrides.port !== undefined ? overrides.port : makePort().port;
-	const result = createHostedRlmRunController({
-		port,
-		expectedIdentity: overrides.expectedIdentity ?? IDENTITY,
-		...(overrides.listener !== undefined ? { listener: overrides.listener } : undefined),
+function deferred(): Deferred {
+	let resolveValue: (value: unknown) => void = () => undefined;
+	const promise = new Promise<unknown>((resolve) => {
+		resolveValue = resolve;
 	});
-	if (!result.ok) throw new Error(`createController failed: ${result.code}`);
+	return { promise, resolve: resolveValue };
+}
+
+function value<T>(result: HostedRlmPortResult<T>): T {
+	expect(result.ok).toBe(true);
+	if (!result.ok) throw new Error(result.error.code);
 	return result.value;
 }
 
-function expectCreate(input: unknown): CreateHostedRlmRunControllerResult {
-	return createHostedRlmRunController(input);
+function box(overrides: Overrides = {}): {
+	port: HostedRlmRuntimePort;
+	calls: Calls;
+	emit: (event: unknown) => void;
+} {
+	const calls: Calls = { start: 0, terminal: 0, abort: 0, observe: 0, subscribe: 0, unsubscribe: 0, close: 0 };
+	let listener: ((event: unknown) => void) | undefined;
+	const raw = {
+		identity: { ...IDENTITY },
+		startInitialTask() {
+			calls.start += 1;
+			return overrides.start === undefined ? Promise.resolve({ code: "ADMITTED" }) : overrides.start();
+		},
+		awaitTerminal() {
+			calls.terminal += 1;
+			return overrides.terminal === undefined ? Promise.resolve(TASK) : overrides.terminal();
+		},
+		abort() {
+			calls.abort += 1;
+			return overrides.abort === undefined ? Promise.resolve({ status: "aborted" }) : overrides.abort();
+		},
+		observe() {
+			calls.observe += 1;
+			return overrides.observe === undefined ? Promise.resolve(SNAPSHOT) : overrides.observe();
+		},
+		subscribe(callback: (event: unknown) => void) {
+			calls.subscribe += 1;
+			listener = callback;
+			return {
+				unsubscribe() {
+					calls.unsubscribe += 1;
+					return { status: "unsubscribed" };
+				},
+			};
+		},
+		close() {
+			calls.close += 1;
+			return overrides.close === undefined ? Promise.resolve({ status: "closed" }) : overrides.close();
+		},
+	};
+	const normalized = createHostedRlmRuntimePort(raw);
+	if (!normalized.ok) throw new Error(normalized.code);
+	return { port: normalized.value, calls, emit: (event) => listener?.(event) };
 }
 
-// ---------------------------------------------------------------------------
-// Tests: createHostedRlmRunController factory
-// ---------------------------------------------------------------------------
+function controller(port: HostedRlmRuntimePort, listener?: (event: never) => void): HostedRlmRunController {
+	const created = createHostedRlmRunController(
+		listener === undefined ? { port, expectedIdentity: IDENTITY } : { port, expectedIdentity: IDENTITY, listener },
+	);
+	if (!created.ok) throw new Error(created.code);
+	return created.value;
+}
 
-describe("createHostedRlmRunController", () => {
-	test("returns a frozen controller with matching identity", () => {
-		const box = makePort();
-		const result = expectCreate({ port: box.port, expectedIdentity: IDENTITY });
-		expect(result.ok).toBe(true);
-		if (!result.ok) return;
-		expect(Object.isFrozen(result)).toBe(true);
-		expect(Object.isFrozen(result.value)).toBe(true);
-		expect(Object.isFrozen(result.value.identity)).toBe(true);
-		expect(result.value.identity).toEqual(IDENTITY);
-		expect(Object.keys(result.value)).toEqual(["identity", "start", "requestAbort", "finish", "observe"]);
+function directPort(overrides: Partial<HostedRlmRuntimePort> = {}): HostedRlmRuntimePort {
+	const port: HostedRlmRuntimePort = {
+		identity: IDENTITY,
+		startInitialTask: () => Promise.resolve({ ok: true, value: { code: "ADMITTED" } }),
+		awaitTerminal: () => Promise.resolve({ ok: true, value: TASK }),
+		abort: () => Promise.resolve({ ok: true, value: { status: "aborted" } }),
+		observe: () => Promise.resolve({ ok: true, value: SNAPSHOT }),
+		subscribe: () => ({ ok: true, value: { unsubscribe: () => ({ ok: true }) } }),
+		close: () => Promise.resolve({ ok: true, value: { status: "closed" } }),
+	};
+	return Object.freeze({
+		identity: overrides.identity === undefined ? port.identity : overrides.identity,
+		startInitialTask: overrides.startInitialTask === undefined ? port.startInitialTask : overrides.startInitialTask,
+		awaitTerminal: overrides.awaitTerminal === undefined ? port.awaitTerminal : overrides.awaitTerminal,
+		abort: overrides.abort === undefined ? port.abort : overrides.abort,
+		observe: overrides.observe === undefined ? port.observe : overrides.observe,
+		subscribe: overrides.subscribe === undefined ? port.subscribe : overrides.subscribe,
+		close: overrides.close === undefined ? port.close : overrides.close,
+	});
+}
+
+async function withoutUnhandledRejection(action: () => Promise<void>): Promise<void> {
+	const reasons: unknown[] = [];
+	const listener = (reason: unknown): void => {
+		reasons.push(reason);
+	};
+	process.on("unhandledRejection", listener);
+	try {
+		await action();
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		expect(reasons).toEqual([]);
+	} finally {
+		process.off("unhandledRejection", listener);
+	}
+}
+
+afterEach(() => vi.useRealTimers());
+
+describe("hosted RLM run controller", () => {
+	test("matches identity before effects and returns an exact frozen controller", () => {
+		const runtime = box();
+		const mismatch = createHostedRlmRunController({
+			port: runtime.port,
+			expectedIdentity: { ...IDENTITY, sessionId: "other" },
+		});
+		expect(mismatch).toEqual({ ok: false, code: "IDENTITY_MISMATCH" });
+		expect(runtime.calls.subscribe).toBe(0);
+		expect(runtime.calls.close).toBe(0);
+		const created = createHostedRlmRunController({ port: runtime.port, expectedIdentity: IDENTITY });
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		expect(Object.keys(created.value)).toEqual(["identity", "start", "requestAbort", "finish", "observe", "close"]);
+		expect(Object.isFrozen(created.value)).toBe(true);
+		expect(Object.isFrozen(created.value.identity)).toBe(true);
+		expect(runtime.calls.subscribe).toBe(1);
 	});
 
-	test.each([[undefined], [null], [true], [4], ["raw"], [[]], [() => undefined]])(
-		"rejects invalid outer value %#",
-		(raw) => {
-			expect(expectCreate(raw)).toEqual({ ok: false, code: "INVALID_INPUT" });
+	test("rejects hostile ports and input accessors without effects", () => {
+		const runtime = box();
+		const trap = vi.fn(() => {
+			throw new Error("trap");
+		});
+		expect(
+			createHostedRlmRunController(new Proxy({ port: runtime.port, expectedIdentity: IDENTITY }, { get: trap })),
+		).toEqual({
+			ok: false,
+			code: "INVALID_INPUT",
+		});
+		expect(trap).not.toHaveBeenCalled();
+		const input: Record<string, unknown> = { port: runtime.port, expectedIdentity: IDENTITY };
+		Object.defineProperty(input, "expectedIdentity", { enumerable: true, get: trap });
+		expect(createHostedRlmRunController(input)).toEqual({ ok: false, code: "INVALID_INPUT" });
+		expect(trap).not.toHaveBeenCalled();
+	});
+
+	test("start returns ADMITTED and finish has no whole-task timeout", async () => {
+		vi.useFakeTimers();
+		const terminal = deferred();
+		const runtime = box({ terminal: () => terminal.promise });
+		const run = controller(runtime.port);
+		const admitted = run.start({ prompt: "long task" });
+		expect(Object.isExtensible(admitted)).toBe(true);
+		expect(value(await admitted)).toEqual({ code: "ADMITTED" });
+		const finishing = run.finish();
+		await vi.advanceTimersByTimeAsync(35_000);
+		let settled = false;
+		void finishing.then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		terminal.resolve(TASK);
+		expect(value(await finishing)).toEqual(TASK);
+		expect(runtime.calls.start).toBe(1);
+		expect(runtime.calls.terminal).toBe(1);
+		expect(runtime.calls.unsubscribe).toBe(1);
+	});
+
+	test("concurrent and repeated finish calls coalesce one terminal wait and unsubscribe", async () => {
+		const terminal = deferred();
+		const runtime = box({ terminal: () => terminal.promise });
+		const run = controller(runtime.port);
+		await run.start({ prompt: "go" });
+		const first = run.finish();
+		const second = run.finish();
+		expect(first).toBe(second);
+		terminal.resolve(TASK);
+		expect(value(await first)).toEqual(TASK);
+		expect(runtime.calls.terminal).toBe(1);
+		expect(runtime.calls.unsubscribe).toBe(1);
+	});
+
+	test("requestAbort remains available while finish waits and reaches remote once", async () => {
+		const terminal = deferred();
+		const runtime = box({ terminal: () => terminal.promise });
+		const run = controller(runtime.port);
+		await run.start({ prompt: "go" });
+		const finishing = run.finish();
+		const first = run.requestAbort();
+		const second = run.requestAbort();
+		expect(first).toBe(second);
+		expect(value(await first)).toEqual({ status: "aborted" });
+		expect(runtime.calls.abort).toBe(1);
+		terminal.resolve({
+			status: "cancelled",
+			durationMs: 3,
+			parentReplyCount: 0,
+			toolUseCount: 0,
+			errorCode: "CANCELLED",
+		});
+		expect(value(await finishing).status).toBe("cancelled");
+	});
+
+	test("synchronous abort uncertainty is cached across retries", async () => {
+		const runtime = box({
+			abort() {
+				throw new Error("after dispatch");
+			},
+		});
+		const run = controller(runtime.port);
+		await run.start({ prompt: "go" });
+		const first = run.requestAbort();
+		const second = run.requestAbort();
+		expect(first).toBe(second);
+		expect(await first).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(runtime.calls.abort).toBe(1);
+	});
+
+	test("abort and close preinstall shared promises before hostile reentrancy", async () => {
+		let run: HostedRlmRunController | undefined;
+		let abortCalls = 0;
+		let closeCalls = 0;
+		let reenteredAbort: Promise<HostedRlmPortResult<unknown>> | undefined;
+		let reenteredClose: Promise<HostedRlmPortResult<unknown>> | undefined;
+		const fake = Object.freeze({
+			identity: Object.freeze({ ...IDENTITY }),
+			startInitialTask: () => Promise.resolve({ ok: true, value: { code: "ADMITTED" } }),
+			awaitTerminal: () => Promise.resolve({ ok: true, value: TASK }),
+			abort() {
+				abortCalls += 1;
+				throw new Error("after dispatch");
+			},
+			observe: () => Promise.resolve({ ok: true, value: SNAPSHOT }),
+			subscribe: () => Object.freeze({ ok: true, value: Object.freeze({ unsubscribe: () => ({ ok: true }) }) }),
+			close() {
+				closeCalls += 1;
+				if (run !== undefined) {
+					reenteredAbort = run.requestAbort();
+					reenteredClose = run.close();
+				}
+				return Promise.resolve({ ok: true, value: { status: "closed" } });
+			},
+		});
+		const created = createHostedRlmRunController({ port: fake, expectedIdentity: IDENTITY });
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		run = created.value;
+		await run.start({ prompt: "go" });
+		const firstAbort = run.requestAbort();
+		expect(reenteredAbort).toBe(firstAbort);
+		expect(reenteredClose).toBe(run.close());
+		expect(await firstAbort).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(value(await run.close())).toEqual({ status: "closed" });
+		expect(abortCalls).toBe(1);
+		expect(closeCalls).toBe(1);
+	});
+
+	test("duplicate start does not dispatch twice", async () => {
+		const runtime = box();
+		const run = controller(runtime.port);
+		expect(value(await run.start({ prompt: "one" }))).toEqual({ code: "ADMITTED" });
+		expect(await run.start({ prompt: "two" })).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(runtime.calls.start).toBe(1);
+	});
+
+	test("finish without start unsubscribes exactly once and returns uncertainty", async () => {
+		const runtime = box();
+		const run = controller(runtime.port);
+		expect(await run.finish()).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(runtime.calls.unsubscribe).toBe(1);
+		expect(runtime.calls.terminal).toBe(0);
+		expect(await run.finish()).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(runtime.calls.unsubscribe).toBe(1);
+	});
+
+	test("close is synchronous in revocation, asynchronous in result, and coalesced", async () => {
+		const runtime = box();
+		const run = controller(runtime.port);
+		const first = run.close();
+		const second = run.close();
+		expect(first).toBe(second);
+		expect(runtime.calls.unsubscribe).toBe(1);
+		expect(runtime.calls.close).toBe(1);
+		expect(value(await first)).toEqual({ status: "closed" });
+		expect(await run.observe()).toEqual({ ok: false, error: { code: "CLOSED" } });
+	});
+
+	test("finish and close race share unsubscribe ownership", async () => {
+		const terminal = deferred();
+		const runtime = box({ terminal: () => terminal.promise });
+		const run = controller(runtime.port);
+		await run.start({ prompt: "go" });
+		const finishing = run.finish();
+		const closing = run.close();
+		expect(runtime.calls.unsubscribe).toBe(1);
+		expect(await finishing).toEqual({ ok: false, error: { code: "CLOSED" } });
+		expect(runtime.calls.terminal).toBe(0);
+		terminal.resolve(TASK);
+		expect(value(await closing)).toEqual({ status: "closed" });
+		expect(runtime.calls.unsubscribe).toBe(1);
+		expect(runtime.calls.close).toBe(1);
+	});
+
+	test("buffers synchronous events until token validation and rejects hostile events", () => {
+		let listenerCalls = 0;
+		let unsubscribeCalls = 0;
+		let closeCalls = 0;
+		const hostileEvent = new Proxy(
+			{ type: "waiting" },
+			{
+				get() {
+					throw new Error("event trap");
+				},
+			},
+		);
+		const fake = Object.freeze({
+			identity: Object.freeze({ ...IDENTITY }),
+			startInitialTask: () => Promise.resolve({ ok: true, value: { code: "ADMITTED" } }),
+			awaitTerminal: () => Promise.resolve({ ok: true, value: TASK }),
+			abort: () => Promise.resolve({ ok: true, value: { status: "aborted" } }),
+			observe: () => Promise.resolve({ ok: true, value: SNAPSHOT }),
+			subscribe(callback: (event: unknown) => void) {
+				callback(hostileEvent);
+				return Object.freeze({
+					ok: true,
+					value: Object.freeze({
+						unsubscribe() {
+							unsubscribeCalls += 1;
+							return { ok: true };
+						},
+					}),
+				});
+			},
+			close() {
+				closeCalls += 1;
+				return Promise.resolve({ ok: true, value: { status: "closed" } });
+			},
+		});
+		const created = createHostedRlmRunController({
+			port: fake,
+			expectedIdentity: IDENTITY,
+			listener: () => {
+				listenerCalls += 1;
+			},
+		});
+		expect(created).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
+		expect(listenerCalls).toBe(0);
+		expect(unsubscribeCalls).toBe(1);
+		expect(closeCalls).toBe(1);
+	});
+
+	test("listener faults close the run without escaping the event callback", async () => {
+		const runtime = box();
+		const run = controller(runtime.port, () => {
+			throw new Error("listener");
+		});
+		expect(() => runtime.emit({ type: "agent_start" })).not.toThrow();
+		expect(runtime.calls.unsubscribe).toBe(1);
+		expect(runtime.calls.close).toBe(1);
+		expect(value(await run.close())).toEqual({ status: "closed" });
+	});
+
+	test("observe returns a fresh frozen snapshot", async () => {
+		const runtime = box();
+		const run = controller(runtime.port);
+		const observed = run.observe();
+		expect(Object.isExtensible(observed)).toBe(true);
+		const snapshot = value(await observed);
+		expect(snapshot).toEqual(SNAPSHOT);
+		expect(snapshot).not.toBe(SNAPSHOT);
+		expect(Object.isFrozen(snapshot)).toBe(true);
+	});
+
+	test("malformed public results trigger close and return uncertainty", async () => {
+		let closeCalls = 0;
+		let unsubscribeCalls = 0;
+		const fake = Object.freeze({
+			identity: Object.freeze({ ...IDENTITY }),
+			startInitialTask: () => Promise.resolve(Object.freeze({ ok: true, value: Object.freeze({ code: "WRONG" }) })),
+			awaitTerminal: () => Promise.resolve(Object.freeze({ ok: true, value: TASK })),
+			abort: () => Promise.resolve(Object.freeze({ ok: true, value: Object.freeze({ status: "aborted" }) })),
+			observe: () => Promise.resolve(Object.freeze({ ok: true, value: SNAPSHOT })),
+			subscribe: () =>
+				Object.freeze({
+					ok: true,
+					value: Object.freeze({
+						unsubscribe: () => {
+							unsubscribeCalls += 1;
+							return Object.freeze({ ok: true });
+						},
+					}),
+				}),
+			close: () => {
+				closeCalls += 1;
+				return Promise.resolve(Object.freeze({ ok: true, value: Object.freeze({ status: "closed" }) }));
+			},
+		});
+		const created = createHostedRlmRunController({ port: fake, expectedIdentity: IDENTITY });
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		expect(await created.value.start({ prompt: "go" })).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(unsubscribeCalls).toBe(1);
+		expect(closeCalls).toBe(1);
+	});
+
+	test("hostile Promise species is rejected without invoking it and close still dispatches", async () => {
+		let getterCalls = 0;
+		let closeCalls = 0;
+		const hostile = Promise.resolve(Object.freeze({ ok: true, value: Object.freeze({ code: "ADMITTED" }) }));
+		Object.defineProperty(hostile, "constructor", {
+			get() {
+				getterCalls += 1;
+				throw new Error("species");
+			},
+		});
+		const fake = Object.freeze({
+			identity: Object.freeze({ ...IDENTITY }),
+			startInitialTask: () => hostile,
+			awaitTerminal: () => Promise.resolve({ ok: true, value: TASK }),
+			abort: () => Promise.resolve({ ok: true, value: { status: "aborted" } }),
+			observe: () => Promise.resolve({ ok: true, value: SNAPSHOT }),
+			subscribe: () => Object.freeze({ ok: true, value: Object.freeze({ unsubscribe: () => ({ ok: true }) }) }),
+			close: () => {
+				closeCalls += 1;
+				return Promise.resolve({ ok: true, value: { status: "closed" } });
+			},
+		});
+		const created = createHostedRlmRunController({ port: fake, expectedIdentity: IDENTITY });
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		expect(await created.value.start({ prompt: "go" })).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(getterCalls).toBe(0);
+		expect(closeCalls).toBe(1);
+	});
+
+	test("close during pending admission fences finish and later terminal dispatch", async () => {
+		const admission = deferred();
+		const runtime = box({ start: () => admission.promise });
+		const run = controller(runtime.port);
+		const starting = run.start({ prompt: "go" });
+		const finishing = run.finish();
+		const closing = run.close();
+		expect(await finishing).toEqual({ ok: false, error: { code: "CLOSED" } });
+		expect(runtime.calls.terminal).toBe(0);
+		admission.resolve({ code: "ADMITTED" });
+		expect(value(await starting)).toEqual({ code: "ADMITTED" });
+		expect(value(await closing)).toEqual({ status: "closed" });
+		await Promise.resolve();
+		expect(runtime.calls.terminal).toBe(0);
+	});
+
+	test("first finish after close is CLOSED and never dispatches terminal", async () => {
+		const runtime = box();
+		const run = controller(runtime.port);
+		expect(value(await run.close())).toEqual({ status: "closed" });
+		expect(await run.finish()).toEqual({ ok: false, error: { code: "CLOSED" } });
+		expect(runtime.calls.terminal).toBe(0);
+	});
+
+	test("finish before start permanently fences later start", async () => {
+		const runtime = box();
+		const run = controller(runtime.port);
+		expect(await run.finish()).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(await run.start({ prompt: "orphan" })).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+		expect(runtime.calls.start).toBe(0);
+		expect(runtime.calls.terminal).toBe(0);
+	});
+
+	test("synchronous raw start reentry into finish joins preinstalled admission", async () => {
+		let run: HostedRlmRunController | undefined;
+		let reentered: Promise<HostedRlmPortResult<unknown>> | undefined;
+		const runtime = box({
+			start() {
+				if (run !== undefined) reentered = run.finish();
+				return Promise.resolve({ code: "ADMITTED" });
+			},
+		});
+		run = controller(runtime.port);
+		expect(value(await run.start({ prompt: "go" }))).toEqual({ code: "ADMITTED" });
+		expect(reentered).toBeDefined();
+		if (reentered === undefined) return;
+		expect(value(await reentered)).toEqual(TASK);
+		expect(run.finish()).toBe(reentered);
+		expect(runtime.calls.start).toBe(1);
+		expect(runtime.calls.terminal).toBe(1);
+	});
+
+	test.each(["own property", "subclass", "species accessor", "constructor accessor"])(
+		"controller contains rejected %s Promise without unhandledRejection",
+		async (kind) => {
+			await withoutUnhandledRejection(async () => {
+				let getterCalls = 0;
+				let rejected: Promise<unknown>;
+				if (kind === "subclass") {
+					class SupplierPromise<T> extends Promise<T> {}
+					rejected = SupplierPromise.reject(new Error("subclass"));
+				} else if (kind === "species accessor") {
+					class SupplierPromise<T> extends Promise<T> {
+						static get [Symbol.species](): PromiseConstructor {
+							getterCalls += 1;
+							throw new Error("must not run");
+						}
+					}
+					rejected = SupplierPromise.reject(new Error("species"));
+				} else {
+					rejected = Promise.reject(new Error(kind));
+					if (kind === "own property")
+						Object.defineProperty(rejected, "marker", { value: true, configurable: true });
+					else {
+						Object.defineProperty(rejected, "constructor", {
+							configurable: true,
+							get() {
+								getterCalls += 1;
+								throw new Error("must not run");
+							},
+						});
+					}
+				}
+				let closeCalls = 0;
+				const port = directPort({
+					startInitialTask: () => rejected,
+					close: () => {
+						closeCalls += 1;
+						return Promise.resolve({ ok: true, value: { status: "closed" } });
+					},
+				});
+				const run = controller(port);
+				expect(await run.start({ prompt: "go" })).toEqual({ ok: false, error: { code: "CALL_UNCERTAIN" } });
+				expect(getterCalls).toBe(0);
+				expect(closeCalls).toBe(1);
+			});
 		},
 	);
 
-	test.each(["port", "expectedIdentity"])("rejects missing %s", (key) => {
-		const box = makePort();
-		const raw: Record<string, unknown> = {
-			port: box.port,
-			expectedIdentity: IDENTITY,
-		};
-		delete raw[key];
-		expect(expectCreate(raw)).toEqual({ ok: false, code: "INVALID_INPUT" });
+	test.each(["rejected own close", "malformed close", "constructor close"])(
+		"controller contains %s Promise result",
+		async (kind) => {
+			await withoutUnhandledRejection(async () => {
+				let getterCalls = 0;
+				const close = (): Promise<HostedRlmPortResult<{ status: "closed" }>> => {
+					if (kind === "malformed close")
+						return Promise.resolve({ ok: true, value: { status: "closed", extra: true } });
+					const rejected = Promise.reject(new Error(kind));
+					if (kind === "rejected own close")
+						Object.defineProperty(rejected, "marker", { value: true, configurable: true });
+					else {
+						Object.defineProperty(rejected, "constructor", {
+							configurable: true,
+							get() {
+								getterCalls += 1;
+								throw new Error("must not run");
+							},
+						});
+					}
+					return rejected;
+				};
+				const run = controller(directPort({ close }));
+				expect(await run.close()).toEqual({ ok: false, error: { code: "CLEANUP_UNCERTAIN" } });
+				expect(getterCalls).toBe(0);
+			});
+		},
+	);
+
+	test("controller copies and freezes nested observation usage", async () => {
+		const usage = { inputTokens: 12, outputTokens: 13 };
+		const snapshot = { ...SNAPSHOT, answerPreview: "work", usage };
+		const run = controller(directPort({ observe: () => Promise.resolve({ ok: true, value: snapshot }) }));
+		const result = value(await run.observe());
+		expect(result).toEqual(snapshot);
+		expect(result).not.toBe(snapshot);
+		expect(result.usage).not.toBe(usage);
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(Object.isFrozen(result.usage)).toBe(true);
 	});
 
-	test("rejects port with mismatched identity", () => {
-		const box = makePort();
-		const wrong = { ...IDENTITY, childId: "wrong-id" };
-		expect(expectCreate({ port: box.port, expectedIdentity: wrong })).toEqual({
-			ok: false,
-			code: "IDENTITY_MISMATCH",
-		});
+	test.each([
+		["agent_start", { type: "agent_start" }],
+		["agent_end", { type: "agent_end" }],
+		["waiting", { type: "waiting" }],
+		["writing", { type: "writing", answerPreview: "draft" }],
+		["executing", { type: "executing", toolName: "bash" }],
+		["child_update", { type: "child_update", status: "running", toolUseCount: 1, parentReplyCount: 2 }],
+	])("controller delivers event variant %s", (_name, event) => {
+		const runtime = box();
+		const delivered: unknown[] = [];
+		controller(runtime.port, (value) => delivered.push(value));
+		runtime.emit(event);
+		expect(delivered).toEqual([event]);
+		expect(delivered[0]).not.toBe(event);
+		expect(Object.isFrozen(delivered[0])).toBe(true);
 	});
 
-	test("rejects port with extra keys, proxy, accessors, symbols", () => {
-		const box = makePort();
-		const withExtra = { ...box.port, extra: true };
-		expect(expectCreate({ port: withExtra, expectedIdentity: IDENTITY })).toEqual({
-			ok: false,
-			code: "INVALID_INPUT",
-		});
-		expect(expectCreate({ port: new Proxy(box.port, {}), expectedIdentity: IDENTITY })).toEqual({
-			ok: false,
-			code: "INVALID_INPUT",
-		});
-		const accessorPort: Record<string, unknown> = {};
-		Object.assign(accessorPort, box.port);
-		Object.defineProperty(accessorPort, "identity", {
-			enumerable: true,
-			get: () => IDENTITY,
-		});
-		expect(expectCreate({ port: accessorPort, expectedIdentity: IDENTITY })).toEqual({
-			ok: false,
-			code: "INVALID_INPUT",
-		});
-		const sym = Symbol("hide");
-		const withSymbol = { ...box.port, [sym]: true };
-		expect(expectCreate({ port: withSymbol, expectedIdentity: IDENTITY })).toEqual({
-			ok: false,
-			code: "INVALID_INPUT",
-		});
-	});
-
-	test("rejects proxied port methods", () => {
-		const box = makePort();
-		const raw: Record<string, unknown> = { ...box.port };
-		raw.startInitialTask = new Proxy(() => undefined, {});
-		expect(expectCreate({ port: raw, expectedIdentity: IDENTITY })).toEqual({
-			ok: false,
-			code: "INVALID_INPUT",
-		});
-	});
-
-	test("rejects invalid expectedIdentity fields", () => {
-		const box = makePort();
-		for (const childId of ["", "has space", "x".repeat(129)]) {
-			expect(
-				expectCreate({
-					port: box.port,
-					expectedIdentity: {
-						childId,
-						sessionId: "s",
-						sessionName: "n",
-						modelSelector: "m",
-					},
-				}),
-			).toEqual({ ok: false, code: "INVALID_INPUT" });
-		}
-	});
-
-	test("rejects extra keys on expectedIdentity", () => {
-		const box = makePort();
-		expect(
-			expectCreate({
-				port: box.port,
-				expectedIdentity: { ...IDENTITY, extra: true },
-			}),
-		).toEqual({ ok: false, code: "INVALID_INPUT" });
-	});
-
-	test("rejects non-function and proxied listener", () => {
-		const box = makePort();
-		expect(
-			expectCreate({
-				port: box.port,
-				expectedIdentity: IDENTITY,
-				listener: "bad",
-			}),
-		).toEqual({ ok: false, code: "INVALID_INPUT" });
-		expect(
-			expectCreate({
-				port: box.port,
-				expectedIdentity: IDENTITY,
-				listener: new Proxy(() => undefined, {}),
-			}),
-		).toEqual({ ok: false, code: "INVALID_INPUT" });
-	});
-
-	test("binds port methods to original owner", async () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask(this: unknown) {
-				if (this !== port) throw new Error("unbound start");
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort(this: unknown) {
-				if (this !== port) throw new Error("unbound abort");
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe(this: unknown) {
-				if (this !== port) throw new Error("unbound observe");
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe(this: unknown, _listener: unknown) {
-				if (this !== port) throw new Error("unbound subscribe");
-				return {
+	test.each(["finish unsubscribe failure", "finish unsubscribe throw", "abort then finish unsubscribe failure"])(
+		"reports cleanup uncertainty for %s",
+		async (kind) => {
+			let unsubscribeCalls = 0;
+			const port = directPort({
+				subscribe: () => ({
 					ok: true,
 					value: {
 						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const controller = createController({ port });
-		expect(success(await controller.start({ prompt: "go" }))).toEqual(TASK);
-	});
-
-	test("subscribes before start", () => {
-		const box = makePort();
-		const events: HostedRlmRuntimeEvent[] = [];
-		const listener = (event: HostedRlmRuntimeEvent) => events.push(event);
-		createController({ port: box.port, listener });
-		expect(box.getCalls().subscribe).toBe(1);
-		expect(box.getCalls().start).toBe(0);
-		box.emit({ type: "agent_start" });
-		expect(events).toEqual([{ type: "agent_start" }]);
-	});
-
-	test("subscribes even without user listener (internal no-op)", () => {
-		const box = makePort();
-		createController({ port: box.port });
-		expect(box.getCalls().subscribe).toBe(1);
-	});
-
-	test("rejects factory when subscribe fails", () => {
-		const box = makePort({
-			subscribeResult: { ok: false, error: { code: "SUBSCRIBE_UNCERTAIN" } },
-		});
-		expect(expectCreate({ port: box.port, expectedIdentity: IDENTITY })).toEqual({
-			ok: false,
-			code: "INVALID_INPUT",
-		});
-	});
-
-	test("factory failure results are fresh and frozen", () => {
-		const r1 = expectCreate(null);
-		const r2 = expectCreate(null);
-		expect(r1).not.toBe(r2);
-		expect(Object.isFrozen(r1)).toBe(true);
-		expect(Object.isFrozen(r2)).toBe(true);
-
-		const box = makePort();
-		const r3 = expectCreate({ port: box.port, expectedIdentity: { ...IDENTITY, childId: "x" } });
-		const r4 = expectCreate({ port: box.port, expectedIdentity: { ...IDENTITY, childId: "x" } });
-		expect(r3).not.toBe(r4);
-		expect(Object.isFrozen(r3)).toBe(true);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: start
-// ---------------------------------------------------------------------------
-
-describe("start", () => {
-	test("one-shot: subsequent calls return CALL_UNCERTAIN without calling port start", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		const first = await controller.start({ prompt: "go" });
-		expect(success(first)).toEqual(TASK);
-		expect(box.getCalls().start).toBe(1);
-		expectUncertain(await controller.start({ prompt: "again" }));
-		expect(box.getCalls().start).toBe(1);
-	});
-
-	test("rejects raw throw from port method", async () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				throw new Error("secret");
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const controller = createController({ port });
-		expectUncertain(await controller.start({ prompt: "go" }));
-	});
-
-	test("rejects non-Promise return from port start", async () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return makePortResult(true, TASK);
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const controller = createController({ port });
-		expectUncertain(await controller.start({ prompt: "go" }));
-	});
-
-	test("rejects port returning ok:false result", async () => {
-		const box = makePort({
-			startResult: makePortResult(false, { code: "CALL_UNCERTAIN" }),
-		});
-		const controller = createController({ port: box.port });
-		expectUncertain(await controller.start({ prompt: "go" }));
-	});
-
-	test("rejects start after finishStarted", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		controller.finish();
-		expectUncertain(await controller.start({ prompt: "again" }));
-	});
-
-	test("rejects start after finish completes", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		await controller.finish();
-		expectUncertain(await controller.start({ prompt: "again" }));
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: requestAbort
-// ---------------------------------------------------------------------------
-
-describe("requestAbort", () => {
-	test("pre-start returns fresh CALL_UNCERTAIN each time without caching", async () => {
-		const controller = createController();
-		expectUncertain(await controller.requestAbort());
-		await controller.start({ prompt: "go" });
-		const first = controller.requestAbort();
-		const second = controller.requestAbort();
-		expect(first).toBe(second);
-		expect(success(await first)).toEqual({ status: "aborted" });
-	});
-
-	test("rejected during finish", async () => {
-		const controller = createController();
-		await controller.start({ prompt: "go" });
-		const finishP = controller.finish();
-		expectUncertain(await controller.requestAbort());
-		await finishP;
-	});
-
-	test("rejected after finish", async () => {
-		const controller = createController();
-		await controller.start({ prompt: "go" });
-		await controller.finish();
-		expectUncertain(await controller.requestAbort());
-	});
-
-	test("pre-start fresh each call (identity check)", async () => {
-		const controller = createController();
-		const a1 = controller.requestAbort();
-		const a2 = controller.requestAbort();
-		expect(a1).not.toBe(a2);
-		expectUncertain(await a1);
-		expectUncertain(await a2);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: finish
-// ---------------------------------------------------------------------------
-
-describe("finish", () => {
-	test("returns CALL_UNCERTAIN without start, still unsubscribes", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		expectUncertain(await controller.finish());
-		// Subscription was cleaned up
-		expect(box.getCalls().unsubscribe).toBe(1);
-	});
-
-	test("joins start + admitted abort + unsubscribe exactly once", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		await controller.requestAbort();
-		const result = await controller.finish();
-		expect(success(result)).toEqual(TASK);
-		expect(box.getCalls().unsubscribe).toBe(1);
-	});
-
-	test("finish is one-shot: same promise returned", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		const first = controller.finish();
-		const second = controller.finish();
-		expect(first).toBe(second);
-	});
-
-	test("single finish promise returned after completion", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		const first = await controller.finish();
-		expect(success(first)).toEqual(TASK);
-		const second = controller.finish();
-		expect(await second).toEqual(first);
-	});
-
-	test("cleanup uncertainty: unsubscribe failure makes finish uncertain", async () => {
-		const box = makePort({
-			unsubscribeResult: { ok: false, error: { code: "UNSUBSCRIBE_UNCERTAIN" } },
-		});
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		expectUncertain(await controller.finish());
-	});
-
-	test("unsubscribe uncertainty preserves the one finish promise", async () => {
-		const { port } = makePort({ unsubscribeResult: { ok: false, error: { code: "UNSUBSCRIBE_UNCERTAIN" } } });
-		const controller = createController({ port });
-		await controller.start({ prompt: "go" });
-		const first = controller.finish();
-		expectUncertain(await first);
-		const second = controller.finish();
-		expect(second).toBe(first);
-		expectUncertain(await second);
-	});
-
-	test("abort uncertainty during finish still unsubscribes", async () => {
-		const box = makePort({
-			abortResult: makePortResult(false, { code: "CALL_UNCERTAIN" }),
-		});
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		await controller.requestAbort();
-		expectUncertain(await controller.finish());
-		// Subscribe was still cleaned up despite abort uncertainty
-		expect(box.getCalls().unsubscribe).toBe(1);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: listener isolation
-// ---------------------------------------------------------------------------
-
-describe("listener isolation", () => {
-	test("listener throw does not poison the controller", async () => {
-		const box = makePort();
-		const controller = createController({
-			port: box.port,
-			listener: () => {
-				throw new Error("caller");
-			},
-		});
-		box.emit({ type: "agent_start" });
-		await controller.start({ prompt: "go" });
-		expect(success(await controller.finish())).toEqual(TASK);
-	});
-
-	test("listener receives frozen exact events", async () => {
-		const box = makePort();
-		const events: HostedRlmRuntimeEvent[] = [];
-		const listener = (event: HostedRlmRuntimeEvent) => events.push(event);
-		createController({ port: box.port, listener });
-		box.emit({ type: "agent_start" });
-		expect(events).toHaveLength(1);
-		expect(events[0]).toEqual({ type: "agent_start" });
-		expect(Object.isFrozen(events[0])).toBe(true);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: malformed subscription from public port
-// ---------------------------------------------------------------------------
-
-describe("malformed subscription from public port", () => {
-	test("hostile subscribe result with extras rejects", () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-						extra: true,
-					},
-				};
-			},
-		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "INVALID_INPUT" });
-	});
-
-	test("hostile subscribe throws", () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				throw new Error("secret");
-			},
-		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
-	});
-
-	test("hostile subscribe returns proxy token", () => {
-		const token = new Proxy({ unsubscribe: () => ({ ok: true }) }, {});
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return { ok: true, value: token };
-			},
-		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
-	});
-
-	test("hostile subscribe returns ok:false", () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return { ok: false, error: { code: "SUBSCRIBE_UNCERTAIN" } };
-			},
-		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "INVALID_INPUT" });
-	});
-
-	test("hostile subscribe returns non-object", () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return "bad";
-			},
-		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: malformed subscribe backout / cleanup uncertainty
-// ---------------------------------------------------------------------------
-
-describe("subscribe backout and cleanup uncertainty", () => {
-	test("subscribe result with non-function inner unsubscribe resolves with backout", () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: { unsubscribe: "not a function" },
-				};
-			},
-		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
-	});
-
-	test("subscribe backout success: backout result is {ok:true}, factory returns INVALID_INPUT", () => {
-		let unsubCalled = false;
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						// biome-ignore lint/suspicious/noThenProperty: intentional hostile test
-						then: () => undefined,
-						unsubscribe() {
-							unsubCalled = true;
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "INVALID_INPUT" });
-		expect(unsubCalled).toBe(true);
-	});
-
-	test("subscribe backout failure: backout result is {ok:false}, factory returns CLEANUP_UNCERTAIN", () => {
-		let unsubCalled = false;
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						// biome-ignore lint/suspicious/noThenProperty: intentional hostile test
-						then: () => undefined,
-						unsubscribe() {
-							unsubCalled = true;
+							unsubscribeCalls += 1;
+							if (kind === "finish unsubscribe throw") throw new Error("unsubscribe");
 							return { ok: false, error: { code: "UNSUBSCRIBE_UNCERTAIN" } };
 						},
 					},
-				};
+				}),
+			});
+			const run = controller(port);
+			await run.start({ prompt: "go" });
+			if (kind.startsWith("abort")) await run.requestAbort();
+			expect(await run.finish()).toEqual({ ok: false, error: { code: "CLEANUP_UNCERTAIN" } });
+			expect(unsubscribeCalls).toBe(1);
+		},
+	);
+
+	test.each(["start", "terminal", "abort", "observe", "close"])("controller binds %s receiver", async (lane) => {
+		let owner: HostedRlmRuntimePort | undefined;
+		let receiverMatched = false;
+		const base = directPort();
+		const replacement = function (this: HostedRlmRuntimePort): Promise<HostedRlmPortResult<unknown>> {
+			receiverMatched = this === owner;
+			if (lane === "start") return Promise.resolve({ ok: true, value: { code: "ADMITTED" } });
+			if (lane === "terminal") return Promise.resolve({ ok: true, value: TASK });
+			if (lane === "abort") return Promise.resolve({ ok: true, value: { status: "aborted" } });
+			if (lane === "observe") return Promise.resolve({ ok: true, value: SNAPSHOT });
+			return Promise.resolve({ ok: true, value: { status: "closed" } });
+		};
+		const overrides: Partial<HostedRlmRuntimePort> = {};
+		if (lane === "start") overrides.startInitialTask = replacement;
+		if (lane === "terminal") overrides.awaitTerminal = replacement;
+		if (lane === "abort") overrides.abort = replacement;
+		if (lane === "observe") overrides.observe = replacement;
+		if (lane === "close") overrides.close = replacement;
+		owner = directPort({ ...base, ...overrides });
+		const run = controller(owner);
+		if (lane === "start") await run.start({ prompt: "go" });
+		if (lane === "terminal") {
+			await run.start({ prompt: "go" });
+			await run.finish();
+		}
+		if (lane === "abort") {
+			await run.start({ prompt: "go" });
+			await run.requestAbort();
+		}
+		if (lane === "observe") await run.observe();
+		if (lane === "close") await run.close();
+		expect(receiverMatched).toBe(true);
+	});
+
+	test("controller binds subscribe and unsubscribe receivers", () => {
+		let portOwner: HostedRlmRuntimePort | undefined;
+		let tokenOwner: object | undefined;
+		let subscribeReceiver = false;
+		let unsubscribeReceiver = false;
+		const token = {
+			unsubscribe() {
+				unsubscribeReceiver = this === tokenOwner;
+				return { ok: true };
 			},
 		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
-		expect(unsubCalled).toBe(true);
-	});
-
-	test("subscribe backout failure: backout throws, factory returns CLEANUP_UNCERTAIN", () => {
-		let unsubCalled = false;
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						// biome-ignore lint/suspicious/noThenProperty: intentional hostile test
-						then: () => undefined,
-						unsubscribe() {
-							unsubCalled = true;
-							throw new Error("crash");
-						},
-					},
-				};
-			},
+		tokenOwner = token;
+		const subscribe = function (this: HostedRlmRuntimePort) {
+			subscribeReceiver = this === portOwner;
+			return { ok: true, value: token };
 		};
-		expect(expectCreate({ port, expectedIdentity: IDENTITY })).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
-		expect(unsubCalled).toBe(true);
+		portOwner = directPort({ subscribe });
+		const run = controller(portOwner);
+		expect(subscribeReceiver).toBe(true);
+		void run.finish();
+		expect(unsubscribeReceiver).toBe(true);
 	});
 
-	test("subscribe backout result is CLEANUP_UNCERTAIN and result is frozen", () => {
-		let unsubCalled = false;
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						// biome-ignore lint/suspicious/noThenProperty: intentional hostile test
-						then: () => undefined,
-						unsubscribe() {
-							unsubCalled = true;
-							throw new Error("crash");
-						},
-					},
-				};
-			},
-		};
-		const result = expectCreate({ port, expectedIdentity: IDENTITY });
-		expect(Object.isFrozen(result)).toBe(true);
-		expect(unsubCalled).toBe(true);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: sync events and overflow
-// ---------------------------------------------------------------------------
-
-describe("sync events and overflow", () => {
-	test("sync events are decoded before delivery and delivered in order", () => {
-		const delivered: string[] = [];
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe(listener: unknown) {
-				if (typeof listener === "function") {
-					Reflect.apply(listener, undefined, [{ type: "agent_start" }]);
-					Reflect.apply(listener, undefined, [{ type: "waiting" }]);
-				}
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const listener = (event: HostedRlmRuntimeEvent) => delivered.push(event.type);
-		createController({ port, listener });
-		expect(delivered).toEqual(["agent_start", "waiting"]);
-	});
-
-	test("malformed sync event before token validation poisons and backout runs", () => {
-		const delivered: string[] = [];
-		let unsubCalled = false;
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve(makePortResult(true, TASK));
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe(listener: unknown) {
-				if (typeof listener === "function") {
-					Reflect.apply(listener, undefined, [{ type: "writing", answerPreview: undefined }]);
-				}
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							unsubCalled = true;
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const listener = (event: HostedRlmRuntimeEvent) => delivered.push(event.type);
-		expect(
-			expectCreate({
-				port,
-				expectedIdentity: IDENTITY,
-				listener,
-			}),
-		).toEqual({ ok: false, code: "INVALID_INPUT" });
-		expect(unsubCalled).toBe(true);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: abort sharing
-// ---------------------------------------------------------------------------
-
-describe("abort sharing", () => {
-	test("multiple abort calls share one promise after start", async () => {
-		const controller = createController();
-		await controller.start({ prompt: "go" });
-		const first = controller.requestAbort();
-		const second = controller.requestAbort();
-		expect(first).toBe(second);
-		expect(success(await first)).toEqual({ status: "aborted" });
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: finish join + unsubscribe uncertainty
-// ---------------------------------------------------------------------------
-
-describe("finish join + unsubscribe uncertainty", () => {
-	test("finish returns uncertainty when abort result is non-ok, still unsubscribes", async () => {
-		const box = makePort({
-			abortResult: makePortResult(false, { code: "MALFORMED_RESULT" }),
+	test("close settles finish even after raw terminal dispatch and still drains remote work", async () => {
+		const terminal = deferred();
+		const runtime = box({ terminal: () => terminal.promise });
+		const run = controller(runtime.port);
+		await run.start({ prompt: "go" });
+		const finishing = run.finish();
+		await Promise.resolve();
+		expect(runtime.calls.terminal).toBe(1);
+		const closing = run.close();
+		expect(await finishing).toEqual({ ok: false, error: { code: "CLOSED" } });
+		let closeSettled = false;
+		void closing.then(() => {
+			closeSettled = true;
 		});
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		await controller.requestAbort();
-		expectUncertain(await controller.finish());
-		expect(box.getCalls().unsubscribe).toBe(1);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: controller.observe
-// ---------------------------------------------------------------------------
-
-describe("controller.observe", () => {
-	test("delegates to validated port observe", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		const result = await controller.observe();
-		expect(success(result)).toEqual(SNAPSHOT);
-		expect(box.getCalls().observe).toBe(1);
+		await Promise.resolve();
+		expect(closeSettled).toBe(false);
+		terminal.resolve(TASK);
+		expect(value(await closing)).toEqual({ status: "closed" });
+		expect(runtime.calls.terminal).toBe(1);
 	});
 
-	test("works before start", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		const result = await controller.observe();
-		expect(success(result)).toEqual(SNAPSHOT);
-	});
-
-	test("works after finish", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		await controller.start({ prompt: "go" });
-		await controller.finish();
-		const result = await controller.observe();
-		expect(success(result)).toEqual(SNAPSHOT);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: hostile port results
-// ---------------------------------------------------------------------------
-
-describe("hostile port results", () => {
-	test("hostile thenable rejected as uncertain", async () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				const thenable = {
-					// biome-ignore lint/suspicious/noThenProperty: intentional hostile test
-					then: (resolve: (v: unknown) => void) => resolve(makePortResult(true, TASK)),
-				};
-				return thenable;
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const controller = createController({ port });
-		expectUncertain(await controller.start({ prompt: "go" }));
-	});
-
-	test("non-Promise object with own properties rejected", async () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				const fake: Record<string, unknown> = {};
-				Object.setPrototypeOf(fake, Promise.prototype);
-				Object.defineProperty(fake, "custom", {
-					value: 1,
-					enumerable: true,
-				});
-				return fake;
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const controller = createController({ port });
-		expectUncertain(await controller.start({ prompt: "go" }));
-	});
-
-	test("port method throw produces uncertain", async () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				throw new Error("crash");
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const controller = createController({ port });
-		expectUncertain(await controller.start({ prompt: "go" }));
-	});
-
-	test("malformed public port result (wrong keys) rejected", async () => {
-		const port: Record<string, unknown> = {
-			identity: { ...IDENTITY },
-			startInitialTask() {
-				return Promise.resolve({ status: "mystery", data: TASK });
-			},
-			abort() {
-				return Promise.resolve(makePortResult(true, { status: "aborted" }));
-			},
-			observe() {
-				return Promise.resolve(makePortResult(true, SNAPSHOT));
-			},
-			subscribe() {
-				return {
-					ok: true,
-					value: {
-						unsubscribe() {
-							return { ok: true };
-						},
-					},
-				};
-			},
-		};
-		const controller = createController({ port });
-		expectUncertain(await controller.start({ prompt: "go" }));
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: races with no casts
-// ---------------------------------------------------------------------------
-
-describe("races with no casts", () => {
-	test("finish before start resolves still unsubscribes", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		expectUncertain(await controller.finish());
-		expect(box.getCalls().unsubscribe).toBe(1);
-	});
-
-	test("start + immediate finish waits for start", async () => {
-		const box = makePort();
-		const controller = createController({ port: box.port });
-		const startP = controller.start({ prompt: "go" });
-		const finishP = controller.finish();
-		const startResult = await startP;
-		expect(success(startResult)).toEqual(TASK);
-		const finishResult = await finishP;
-		expect(success(finishResult)).toEqual(TASK);
-	});
-
-	test("abort before start not cached", async () => {
-		const controller = createController();
-		const a1 = controller.requestAbort();
-		const a2 = controller.requestAbort();
-		expect(a1).not.toBe(a2);
-		expectUncertain(await a1);
-		expectUncertain(await a2);
-	});
-
-	test("abort after start cached", async () => {
-		const controller = createController();
-		await controller.start({ prompt: "go" });
-		const a1 = controller.requestAbort();
-		const a2 = controller.requestAbort();
-		expect(a1).toBe(a2);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: finish start-started but no start yet
-// ---------------------------------------------------------------------------
-
-describe("finish lifecycle races", () => {
-	test("finish waits for start when start is pending", async () => {
-		const box = makePort({ startDelay: 10 });
-		const controller = createController({ port: box.port });
-		const startP = controller.start({ prompt: "go" });
-		// finish before start resolves
-		const finishP = controller.finish();
-		expect(success(await startP)).toEqual(TASK);
-		expect(success(await finishP)).toEqual(TASK);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// Tests: regression — actual createHostedRlmRuntimePort input
-// ---------------------------------------------------------------------------
-
-describe("regression: accepted hosted port", () => {
-	function makeAcceptedPort(): Record<string, unknown> {
-		const rawIdentity = { ...IDENTITY };
-		// Raw functions return SEMANTIC VALUES (not port results).
-		// createHostedRlmRuntimePort wraps them into port results itself.
-		const rawStart = (_input: unknown): unknown => Promise.resolve(TASK);
-		const rawAbort = (): unknown => Promise.resolve({ status: "aborted" as const });
-		const rawObserve = (): unknown => Promise.resolve(SNAPSHOT);
-		const rawSubRes = Object.freeze({
-			unsubscribe: Object.freeze(() => Object.freeze({ status: "unsubscribed" as const })),
+	test.each(["start", "close"])("controller observes rejected non-extensible native Promise from %s", async (lane) => {
+		await withoutUnhandledRejection(async () => {
+			const rejected = Promise.reject(new Error(`non-extensible ${lane}`));
+			Object.preventExtensions(rejected);
+			expect(Object.getOwnPropertyDescriptor(rejected, "constructor")).toBeUndefined();
+			expect(Object.getOwnPropertyDescriptor(Object.getPrototypeOf(rejected), "constructor")?.get).toBeUndefined();
+			const run = controller(
+				directPort(lane === "start" ? { startInitialTask: () => rejected } : { close: () => rejected }),
+			);
+			const result = lane === "start" ? await run.start({ prompt: "go" }) : await run.close();
+			expect(result).toEqual({
+				ok: false,
+				error: { code: lane === "start" ? "CALL_UNCERTAIN" : "CLEANUP_UNCERTAIN" },
+			});
+			expect(Object.isExtensible(rejected)).toBe(false);
+			expect(Object.getOwnPropertyDescriptor(rejected, "constructor")).toBeUndefined();
 		});
-		const rawSubscribe = (_cb: unknown): unknown => rawSubRes;
-		const adapter = Object.freeze({
-			identity: rawIdentity,
-			startInitialTask: rawStart,
-			abort: rawAbort,
-			observe: rawObserve,
-			subscribe: rawSubscribe,
-		});
-		const fp = createHostedRlmRuntimePort(adapter);
-		if (!fp.ok) throw new Error("port factory failed");
-		const port = fp.value;
-		const raw: Record<string, unknown> = {};
-		raw.identity = port.identity;
-		raw.startInitialTask = port.startInitialTask;
-		raw.abort = port.abort;
-		raw.observe = port.observe;
-		raw.subscribe = port.subscribe;
-		return raw;
-	}
-
-	test("controller accepts an actual hosted port and completes successfully", async () => {
-		const port = makeAcceptedPort();
-		const controller = createController({
-			port,
-			expectedIdentity: IDENTITY,
-		});
-		expect(controller.identity).toEqual(IDENTITY);
-		expect(success(await controller.start({ prompt: "go" }))).toEqual(TASK);
-		expect(success(await controller.finish())).toEqual(TASK);
-	});
-
-	test("accepted port: finish before start unsubscribes and returns uncertain", async () => {
-		const port = makeAcceptedPort();
-		const controller = createController({ port, expectedIdentity: IDENTITY });
-		expectUncertain(await controller.finish());
-	});
-
-	test("accepted port: abort then finish works", async () => {
-		const port = makeAcceptedPort();
-		const controller = createController({ port, expectedIdentity: IDENTITY });
-		await controller.start({ prompt: "go" });
-		await controller.requestAbort();
-		const result = await controller.finish();
-		expect(success(result)).toEqual(TASK);
-	});
-
-	test("accepted port: observe works", async () => {
-		const port = makeAcceptedPort();
-		const controller = createController({ port, expectedIdentity: IDENTITY });
-		const snapshot = await controller.observe();
-		expect(success(snapshot)).toEqual(SNAPSHOT);
-	});
-
-	test("accepted port: sync subscribe events deliver in order", () => {
-		const delivered: string[] = [];
-		const rawIdentity = { ...IDENTITY };
-		// Raw functions return semantic values. createHostedRlmRuntimePort wraps them.
-		const rawStart = (_input: unknown): unknown => Promise.resolve(TASK);
-		const rawAbort = (): unknown => Promise.resolve({ status: "aborted" as const });
-		const rawObserve = (): unknown => Promise.resolve(SNAPSHOT);
-		const rawSubRes = Object.freeze({
-			unsubscribe: Object.freeze(() => Object.freeze({ status: "unsubscribed" as const })),
-		});
-		const rawSubscribe = (cb: unknown): unknown => {
-			if (typeof cb === "function") {
-				Reflect.apply(cb, undefined, [{ type: "agent_start" }]);
-				Reflect.apply(cb, undefined, [{ type: "waiting" }]);
-			}
-			return rawSubRes;
-		};
-		const adapter = Object.freeze({
-			identity: rawIdentity,
-			startInitialTask: rawStart,
-			abort: rawAbort,
-			observe: rawObserve,
-			subscribe: rawSubscribe,
-		});
-		const fp = createHostedRlmRuntimePort(adapter);
-		if (!fp.ok) throw new Error("port factory failed");
-		const port: Record<string, unknown> = {};
-		port.identity = fp.value.identity;
-		port.startInitialTask = fp.value.startInitialTask;
-		port.abort = fp.value.abort;
-		port.observe = fp.value.observe;
-		port.subscribe = fp.value.subscribe;
-
-		const listener = (event: HostedRlmRuntimeEvent) => delivered.push(event.type);
-		createController({ port, expectedIdentity: IDENTITY, listener });
-		expect(delivered).toEqual(["agent_start", "waiting"]);
-	});
-
-	test("accepted port: malformed subscription returns INVALID_INPUT", () => {
-		const rawIdentity = { ...IDENTITY };
-		// Raw functions return semantic values. createHostedRlmRuntimePort wraps them.
-		const rawStart = (_input: unknown): unknown => Promise.resolve(TASK);
-		const rawAbort = (): unknown => Promise.resolve({ status: "aborted" as const });
-		const rawObserve = (): unknown => Promise.resolve(SNAPSHOT);
-		const rawSubRes = Object.freeze({
-			unsubscribe: Object.freeze(() => Object.freeze({ status: "unsubscribed" as const })),
-		});
-		const rawSubscribe = (cb: unknown): unknown => {
-			if (typeof cb === "function") {
-				// Send a malformed event before returning
-				Reflect.apply(cb, undefined, [{ type: "writing", answerPreview: undefined }]);
-			}
-			return rawSubRes;
-		};
-		const adapter = Object.freeze({
-			identity: rawIdentity,
-			startInitialTask: rawStart,
-			abort: rawAbort,
-			observe: rawObserve,
-			subscribe: rawSubscribe,
-		});
-		const fp = createHostedRlmRuntimePort(adapter);
-		if (!fp.ok) throw new Error("port factory failed");
-		const port: Record<string, unknown> = {};
-		port.identity = fp.value.identity;
-		port.startInitialTask = fp.value.startInitialTask;
-		port.abort = fp.value.abort;
-		port.observe = fp.value.observe;
-		port.subscribe = fp.value.subscribe;
-
-		const result = expectCreate({ port, expectedIdentity: IDENTITY });
-		expect(result).toEqual({ ok: false, code: "INVALID_INPUT" });
-	});
-
-	test("accepted port: abort uncertainty during finish still unsubscribes", async () => {
-		let unsubCalled = false;
-		const rawIdentity = { ...IDENTITY };
-		// Raw functions return semantic values. createHostedRlmRuntimePort wraps them.
-		const rawStart = (_input: unknown): unknown => Promise.resolve(TASK);
-		const rawAbort = (): unknown => Promise.reject(new Error("abort failed"));
-		const rawObserve = (): unknown => Promise.resolve(SNAPSHOT);
-		const rawSubRes = Object.freeze({
-			unsubscribe: Object.freeze(() => {
-				unsubCalled = true;
-				return Object.freeze({ status: "unsubscribed" as const });
-			}),
-		});
-		const rawSubscribe = (_cb: unknown): unknown => rawSubRes;
-		const adapter = Object.freeze({
-			identity: rawIdentity,
-			startInitialTask: rawStart,
-			abort: rawAbort,
-			observe: rawObserve,
-			subscribe: rawSubscribe,
-		});
-		const fp = createHostedRlmRuntimePort(adapter);
-		if (!fp.ok) throw new Error("port factory failed");
-		const port: Record<string, unknown> = {};
-		port.identity = fp.value.identity;
-		port.startInitialTask = fp.value.startInitialTask;
-		port.abort = fp.value.abort;
-		port.observe = fp.value.observe;
-		port.subscribe = fp.value.subscribe;
-
-		const controller = createController({ port, expectedIdentity: IDENTITY });
-		await controller.start({ prompt: "go" });
-		await controller.requestAbort();
-		expectUncertain(await controller.finish());
-		expect(unsubCalled).toBe(true);
 	});
 });
