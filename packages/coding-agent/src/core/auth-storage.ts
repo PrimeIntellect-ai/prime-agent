@@ -128,7 +128,13 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			return;
 		}
 		try {
-			writeSync(descriptor, "{}");
+			const bytes = Buffer.from("{}");
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error(`Short write initializing ${this.authPath}`);
+				offset += written;
+			}
 			fchmodSync(descriptor, 0o600); // Exact bits despite the umask.
 		} finally {
 			closeSync(descriptor);

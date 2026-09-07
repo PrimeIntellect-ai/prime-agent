@@ -301,14 +301,17 @@ class HarnessState:
         target_path = Path(os.path.realpath(self.file_path))
         temp_path = target_path.with_name(f"{target_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
-            mode = stat.S_IMODE(os.stat(target_path).st_mode)
+            existing_mode = stat.S_IMODE(os.stat(target_path).st_mode)
         except FileNotFoundError:
-            mode = 0o600
+            existing_mode = None
+        mode = existing_mode if existing_mode is not None else 0o600
         try:
-            # The temp carries its final mode from creation: no umask-open window.
+            # Create no looser than the destination; retain the umask for new files.
             descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             with os.fdopen(descriptor, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            if existing_mode is not None:
+                os.chmod(temp_path, existing_mode)
             os.replace(temp_path, target_path)
         finally:
             temp_path.unlink(missing_ok=True)

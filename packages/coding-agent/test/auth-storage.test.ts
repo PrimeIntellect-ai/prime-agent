@@ -4,14 +4,28 @@ import { join } from "node:path";
 import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.js";
 
+const initialWriteFault = vi.hoisted(() => ({ count: -1 }));
 const renameFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 const absenceIllusion = vi.hoisted(() => ({ paths: new Set<string>() }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
+		writeSync: ((fd: number, data: NodeJS.ArrayBufferView | string, offset?: number, length?: number) => {
+			if (initialWriteFault.count >= 0) {
+				const count = initialWriteFault.count;
+				initialWriteFault.count = -1;
+				if (count === 0) return 0;
+				const bytes =
+					typeof data === "string"
+						? Buffer.from(data)
+						: Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+				return actual.writeSync(fd, bytes, offset ?? 0, count);
+			}
+			return actual.writeSync(fd, data as never, offset as never, length as never);
+		}) as typeof actual.writeSync,
 		renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
 			if (renameFault.error && String(to).endsWith("auth.json")) throw renameFault.error;
 			return actual.renameSync(from, to);
@@ -968,6 +982,34 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("completes a short initial write before loading and saving credentials", () => {
+			initialWriteFault.count = 1;
+			try {
+				authStorage = AuthStorage.create(authJsonPath);
+			} finally {
+				initialWriteFault.count = -1;
+			}
+
+			expect(authStorage.drainErrors()).toEqual([]);
+			expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({});
+			authStorage.set("openai", { type: "api_key", key: "new-key" });
+			expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toMatchObject({
+				openai: { type: "api_key", key: "new-key" },
+			});
+		});
+
+		test("fails initial writes that make no progress before exposing storage", () => {
+			const backend = new FileAuthStorageBackend(authJsonPath);
+			const consume = vi.fn(() => ({ result: undefined }));
+			initialWriteFault.count = 0;
+			try {
+				expect(() => backend.withLock(consume)).toThrow(/Short write/);
+				expect(consume).not.toHaveBeenCalled();
+			} finally {
+				initialWriteFault.count = -1;
+			}
+		});
+
 		test("first-run initialization survives a restrictive umask", () => {
 			const previousUmask = process.umask(0o700);
 			try {

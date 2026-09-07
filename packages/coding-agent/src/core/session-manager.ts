@@ -1116,7 +1116,7 @@ function storeSessionScanState(filePath: string, state: SessionScanState): void 
 	retainedUsageEntries += state.accountedUsageEntries;
 	sessionScanStates.set(filePath, state);
 	for (const key of sessionScanStates.keys()) {
-		if (retainedUsageEntries <= SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES || key === filePath) break;
+		if (retainedUsageEntries <= SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES) break;
 		dropSessionScanState(key);
 	}
 }

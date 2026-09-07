@@ -5,7 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type Api, type ImageContent, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
@@ -68,7 +68,12 @@ import {
 	type SessionCwdIssue,
 } from "./core/session-cwd.js";
 import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
-import { SessionManager } from "./core/session-manager.js";
+import {
+	findMostRecentSessionForCwd,
+	getDefaultSessionDir,
+	loadEntriesFromFile,
+	SessionManager,
+} from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
@@ -455,10 +460,22 @@ function getResumeSelector(parsed: Pick<Args, "resume">): string | undefined {
 	return typeof parsed.resume === "string" ? parsed.resume : undefined;
 }
 
+function readSessionManager(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
+	const entries = loadEntriesFromFile(path);
+	const header = entries.find((entry) => entry.type === "session");
+	const manager = SessionManager.inMemory(
+		cwdOverride ?? header?.cwd ?? process.cwd(),
+		sessionDir ?? dirname(resolve(path)),
+	);
+	manager.setSessionFile(path, entries);
+	return manager;
+}
+
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
+	readOnly = false,
 ): Promise<SessionManager> {
 	const explicitCwdOverride = parsed.cwd ? cwd : undefined;
 
@@ -484,7 +501,9 @@ export async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
+				return readOnly
+					? readSessionManager(resolved.path, sessionDir, explicitCwdOverride)
+					: SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -499,10 +518,15 @@ export async function createSessionManager(
 	}
 
 	if (parsed.continue) {
+		if (readOnly) {
+			const dir = sessionDir ?? getDefaultSessionDir(cwd);
+			const path = findMostRecentSessionForCwd(dir, cwd);
+			return path ? readSessionManager(path, dir, cwd) : SessionManager.inMemory(cwd, dir);
+		}
 		return SessionManager.continueRecent(cwd, sessionDir);
 	}
 
-	return SessionManager.create(cwd, sessionDir);
+	return readOnly ? SessionManager.inMemory(cwd, sessionDir) : SessionManager.create(cwd, sessionDir);
 }
 
 function buildSessionOptions(
@@ -997,7 +1021,7 @@ function createSessionManagerForActiveDaemonSummary(summary: SessionSummary, fal
 	const cwd = summary.cwd || fallbackCwd;
 	if (summary.sessionFile) {
 		try {
-			return SessionManager.open(summary.sessionFile, undefined, cwd);
+			return readSessionManager(summary.sessionFile, undefined, cwd);
 		} catch {
 			return SessionManager.inMemory(cwd);
 		}
@@ -1301,7 +1325,7 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager = SessionManager.inMemory(cwd);
 	} else {
 		try {
-			sessionManager = await createSessionManager(parsed, cwd, sessionDir);
+			sessionManager = await createSessionManager(parsed, cwd, sessionDir, useDaemonClient);
 		} catch (error) {
 			if (!(error instanceof SessionSelectorError)) {
 				throw error;
@@ -1322,7 +1346,9 @@ export async function main(args: string[], options?: MainOptions) {
 			if (!selectedCwd) {
 				process.exit(0);
 			}
-			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
+			sessionManager = useDaemonClient
+				? readSessionManager(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd)
+				: SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
 		} else {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
 			process.exit(1);

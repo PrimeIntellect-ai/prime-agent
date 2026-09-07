@@ -2508,89 +2508,270 @@ describe("AgentSession rlm recursion", () => {
 		expect(attribution.aggregateUsage.cost.total).toBe(10);
 	});
 
-	it("keeps a sibling's pending usage out of durable parent aggregates", async () => {
-		const gates = new Map([
-			["A", deferred<void>()],
-			["B", deferred<void>()],
+	it("retains child usage until a delayed parent message_end hook persists its assistant", async () => {
+		const hookEntered = deferred<void>();
+		const releaseHook = deferred<void>();
+		let parentAssistant: AssistantMessage | undefined;
+		let child: AgentSession | undefined;
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("message_end", async (event) => {
+					if (
+						event.message.role === "assistant" &&
+						event.message.content.some(
+							(block) => block.type === "toolCall" && block.name === "spawn_accounting_child",
+						)
+					) {
+						parentAssistant = event.message;
+						hookEntered.resolve();
+						await releaseHook.promise;
+					}
+				});
+			},
 		]);
-		const started = new Set<string>();
 		const root = createSession({
+			extensionsResult,
 			customTools: [
 				{
-					name: "hold",
-					description: "Wait for release",
-					label: "hold",
-					parameters: Type.Object({ child: Type.String() }),
-					execute: async (_toolCallId: string, params: { child: string }) => {
-						started.add(params.child);
-						await gates.get(params.child)!.promise;
-						return { content: [{ type: "text" as const, text: "released" }], details: {} };
+					name: "spawn_accounting_child",
+					description: "Spawn a child for the accounting test",
+					label: "spawn child",
+					parameters: Type.Object({}),
+					execute: async () => {
+						const admitted = await root.runRlmChild("charge child");
+						child = root.getRlmChildSession(admitted.rlm_child_id);
+						return { content: [{ type: "text" as const, text: admitted.rlm_child_id }], details: {} };
 					},
 				},
 			],
 			streamFn: (_model, context) => {
+				const text = userText(context);
 				const stream = createAssistantMessageEventStream();
-				const child = userText(context);
-				const finished = context.messages.some((message) => message.role === "toolResult") || !gates.has(child);
 				queueMicrotask(() => {
-					const message = finished
-						? assistantMessage("done", usage(0, 0))
-						: {
-								...assistantMessage("", child === "A" ? usage(7, 3) : usage(11, 5)),
+					if (text === "spawn accounting child") {
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: {
+								...assistantMessage("", usage(2, 1)),
 								content: [
-									{ type: "toolCall" as const, id: `hold-${child}`, name: "hold", arguments: { child } },
+									{ type: "toolCall", id: "spawn-accounting", name: "spawn_accounting_child", arguments: {} },
 								],
-								stopReason: "toolUse" as const,
-							};
-					stream.push({ type: "done", reason: finished ? "stop" : "toolUse", message });
+								stopReason: "toolUse",
+							},
+						});
+					} else {
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: assistantMessage(
+								text === "charge child" ? "child done" : "parent done",
+								text === "charge child" ? usage(7, 3) : usage(0, 0),
+							),
+						});
+					}
 				});
 				return stream;
 			},
 		});
-		const parentAssistant = assistantMessage("running ipython", usage(2, 1));
-		root.agent.state.messages.push(parentAssistant);
-		root.sessionManager.appendMessage(parentAssistant);
-		const sessionFile = root.sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Missing parent session file");
-		const children: AgentSession[] = [];
-		const attributions = () =>
-			root.sessionManager.getEntries().filter((entry) => entry.type === "child_usage_attributed");
-		const expectDurableOwnUsage = async () => {
-			const reopened = SessionManager.open(sessionFile, join(tempDir, "sessions"));
-			const entries = reopened.getEntries();
-			const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
-			expect(ownUsage.input).toBe(2);
-			expect(ownUsage.output).toBe(1);
-			expect(ownUsage.cost.total).toBe(3);
-			expect((await readSessionInfo(sessionFile))?.usage).toEqual({ inputTokens: 2, outputTokens: 1, cost: 3 });
-		};
+		const prompt = root.prompt("spawn accounting child");
 		try {
-			for (const name of ["A", "B"]) {
-				const admitted = await root.runRlmChild(name);
-				const child = root.getRlmChildSession(admitted.rlm_child_id);
-				if (!child) throw new Error("Missing child session");
-				children.push(child);
-			}
-			await waitFor(() => started.size === 2);
-			expect(parentAssistant.usage.cost.total).toBe(29);
-			expect(attributions()).toHaveLength(0);
-			gates.get("A")!.resolve();
-			await waitFor(() => attributions().length === 1);
-			expect(attributions()[0]?.aggregateUsage.cost.total).toBe(13);
-			expect(parentAssistant.usage.cost.total).toBe(29);
-			expect(parentAssistant.usage.totalTokens).toBe(3);
-			await expectDurableOwnUsage();
-			gates.get("B")!.resolve();
-			await waitFor(() => attributions().length === 2);
-			expect(attributions().map((entry) => entry.aggregateUsage.cost.total)).toEqual([13, 29]);
-			expect(parentAssistant.usage.cost.total).toBe(29);
-			expect(parentAssistant.usage.totalTokens).toBe(3);
-			await expectDurableOwnUsage();
+			await hookEntered.promise;
+			await waitFor(() => root.getRlmChildSnapshots().some((snapshot) => snapshot.status === "done"));
+			expect(child?.getLastAssistantText()).toBe("child done");
+			expect(parentAssistant?.usage.cost.total).toBe(13);
+			expect(
+				root.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "message" && entry.message === parentAssistant),
+			).toBe(false);
 		} finally {
-			for (const gate of gates.values()) gate.resolve();
-			await Promise.all(children.map((child) => child.agent.waitForIdle()));
+			releaseHook.resolve();
+			await prompt;
+			await root.agent.waitForIdle();
 		}
+		root.sessionManager.flushNow();
+		const sessionFile = root.sessionFile;
+		if (!sessionFile || !child?.sessionFile) throw new Error("Missing persisted sessions");
+		const reopenedEntries = SessionManager.open(sessionFile, join(tempDir, "sessions")).getEntries();
+		const reopenedUsage = computeOwnAndTotalUsage(reopenedEntries, reopenedEntries);
+		const childEntries = SessionManager.open(child.sessionFile, join(tempDir, "sessions")).getEntries();
+		const childUsage = computeOwnAndTotalUsage(childEntries, childEntries);
+		const attributions = reopenedEntries.filter((entry) => entry.type === "child_usage_attributed");
+		expect({
+			liveTotal: root.getSessionStats().cost,
+			liveOwn: root.getOwnUsageSummary()?.cost,
+			attributedChild: attributions.reduce((total, entry) => total + entry.childUsage.cost.total, 0),
+			reopenedTotal: reopenedUsage.totalUsage.cost.total,
+			reopenedOwn: reopenedUsage.ownUsage.cost.total,
+			scannedOwn: (await readSessionInfo(sessionFile))?.usage?.cost,
+			childLiveOwn: child.getOwnUsageSummary()?.cost,
+			childReopenedOwn: childUsage.ownUsage.cost.total,
+			childScannedOwn: (await readSessionInfo(child.sessionFile))?.usage?.cost,
+		}).toEqual({
+			liveTotal: 13,
+			liveOwn: 3,
+			attributedChild: 10,
+			reopenedTotal: 13,
+			reopenedOwn: 3,
+			scannedOwn: 3,
+			childLiveOwn: 10,
+			childReopenedOwn: 10,
+			childScannedOwn: 10,
+		});
 	});
+
+	it.each([
+		{ memoized: false, failFirstAppend: false },
+		{ memoized: true, failFirstAppend: false },
+		{ memoized: true, failFirstAppend: true },
+	])(
+		"keeps a sibling's pending usage out of own spend (memoized=$memoized, failedAppend=$failFirstAppend)",
+		async ({ memoized, failFirstAppend }) => {
+			const gates = new Map([
+				["A", deferred<void>()],
+				["B", deferred<void>()],
+			]);
+			const started = new Set<string>();
+			const root = createSession({
+				customTools: [
+					{
+						name: "hold",
+						description: "Wait for release",
+						label: "hold",
+						parameters: Type.Object({ child: Type.String() }),
+						execute: async (_toolCallId: string, params: { child: string }) => {
+							started.add(params.child);
+							await gates.get(params.child)!.promise;
+							return { content: [{ type: "text" as const, text: "released" }], details: {} };
+						},
+					},
+				],
+				streamFn: (_model, context) => {
+					const stream = createAssistantMessageEventStream();
+					const child = userText(context);
+					const finished = context.messages.some((message) => message.role === "toolResult") || !gates.has(child);
+					queueMicrotask(() => {
+						const message = finished
+							? assistantMessage("done", usage(0, 0))
+							: {
+									...assistantMessage("", child === "A" ? usage(7, 3) : usage(11, 5)),
+									content: [
+										{ type: "toolCall" as const, id: `hold-${child}`, name: "hold", arguments: { child } },
+									],
+									stopReason: "toolUse" as const,
+								};
+						stream.push({ type: "done", reason: finished ? "stop" : "toolUse", message });
+					});
+					return stream;
+				},
+			});
+			const parentAssistant = assistantMessage("running ipython", usage(2, 1));
+			root.agent.state.messages.push(parentAssistant);
+			root.sessionManager.appendMessage(parentAssistant);
+			const sessionFile = root.sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Missing parent session file");
+			if (memoized) expect(root.getOwnUsageSummary()?.cost).toBe(3);
+			let failedAppend = false;
+			let appendFailureCode: string | undefined;
+			let attributionAttempts = 0;
+			const persist = root.sessionManager._persist.bind(root.sessionManager);
+			vi.spyOn(root.sessionManager, "_persist").mockImplementation((entry) => {
+				if (entry.type === "child_usage_attributed") attributionAttempts++;
+				if (failFirstAppend && !failedAppend && entry.type === "child_usage_attributed") {
+					failedAppend = true;
+					const content = readFileSync(sessionFile);
+					rmSync(sessionFile);
+					mkdirSync(sessionFile);
+					try {
+						persist(entry);
+					} catch (error) {
+						appendFailureCode = (error as NodeJS.ErrnoException).code;
+						throw error;
+					} finally {
+						rmSync(sessionFile, { recursive: true, force: true });
+						writeFileSync(sessionFile, content);
+					}
+					return;
+				}
+				persist(entry);
+			});
+			let otherBranchInput = 0;
+			const expectLiveOwnUsage = () => {
+				const tree = root.getContextTree();
+				expect(tree.totalUsage.cost.total).toBe(29);
+				expect(tree.ownUsage.cost.total).toBe(3);
+				expect(root.getOwnUsageSummary()).toEqual({
+					inputTokens: 2 + otherBranchInput,
+					outputTokens: 1,
+					cost: 3 + otherBranchInput,
+				});
+			};
+			const children: AgentSession[] = [];
+			const attributions = () =>
+				root.sessionManager.getEntries().filter((entry) => entry.type === "child_usage_attributed");
+			const expectDurableOwnUsage = async () => {
+				const reopened = SessionManager.open(sessionFile, join(tempDir, "sessions"));
+				const entries = reopened.getEntries();
+				const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
+				expect(ownUsage.input).toBe(2 + otherBranchInput);
+				expect(ownUsage.output).toBe(1);
+				expect(ownUsage.cost.total).toBe(3 + otherBranchInput);
+				expect((await readSessionInfo(sessionFile))?.usage).toEqual({
+					inputTokens: 2 + otherBranchInput,
+					outputTokens: 1,
+					cost: 3 + otherBranchInput,
+				});
+			};
+			try {
+				for (const name of ["A", "B"]) {
+					const admitted = await root.runRlmChild(name);
+					const child = root.getRlmChildSession(admitted.rlm_child_id);
+					if (!child) throw new Error("Missing child session");
+					children.push(child);
+				}
+				await waitFor(() => started.size === 2);
+				expect(parentAssistant.usage.cost.total).toBe(29);
+				expect(attributions()).toHaveLength(0);
+				expectLiveOwnUsage();
+				const chargedBranch = root.sessionManager.appendCustomEntry("usage-test-marker", {});
+				expectLiveOwnUsage();
+				root.sessionManager.resetLeaf();
+				root.sessionManager.appendMessage(assistantMessage("other branch", usage(5, 0)));
+				otherBranchInput = 5;
+				const otherTree = root.getContextTree();
+				expect(otherTree.ownUsage.cost.total).toBe(5);
+				expect(otherTree.totalUsage.cost.total).toBe(5);
+				expect(root.getOwnUsageSummary()?.cost).toBe(8);
+				root.sessionManager.branch(chargedBranch);
+				expectLiveOwnUsage();
+				gates.get("A")!.resolve();
+				await waitFor(() => attributions().length === 1);
+				expect(attributions()[0]?.aggregateUsage.cost.total).toBe(13);
+				expect(parentAssistant.usage.cost.total).toBe(29);
+				expect(parentAssistant.usage.totalTokens).toBe(3);
+				expectLiveOwnUsage();
+				await expectDurableOwnUsage();
+				gates.get("B")!.resolve();
+				await waitFor(() => attributions().length === 2);
+				expect(attributions().map((entry) => entry.aggregateUsage.cost.total)).toEqual([
+					13,
+					failFirstAppend ? 19 : 29,
+				]);
+				expect(parentAssistant.usage.cost.total).toBe(29);
+				expect(parentAssistant.usage.totalTokens).toBe(3);
+				expectLiveOwnUsage();
+				await expectDurableOwnUsage();
+				expect(failedAppend).toBe(failFirstAppend);
+				expect(appendFailureCode).toBe(failFirstAppend ? "EISDIR" : undefined);
+				await waitFor(() => root.getRlmChildSnapshots().every((snapshot) => snapshot.status === "done"));
+				expect(attributionAttempts).toBe(2);
+			} finally {
+				for (const gate of gates.values()) gate.resolve();
+				await Promise.all(children.map((child) => child.agent.waitForIdle()));
+			}
+		},
+	);
 
 	it("coalesces the admitted task's tool-loop turns into one flushed spawn-usage attribution", async () => {
 		const root = createToolLoopSession(2, [usage(1, 1), usage(2, 2)]);

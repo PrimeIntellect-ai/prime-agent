@@ -158,6 +158,32 @@ class HarnessStateTest(unittest.TestCase):
             titles = [entry.title for entry in reloaded.entries["memory"].values()]
             self.assertEqual(titles, ["Durable fact"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits and umask")
+    def test_save_preserves_existing_mode_despite_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("First", "Creates the file.")
+            os.chmod(state.file_path, 0o666)
+            previous_umask = os.umask(0o022)
+            try:
+                state.create_memory("Second", "Replaces the file.")
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o666)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits and umask")
+    def test_save_new_file_keeps_restrictive_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            previous_umask = os.umask(0o777)
+            try:
+                state.create_memory("First", "Creates the file.")
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0)
+
     def test_save_preserves_restrictive_file_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
