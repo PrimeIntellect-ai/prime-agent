@@ -392,6 +392,11 @@ export class IpythonKernelProvisioner {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
 		}
+		// Only a terminally dead kernel drops the memo; a repairing manager (idle/starting) recovers itself.
+		if (this.startedManager?.isDefunct) {
+			this.managerPromise = undefined;
+			this.startedManager = undefined;
+		}
 		let cleanupProgressListener: (() => void) | undefined;
 		if (onProgress && !this.startedManager) {
 			this.startupListeners.add(onProgress);

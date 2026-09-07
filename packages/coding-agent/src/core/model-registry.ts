@@ -23,12 +23,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.js";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -485,14 +486,23 @@ export class ModelRegistry {
 		this.providerRequestConfigs.clear();
 		this.modelRequestHeaders.clear();
 		this.lastProviderAuthSourceTokens.clear();
-		this.authorizedPrivatePrimeInferenceModelIds.clear();
-		this.authorizedPrivatePrimeInferenceTeamId = undefined;
 		this.explicitPrivatePrimeInferenceModelIds.clear();
 		this.loadError = undefined;
 
 		// Credentials may have been written by another process (e.g. the UI
 		// process saving a login while the session lives in the daemon).
 		this.authStorage.reload();
+		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
+		// Direct refreshes must preserve same-team stale recovery, but invalidate changed auth immediately.
+		if (
+			this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source !== "stale" ||
+			!teamId ||
+			teamId !== this.authorizedPrivatePrimeInferenceTeamId
+		) {
+			this.authorizedPrivatePrimeInferenceModelIds.clear();
+			this.authorizedPrivatePrimeInferenceModels = [];
+			this.authorizedPrivatePrimeInferenceTeamId = undefined;
+		}
 		resetApiProviders();
 		resetOAuthProviders();
 		// reset drops everything but model-provider built-ins; re-add MCP integrations
@@ -793,11 +803,7 @@ export class ModelRegistry {
 	 */
 	getAvailable(): Model<Api>[] {
 		return this.models.filter((model) => {
-			if (
-				isPrivatePrimeInferenceModel(model) &&
-				!this.explicitPrivatePrimeInferenceModelIds.has(model.id) &&
-				!this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
-			) {
+			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
 				return false;
 			}
 			return this.hasConfiguredAuth(model);
@@ -809,31 +815,64 @@ export class ModelRegistry {
 	 * return from the disk/bundled fallback immediately and refresh in the background.
 	 */
 	async refreshAvailableModels(): Promise<Model<Api>[]> {
-		const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
-		const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
-		this.refresh();
-		const cachePath = this.primeInferenceCatalogCachePath();
-		if (cachePath) {
-			void refreshPrimeInferenceModels(cachePath, this.bundledPrimeInferenceModels(), {
-				offline: isOfflineModeEnabled(),
-			}).then((models) => {
-				if (!models) return;
-				this.livePrimeInferenceModels = models;
-				this.reloadModelsAfterCatalogChange();
-			});
-		}
-		await this.refreshPrivatePrimeInferenceAuthorization(previousPrivateModelIds, previousTeamId);
-		return this.getAvailable();
+		return this.runSerializedEntitlementRefresh(async () => {
+			const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
+			const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
+			const previousPrivateModels = this.authorizedPrivatePrimeInferenceModels;
+			this.refresh();
+			const cachePath = this.primeInferenceCatalogCachePath();
+			if (cachePath) {
+				void refreshPrimeInferenceModels(cachePath, this.bundledPrimeInferenceModels(), {
+					offline: isOfflineModeEnabled(),
+				}).then((models) => {
+					if (!models) return;
+					this.livePrimeInferenceModels = models;
+					this.reloadModelsAfterCatalogChange();
+				});
+			}
+			await this.refreshPrivatePrimeInferenceAuthorization(
+				previousPrivateModelIds,
+				previousTeamId,
+				previousPrivateModels,
+			);
+			return this.getAvailable();
+		});
+	}
+
+	private entitlementRefreshChain: Promise<unknown> = Promise.resolve();
+
+	private runSerializedEntitlementRefresh<T>(task: () => Promise<T>): Promise<T> {
+		const run = this.entitlementRefreshChain.then(task, task);
+		this.entitlementRefreshChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	private async refreshPrivatePrimeInferenceAuthorization(
 		previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds),
 		previousTeamId = this.authorizedPrivatePrimeInferenceTeamId,
+		previousPrivateModels = this.authorizedPrivatePrimeInferenceModels,
 	): Promise<void> {
 		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
 		const teamHeaders = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
 		const teamId = teamHeaders?.["X-Prime-Team-ID"];
 		if (!apiKey || !teamHeaders || !teamId) {
+			// Stale is not logout: keep fetched entitlements for explicit re-selection
+			// (the auth filter still hides the models while stale) — but only for
+			// the team they were fetched for; a team switch invalidates them.
+			if (
+				this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source === "stale" &&
+				teamId &&
+				teamId === previousTeamId
+			) {
+				this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
+				this.authorizedPrivatePrimeInferenceModels = previousPrivateModels;
+				this.authorizedPrivatePrimeInferenceTeamId = previousTeamId;
+				this.reloadModelsAfterCatalogChange();
+				return;
+			}
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
 			this.authorizedPrivatePrimeInferenceModels = [];
 			this.authorizedPrivatePrimeInferenceTeamId = undefined;
@@ -885,7 +924,9 @@ export class ModelRegistry {
 			this.writePrivatePrimeAuthorizationCache({ fingerprint, models: authorizedModels, refreshedAt: Date.now() });
 		} else if (teamId === previousTeamId) {
 			this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
+			this.authorizedPrivatePrimeInferenceModels = previousPrivateModels;
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
+			this.reloadModelsAfterCatalogChange();
 		} else {
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
 			this.authorizedPrivatePrimeInferenceModels = [];
@@ -1006,15 +1047,11 @@ export class ModelRegistry {
 			},
 		}));
 		try {
-			const tmpPath = `${cachePath}.${process.pid}.tmp`;
-			writeFileSync(
-				tmpPath,
+			writeFileAtomicSync(
+				cachePath,
 				JSON.stringify({ fingerprint: cache.fingerprint, data, refreshedAt: cache.refreshedAt }),
-				{
-					mode: 0o600,
-				},
+				{ mode: 0o600 },
 			);
-			renameSync(tmpPath, cachePath);
 		} catch {
 			// A failed cache write only requires a later refetch.
 		}
@@ -1034,7 +1071,12 @@ export class ModelRegistry {
 		};
 	}
 
-	async canUseModel(model: Model<Api>): Promise<boolean> {
+	/** `assumeAuthConfigured` validates an explicit stale-provider selection BEFORE the clear commits. */
+	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
+		if (options?.assumeAuthConfigured) {
+			// Must be side-effect-free: a keyless refresh would drop the cached entitlements it needs.
+			return !isPrivatePrimeInferenceModel(model) || this.isAuthorizedPrivatePrimeInferenceModel(model);
+		}
 		if (!this.hasConfiguredAuth(model)) {
 			return false;
 		}
@@ -1046,8 +1088,15 @@ export class ModelRegistry {
 		return availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
 	}
 
+	private isAuthorizedPrivatePrimeInferenceModel(model: Model<Api>): boolean {
+		return (
+			this.explicitPrivatePrimeInferenceModelIds.has(model.id) ||
+			this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
+		);
+	}
+
 	async getExecutableModels(): Promise<Model<Api>[]> {
-		await this.refreshPrivatePrimeInferenceAuthorization();
+		await this.runSerializedEntitlementRefresh(() => this.refreshPrivatePrimeInferenceAuthorization());
 		const availableModels = this.getAvailable();
 		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
 		if (codexModels.length === 0) {
@@ -1279,6 +1328,12 @@ export class ModelRegistry {
 
 		const token = this.getCurrentProviderAuthSourceToken(provider);
 		return token ? this.markProviderAuthSourceStale(token) : false;
+	}
+
+	/** Forget stale-auth markings; a structured auth failure on the next request re-marks the provider. */
+	clearProviderAuthStale(provider: string): void {
+		this.staleProviderRequestAuthSources.delete(provider);
+		this.authStorage.clearAuthStale(provider);
 	}
 
 	getCurrentProviderAuthSourceToken(provider: string): AuthSourceToken | undefined {

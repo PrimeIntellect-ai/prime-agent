@@ -1,16 +1,21 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
+	appendFileSync,
 	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -3860,7 +3865,14 @@ describe("daemon mode helpers", () => {
 			client.transport = "private-framed";
 			const result = {
 				activeSessionId: state.activeSessionId,
-				snapshot: { summary: {}, state: {}, messages: [] },
+				snapshot: {
+					activeSessionId: state.activeSessionId,
+					summary: {},
+					state: {},
+					messages: [],
+					lastEventSequence: 0,
+					lastEventCursor: { generation: state.eventGeneration, sequence: 0 },
+				},
 				lastEventSequence: 0,
 			} as unknown as DaemonAttachResult;
 			const streamWorkerSnapshot = vi.fn(async () => undefined);
@@ -3927,9 +3939,12 @@ describe("daemon mode helpers", () => {
 			const result = {
 				activeSessionId: state.activeSessionId,
 				snapshot: {
+					activeSessionId: state.activeSessionId,
 					summary: {},
 					state: {},
 					messages: [{ role: "user", content: "x".repeat(4 * 1024 * 1024 + 1), timestamp: 0 }],
+					lastEventSequence: 0,
+					lastEventCursor: { generation: state.eventGeneration, sequence: 0 },
 				},
 				lastEventSequence: 0,
 			} as unknown as DaemonAttachResult;
@@ -4568,6 +4583,223 @@ describe("daemon mode helpers", () => {
 		} finally {
 			releasePassiveList();
 			releaseBinding();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	function makePassiveMemoHarness(tempDir: string) {
+		const fixture = makePersistedRlmDaemonFixture(tempDir);
+		const internals = fixture.daemon as unknown as {
+			createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			listPassiveRlmSubagents(): Promise<
+				Array<{ entry: { childId: string; status: string }; info: { messageCount: number } }>
+			>;
+		};
+		return { fixture, internals };
+	}
+
+	const passiveMessageLine = (id: string, text: string) =>
+		`${JSON.stringify({
+			type: "message",
+			id,
+			parentId: null,
+			timestamp: "2026-01-01T00:00:02.000Z",
+			message: { role: "user", content: text, timestamp: 3 },
+		})}\n`;
+
+	it("memoizes the passive topology walk until a topology input changes", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-memo-"));
+		try {
+			const { fixture, internals } = makePassiveMemoHarness(tempDir);
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+
+			// The first walk seeds the ledger, so it never memoizes; the second is
+			// the first stable derivation and the third must reuse it.
+			await internals.listPassiveRlmSubagents();
+			const first = await internals.listPassiveRlmSubagents();
+			expect(first.map(({ entry }) => entry.childId)).toEqual(
+				expect.arrayContaining([fixture.childId, fixture.grandchildId]),
+			);
+			expect(await internals.listPassiveRlmSubagents()).toBe(first);
+
+			// A child session append invalidates the memo and re-derives fresh infos.
+			appendFileSync(fixture.childSessionFile, passiveMessageLine("m2", "one more instruction"));
+			const third = await internals.listPassiveRlmSubagents();
+			expect(third).not.toBe(first);
+			expect(third.find(({ entry }) => entry.childId === fixture.childId)?.info.messageCount).toBe(2);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a rejecting topology walk request-scoped and retries on the next call", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-reject-"));
+		try {
+			const { fixture, internals } = makePassiveMemoHarness(tempDir);
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.listPassiveRlmSubagents();
+
+			const ledgerDir = join(tempDir, "rlm-ledger");
+			const ledgerFile = readdirSync(ledgerDir).find((name) => name.endsWith(".jsonl"));
+			if (!ledgerFile) throw new Error("Missing spawn ledger file");
+			const ledgerPath = join(ledgerDir, ledgerFile);
+			const intact = readFileSync(ledgerPath, "utf8");
+			appendFileSync(ledgerPath, "not json\n");
+
+			// The walk rejects to its caller only; a discarded cleanup promise must
+			// not surface as an unhandled rejection (the daemon crashes on those).
+			await expect(internals.listPassiveRlmSubagents()).rejects.toThrow();
+
+			writeFileSync(ledgerPath, intact);
+			expect((await internals.listPassiveRlmSubagents()).map(({ entry }) => entry.childId)).toContain(
+				fixture.childId,
+			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("re-lists a child whose session file returns after being absent", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-absent-"));
+		try {
+			const { fixture, internals } = makePassiveMemoHarness(tempDir);
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.listPassiveRlmSubagents();
+
+			const asideFile = `${fixture.grandchildSessionFile}.aside`;
+			renameSync(fixture.grandchildSessionFile, asideFile);
+			const without = await internals.listPassiveRlmSubagents();
+			expect(without.map(({ entry }) => entry.childId)).not.toContain(fixture.grandchildId);
+			await internals.listPassiveRlmSubagents();
+
+			// An absent input is a stat identity too: the file reappearing must
+			// invalidate the memo even though no listed child changed.
+			renameSync(asideFile, fixture.grandchildSessionFile);
+			const restored = await internals.listPassiveRlmSubagents();
+			expect(restored.map(({ entry }) => entry.childId)).toContain(fixture.grandchildId);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("re-derives passive metadata when a child display record is rewritten", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-display-"));
+		try {
+			const { fixture, internals } = makePassiveMemoHarness(tempDir);
+			const display = {
+				type: "rlm_subagent" as const,
+				childId: fixture.childId,
+				sessionName: "spawn-worker",
+				sessionDir: fixture.childSessionDir,
+				sessionFile: fixture.childSessionFile,
+				rlmParentNodeId: fixture.childId,
+				status: "running" as const,
+				createdAt: 1,
+				updatedAt: "2026-01-01T00:00:00.000Z",
+			};
+			const displayPath = join(fixture.childSessionDir, "rlm-subagent.json");
+			writeFileSync(displayPath, `${JSON.stringify(display)}\n`);
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.listPassiveRlmSubagents();
+			const running = await internals.listPassiveRlmSubagents();
+			expect(running.find(({ entry }) => entry.childId === fixture.childId)?.entry.status).toBe("running");
+
+			// A cross-process completion rewrites only the display record; the memo
+			// must treat it as a walk input and re-derive.
+			writeFileSync(displayPath, `${JSON.stringify({ ...display, status: "completed" })}\n`);
+			const completed = await internals.listPassiveRlmSubagents();
+			expect(completed.find(({ entry }) => entry.childId === fixture.childId)?.entry.status).toBe("completed");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it.each(["display", "legacy"] as const)(
+		"retries a transient %s metadata read failure without a stat change",
+		async (source) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-read-retry-"));
+			const readFile = fsPromises.readFile;
+			let readSpy: ReturnType<typeof vi.spyOn> | undefined;
+			try {
+				const { fixture, internals } = makePassiveMemoHarness(tempDir);
+				await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+				// Seed the ledger before failing optional metadata reads.
+				await internals.listPassiveRlmSubagents();
+				const metadata = {
+					type: "rlm_subagent",
+					childId: fixture.childId,
+					sessionName: "spawn-worker",
+					sessionDir: fixture.childSessionDir,
+					sessionFile: fixture.childSessionFile,
+					rlmDepth: 1,
+					rlmMaxDepth: 7,
+					prompt: "recover the original task",
+					model: { provider: "test-provider", modelId: "test-model" },
+					status: "running",
+					createdAt: 1,
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				};
+				const metadataPath =
+					source === "display"
+						? join(fixture.childSessionDir, "rlm-subagent.json")
+						: join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
+				writeFileSync(metadataPath, `${JSON.stringify(metadata)}\n`);
+				const before = statSync(metadataPath);
+				let metadataReads = 0;
+				readSpy = vi.spyOn(fsPromises, "readFile").mockImplementation((...args) => {
+					if (
+						typeof args[0] === "string" &&
+						canonicalSessionPath(args[0]) === canonicalSessionPath(metadataPath) &&
+						++metadataReads === 1
+					) {
+						return Promise.reject(
+							Object.assign(new Error("transient metadata read failure"), { code: "EACCES" }),
+						);
+					}
+					return readFile(...args);
+				});
+				syncBuiltinESMExports();
+
+				const fallback = await internals.listPassiveRlmSubagents();
+				expect(fallback.find(({ entry }) => entry.childId === fixture.childId)?.entry.status).toBe("completed");
+				expect(metadataReads).toBe(1);
+				const recovered = await internals.listPassiveRlmSubagents();
+				expect(recovered.find(({ entry }) => entry.childId === fixture.childId)?.entry).toMatchObject({
+					prompt: metadata.prompt,
+					model: metadata.model,
+					rlmDepth: 1,
+					rlmMaxDepth: 7,
+					status: "running",
+				});
+				expect(metadataReads).toBe(2);
+				const after = statSync(metadataPath);
+				expect([after.size, after.mtimeMs, after.ino]).toEqual([before.size, before.mtimeMs, before.ino]);
+				expect(await internals.listPassiveRlmSubagents()).toBe(recovered);
+				expect(metadataReads).toBe(2);
+			} finally {
+				readSpy?.mockRestore();
+				syncBuiltinESMExports();
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("keeps the memo across appends to a resident child's transcript", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-resident-append-"));
+		try {
+			const { fixture, internals } = makePassiveMemoHarness(tempDir);
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			await internals.listPassiveRlmSubagents();
+			const first = await internals.listPassiveRlmSubagents();
+			expect(first.map(({ entry }) => entry.childId)).toContain(fixture.grandchildId);
+			expect(first.map(({ entry }) => entry.childId)).not.toContain(fixture.childId);
+
+			// A resident child's identity comes from the roster, not its transcript:
+			// its streaming appends must not invalidate the passive memo.
+			appendFileSync(fixture.childSessionFile, passiveMessageLine("m9", "streamed while resident"));
+			expect(await internals.listPassiveRlmSubagents()).toBe(first);
+		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -6925,6 +7157,52 @@ describe("daemon mode helpers", () => {
 			} else {
 				process.env[ENV_AGENT_DIR] = originalAgentDir;
 			}
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reconciles a stale display status on a tombstoned ledger edge (idempotent delete)", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-reconcile-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const host = internals.createSubagentRuntimeHost(parentState);
+			const displayPath = join(fixture.childSessionDir, "rlm-subagent.json");
+
+			// First delete: write the deletion tombstone to the display and
+			// append a delete record to the ledger.
+			await host.deleteRlmSubagentRuntime(fixture.childId);
+			expect(JSON.parse(readFileSync(displayPath, "utf8"))).toMatchObject({ status: "deleted" });
+
+			// Simulate a stale overwrite by a completion write that raced
+			// before the ledger tombstone was durable. The display now claims
+			// the child is running again.
+			writeFileSync(
+				displayPath,
+				`${JSON.stringify({
+					type: "rlm_subagent",
+					childId: fixture.childId,
+					sessionName: "stale",
+					sessionDir: fixture.childSessionDir,
+					sessionFile: fixture.childSessionFile,
+					status: "running",
+					createdAt: 1,
+					updatedAt: new Date().toISOString(),
+				})}\n`,
+			);
+
+			// Retry the delete: the tombstoned-edge path must reconcile the
+			// display back to "deleted" and sweep the artifact dir.
+			await host.deleteRlmSubagentRuntime(fixture.childId);
+
+			expect(JSON.parse(readFileSync(displayPath, "utf8"))).toMatchObject({ status: "deleted" });
+			expect(existsSync(fixture.childArtifactDir)).toBe(false);
+			expect(existsSync(fixture.childSessionFile)).toBe(true);
+		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

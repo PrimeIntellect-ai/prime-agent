@@ -16,10 +16,11 @@ describe("buildInitialMessage", () => {
 		const parsed = createArgs(["Summarize the text given"]);
 		const result = buildInitialMessage({
 			parsed,
-			stdinContent: "README contents\n",
+			stdinContent: "README contents",
 		});
 
-		expect(result.initialMessage).toBe("README contents\nSummarize the text given");
+		// Unterminated stdin must not glue onto the instruction as one word.
+		expect(result.initialMessage).toBe("README contents\n\nSummarize the text given");
 		expect(parsed.messages).toEqual([]);
 	});
 
@@ -38,11 +39,11 @@ describe("buildInitialMessage", () => {
 		const parsed = createArgs(["Explain it", "Second message"]);
 		const result = buildInitialMessage({
 			parsed,
-			stdinContent: "stdin\n",
-			fileText: "file\n",
+			stdinContent: "stdin",
+			fileText: "file",
 		});
 
-		expect(result.initialMessage).toBe("stdin\nfile\nExplain it");
+		expect(result.initialMessage).toBe("stdin\n\nfile\n\nExplain it");
 		expect(parsed.messages).toEqual(["Second message"]);
 	});
 });

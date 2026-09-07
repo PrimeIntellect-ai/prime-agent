@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -14,6 +13,7 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
+import { isProcessAlive, spawnHidden } from "../utils/child-process.js";
 import { createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
 export const DAEMON_UPDATE_RESTART_COORDINATOR_FLAG = "--internal-update-restart-coordinator";
@@ -354,15 +354,6 @@ async function withCoordinatorRegistryGuard<T>(registryDir: string, action: () =
 	}
 }
 
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-	return true;
-}
-
 function matchesProcessStartId(identity: DaemonUpdateRestartProcessIdentity): boolean {
 	if (!identity.processStartId) {
 		return true;
@@ -556,7 +547,7 @@ export async function launchDaemonUpdateRestartCoordinator(
 		statusPath,
 		...(originActiveSessionId ? [DAEMON_UPDATE_RESTART_ORIGIN_FLAG, originActiveSessionId] : []),
 	]);
-	const child = spawn(launch.command, launch.args, {
+	const child = spawnHidden(launch.command, launch.args, {
 		cwd: options.cwd ?? process.cwd(),
 		detached: true,
 		env: coordinatorEnvironment(agentDir),

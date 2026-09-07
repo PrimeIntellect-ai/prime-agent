@@ -456,7 +456,7 @@ describe("#502 unified session view regressions", () => {
 		expect(rendered).toMatch(/\$0\.00\s+2h\s*$/);
 	});
 
-	test("rows keep model and effort ahead of summaries on every row kind", () => {
+	test("rows keep compact model IDs visible on every row kind", () => {
 		initTheme("dark");
 		const subagent = {
 			// Direct children in a scoped Agents View render as agent rows while
@@ -499,30 +499,32 @@ describe("#502 unified session view regressions", () => {
 			);
 
 		const full = render(160);
-		expect(full).toMatch(
-			/Inspect agents view\s+prime-inference\/gpt-5\.6-terra:high\s+Investigate a variable background status/,
-		);
+		expect(full).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+Investigate a variable background status/);
+		for (const width of [60, 80, 120]) {
+			expect(render(width)).toContain("gpt-5.6-terra");
+			expect(render(width)).toHaveLength(width);
+		}
 		const narrow = render(100);
-		expect(narrow).toContain("prime-inference/gpt-5.6-terra:high");
-		expect(narrow).not.toContain("Investigate a variable background status");
+		expect(narrow).toContain("gpt-5.6-terra");
+		expect(narrow).not.toContain("prime-inference/");
 
 		subagent.summary.summary = "";
-		expect(render(100)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra:high/);
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
 
 		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
 		subagent.summary.runtimeKind = undefined;
 		subagent.summary.rlmChildId = "effort-child";
-		expect(render(100)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra:high/);
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
 
 		subagent.summary.thinkingLevel = "off";
 		subagent.summary.summary = "A later summary";
-		expect(render(120)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra\s+A later summary/);
+		expect(render(120)).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+A later summary/);
 		expect(render(120)).not.toContain(":off");
 
 		// Top-level sessions show the same label; the model cell is not subagent-only.
 		subagent.summary.runtimeKind = "top-level";
 		subagent.summary.rlmChildId = undefined;
-		expect(render(120)).toMatch(/Inspect agents view\s+prime-inference\/gpt-5\.6-terra\s+A later summary/);
+		expect(render(120)).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+A later summary/);
 
 		// Pending delete replaces the suffixes, model label included.
 		const pendingDelete = { ...harness, isPendingDeleteRow: () => true, getPendingDeleteTitle: () => "delete?" };
@@ -532,7 +534,7 @@ describe("#502 unified session view regressions", () => {
 					"renderRow",
 				).call(pendingDelete, subagent, 120),
 			),
-		).not.toContain("prime-inference");
+		).not.toContain("gpt-5.6-terra");
 
 		expect(render(20)).toHaveLength(20);
 	});

@@ -1,4 +1,13 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -143,6 +152,93 @@ describe("session cwd handling", () => {
 			}),
 		).rejects.toBeInstanceOf(MissingSessionCwdError);
 		expect(createRuntimeCalled).toBe(false);
+	});
+
+	it.each([2, 3])(
+		"reads version %s resume files without repairing, migrating, or changing symlinks",
+		async (version) => {
+			const dir = createTempDir("pi-readonly-resume");
+			cleanupPaths.push(dir);
+			const storedCwd = join(dir, "missing-project");
+			const path = join(dir, "session.jsonl");
+			const alias = join(dir, "alias.jsonl");
+			const original = `not-json\n${JSON.stringify({ type: "session", version, id: "readonly", timestamp: "2026-01-01T00:00:00Z", cwd: storedCwd })}\n${JSON.stringify({ type: "session_info", id: "name", parentId: null, timestamp: "2026-01-01T00:00:00Z", name: "Reader name" })}\n{"type":"message","id":"torn`;
+			writeFileSync(path, original);
+			symlinkSync(path, alias);
+			const manager = await createSessionManager(parseArgs(["--resume", alias]), dir, dir, true);
+			expect(manager.isPersisted()).toBe(false);
+			expect(manager.getCwd()).toBe(storedCwd);
+			expect(manager.getSessionName()).toBe("Reader name");
+			expect(manager.getSessionFile()).toBe(alias);
+			expect(manager.getSessionDir()).toBe(dir);
+			expect(manager.getEntries()).toHaveLength(1);
+			expect(manager.getLeafId()).toBe(manager.getEntries()[0].id);
+			expect(getMissingSessionCwdIssue(manager, dir)?.sessionCwd).toBe(storedCwd);
+			const overridden = await createSessionManager(parseArgs(["--cwd", dir, "--resume", alias]), dir, dir, true);
+			expect(overridden.getCwd()).toBe(dir);
+			expect(getMissingSessionCwdIssue(overridden, dir)).toBeUndefined();
+			expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+			expect(readFileSync(path, "utf8")).toBe(original);
+		},
+	);
+
+	it("continues the latest matching cwd without mutating its transcript", async () => {
+		const dir = createTempDir("pi-readonly-continue");
+		cleanupPaths.push(dir);
+		const older = join(dir, "older.jsonl");
+		const latest = join(dir, "latest.jsonl");
+		const other = join(dir, "other.jsonl");
+		writeSessionFile(older, dir);
+		writeSessionFile(latest, dir);
+		writeSessionFile(other, join(dir, "other-project"));
+		const original = `${readFileSync(latest, "utf8")}{"type":"message","id":"torn`;
+		writeFileSync(latest, original);
+		utimesSync(older, 100, 100);
+		utimesSync(latest, 200, 200);
+		utimesSync(other, 300, 300);
+		const manager = await createSessionManager(parseArgs(["--continue"]), dir, dir, true);
+		expect(manager.getSessionFile()).toBe(latest);
+		expect(manager.getCwd()).toBe(dir);
+		expect(manager.isPersisted()).toBe(false);
+		expect(readFileSync(latest, "utf8")).toBe(original);
+	});
+
+	it("keeps a no-match readonly continue as an in-memory draft", async () => {
+		const dir = createTempDir("pi-readonly-continue-empty");
+		cleanupPaths.push(dir);
+		writeSessionFile(join(dir, "other.jsonl"), join(dir, "other-project"));
+		const manager = await createSessionManager(parseArgs(["--continue"]), dir, dir, true);
+		expect(manager.isPersisted()).toBe(false);
+		expect(manager.getSessionFile()).toBeUndefined();
+		expect(manager.getSessionDir()).toBe(dir);
+		expect(manager.getCwd()).toBe(dir);
+	});
+
+	it("keeps fork output writable when startup reads are readonly", async () => {
+		const dir = createTempDir("pi-readonly-fork");
+		cleanupPaths.push(dir);
+		const source = join(dir, "source.jsonl");
+		writeSessionFile(source, dir);
+		const manager = await createSessionManager(parseArgs(["--fork", source]), dir, dir, true);
+		expect(manager.isPersisted()).toBe(true);
+		expect(manager.getSessionFile()).not.toBe(source);
+		expect(existsSync(manager.getSessionFile()!)).toBe(true);
+		manager.appendSessionInfo("Writable fork");
+		expect(SessionManager.open(manager.getSessionFile()!).getSessionName()).toBe("Writable fork");
+	});
+
+	it("preserves writer-owned crash repair for default startup", async () => {
+		const dir = createTempDir("pi-writer-resume");
+		cleanupPaths.push(dir);
+		const path = join(dir, "session.jsonl");
+		writeSessionFile(path, dir);
+		const kept = readFileSync(path, "utf8");
+		writeFileSync(path, `${kept}{"type":"message","id":"torn`);
+		const manager = await createSessionManager(parseArgs(["--resume", path]), dir, dir);
+		expect(manager.isPersisted()).toBe(true);
+		expect(readFileSync(path, "utf8")).toBe(kept);
+		manager.appendSessionInfo("After repair");
+		expect(SessionManager.open(path).getSessionName()).toBe("After repair");
 	});
 
 	it("preserves an explicit catalog directory for in-memory bootstrap sessions", () => {

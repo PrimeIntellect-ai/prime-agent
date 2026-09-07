@@ -1,2 +1,2 @@
-- Simplified the agents view with per-session models, total cost and age, one column header, and collapsed inactive sessions while keeping the logo, startup metadata, and search.
+- Simplified the agents view with total cost and age, one column header, and collapsed inactive sessions while keeping the logo, startup metadata, and search.
 - Kept a running-subagent count beneath collapsed agents while their subagents are working.

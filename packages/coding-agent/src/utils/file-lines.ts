@@ -34,10 +34,34 @@ export function readFirstLineSync(filePath: string, maxBytes = 64 * 1024): strin
 	return Buffer.concat(chunks).toString("utf8").replace(/\r$/, "");
 }
 
-export async function* readLinesAsBuffers(filePath: string): AsyncGenerator<Buffer> {
+/** Read the bytes in [start, endExclusive), stopping early at EOF. */
+export function readBytesSync(filePath: string, start: number, endExclusive: number): Buffer {
+	const length = Math.max(0, endExclusive - start);
+	const buffer = Buffer.alloc(length);
+	const fd = openSync(filePath, "r");
+	try {
+		let offset = 0;
+		while (offset < length) {
+			const bytesRead = readSync(fd, buffer, offset, length - offset, start + offset);
+			if (bytesRead === 0) break;
+			offset += bytesRead;
+		}
+		return buffer.subarray(0, offset);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+export interface ReadLinesRange {
+	start?: number;
+	/** Inclusive, as in createReadStream: bounds the read to a stat() snapshot so a growing file cannot extend the scan. */
+	end?: number;
+}
+
+export async function* readLinesAsBuffers(filePath: string, range?: ReadLinesRange): AsyncGenerator<Buffer> {
 	const pendingParts: Buffer[] = [];
 	let pendingBytes = 0;
-	for await (const chunk of createReadStream(filePath)) {
+	for await (const chunk of createReadStream(filePath, range)) {
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 		let start = 0;
 		while (start < buffer.length) {

@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
 	type Api,
 	isPrivatePrimeInferenceModelId,
@@ -8,6 +8,8 @@ import {
 	type PrimeInferenceCatalogEntry,
 	parsePrimeInferenceModelCatalog,
 } from "@earendil-works/pi-ai";
+
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 
 export const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
 const FETCH_TIMEOUT_MS = 5_000;
@@ -91,18 +93,10 @@ export function readCachedPrimeInferenceModels(
 }
 
 function writeCache(cachePath: string, value: unknown): void {
-	const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
 	try {
-		writeFileSync(temporaryPath, JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
-		renameSync(temporaryPath, cachePath);
+		writeFileAtomicSync(cachePath, JSON.stringify(value), { mode: 0o600 });
 	} catch {
 		// The bundled catalog remains available when the cache cannot be persisted.
-	} finally {
-		try {
-			if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
-		} catch {
-			// Ignore cache cleanup failures.
-		}
 	}
 }
 

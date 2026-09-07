@@ -797,8 +797,8 @@ describe("AgentsViewMode", () => {
 				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
 			const parentLine = render(parentRow, 120);
 			const savedLine = render(savedRow, 120);
-			expect(parentLine).toContain("openai/gpt-5.6-sol");
-			expect(savedLine).toContain("prime-inference/glm-5.2-fast");
+			expect(parentLine).toContain("gpt-5.6-sol");
+			expect(savedLine).toContain("glm-5.2-fast");
 			expect(parentLine).toContain("$1.10");
 			expect(parentLine).not.toContain("$0.42");
 			expect(parentLine).not.toMatch(/[↑↓]/);

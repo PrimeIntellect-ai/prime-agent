@@ -29,6 +29,7 @@ import { ensureTool } from "../../utils/tools-manager.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../daemon/daemon-client.js";
+import { DaemonSessionRecoveringError } from "../daemon/daemon-errors.js";
 import {
 	collectDaemonClientEnv,
 	type DaemonClosingReason,
@@ -347,7 +348,11 @@ async function openAgentsViewSession(
 			return { connection, summary };
 		} catch (error) {
 			client.close();
-			if (!summary.sessionFile || !isUnknownActiveSessionError(error)) {
+			// Recovering takes the saved-session path too; its create/open route retries the recovery.
+			if (
+				!summary.sessionFile ||
+				!(isUnknownActiveSessionError(error) || error instanceof DaemonSessionRecoveringError)
+			) {
 				throw error;
 			}
 			client = await connectAgentsViewDaemonClient(socketPath);
@@ -2849,7 +2854,7 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
 		12,
 	);
-	const modelWidth = Math.min(desiredModelWidth, Math.max(0, available - 12));
+	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
 	const detailLine = (cost: string, age: string) => `${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
@@ -2887,9 +2892,7 @@ function formatTableCell(value: string, width: number): string {
 }
 
 function formatSessionModel(summary: SessionSummary): string {
-	if (!summary.model) return "-";
-	const effort = summary.thinkingLevel && summary.thinkingLevel !== "off" ? `:${summary.thinkingLevel}` : "";
-	return `${summary.model.provider}/${summary.model.id}${effort}`;
+	return summary.model?.id ?? "-";
 }
 
 function formatSessionDuration(summary: SessionSummary): string {

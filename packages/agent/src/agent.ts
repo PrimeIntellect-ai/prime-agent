@@ -112,7 +112,6 @@ export interface AgentOptions {
 	sessionId?: string;
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
-	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
 }
 
@@ -216,7 +215,6 @@ export class Agent {
 	public sessionId?: string;
 	public thinkingBudgets?: ThinkingBudgets;
 	public transport: Transport;
-	public maxRetryDelayMs?: number;
 	public toolExecution: ToolExecutionMode;
 
 	constructor(options: AgentOptions = {}) {
@@ -237,7 +235,6 @@ export class Agent {
 		this.sessionId = options.sessionId;
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
-		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
 	}
 
@@ -470,7 +467,6 @@ export class Agent {
 			onResponse: this.onResponse,
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
-			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
