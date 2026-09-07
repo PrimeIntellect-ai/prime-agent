@@ -1176,8 +1176,6 @@ export class AgentSession {
 
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
-	/** Spend of assistant carriers removed from live state by auto-retry (still in the transcript). */
-	private _droppedRetryUsage: Usage = emptyUsage();
 	/** Bumped by every retry resolution; stale scheduled-continue callbacks check it before touching retry state. */
 	private _retryGeneration = 0;
 	private _retryPromise: Promise<void> | undefined = undefined;
@@ -11428,13 +11426,6 @@ export class AgentSession {
 
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			// The transcript keeps the dropped carrier; the live stats sum reads
-			// state.messages, so its spend must survive the retry drop.
-			const dropped = messages[messages.length - 1] as AssistantMessage;
-			addAssistantUsage(this._droppedRetryUsage, dropped.usage);
-			for (const discarded of dropped.discardedUsage ?? []) {
-				addAssistantUsage(this._droppedRetryUsage, discarded);
-			}
 			this.agent.state.messages = messages.slice(0, -1);
 		}
 
@@ -12151,10 +12142,15 @@ export class AgentSession {
 				addSpend(assistantMsg);
 			}
 		}
-		// Persisted-but-not-live spend on this branch (auto-retry drops the failed
-		// carrier from live state; rebuilds and navigation re-derive live from the
-		// branch, so identity dedupe keeps this both branch-scoped and count-once).
-		for (const entry of this.sessionManager.getBranch()) {
+		// Persisted-but-not-live spend since the latest compaction (auto-retry
+		// drops the failed carrier from live state). Rebuilds and navigation
+		// re-derive live from these same entry objects, so the identity dedupe
+		// keeps this branch-scoped and count-once; pre-compaction spend stays
+		// out, matching this stats view's live-context contract.
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "compaction") break;
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				addSpend(entry.message as AssistantMessage);
 			}
