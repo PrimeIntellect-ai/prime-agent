@@ -650,7 +650,7 @@ class BashHandle:
         try:
             task = loop.create_task(notice)
         except BaseException:
-            self.kill(signal.SIGKILL)
+            self.kill(signal.SIGKILL if _IS_POSIX else signal.SIGTERM)
             notice.close()
             repl.emit({"application/vnd.prime-agent.bash-activity+json": {**activity, "active": False}})
             raise
