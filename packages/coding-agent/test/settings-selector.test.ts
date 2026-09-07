@@ -85,6 +85,28 @@ describe("SettingsSelectorComponent", () => {
 		}
 	});
 
+	test("edits the auto-compact context cap through the numeric submenu", () => {
+		const onCompactionMaxContextTokensChange = vi.fn();
+		const component = new SettingsSelectorComponent(config, { ...callbacks, onCompactionMaxContextTokensChange });
+		const list = component.getSettingsList();
+		for (const character of "cap") list.handleInput(character);
+
+		list.handleInput("\r");
+		for (const character of "50000") list.handleInput(character);
+		list.handleInput("\r");
+		expect(onCompactionMaxContextTokensChange).toHaveBeenCalledWith(50000);
+
+		list.handleInput("\r");
+		for (const character of "9".repeat(20)) list.handleInput(character);
+		list.handleInput("\r");
+		expect(onCompactionMaxContextTokensChange).toHaveBeenCalledTimes(1);
+
+		list.handleInput("\r");
+		for (let index = 0; index < 5; index++) list.handleInput("\x7f");
+		list.handleInput("\r");
+		expect(onCompactionMaxContextTokensChange).toHaveBeenLastCalledWith(undefined);
+	});
+
 	test("cycles a custom idle eviction value to the next numeric option", () => {
 		const onIdleEvictionMinutesChange = vi.fn();
 		const component = new SettingsSelectorComponent(

@@ -256,7 +256,7 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "compaction-max-context-tokens",
 				label: "Auto-compact context cap",
-				description: "Auto-compact once context reaches this many tokens (empty = only the model window applies)",
+				description: "Auto-compact once context reaches this many tokens (global setting; empty = unset)",
 				currentValue:
 					config.compactionMaxContextTokens === undefined ? "unset" : String(config.compactionMaxContextTokens),
 				submenu: (currentValue, done) =>
@@ -269,11 +269,12 @@ export class SettingsSelectorComponent extends Container {
 								done("unset");
 								return;
 							}
-							if (!/^\d+$/.test(value) || Number(value) <= 0) {
+							const parsed = Number(value);
+							if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed) || parsed <= 0) {
 								done();
 								return;
 							}
-							done(String(Number(value)));
+							done(String(parsed));
 						},
 						() => done(),
 					),
