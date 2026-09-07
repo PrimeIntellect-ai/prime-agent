@@ -1,0 +1,1 @@
+- Fixed unbounded session-journal growth from derived bookkeeping: child usage attribution now flushes one entry per child turn instead of one per model request, and idle status sweeps no longer persist fabricated fallback verdicts, duplicate statuses, or retry failed summary generations (including paid model calls) every 25 seconds on unchanged content.
