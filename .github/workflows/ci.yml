@@ -325,6 +325,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Bun 1.4.0
+        id: windows_bun
         uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
         with:
           bun-version: 1.4.0
@@ -335,9 +336,11 @@ jobs:
           version: "0.12.4"
 
       - name: Verify Bun 1.4.0
+        id: windows_bun_verified
         run: bun run check:bun-version
 
       - name: Install dependencies
+        id: windows_dependencies
         run: bun install --frozen-lockfile
 
       - name: Type check
@@ -357,15 +360,24 @@ jobs:
           test/kernel-bash-shell.test.ts
           test/windows-process-signal.test.ts
 
-      - name: Test identity-pinned tree signals under Bun and Node
+      - name: Build the Node identity signal fixture
+        id: windows_node_fixture
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
+        timeout-minutes: 3
         working-directory: packages/coding-agent
-        run: |
-          bun ./test/fixtures/windows-process-signal-native.ts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          bun build ./test/fixtures/windows-process-signal-native.ts --target=node --external koffi --outfile=./node_modules/.cache/windows-process-signal-native.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node node_modules/.cache/windows-process-signal-native.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: bun build ./test/fixtures/windows-process-signal-native.ts --target=node --external koffi --outfile=./node_modules/.cache/windows-process-signal-native.mjs
+
+      - name: Test identity-pinned tree signals under Bun
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: packages/coding-agent
+        run: bun ./test/fixtures/windows-process-signal-native.ts
+
+      - name: Test identity-pinned tree signals under Node
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' && steps.windows_node_fixture.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: packages/coding-agent
+        run: node ./node_modules/.cache/windows-process-signal-native.mjs
 
       - name: Test terminal behavior
         working-directory: packages/tui

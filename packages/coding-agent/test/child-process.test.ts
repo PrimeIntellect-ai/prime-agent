@@ -1,7 +1,7 @@
 import type * as ChildProcessModule from "node:child_process";
-import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,6 +21,9 @@ import {
 	spawnSyncHidden,
 	waitForChildProcess,
 } from "../src/utils/child-process.js";
+
+import { captureWindowsProcessCreationTime } from "../src/utils/windows-process-signal.js";
+import { cooperativeTreeScript, observe, waitUntil } from "./fixtures/windows-process-observation.js";
 
 import { spawnZombieProcess } from "./fixtures/zombie-process.js";
 
@@ -53,23 +56,6 @@ async function waitForFile(path: string): Promise<void> {
 	}
 }
 
-async function waitForProcessExit(pid: number): Promise<void> {
-	const deadline = Date.now() + 10_000;
-	while (isProcessAlive(pid)) {
-		if (Date.now() >= deadline) throw new Error(`Process ${pid} did not exit`);
-		await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-	}
-}
-
-function forceKillOnWindows(pid: number | undefined): void {
-	if (!pid || !isProcessAlive(pid)) return;
-	try {
-		execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-	} catch {
-		// The process may have exited between the liveness check and taskkill.
-	}
-}
-
 describe("waitForChildProcess", () => {
 	it("reports signaled already-exited children as failures", async () => {
 		const child = Object.assign(new EventEmitter(), {
@@ -95,48 +81,92 @@ describe("signalProcessGroupOrProcess", () => {
 		expect(() => signalProcessGroupOrProcess(999999999, "SIGKILL")).not.toThrow();
 	});
 
-	it.skipIf(process.platform !== "win32")("finishes a tree kill after the signaling process exits", async () => {
-		const testDir = mkdtempSync(join(tmpdir(), "prime-agent-taskkill-test-"));
-		const grandchildPidFile = join(testDir, "grandchild.pid");
-		let target: ChildProcess | undefined;
-		let grandchildPid: number | undefined;
-		try {
-			target = spawn(
-				process.execPath,
-				[
-					"--eval",
-					`const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); writeFileSync(process.argv[1], String(child.pid)); setInterval(() => {}, 1000);`,
-					grandchildPidFile,
-				],
-				{ stdio: "ignore" },
-			);
-			await waitForFile(grandchildPidFile);
-			grandchildPid = Number.parseInt(readFileSync(grandchildPidFile, "utf8"), 10);
-			expect(isProcessAlive(target.pid!)).toBe(true);
-			expect(isProcessAlive(grandchildPid)).toBe(true);
-
-			const helperUrl = pathToFileURL(resolve(import.meta.dirname, "../src/utils/child-process.ts")).href;
-			const killer = spawn(
-				process.execPath,
-				[
-					"--eval",
-					`import { signalProcessGroupOrProcess } from ${JSON.stringify(helperUrl)}; signalProcessGroupOrProcess(${target.pid}, "SIGKILL");`,
-				],
-				{ stdio: "ignore" },
-			);
-			const killerCode = await new Promise<number | null>((resolveExit, rejectExit) => {
-				killer.once("error", rejectExit);
-				killer.once("exit", resolveExit);
-			});
-			expect(killerCode).toBe(0);
-			await waitForProcessExit(target.pid!);
-			await waitForProcessExit(grandchildPid);
-		} finally {
-			forceKillOnWindows(target?.pid);
-			forceKillOnWindows(grandchildPid);
-			rmSync(testDir, { recursive: true, force: true });
-		}
-	});
+	it.skipIf(process.platform !== "win32")(
+		"finishes a tree kill after the signaling process exits",
+		async () => {
+			const started = Date.now();
+			const testDir = mkdtempSync(join(tmpdir(), "prime-agent-taskkill-test-"));
+			const ready = join(testDir, "ready");
+			const stop = join(testDir, "stop");
+			const records: Array<{ pid: number; identity: string | null }> = [];
+			const errors: unknown[] = [];
+			let target: ChildProcess | undefined;
+			let killer: ChildProcess | undefined;
+			let killerStderr = "";
+			const phase = (name: string, detail: unknown = null) =>
+				console.error(
+					JSON.stringify({
+						case: "caller-exit",
+						ms: Date.now() - started,
+						phase: name,
+						records,
+						alive: records.map(({ pid }) => isProcessAlive(pid)),
+						detail,
+						killerStderr,
+					}),
+				);
+			try {
+				target = spawn(process.execPath, ["-e", cooperativeTreeScript, ready, stop], { stdio: "ignore" });
+				target.once("error", (error) => {
+					errors.push(error);
+					phase("target-error", String(error));
+				});
+				await waitForFile(ready); // <=10s readiness.
+				const pids = JSON.parse(readFileSync(ready, "utf8")) as number[];
+				records.push(...pids.map((pid) => ({ pid, identity: null })));
+				phase("ready-before-capture");
+				for (const record of records) record.identity = captureWindowsProcessCreationTime(record.pid);
+				phase("identity-captured");
+				expect(records.map(({ pid }) => isProcessAlive(pid))).toEqual([true, true]);
+				const helperUrl = pathToFileURL(resolve(import.meta.dirname, "../src/utils/child-process.ts")).href;
+				killer = spawn(
+					process.execPath,
+					[
+						"--eval",
+						`import { signalProcessGroupOrProcess } from ${JSON.stringify(helperUrl)}; console.error("signal-enter", Date.now()); signalProcessGroupOrProcess(${target.pid}, "SIGKILL", error => console.error("signal-failure", Date.now(), error.message)); console.error("signal-return", Date.now());`,
+					],
+					{ stdio: ["ignore", "ignore", "pipe"] },
+				);
+				killer.stderr?.on("data", (data: Buffer) => {
+					killerStderr += data.toString().slice(0, Math.max(0, 4096 - killerStderr.length));
+				});
+				killer.once("exit", (code, signal) => phase("caller-exit", { code, signal }));
+				phase("signal-requested");
+				expect(await observe(waitForChildProcess(killer), 5000, "caller exit")).toBe(0);
+				await waitUntil(() => records.every(({ pid }) => !isProcessAlive(pid)), 15000, "both tree processes exit");
+				expect(records.map(({ pid }) => isProcessAlive(pid))).toEqual([false, false]);
+				phase("whole-tree-gone");
+			} catch (error) {
+				errors.push(error);
+			} finally {
+				phase("before-cleanup");
+				try {
+					writeFileSync(join(testDir, "records.json"), JSON.stringify(records));
+				} catch (error) {
+					errors.push(error);
+				}
+				try {
+					writeFileSync(stop, "stop");
+				} catch (error) {
+					errors.push(error);
+				}
+				try {
+					await waitUntil(
+						() =>
+							records.every(({ pid }) => !isProcessAlive(pid)) &&
+							[target, killer].every((child) => !child || child.exitCode !== null || child.signalCode !== null),
+						10000,
+						"cooperative cleanup",
+					);
+				} catch (error) {
+					errors.push(error);
+				}
+				phase("cleanup-complete", { errors: errors.map(String), preserved: testDir });
+			}
+			if (errors.length) throw new AggregateError(errors, "Caller-exit tree test failed");
+		},
+		45000,
+	);
 });
 
 describe("process liveness", () => {
