@@ -39,6 +39,8 @@ const capturedTypedArraySet = Uint8Array.prototype.set;
 const capturedDataViewGetUint32 = DataView.prototype.getUint32;
 const capturedPromiseThenDescriptor = capturedGetOwnPropertyDescriptor(capturedPromisePrototype, "then");
 const capturedPromiseThen = capturedPromiseThenDescriptor?.value;
+const capturedSetTimeout = setTimeout;
+const capturedClearTimeout = clearTimeout;
 
 const IO_METHODS = capturedFreeze(["readExact", "writeExact", "close", "readClassified", "waitClosed"]);
 const HEADER_PREFIX_BYTES = 24;
@@ -337,6 +339,14 @@ function discardReadData(raw: unknown): void {
 	}
 }
 
+function takeReadTimeout(raw: unknown): boolean {
+	try {
+		return exactPlainFrozen(raw, ["type"]) && ownValue(raw, "type") === "TIMEOUT";
+	} catch {
+		return false;
+	}
+}
+
 function concatenate(first: Uint8Array, second: Uint8Array): Uint8Array | undefined {
 	try {
 		const result = new CapturedUint8Array(new CapturedArrayBuffer(first.byteLength + second.byteLength));
@@ -386,6 +396,7 @@ export function createSandboxV31PhysicalPort(ioRaw: unknown, channelRaw: unknown
 	const closeWaiters = new CapturedArray<Deferred<CloseResult>>();
 	const promiseChains = new CapturedArray<OwnedPromiseChain>();
 	let activeSendPromise: Promise<unknown> | null = null;
+	let retryTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
 	function finishCloseWaiters(): void {
 		if (!shutdownStarted || !waitClosedDone || pendingDrains !== 0 || activeSendPromise !== null) return;
@@ -444,6 +455,10 @@ export function createSandboxV31PhysicalPort(ioRaw: unknown, channelRaw: unknown
 	function beginShutdown(asPoison: boolean): void {
 		if (asPoison) poisoned = true;
 		stopped = true;
+		if (retryTimeoutId !== undefined) {
+			capturedClearTimeout(retryTimeoutId);
+			retryTimeoutId = undefined;
+		}
 		if (shutdownStarted) {
 			finishCloseWaiters();
 			return;
@@ -503,6 +518,15 @@ export function createSandboxV31PhysicalPort(ioRaw: unknown, channelRaw: unknown
 			}
 			const prefix = takeReadData(raw, HEADER_PREFIX_BYTES);
 			if (prefix === undefined) {
+				if (takeReadTimeout(raw)) {
+					if (!stopped && retryTimeoutId === undefined) {
+						retryTimeoutId = capturedSetTimeout((): void => {
+							retryTimeoutId = undefined;
+							if (!stopped) receiveHeader();
+						}, 0);
+					}
+					return;
+				}
 				failOperation();
 				return;
 			}

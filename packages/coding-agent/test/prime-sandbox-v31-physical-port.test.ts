@@ -544,7 +544,7 @@ describe("V31 authenticated transport physical port", () => {
 		}
 	});
 
-	test("classifies a read timeout into terminal failure without exposing it", async () => {
+	test("classifies a read timeout into benign idle without shutting down", async () => {
 		const pair = await channels();
 		expect(pair).toBeDefined();
 		if (pair === undefined) return;
@@ -569,9 +569,9 @@ describe("V31 authenticated transport physical port", () => {
 		const runtime = port(createSandboxV31PhysicalPort(io, pair.runtime));
 		if (runtime === undefined) return;
 		expect(runtime.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
-		await turn();
-		expect(closed).toBe(true);
-		expect(await runtime.close()).toEqual({ code: "FAILED" });
+		for (let i = 0; i < 20; i += 1) await turn();
+		expect(closed).toBe(false);
+		expect(await runtime.close()).toEqual({ code: "CLOSED" });
 	});
 
 	test("lets V31 detect a decrypted transport/application stream mismatch", async () => {
@@ -624,6 +624,244 @@ describe("V31 authenticated transport physical port", () => {
 		expect(physical.registerInbound(() => {})).toEqual({ code: "ALREADY_EXISTS" });
 		expect(closes).toBe(1);
 		expect(await physical.close()).toEqual({ code: "FAILED" });
+	});
+
+	test("repeated 1000 header timeouts then valid frame dispatch", async () => {
+		const pair = await channels();
+		expect(pair).toBeDefined();
+		if (pair === undefined) return;
+		const link = duplex();
+		const runtime = port(createSandboxV31PhysicalPort(link.runtime.io, pair.runtime));
+		if (runtime === undefined) return;
+		const received: { stream: number; bytes: number[] }[] = [];
+		expect(
+			runtime.registerInbound((stream: unknown, plaintext: unknown) => {
+				expect(typeof stream).toBe("number");
+				expect(plaintext instanceof Uint8Array).toBe(true);
+				if (typeof stream !== "number" || !(plaintext instanceof Uint8Array)) return;
+				received.push({ stream, bytes: Array.from(plaintext) });
+			}),
+		).toEqual({ code: "REGISTERED" });
+		for (let i = 0; i < 1000; i += 1) await turn();
+		const encrypted = await encryptSandboxTransportFrame(pair.home, 2n, sequence(10, 5));
+		expect(encrypted.ok).toBe(true);
+		if (!encrypted.ok) return;
+		link.runtime.inject(encrypted.value);
+		for (let i = 0; i < 20; i += 1) await turn();
+		expect(received).toEqual([{ stream: 2, bytes: [10, 11, 12, 13, 14] }]);
+		expect(link.runtime.closed()).toBe(false);
+		expect(await runtime.close()).toEqual({ code: "CLOSED" });
+	});
+
+	test("timeout-close reentrancy closes cleanly", async () => {
+		const pair = await channels();
+		expect(pair).toBeDefined();
+		if (pair === undefined) return;
+		const link = duplex();
+		const runtime = port(createSandboxV31PhysicalPort(link.runtime.io, pair.runtime));
+		if (runtime === undefined) return;
+		expect(runtime.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
+		await turn();
+		const closing = runtime.close();
+		expect(await closing).toEqual({ code: "CLOSED" });
+		expect(link.runtime.closed()).toBe(true);
+	});
+
+	test("mid-frame timeout is terminal failure", async () => {
+		const pair = await channels();
+		expect(pair).toBeDefined();
+		if (pair === undefined) return;
+		let callIndex = 0;
+		let closed = false;
+		const io = Object.freeze({
+			readExact(): Promise<undefined> {
+				return new NativePromise((resolve) => resolve(undefined));
+			},
+			writeExact(): Promise<boolean> {
+				return new NativePromise((resolve) => resolve(false));
+			},
+			close(): void {
+				closed = true;
+			},
+			readClassified(length: unknown, timeoutMs: unknown): Promise<unknown> {
+				callIndex += 1;
+				if (typeof length !== "number" || typeof timeoutMs !== "number") {
+					return new NativePromise((resolve) => resolve(Object.freeze({ type: "IO_FAILURE" })));
+				}
+				if (callIndex === 1) {
+					const bytes = new Uint8Array(new ArrayBuffer(length));
+					return new NativePromise((resolve) => resolve(Object.freeze({ type: "DATA", data: bytes })));
+				}
+				return new NativePromise((resolve) => resolve(Object.freeze({ type: "TIMEOUT" })));
+			},
+			waitClosed(): Promise<void> {
+				return new NativePromise((resolve) => resolve());
+			},
+		});
+		const mid = port(createSandboxV31PhysicalPort(io, pair.runtime));
+		if (mid === undefined) return;
+		expect(mid.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
+		for (let i = 0; i < 20; i += 1) await turn();
+		expect(closed).toBe(true);
+		expect(await mid.close()).toEqual({ code: "FAILED" });
+	});
+
+	test("malformed timeout variants are terminal failure", async () => {
+		const malformed: Array<() => unknown> = [
+			() => Object.freeze({ type: "TIMEOUT", extra: true }),
+			() => ({ type: "TIMEOUT" }),
+			() => {
+				const obj = { type: "TIMEOUT" };
+				Object.defineProperty(obj, "type", { get: () => "TIMEOUT" });
+				return Object.freeze(obj);
+			},
+			() => new Proxy({ type: "TIMEOUT" }, {}),
+		];
+		for (const make of malformed) {
+			const pair = await channels();
+			expect(pair).toBeDefined();
+			if (pair === undefined) return;
+			let closed = false;
+			const io = Object.freeze({
+				readExact(): Promise<undefined> {
+					return new NativePromise((resolve) => resolve(undefined));
+				},
+				writeExact(): Promise<boolean> {
+					return new NativePromise((resolve) => resolve(false));
+				},
+				close(): void {
+					closed = true;
+				},
+				readClassified(): Promise<unknown> {
+					return new NativePromise((resolve) => resolve(make()));
+				},
+				waitClosed(): Promise<void> {
+					return new NativePromise((resolve) => resolve());
+				},
+			});
+			const p = port(createSandboxV31PhysicalPort(io, pair.runtime));
+			if (p === undefined) return;
+			expect(p.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
+			await turn();
+			expect(closed).toBe(true);
+			expect(await p.close()).toEqual({ code: "FAILED" });
+		}
+	});
+
+	test("timeout then IO or EOF is terminal failure", async () => {
+		const pair = await channels();
+		expect(pair).toBeDefined();
+		if (pair === undefined) return;
+		const link = duplex();
+		const runtime = port(createSandboxV31PhysicalPort(link.runtime.io, pair.runtime));
+		if (runtime === undefined) return;
+		expect(runtime.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
+		link.runtime.endPeer();
+		await turn();
+		expect(link.runtime.closed()).toBe(true);
+		expect(await runtime.close()).toEqual({ code: "FAILED" });
+	});
+
+	test("exact one pending read during timeout loops", async () => {
+		const pair = await channels();
+		expect(pair).toBeDefined();
+		if (pair === undefined) return;
+		let pendingCount = 0;
+		let maxPending = 0;
+		const io = Object.freeze({
+			readExact(): Promise<undefined> {
+				return new NativePromise((resolve) => resolve(undefined));
+			},
+			writeExact(): Promise<boolean> {
+				return new NativePromise((resolve) => resolve(false));
+			},
+			close(): void {},
+			readClassified(): Promise<Readonly<{ type: "TIMEOUT" }>> {
+				pendingCount += 1;
+				maxPending = Math.max(maxPending, pendingCount);
+				return new NativePromise((resolve) => {
+					setTimeout(() => {
+						pendingCount -= 1;
+						resolve(Object.freeze({ type: "TIMEOUT" }));
+					}, 0);
+				});
+			},
+			waitClosed(): Promise<void> {
+				return new NativePromise((resolve) => resolve());
+			},
+		});
+		const p = port(createSandboxV31PhysicalPort(io, pair.runtime));
+		if (p === undefined) return;
+		expect(p.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
+		for (let i = 0; i < 10; i += 1) await new NativePromise((r) => setTimeout(r, 0));
+		expect(maxPending).toBeLessThanOrEqual(1);
+		expect(await p.close()).toEqual({ code: "CLOSED" });
+	});
+
+	test("late timeout settlement after close is inert", async () => {
+		const pair = await channels();
+		expect(pair).toBeDefined();
+		if (pair === undefined) return;
+		let resolveLate: ((value: unknown) => void) | undefined;
+		let closed = false;
+		const io = Object.freeze({
+			readExact(): Promise<undefined> {
+				return new NativePromise((resolve) => resolve(undefined));
+			},
+			writeExact(): Promise<boolean> {
+				return new NativePromise((resolve) => resolve(false));
+			},
+			close(): void {
+				closed = true;
+				resolveLate?.(Object.freeze({ type: "IO_FAILURE" }));
+				resolveLate = undefined;
+			},
+			readClassified(): Promise<unknown> {
+				return new NativePromise((resolve) => {
+					resolveLate = (value: unknown) => resolve(value);
+				});
+			},
+			waitClosed(): Promise<void> {
+				return new NativePromise((resolve) => resolve());
+			},
+		});
+		const p = port(createSandboxV31PhysicalPort(io, pair.runtime));
+		if (p === undefined) return;
+		expect(p.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
+		expect(await p.close()).toEqual({ code: "CLOSED" });
+		expect(closed).toBe(true);
+		resolveLate?.(Object.freeze({ type: "TIMEOUT" }));
+		await turn();
+		expect(await p.close()).toEqual({ code: "CLOSED" });
+	});
+
+	test("no stack overflow from rapid sequential header timeouts", async () => {
+		const pair = await channels();
+		expect(pair).toBeDefined();
+		if (pair === undefined) return;
+		let count = 0;
+		const io = Object.freeze({
+			readExact(): Promise<undefined> {
+				return new NativePromise((resolve) => resolve(undefined));
+			},
+			writeExact(): Promise<boolean> {
+				return new NativePromise((resolve) => resolve(false));
+			},
+			close(): void {},
+			readClassified(): Promise<Readonly<{ type: "TIMEOUT" }>> {
+				count += 1;
+				return new NativePromise((resolve) => resolve(Object.freeze({ type: "TIMEOUT" })));
+			},
+			waitClosed(): Promise<void> {
+				return new NativePromise((resolve) => resolve());
+			},
+		});
+		const p = port(createSandboxV31PhysicalPort(io, pair.runtime));
+		if (p === undefined) return;
+		expect(p.registerInbound(() => {})).toEqual({ code: "REGISTERED" });
+		for (let i = 0; i < 50; i += 1) await turn();
+		expect(count).toBeGreaterThanOrEqual(50);
+		expect(await p.close()).toEqual({ code: "CLOSED" });
 	});
 
 	test("rejects invalid factory inputs without taking ownership", async () => {
