@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
+import { type Api, findEnvKeys, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	appendRotatingLog,
@@ -143,6 +143,7 @@ import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
 import {
+	collectDaemonLaunchEnv,
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_DEFAULT_CLIENT_CAPABILITIES,
@@ -2534,10 +2535,27 @@ export class AgentDaemon {
 			await client.connect(3000);
 			await client.waitForHello(3000);
 			const runtimeConfig = parentState.runtime.runtimeConfig;
+			const inheritsProvider = options.model.provider === parentState.runtime.session.model?.provider;
+			const authSource = parentState.runtime.services.authStorage.getAuthStatus(options.model.provider).source;
+			const apiKey =
+				inheritsProvider &&
+				authSource === "runtime" &&
+				(runtimeConfig?.provider ?? parentState.runtime.session.model?.provider) === options.model.provider
+					? runtimeConfig?.apiKey
+					: undefined;
+			const launchEnv: Record<string, string> = {};
+			if (inheritsProvider) {
+				const envKey = authSource === "environment" ? findEnvKeys(options.model.provider)?.[0] : undefined;
+				if (envKey && process.env[envKey]) launchEnv[envKey] = process.env[envKey];
+				if (options.model.provider === "prime-inference" && process.env.PRIME_TEAM_ID !== undefined) {
+					launchEnv.PRIME_TEAM_ID = process.env.PRIME_TEAM_ID;
+				}
+			}
 			const createResponse = await client.request(
 				{
 					type: "create",
 					lifecycle: "resident",
+					...(inheritsProvider ? { launchEnv: collectDaemonLaunchEnv(launchEnv) } : {}),
 					...(options.sessionName ? { name: options.sessionName } : {}),
 					config: {
 						cwd: options.cwd,
@@ -2545,6 +2563,7 @@ export class AgentDaemon {
 						...(runtimeConfig?.sessionDir ? { sessionDir: runtimeConfig.sessionDir } : {}),
 						provider: options.model.provider,
 						model: options.model.id,
+						...(apiKey ? { apiKey } : {}),
 						thinking: options.thinkingLevel,
 						...(runtimeConfig?.telemetryDisabled ? { telemetryDisabled: true as const } : {}),
 					},

@@ -6555,6 +6555,7 @@ export class AgentSession {
 
 	get isSessionActive(): boolean {
 		return (
+			this._ipythonKernelProvisioner?.manager?.hasBackgroundWork === true ||
 			this.isStreaming ||
 			this.isCompacting ||
 			this.isRetrying ||

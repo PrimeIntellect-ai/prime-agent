@@ -1,1 +1,2 @@
 - Added completion follow-ups when background kernel `bash()` commands finish so agents can inspect results and continue.
+- Kept sessions resident until background shell commands finish and their notifications are accepted.

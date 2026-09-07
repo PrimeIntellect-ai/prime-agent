@@ -631,20 +631,25 @@ class BashHandle:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = loop.create_task(self._notify_background_completion(cell_finished))
+        from . import repl
+
+        activity = {"id": secrets.token_hex(16), "pid": self._pid, "active": True}
+        # Publish synchronously before bash() returns and the creating cell can end.
+        repl.emit({"application/vnd.prime-agent.bash-activity+json": activity})
+        task = loop.create_task(self._notify_background_completion(cell_finished, activity))
         task.add_done_callback(_consume_notice_task)
 
-    async def _notify_background_completion(self, cell_finished: asyncio.Event) -> None:
-        result = await self._wait()
-        # The cell may do other work before awaiting this handle. Do not classify
-        # it as detached until that whole cell has crossed its completion barrier.
-        await cell_finished.wait()
-        if self._awaited_by_creating_cell:
-            return
-        try:
-            from . import repl
+    async def _notify_background_completion(
+        self, cell_finished: asyncio.Event, activity: dict[str, Any]
+    ) -> None:
+        from . import repl
 
-            if not repl.is_active():
+        try:
+            result = await self._wait()
+            # The cell may do other work before awaiting this handle. Do not classify
+            # it as detached until that whole cell has crossed its completion barrier.
+            await cell_finished.wait()
+            if self._awaited_by_creating_cell or not repl.is_active():
                 return
             command = self.command
             if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
@@ -661,6 +666,9 @@ class BashHandle:
             # Standalone runtimes have no host handler, and teardown can close
             # the bridge while a process is finishing. Shell results stay usable.
             return
+        finally:
+            # Keep the kernel resident until the completion follow-up is accepted.
+            repl.emit({"application/vnd.prime-agent.bash-activity+json": {**activity, "active": False}})
 
     async def _wait(self) -> BashResult:
         # Asyncio-native wakeup: no executor thread is parked for the command's
