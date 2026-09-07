@@ -1876,10 +1876,21 @@ export class AgentSession {
 						(record): record is DeliveryRecord & { message: CustomMessage } =>
 							(record.role === "next_turn" || (payload.acceptedAgentMessage && record.role === "prefix")) &&
 							record.message.role === "custom" &&
+							record.message.customType !== HARNESS_DIGEST_CUSTOM_TYPE &&
 							!record.durable,
 					)
 					.map((record) => cloneCustomMessage(record.message));
 				restorableMessages.push(...restorable);
+				// Lazy injection owns digest delivery: a cancelled turn re-arms it
+				// instead of restoring a possibly stale digest message.
+				if (
+					payload.records.some(
+						(record) =>
+							record.message.role === "custom" && record.message.customType === HARNESS_DIGEST_CUSTOM_TYPE,
+					)
+				) {
+					this._harnessDigestPending = true;
+				}
 				if (dispatched) {
 					payload.captureRunMessages = new Set(payload.records.map((record) => record.message));
 					this.agent.state.messages = this.agent.state.messages.filter(
@@ -6169,7 +6180,7 @@ export class AgentSession {
 					if (executionPolicy.nextTurnContextTiming === "commit") {
 						nextTurnMessages = this._takePendingNextTurnMessages();
 					}
-					if (this._harnessDigestPending && executionPolicy.nextTurnContextTiming !== "skip") {
+					if (this._harnessDigestPending) {
 						// The first-turn digest rides the turn's delivery records so a
 						// cancelled first turn strips it with the rest of the turn.
 						this._harnessDigestPending = false;

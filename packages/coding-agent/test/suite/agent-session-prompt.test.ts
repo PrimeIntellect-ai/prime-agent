@@ -2127,6 +2127,26 @@ describe("Harness digest at cold boundaries", () => {
 		).toBe(true);
 	});
 
+	it("delivers the digest on a custom-triggered first turn", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		let firstContextText = "";
+		harness.setResponses([
+			(context) => {
+				firstContextText = getMessageText(context.messages[0]);
+				return fauxAssistantMessage("ok");
+			},
+		]);
+
+		await harness.session.sendCustomMessage(
+			{ customType: "kickoff", content: "go", display: false },
+			{ triggerTurn: true },
+		);
+		await harness.session.waitForIdle();
+
+		expect(firstContextText).toContain("The persistent memories produced across this session so far:");
+	});
+
 	it("strips the digest with a cleared first turn and re-delivers it on the next turn", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
