@@ -25,6 +25,7 @@ APPLY = 0x0A
 VERIFY = 0x0B
 CLEANUP = 0x0C
 FINALIZE = 0x0D
+RECOVER = 0x0E
 SUPPLY_EVIDENCE = 0x0F
 REPLAY_PLAN = 0x10
 QUIT = 0xFF
@@ -814,6 +815,7 @@ def _open_root(fds, state, raw):
             raise Failure(UNCERTAIN, REASON_LOCK)
         _verify_root_chain(chain, state)
         state["phase"] = "READY"
+        state["recover_unused"] = True
         installed = True
     except Failure:
         raise
@@ -1328,6 +1330,7 @@ def _entry_payload(entry):
 
 
 def _begin_plan(fds, state, payload):
+    state["recover_unused"] = False
     if len(payload) != 104:
         raise Failure(ERROR, ERR_FORMAT)
     count, total = struct.unpack_from(">II", payload, 0)
@@ -2213,6 +2216,1199 @@ def _vector_commitment(vector):
         _zero(count)
 
 
+def _recover_names(fd, reason):
+    try:
+        names = os.listdir(fd)
+    except OSError:
+        raise Failure(UNCERTAIN, reason)
+    result = []
+    try:
+        for name in names:
+            encoded = bytearray(os.fsencode(name))
+            if not encoded or b"/" in encoded or b"\x00" in encoded:
+                _zero(encoded)
+                raise Failure(UNCERTAIN, reason)
+            result.append(encoded)
+        return result
+    except BaseException:
+        _zero_owned(result)
+        raise
+    finally:
+        names.clear()
+
+
+def _recover_open_dir(fds, state, parent_fd, name):
+    try:
+        fd = _track(fds, _openat(parent_fd, name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC))
+        _bind_name(parent_fd, name, fd, state, reason=REASON_EVIDENCE, directory=True)
+        return fd
+    except Failure:
+        raise
+    except OSError:
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+
+
+def _recover_joint_leaf(fds, state, parent_fd, canonical, temporary, limit):
+    opened = []
+    try:
+        for name in (canonical, temporary):
+            try:
+                fd = _track(fds, _openat(parent_fd, name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC))
+            except FileNotFoundError:
+                opened.append(None)
+                continue
+            except OSError:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            opened.append(fd)
+        canonical_fd, temporary_fd = opened
+        if canonical_fd is None and temporary_fd is None:
+            return None
+        if canonical_fd is not None and temporary_fd is not None:
+            canonical_stat = _bind_name(parent_fd, canonical, canonical_fd, state, nlinks=(2,), reason=REASON_EVIDENCE)
+            temporary_stat = _bind_name(parent_fd, temporary, temporary_fd, state, nlinks=(2,), reason=REASON_EVIDENCE)
+            if not _same_inode(canonical_stat, temporary_stat):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            raw = _fd_bytes(canonical_fd, limit, REASON_EVIDENCE)
+            duplicate = _fd_bytes(temporary_fd, limit, REASON_EVIDENCE)
+            try:
+                if raw != duplicate:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            finally:
+                _zero(duplicate)
+            return {"raw": raw, "canonical": True, "temporary": True}
+        selected_fd = canonical_fd if canonical_fd is not None else temporary_fd
+        selected_name = canonical if canonical_fd is not None else temporary
+        _bind_name(parent_fd, selected_name, selected_fd, state, nlinks=(1,), reason=REASON_EVIDENCE)
+        return {
+            "raw": _fd_bytes(selected_fd, limit, REASON_EVIDENCE),
+            "canonical": canonical_fd is not None,
+            "temporary": temporary_fd is not None,
+        }
+    finally:
+        for fd in opened:
+            if fd is not None:
+                _close(fds, fd)
+
+
+def _recover_tombstone(fds, state):
+    captured = _recover_joint_leaf(fds, state, state["root_fd"], bytearray(TOMBSTONE), bytearray(TOMBSTONE_TEMP), 209)
+    if captured is None:
+        return None
+    raw = captured["raw"]
+    try:
+        tag, revision = _parse_record(raw)
+        expected = 209 if tag == 0x0E else 105 if tag == 0x0F else 0
+        if expected == 0 or len(raw) != expected or revision == 0 or revision > MAX_CHAIN:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        payload = memoryview(raw)[73:]
+        try:
+            tx_id = bytearray(payload[:32])
+            if tx_id == ZERO32:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            result = {
+                "tag": tag,
+                "revision": revision,
+                "terminal_digest": bytearray(raw[5:37]),
+                "tx_id": tx_id,
+                "canonical": captured["canonical"],
+                "temporary": captured["temporary"],
+            }
+            if tag == 0x0E:
+                result["plan_digest"] = bytearray(payload[32:64])
+                result["commitment"] = bytearray(payload[64:96])
+                result["vector_len"] = struct.unpack_from(">Q", payload, 96)[0]
+                result["ticket"] = bytearray(payload[104:136])
+                if (
+                    result["plan_digest"] == ZERO32
+                    or result["commitment"] == ZERO32
+                    or result["ticket"] == ZERO32
+                    or result["vector_len"] < 1
+                    or result["vector_len"] > MAX_CHAIN
+                    or result["revision"] != result["vector_len"]
+                ):
+                    _zero_owned(result)
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            return result
+        finally:
+            payload.release()
+    except Failure:
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    finally:
+        _zero(raw)
+
+
+def _recover_records(fds, state, journal_fd):
+    names = _recover_names(journal_fd, REASON_EVIDENCE)
+    records = []
+    total = 0
+    grouped = {}
+    try:
+        for name in names:
+            temporary = len(name) == 69 and name.startswith(b".tmp-")
+            base = bytearray(name[5:]) if temporary else bytearray(name)
+            try:
+                if len(base) != 64 or any(not (0x30 <= value <= 0x39 or 0x61 <= value <= 0x66) for value in base):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                key = base.decode("ascii")
+                kinds = grouped.setdefault(key, set())
+                kind = "temporary" if temporary else "canonical"
+                if kind in kinds:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                kinds.add(kind)
+            finally:
+                _zero(base)
+        for key in grouped:
+            canonical = bytearray(key.encode("ascii"))
+            prefix = bytearray(b".tmp-")
+            temporary = _concat((prefix, canonical))
+            raw = None
+            actual_name = None
+            try:
+                captured = _recover_joint_leaf(fds, state, journal_fd, canonical, temporary, MAX_PAYLOAD)
+                if captured is None:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                raw = captured["raw"]
+                actual_name = _sha256_hex(raw)
+                tag, revision = _parse_record(raw)
+                if actual_name != canonical:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                total += len(raw)
+                if total > MAX_JOURNAL_BYTES:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                records.append({
+                    "tag": tag,
+                    "revision": revision,
+                    "raw": raw,
+                    "canonical": captured["canonical"],
+                    "temporary": captured["temporary"],
+                })
+                raw = None
+            finally:
+                _zero(canonical)
+                _zero(prefix)
+                _zero(temporary)
+                if actual_name is not None:
+                    _zero(actual_name)
+                if raw is not None:
+                    _zero(raw)
+        records.sort(key=lambda item: item["revision"])
+        if len(records) > MAX_CHAIN:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        previous = bytearray(32)
+        try:
+            for revision, record_item in enumerate(records):
+                raw = record_item["raw"]
+                if (
+                    record_item["revision"] != revision
+                    or memoryview(raw)[5:37] != previous
+                    or (record_item["temporary"] and revision != len(records) - 1)
+                ):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                _zero(previous)
+                previous = _sha256(raw)
+        finally:
+            _zero(previous)
+        return records
+    except (UnicodeError, Failure):
+        _zero_owned(records)
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    finally:
+        grouped.clear()
+        _zero_owned(names)
+
+
+def _recover_plan_from_records(records):
+    if not records:
+        return {"plan_present": False, "tx_id": None, "plan_digest": None, "entries": [], "directories": [], "commit": False}
+    if records[0]["tag"] != 0x01:
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    header = records[0]["raw"]
+    payload = memoryview(header)[73:]
+    try:
+        entry_count, total_bytes = struct.unpack_from(">II", payload, 0)
+        tx_id = bytearray(payload[8:40])
+        tx_digest = bytearray(payload[40:72])
+        aggregate = bytearray(payload[72:104])
+    finally:
+        payload.release()
+    result = {
+        "entry_count": entry_count,
+        "total_bytes": total_bytes,
+        "tx_id": tx_id,
+        "tx_digest": tx_digest,
+        "declared_aggregate": aggregate,
+        "entries": [],
+        "directories": [],
+        "plan_present": False,
+        "plan_digest": None,
+        "commit": False,
+    }
+    try:
+        if entry_count < 1 or entry_count > MAX_ENTRIES or total_bytes > MAX_TOTAL_BYTES:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        index = 1
+        while index < len(records) and records[index]["tag"] == 0x02 and len(result["entries"]) < entry_count:
+            raw = records[index]["raw"]
+            entry = _parse_entry(memoryview(raw)[73:])
+            entry["digest"] = _entry_digest(entry)
+            for previous_entry in result["entries"]:
+                slash = bytearray(b"/")
+                left = _concat((previous_entry["path"], slash))
+                right = _concat((entry["path"], slash))
+                try:
+                    if previous_entry["path"] == entry["path"] or previous_entry["path"].startswith(right) or entry["path"].startswith(left):
+                        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                finally:
+                    _zero(slash)
+                    _zero(left)
+                    _zero(right)
+            result["entries"].append(entry)
+            index += 1
+        if len(result["entries"]) < entry_count:
+            if index != len(records):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            return result
+        expected_directories = []
+        for entry in result["entries"]:
+            for position, value in enumerate(entry["path"]):
+                if value == 0x2F:
+                    candidate = bytearray(entry["path"][:position])
+                    if not any(candidate == existing for existing in expected_directories):
+                        expected_directories.append(candidate)
+                    else:
+                        _zero(candidate)
+        expected_directories.sort(key=lambda item: (item.count(b"/"), item))
+        while index < len(records) and records[index]["tag"] == 0x03:
+            raw = records[index]["raw"]
+            record_payload = memoryview(raw)[73:]
+            try:
+                size = struct.unpack_from(">H", record_payload, 0)[0]
+                directory = bytearray(record_payload[2:])
+            finally:
+                record_payload.release()
+            position = len(result["directories"])
+            if size != len(directory) or position >= len(expected_directories) or directory != expected_directories[position]:
+                _zero(directory)
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            result["directories"].append(directory)
+            index += 1
+        if len(result["directories"]) != len(expected_directories):
+            _zero_owned(expected_directories)
+            if index != len(records):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            return result
+        _zero_owned(expected_directories)
+        if index >= len(records):
+            return result
+        if records[index]["tag"] != 0x04:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        ordered = sorted((bytearray(entry["digest"]) for entry in result["entries"]))
+        computed_aggregate = _domain_hash(DOMAIN_ENTRY_AGG, ordered)
+        computed_plan = _domain_hash(DOMAIN_PLAN, (computed_aggregate,))
+        _zero_owned(ordered)
+        raw = records[index]["raw"]
+        sealed = memoryview(raw)[73:]
+        try:
+            sealed_entries, sealed_dirs = struct.unpack_from(">II", sealed, 0)
+            sealed_digest = bytearray(sealed[8:40])
+        finally:
+            sealed.release()
+        if (
+            sealed_entries != entry_count
+            or sealed_dirs != len(result["directories"])
+            or computed_aggregate != result["declared_aggregate"]
+            or sealed_digest != computed_plan
+            or sum(entry["post_size"] for entry in result["entries"] if entry["kind"] in (0, 2)) != total_bytes
+        ):
+            _zero(computed_aggregate)
+            _zero(computed_plan)
+            _zero(sealed_digest)
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        _zero(computed_aggregate)
+        _zero(sealed_digest)
+        result["plan_present"] = True
+        result["plan_digest"] = computed_plan
+        index += 1
+
+        def consume_repeated(tag, maximum, validator):
+            nonlocal index
+            count = 0
+            while index < len(records) and records[index]["tag"] == tag:
+                if count >= maximum:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                validator(count, memoryview(records[index]["raw"])[73:])
+                count += 1
+                index += 1
+            return count
+
+        staged_paths = []
+        def validate_stage(unused, item):
+            try:
+                path_sha = bytearray(item[:32])
+                digest = bytearray(item[32:64])
+                size = struct.unpack_from(">I", item, 64)[0]
+                matches = [entry for entry in result["entries"] if entry["kind"] in (0, 2) and _sha256(entry["path"]) == path_sha]
+                if len(matches) != 1 or digest != matches[0]["post_digest"] or size != matches[0]["post_size"] or any(path_sha == prior for prior in staged_paths):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                staged_paths.append(path_sha)
+                path_sha = None
+            finally:
+                if path_sha is not None:
+                    _zero(path_sha)
+                _zero(digest)
+                item.release()
+        result["stage_count"] = consume_repeated(0x05, entry_count, validate_stage)
+        result["staged_paths"] = staged_paths
+        staged_paths = []
+        expected_stage_count = sum(1 for entry in result["entries"] if entry["kind"] in (0, 2))
+        if index < len(records) and result["stage_count"] != expected_stage_count:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+
+        backup_paths = []
+        expected_backups = [entry for entry in result["entries"] if entry["kind"] in (1, 2)]
+        def validate_backup(unused, item):
+            try:
+                path_sha = bytearray(item[:32])
+                digest = bytearray(item[32:64])
+                size = struct.unpack_from(">I", item, 64)[0]
+                matches = [entry for entry in result["entries"] if entry["kind"] in (1, 2) and _sha256(entry["path"]) == path_sha]
+                if (
+                    len(matches) != 1
+                    or unused >= len(expected_backups)
+                    or matches[0] is not expected_backups[unused]
+                    or digest != matches[0]["pre_digest"]
+                    or size != matches[0]["pre_size"]
+                    or any(path_sha == prior for prior in backup_paths)
+                ):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                backup_paths.append(path_sha)
+                path_sha = None
+            finally:
+                if path_sha is not None:
+                    _zero(path_sha)
+                _zero(digest)
+                item.release()
+        result["backup_count"] = consume_repeated(0x06, entry_count, validate_backup)
+        result["backup_paths"] = backup_paths
+        backup_paths = []
+        if index < len(records) and result["backup_count"] != len(expected_backups):
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+
+        prepared = 0
+        prepared_states = []
+        while index < len(records) and records[index]["tag"] == 0x07:
+            item = memoryview(records[index]["raw"])[73:]
+            try:
+                size = struct.unpack_from(">H", item, 0)[0]
+                directory = item[2:2 + size]
+                if prepared >= len(result["directories"]) or directory != result["directories"][prepared] or item[-1] not in (0, 1):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            finally:
+                directory.release()
+                item.release()
+            prepared_states.append(records[index]["raw"][-1])
+            prepared += 1
+            index += 1
+        result["prepared_count"] = prepared
+        result["prepared_states"] = prepared_states
+        if prepared not in (0, len(result["directories"])):
+            if index != len(records):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            return result
+        if index < len(records) and records[index]["tag"] == 0x08:
+            if memoryview(records[index]["raw"])[73:] != result["plan_digest"] or prepared != len(result["directories"]):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            result["prepare_done"] = True
+            index += 1
+        else:
+            result["prepare_done"] = False
+            if index != len(records):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            return result
+        if index < len(records) and records[index]["tag"] == 0x09:
+            if memoryview(records[index]["raw"])[73:] != result["plan_digest"]:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            result["commit"] = True
+            index += 1
+        else:
+            if index != len(records):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            return result
+        applied_dirs = 0
+        applied_directory_states = []
+        while index < len(records) and records[index]["tag"] == 0x0A:
+            item = memoryview(records[index]["raw"])[73:]
+            try:
+                size = struct.unpack_from(">H", item, 0)[0]
+                directory = item[2:2 + size]
+                if applied_dirs >= len(result["directories"]) or directory != result["directories"][applied_dirs] or item[-1] not in (0, 1):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            finally:
+                directory.release()
+                item.release()
+            applied_directory_states.append(records[index]["raw"][-1])
+            applied_dirs += 1
+            index += 1
+        result["applied_dirs"] = applied_dirs
+        result["applied_directory_states"] = applied_directory_states
+        applied_entries = 0
+        while index < len(records) and records[index]["tag"] == 0x0B:
+            item = memoryview(records[index]["raw"])[73:]
+            try:
+                entry_index = struct.unpack_from(">H", item, 0)[0]
+                if entry_index != applied_entries or entry_index >= len(result["entries"]) or item[2:34] != result["entries"][entry_index]["digest"] or item[34] != result["entries"][entry_index]["kind"] + 1:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            finally:
+                item.release()
+            applied_entries += 1
+            index += 1
+        result["applied_entries"] = applied_entries
+        if applied_entries > 0 and applied_dirs != len(result["directories"]):
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        result["verified"] = False
+        result["cleanup_done"] = False
+        if index < len(records) and records[index]["tag"] == 0x0C:
+            if applied_dirs != len(result["directories"]) or applied_entries != len(result["entries"]) or memoryview(records[index]["raw"])[73:] != result["plan_digest"]:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            result["verified"] = True
+            index += 1
+        if index < len(records) and records[index]["tag"] == 0x0D:
+            if not result["verified"] or memoryview(records[index]["raw"])[73:] != result["plan_digest"]:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            result["cleanup_done"] = True
+            index += 1
+        if index != len(records):
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        _zero_owned(staged_paths)
+        _zero_owned(backup_paths)
+        return result
+    except BaseException:
+        _zero_owned(result)
+        raise
+
+
+def _recover_workspace_leaf(fds, state, entry):
+    try:
+        parent, leaf = _walk_parent(fds, state, entry["path"], REASON_EVIDENCE)
+    except Missing:
+        return None, None, None, None, None
+    fd = None
+    try:
+        found = _lstat(parent, leaf, REASON_EVIDENCE)
+        if found is None:
+            return None, None, None, parent, leaf
+        fd = _open_bound_leaf(fds, state, parent, leaf, nlinks=(1, 2), reason=REASON_EVIDENCE)
+        found = _bind_name(parent, leaf, fd, state, nlinks=(1, 2), reason=REASON_EVIDENCE)
+        raw = _fd_bytes(fd, MAX_TOTAL_BYTES, REASON_EVIDENCE)
+        digest = _sha256(raw)
+        size = len(raw)
+        _zero(raw)
+        result = ((size, digest), found, fd, parent, leaf)
+        fd = None
+        return result
+    except BaseException:
+        if fd is not None:
+            _close(fds, fd)
+        _zero(leaf)
+        _close(fds, parent)
+        raise
+
+
+def _recover_directory_present(fds, state, path):
+    try:
+        parent, leaf = _walk_parent(fds, state, path, REASON_EVIDENCE)
+    except Missing:
+        return False
+    try:
+        found = _lstat(parent, leaf, REASON_EVIDENCE)
+        if found is None:
+            return False
+        directory_fd = _recover_open_dir(fds, state, parent, leaf)
+        _close(fds, directory_fd)
+        return True
+    finally:
+        _zero(leaf)
+        _close(fds, parent)
+
+
+def _recover_matches_postimage_or_prefix(fds, state, entry, candidate, stage_fd):
+    if len(candidate) > entry["post_size"]:
+        return False
+    if len(candidate) == entry["post_size"]:
+        digest = _sha256(candidate)
+        try:
+            return digest == entry["post_digest"]
+        finally:
+            _zero(digest)
+    if stage_fd is None:
+        return False
+    name = _sha256_hex(entry["path"])
+    staged = None
+    digest = None
+    try:
+        staged = _read_leaf(fds, state, stage_fd, name, MAX_TOTAL_BYTES, REASON_EVIDENCE)
+        digest = _sha256(staged)
+        if len(staged) != entry["post_size"] or digest != entry["post_digest"]:
+            return False
+        prefix = memoryview(staged)[:len(candidate)]
+        try:
+            return candidate == prefix
+        finally:
+            prefix.release()
+    finally:
+        _zero(name)
+        if staged is not None:
+            _zero(staged)
+        if digest is not None:
+            _zero(digest)
+
+
+def _recover_install_inventory(fds, state, plan, install_fd, stage_fd):
+    names = _recover_names(install_fd, REASON_EVIDENCE)
+    try:
+        if not plan["plan_present"]:
+            for name in names:
+                if len(name) != 64 or any(not (0x30 <= value <= 0x39 or 0x61 <= value <= 0x66) for value in name):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                raw = _read_leaf(fds, state, install_fd, name, MAX_TOTAL_BYTES, REASON_EVIDENCE)
+                _zero(raw)
+            return {"has_artifacts": bool(names), "key": None, "stat": None, "fd": None, "dir_fd": install_fd}
+        if len(names) > 1:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        if not names:
+            return {"has_artifacts": False, "key": None, "stat": None, "fd": None, "dir_fd": install_fd}
+        name = names[0]
+        if len(name) != 64 or any(not (0x30 <= value <= 0x39 or 0x61 <= value <= 0x66) for value in name):
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        applied_entries = plan.get("applied_entries", 0)
+        if (
+            not plan.get("commit", False)
+            or applied_entries >= len(plan["entries"])
+            or plan.get("applied_dirs", 0) != len(plan["directories"])
+        ):
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        entry = plan["entries"][applied_entries]
+        expected_name = _sha256_hex(entry["path"])
+        fd = None
+        raw = None
+        try:
+            if entry["kind"] != 0 or name != expected_name:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            fd = _open_bound_leaf(fds, state, install_fd, name, nlinks=(1, 2), reason=REASON_EVIDENCE)
+            found = _bind_name(install_fd, name, fd, state, nlinks=(1, 2), reason=REASON_EVIDENCE)
+            raw = _fd_bytes(fd, MAX_TOTAL_BYTES, REASON_EVIDENCE)
+            if not _recover_matches_postimage_or_prefix(fds, state, entry, raw, stage_fd):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            if len(raw) < entry["post_size"] and found.st_nlink != 1:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            result = {
+                "has_artifacts": True,
+                "key": name.decode("ascii"),
+                "stat": found,
+                "fd": fd,
+                "dir_fd": install_fd,
+            }
+            fd = None
+            return result
+        finally:
+            if fd is not None:
+                _close(fds, fd)
+            if raw is not None:
+                _zero(raw)
+            _zero(expected_name)
+    except (UnicodeError, Failure):
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    finally:
+        _zero_owned(names)
+
+
+def _recover_validate_workspace(fds, state, plan, tombstone, install, stage_fd):
+    force_old = not plan.get("commit", False) and (tombstone is None or tombstone["tag"] == 0x0F)
+    force_new = tombstone is not None and tombstone["tag"] == 0x0E
+    prepared_states = plan.get("prepared_states", [])
+    applied_dirs = plan.get("applied_dirs", 0)
+    for index, directory in enumerate(plan["directories"] if plan["plan_present"] else []):
+        if force_new:
+            allowed = _recover_directory_present(fds, state, directory)
+        elif index >= len(prepared_states):
+            continue
+        else:
+            old_present = prepared_states[index] == 1
+            present = _recover_directory_present(fds, state, directory)
+            if force_old or index > applied_dirs:
+                allowed = present == old_present
+            elif index < applied_dirs:
+                allowed = present
+            else:
+                allowed = present == old_present or present
+        if not allowed:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    applied_entries = plan.get("applied_entries", 0)
+    for index, entry in enumerate(plan["entries"]):
+        observed, observed_stat, observed_fd, parent, leaf = _recover_workspace_leaf(fds, state, entry)
+        temporary = None
+        temporary_raw = None
+        try:
+            if parent is not None and entry["kind"] == 2:
+                path_name = _sha256_hex(entry["path"])
+                prefix = bytearray(b"\x01wa-upd-")
+                temporary = _concat((prefix, path_name))
+                parent_names = _recover_names(parent, REASON_EVIDENCE)
+                try:
+                    if any(name.startswith(prefix) and name != temporary for name in parent_names):
+                        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                finally:
+                    _zero_owned(parent_names)
+                    _zero(path_name)
+                    _zero(prefix)
+                temporary_found = _lstat(parent, temporary, REASON_EVIDENCE)
+                if temporary_found is not None:
+                    temporary_raw = _read_leaf(
+                        fds, state, parent, temporary, MAX_TOTAL_BYTES, REASON_EVIDENCE, nlinks=(1,)
+                    )
+                    if observed_fd is not None:
+                        observed_stat = _bind_name(
+                            parent, leaf, observed_fd, state, nlinks=(1,), reason=REASON_EVIDENCE
+                        )
+                    if (
+                        tombstone is not None
+                        or not plan.get("commit", False)
+                        or applied_dirs != len(plan["directories"])
+                        or index != applied_entries
+                        or not _recover_matches_postimage_or_prefix(
+                            fds, state, entry, temporary_raw, stage_fd
+                        )
+                        or observed is None
+                        or observed_stat.st_nlink != 1
+                        or observed[0] != entry["pre_size"]
+                        or observed[1] != entry["pre_digest"]
+                    ):
+                        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            is_pre = observed is not None and observed[0] == entry["pre_size"] and observed[1] == entry["pre_digest"]
+            is_post = observed is not None and observed[0] == entry["post_size"] and observed[1] == entry["post_digest"]
+            if entry["kind"] == 0:
+                old_ok = observed is None
+                new_ok = is_post
+                expected_name = _sha256_hex(entry["path"])
+                try:
+                    install_for_entry = install["key"] == expected_name.decode("ascii")
+                finally:
+                    _zero(expected_name)
+                if install_for_entry:
+                    install_name = bytearray(install["key"].encode("ascii"))
+                    try:
+                        install_stat = _bind_name(
+                            install["dir_fd"], install_name, install["fd"], state,
+                            nlinks=(1, 2), reason=REASON_EVIDENCE,
+                        )
+                        if observed is None:
+                            if install_stat.st_nlink != 1:
+                                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                        else:
+                            observed_stat = _bind_name(
+                                parent, leaf, observed_fd, state, nlinks=(1, 2), reason=REASON_EVIDENCE
+                            )
+                            if (
+                                not is_post
+                                or observed_stat.st_nlink != 2
+                                or install_stat.st_nlink != 2
+                                or not _same_inode(observed_stat, install_stat)
+                            ):
+                                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                    finally:
+                        _zero(install_name)
+                elif observed_stat is not None and observed_stat.st_nlink != 1:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            elif entry["kind"] == 1:
+                old_ok = is_pre
+                new_ok = observed is None
+                if observed_stat is not None and observed_stat.st_nlink != 1:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            else:
+                old_ok = is_pre
+                new_ok = is_post
+                if observed_stat is not None and observed_stat.st_nlink != 1:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            if force_old:
+                allowed = old_ok
+            elif force_new:
+                allowed = new_ok
+            elif applied_dirs < len(plan["directories"]):
+                allowed = old_ok
+            elif index < applied_entries:
+                allowed = new_ok
+            elif index == applied_entries:
+                allowed = old_ok or new_ok
+            else:
+                allowed = old_ok
+            if not allowed:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        finally:
+            if observed is not None:
+                _zero(observed[1])
+            if temporary is not None:
+                _zero(temporary)
+            if temporary_raw is not None:
+                _zero(temporary_raw)
+            if observed_fd is not None:
+                _close(fds, observed_fd)
+            if leaf is not None:
+                _zero(leaf)
+            if parent is not None:
+                _close(fds, parent)
+    if install["fd"] is not None:
+        _close(fds, install["fd"])
+        install["fd"] = None
+
+
+def _recover_artifact_inventory(fds, state, plan, directory_name, fd):
+    names = _recover_names(fd, REASON_EVIDENCE)
+    expected = {}
+    try:
+        if not plan["plan_present"]:
+            grouped = set()
+            for name in names:
+                temporary_name = len(name) == 69 and name.startswith(b".tmp-")
+                base = bytearray(name[5:]) if temporary_name else bytearray(name)
+                try:
+                    if (
+                        len(base) != 64
+                        or any(not (0x30 <= value <= 0x39 or 0x61 <= value <= 0x66) for value in base)
+                        or (directory_name == "stage" and temporary_name)
+                    ):
+                        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                    grouped.add(base.decode("ascii"))
+                finally:
+                    _zero(base)
+            for key in grouped:
+                canonical = bytearray(key.encode("ascii"))
+                raw = None
+                try:
+                    if directory_name == "stage":
+                        raw = _read_leaf(fds, state, fd, canonical, MAX_TOTAL_BYTES, REASON_EVIDENCE)
+                    else:
+                        prefix = bytearray(b".tmp-")
+                        temporary = _concat((prefix, canonical))
+                        try:
+                            captured = _recover_joint_leaf(fds, state, fd, canonical, temporary, MAX_TOTAL_BYTES)
+                            if captured is None:
+                                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                            raw = captured["raw"]
+                        finally:
+                            _zero(prefix)
+                            _zero(temporary)
+                finally:
+                    if raw is not None:
+                        _zero(raw)
+                    _zero(canonical)
+            grouped.clear()
+            return {"has_artifacts": bool(names), "present": set(), "recorded": set()}
+        recorded = plan.get("staged_paths", []) if directory_name == "stage" else plan.get("backup_paths", [])
+        for entry in plan["entries"]:
+            wanted = None
+            if directory_name == "stage" and entry["kind"] in (0, 2):
+                wanted = (entry["post_size"], entry["post_digest"])
+            elif directory_name == "backup" and entry["kind"] in (1, 2):
+                wanted = (entry["pre_size"], entry["pre_digest"])
+            if wanted is not None:
+                digest = _sha256(entry["path"])
+                name = _sha256_hex(entry["path"])
+                try:
+                    expected[name.decode("ascii")] = (wanted[0], wanted[1], any(digest == item for item in recorded))
+                finally:
+                    _zero(digest)
+                    _zero(name)
+        present = set()
+        kinds = {}
+        for name in names:
+            temporary = len(name) == 69 and name.startswith(b".tmp-")
+            base = bytearray(name[5:]) if temporary else bytearray(name)
+            try:
+                if len(base) != 64 or any(not (0x30 <= value <= 0x39 or 0x61 <= value <= 0x66) for value in base):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                key = base.decode("ascii")
+                if key not in expected or (directory_name == "stage" and temporary):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                kind = "temporary" if temporary else "canonical"
+                key_kinds = kinds.setdefault(key, set())
+                if kind in key_kinds:
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                key_kinds.add(kind)
+                present.add(key)
+            finally:
+                _zero(base)
+        unrecorded = [key for key in present if not expected[key][2]]
+        if len(unrecorded) > 1:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        if directory_name == "backup" and unrecorded:
+            expected_stage_count = sum(1 for entry in plan["entries"] if entry["kind"] in (0, 2))
+            if plan.get("stage_count", 0) != expected_stage_count:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            backup_entries = [entry for entry in plan["entries"] if entry["kind"] in (1, 2)]
+            next_index = len(plan.get("backup_paths", []))
+            if next_index >= len(backup_entries):
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            next_name = _sha256_hex(backup_entries[next_index]["path"])
+            try:
+                if unrecorded[0] != next_name.decode("ascii"):
+                    raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            finally:
+                _zero(next_name)
+        for key in present:
+            canonical = bytearray(key.encode("ascii"))
+            raw = None
+            try:
+                if directory_name == "stage":
+                    raw = _read_leaf(fds, state, fd, canonical, MAX_TOTAL_BYTES, REASON_EVIDENCE)
+                else:
+                    prefix = bytearray(b".tmp-")
+                    temporary = _concat((prefix, canonical))
+                    try:
+                        captured = _recover_joint_leaf(fds, state, fd, canonical, temporary, MAX_TOTAL_BYTES)
+                        if captured is None:
+                            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                        if expected[key][2] and captured["temporary"]:
+                            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                        raw = captured["raw"]
+                    finally:
+                        _zero(prefix)
+                        _zero(temporary)
+                wanted_size, wanted_digest, is_recorded = expected[key]
+                digest = _sha256(raw)
+                try:
+                    if len(raw) > wanted_size:
+                        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                    if is_recorded and (len(raw) != wanted_size or digest != wanted_digest):
+                        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                    if not is_recorded and len(raw) == wanted_size and digest != wanted_digest:
+                        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+                finally:
+                    _zero(digest)
+            finally:
+                if raw is not None:
+                    _zero(raw)
+                _zero(canonical)
+        return {
+            "has_artifacts": bool(names),
+            "present": present,
+            "recorded": {key for key, value in expected.items() if value[2]},
+        }
+    finally:
+        _zero_owned(names)
+        expected.clear()
+
+
+def _recover_validate_artifact_cleanup(plan, tombstone, inventories):
+    if not plan["plan_present"]:
+        return
+    stage = inventories.get("stage", {"present": set(), "recorded": set()})
+    backup = inventories.get("backup", {"present": set(), "recorded": set()})
+    cleanup_authorized = tombstone is not None or plan.get("verified", False)
+    if not cleanup_authorized:
+        if not stage["recorded"].issubset(stage["present"]) or not backup["recorded"].issubset(backup["present"]):
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        return
+    if not stage["present"].issubset(stage["recorded"]) or not backup["present"].issubset(backup["recorded"]):
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    staged_order = [item.hex() for item in plan.get("staged_paths", [])]
+    stage_prefixes = [set(staged_order[:length]) for length in range(len(staged_order) + 1)]
+    matching_stage = [length for length, prefix in enumerate(stage_prefixes) if prefix == stage["present"]]
+    backup_order = sorted(item.hex() for item in plan.get("backup_paths", []))
+    backup_prefixes = [set(backup_order[:length]) for length in range(len(backup_order) + 1)]
+    matching_backup = [length for length, prefix in enumerate(backup_prefixes) if prefix == backup["present"]]
+    if len(matching_stage) != 1 or len(matching_backup) != 1:
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    stage_length = matching_stage[0]
+    backup_length = matching_backup[0]
+    if plan.get("cleanup_done", False):
+        if stage_length != 0 or backup_length != 0:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    elif stage_length > 0 and backup_length != len(backup_order):
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    elif stage_length == len(staged_order) and backup_length != len(backup_order):
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+
+def _recover_private(fds, state, tombstone):
+    private_name = bytearray(PRIVATE_ROOT)
+    try:
+        private_stat = _lstat(state["root_fd"], private_name, REASON_EVIDENCE)
+        if private_stat is None:
+            return None
+        private_fd = _recover_open_dir(fds, state, state["root_fd"], private_name)
+    finally:
+        _zero(private_name)
+    names = _recover_names(private_fd, REASON_EVIDENCE)
+    directory_fds = {}
+    records = None
+    plan = None
+    try:
+        encoded_names = {name.decode("ascii", "strict") for name in names}
+        if any(name not in ("journal", "stage", "install", "backup") for name in encoded_names):
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        if tombstone is None and encoded_names != {"journal", "stage", "install", "backup"}:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        if tombstone is not None:
+            present_order = [name for name in ("journal", "stage", "install", "backup") if name in encoded_names]
+            valid_suffixes = [list(("journal", "stage", "install", "backup")[index:]) for index in range(5)]
+            if present_order not in valid_suffixes and encoded_names != {"journal", "stage", "install", "backup"}:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        for name in ("journal", "stage", "install", "backup"):
+            if name in encoded_names:
+                directory_fds[name] = _recover_open_dir(fds, state, private_fd, bytearray(name.encode("ascii")))
+        records = _recover_records(fds, state, directory_fds["journal"]) if "journal" in directory_fds else []
+        plan = _recover_plan_from_records(records)
+        if plan["tx_id"] is None:
+            if tombstone is None:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            plan["tx_id"] = bytearray(tombstone["tx_id"])
+        if tombstone is not None and plan["tx_id"] != tombstone["tx_id"]:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        inventories = {}
+        has_artifacts = False
+        for name in ("stage", "backup"):
+            if name in directory_fds:
+                inventory = _recover_artifact_inventory(fds, state, plan, name, directory_fds[name])
+                inventories[name] = inventory
+                has_artifacts = inventory["has_artifacts"] or has_artifacts
+        if "install" in directory_fds:
+            install = _recover_install_inventory(
+                fds, state, plan, directory_fds["install"], directory_fds.get("stage")
+            )
+            has_artifacts = install["has_artifacts"] or has_artifacts
+        else:
+            install = {"has_artifacts": False, "key": None, "stat": None, "fd": None, "dir_fd": None}
+        if tombstone is None and not plan["plan_present"] and has_artifacts:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        _recover_validate_artifact_cleanup(plan, tombstone, inventories)
+        _recover_validate_workspace(fds, state, plan, tombstone, install, directory_fds.get("stage"))
+        state["private_fd"] = private_fd
+        state["dir_fds"] = directory_fds
+        state["records"] = [bytearray(item["raw"]) for item in records]
+        state["previous_record"] = _sha256(state["records"][-1]) if state["records"] else bytearray(32)
+        state["journal_bytes"] = sum(len(raw) for raw in state["records"])
+        state.update(plan)
+        state["paths"] = [bytearray(entry["path"]) for entry in plan["entries"]]
+        state["staged"] = []
+        state["stage"] = None
+        result = {"records": records, "plan": plan, "has_artifacts": has_artifacts}
+        private_fd = None
+        directory_fds = {}
+        plan = None
+        records = None
+        return result
+    except (UnicodeError, Failure):
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    finally:
+        _zero_owned(names)
+        if records is not None:
+            _zero_owned(records)
+        if plan is not None:
+            _zero_owned(plan)
+        for fd in directory_fds.values():
+            _close(fds, fd)
+        if private_fd is not None:
+            _close(fds, private_fd)
+
+
+def _recover_vector(records):
+    return [_sha256(item["raw"]) for item in records]
+
+
+def _recover_phase_two_payload(state, tombstone, private):
+    records = private["records"]
+    vector = _recover_vector(records)
+    prefix_len = len(vector)
+    source = 1 if tombstone is not None else 0
+    plan_present = 1 if private["plan"]["plan_present"] else 0
+    continuation = 1 if tombstone is not None and not plan_present and private["has_artifacts"] else 0
+    if tombstone is None:
+        if prefix_len < 1 or not private["plan"]["commit"]:
+            _zero_owned(vector)
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        commitment = _vector_commitment(vector)
+        vector_len = prefix_len
+        ticket = bytearray(32)
+        terminal = prefix_len - 1
+        plan_digest = bytearray(private["plan"]["plan_digest"])
+    else:
+        if tombstone["tag"] != 0x0E:
+            _zero_owned(vector)
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        commitment = bytearray(tombstone["commitment"])
+        vector_len = tombstone["vector_len"]
+        ticket = bytearray(tombstone["ticket"])
+        terminal = vector_len - 1
+        plan_digest = bytearray(tombstone["plan_digest"])
+        locally_complete = prefix_len == vector_len
+        local_commitment = _vector_commitment(vector) if locally_complete else None
+        if (
+            prefix_len > vector_len
+            or (plan_present and private["plan"]["plan_digest"] != plan_digest)
+            or (locally_complete and vector[-1] != tombstone["terminal_digest"])
+            or (locally_complete and local_commitment != commitment)
+        ):
+            if local_commitment is not None:
+                _zero(local_commitment)
+            _zero_owned(vector)
+            _zero(commitment)
+            _zero(ticket)
+            _zero(plan_digest)
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        if local_commitment is not None:
+            _zero(local_commitment)
+    phase = bytearray((2, source, continuation, plan_present, 1 if source else 0))
+    vector_length = _u64(vector_len)
+    prefix_length = _u32(prefix_len)
+    terminal_revision = _u32(terminal)
+    decision = bytearray((2,))
+    parts = [phase, state["tx_id"], plan_digest, commitment, vector_length, ticket, prefix_length]
+    parts.extend(vector)
+    parts.extend((terminal_revision, decision))
+    try:
+        payload = _concat(parts)
+        if len(payload) > MAX_PAYLOAD:
+            _zero(payload)
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        state["evidence"] = {
+            "phase": 2,
+            "consumed": False,
+            "source": source,
+            "continuation": continuation,
+            "vector": vector,
+            "vector_len": vector_len,
+            "terminal": terminal,
+            "ticket": bytearray(ticket),
+            "commitment": bytearray(commitment),
+            "tombstone": tombstone,
+        }
+        vector = []
+        return payload
+    finally:
+        _zero(phase)
+        _zero(vector_length)
+        _zero(prefix_length)
+        _zero(terminal_revision)
+        _zero(decision)
+        _zero(commitment)
+        _zero(ticket)
+        _zero(plan_digest)
+        _zero_owned(vector)
+
+
+def _recover_phase_four_payload(state, tombstone, private):
+    records = private["records"]
+    vector = _recover_vector(records)
+    prefix_len = len(vector)
+    plan_present = 1 if private["plan"]["plan_present"] else 0
+    source = 1 if tombstone is not None else 0
+    if tombstone is not None and (
+        prefix_len > tombstone["revision"]
+        or (prefix_len == tombstone["revision"] and vector[-1] != tombstone["terminal_digest"])
+    ):
+        _zero_owned(vector)
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+    continuation = 1 if source and not plan_present and private["has_artifacts"] else 0
+    phase = bytearray((4, source, continuation, plan_present))
+    prefix_length = _u32(prefix_len)
+    terminal = prefix_len - 1 if prefix_len else 0
+    terminal_revision = _u32(terminal)
+    decision = bytearray((3,))
+    parts = [phase, state["tx_id"]]
+    if plan_present:
+        parts.append(state["plan_digest"])
+    parts.append(prefix_length)
+    parts.extend(vector)
+    parts.extend((terminal_revision, decision))
+    try:
+        payload = _concat(parts)
+        if len(payload) > MAX_PAYLOAD:
+            _zero(payload)
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        state["evidence"] = {
+            "phase": 4,
+            "consumed": False,
+            "source": source,
+            "continuation": continuation,
+            "vector": vector,
+            "terminal": terminal,
+            "tombstone": tombstone,
+        }
+        vector = []
+        return payload
+    finally:
+        _zero(phase)
+        _zero(prefix_length)
+        _zero(terminal_revision)
+        _zero(decision)
+        _zero_owned(vector)
+
+
+def _recover_tombstone_only_payload(state, tombstone):
+    state["tx_id"] = bytearray(tombstone["tx_id"])
+    state["tombstone_record"] = tombstone
+    if tombstone["tag"] == 0x0E:
+        state["plan_digest"] = bytearray(tombstone["plan_digest"])
+        state["tombstone"] = {
+            "ticket": bytearray(tombstone["ticket"]),
+            "commitment": bytearray(tombstone["commitment"]),
+            "length": tombstone["vector_len"],
+        }
+        state["evidence"] = {"phase": 3, "consumed": False}
+        phase = bytearray((3,))
+        length = _u64(tombstone["vector_len"])
+        kind = bytearray((0,))
+        try:
+            return _concat((phase, state["tx_id"], state["plan_digest"], tombstone["commitment"], length, tombstone["ticket"], kind))
+        finally:
+            _zero(phase)
+            _zero(length)
+            _zero(kind)
+    state["evidence"] = {"phase": 5, "consumed": False}
+    phase = bytearray((5,))
+    kind = bytearray((1,))
+    try:
+        return _concat((phase, state["tx_id"], kind))
+    finally:
+        _zero(phase)
+        _zero(kind)
+
+
+def _recover(fds, state, payload):
+    if payload:
+        raise Failure(ERROR, ERR_FORMAT)
+    state["recovery_classifier_only"] = True
+    try:
+        tombstone = _recover_tombstone(fds, state)
+        private = _recover_private(fds, state, tombstone)
+        if tombstone is None and private is None:
+            state["phase"] = "READY_RECOVERED"
+            state["recover_unused"] = False
+            state["recovery_classifier_only"] = False
+            return ABSENT, bytearray()
+        if tombstone is not None and private is None:
+            state["phase"] = "NEEDS_EVIDENCE"
+            state["recover_unused"] = False
+            return NEED_EVIDENCE, _recover_tombstone_only_payload(state, tombstone)
+        if private is None:
+            raise Failure(UNCERTAIN, REASON_EVIDENCE)
+        state["recover_unused"] = False
+        if tombstone is not None and tombstone["tag"] == 0x0E:
+            state["phase"] = "NEEDS_EVIDENCE"
+            return NEED_EVIDENCE, _recover_phase_two_payload(state, tombstone, private)
+        if tombstone is not None and tombstone["tag"] == 0x0F:
+            if private["plan"]["commit"]:
+                raise Failure(UNCERTAIN, REASON_EVIDENCE)
+            state["phase"] = "NEEDS_EVIDENCE"
+            return NEED_EVIDENCE, _recover_phase_four_payload(state, tombstone, private)
+        if private["plan"]["commit"]:
+            state["phase"] = "NEEDS_EVIDENCE"
+            return NEED_EVIDENCE, _recover_phase_two_payload(state, None, private)
+        state["phase"] = "NEEDS_EVIDENCE"
+        return NEED_EVIDENCE, _recover_phase_four_payload(state, None, private)
+    except Failure:
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
+
+
 def _need_vector(fds, state):
     vector = _record_vector(fds, state)
     state["evidence"] = {"phase": 1, "consumed": False, "vector": vector}
@@ -2466,6 +3662,8 @@ def _supply(fds, state, payload):
     if evidence is None or evidence["consumed"]:
         raise Failure(UNCERTAIN, REASON_EVIDENCE)
     evidence["consumed"] = True
+    if state.get("recovery_classifier_only", False):
+        raise Failure(UNCERTAIN, REASON_EVIDENCE)
     if not payload or payload[0] != evidence["phase"]:
         raise Failure(UNCERTAIN, REASON_EVIDENCE)
     if evidence["phase"] == 1:
@@ -2494,6 +3692,8 @@ def _quit(fds, state):
 
 def _dispatch(fds, state, opcode, payload):
     phase = state["phase"]
+    if opcode == RECOVER and payload:
+        raise Failure(ERROR, ERR_FORMAT)
     if opcode == OPEN_ROOT:
         if phase != "INIT":
             raise Failure(ERROR, ERR_ORDER)
@@ -2503,12 +3703,17 @@ def _dispatch(fds, state, opcode, payload):
         raise Failure(ERROR, ERR_ORDER)
     _verify_root_binding(state)
     _verify_stage_bindings(state)
+    if opcode == RECOVER:
+        if phase != "READY" or not state.get("recover_unused", False):
+            raise Failure(ERROR, ERR_ORDER)
+        return _recover(fds, state, payload)
     if opcode == SUPPLY_EVIDENCE:
         return _supply(fds, state, payload)
     if opcode == REPLAY_PLAN:
         raise Failure(ERROR, ERR_ORDER)
     table = {
         "READY": (BEGIN_PLAN, _begin_plan, OK),
+        "READY_RECOVERED": (BEGIN_PLAN, _begin_plan, OK),
         "PLAN": (PLAN_ENTRY, _plan_entry, OK),
         "PREFLIGHT": (BACKUP, _backup, OK),
         "BACKUP_DONE": (PREPARE, _prepare, PREPARED),

@@ -25,7 +25,7 @@ const CAPTURED_PROCESS_KILL = process.kill.bind(process);
 
 const HEADER_SIZE = 5;
 const MAX_PAYLOAD = 1_048_576;
-const MAX_STREAM_BYTES = 1_048_576;
+const MAX_STREAM_BYTES = MAX_PAYLOAD + HEADER_SIZE * 3;
 const OP_DEADLINE_MS = 3000;
 const QUIT_GRACE_MS = 3000;
 const TERM_GRACE_MS = 2000;
@@ -34,10 +34,15 @@ const GROUP_POLL_MS = 200;
 const GROUP_POLL_COUNT = 10;
 const DRAIN_GRACE_MS = 2000;
 
+const RECOVER = 0x0e;
 const OPEN_ROOT = 0xfe;
 const QUIT = 0xff;
 const RESPONSE_OK = 0x00;
+const RESPONSE_UNCERTAIN = 0x01;
 const RESPONSE_READY = 0x03;
+const RESPONSE_ABSENT = 0x0d;
+const RESPONSE_NEED_EVIDENCE = 0x0e;
+const RECOVERY_REASON = 0x0c;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const SAFE_USERNAME_RE = /^[a-zA-Z0-9._-]+$/;
 
@@ -722,6 +727,79 @@ async function cleanupProcess(processState: HelperProcess): Promise<boolean> {
 	return clean;
 }
 
+type WorkspaceRecoveryResult =
+	| Readonly<{ outcome: "ABSENT" }>
+	| Readonly<{ outcome: "FINALIZED" }>
+	| Readonly<{ outcome: "UNCERTAIN"; reason: "RECOVERY_UNCERTAIN" }>;
+
+function absentRecoveryResult(): WorkspaceRecoveryResult {
+	return Object.freeze({ outcome: "ABSENT" });
+}
+
+function uncertainRecoveryResult(): WorkspaceRecoveryResult {
+	return Object.freeze({ outcome: "UNCERTAIN", reason: "RECOVERY_UNCERTAIN" });
+}
+
+async function runWorkspaceRecovery(rootPathRaw: unknown): Promise<WorkspaceRecoveryResult> {
+	if (!isSessionRoot(rootPathRaw)) return uncertainRecoveryResult();
+	const spawnAttempt = await spawnHelper();
+	const processState = spawnAttempt.processState;
+	if (processState === null) return uncertainRecoveryResult();
+
+	const pathBytes = new TextEncoder().encode(rootPathRaw);
+	let openResult: Uint8Array | null;
+	try {
+		openResult = await sendForResult(
+			processState.stdin,
+			processState.stdout,
+			processState.writeState,
+			OPEN_ROOT,
+			pathBytes,
+			OP_DEADLINE_MS,
+			0,
+			RESPONSE_READY,
+		);
+	} finally {
+		zeroBuffer(pathBytes);
+	}
+	if (openResult === null || openResult.byteLength !== 0) {
+		if (openResult !== null) zeroBuffer(openResult);
+		await cleanupProcess(processState);
+		return uncertainRecoveryResult();
+	}
+	zeroBuffer(openResult);
+
+	const deadline = CAPTURED_PERFORMANCE_NOW() + OP_DEADLINE_MS;
+	const empty = new Uint8Array(0);
+	let response: HelperFrame | null = null;
+	if (await writeFrame(processState.stdin, processState.writeState, RECOVER, empty, deadline)) {
+		response = await readFrame(processState.stdout, deadline);
+	}
+	let recovery = uncertainRecoveryResult();
+	if (response !== null) {
+		if (response.status === RESPONSE_ABSENT && response.payload.byteLength === 0) {
+			recovery = absentRecoveryResult();
+		} else if (
+			response.status === RESPONSE_UNCERTAIN &&
+			response.payload.byteLength === 1 &&
+			response.payload[0] === RECOVERY_REASON
+		) {
+			recovery = uncertainRecoveryResult();
+		} else if (response.status === RESPONSE_NEED_EVIDENCE) {
+			// Store V5 owns the durable evidence ledger. Until that private
+			// composition is present, the core must not issue authorization.
+			recovery = uncertainRecoveryResult();
+		}
+		zeroBuffer(response.payload);
+	}
+
+	return (await cleanupProcess(processState)) ? recovery : uncertainRecoveryResult();
+}
+
+export function recoverWorkspaceTransactionInternal(rootPathRaw: unknown): Promise<WorkspaceRecoveryResult> {
+	return runWorkspaceRecovery(rootPathRaw);
+}
+
 export async function verifyWorkspaceRootLifecycleInternal(rootPathRaw: unknown): Promise<WorkspaceVerificationResult> {
 	if (!isSessionRoot(rootPathRaw)) return failResult("OPEN_ROOT_FAILED");
 	const spawnAttempt = await spawnHelper();
@@ -746,7 +824,7 @@ export async function verifyWorkspaceRootLifecycleInternal(rootPathRaw: unknown)
 	} finally {
 		zeroBuffer(pathBytes);
 	}
-	if (openResult === null || !(openResult instanceof Uint8Array) || openResult.byteLength !== 0) {
+	if (openResult === null || openResult.byteLength !== 0) {
 		if (openResult !== null) zeroBuffer(openResult);
 		return (await cleanupProcess(processState)) ? failResult("OPEN_ROOT_FAILED") : failResult("HELPER_FAILED");
 	}

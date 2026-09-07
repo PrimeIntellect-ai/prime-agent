@@ -127,6 +127,23 @@ while True:
         if MODE == "drain-error":
             os.close(1)
             time.sleep(60)
+    elif opcode == 0x0E:
+        if payload:
+            send(2, b"\x02")
+        elif MODE == "recover-need":
+            send(0x0E, b"\x05" + b"x" * 33)
+        elif MODE == "recover-max-need":
+            send(0x0E, b"x" * 1048566)
+        elif MODE == "recover-uncertain":
+            send(1, b"\x0c")
+        elif MODE == "recover-wrong-reason":
+            send(1, b"\x09")
+        elif MODE == "recover-finalized":
+            send(0x0B)
+        elif MODE == "recover-malformed-absent":
+            send(0x0D, b"x")
+        else:
+            send(0x0D)
     elif opcode == 255:
         if MODE == "quit-malformed":
             send(0, b"x")
@@ -200,6 +217,26 @@ function verifyResultWithFixture(mode: string, missingPython = false, uncertainP
 
 function verifyWithFixture(mode: string): boolean {
 	return verifyResultWithFixture(mode) === '{"ok":true}';
+}
+
+function recoveryResultWithFixture(mode: string): string {
+	const root = freshSessionRoot();
+	const runner = createHarness(mode, false, false);
+	writeFileSync(
+		runner,
+		`import { recoverWorkspaceTransactionInternal } from "./prime-workspace-helper-core.ts";
+const result = await recoverWorkspaceTransactionInternal(process.argv[2]);
+process.stdout.write(JSON.stringify({ result, frozen: Object.isFrozen(result) }));
+`,
+	);
+	const result = spawnSync(process.execPath, [runner, root], {
+		cwd: dirname(runner),
+		env: process.env,
+		maxBuffer: 2_097_152,
+		timeout: 20_000,
+	});
+	if (result.error !== undefined) return "PROCESS_ERROR";
+	return result.stdout.toString("utf8");
 }
 
 afterEach(() => {
@@ -416,12 +453,49 @@ describe("hostile helper lifecycle", () => {
 	}, 15_000);
 });
 
+describe("V25 recovery trigger integration", () => {
+	it("does not change the public root-open lifecycle verifier semantics", async () => {
+		expect(await verifyWithFixture("recover-need")).toBe(true);
+	});
+
+	it("maps an exact clean RECOVER response to a fresh frozen ABSENT result", () => {
+		expect(recoveryResultWithFixture("zero-exit")).toBe('{"result":{"outcome":"ABSENT"},"frozen":true}');
+	});
+
+	it("fails closed on NEED_EVIDENCE until Store V5 evidence authority is composed", () => {
+		const expected = '{"result":{"outcome":"UNCERTAIN","reason":"RECOVERY_UNCERTAIN"},"frozen":true}';
+		expect(recoveryResultWithFixture("recover-need")).toBe(expected);
+		expect(recoveryResultWithFixture("recover-max-need")).toBe(expected);
+	});
+
+	it("accepts only the fixed recovery-uncertain reason and never leaks helper payloads", () => {
+		expect(recoveryResultWithFixture("recover-uncertain")).toBe(
+			'{"result":{"outcome":"UNCERTAIN","reason":"RECOVERY_UNCERTAIN"},"frozen":true}',
+		);
+		expect(recoveryResultWithFixture("recover-wrong-reason")).toBe(
+			'{"result":{"outcome":"UNCERTAIN","reason":"RECOVERY_UNCERTAIN"},"frozen":true}',
+		);
+		expect(recoveryResultWithFixture("recover-malformed-absent")).toBe(
+			'{"result":{"outcome":"UNCERTAIN","reason":"RECOVERY_UNCERTAIN"},"frozen":true}',
+		);
+	});
+
+	it("does not accept a premature FINALIZED response before evidence composition", () => {
+		expect(recoveryResultWithFixture("recover-finalized")).toBe(
+			'{"result":{"outcome":"UNCERTAIN","reason":"RECOVERY_UNCERTAIN"},"frozen":true}',
+		);
+	});
+});
+
 describe("module export and import inventory", () => {
 	it("keeps the narrow lifecycle core surface while transaction integration remains blocked", async () => {
 		const authMod = await import("../src/modes/daemon/sandbox/prime-workspace-authority.js");
 		const coreMod = await import("../src/modes/daemon/sandbox/prime-workspace-helper-core.js");
 		expect(Object.keys(authMod).sort()).toEqual(["verifyWorkspaceRootLifecycle"]);
-		expect(Object.keys(coreMod).sort()).toEqual(["verifyWorkspaceRootLifecycleInternal"]);
+		expect(Object.keys(coreMod).sort()).toEqual([
+			"recoverWorkspaceTransactionInternal",
+			"verifyWorkspaceRootLifecycleInternal",
+		]);
 		expect(typeof authMod.verifyWorkspaceRootLifecycle).toBe("function");
 		expect(typeof coreMod.verifyWorkspaceRootLifecycleInternal).toBe("function");
 	});

@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
 	chmodSync,
+	existsSync,
 	linkSync,
 	lstatSync,
 	mkdirSync,
@@ -29,6 +30,7 @@ const HELPER = join(
 	"ws-posix-helper.py",
 );
 const PRIVATE_ROOT = "\x01prime-agent-ws-v1";
+const TOMBSTONE = "\x01prime-agent-ws-tombstone";
 const roots: string[] = [];
 const fixtures: string[] = [];
 type Bytes = Uint8Array<ArrayBuffer>;
@@ -324,7 +326,11 @@ function buildHappyTransaction(root: string) {
 	const afterBackup = bytesFromArray(requestFrames);
 	requestFrames.push(frame(8), frame(9));
 	const afterCommit = bytesFromArray(requestFrames);
-	requestFrames.push(frame(10), frame(11), frame(12));
+	requestFrames.push(frame(10));
+	const afterApply = bytesFromArray(requestFrames);
+	requestFrames.push(frame(11));
+	const afterVerify = bytesFromArray(requestFrames);
+	requestFrames.push(frame(12));
 	const beforeFinalize = bytesFromArray(requestFrames);
 	requestFrames.push(frame(13, bytes(txId, planDigest)));
 	const need1Parts: Uint8Array<ArrayBufferLike>[] = [new Uint8Array([1]), txId, planDigest, u32(vector.length)];
@@ -377,6 +383,8 @@ function buildHappyTransaction(root: string) {
 		afterPreflight,
 		afterBackup,
 		afterCommit,
+		afterApply,
+		afterVerify,
 		beforeFinalize,
 		header,
 	};
@@ -422,6 +430,43 @@ function simpleCreateBoundaries(root: string, pathText: string, content: string)
 	const afterPrepare = bytes(afterBackup, frame(8));
 	const afterCommit = bytes(afterPrepare, frame(9));
 	return { ...stage, afterStage, afterPreflight, afterBackup, afterPrepare, afterCommit };
+}
+
+function simpleUpdateBoundaries(root: string, pathText: string, before: string, after: string) {
+	const entry = makeEntry(2, pathText, before, after);
+	writeFileSync(join(root, pathText), entry.pre, { mode: 0o600 });
+	const aggregate = domainHash("EAG\0", entry.digest);
+	const header = bytes(u32(1), u32(entry.post.byteLength), random32(), random32(), aggregate);
+	const afterPrepare = bytes(
+		frame(0xfe, new TextEncoder().encode(root)),
+		frame(1, header),
+		frame(2, entry.payload),
+		frame(3),
+		frame(4, bytes(u16(entry.path.byteLength), entry.path, u32(entry.post.byteLength), entry.postDigest)),
+		frame(5, bytes(hash(entry.path), u32(0), entry.post)),
+		frame(6),
+		frame(7),
+		frame(8),
+	);
+	const afterCommit = bytes(afterPrepare, frame(9));
+	return { entry, afterPrepare, afterCommit };
+}
+
+function makeTombstone(kind: "commit" | "abort", txId: Bytes, vector: readonly Bytes[] = [random32()]): Bytes {
+	if (kind === "abort") return record(0x0f, vector.length, vector[vector.length - 1], txId);
+	const planDigest = random32();
+	const commitment = domainHashFromArray("EVV\0", [u32(vector.length)].concat(vector));
+	const ticket = random32();
+	return record(
+		0x0e,
+		vector.length,
+		vector[vector.length - 1],
+		bytes(txId, planDigest, commitment, u64(vector.length), ticket),
+	);
+}
+
+function recoverInput(root: string, payload: Uint8Array<ArrayBufferLike> = new Uint8Array(0)): Bytes {
+	return bytes(frame(0xfe, new TextEncoder().encode(root)), frame(0x0e, payload), frame(0xff));
 }
 
 afterEach(() => {
@@ -1166,5 +1211,769 @@ else:
 		expect(child.exitCode).toBe(0);
 		expect(stderrBytes).toBe(0);
 		expect(() => process.kill(-pid, 0)).toThrow();
+	});
+});
+
+describe("Workspace V25 RECOVER trigger", () => {
+	it("uses the exact empty golden frame and keeps request/response opcode 0x0e directional", () => {
+		const root = freshRoot();
+		expect(frame(0x0e)).toEqual(new Uint8Array([0x0e, 0, 0, 0, 0]));
+		const result = run(recoverInput(root));
+		expect(result.status).toBe(0);
+		const responses = parseFrames(result.stdout);
+		expect(responses.map((response) => [response.status, response.payload.byteLength])).toEqual([
+			[0x03, 0],
+			[0x0d, 0],
+			[0x00, 0],
+		]);
+		// 0x0e is RECOVER only Home→helper. Helper→Home 0x0e remains NEED_EVIDENCE.
+		expect(responses.some((response) => response.status === 0x0e)).toBe(false);
+	});
+
+	it("applies format-before-order precedence and rejects pre-open, duplicate, and late RECOVER", () => {
+		const nonempty = run(frame(0x0e, new Uint8Array([1])));
+		expect(parseFrames(nonempty.stdout)).toEqual([{ status: 2, payload: new Uint8Array([2]) }]);
+		const preOpen = run(frame(0x0e));
+		expect(parseFrames(preOpen.stdout)).toEqual([{ status: 2, payload: new Uint8Array([1]) }]);
+
+		const root = freshRoot();
+		const duplicate = run(bytes(frame(0xfe, new TextEncoder().encode(root)), frame(0x0e), frame(0x0e)));
+		expect(
+			parseFrames(duplicate.stdout).map((response) => [
+				response.status,
+				response.payload.byteLength === 0 ? -1 : response.payload[0],
+			]),
+		).toEqual([
+			[3, -1],
+			[13, -1],
+			[2, 1],
+		]);
+
+		const lateRoot = freshRoot();
+		const stage = simpleCreateStage(lateRoot, "late", "content");
+		const late = run(bytes(stage.begin, frame(0x0e)));
+		expect(
+			parseFrames(late.stdout).map((response) => [
+				response.status,
+				response.payload.byteLength === 0 ? -1 : response.payload[0],
+			]),
+		).toEqual([
+			[3, -1],
+			[0, -1],
+			[2, 1],
+		]);
+	});
+
+	it("completes a fresh transaction on the same helper after the direct clean ABSENT arm", () => {
+		const root = freshRoot();
+		const transaction = buildHappyTransaction(root);
+		const open = frame(0xfe, new TextEncoder().encode(root));
+		const input = bytes(open, frame(0x0e), transaction.input.slice(open.byteLength));
+		const result = run(input);
+		expect(result.status).toBe(0);
+		expect(result.stderr.byteLength).toBe(0);
+		const responses = parseFrames(result.stdout);
+		expect(responses[0]).toEqual({ status: 3, payload: new Uint8Array(0) });
+		expect(responses[1]).toEqual({ status: 13, payload: new Uint8Array(0) });
+		expect(responses.at(-2)).toEqual({ status: 11, payload: new Uint8Array(0) });
+		expect(responses.at(-1)).toEqual({ status: 0, payload: new Uint8Array(0) });
+		expect(responses.some((response) => response.status === 1)).toBe(false);
+		expect(readFileSync(join(root, "new", "deep", "file"))).toEqual(Buffer.from(transaction.entries[0].post));
+		expect(readFileSync(join(root, "old", "update"))).toEqual(Buffer.from(transaction.entries[2].post));
+		expect(existsSync(join(root, "old", "delete"))).toBe(false);
+		expect(readdirSync(root).sort()).toEqual(["new", "old"]);
+	});
+
+	it("classifies valid commit and abort tombstones without private state as phases 3 and 5", () => {
+		for (const kind of ["commit", "abort"] as const) {
+			const root = freshRoot();
+			const txId = random32();
+			writeFileSync(join(root, TOMBSTONE), makeTombstone(kind, txId), { mode: 0o600 });
+			const responses = parseFrames(run(recoverInput(root)).stdout);
+			expect(responses[1].status).toBe(0x0e);
+			expect(responses[1].payload[0]).toBe(kind === "commit" ? 3 : 5);
+			expect(responses[1].payload.slice(1, 33)).toEqual(txId);
+			expect(responses[1].payload.byteLength).toBe(kind === "commit" ? 138 : 34);
+		}
+	});
+
+	it("classifies every retained logical decision boundary as phase 4 before commit and phase 2 at commit", () => {
+		const cases: readonly [string, (boundary: ReturnType<typeof simpleCreateBoundaries>) => Bytes, number, number][] =
+			[
+				["header", (boundary) => boundary.begin, 4, 0],
+				["sealed-stage", (boundary) => boundary.afterStage, 4, 1],
+				["preflight", (boundary) => boundary.afterPreflight, 4, 1],
+				["backup", (boundary) => boundary.afterBackup, 4, 1],
+				["prepare", (boundary) => boundary.afterPrepare, 4, 1],
+				["commit", (boundary) => boundary.afterCommit, 2, 1],
+			];
+		for (const [name, select, phase, planPresent] of cases) {
+			const root = freshRoot();
+			const boundary = simpleCreateBoundaries(root, `recover-${name}`, "content");
+			expect(run(select(boundary)).status).toBe(0);
+			const responses = parseFrames(run(recoverInput(root)).stdout);
+			expect(responses[1].status).toBe(0x0e);
+			expect(responses[1].payload[0]).toBe(phase);
+			expect(responses[1].payload[1]).toBe(0);
+			expect(responses[1].payload[3]).toBe(planPresent);
+		}
+	});
+
+	it("rejects workspace mutation evidence for every complete pre-seal plan entry", () => {
+		const root = freshRoot();
+		const partialPlan = simpleCreateStage(root, "preseal-mutated", "content");
+		expect(run(bytes(partialPlan.begin, frame(2, partialPlan.entry.payload))).status).toBe(0);
+		writeFileSync(join(root, "preseal-mutated"), partialPlan.entry.post, { mode: 0o600 });
+		expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+	});
+
+	it("binds recorded artifacts and accepts only plan-bounded in-flight publication cuts", () => {
+		const missingRoot = freshRoot();
+		const missingBoundary = simpleCreateBoundaries(missingRoot, "missing-stage", "content");
+		expect(run(missingBoundary.afterStage).status).toBe(0);
+		const missingStageDir = join(missingRoot, PRIVATE_ROOT, "stage");
+		const [missingName] = readdirSync(missingStageDir);
+		expect(missingName).toBeDefined();
+		if (missingName === undefined) return;
+		rmSync(join(missingStageDir, missingName));
+		expect(parseFrames(run(recoverInput(missingRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+
+		const partialRoot = freshRoot();
+		const partial = simpleCreateStage(partialRoot, "partial-stage", "content");
+		expect(run(partial.prefix).status).toBe(0);
+		const partialResponse = parseFrames(run(recoverInput(partialRoot)).stdout)[1];
+		expect(partialResponse.status).toBe(0x0e);
+		expect(partialResponse.payload[0]).toBe(4);
+
+		const jointRoot = freshRoot();
+		const transaction = buildHappyTransaction(jointRoot);
+		expect(run(transaction.afterPreflight).status).toBe(0);
+		const backupDir = join(jointRoot, PRIVATE_ROOT, "backup");
+		const backupName = Buffer.from(hash(transaction.entries[1].path)).toString("hex");
+		writeFileSync(join(backupDir, backupName), transaction.entries[1].pre, { mode: 0o600 });
+		linkSync(join(backupDir, backupName), join(backupDir, `.tmp-${backupName}`));
+		const jointResponse = parseFrames(run(recoverInput(jointRoot)).stdout)[1];
+		expect(jointResponse.status).toBe(0x0e);
+		expect(jointResponse.payload[0]).toBe(4);
+	});
+
+	it("classifies complete temp-only tombstone publication cuts without mutating them", () => {
+		for (const kind of ["commit", "abort"] as const) {
+			const root = freshRoot();
+			const txId = random32();
+			const temporary = join(root, ".tmp-prime-agent-ws-tombstone");
+			writeFileSync(temporary, makeTombstone(kind, txId), { mode: 0o600 });
+			const before = lstatSync(temporary);
+			const response = parseFrames(run(recoverInput(root)).stdout)[1];
+			expect(response.status).toBe(0x0e);
+			expect(response.payload[0]).toBe(kind === "commit" ? 3 : 5);
+			const after = lstatSync(temporary);
+			expect([after.ino, after.mode, after.nlink, after.size]).toEqual([
+				before.ino,
+				before.mode,
+				before.nlink,
+				before.size,
+			]);
+			expect(existsSync(join(root, TOMBSTONE))).toBe(false);
+		}
+		const corruptRoot = freshRoot();
+		writeFileSync(join(corruptRoot, ".tmp-prime-agent-ws-tombstone"), new Uint8Array([0x0e]), { mode: 0o600 });
+		expect(parseFrames(run(recoverInput(corruptRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+	});
+
+	it("ties durable apply records to the exact ordered workspace postimages", () => {
+		const entryRoot = freshRoot();
+		const entryBoundary = simpleCreateBoundaries(entryRoot, "entry", "content");
+		expect(run(entryBoundary.afterCommit).status).toBe(0);
+		const entryJournal = join(entryRoot, PRIVATE_ROOT, "journal");
+		const entryRecords = readdirSync(entryJournal).map((name) => readFileSync(join(entryJournal, name)));
+		entryRecords.sort(
+			(left, right) =>
+				new DataView(left.buffer, left.byteOffset).getUint32(1, false) -
+				new DataView(right.buffer, right.byteOffset).getUint32(1, false),
+		);
+		const entryLast = entryRecords[entryRecords.length - 1];
+		expect(entryLast).toBeDefined();
+		if (entryLast === undefined) return;
+		const forgedEntry = record(
+			0x0b,
+			entryRecords.length,
+			hash(entryLast),
+			bytes(u16(0), entryBoundary.entry.digest, new Uint8Array([1])),
+		);
+		writeFileSync(join(entryJournal, Buffer.from(hash(forgedEntry)).toString("hex")), forgedEntry, { mode: 0o600 });
+		expect(parseFrames(run(recoverInput(entryRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+
+		const directoryRoot = freshRoot();
+		const directoryBoundary = simpleCreateBoundaries(directoryRoot, "nested/file", "content");
+		expect(run(directoryBoundary.afterCommit).status).toBe(0);
+		const directoryJournal = join(directoryRoot, PRIVATE_ROOT, "journal");
+		const directoryRecords = readdirSync(directoryJournal).map((name) => readFileSync(join(directoryJournal, name)));
+		directoryRecords.sort(
+			(left, right) =>
+				new DataView(left.buffer, left.byteOffset).getUint32(1, false) -
+				new DataView(right.buffer, right.byteOffset).getUint32(1, false),
+		);
+		const directoryLast = directoryRecords[directoryRecords.length - 1];
+		expect(directoryLast).toBeDefined();
+		if (directoryLast === undefined) return;
+		const path = new TextEncoder().encode("nested");
+		const forgedDirectory = record(
+			0x0a,
+			directoryRecords.length,
+			hash(directoryLast),
+			bytes(u16(path.byteLength), path, new Uint8Array([1])),
+		);
+		writeFileSync(join(directoryJournal, Buffer.from(hash(forgedDirectory)).toString("hex")), forgedDirectory, {
+			mode: 0o600,
+		});
+		expect(parseFrames(run(recoverInput(directoryRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+	});
+
+	it("never accepts evidence or mutates after classifier-only NEED_EVIDENCE", () => {
+		for (const kind of ["commit", "abort"] as const) {
+			const root = freshRoot();
+			const txId = random32();
+			const vector = [random32()];
+			let supply: Bytes;
+			if (kind === "commit") {
+				const planDigest = random32();
+				const commitment = domainHashFromArray("EVV\0", [u32(1), vector[0]]);
+				const priorTicket = random32();
+				const tombstone = record(0x0e, 1, vector[0], bytes(txId, planDigest, commitment, u64(1), priorTicket));
+				writeFileSync(join(root, TOMBSTONE), tombstone, { mode: 0o600 });
+				supply = bytes(
+					new Uint8Array([3]),
+					txId,
+					planDigest,
+					random32(),
+					commitment,
+					u64(1),
+					priorTicket,
+					new Uint8Array([0]),
+				);
+			} else {
+				writeFileSync(join(root, TOMBSTONE), record(0x0f, 1, vector[0], txId), { mode: 0o600 });
+				supply = bytes(new Uint8Array([5]), txId, random32(), new Uint8Array([1]));
+			}
+			const input = bytes(
+				frame(0xfe, new TextEncoder().encode(root)),
+				frame(0x0e),
+				frame(0x0f, supply),
+				frame(0xff),
+			);
+			const responses = parseFrames(run(input).stdout);
+			expect(responses[1].status).toBe(0x0e);
+			expect(responses[2]).toEqual({ status: 1, payload: new Uint8Array([0x0c]) });
+			expect(existsSync(join(root, TOMBSTONE))).toBe(true);
+		}
+	});
+
+	it("classifies every CREATE install publication cut as the same exact phase-2 need", () => {
+		const root = freshRoot();
+		const boundary = simpleCreateBoundaries(root, "install-cut", "content");
+		expect(run(boundary.afterCommit).status).toBe(0);
+		const golden = parseFrames(run(recoverInput(root)).stdout)[1];
+		expect(golden.status).toBe(0x0e);
+		expect(golden.payload[0]).toBe(2);
+		const installName = Buffer.from(hash(boundary.entry.path)).toString("hex");
+		const install = join(root, PRIVATE_ROOT, "install", installName);
+		const target = join(root, "install-cut");
+		writeFileSync(install, boundary.entry.post, { mode: 0o600 });
+		expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+		linkSync(install, target);
+		expect(lstatSync(install).nlink).toBe(2);
+		expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+		rmSync(install);
+		expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+	});
+
+	it("classifies UPDATE temporary and rename cuts as the same exact phase-2 need", () => {
+		const root = freshRoot();
+		const boundary = simpleUpdateBoundaries(root, "update-cut", "before", "after");
+		expect(run(boundary.afterCommit).status).toBe(0);
+		const golden = parseFrames(run(recoverInput(root)).stdout)[1];
+		expect(golden.status).toBe(0x0e);
+		expect(golden.payload[0]).toBe(2);
+		const temporary = join(root, `\x01wa-upd-${Buffer.from(hash(boundary.entry.path)).toString("hex")}`);
+		writeFileSync(temporary, boundary.entry.post, { mode: 0o600 });
+		expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+		renameSync(temporary, join(root, "update-cut"));
+		expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+	});
+
+	it("classifies every bounded CREATE and UPDATE write prefix as the same exact phase-2 need", () => {
+		const content = Array.from({ length: 65_540 }, (_, index) => String.fromCharCode(33 + (index % 90))).join("");
+		const prefixLengths = [0, 1, 65_535, 65_536, 65_537, content.length - 2, content.length - 1];
+
+		const createRoot = freshRoot();
+		const createBoundary = simpleCreateBoundaries(createRoot, "partial-create", content);
+		expect(run(createBoundary.afterCommit).status).toBe(0);
+		const createGolden = parseFrames(run(recoverInput(createRoot)).stdout)[1];
+		expect(createGolden.status).toBe(0x0e);
+		expect(createGolden.payload[0]).toBe(2);
+		const install = join(
+			createRoot,
+			PRIVATE_ROOT,
+			"install",
+			Buffer.from(hash(createBoundary.entry.path)).toString("hex"),
+		);
+		for (const length of prefixLengths) {
+			writeFileSync(install, createBoundary.entry.post.subarray(0, length), { mode: 0o600 });
+			expect(parseFrames(run(recoverInput(createRoot)).stdout)[1]).toEqual(createGolden);
+			expect(readFileSync(install)).toEqual(Buffer.from(createBoundary.entry.post.subarray(0, length)));
+		}
+		const continuation = parseFrames(
+			run(
+				bytes(
+					frame(0xfe, new TextEncoder().encode(createRoot)),
+					frame(0x0e),
+					frame(0x0f, new Uint8Array([2])),
+					frame(0xff),
+				),
+			).stdout,
+		);
+		expect(continuation[1]).toEqual(createGolden);
+		expect(continuation[2]).toEqual({ status: 1, payload: new Uint8Array([0x0c]) });
+		expect(readFileSync(install)).toEqual(Buffer.from(createBoundary.entry.post.subarray(0, content.length - 1)));
+
+		const updateRoot = freshRoot();
+		const updateBoundary = simpleUpdateBoundaries(updateRoot, "partial-update", "before", content);
+		expect(run(updateBoundary.afterCommit).status).toBe(0);
+		const updateGolden = parseFrames(run(recoverInput(updateRoot)).stdout)[1];
+		expect(updateGolden.status).toBe(0x0e);
+		expect(updateGolden.payload[0]).toBe(2);
+		const temporary = join(updateRoot, `\x01wa-upd-${Buffer.from(hash(updateBoundary.entry.path)).toString("hex")}`);
+		for (const length of prefixLengths) {
+			writeFileSync(temporary, updateBoundary.entry.post.subarray(0, length), { mode: 0o600 });
+			expect(parseFrames(run(recoverInput(updateRoot)).stdout)[1]).toEqual(updateGolden);
+			expect(readFileSync(temporary)).toEqual(Buffer.from(updateBoundary.entry.post.subarray(0, length)));
+			expect(readFileSync(join(updateRoot, "partial-update"))).toEqual(Buffer.from(updateBoundary.entry.pre));
+		}
+	});
+
+	it("rejects malformed partial CREATE installs and UPDATE temporaries", () => {
+		const uncertain = { status: 1, payload: new Uint8Array([0x0c]) };
+		const recover = (root: string) => parseFrames(run(recoverInput(root)).stdout)[1];
+		const createFixture = (content = "0123456789") => {
+			const root = freshRoot();
+			const boundary = simpleCreateBoundaries(root, "partial-create-mutant", content);
+			expect(run(boundary.afterCommit).status).toBe(0);
+			const install = join(root, PRIVATE_ROOT, "install", Buffer.from(hash(boundary.entry.path)).toString("hex"));
+			return { root, boundary, install };
+		};
+		const updateFixture = (content = "0123456789") => {
+			const root = freshRoot();
+			const boundary = simpleUpdateBoundaries(root, "partial-update-mutant", "before", content);
+			expect(run(boundary.afterCommit).status).toBe(0);
+			const temporary = join(root, `\x01wa-upd-${Buffer.from(hash(boundary.entry.path)).toString("hex")}`);
+			return { root, boundary, temporary };
+		};
+
+		{
+			const { root, install } = createFixture();
+			writeFileSync(install, "X", { mode: 0o600 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, boundary, install } = createFixture();
+			writeFileSync(install, bytes(boundary.entry.post, new Uint8Array([0])), { mode: 0o600 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, install } = createFixture();
+			writeFileSync(install, "0", { mode: 0o640 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, install } = createFixture();
+			mkdirSync(install, { mode: 0o700 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, install } = createFixture();
+			writeFileSync(install, "0", { mode: 0o600 });
+			linkSync(install, join(root, "external-partial-install-alias"));
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, boundary, install } = createFixture();
+			writeFileSync(install, "0", { mode: 0o600 });
+			writeFileSync(join(root, "partial-create-mutant"), boundary.entry.post, { mode: 0o600 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, boundary } = createFixture();
+			writeFileSync(
+				join(root, PRIVATE_ROOT, "install", Buffer.from(hash(random32())).toString("hex")),
+				boundary.entry.post.subarray(0, 1),
+				{ mode: 0o600 },
+			);
+			expect(recover(root)).toEqual(uncertain);
+		}
+
+		{
+			const { root, temporary } = updateFixture();
+			writeFileSync(temporary, "X", { mode: 0o600 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, boundary, temporary } = updateFixture();
+			writeFileSync(temporary, bytes(boundary.entry.post, new Uint8Array([0])), { mode: 0o600 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, temporary } = updateFixture();
+			writeFileSync(temporary, "0", { mode: 0o640 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, temporary } = updateFixture();
+			mkdirSync(temporary, { mode: 0o700 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, temporary } = updateFixture();
+			writeFileSync(temporary, "0", { mode: 0o600 });
+			linkSync(temporary, join(root, "external-partial-update-alias"));
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, boundary, temporary } = updateFixture();
+			writeFileSync(temporary, "0", { mode: 0o600 });
+			writeFileSync(join(root, "partial-update-mutant"), boundary.entry.post, { mode: 0o600 });
+			expect(recover(root)).toEqual(uncertain);
+		}
+		{
+			const { root, boundary } = updateFixture();
+			writeFileSync(
+				join(root, `\x01wa-upd-${Buffer.from(hash(random32())).toString("hex")}`),
+				boundary.entry.post.subarray(0, 1),
+				{ mode: 0o600 },
+			);
+			expect(recover(root)).toEqual(uncertain);
+		}
+	});
+
+	it("rejects wrong managed-file ownership before prefix authorization", () => {
+		const probe = `
+import importlib.util
+import os
+import stat
+import sys
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("ws_helper", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+wrong_owner = SimpleNamespace(
+    st_mode=stat.S_IFREG | 0o600,
+    st_uid=os.getuid() + 1,
+    st_nlink=1,
+    st_dev=7,
+)
+try:
+    module._verify_file(wrong_owner, {"root_dev": 7}, reason=module.REASON_EVIDENCE)
+except module.Failure as error:
+    if error.status_code == module.UNCERTAIN and error.detail_code == module.REASON_EVIDENCE:
+        raise SystemExit(0)
+raise SystemExit(1)
+`;
+		const result = spawnSync(PYTHON, ["-c", probe, HELPER], { cwd: "/", env: {} });
+		expect(result.status).toBe(0);
+		expect(result.stdout.byteLength).toBe(0);
+		expect(result.stderr.byteLength).toBe(0);
+	});
+
+	it("does not classify partial CREATE or UPDATE artifacts before durable commit", () => {
+		const root = freshRoot();
+		const boundary = simpleCreateBoundaries(root, "precommit-partial", "content");
+		expect(run(boundary.afterPrepare).status).toBe(0);
+		const createPhaseFour = parseFrames(run(recoverInput(root)).stdout)[1];
+		expect(createPhaseFour.status).toBe(0x0e);
+		expect(createPhaseFour.payload[0]).toBe(4);
+		const install = join(root, PRIVATE_ROOT, "install", Buffer.from(hash(boundary.entry.path)).toString("hex"));
+		writeFileSync(install, boundary.entry.post.subarray(0, 1), { mode: 0o600 });
+		expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+		expect(existsSync(join(root, "precommit-partial"))).toBe(false);
+		expect(readFileSync(install)).toEqual(Buffer.from(boundary.entry.post.subarray(0, 1)));
+
+		const updateRoot = freshRoot();
+		const updateBoundary = simpleUpdateBoundaries(updateRoot, "precommit-update", "before", "after");
+		expect(run(updateBoundary.afterPrepare).status).toBe(0);
+		const updatePhaseFour = parseFrames(run(recoverInput(updateRoot)).stdout)[1];
+		expect(updatePhaseFour.status).toBe(0x0e);
+		expect(updatePhaseFour.payload[0]).toBe(4);
+		const temporary = join(updateRoot, `\x01wa-upd-${Buffer.from(hash(updateBoundary.entry.path)).toString("hex")}`);
+		writeFileSync(temporary, updateBoundary.entry.post.subarray(0, 1), { mode: 0o600 });
+		expect(parseFrames(run(recoverInput(updateRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+		expect(readFileSync(join(updateRoot, "precommit-update"))).toEqual(Buffer.from(updateBoundary.entry.pre));
+		expect(readFileSync(temporary)).toEqual(Buffer.from(updateBoundary.entry.post.subarray(0, 1)));
+	});
+
+	it("classifies journal temp-only and same-inode publication cuts at every retained boundary", () => {
+		const selectors: readonly ((boundary: ReturnType<typeof simpleCreateBoundaries>) => Bytes)[] = [
+			(boundary) => boundary.begin,
+			(boundary) => boundary.afterStage,
+			(boundary) => boundary.afterPrepare,
+			(boundary) => boundary.afterCommit,
+		];
+		for (const [index, select] of selectors.entries()) {
+			const root = freshRoot();
+			const boundary = simpleCreateBoundaries(root, `journal-cut-${index}`, "content");
+			expect(run(select(boundary)).status).toBe(0);
+			const golden = parseFrames(run(recoverInput(root)).stdout)[1];
+			expect(golden.status).toBe(0x0e);
+			const journal = join(root, PRIVATE_ROOT, "journal");
+			const records = readdirSync(journal).map((name) => {
+				const raw = readFileSync(join(journal, name));
+				return {
+					name,
+					revision: new DataView(raw.buffer, raw.byteOffset).getUint32(1, false),
+				};
+			});
+			records.sort((left, right) => left.revision - right.revision);
+			const last = records.at(-1);
+			expect(last).toBeDefined();
+			if (last === undefined) continue;
+			const canonical = join(journal, last.name);
+			const temporary = join(journal, `.tmp-${last.name}`);
+			renameSync(canonical, temporary);
+			expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+			renameSync(temporary, canonical);
+			linkSync(canonical, temporary);
+			expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+		}
+	});
+
+	it("classifies every descending stage and backup cleanup suffix in phases 2 and 4", () => {
+		for (const phase of [2, 4] as const) {
+			const root = freshRoot();
+			const transaction = buildHappyTransaction(root);
+			const boundary = phase === 2 ? transaction.afterVerify : transaction.afterBackup;
+			expect(run(boundary).status).toBe(0);
+			if (phase === 4) {
+				const journal = join(root, PRIVATE_ROOT, "journal");
+				const records = readdirSync(journal).map((name) => readFileSync(join(journal, name)));
+				records.sort(
+					(left, right) =>
+						new DataView(left.buffer, left.byteOffset).getUint32(1, false) -
+						new DataView(right.buffer, right.byteOffset).getUint32(1, false),
+				);
+				const vector = records.map(hash);
+				const txId = transaction.header.slice(8, 40);
+				writeFileSync(
+					join(root, TOMBSTONE),
+					record(0x0f, vector.length, vector.at(-1) ?? new Uint8Array(32), txId),
+					{
+						mode: 0o600,
+					},
+				);
+			}
+			const golden = parseFrames(run(recoverInput(root)).stdout)[1];
+			expect(golden.status).toBe(0x0e);
+			expect(golden.payload[0]).toBe(phase);
+			const stage = join(root, PRIVATE_ROOT, "stage");
+			for (const entry of [transaction.entries[2], transaction.entries[0]]) {
+				rmSync(join(stage, Buffer.from(hash(entry.path)).toString("hex")));
+				expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+			}
+			const backup = join(root, PRIVATE_ROOT, "backup");
+			for (const name of readdirSync(backup).sort().reverse()) {
+				rmSync(join(backup, name));
+				expect(parseFrames(run(recoverInput(root)).stdout)[1]).toEqual(golden);
+			}
+		}
+	});
+
+	it("rejects publication mutants, non-suffix cleanup, and external aliases", () => {
+		const corruptInstallRoot = freshRoot();
+		const corruptInstallBoundary = simpleCreateBoundaries(corruptInstallRoot, "bad-install", "content");
+		expect(run(corruptInstallBoundary.afterCommit).status).toBe(0);
+		writeFileSync(
+			join(
+				corruptInstallRoot,
+				PRIVATE_ROOT,
+				"install",
+				Buffer.from(hash(corruptInstallBoundary.entry.path)).toString("hex"),
+			),
+			"wrong",
+			{ mode: 0o600 },
+		);
+		expect(parseFrames(run(recoverInput(corruptInstallRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+
+		const corruptUpdateRoot = freshRoot();
+		const corruptUpdateBoundary = simpleUpdateBoundaries(corruptUpdateRoot, "bad-update", "before", "after");
+		expect(run(corruptUpdateBoundary.afterCommit).status).toBe(0);
+		writeFileSync(
+			join(corruptUpdateRoot, `\x01wa-upd-${Buffer.from(hash(corruptUpdateBoundary.entry.path)).toString("hex")}`),
+			"wrong",
+			{ mode: 0o600 },
+		);
+		expect(parseFrames(run(recoverInput(corruptUpdateRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+
+		const splitJournalRoot = freshRoot();
+		const splitJournalBoundary = simpleCreateBoundaries(splitJournalRoot, "split-journal", "content");
+		expect(run(splitJournalBoundary.afterCommit).status).toBe(0);
+		const splitJournal = join(splitJournalRoot, PRIVATE_ROOT, "journal");
+		const splitRecords = readdirSync(splitJournal)
+			.map((name) => ({ name, raw: readFileSync(join(splitJournal, name)) }))
+			.sort(
+				(left, right) =>
+					new DataView(left.raw.buffer, left.raw.byteOffset).getUint32(1, false) -
+					new DataView(right.raw.buffer, right.raw.byteOffset).getUint32(1, false),
+			);
+		const splitLast = splitRecords.at(-1);
+		expect(splitLast).toBeDefined();
+		if (splitLast !== undefined) {
+			writeFileSync(join(splitJournal, `.tmp-${splitLast.name}`), splitLast.raw, { mode: 0o600 });
+			expect(parseFrames(run(recoverInput(splitJournalRoot)).stdout)[1]).toEqual({
+				status: 1,
+				payload: new Uint8Array([0x0c]),
+			});
+		}
+
+		const installRoot = freshRoot();
+		const installBoundary = simpleCreateBoundaries(installRoot, "install-mutant", "content");
+		expect(run(installBoundary.afterCommit).status).toBe(0);
+		const installName = Buffer.from(hash(installBoundary.entry.path)).toString("hex");
+		const install = join(installRoot, PRIVATE_ROOT, "install", installName);
+		writeFileSync(install, installBoundary.entry.post, { mode: 0o600 });
+		linkSync(install, join(installRoot, "external-install-link"));
+		expect(parseFrames(run(recoverInput(installRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+
+		const updateRoot = freshRoot();
+		const updateBoundary = simpleUpdateBoundaries(updateRoot, "update-mutant", "before", "after");
+		expect(run(updateBoundary.afterCommit).status).toBe(0);
+		const updateTemporary = join(
+			updateRoot,
+			`\x01wa-upd-${Buffer.from(hash(updateBoundary.entry.path)).toString("hex")}`,
+		);
+		writeFileSync(updateTemporary, updateBoundary.entry.post, { mode: 0o600 });
+		linkSync(updateTemporary, join(updateRoot, "external-update-link"));
+		expect(parseFrames(run(recoverInput(updateRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+
+		const journalRoot = freshRoot();
+		const journalBoundary = simpleCreateBoundaries(journalRoot, "journal-mutant", "content");
+		expect(run(journalBoundary.afterCommit).status).toBe(0);
+		const journal = join(journalRoot, PRIVATE_ROOT, "journal");
+		const [journalName] = readdirSync(journal);
+		expect(journalName).toBeDefined();
+		if (journalName !== undefined) {
+			linkSync(join(journal, journalName), join(journalRoot, "external-journal-link"));
+			expect(parseFrames(run(recoverInput(journalRoot)).stdout)[1]).toEqual({
+				status: 1,
+				payload: new Uint8Array([0x0c]),
+			});
+		}
+
+		const cleanupRoot = freshRoot();
+		const cleanup = buildHappyTransaction(cleanupRoot);
+		expect(run(cleanup.afterVerify).status).toBe(0);
+		const firstStage = join(
+			cleanupRoot,
+			PRIVATE_ROOT,
+			"stage",
+			Buffer.from(hash(cleanup.entries[0].path)).toString("hex"),
+		);
+		rmSync(firstStage);
+		expect(parseFrames(run(recoverInput(cleanupRoot)).stdout)[1]).toEqual({
+			status: 1,
+			payload: new Uint8Array([0x0c]),
+		});
+	});
+
+	it("rejects an artifact with an unbound external hardlink", () => {
+		const root = freshRoot();
+		const boundary = simpleCreateBoundaries(root, "hardlinked-stage", "content");
+		expect(run(boundary.afterStage).status).toBe(0);
+		const stageDir = join(root, PRIVATE_ROOT, "stage");
+		const [stageName] = readdirSync(stageDir);
+		expect(stageName).toBeDefined();
+		if (stageName === undefined) return;
+		linkSync(join(stageDir, stageName), join(root, "external-stage-link"));
+		const response = parseFrames(run(recoverInput(root)).stdout)[1];
+		expect(response).toEqual({ status: 1, payload: new Uint8Array([0x0c]) });
+	});
+
+	it("maps corrupt, unknown, and noncanonical durable snapshots to fixed recovery uncertainty", () => {
+		const rootsUnderTest = [freshRoot(), freshRoot(), freshRoot()];
+		writeFileSync(join(rootsUnderTest[0], TOMBSTONE), new Uint8Array([0x0e]), { mode: 0o600 });
+		mkdirSync(join(rootsUnderTest[1], PRIVATE_ROOT), { mode: 0o700 });
+		writeFileSync(join(rootsUnderTest[1], PRIVATE_ROOT, "unknown"), "x", { mode: 0o600 });
+		const txId = random32();
+		writeFileSync(join(rootsUnderTest[2], TOMBSTONE), makeTombstone("abort", txId), { mode: 0o600 });
+		linkSync(join(rootsUnderTest[2], TOMBSTONE), join(rootsUnderTest[2], "extra-hardlink"));
+		for (const root of rootsUnderTest) {
+			const responses = parseFrames(run(recoverInput(root)).stdout);
+			expect(responses[1]).toEqual({ status: 1, payload: new Uint8Array([0x0c]) });
+		}
+	});
+
+	it("reclassifies the same retained snapshot identically on a fresh helper retry", () => {
+		const root = freshRoot();
+		const boundary = simpleCreateBoundaries(root, "retry", "content");
+		expect(run(boundary.afterCommit).status).toBe(0);
+		const first = parseFrames(run(recoverInput(root)).stdout)[1];
+		const second = parseFrames(run(recoverInput(root)).stdout)[1];
+		expect(first).toEqual(second);
+		expect(first.status).toBe(0x0e);
+		expect(first.payload[0]).toBe(2);
+	});
+
+	it("performs no durable mutation while classifying a valid retained prefix", () => {
+		const root = freshRoot();
+		const boundary = simpleCreateBoundaries(root, "readonly", "content");
+		expect(run(boundary.afterPrepare).status).toBe(0);
+		function snapshot(directory: string): string[] {
+			const rows: string[] = [];
+			function walk(current: string, prefix: string): void {
+				for (const name of readdirSync(current).sort()) {
+					const full = join(current, name);
+					const item = lstatSync(full);
+					rows.push(`${prefix}${name}:${item.mode}:${item.nlink}:${item.size}:${item.ino}`);
+					if (item.isDirectory()) walk(full, `${prefix}${name}/`);
+				}
+			}
+			walk(directory, "");
+			return rows;
+		}
+		const before = snapshot(root);
+		const response = parseFrames(run(recoverInput(root)).stdout)[1];
+		expect(response.status).toBe(0x0e);
+		expect(response.payload[0]).toBe(4);
+		expect(snapshot(root)).toEqual(before);
 	});
 });
