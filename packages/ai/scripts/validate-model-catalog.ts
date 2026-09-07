@@ -35,11 +35,7 @@ export function copilotModelApi(modelId: string): Api | undefined {
 	return undefined;
 }
 
-/**
- * Codex rows verified to have a SMALLER ChatGPT-backend window than the API
- * side: upstream Codex CLI models.json (rust-v0.153.4) lists gpt-6-astra at
- * context_window 272000 while the openai row carries 1050000.
- */
+// ChatGPT-backend window verified smaller than the API side (Codex CLI models.json, rust-v0.153.4).
 export const CODEX_SMALLER_WINDOW_VERIFIED = new Set(["gpt-6-astra"]);
 
 function familyKey(modelId: string): string {
@@ -47,17 +43,14 @@ function familyKey(modelId: string): string {
 	return segments[segments.length - 1].toLowerCase();
 }
 
-// Runtime-selectable levels via the UI's own function. Compared within one transport (api), only
-// among rows that declare a map, and modulo "off": cross-transport sets, absent-map provider
-// defaults, and off-support all vary legitimately per transport.
+// Runtime-selectable levels via the UI's own function; compared within one transport, declared maps only, modulo "off".
 function selectableLevels(model: CatalogRowLike): string {
 	return getSupportedThinkingLevels(model as Model<Api>)
 		.filter((level) => level !== "off")
 		.join(",");
 }
 
-// Plain openai-format completions send reasoning params only when compat allows; the
-// zai/qwen/deepseek/openrouter formats use the map as an enable toggle instead.
+// Plain openai-format completions gate reasoning params on compat; other formats use the map as an enable toggle.
 function effortIsSendable(model: CatalogRowLike): boolean {
 	// Model requires baseUrl, so rows without one behave like the empty-string rows: provider-only detection.
 	const compat = getCompat({ ...model, baseUrl: model.baseUrl ?? "" } as Model<"openai-completions">);

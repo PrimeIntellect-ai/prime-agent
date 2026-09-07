@@ -2020,8 +2020,7 @@ async function generateModels() {
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
-	// 272k was measured on the 2026-01 generation; models the API side serves at 1M+ accept it on the
-	// ChatGPT backend too, except rows with an upstream-verified smaller window.
+	// The ChatGPT backend accepts the 1M+ API-side window (#1597) except upstream-verified smaller rows.
 	for (const codexModel of codexModels) {
 		if (CODEX_SMALLER_WINDOW_VERIFIED.has(codexModel.id)) continue;
 		const openaiTwin = allModels.find((m) => m.provider === "openai" && m.id === codexModel.id);
@@ -2274,8 +2273,7 @@ async function generateModels() {
 		applyThinkingLevelMetadata(model);
 	}
 
-	// Non-adaptive anthropic-messages rows express thinking as budget tokens, where xhigh/max clamp to high;
-	// null those entries so the UI never offers a level that serializes identically to high.
+	// Non-adaptive anthropic-messages rows think via budget tokens, where xhigh/max clamp to high.
 	for (const model of allModels) {
 		if (model.api !== "anthropic-messages" || !model.reasoning || !model.thinkingLevelMap) continue;
 		if (supportsAdaptiveThinking(model.id)) continue;
