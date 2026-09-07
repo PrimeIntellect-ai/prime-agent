@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private POSIX durability helper for the hosted session store V4 protocol."""
+"""Private POSIX durability helper for Store V4 and V5 startup protocols."""
 
 import errno
 import fcntl
@@ -76,6 +76,28 @@ _W_RUNNING = 5
 _W_DELETE_DISPATCHED = 6
 _W_ABSENT = 7
 _W_RETIRED_ABSENT = 8
+_V5_HELLO = 0xF0
+_V5_READY = 0x84
+_WS_BEGIN = 0x0A
+_WS_WRITE_STREAM = 0x0B
+_WS_ABORT_DRAFT = 0x0C
+_WS_SEAL_INPUTS = 0x0D
+_WS_MARK_START_DISPATCHED = 0x0E
+_WS_BEGIN_VECTOR = 0x0F
+_WS_SEAL_VECTOR = 0x10
+_WS_CONSUME_ATTEMPT = 0x11
+_WS_RECORD_RESULT = 0x12
+_WS_INSPECT = 0x13
+_WS_ACK_RESULT = 0x14
+_WS_ACK_AND_PURGE = 0x15
+_WS_READ = 0x16
+_WS_INVENTORY = 0x17
+_MODE_UNSELECTED = 0
+_MODE_V4_COMPAT = 1
+_MODE_V5_READY = 2
+_MODE_V5_BLOCKED = 3
+
+_V5_OPCODES = frozenset((_V5_HELLO, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17))
 
 
 class Fatal(Exception):
@@ -2120,8 +2142,6 @@ def _session_payload(lifecycle, scan):
             _zero(result)
 
 
-
-
 def _peek_generation_state(fds, generations_fd, generation_name, lifecycle, uid, device):
     generation_fd, error = _open_dir(fds, generations_fd, generation_name, uid, device)
     if generation_fd is None:
@@ -3718,7 +3738,7 @@ def _cmd_purge(fds, root_fd, payload, uid, device):
         identity_digest_arg.release()
 
 
-def _dispatch(fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_inode, opcode, payload):
+def _dispatch_v4(fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_inode, opcode, payload):
     if opcode == _INVENTORY:
         if len(payload) != 0:
             return "error", _E_INPUT
@@ -3752,6 +3772,203 @@ def _dispatch(fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_
     return "ok", result
 
 
+def _is_empty_root(root_fd):
+    entries = _list(root_fd)
+    if len(entries) != 1 or entries[0] != _LOCK:
+        return False
+    return True
+
+
+def _v5_validate_request(opcode, payload):
+    if opcode == _WS_INVENTORY:
+        if len(payload) != 0:
+            raise Fatal(_E_PROTOCOL)
+        return None
+    if opcode == _WS_BEGIN:
+        if len(payload) != 172:
+            return _E_INPUT
+        plan_payload_len = struct.unpack_from(">I", payload, 160)[0]
+        content_len = struct.unpack_from(">Q", payload, 164)[0]
+        if plan_payload_len < 1 or plan_payload_len > 1048576:
+            return _E_BOUNDS
+        if content_len > 1073741824:
+            return _E_BOUNDS
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_WRITE_STREAM:
+        if len(payload) < 169:
+            return _E_INPUT
+        if len(payload) == 169:
+            return _E_BOUNDS
+        if len(payload) > 1048576:
+            return _E_BOUNDS
+        stream_kind = payload[128]
+        if stream_kind not in (1, 2, 3):
+            return _E_INPUT
+        data_len = len(payload) - 169
+        if data_len < 1 or data_len > 1048407:
+            return _E_BOUNDS
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        data_view = memoryview(payload)[169:]
+        try:
+            computed = _digest(data_view)
+        finally:
+            data_view.release()
+        try:
+            if not _same_at(payload, 137, computed):
+                return _E_INPUT
+        finally:
+            _zero(computed)
+        return None
+    if opcode == _WS_ABORT_DRAFT:
+        if len(payload) != 137:
+            return _E_INPUT
+        stream_kind = payload[128]
+        if stream_kind not in (1, 3):
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_SEAL_INPUTS:
+        if len(payload) != 192:
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_MARK_START_DISPATCHED:
+        if len(payload) != 168:
+            raise Fatal(_E_PROTOCOL)
+        if _range_zero(payload, 96, 128):
+            raise Fatal(_E_PROTOCOL)
+        return None
+    if opcode == _WS_BEGIN_VECTOR:
+        if len(payload) != 201:
+            return _E_INPUT
+        decision_kind = payload[128]
+        if decision_kind not in (2, 3):
+            return _E_INPUT
+        vector_len = struct.unpack_from(">I", payload, 129)[0]
+        if vector_len > 32763:
+            return _E_BOUNDS
+        terminal_revision = struct.unpack_from(">I", payload, 133)[0]
+        expected_terminal = 0 if vector_len == 0 else vector_len - 1
+        if terminal_revision != expected_terminal:
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_SEAL_VECTOR:
+        if len(payload) != 200:
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_CONSUME_ATTEMPT:
+        if len(payload) != 307:
+            return _E_INPUT
+        phase = payload[208]
+        if phase < 1 or phase > 5:
+            return _E_INPUT
+        decision_kind = payload[209]
+        if decision_kind not in (2, 3):
+            return _E_INPUT
+        if phase in (1, 2, 3) and decision_kind != 2:
+            return _E_INPUT
+        if phase in (4, 5) and decision_kind != 3:
+            return _E_INPUT
+        plan_present = payload[210]
+        if plan_present not in (0, 1):
+            return _E_INPUT
+        if phase in (1, 2, 3, 5) and plan_present != 0:
+            return _E_INPUT
+        if phase == 1:
+            if not _range_zero(payload, 211, 243):
+                return _E_INPUT
+        elif phase in (2, 3):
+            if _range_zero(payload, 211, 243):
+                return _E_INPUT
+        elif phase in (4, 5):
+            if not _range_zero(payload, 211, 243):
+                return _E_INPUT
+        attempt_ordinal = struct.unpack_from(">Q", payload, 168)[0]
+        if attempt_ordinal < 1 or attempt_ordinal > 1024:
+            return _E_BOUNDS
+        if _range_zero(payload, 176, 208):
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_RECORD_RESULT:
+        if len(payload) != 173:
+            return _E_INPUT
+        result_kind = payload[172]
+        if result_kind not in (1, 2):
+            return _E_INPUT
+        dispatch_ordinal = struct.unpack_from(">I", payload, 168)[0]
+        if dispatch_ordinal < 1 or dispatch_ordinal > 1024:
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_INSPECT:
+        if len(payload) != 128:
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_ACK_RESULT:
+        if len(payload) != 169:
+            return _E_INPUT
+        result_kind = payload[168]
+        if result_kind not in (1, 2):
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_ACK_AND_PURGE:
+        if len(payload) != 168:
+            return _E_INPUT
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    if opcode == _WS_READ:
+        if len(payload) != 173:
+            return _E_INPUT
+        record_kind = payload[128]
+        if record_kind not in (1, 2, 3):
+            return _E_INPUT
+        requested_len = struct.unpack_from(">I", payload, 137)[0]
+        if requested_len < 1 or requested_len > 1048562:
+            return _E_BOUNDS
+        if _range_zero(payload, 96, 128):
+            return _E_INPUT
+        return None
+    raise Fatal(_E_PROTOCOL)
+
+
+def _v5_handle_hello(root_fd, payload):
+    if len(payload) != 8 or payload != b"PISTOV05":
+        return (_MODE_UNSELECTED, "error", _E_PROTOCOL)
+    if _is_empty_root(root_fd):
+        return (_MODE_V5_READY, "v5_ready", None)
+    return (_MODE_V5_BLOCKED, "error", _E_STATE)
+
+
+def _dispatch_v5(opcode, payload, v5_mode):
+    if opcode == _V5_HELLO:
+        return (v5_mode, "error", _E_PROTOCOL)
+    err = _v5_validate_request(opcode, payload)
+    if err is not None:
+        return (v5_mode, "error", err)
+    if opcode == _WS_INVENTORY:
+        return (v5_mode, "done", None)
+    if opcode == _WS_BEGIN:
+        return (v5_mode, "error", _E_BUSY)
+    return (v5_mode, "error", _E_ABSENT)
+
+
 def main():
     fds = Fds()
     root_fd = None
@@ -3764,6 +3981,7 @@ def main():
     opened = False
     current_opcode = 0
     exit_code = 2
+    v5_mode = _MODE_UNSELECTED
     try:
         while True:
             current_opcode = 0
@@ -3826,7 +4044,33 @@ def main():
                     break
                 command_mark = fds.mark()
                 try:
-                    kind, value = _dispatch(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, current_opcode, payload)
+                    next_mode = None
+                    kind = None
+                    value = None
+                    if v5_mode == _MODE_UNSELECTED:
+                        if current_opcode == _V5_HELLO:
+                            next_mode, kind, value = _v5_handle_hello(root_fd, payload)
+                        elif current_opcode in _V5_OPCODES:
+                            raise Fatal(_E_PROTOCOL)
+                        else:
+                            kind, value = _dispatch_v4(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, current_opcode, payload)
+                            next_mode = _MODE_V4_COMPAT
+                    elif v5_mode == _MODE_V4_COMPAT:
+                        if current_opcode in _V5_OPCODES:
+                            raise Fatal(_E_PROTOCOL)
+                        kind, value = _dispatch_v4(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, current_opcode, payload)
+                    elif v5_mode == _MODE_V5_BLOCKED:
+                        if current_opcode != _V5_HELLO:
+                            raise Fatal(_E_PROTOCOL)
+                        next_mode = _MODE_V5_BLOCKED
+                        kind = "error"
+                        value = _E_PROTOCOL
+                    elif v5_mode == _MODE_V5_READY:
+                        if current_opcode not in _V5_OPCODES:
+                            raise Fatal(_E_PROTOCOL)
+                        next_mode, kind, value = _dispatch_v5(current_opcode, payload, v5_mode)
+                    else:
+                        raise Fatal(_E_PROTOCOL)
                 except Fatal:
                     fds.close_after(command_mark)
                     if fds.uncertain:
@@ -3836,6 +4080,8 @@ def main():
                 if fds.mark() != command_mark or fds.uncertain:
                     raise Fatal(_E_UNCERTAIN)
                 _root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)
+                if next_mode is not None:
+                    v5_mode = next_mode
                 if kind == "error":
                     response = _error_payload(current_opcode, value)
                     _write_frame(1, _ERROR, response)
@@ -3854,6 +4100,14 @@ def main():
                         _zero(value)
                         value = None
                     _write_frame(1, _DONE, bytearray())
+                elif kind == "v5_ready":
+                    response = bytearray(9)
+                    response[0] = _V5_HELLO
+                    response[1:9] = b"PISTOV05"
+                    _write_frame(1, _V5_READY, response)
+                elif kind == "done":
+                    response = bytearray()
+                    _write_frame(1, _DONE, response)
                 elif kind != "emitted":
                     raise Fatal(_E_PROTOCOL)
             finally:

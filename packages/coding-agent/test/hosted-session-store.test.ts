@@ -16,7 +16,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { createHostedSessionStore } from "../src/modes/daemon/sandbox/hosted-session-store.js";
+import {
+	createHostedSessionStore,
+	createStartupV5HostedSessionStore,
+} from "../src/modes/daemon/sandbox/hosted-session-store.js";
 
 const sourcePath = resolve(import.meta.dir, "../src/modes/daemon/sandbox/hosted-session-store.ts");
 const helperPath = resolve(import.meta.dir, "../src/modes/daemon/sandbox/hosted-session-store-posix-helper.py");
@@ -226,11 +229,403 @@ async function expectRejectedRegistry(value: unknown): Promise<object> {
 	return result;
 }
 
+const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+
+const boundedSupervisorSource = `
+import errno,json,os,selectors,signal,subprocess,sys,time
+CAP=1048576
+def bounded(command,limit):
+ deadline=time.monotonic()+limit
+ q=None;sel=None;out=bytearray();err=bytearray()
+ timed=False;out_overflow=False;err_overflow=False;signal_failure=False;drain_failure=False
+ exited=False;out_eof=False;err_eof=False;absent=False;term_sent=False;kill_sent=False
+ out_pipe=None;err_pipe=None;out_fd=-1;err_fd=-1
+ try:
+  q=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+ except BaseException:
+  return None,b'',b'',False,False,False,True,True,False,False,False,False,False,False
+ pgid=q.pid
+ def signal_group(value):
+  nonlocal signal_failure
+  try:
+   os.killpg(pgid,value)
+   return True
+  except OSError as failure:
+   if failure.errno==errno.ESRCH:
+    return False
+   signal_failure=True
+   return False
+ def group_absent():
+  nonlocal signal_failure
+  try:
+   os.killpg(pgid,0)
+   return False
+  except OSError as failure:
+   if failure.errno==errno.ESRCH:
+    return True
+   signal_failure=True
+   return False
+ def poll_exit():
+  nonlocal drain_failure
+  try:
+   return q.poll() is not None
+  except BaseException:
+   drain_failure=True
+   return False
+ def close_ready(fd):
+  nonlocal drain_failure,out_eof,err_eof
+  pipe=out_pipe if fd==out_fd else err_pipe
+  try:
+   sel.unregister(fd)
+  except BaseException:
+   drain_failure=True
+  try:
+   pipe.close()
+  except BaseException:
+   drain_failure=True
+  if fd==out_fd:
+   out_eof=True
+  else:
+   err_eof=True
+ def drain_ready(end):
+  nonlocal drain_failure,out_overflow,err_overflow
+  remaining=end-time.monotonic()
+  if remaining<=0:
+   return
+  timeout=remaining
+  if timeout>0.05:
+   timeout=0.05
+  try:
+   events=sel.select(timeout)
+  except BaseException:
+   drain_failure=True
+   return
+  for key,unused_mask in events:
+   fd=key.fileobj
+   try:
+    data=os.read(fd,65536)
+   except BlockingIOError:
+    continue
+   except InterruptedError:
+    continue
+   except OSError:
+    drain_failure=True
+    continue
+   if len(data)==0:
+    close_ready(fd)
+    continue
+   if fd==out_fd:
+    available=CAP-len(out)
+    if len(data)>available:
+     if available>0:
+      out.extend(data[:available])
+     out_overflow=True
+    else:
+     out.extend(data)
+   elif fd==err_fd:
+    available=CAP-len(err)
+    if len(data)>available:
+     if available>0:
+      err.extend(data[:available])
+     err_overflow=True
+    else:
+     err.extend(data)
+   else:
+    drain_failure=True
+ def settled():
+  nonlocal exited,absent
+  exited=poll_exit()
+  if not exited or not out_eof or not err_eof:
+   return False
+  absent=group_absent()
+  return absent
+ try:
+  out_pipe=q.stdout;err_pipe=q.stderr
+  if out_pipe is None or err_pipe is None:
+   drain_failure=True
+  else:
+   try:
+    out_fd=out_pipe.fileno();err_fd=err_pipe.fileno()
+    os.set_blocking(out_fd,False);os.set_blocking(err_fd,False)
+    sel=selectors.DefaultSelector()
+    sel.register(out_fd,selectors.EVENT_READ)
+    sel.register(err_fd,selectors.EVENT_READ)
+   except BaseException:
+    drain_failure=True
+  if sel is not None and not drain_failure:
+   while not settled():
+    if out_overflow or err_overflow or drain_failure:
+     break
+    now=time.monotonic()
+    if now>=deadline:
+     timed=True
+     break
+    drain_ready(deadline)
+  if not settled():
+   term_sent=signal_group(signal.SIGTERM)
+   term_end=time.monotonic()+2
+   while not settled() and time.monotonic()<term_end:
+    if sel is not None:
+     drain_ready(term_end)
+    else:
+     try:
+      q.wait(timeout=0.05)
+     except subprocess.TimeoutExpired:
+      continue
+     except BaseException:
+      drain_failure=True
+   if not settled():
+    kill_sent=signal_group(signal.SIGKILL)
+    kill_end=time.monotonic()+2
+    while not settled() and time.monotonic()<kill_end:
+     if sel is not None:
+      drain_ready(kill_end)
+     else:
+      try:
+       q.wait(timeout=0.05)
+      except subprocess.TimeoutExpired:
+       continue
+      except BaseException:
+       drain_failure=True
+  exited=poll_exit()
+  if exited:
+   try:
+    q.wait(timeout=0)
+   except BaseException:
+    drain_failure=True
+  absent=group_absent()
+  if not exited or not out_eof or not err_eof or not absent:
+   drain_failure=True
+ finally:
+  if not absent:
+   kill_sent=signal_group(signal.SIGKILL) or kill_sent
+   final_end=time.monotonic()+0.25
+   while time.monotonic()<final_end and not settled():
+    if sel is not None:
+     drain_ready(final_end)
+    else:
+     try:
+      q.wait(timeout=0.05)
+     except subprocess.TimeoutExpired:
+      continue
+     except BaseException:
+      drain_failure=True
+   absent=group_absent()
+  if sel is not None:
+   try:
+    sel.close()
+   except BaseException:
+    drain_failure=True
+  if out_pipe is not None and not out_eof:
+   try:
+    out_pipe.close()
+   except BaseException:
+    drain_failure=True
+  if err_pipe is not None and not err_eof:
+   try:
+    err_pipe.close()
+   except BaseException:
+    drain_failure=True
+  exited=poll_exit()
+  if exited:
+   try:
+    q.wait(timeout=0)
+   except BaseException:
+    drain_failure=True
+  absent=group_absent()
+  if not exited or not out_eof or not err_eof or not absent:
+   drain_failure=True
+ return q.returncode,bytes(out),bytes(err),timed,out_overflow,err_overflow,signal_failure,drain_failure,exited,out_eof,err_eof,absent,term_sent,kill_sent
+`.trim();
+
+const boundedSelfTestRunner =
+	boundedSupervisorSource +
+	`
+r=bounded(json.loads(sys.argv[1]),float(sys.argv[2]))
+print(json.dumps({"outLength":len(r[1]),"errLength":len(r[2]),"outSmall":r[1].decode("ascii") if len(r[1])<=100 else "","errSmall":r[2].decode("ascii") if len(r[2])<=100 else "","timed":r[3],"stdoutOverflow":r[4],"stderrOverflow":r[5],"signalFailure":r[6],"drainFailure":r[7],"exited":r[8],"stdoutEof":r[9],"stderrEof":r[10],"groupAbsent":r[11],"termSent":r[12],"killSent":r[13]},sort_keys=True))`;
+
+const dockerSupervisorRunner =
+	boundedSupervisorSource +
+	String.raw`
+def complete(r):
+ return r[0] is not None and not r[3] and not r[4] and not r[5] and not r[6] and not r[7] and r[8] and r[9] and r[10] and r[11]
+def summary(r):
+ return {"returncode":r[0],"timed":r[3],"stdoutOverflow":r[4],"stderrOverflow":r[5],"signalFailure":r[6],"drainFailure":r[7],"exited":r[8],"stdoutEof":r[9],"stderrEof":r[10],"groupAbsent":r[11],"termSent":r[12],"killSent":r[13]}
+args=json.loads(sys.argv[1]);name=sys.argv[2];limit=float(sys.argv[3])
+main=bounded(args,limit)
+removed=bounded(["docker","rm","-f",name],10)
+listed=bounded(["docker","ps","-a","--filter","name=^/"+name+"$","--format","{{.Names}}"],10)
+ok=complete(main) and complete(removed) and complete(listed) and listed[0]==0 and listed[1].strip()==b""
+sys.stdout.buffer.write(main[1]);sys.stderr.buffer.write(main[2])
+if not ok:
+ sys.stderr.write("\nSUPERVISOR "+json.dumps({"main":summary(main),"removed":summary(removed),"listed":summary(listed),"listedOutput":listed[1].decode("utf-8","replace")},sort_keys=True)+"\n")
+sys.exit(main[0] if ok else 124)
+`;
+
+async function runBoundedSelfTest(command: string[], limit: number): Promise<unknown> {
+	const child = Bun.spawn([hostPython, "-c", boundedSelfTestRunner, JSON.stringify(command), String(limit)], {
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const stdoutPromise = new Response(child.stdout).text();
+	const stderrPromise = new Response(child.stderr).text();
+	const exitCode = await child.exited;
+	const stdout = await stdoutPromise;
+	const stderr = await stderrPromise;
+	return Object.freeze({ exitCode, stderr, value: JSON.parse(stdout) });
+}
+
+const settledSupervisorShape = Object.freeze({
+	signalFailure: false,
+	drainFailure: false,
+	exited: true,
+	stdoutEof: true,
+	stderrEof: true,
+	groupAbsent: true,
+});
+
+test("bounds stdout overflow and removes the live descendant group", async () => {
+	const value = await runBoundedSelfTest(
+		[
+			hostPython,
+			"-c",
+			"import os,sys,time;pid=os.fork();(time.sleep(30),os._exit(0)) if pid==0 else None;sys.stdout.buffer.write(b'x'*1100000);sys.stdout.flush();os._exit(0)",
+		],
+		3,
+	);
+	expect(value).toEqual({
+		exitCode: 0,
+		stderr: "",
+		value: {
+			outLength: 1_048_576,
+			errLength: 0,
+			outSmall: "",
+			errSmall: "",
+			timed: false,
+			stdoutOverflow: true,
+			stderrOverflow: false,
+			...settledSupervisorShape,
+			termSent: true,
+			killSent: false,
+		},
+	});
+}, 15_000);
+
+test("bounds stderr overflow and removes the live descendant group", async () => {
+	const value = await runBoundedSelfTest(
+		[
+			hostPython,
+			"-c",
+			"import os,sys,time;pid=os.fork();(time.sleep(30),os._exit(0)) if pid==0 else None;sys.stderr.buffer.write(b'x'*1100000);sys.stderr.flush();os._exit(0)",
+		],
+		3,
+	);
+	expect(value).toEqual({
+		exitCode: 0,
+		stderr: "",
+		value: {
+			outLength: 0,
+			errLength: 1_048_576,
+			outSmall: "",
+			errSmall: "",
+			timed: false,
+			stdoutOverflow: false,
+			stderrOverflow: true,
+			...settledSupervisorShape,
+			termSent: true,
+			killSent: false,
+		},
+	});
+}, 15_000);
+
+test("drains both full pipes before removing a live descendant group", async () => {
+	const value = await runBoundedSelfTest(
+		[
+			hostPython,
+			"-c",
+			"import os,sys,threading,time;t1=threading.Thread(target=lambda:sys.stdout.buffer.write(b'x'*700000));t2=threading.Thread(target=lambda:sys.stderr.buffer.write(b'y'*700000));t1.start();t2.start();t1.join();t2.join();sys.stdout.flush();sys.stderr.flush();pid=os.fork();(time.sleep(30),os._exit(0)) if pid==0 else os._exit(0)",
+		],
+		0.5,
+	);
+	expect(value).toEqual({
+		exitCode: 0,
+		stderr: "",
+		value: {
+			outLength: 700_000,
+			errLength: 700_000,
+			outSmall: "",
+			errSmall: "",
+			timed: true,
+			stdoutOverflow: false,
+			stderrOverflow: false,
+			...settledSupervisorShape,
+			termSent: true,
+			killSent: false,
+		},
+	});
+}, 15_000);
+
+test("escalates a SIGTERM-ignoring group to SIGKILL", async () => {
+	const value = await runBoundedSelfTest(
+		[
+			hostPython,
+			"-c",
+			"import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print('ready',flush=True);time.sleep(30)",
+		],
+		0.3,
+	);
+	expect(value).toEqual({
+		exitCode: 0,
+		stderr: "",
+		value: {
+			outLength: 6,
+			errLength: 0,
+			outSmall: "ready\n",
+			errSmall: "",
+			timed: true,
+			stdoutOverflow: false,
+			stderrOverflow: false,
+			...settledSupervisorShape,
+			termSent: true,
+			killSent: true,
+		},
+	});
+}, 15_000);
+
+test("retains exact small output from a normal process", async () => {
+	const value = await runBoundedSelfTest(
+		[
+			hostPython,
+			"-c",
+			"import sys;sys.stdout.write('hello\\n');sys.stdout.flush();sys.stderr.write('world\\n');sys.stderr.flush()",
+		],
+		2,
+	);
+	expect(value).toEqual({
+		exitCode: 0,
+		stderr: "",
+		value: {
+			outLength: 6,
+			errLength: 6,
+			outSmall: "hello\n",
+			errSmall: "world\n",
+			timed: false,
+			stdoutOverflow: false,
+			stderrOverflow: false,
+			...settledSupervisorShape,
+			termSent: false,
+			killSent: false,
+		},
+	});
+}, 15_000);
+
 describe("hosted session store V22 boundary", () => {
-	test("has one runtime export", async () => {
+	test("has the two exact runtime exports", async () => {
 		const module = await import("../src/modes/daemon/sandbox/hosted-session-store.js");
-		expect(Object.keys(module)).toEqual(["createHostedSessionStore"]);
+		expect(Object.keys(module).sort()).toEqual(["createHostedSessionStore", "createStartupV5HostedSessionStore"]);
 		expect(module.createHostedSessionStore).toBe(createHostedSessionStore);
+		expect(module.createStartupV5HostedSessionStore).toBe(createStartupV5HostedSessionStore);
 	});
 
 	test("rejects primitive registry values without starting the helper", async () => {
@@ -286,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(159255);
+		expect(bytes.byteLength).toBe(168389);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"3107f2126945a6664875d07c66578ee93fabb097364222b353c40f440918558c",
+			"bdb6a719843aa3590bdb8301ce2551161cda5084b09a0ffdbe503ec3a31a7b8a",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -380,9 +775,49 @@ describe("hosted session store source constraints", () => {
 		expect(source).not.toMatch(/process\.env|process\.argv/);
 	});
 
+	test("keeps V5 response parsing, startup gating, and close authority exact", () => {
+		const source = readFileSync(sourcePath, "utf8");
+		const parserStart = source.indexOf("private acceptFrame(opcode: number, payload: Uint8Array): void {");
+		const parserEnd = source.indexOf("\n\tcommand(", parserStart);
+		const parser = source.slice(parserStart, parserEnd);
+		const errorBranch = parser.indexOf("if (opcode === ERROR)");
+		const readyBranch = parser.indexOf("if (pending.responseMode === V5_READY_MODE)");
+		const inventoryBranch = parser.indexOf("if (pending.responseMode === V5_EMPTY_INVENTORY_MODE)", readyBranch);
+		const v4Branch = parser.indexOf("if (pending.inventory || pending.inspect)");
+		expect(parserStart).toBeGreaterThanOrEqual(0);
+		expect(parserEnd).toBeGreaterThan(parserStart);
+		expect(errorBranch).toBeGreaterThanOrEqual(0);
+		expect(readyBranch).toBeGreaterThan(errorBranch);
+		expect(inventoryBranch).toBeGreaterThan(readyBranch);
+		expect(v4Branch).toBeGreaterThan(inventoryBranch);
+		for (const exact of [
+			"if (pending.responseMode === V5_EMPTY_INVENTORY_MODE)",
+			"opcode === V5_READY_RESPONSE",
+			"payload.byteLength === 9",
+			"payload[0] === V5_HELLO_OPCODE",
+			"payload[8] === 0x35",
+			"if (opcode !== DONE || payload.byteLength !== 0)",
+			"zeroBytes(payload)",
+			"this.fatal()",
+		])
+			expect(parser).toContain(exact);
+		expect(source).toContain(
+			"const result = this.command(V5_HELLO_OPCODE, payload, 30_000, false, false, V5_READY_MODE);",
+		);
+		expect(source).toContain(
+			"return this.command(WS_INVENTORY_OPCODE, new Uint8Array(0), 30_000, false, false, V5_EMPTY_INVENTORY_MODE);",
+		);
+		expect(source).toContain('this.gateState = "RECOVERY_CLOSED";');
+		expect(source).toContain('this.gateState = "ADMISSION_OPEN";');
+		expect(source).toContain('this.gateState = "GLOBAL_REVOKED";');
+		expect(source).toContain("if (this.closePromise !== undefined) return this.closePromise;");
+		expect(source).toContain("const store: StartupV5HostedSessionStore = _freeze({");
+		expect(source).toContain("close: () => {");
+	});
+
 	test("keeps the hardened TypeScript source forms", () => {
 		const source = readFileSync(sourcePath, "utf8");
-		expect(source.match(/export function /g)).toEqual(["export function "]);
+		expect(source.match(/export function /g)).toEqual(["export function ", "export function "]);
 		expect(source).not.toMatch(/\bany\b/);
 		expect(source).not.toMatch(/\bthrow\b/);
 		expect(source).not.toContain("...");
@@ -403,7 +838,7 @@ externalTest(
 			`import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, chownSync, closeSync, constants, cpSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { createHostedSessionStore } from "./src/modes/daemon/sandbox/hosted-session-store.js";
+import { createHostedSessionStore, createStartupV5HostedSessionStore } from "./src/modes/daemon/sandbox/hosted-session-store.js";
 import { types as utilTypes } from "node:util";
 
 interface State {
@@ -615,6 +1050,13 @@ if (process.argv[2]?.startsWith("rollover-cut")) {
 	console.log("ROLLOVER_CUT_OK " + process.argv[2]);
 	process.exit(0);
 }
+if (process.argv[2]?.startsWith("v5fault-")) {
+	const scenario = process.argv[2].slice("v5fault-".length);
+	const startupFailure = await createStartupV5HostedSessionStore(registry);
+	exactFailed(startupFailure, "V5 fault exact FAILED " + scenario);
+	console.log("V5_FAULT_OK " + scenario);
+	process.exit(0);
+}
 if (process.argv[2]?.startsWith("fault-")) {
 	const scenario = process.argv[2].slice("fault-".length);
 	const faultFactory = await createHostedSessionStore(registry);
@@ -647,16 +1089,54 @@ if (process.argv[2] === "timeout") {
 	const timeoutAllocation = await timeoutFactory.store.allocate(timeoutIdentity, timeoutDigests);
 	check(timeoutAllocation.code === "ALLOCATED", "timeout allocate");
 	if (timeoutAllocation.code !== "ALLOCATED") process.exit(71);
-	const proceed = new Promise<void>((resolveProceed) => process.once("SIGUSR1", () => resolveProceed()));
-	process.kill(process.ppid, "SIGUSR1");
-	await proceed;
-	const timed = await timeoutFactory.store.createDispatched(timeoutAllocation.session);
+	const children = readFileSync("/proc/" + process.pid + "/task/" + process.pid + "/children", "utf8").trim().split(/\\s+/);
+	check(children.length === 1, "timeout helper child");
+	const helperPid = Number(children[0]);
+	check(Number.isSafeInteger(helperPid) && helperPid > 1, "timeout helper pid");
+	if (!Number.isSafeInteger(helperPid) || helperPid <= 1) process.exit(72);
+	process.kill(helperPid, "SIGSTOP");
+	const timedPromise = timeoutFactory.store.createDispatched(timeoutAllocation.session);
+	await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 30_750));
+	const status = readFileSync("/proc/" + helperPid + "/status", "utf8").split("\\n");
+	let pending = 0n;
+	for (const line of status) {
+		if (line.startsWith("SigPnd:") || line.startsWith("ShdPnd:")) {
+			const fields = line.trim().split(/\\s+/);
+			if (fields.length === 2) pending |= BigInt("0x" + fields[1]);
+		}
+	}
+	check((pending & (1n << 14n)) !== 0n, "real SIGTERM pending during grace");
+	const timed = await timedPromise;
 	check(timed.code === "FAILED", "Store-owned command timeout");
 	check((await timeoutFactory.store.inventory()).code === "FAILED", "timeout poison reuse");
 	check((await timeoutFactory.store.close()).code === "FAILED", "timeout failed close");
+	let helperGroupAbsent = false;
+	try {
+		process.kill(-helperPid, 0);
+	} catch (failure) {
+		helperGroupAbsent = failure instanceof Error && "code" in failure && failure.code === "ESRCH";
+	}
+	check(helperGroupAbsent, "timeout helper group ESRCH");
 	console.log("TIMEOUT_OK");
+	console.log("STORE_TIMEOUT_TERM_KILL_ESRCH_OK");
 	process.exit(0);
 }
+const blockedRoot = "/root/.prime/agent/sandbox-session-state-v1";
+rmSync(blockedRoot, { recursive: true, force: true });
+const v4BeforeBlocked = await createHostedSessionStore(registry);
+check(v4BeforeBlocked.code === "READY", "V5 blocked V4 factory");
+if (v4BeforeBlocked.code !== "READY") process.exit(48);
+const blockedIdentity = Object.freeze({ sessionId: "blocked-s", activeSessionId: "blocked-a", childId: "blocked-c", name: "blocked", modelSelector: "model", durableParentSessionId: "blocked-p", rlmParentNodeId: "blocked-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "55".repeat(32), depth: 1 });
+const blockedDigests = Object.freeze({ releaseDigest: new Uint8Array(32).fill(6), manifestDigest: new Uint8Array(32).fill(7), bootstrapDigest: new Uint8Array(32).fill(8), trustDigest: new Uint8Array(32).fill(9), runtimeConfigDigest: new Uint8Array(32).fill(10) });
+const blockedInventory = await v4BeforeBlocked.store.inventory();
+const blockedAllocation = await v4BeforeBlocked.store.allocate(blockedIdentity, blockedDigests);
+const blockedClose = await v4BeforeBlocked.store.close();
+check(blockedInventory.code === "INVENTORIED", "V5 blocked V4 inventory");
+check(blockedAllocation.code === "ALLOCATED", "V5 blocked real V4 allocation " + blockedAllocation.code);
+check(blockedClose.code === "CLOSED", "V5 blocked first helper closed");
+exactFailed(await createStartupV5HostedSessionStore(registry), "V5 nonempty root blocked");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_NONEMPTY_BLOCKED_OK");
 const integrationStarted = Date.now();
 function milestone(label: string): void { console.log("MILESTONE " + label + " " + (Date.now() - integrationStarted)); }
 const ready = await createHostedSessionStore(registry);
@@ -1263,48 +1743,190 @@ await expectHostileLock("owner", (lock) => chownSync(lock, 65534, 65534));
 await expectHostileLock("link", (lock) => { const other = "/tmp/hostile-lock-link"; rmSync(other, { force: true }); linkSync(lock, other); });
 await expectHostileLock("type", (lock) => { unlinkSync(lock); mkdirSync(lock, { mode: 0o600 }); });
 rmSync(fixedRoot, { recursive: true, force: true });
+const invalidStartupRegistries: unknown[] = [undefined, null, false, 0, "", Object.freeze({}), Object.freeze([]), new Proxy(registry, {})];
+for (let index = 0; index < invalidStartupRegistries.length; index += 1)
+	exactFailed(await createStartupV5HostedSessionStore(invalidStartupRegistries[index]), "V5 invalid registry " + index);
+
+const startupReady = await createStartupV5HostedSessionStore(registry);
+check(startupReady.code === "READY", "V5 startup ready");
+if (startupReady.code !== "READY") process.exit(49);
+check(Object.getPrototypeOf(startupReady) === Object.prototype && Object.isFrozen(startupReady), "V5 ready exact ordinary");
+check(Object.getOwnPropertyNames(startupReady).join(",") === "code,store" && Object.getOwnPropertySymbols(startupReady).length === 0, "V5 ready keys");
+const startupStore = startupReady.store;
+check(Object.getPrototypeOf(startupStore) === Object.prototype && Object.isFrozen(startupStore), "V5 store exact ordinary");
+check(Object.getOwnPropertyNames(startupStore).join(",") === "close" && Object.getOwnPropertySymbols(startupStore).length === 0, "V5 close-only authority");
+const startupCloseDescriptor = Object.getOwnPropertyDescriptor(startupStore, "close");
+check(typeof startupCloseDescriptor?.value === "function" && startupCloseDescriptor.enumerable === true && startupCloseDescriptor.writable === false && startupCloseDescriptor.configurable === false, "V5 close descriptor");
+check(readdirSync(fixedRoot).join(",") === ".lock", "V5 startup creates no V5 names");
+const startupCloseOne = startupStore.close();
+const startupCloseTwo = startupStore.close();
+check(startupCloseOne === startupCloseTwo && startupCloseOne instanceof Promise && Object.getPrototypeOf(startupCloseOne) === Promise.prototype, "V5 memoized native close Promise");
+const startupClosedOne = await startupCloseOne;
+const startupClosedTwo = await startupCloseTwo;
+check(startupClosedOne === startupClosedTwo, "V5 memoized close result");
+exactOne(startupClosedOne, "CLOSED", "V5 closed");
+check(readdirSync(fixedRoot).join(",") === ".lock", "V5 close leaves exact lock-only root");
+console.log("V5_STARTUP_FACTORY_OK");
+rmSync(fixedRoot, { recursive: true, force: true });
 milestone("hostile-and-purge");
 console.log("INTEGRATION_OK");
 `,
 		);
-		const controllerPath = resolve(temporary, "timeout-controller.py");
+		const v5ProbePath = resolve(temporary, "v5-protocol-probe.py");
 		writeFileSync(
-			controllerPath,
-			`import errno,os,signal,subprocess,threading
-ready=threading.Event()
-signal.signal(signal.SIGUSR1,lambda unused_signal,unused_frame:ready.set())
-p=subprocess.Popen(["chroot","/chroot","/bun","/app/integration.ts","timeout"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
-helper=None
-try:
- if not ready.wait(5): raise RuntimeError("Store timeout harness readiness")
- children=open(f"/proc/{p.pid}/task/{p.pid}/children",encoding="ascii").read().split()
- if len(children)!=1: raise RuntimeError(f"helper children {children}")
- helper=int(children[0])
- os.kill(helper,signal.SIGSTOP)
- os.kill(p.pid,signal.SIGUSR1)
- threading.Event().wait(30.75)
- status=open(f"/proc/{helper}/status",encoding="ascii").read().splitlines()
- pending=0
- for line in status:
-  if line.startswith("SigPnd:") or line.startswith("ShdPnd:"): pending|=int(line.split()[1],16)
- if pending & (1 << (signal.SIGTERM-1)) == 0: raise RuntimeError("real SIGTERM not pending during grace")
- out,err=p.communicate(timeout=5)
- absent=False
- try: os.killpg(helper,0)
- except OSError as failure: absent=failure.errno==errno.ESRCH
- if p.returncode!=0 or b"TIMEOUT_OK" not in out or not absent: raise RuntimeError(f"timeout result rc={p.returncode} absent={absent} out={out!r} err={err!r}")
- print("STORE_TIMEOUT_TERM_KILL_ESRCH_OK")
-except BaseException as original:
- try: os.killpg(p.pid,signal.SIGKILL)
- except OSError: pass
- try: p.communicate(timeout=2)
- except BaseException as failure:
-  absent=False
-  try: os.killpg(p.pid,0)
-  except OSError as probe: absent=probe.errno==errno.ESRCH
-  raise RuntimeError(f"timeout controller KILL drain timeout absent={absent}") from failure
- raise original
+			v5ProbePath,
+			String.raw`import errno,hashlib,os,selectors,shutil,signal,struct,subprocess,time
+HELPER="/app/src/modes/daemon/sandbox/hosted-session-store-posix-helper.py"
+ROOT="/root/.prime/agent/sandbox-session-state-v1"
+CAP=1048576
+
+def frame(opcode,payload=b""):
+ return bytes((opcode,))+struct.pack(">I",len(payload))+payload
+
+def parse(data):
+ rows=[];offset=0
+ while offset<len(data):
+  if len(data)-offset<5:raise RuntimeError("partial response header")
+  opcode=data[offset];size=struct.unpack_from(">I",data,offset+1)[0];end=offset+5+size
+  if end>len(data):raise RuntimeError("partial response payload")
+  rows.append((opcode,data[offset+5:end]));offset=end
+ return rows
+
+def absent(pgid):
+ try:os.killpg(pgid,0)
+ except OSError as failure:
+  if failure.errno==errno.ESRCH:return True
+  raise
+ return False
+
+def run(label,requests,expected,returncode,lock_only=True):
+ if os.path.exists(ROOT):shutil.rmtree(ROOT)
+ fd=os.open(HELPER,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ if fd!=3:
+  os.dup2(fd,3,inheritable=True);os.close(fd);fd=3
+ if os.lseek(fd,0,os.SEEK_CUR)!=0:raise RuntimeError(label+" helper offset")
+ p=None;sel=None;out=bytearray();err=bytearray();stdin_closed=False;out_eof=False;err_eof=False;sent=0
+ data=b"".join(requests);deadline=time.monotonic()+8
+ try:
+  p=subprocess.Popen(["/usr/local/bin/python3","/proc/self/fd/3"],cwd="/",env={},stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,pass_fds=(fd,))
+  os.close(fd);fd=-1
+  if p.stdin is None or p.stdout is None or p.stderr is None:raise RuntimeError(label+" pipes")
+  for stream in (p.stdin,p.stdout,p.stderr):os.set_blocking(stream.fileno(),False)
+  sel=selectors.DefaultSelector();sel.register(p.stdin,selectors.EVENT_WRITE,"in");sel.register(p.stdout,selectors.EVENT_READ,"out");sel.register(p.stderr,selectors.EVENT_READ,"err")
+  while True:
+   exited=p.poll() is not None
+   if exited and out_eof and err_eof:break
+   if time.monotonic()>=deadline:raise RuntimeError(label+" deadline")
+   for key,unused_mask in sel.select(0.05):
+    kind=key.data;stream=key.fileobj
+    if kind=="in":
+     try:count=os.write(stream.fileno(),data[sent:sent+65536])
+     except BlockingIOError:continue
+     except BrokenPipeError:
+      sel.unregister(stream);stream.close();stdin_closed=True;continue
+     if count<=0:raise RuntimeError(label+" stdin write")
+     sent+=count
+     if sent==len(data):sel.unregister(stream);stream.close();stdin_closed=True
+    else:
+     try:chunk=os.read(stream.fileno(),65536)
+     except BlockingIOError:continue
+     if not chunk:
+      sel.unregister(stream);stream.close()
+      if kind=="out":out_eof=True
+      else:err_eof=True
+      continue
+     target=out if kind=="out" else err
+     if len(target)+len(chunk)>CAP:raise RuntimeError(label+" output cap")
+     target.extend(chunk)
+  p.wait(timeout=0)
+  if not stdin_closed or sent!=len(data):raise RuntimeError(label+" input incomplete")
+  if p.returncode!=returncode:raise RuntimeError(label+" returncode "+str(p.returncode))
+  if len(err)!=0:raise RuntimeError(label+" stderr "+repr(bytes(err)))
+  if not absent(p.pid):raise RuntimeError(label+" group present")
+  rows=parse(bytes(out))
+  if rows!=expected:raise RuntimeError(label+" frames "+repr(rows))
+  if lock_only and os.listdir(ROOT)!=[".lock"]:raise RuntimeError(label+" names "+repr(os.listdir(ROOT)))
+ finally:
+  if fd>=0:os.close(fd)
+  if p is not None and not absent(p.pid):
+   try:os.killpg(p.pid,signal.SIGTERM)
+   except OSError as failure:
+    if failure.errno!=errno.ESRCH:raise
+   for cleanup_signal in (signal.SIGKILL,):
+    end=time.monotonic()+2
+    while time.monotonic()<end:
+     if sel is not None:
+      for key,unused_mask in sel.select(0.05):
+       stream=key.fileobj
+       if key.data=="in":
+        sel.unregister(stream);stream.close();stdin_closed=True
+       else:
+        try:chunk=os.read(stream.fileno(),65536)
+        except BlockingIOError:continue
+        if not chunk:
+         sel.unregister(stream);stream.close()
+         if key.data=="out":out_eof=True
+         else:err_eof=True
+     p.poll()
+     if p.returncode is not None and out_eof and err_eof and absent(p.pid):break
+    if p.returncode is not None and out_eof and err_eof and absent(p.pid):break
+    try:os.killpg(p.pid,cleanup_signal)
+    except OSError as failure:
+     if failure.errno!=errno.ESRCH:raise
+   if p.poll() is None or not out_eof or not err_eof or not absent(p.pid):raise RuntimeError(label+" cleanup absence")
+  if sel is not None:sel.close()
+
+OPEN=frame(0xFE);QUIT=frame(0xFF);HELLO=frame(0xF0,b"PISTOV05");INVENTORY=frame(0x17)
+OK_OPEN=(0x80,b"\xfe");OK_QUIT=(0x80,b"\xff");READY=(0x84,b"\xf0PISTOV05");DONE=(0x82,b"")
+def error(opcode,code):return (0xE0,bytes((opcode,code)))
+B=bytearray(128);B[96]=1
+begin=bytes(B)+bytes(32)+struct.pack(">I",1)+struct.pack(">Q",0)
+data=b"abc";write_base=bytes(B)+bytes((1,))+struct.pack(">Q",0)
+write_match=write_base+hashlib.sha256(data).digest()+data
+write_mismatch=write_base+bytes(32)+data
+seal=bytes(B)+bytes(64)
+run("happy",[OPEN,HELLO,INVENTORY,frame(0x0A,begin),frame(0x0B,write_match),frame(0x0B,write_mismatch),frame(0x0D,seal),HELLO,INVENTORY,QUIT],[OK_OPEN,READY,DONE,error(0x0A,0x06),error(0x0B,0x04),error(0x0B,0x01),error(0x0D,0x04),error(0xF0,0x02),DONE,OK_QUIT],0)
+run("malformed hello recovery",[OPEN,frame(0xF0,b"XXXXXXXX"),HELLO,QUIT],[OK_OPEN,error(0xF0,0x02),READY,OK_QUIT],0)
+recoverable=(0x0A,0x0B,0x0C,0x0D,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16)
+run("recoverable lengths",[OPEN,HELLO]+[frame(opcode) for opcode in recoverable]+[INVENTORY,QUIT],[OK_OPEN,READY]+[error(opcode,0x01) for opcode in recoverable]+[DONE,OK_QUIT],0)
+begin_plan_bounds=bytes(B)+bytes(32)+struct.pack(">I",0)+struct.pack(">Q",0)
+begin_content_bounds=bytes(B)+bytes(32)+struct.pack(">I",1)+struct.pack(">Q",1073741825)
+write_empty=write_base+bytes(32)
+vector_bounds=bytes(B)+bytes((2,))+struct.pack(">I",32764)+struct.pack(">I",32763)+bytes(64)
+consume_bounds=bytearray(307);consume_bounds[:128]=B;consume_bounds[176]=1;consume_bounds[208]=1;consume_bounds[209]=2
+read_bounds=bytes(B)+bytes((1,))+struct.pack(">Q",0)+struct.pack(">I",0)+bytes(32)
+bounds_requests=[frame(0x0A,begin_plan_bounds),frame(0x0A,begin_content_bounds),frame(0x0B,write_empty),frame(0x0F,vector_bounds),frame(0x11,consume_bounds),frame(0x16,read_bounds)]
+run("bounds",[OPEN,HELLO]+bounds_requests+[INVENTORY,QUIT],[OK_OPEN,READY,error(0x0A,0x03),error(0x0A,0x03),error(0x0B,0x03),error(0x0F,0x03),error(0x11,0x03),error(0x16,0x03),DONE,OK_QUIT],0)
+zero_b=bytes(128)
+abort_bad=bytes(B)+bytes((2,))+bytes(8)
+vector_bad_kind=bytes(B)+bytes((1,))+bytes(4)+bytes(4)+bytes(64)
+vector_bad_terminal=bytes(B)+bytes((2,))+struct.pack(">I",2)+struct.pack(">I",0)+bytes(64)
+consume_bad=bytearray(307);consume_bad[:128]=B
+record_bad=bytes(B)+bytes(40)+struct.pack(">I",0)+bytes((1,))
+ack_bad=bytes(B)+bytes(40)+bytes((0,))
+read_bad=bytes(B)+bytes((0,))+bytes(8)+struct.pack(">I",1)+bytes(32)
+input_requests=[frame(0x0A,zero_b+bytes(32)+struct.pack(">I",1)+bytes(8)),frame(0x0B,bytes(B)+bytes((0,))+bytes(8)+hashlib.sha256(data).digest()+data),frame(0x0C,abort_bad),frame(0x0F,vector_bad_kind),frame(0x0F,vector_bad_terminal),frame(0x11,consume_bad),frame(0x12,record_bad),frame(0x14,ack_bad),frame(0x16,read_bad)]
+run("input fields",[OPEN,HELLO]+input_requests+[INVENTORY,QUIT],[OK_OPEN,READY]+[error(opcode,0x01) for opcode in (0x0A,0x0B,0x0C,0x0F,0x0F,0x11,0x12,0x14,0x16)]+[DONE,OK_QUIT],0)
+valid_abort=bytes(B)+bytes((1,))+bytes(8)
+valid_mark=bytes(B)+bytes(40)
+valid_vector=bytes(B)+bytes((2,))+bytes(4)+bytes(4)+bytes(64)
+valid_seal_vector=bytes(B)+bytes(72)
+valid_consume=bytearray(307);valid_consume[:128]=B;valid_consume[168:176]=struct.pack(">Q",1);valid_consume[176]=1;valid_consume[208]=1;valid_consume[209]=2
+valid_record=bytes(B)+bytes(40)+struct.pack(">I",1)+bytes((1,))
+valid_ack=bytes(B)+bytes(40)+bytes((1,))
+valid_ack_purge=bytes(B)+bytes(40)
+valid_read=bytes(B)+bytes((1,))+bytes(8)+struct.pack(">I",1)+bytes(32)
+valids=[(0x0C,valid_abort),(0x0E,valid_mark),(0x0F,valid_vector),(0x10,valid_seal_vector),(0x11,valid_consume),(0x12,valid_record),(0x13,bytes(B)),(0x14,valid_ack),(0x15,valid_ack_purge),(0x16,valid_read)]
+run("valid absent",[OPEN,HELLO]+[frame(opcode,payload) for opcode,payload in valids]+[QUIT],[OK_OPEN,READY]+[error(opcode,0x04) for opcode,payload in valids]+[OK_QUIT],0)
+run("fatal mark",[OPEN,HELLO,frame(0x0E,bytes(168))],[OK_OPEN,READY,error(0x0E,0x02)],2)
+run("fatal inventory",[OPEN,HELLO,frame(0x17,b"x")],[OK_OPEN,READY,error(0x17,0x02)],2)
+run("unselected V5",[OPEN,INVENTORY],[OK_OPEN,error(0x17,0x02)],2)
+run("V4 to V5",[OPEN,frame(0x01),HELLO],[OK_OPEN,DONE,error(0xF0,0x02)],2)
+run("V5 to V4",[OPEN,HELLO,frame(0x01)],[OK_OPEN,READY,error(0x01,0x02)],2)
+print("V5_RAW_PROTOCOL_OK")
+shutil.rmtree(ROOT)
 `,
+			{ mode: 0o600 },
 		);
 		const faultInterpreterPath = resolve(temporary, "fault-python3");
 		writeFileSync(
@@ -1339,18 +1961,38 @@ opcode,payload=request()
 if opcode!=0xFE or payload: raise SystemExit(3)
 emit(frame(0x80,b"\\xfe"))
 opcode,payload=request()
-if opcode!=0x01 or payload: raise SystemExit(4)
-if scenario=="malformed-length": emit(bytes([0x82])+struct.pack(">I",1048577))
-elif scenario=="malformed-payload": emit(frame(0xE0,b"\\x01"))
-elif scenario=="trailing": emit(frame(0x82)+bytes([0x82])+struct.pack(">I",1048577))
-elif scenario=="duplicate": emit(frame(0x82)+frame(0x82))
-elif scenario=="reordered": emit(frame(0x82)+frame(0x81))
-elif scenario=="late":
- emit(frame(0x82)); threading.Event().wait(0.05); emit(frame(0x82))
-elif scenario=="wrong-opcode": emit(frame(0x80,b"\\x01"))
-elif scenario=="stdout-overflow": emit(frame(0x81,b"x"*1048576)+b"x")
-elif scenario=="stderr-overflow": emit(b"x"*65537,2)
-else: raise SystemExit(5)
+if scenario.startswith("v5-"):
+ if opcode!=0xF0 or payload!=b"PISTOV05": raise SystemExit(4)
+ if scenario=="v5-hello-protocol" or scenario=="v5-hello-state":
+  emit(frame(0xE0,bytes([0xF0,0x02 if scenario.endswith("protocol") else 0x0E])))
+  opcode,payload=request()
+  if opcode!=0xFF or payload: raise SystemExit(6)
+  emit(frame(0x80,bytes((0xFF,))));raise SystemExit(0)
+ if scenario=="v5-hello-busy": emit(frame(0xE0,bytes((0xF0,0x06))))
+ elif scenario=="v5-ready-wrong-opcode": emit(frame(0x80,bytes((0xF0,))))
+ elif scenario=="v5-ready-short": emit(frame(0x84,bytes((0xF0,))+b"PISTOV0"))
+ elif scenario=="v5-ready-wrong-magic": emit(frame(0x84,bytes((0xF0,))+b"XXXXXXXX"))
+ else:
+  emit(frame(0x84,bytes((0xF0,))+b"PISTOV05"))
+  opcode,payload=request()
+  if opcode!=0x17 or payload: raise SystemExit(7)
+  if scenario=="v5-inventory-wrong-opcode": emit(frame(0x80,bytes((0x17,))))
+  elif scenario=="v5-inventory-session": emit(frame(0x81,b"x"))
+  elif scenario=="v5-inventory-error": emit(frame(0xE0,bytes((0x17,0x02))))
+  else: raise SystemExit(8)
+else:
+ if opcode!=0x01 or payload: raise SystemExit(4)
+ if scenario=="malformed-length": emit(bytes([0x82])+struct.pack(">I",1048577))
+ elif scenario=="malformed-payload": emit(frame(0xE0,b"\\x01"))
+ elif scenario=="trailing": emit(frame(0x82)+bytes([0x82])+struct.pack(">I",1048577))
+ elif scenario=="duplicate": emit(frame(0x82)+frame(0x82))
+ elif scenario=="reordered": emit(frame(0x82)+frame(0x81))
+ elif scenario=="late":
+  emit(frame(0x82)); threading.Event().wait(0.05); emit(frame(0x82))
+ elif scenario=="wrong-opcode": emit(frame(0x80,b"\\x01"))
+ elif scenario=="stdout-overflow": emit(frame(0x81,b"x"*1048576)+b"x")
+ elif scenario=="stderr-overflow": emit(b"x"*65537,2)
+ else: raise SystemExit(5)
 while True:
  try: request()
  except (EOFError,SystemExit): threading.Event().wait(4)
@@ -1360,8 +2002,11 @@ while True:
 		const faultControllerPath = resolve(temporary, "fault-controller.py");
 		writeFileSync(
 			faultControllerPath,
-			`import errno,os,signal,subprocess,time
-cases=("malformed-length","malformed-payload","trailing","duplicate","reordered","late","wrong-opcode","stdout-overflow","stderr-overflow")
+			boundedSupervisorSource +
+				`
+def complete(r):
+ return r[0] is not None and not r[3] and not r[4] and not r[5] and not r[6] and not r[7] and r[8] and r[9] and r[10] and r[11] and not r[12] and not r[13]
+cases=("malformed-length","malformed-payload","trailing","duplicate","reordered","late","wrong-opcode","stdout-overflow","stderr-overflow","v5-hello-protocol","v5-hello-state","v5-hello-busy","v5-ready-wrong-opcode","v5-ready-short","v5-ready-wrong-magic","v5-inventory-wrong-opcode","v5-inventory-session","v5-inventory-error")
 for scenario in cases:
  open("/chroot/tmp/fault-scenario","w",encoding="ascii").write(scenario)
  term_path="/chroot/tmp/fault-term-"+scenario
@@ -1370,31 +2015,19 @@ for scenario in cases:
   try: os.unlink(path)
   except FileNotFoundError: pass
  started=time.monotonic()
- p=subprocess.Popen(["chroot","/chroot","/bun","/app/integration.ts","fault-"+scenario],stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
- try: out,err=p.communicate(timeout=7)
- except subprocess.TimeoutExpired:
-  os.killpg(p.pid,signal.SIGTERM)
-  try: out,err=p.communicate(timeout=2)
-  except subprocess.TimeoutExpired:
-   os.killpg(p.pid,signal.SIGKILL)
-   try: out,err=p.communicate(timeout=2)
-   except subprocess.TimeoutExpired as failure:
-    absent=False
-    try: os.killpg(p.pid,0)
-    except OSError as probe: absent=probe.errno==errno.ESRCH
-    raise RuntimeError(f"fault KILL drain timeout {scenario} absent={absent}") from failure
-  raise RuntimeError("fault timeout "+scenario)
- absent=False
- try: os.killpg(p.pid,0)
- except OSError as failure: absent=failure.errno==errno.ESRCH
+ argument=("v5fault-" if scenario.startswith("v5-") else "fault-")+scenario
+ r=bounded(["chroot","/chroot","/bun","/app/integration.ts",argument],7)
+ out=r[1];err=r[2]
  term=open(term_path,encoding="ascii").read() if os.path.exists(term_path) else ""
  helper=int(open(pid_path,encoding="ascii").read()) if os.path.exists(pid_path) else 0
  helper_absent=False
  try: os.killpg(helper,0)
  except OSError as failure: helper_absent=failure.errno==errno.ESRCH
  elapsed=time.monotonic()-started
- if p.returncode!=0 or ("FAULT_OK "+scenario).encode() not in out or term!="1" or not absent or not helper_absent or elapsed>5:
-  raise RuntimeError(f"fault {scenario} rc={p.returncode} term={term!r} absent={absent} helper_absent={helper_absent} elapsed={elapsed} out={out!r} err={err!r}")
+ marker=(("V5_FAULT_OK " if scenario.startswith("v5-") else "FAULT_OK ")+scenario).encode()
+ expected_term="" if scenario in ("v5-hello-protocol","v5-hello-state") else "1"
+ if not complete(r) or r[0]!=0 or marker not in out or term!=expected_term or not helper_absent or elapsed>5:
+  raise RuntimeError(f"fault {scenario} result={r[0:1]+r[3:]} term={term!r} helper_absent={helper_absent} elapsed={elapsed} out={out!r} err={err!r}")
  print("FAULT_CASE_OK "+scenario)
 `,
 		);
@@ -1440,28 +2073,16 @@ while True:
 		const rolloverControllerPath = resolve(temporary, "rollover-controller.py");
 		writeFileSync(
 			rolloverControllerPath,
-			`import errno,os,shutil,signal,struct,subprocess
+			boundedSupervisorSource +
+				`
+import shutil,struct
+def complete(r):
+ return r[0] is not None and not r[3] and not r[4] and not r[5] and not r[6] and not r[7] and r[8] and r[9] and r[10] and r[11] and not r[12] and not r[13]
 root="/chroot/root/.prime/agent/sandbox-session-state-v1"
 def run(args,label):
- p=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
- try:out,err=p.communicate(timeout=8)
- except subprocess.TimeoutExpired:
-  os.killpg(p.pid,signal.SIGTERM)
-  try:out,err=p.communicate(timeout=2)
-  except subprocess.TimeoutExpired:
-   os.killpg(p.pid,signal.SIGKILL)
-   try:out,err=p.communicate(timeout=2)
-   except subprocess.TimeoutExpired as failure:
-    absent=False
-    try:os.killpg(p.pid,0)
-    except OSError as probe:absent=probe.errno==errno.ESRCH
-    raise RuntimeError(f"{label} KILL drain timeout absent={absent}") from failure
-  raise RuntimeError(label+" timeout")
- absent=False
- try:os.killpg(p.pid,0)
- except OSError as failure:absent=failure.errno==errno.ESRCH
- if p.returncode!=0 or not absent:raise RuntimeError(f"{label} rc={p.returncode} absent={absent} out={out!r} err={err!r}")
- return out
+ r=bounded(args,8)
+ if not complete(r) or r[0]!=0:raise RuntimeError(f"{label} result={r[0:1]+r[3:]} out={r[1]!r} err={r[2]!r}")
+ return r[1]
 for scenario in ("case3","case4"):
  open("/chroot/tmp/rollover-scenario","w",encoding="ascii").write(scenario)
  out=run(["chroot","/chroot","/bun","/app/integration.ts","rollover-cut"+scenario[-1]],"cut "+scenario)
@@ -1501,25 +2122,25 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"cba24db4ab698da54013ab912725efd5ae891e72cabaf890ef87c8833bbb2d1f",
+			"3458478c46e66c48e7e4257a05aabdb5cf9679a06a39b42aab7704e26af6a100",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
-			"8d93c47d0720918630b7582593ca7e84c5ad1b128d5b0dee8c2358d60e140620",
+			"92701b9e1f5bcd32a73dfec2f71688542a845b68e5b9964222e69bb3e52e04cd",
 		);
-		expect(createHash("sha256").update(readFileSync(controllerPath)).digest("hex")).toBe(
-			"fcaba4bae87233625e3936d07e12b7a8baa2adb93c2e02e6882ef9f913642512",
+		expect(createHash("sha256").update(readFileSync(v5ProbePath)).digest("hex")).toBe(
+			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
 		);
 		expect(createHash("sha256").update(readFileSync(faultInterpreterPath)).digest("hex")).toBe(
-			"88d49b69d61814c92e5239491501cdab96c374ce941d38c553879783a3b234bd",
+			"b8aea9844ddf317b66e1cf38a441946fb15dd9ada6751d47415d6e54cca0642f",
 		);
 		expect(createHash("sha256").update(readFileSync(faultControllerPath)).digest("hex")).toBe(
-			"d38017e3962556401093b2318bf4616952b8132e9d8ac3f9c758fc063da432d8",
+			"baea4373d74736909d2302a974858dc5c8e1b174e07e0ce6f4c25beec0390d60",
 		);
 		expect(createHash("sha256").update(readFileSync(rolloverInterpreterPath)).digest("hex")).toBe(
 			"0f791c80ecea328500be5ddf4baa12ad1cdb15685c85b2b1eadb36f207918464",
 		);
 		expect(createHash("sha256").update(readFileSync(rolloverControllerPath)).digest("hex")).toBe(
-			"4283d727ac18eb14940c4229a90681ef50a685a68420b5650ac93ffe7a220153",
+			"5b03d227941753f7c7c34564381bdf208f8b7e75a0aeb5eb2cd740588ea7cdb7",
 		);
 		const image = "sha256:cec9aa7aa96eea4fa036e9b82be1e6b325f2e3707f462d885868df51ec0a4b47";
 		const runId = `${process.pid}-${Date.now()}`;
@@ -1536,8 +2157,8 @@ for scenario in ("case3","case4"):
 			"install -m0644 /input/hosted-session-wal.ts /chroot/app/src/modes/daemon/sandbox/hosted-session-wal.ts; " +
 			"install -m0644 /input/prime-sandbox-strict-bytes.ts /chroot/app/src/modes/daemon/sandbox/prime-sandbox-strict-bytes.ts; " +
 			"install -m0644 /input/hosted-session-store-posix-helper.py /chroot/app/src/modes/daemon/sandbox/hosted-session-store-posix-helper.py; " +
-			"install -m0644 /input-harness.ts /chroot/app/integration.ts; chmod 700 /chroot/root /chroot/root/.prime /chroot/root/.prime/agent; chmod 755 /chroot/home; chmod 1777 /chroot/tmp; " +
-			'mount -t proc proc /chroot/proc; mount --rbind /dev /chroot/dev; test "$(chroot /chroot /bun --revision)" = "1.4.0+34cbb9a40"; chroot /chroot /bun /app/integration.ts';
+			"install -m0644 /input-harness.ts /chroot/app/integration.ts; install -m0600 /input-v5-probe.py /chroot/app/v5-protocol-probe.py; chmod 700 /chroot/root /chroot/root/.prime /chroot/root/.prime/agent; chmod 755 /chroot/home; chmod 1777 /chroot/tmp; " +
+			'mount -t proc proc /chroot/proc; mount --rbind /dev /chroot/dev; test "$(chroot /chroot /bun --revision)" = "1.4.0+34cbb9a40"; chroot /chroot /usr/local/bin/python3 /app/v5-protocol-probe.py; chroot /chroot /bun /app/integration.ts';
 		const dockerArguments = [
 			"docker",
 			"run",
@@ -1560,7 +2181,7 @@ for scenario in ("case3","case4"):
 			"-v",
 			`${harnessPath}:/input-harness.ts:ro`,
 			"-v",
-			`${controllerPath}:/input-controller.py:ro`,
+			`${v5ProbePath}:/input-v5-probe.py:ro`,
 			"-v",
 			`${faultInterpreterPath}:/input-fault-python3:ro`,
 			"-v",
@@ -1574,17 +2195,9 @@ for scenario in ("case3","case4"):
 			"-c",
 			setup,
 		];
-		const boundedRunner =
-			"import errno,json,os,signal,subprocess,sys\n" +
-			"args=json.loads(sys.argv[1]); name=sys.argv[2]\n" +
-			"def bounded(command,limit):\n q=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)\n expired=False; failed=False\n try: out,err=q.communicate(timeout=limit)\n except subprocess.TimeoutExpired:\n  expired=True\n  try: os.killpg(q.pid,signal.SIGTERM)\n  except OSError as e: failed=e.errno!=errno.ESRCH\n  try: out,err=q.communicate(timeout=2)\n  except subprocess.TimeoutExpired:\n   try: os.killpg(q.pid,signal.SIGKILL)\n   except OSError as e: failed=failed or e.errno!=errno.ESRCH\n   try: out,err=q.communicate(timeout=2)\n   except subprocess.TimeoutExpired as final: failed=True; out=final.output or b''; err=final.stderr or b''\n absent=False\n try: os.killpg(q.pid,0)\n except OSError as e: absent=e.errno==errno.ESRCH\n return q.returncode,out,err,expired,failed,absent\n" +
-			"returncode,out,err,timed,failed,absent=bounded(args,30)\n" +
-			"cleanup_failed=False\ntry: unused_rc,unused_out,unused_err,rm_timed,rm_failed,rm_absent=bounded(['docker','rm','-f',name],10); cleanup_failed=rm_timed or rm_failed or not rm_absent\nexcept BaseException: cleanup_failed=True\n" +
-			"try: ps_rc,ps_out,unused_err,ps_timed,ps_failed,ps_absent=bounded(['docker','ps','-a','--filter','name=^/'+name+'$','--format','{{.Names}}'],10); cleanup_failed=cleanup_failed or ps_rc!=0 or ps_out.strip()!=b'' or ps_timed or ps_failed or not ps_absent\nexcept BaseException: cleanup_failed=True\n" +
-			"sys.stdout.buffer.write(out); sys.stderr.buffer.write(err); sys.exit(124 if timed or failed or not absent or cleanup_failed else returncode)\n";
 		try {
 			const child = Bun.spawn(
-				["/usr/bin/python3", "-c", boundedRunner, JSON.stringify(dockerArguments), containerName],
+				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "45"],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
 			const stdoutPromise = new Response(child.stdout).text();
@@ -1594,6 +2207,9 @@ for scenario in ("case3","case4"):
 			const stderr = await stderrPromise;
 			console.log(stdout);
 			expect(exitCode, stderr).toBe(0);
+			expect(stdout).toContain("V5_RAW_PROTOCOL_OK");
+			expect(stdout).toContain("V5_NONEMPTY_BLOCKED_OK");
+			expect(stdout).toContain("V5_STARTUP_FACTORY_OK");
 			expect(stdout).toContain("INTEGRATION_OK");
 
 			const faultSetup = setup.replace(
@@ -1606,7 +2222,7 @@ for scenario in ("case3","case4"):
 				return value;
 			});
 			const faultChild = Bun.spawn(
-				["/usr/bin/python3", "-c", boundedRunner, JSON.stringify(faultArguments), faultContainerName],
+				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(faultArguments), faultContainerName, "60"],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
 			const faultStdoutPromise = new Response(faultChild.stdout).text();
@@ -1625,6 +2241,15 @@ for scenario in ("case3","case4"):
 				"wrong-opcode",
 				"stdout-overflow",
 				"stderr-overflow",
+				"v5-hello-protocol",
+				"v5-hello-state",
+				"v5-hello-busy",
+				"v5-ready-wrong-opcode",
+				"v5-ready-short",
+				"v5-ready-wrong-magic",
+				"v5-inventory-wrong-opcode",
+				"v5-inventory-session",
+				"v5-inventory-error",
 			])
 				expect(faultStdout).toContain(`FAULT_CASE_OK ${scenario}`);
 
@@ -1638,7 +2263,7 @@ for scenario in ("case3","case4"):
 				return value;
 			});
 			const rolloverChild = Bun.spawn(
-				["/usr/bin/python3", "-c", boundedRunner, JSON.stringify(rolloverArguments), rolloverContainerName],
+				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(rolloverArguments), rolloverContainerName, "30"],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
 			const rolloverStdoutPromise = new Response(rolloverChild.stdout).text();
@@ -1652,16 +2277,15 @@ for scenario in ("case3","case4"):
 
 			const timeoutSetup = setup.replace(
 				"chroot /chroot /bun /app/integration.ts",
-				"/usr/local/bin/python3 /input-controller.py",
+				"chroot /chroot /bun /app/integration.ts timeout",
 			);
 			const timeoutArguments = dockerArguments.map((value) => {
 				if (value === containerName) return timeoutContainerName;
 				if (value === setup) return timeoutSetup;
 				return value;
 			});
-			const timeoutRunner = boundedRunner.replace("bounded(args,30)", "bounded(args,45)");
 			const timeoutChild = Bun.spawn(
-				["/usr/bin/python3", "-c", timeoutRunner, JSON.stringify(timeoutArguments), timeoutContainerName],
+				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(timeoutArguments), timeoutContainerName, "45"],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
 			const timeoutStdoutPromise = new Response(timeoutChild.stdout).text();
@@ -1675,5 +2299,5 @@ for scenario in ("case3","case4"):
 			rmSync(temporary, { recursive: true, force: true });
 		}
 	},
-	120_000,
+	180_000,
 );

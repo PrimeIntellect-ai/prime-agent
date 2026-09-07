@@ -159,6 +159,7 @@ interface PendingCommand {
 	drain: boolean;
 	response: HelperResult | undefined;
 	timer: ReturnType<typeof setTimeout>;
+	responseMode: ResponseMode;
 }
 
 interface QueuedOperation {
@@ -195,8 +196,8 @@ const _ObjectPrototype = Object.prototype;
 const _ArrayPrototype = Array.prototype;
 
 const HELPER_NAME = "hosted-session-store-posix-helper.py";
-const HELPER_SIZE = 159255;
-const HELPER_DIGEST = "3107f2126945a6664875d07c66578ee93fabb097364222b353c40f440918558c";
+const HELPER_SIZE = 168389;
+const HELPER_DIGEST = "bdb6a719843aa3590bdb8301ce2551161cda5084b09a0ffdbe503ec3a31a7b8a";
 const MAX_PAYLOAD = 1_048_576;
 const MAX_UNPARSED = 1_048_581;
 const MAX_STDERR = 65_536;
@@ -223,6 +224,16 @@ const SESSION = 0x81;
 const DONE = 0x82;
 const ERROR = 0xe0;
 const ABSENT_ERROR = 0x04;
+const V5_READY_RESPONSE = 0x84;
+const V5_HELLO_OPCODE = 0xf0;
+const WS_INVENTORY_OPCODE = 0x17;
+const PROTOCOL_ERROR = 0x02;
+const STATE_ERROR = 0x0e;
+const V4_RESPONSE_MODE = 0;
+const V5_READY_MODE = 1;
+const V5_EMPTY_INVENTORY_MODE = 2;
+type ResponseMode = typeof V4_RESPONSE_MODE | typeof V5_READY_MODE | typeof V5_EMPTY_INVENTORY_MODE;
+type StartupGateState = "RECOVERY_CLOSED" | "ADMISSION_OPEN" | "GLOBAL_REVOKED";
 
 function failedResult(): { code: "FAILED" } {
 	return _freeze({ code: "FAILED" });
@@ -986,7 +997,7 @@ class HelperOwner {
 		});
 	}
 
-	private retain(value: unknown): void {
+	retain(value: unknown): void {
 		if (typeof value === "object" && value !== null) this.retainedPromises.add(value);
 	}
 
@@ -1070,6 +1081,11 @@ class HelperOwner {
 			return;
 		}
 		if (opcode === ERROR) {
+			if (pending.responseMode === V5_EMPTY_INVENTORY_MODE) {
+				zeroBytes(payload);
+				this.fatal();
+				return;
+			}
 			if (payload.byteLength !== 2 || payload[0] !== pending.opcode) {
 				zeroBytes(payload);
 				this.fatal();
@@ -1084,6 +1100,39 @@ class HelperOwner {
 			zeroBytes(payload);
 			zeroList(pending.payloads);
 			pending.response = _freeze({ ok: false, errorCode: code });
+			this.finishPending();
+			return;
+		}
+		if (pending.responseMode === V5_READY_MODE) {
+			const ok =
+				opcode === V5_READY_RESPONSE &&
+				payload.byteLength === 9 &&
+				payload[0] === V5_HELLO_OPCODE &&
+				payload[1] === 0x50 &&
+				payload[2] === 0x49 &&
+				payload[3] === 0x53 &&
+				payload[4] === 0x54 &&
+				payload[5] === 0x4f &&
+				payload[6] === 0x56 &&
+				payload[7] === 0x30 &&
+				payload[8] === 0x35;
+			zeroBytes(payload);
+			if (!ok) {
+				this.fatal();
+				return;
+			}
+			pending.response = _freeze({ ok: true, payloads: _freeze([]) });
+			this.finishPending();
+			return;
+		}
+		if (pending.responseMode === V5_EMPTY_INVENTORY_MODE) {
+			if (opcode !== DONE || payload.byteLength !== 0) {
+				zeroBytes(payload);
+				this.fatal();
+				return;
+			}
+			zeroBytes(payload);
+			pending.response = _freeze({ ok: true, payloads: _freeze([]) });
 			this.finishPending();
 			return;
 		}
@@ -1132,6 +1181,7 @@ class HelperOwner {
 		timeout: number,
 		inventory: boolean,
 		inspect = false,
+		responseMode: ResponseMode = V4_RESPONSE_MODE,
 	): Promise<HelperResult> {
 		return new _Promise<HelperResult>((resolveCommand) => {
 			if (this.poisoned || this.pending !== undefined || this.child === undefined || this.child.stdin === null) {
@@ -1156,6 +1206,7 @@ class HelperOwner {
 				drain: false,
 				response: undefined,
 				timer,
+				responseMode,
 			};
 			this.pending = pending;
 			let accepted = false;
@@ -1188,6 +1239,25 @@ class HelperOwner {
 		if (lifecycle.byteLength !== 32)
 			return ownedPromise((resolveResult) => resolveResult(_freeze({ ok: false, errorCode: 0 })));
 		return this.command(INSPECT_SESSION, lifecycle, 30_000, false, true);
+	}
+
+	v5Hello(): Promise<HelperResult> {
+		const payload = new Uint8Array(8);
+		payload[0] = 0x50;
+		payload[1] = 0x49;
+		payload[2] = 0x53;
+		payload[3] = 0x54;
+		payload[4] = 0x4f;
+		payload[5] = 0x56;
+		payload[6] = 0x30;
+		payload[7] = 0x35;
+		const result = this.command(V5_HELLO_OPCODE, payload, 30_000, false, false, V5_READY_MODE);
+		zeroBytes(payload);
+		return result;
+	}
+
+	v5Inventory(): Promise<HelperResult> {
+		return this.command(WS_INVENTORY_OPCODE, new Uint8Array(0), 30_000, false, false, V5_EMPTY_INVENTORY_MODE);
 	}
 
 	private releaseWrites(): void {
@@ -2786,4 +2856,147 @@ export function createHostedSessionStore(
 		]);
 		if (typeof observer === "object" && observer !== null) retained[retained.length] = observer;
 	});
+}
+
+export interface StartupV5HostedSessionStore {
+	close(): Promise<Readonly<{ code: "CLOSED" }> | Readonly<{ code: "FAILED" }>>;
+}
+
+export function createStartupV5HostedSessionStore(
+	registryViewRaw: unknown,
+): Promise<Readonly<{ code: "READY"; store: StartupV5HostedSessionStore }> | Readonly<{ code: "FAILED" }>> {
+	class StartupV5Core {
+		private gateState: StartupGateState;
+		private epoch: number;
+		private owner: HelperOwner;
+		private closePromise: Promise<Readonly<{ code: "CLOSED" }> | Readonly<{ code: "FAILED" }>> | undefined;
+
+		constructor(helperOwner: HelperOwner) {
+			this.gateState = "RECOVERY_CLOSED";
+			this.epoch = 0;
+			this.owner = helperOwner;
+			this.closePromise = undefined;
+		}
+
+		revokeGate(): void {
+			if (this.gateState === "RECOVERY_CLOSED" || this.gateState === "ADMISSION_OPEN") {
+				this.gateState = "GLOBAL_REVOKED";
+				this.epoch += 1;
+			}
+		}
+
+		fail(resolve: (value: Readonly<{ code: "FAILED" }>) => void): void {
+			this.failClean(resolve, false);
+		}
+
+		private failClean(resolve: (value: Readonly<{ code: "FAILED" }>) => void, healthy: boolean): void {
+			this.revokeGate();
+			const cleanup = healthy ? this.owner.closeHealthy() : this.owner.poison();
+			const observer = _reflectApply(_promiseThen, cleanup, [
+				() => resolve(_freeze({ code: "FAILED" })),
+				() => resolve(_freeze({ code: "FAILED" })),
+			]);
+			if (typeof observer === "object" && observer !== null) this.owner.retain(observer);
+		}
+
+		start(
+			helper: ValidatedHelper,
+		): Promise<Readonly<{ code: "READY"; store: StartupV5HostedSessionStore }> | Readonly<{ code: "FAILED" }>> {
+			return new _Promise<
+				Readonly<{ code: "READY"; store: StartupV5HostedSessionStore }> | Readonly<{ code: "FAILED" }>
+			>((resolveStart) => {
+				const started = this.owner.start(helper);
+				const observer = _reflectApply(_promiseThen, started, [
+					(ready: boolean) => {
+						if (!ready) {
+							this.failClean(resolveStart, false);
+							return;
+						}
+						const hello = this.owner.v5Hello();
+						const chain = _reflectApply(_promiseThen, hello, [
+							(helloResult: HelperResult) => {
+								if (helloResult.ok === false) {
+									const healthy =
+										!this.owner.isPoisoned() &&
+										(helloResult.errorCode === PROTOCOL_ERROR || helloResult.errorCode === STATE_ERROR);
+									this.failClean(resolveStart, healthy);
+									return;
+								}
+								const inventory = this.owner.v5Inventory();
+								const chain2 = _reflectApply(_promiseThen, inventory, [
+									(invResult: HelperResult) => {
+										if (invResult.ok === false) {
+											this.failClean(resolveStart, false);
+											return;
+										}
+										this.gateState = "ADMISSION_OPEN";
+										this.epoch += 1;
+										const store: StartupV5HostedSessionStore = _freeze({
+											close: () => {
+												if (this.closePromise !== undefined) return this.closePromise;
+												this.closePromise = new _Promise<
+													Readonly<{ code: "CLOSED" }> | Readonly<{ code: "FAILED" }>
+												>((resolveClose) => {
+													this.revokeGate();
+													const closeEpoch = this.epoch;
+													const cleanup = this.owner.isPoisoned()
+														? this.owner.poison()
+														: this.owner.closeHealthy();
+													const observer = _reflectApply(_promiseThen, cleanup, [
+														(absent: boolean) =>
+															resolveClose(
+																_freeze(
+																	absent && this.epoch === closeEpoch
+																		? { code: "CLOSED" }
+																		: { code: "FAILED" },
+																),
+															),
+														() => resolveClose(_freeze({ code: "FAILED" })),
+													]);
+													if (typeof observer === "object" && observer !== null)
+														this.owner.retain(observer);
+												});
+												return this.closePromise;
+											},
+										});
+										resolveStart(_freeze({ code: "READY", store }));
+									},
+									() => this.failClean(resolveStart, false),
+								]);
+								this.owner.retain(chain2);
+							},
+							() => this.failClean(resolveStart, false),
+						]);
+						this.owner.retain(chain);
+					},
+					() => this.failClean(resolveStart, false),
+				]);
+				this.owner.retain(observer);
+			});
+		}
+	}
+	return new _Promise<Readonly<{ code: "READY"; store: StartupV5HostedSessionStore }> | Readonly<{ code: "FAILED" }>>(
+		(resolveFactory) => {
+			const owner = new HelperOwner();
+			const core = new StartupV5Core(owner);
+			const registry = validateRegistry(registryViewRaw);
+			if (registry === undefined) {
+				core.revokeGate();
+				resolveFactory(failedResult());
+				return;
+			}
+			const helper = validateHelper();
+			if (helper === undefined) {
+				core.revokeGate();
+				resolveFactory(failedResult());
+				return;
+			}
+			const result = core.start(helper);
+			const observer = _reflectApply(_promiseThen, result, [
+				(value) => resolveFactory(value),
+				() => core.fail(resolveFactory),
+			]);
+			owner.retain(observer);
+		},
+	);
 }

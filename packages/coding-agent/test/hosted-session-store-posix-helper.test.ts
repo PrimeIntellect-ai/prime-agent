@@ -41,7 +41,7 @@ function pythonFunction(source: string, name: string): PythonFunction {
 function pythonClass(source: string, name: string): string {
 	const lines = source.split("\n");
 	const prefix = `class ${name}:`;
-	const start = lines.findIndex((line) => line === prefix);
+	const start = lines.indexOf(prefix);
 	if (start < 0) return "";
 	let end = start + 1;
 	while (end < lines.length) {
@@ -69,12 +69,7 @@ function replaceUnique(text: string, anchor: string, replacement: string): strin
 	return text.replace(anchor, replacement);
 }
 
-function mutatePythonFunction(
-	source: string,
-	functionName: string,
-	anchor: string,
-	replacement: string,
-): string {
+function mutatePythonFunction(source: string, functionName: string, anchor: string, replacement: string): string {
 	const found = pythonFunction(source, functionName);
 	if (found.startLine === 0 || count(source, found.body) !== 1) return "";
 	const mutatedBody = replaceUnique(found.body, anchor, replacement);
@@ -347,8 +342,16 @@ const PURGE_SOURCE_OPERATIONS: readonly PurgeSourceOperation[] = [
 
 const PURGE_RECOVERY_MUTATIONS: readonly SourceMutation[] = [
 	{ functionName: "_recover_purge_suffix", anchor: "if _HEAD not in entries:", replacement: "if _HEAD in entries:" },
-	{ functionName: "_recover_purge_suffix", anchor: "if _contains_temp(entries):", replacement: "if not _contains_temp(entries):" },
-	{ functionName: "_recover_purge_suffix", anchor: "if _IDENTITY not in entries:", replacement: "if _IDENTITY in entries:" },
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "if _contains_temp(entries):",
+		replacement: "if not _contains_temp(entries):",
+	},
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "if _IDENTITY not in entries:",
+		replacement: "if _IDENTITY in entries:",
+	},
 	{
 		functionName: "_recover_purge_suffix",
 		anchor: "if _contains_outside(entries, (_IDENTITY, _LEDGER, _GENERATIONS, _HEAD)):",
@@ -384,27 +387,53 @@ const PURGE_RECOVERY_MUTATIONS: readonly SourceMutation[] = [
 		anchor: "if ledger_rows[0][0] == 0:\n                    if not _same(identity, ledger_rows[0][2])",
 		replacement: "if ledger_rows[0][0] != 0:\n                    if not _same(identity, ledger_rows[0][2])",
 	},
-	{ functionName: "_recover_purge_suffix", anchor: "elif len(ledger_rows) == 1:", replacement: "elif len(ledger_rows) == 2:" },
-	{ functionName: "_recover_purge_suffix", anchor: "elif len(ledger_rows) == 0:", replacement: "elif len(ledger_rows) < 0:" },
 	{
 		functionName: "_recover_purge_suffix",
-		anchor: 'else:\n            if _GENERATIONS in entries:\n                raise Fatal(_E_STATE)\n            ledger_stage = "absent"',
-		replacement: 'else:\n            if _GENERATIONS not in entries:\n                raise Fatal(_E_STATE)\n            ledger_stage = "absent"',
+		anchor: "elif len(ledger_rows) == 1:",
+		replacement: "elif len(ledger_rows) == 2:",
+	},
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "elif len(ledger_rows) == 0:",
+		replacement: "elif len(ledger_rows) < 0:",
+	},
+	{
+		functionName: "_recover_purge_suffix",
+		anchor:
+			'else:\n            if _GENERATIONS in entries:\n                raise Fatal(_E_STATE)\n            ledger_stage = "absent"',
+		replacement:
+			'else:\n            if _GENERATIONS not in entries:\n                raise Fatal(_E_STATE)\n            ledger_stage = "absent"',
 	},
 	{
 		functionName: "_recover_purge_suffix",
 		anchor: "current_name = _hex_name(current_generation)\n        if _GENERATIONS in entries:",
 		replacement: "current_name = _hex_name(current_generation)\n        if _GENERATIONS not in entries:",
 	},
-	{ functionName: "_recover_purge_suffix", anchor: "if len(generation_names) == 0:", replacement: "if len(generation_names) == 1:" },
-	{ functionName: "_recover_purge_suffix", anchor: "elif len(generation_names) == 2:", replacement: "elif len(generation_names) == 3:" },
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "if len(generation_names) == 0:",
+		replacement: "if len(generation_names) == 1:",
+	},
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "elif len(generation_names) == 2:",
+		replacement: "elif len(generation_names) == 3:",
+	},
 	{
 		functionName: "_recover_purge_suffix",
 		anchor: "elif len(generation_names) == 1 and generation_names[0] == current_name:",
 		replacement: "elif len(generation_names) == 1 and generation_names[0] != current_name:",
 	},
-	{ functionName: "_recover_purge_suffix", anchor: "if len(generation_entries) == 0:", replacement: "if len(generation_entries) == 1:" },
-	{ functionName: "_recover_purge_suffix", anchor: "elif generation_entries == [_WAL]:", replacement: "elif generation_entries != [_WAL]:" },
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "if len(generation_entries) == 0:",
+		replacement: "if len(generation_entries) == 1:",
+	},
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "elif generation_entries == [_WAL]:",
+		replacement: "elif generation_entries != [_WAL]:",
+	},
 	{
 		functionName: "_recover_purge_suffix",
 		anchor: "if _contains_temp(wal_entries):",
@@ -435,8 +464,16 @@ const PURGE_RECOVERY_MUTATIONS: readonly SourceMutation[] = [
 		anchor: 'generation_stage = "full-head" if wal_rows[0][0] == 1 else "suffix-head"',
 		replacement: 'generation_stage = "full-head" if wal_rows[0][0] != 1 else "suffix-head"',
 	},
-	{ functionName: "_recover_purge_suffix", anchor: "elif len(wal_rows) == 1:", replacement: "elif len(wal_rows) == 2:" },
-	{ functionName: "_recover_purge_suffix", anchor: "elif len(wal_rows) == 0:", replacement: "elif len(wal_rows) < 0:" },
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "elif len(wal_rows) == 1:",
+		replacement: "elif len(wal_rows) == 2:",
+	},
+	{
+		functionName: "_recover_purge_suffix",
+		anchor: "elif len(wal_rows) == 0:",
+		replacement: "elif len(wal_rows) < 0:",
+	},
 	{ functionName: "_recover_purge_suffix", anchor: "candidate = False", replacement: "candidate = True" },
 	{ functionName: "_recover_purge_suffix", anchor: "if not candidate:", replacement: "if candidate:" },
 	{
@@ -477,22 +514,86 @@ const PURGE_RECOVERY_MUTATIONS: readonly SourceMutation[] = [
 ];
 
 const PURGE_TABLE_ROW_MUTATIONS: readonly SourceMutation[] = [
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("suffix-head", "full-head", 1, 6, 2, 16)', replacement: '("suffix-head", "full-head", 0, 6, 2, 16)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("suffix-head", "suffix-head", 1, 1, 1, 15)', replacement: '("suffix-head", "suffix-head", 1, 2, 1, 15)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("terminal-record", "suffix-head", 1, 1, 1, 1)', replacement: '("terminal-record", "suffix-head", 0, 1, 1, 1)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("empty-wal", "suffix-head", 0, 0, 1, 1)', replacement: '("empty-wal", "suffix-head", 0, 1, 1, 1)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("empty-generation", "suffix-head", 0, 0, 1, 1)', replacement: '("empty-generation", "suffix-head", 0, 1, 1, 1)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("empty-generations", "suffix-head", 0, 0, 1, 1)', replacement: '("empty-generations", "suffix-head", 0, 1, 1, 1)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("absent", "suffix-head", 0, 0, 1, 1)', replacement: '("absent", "suffix-head", 0, 0, 1, 2)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("absent", "terminal-record", 0, 0, 1, 1)', replacement: '("absent", "terminal-record", 0, 0, 0, 1)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("absent", "empty", 0, 0, 0, 0)', replacement: '("absent", "empty", 0, 0, 0, 1)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: '("absent", "absent", 0, 0, 0, 0)', replacement: '("absent", "absent", 0, 0, 1, 1)' },
-	{ functionName: "_purge_stage_pair_allowed", anchor: "generation_stage == row[0]", replacement: "generation_stage != row[0]" },
-	{ functionName: "_purge_stage_pair_allowed", anchor: "and ledger_stage == row[1]", replacement: "and ledger_stage != row[1]" },
-	{ functionName: "_purge_stage_pair_allowed", anchor: "and row[2] <= wal_count <= row[3]", replacement: "and row[2] < wal_count <= row[3]" },
-	{ functionName: "_purge_stage_pair_allowed", anchor: "and row[2] <= wal_count <= row[3]", replacement: "and row[2] <= wal_count < row[3]" },
-	{ functionName: "_purge_stage_pair_allowed", anchor: "and row[4] <= ledger_count <= row[5]", replacement: "and row[4] < ledger_count <= row[5]" },
-	{ functionName: "_purge_stage_pair_allowed", anchor: "and row[4] <= ledger_count <= row[5]", replacement: "and row[4] <= ledger_count < row[5]" },
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("suffix-head", "full-head", 1, 6, 2, 16)',
+		replacement: '("suffix-head", "full-head", 0, 6, 2, 16)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("suffix-head", "suffix-head", 1, 1, 1, 15)',
+		replacement: '("suffix-head", "suffix-head", 1, 2, 1, 15)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("terminal-record", "suffix-head", 1, 1, 1, 1)',
+		replacement: '("terminal-record", "suffix-head", 0, 1, 1, 1)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("empty-wal", "suffix-head", 0, 0, 1, 1)',
+		replacement: '("empty-wal", "suffix-head", 0, 1, 1, 1)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("empty-generation", "suffix-head", 0, 0, 1, 1)',
+		replacement: '("empty-generation", "suffix-head", 0, 1, 1, 1)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("empty-generations", "suffix-head", 0, 0, 1, 1)',
+		replacement: '("empty-generations", "suffix-head", 0, 1, 1, 1)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("absent", "suffix-head", 0, 0, 1, 1)',
+		replacement: '("absent", "suffix-head", 0, 0, 1, 2)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("absent", "terminal-record", 0, 0, 1, 1)',
+		replacement: '("absent", "terminal-record", 0, 0, 0, 1)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("absent", "empty", 0, 0, 0, 0)',
+		replacement: '("absent", "empty", 0, 0, 0, 1)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: '("absent", "absent", 0, 0, 0, 0)',
+		replacement: '("absent", "absent", 0, 0, 1, 1)',
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: "generation_stage == row[0]",
+		replacement: "generation_stage != row[0]",
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: "and ledger_stage == row[1]",
+		replacement: "and ledger_stage != row[1]",
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: "and row[2] <= wal_count <= row[3]",
+		replacement: "and row[2] < wal_count <= row[3]",
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: "and row[2] <= wal_count <= row[3]",
+		replacement: "and row[2] <= wal_count < row[3]",
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: "and row[4] <= ledger_count <= row[5]",
+		replacement: "and row[4] < ledger_count <= row[5]",
+	},
+	{
+		functionName: "_purge_stage_pair_allowed",
+		anchor: "and row[4] <= ledger_count <= row[5]",
+		replacement: "and row[4] <= ledger_count < row[5]",
+	},
 ];
 
 function purgeCommandOperationOrder(body: string): string[] {
@@ -919,7 +1020,8 @@ const CREATE_PUBLICATION_SOURCE_MUTATIONS: readonly SourceMutation[] = [
 	{
 		functionName: "_repair_create_identity_link",
 		anchor: "_prove_published(fds, parent, _IDENTITY, temp_fd, temp_st.st_dev, temp_st.st_ino, genesis, uid, device)",
-		replacement: "_prove_published(fds, parent, linked_temp, temp_fd, temp_st.st_dev, temp_st.st_ino, genesis, uid, device)",
+		replacement:
+			"_prove_published(fds, parent, linked_temp, temp_fd, temp_st.st_dev, temp_st.st_ino, genesis, uid, device)",
 	},
 	{
 		functionName: "_repair_create_identity_link",
@@ -1331,11 +1433,13 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 		const command = pythonFunction(source, "_cmd_remove");
 		expect(removeSuffix.startLine).toBeGreaterThan(0);
 		expect(removeSuffix.header).toContain("positive_observation");
-		expect(tokensInOrder(removeSuffix.body, [
-			"if error == errno.ENOENT and not positive_observation:",
-			"return",
-			"raise Fatal(_E_UNCERTAIN)",
-		])).toBe(true);
+		expect(
+			tokensInOrder(removeSuffix.body, [
+				"if error == errno.ENOENT and not positive_observation:",
+				"return",
+				"raise Fatal(_E_UNCERTAIN)",
+			]),
+		).toBe(true);
 		expect(command.body).toContain(
 			"fds, generations_fd, retired_name, lifecycle, uid, device, True, identity_digest, current_entry[4][2]",
 		);
@@ -1343,8 +1447,25 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 
 	test("REMOVE accepts only the mechanically reachable revision-three suffix", async () => {
 		const source = await readFile(HELPER, "utf8");
-		expect(retiredSuffixReachable([{ revision: 1, state: 1 }, { revision: 2, state: 2 }, { revision: 3, state: 8 }], 3)).toBe(true);
-		expect(retiredSuffixReachable([{ revision: 2, state: 2 }, { revision: 3, state: 8 }], 3)).toBe(true);
+		expect(
+			retiredSuffixReachable(
+				[
+					{ revision: 1, state: 1 },
+					{ revision: 2, state: 2 },
+					{ revision: 3, state: 8 },
+				],
+				3,
+			),
+		).toBe(true);
+		expect(
+			retiredSuffixReachable(
+				[
+					{ revision: 2, state: 2 },
+					{ revision: 3, state: 8 },
+				],
+				3,
+			),
+		).toBe(true);
 		expect(retiredSuffixReachable([{ revision: 3, state: 8 }], null)).toBe(true);
 		expect(retiredSuffixReachable([{ revision: 6, state: 8 }], 6)).toBe(false);
 		expect(retiredSuffixReachable([{ revision: 6, state: 8 }], null)).toBe(false);
@@ -1373,12 +1494,7 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 		);
 		expect(peekMutant.length).toBeGreaterThan(0);
 		expect(retiredRevisionChecks(peekMutant)).toBe(false);
-		const scanMutant = mutatePythonFunction(
-			source,
-			"_scan_wal",
-			"rows[0][0] == 3",
-			"rows[0][0] == 6",
-		);
+		const scanMutant = mutatePythonFunction(source, "_scan_wal", "rows[0][0] == 3", "rows[0][0] == 6");
 		expect(scanMutant.length).toBeGreaterThan(0);
 		expect(retiredRevisionChecks(scanMutant)).toBe(false);
 	});
@@ -1386,19 +1502,21 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 	test("REMOVE suffix validation precedes every teardown mutation", async () => {
 		const source = await readFile(HELPER, "utf8");
 		const removeSuffix = pythonFunction(source, "_remove_generation_suffix").body;
-		expect(tokensInOrder(removeSuffix, [
-			"rows, unused_total = _scan_suffix_records(",
-			"terminal_state = _validate_wal_suffix(",
-			"terminal_revision != 3",
-			"head_revision != rows[-1][0]",
-			"if head_temp is not None:",
-			"_unlink(wal_fd, head_temp)",
-			"while index + 1 < len(rows):",
-			"_unlink(wal_fd, _HEAD)",
-			"_unlink(wal_fd, rows[-1][1])",
-			"_rmdir(generation_fd, _WAL)",
-			"_rmdir(generations_fd, generation_name)",
-		])).toBe(true);
+		expect(
+			tokensInOrder(removeSuffix, [
+				"rows, unused_total = _scan_suffix_records(",
+				"terminal_state = _validate_wal_suffix(",
+				"terminal_revision != 3",
+				"head_revision != rows[-1][0]",
+				"if head_temp is not None:",
+				"_unlink(wal_fd, head_temp)",
+				"while index + 1 < len(rows):",
+				"_unlink(wal_fd, _HEAD)",
+				"_unlink(wal_fd, rows[-1][1])",
+				"_rmdir(generation_fd, _WAL)",
+				"_rmdir(generations_fd, generation_name)",
+			]),
+		).toBe(true);
 	});
 
 	test("PURGE table and recovery reject every independent source mutant", async () => {
@@ -1420,58 +1538,52 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 		}
 
 		for (const mutation of PURGE_RECOVERY_MUTATIONS) {
-			const mutant = mutatePythonFunction(
-				source,
-				mutation.functionName,
-				mutation.anchor,
-				mutation.replacement,
-			);
+			const mutant = mutatePythonFunction(source, mutation.functionName, mutation.anchor, mutation.replacement);
 			expect(mutant.length).toBeGreaterThan(0);
 			expect(purgeRecoveryClassifierIsExact(mutant)).toBe(false);
 		}
 
 		for (const mutation of PURGE_TABLE_ROW_MUTATIONS) {
-			const mutant = mutatePythonFunction(
-				source,
-				mutation.functionName,
-				mutation.anchor,
-				mutation.replacement,
-			);
+			const mutant = mutatePythonFunction(source, mutation.functionName, mutation.anchor, mutation.replacement);
 			expect(mutant.length).toBeGreaterThan(0);
 			const mutantAdmission = pythonFunction(mutant, "_purge_stage_pair_allowed").body;
 			expect(exactPurgeAdmission(mutantAdmission)).toBe(false);
 		}
 
-		expect(tokensInOrder(recovery, [
-			"if not _same(identity_digest, head_identity):",
-			"ledger_number != ledger_rows[-1][0]",
-			"_validate_wal_suffix(wal_rows, lifecycle, current_generation, identity_digest)",
-			"wal_revision != wal_rows[-1][0]",
-			"wal_rows[-1][0] != _MAX_WAL_RECORDS",
-			"_purge_stage_pair_allowed(generation_stage, ledger_stage, len(wal_rows), len(ledger_rows))",
-			"_unlink(wal_fd, wal_rows[index][1])",
-		])).toBe(true);
+		expect(
+			tokensInOrder(recovery, [
+				"if not _same(identity_digest, head_identity):",
+				"ledger_number != ledger_rows[-1][0]",
+				"_validate_wal_suffix(wal_rows, lifecycle, current_generation, identity_digest)",
+				"wal_revision != wal_rows[-1][0]",
+				"wal_rows[-1][0] != _MAX_WAL_RECORDS",
+				"_purge_stage_pair_allowed(generation_stage, ledger_stage, len(wal_rows), len(ledger_rows))",
+				"_unlink(wal_fd, wal_rows[index][1])",
+			]),
+		).toBe(true);
 	});
 
 	test("PURGE crash recovery remains forward-only and keeps revision seven", async () => {
 		const source = await readFile(HELPER, "utf8");
 		const recovery = pythonFunction(source, "_recover_purge_suffix").body;
-		expect(tokensInOrder(recovery, [
-			"_unlink(wal_fd, wal_rows[index][1])",
-			"_unlink(ledger_fd, ledger_rows[index][1])",
-			"_unlink(wal_fd, _HEAD)",
-			"_unlink(wal_fd, wal_rows[-1][1])",
-			"_rmdir(generation_fd, _WAL)",
-			"_rmdir(generations_fd, current_name)",
-			"_rmdir(lifecycle_fd, _GENERATIONS)",
-			"_unlink(ledger_fd, _HEAD)",
-			"_unlink(ledger_fd, ledger_rows[-1][1])",
-			"_rmdir(lifecycle_fd, _LEDGER)",
-			"_unlink(lifecycle_fd, _HEAD)",
-			"_unlink(lifecycle_fd, _IDENTITY)",
-			"_rmdir(root_fd, lifecycle_name)",
-			"_probe_absent(root_fd, lifecycle_name)",
-		])).toBe(true);
+		expect(
+			tokensInOrder(recovery, [
+				"_unlink(wal_fd, wal_rows[index][1])",
+				"_unlink(ledger_fd, ledger_rows[index][1])",
+				"_unlink(wal_fd, _HEAD)",
+				"_unlink(wal_fd, wal_rows[-1][1])",
+				"_rmdir(generation_fd, _WAL)",
+				"_rmdir(generations_fd, current_name)",
+				"_rmdir(lifecycle_fd, _GENERATIONS)",
+				"_unlink(ledger_fd, _HEAD)",
+				"_unlink(ledger_fd, ledger_rows[-1][1])",
+				"_rmdir(lifecycle_fd, _LEDGER)",
+				"_unlink(lifecycle_fd, _HEAD)",
+				"_unlink(lifecycle_fd, _IDENTITY)",
+				"_rmdir(root_fd, lifecycle_name)",
+				"_probe_absent(root_fd, lifecycle_name)",
+			]),
+		).toBe(true);
 		expect(recovery).toContain("wal_rows[-1][0] != _MAX_WAL_RECORDS");
 	});
 
@@ -1520,21 +1632,26 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 			}
 			const linked = fixtures[2];
 			if (linked !== undefined) {
-				expect(createPublicationDisposition(source, mutateCreatePublication(linked, false, 2, true, true, false))).toBe("fatal");
-				expect(createPublicationDisposition(source, mutateCreatePublication(linked, true, 3, true, true, false))).toBe("fatal");
-				expect(createPublicationDisposition(source, mutateCreatePublication(linked, true, 2, false, true, false))).toBe("fatal");
-				expect(createPublicationDisposition(source, mutateCreatePublication(linked, true, 2, true, false, false))).toBe("fatal");
-				expect(createPublicationDisposition(source, mutateCreatePublication(linked, true, 2, true, true, true))).toBe("fatal");
+				expect(
+					createPublicationDisposition(source, mutateCreatePublication(linked, false, 2, true, true, false)),
+				).toBe("fatal");
+				expect(
+					createPublicationDisposition(source, mutateCreatePublication(linked, true, 3, true, true, false)),
+				).toBe("fatal");
+				expect(
+					createPublicationDisposition(source, mutateCreatePublication(linked, true, 2, false, true, false)),
+				).toBe("fatal");
+				expect(
+					createPublicationDisposition(source, mutateCreatePublication(linked, true, 2, true, false, false)),
+				).toBe("fatal");
+				expect(
+					createPublicationDisposition(source, mutateCreatePublication(linked, true, 2, true, true, true)),
+				).toBe("fatal");
 			}
 		}
 
 		for (const mutation of CREATE_PUBLICATION_SOURCE_MUTATIONS) {
-			const mutant = mutatePythonFunction(
-				source,
-				mutation.functionName,
-				mutation.anchor,
-				mutation.replacement,
-			);
+			const mutant = mutatePythonFunction(source, mutation.functionName, mutation.anchor, mutation.replacement);
 			expect(mutant.length).toBeGreaterThan(0);
 			expect(createPublicationSourceIsExact(mutant)).toBe(false);
 			for (const targetSpec of CREATE_PUBLICATION_TARGETS) {
@@ -1583,16 +1700,18 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 	test("CREATE preserves published-before-capacity and partial-before-capacity order", async () => {
 		const source = await readFile(HELPER, "utf8");
 		const command = pythonFunction(source, "_cmd_create").body;
-		expect(tokensInOrder(command, [
-			"if _HEAD in existing_entries:",
-			"_scan_lifecycle(",
-			"return None, _E_EXISTS",
-			"_validate_allocated(allocated, lifecycle, generation, identity_digest)",
-			"_complete_create(",
-			"if error != errno.ENOENT:",
-			"root_entries = _list(root_fd)",
-			"if lifecycle_count >= 1024:",
-		])).toBe(true);
+		expect(
+			tokensInOrder(command, [
+				"if _HEAD in existing_entries:",
+				"_scan_lifecycle(",
+				"return None, _E_EXISTS",
+				"_validate_allocated(allocated, lifecycle, generation, identity_digest)",
+				"_complete_create(",
+				"if error != errno.ENOENT:",
+				"root_entries = _list(root_fd)",
+				"if lifecycle_count >= 1024:",
+			]),
+		).toBe(true);
 		expect(command).toContain("if root_entry == lifecycle_name:");
 		expect(command).toContain("if not created:");
 	});
@@ -1677,48 +1796,162 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 		const readFileBody = pythonFunction(source, "_read_file").body;
 		const inventory = pythonFunction(source, "_cmd_inventory").body;
 		const main = pythonFunction(source, "main").body;
-		expect(tokensInOrder(readFileBody, [
-			"complete = False",
-			"if count <= 0:",
-			"raise Fatal(_E_UNCERTAIN)",
-			"if not complete and result is not None:",
-			"_zero(result)",
-		])).toBe(true);
+		expect(
+			tokensInOrder(readFileBody, [
+				"complete = False",
+				"if count <= 0:",
+				"raise Fatal(_E_UNCERTAIN)",
+				"if not complete and result is not None:",
+				"_zero(result)",
+			]),
+		).toBe(true);
 		const guardedInventory = inventoryResponseGuard(inventory);
-		expect(tokensInOrder(guardedInventory, [
-			"_close_scan(fds, scan)",
-			"fds.close(lifecycle_fd)",
-			"if fds.uncertain:",
-			"_root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)",
-			"_write_frame(output_fd, _SESSION, session_response)",
-		])).toBe(true);
+		expect(
+			tokensInOrder(guardedInventory, [
+				"_close_scan(fds, scan)",
+				"fds.close(lifecycle_fd)",
+				"if fds.uncertain:",
+				"_root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)",
+				"_write_frame(output_fd, _SESSION, session_response)",
+			]),
+		).toBe(true);
 		const inventoryMutant = replaceUnique(inventory, "_zero(session_response)", "pass");
 		expect(inventoryMutant.length).toBeGreaterThan(0);
 		expect(inventoryResponseGuard(inventoryMutant)).toBe("");
-		expect(tokensInOrder(main, [
-			"kind, value = _dispatch(",
-			"_root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)",
-			'if kind in ("ok", "session") and value is not None:',
-			"_zero(value)",
-			"_zero(payload)",
-		])).toBe(true);
+		expect(
+			tokensInOrder(main, [
+				"kind, value = _dispatch_v4(",
+				"_root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)",
+				'if kind in ("ok", "session") and value is not None:',
+				"_zero(value)",
+				"_zero(payload)",
+			]),
+		).toBe(true);
 	});
 
 	test("root and lock authority remain bound around recovery", async () => {
 		const source = await readFile(HELPER, "utf8");
 		const bindLock = pythonFunction(source, "_bind_lock").body;
 		const recoverRoot = pythonFunction(source, "_recover_root").body;
-		expect(tokensInOrder(bindLock, [
-			"fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
-			"fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
-		])).toBe(true);
-		expect(count(recoverRoot, "_root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)")).toBeGreaterThanOrEqual(10);
+		expect(
+			tokensInOrder(bindLock, [
+				"fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+				"fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+			]),
+		).toBe(true);
+		expect(
+			count(recoverRoot, "_root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)"),
+		).toBeGreaterThanOrEqual(10);
 		expect(recoveryPhaseChecks(recoverRoot)).toBe(true);
+	});
+
+	test("V5 startup mode, decoder, and response paths stay exact", async () => {
+		const source = await readFile(HELPER, "utf8");
+		for (const exact of [
+			"_V5_HELLO = 0xF0",
+			"_V5_READY = 0x84",
+			"_WS_BEGIN = 0x0A",
+			"_WS_INVENTORY = 0x17",
+			"_MODE_UNSELECTED = 0",
+			"_MODE_V4_COMPAT = 1",
+			"_MODE_V5_READY = 2",
+			"_MODE_V5_BLOCKED = 3",
+			"_V5_OPCODES = frozenset((_V5_HELLO, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17))",
+		])
+			expect(source).toContain(exact);
+
+		const hello = pythonFunction(source, "_v5_handle_hello").body;
+		expect(
+			tokensInOrder(hello, [
+				'if len(payload) != 8 or payload != b"PISTOV05":',
+				'return (_MODE_UNSELECTED, "error", _E_PROTOCOL)',
+				"if _is_empty_root(root_fd):",
+				'return (_MODE_V5_READY, "v5_ready", None)',
+				'return (_MODE_V5_BLOCKED, "error", _E_STATE)',
+			]),
+		).toBe(true);
+
+		const decoder = pythonFunction(source, "_v5_validate_request").body;
+		for (const exact of [
+			"if len(payload) != 172:",
+			"if len(payload) < 169:",
+			"if len(payload) == 169:",
+			"if len(payload) > 1048576:",
+			"if len(payload) != 168:",
+			"if len(payload) != 128:",
+			"if len(payload) != 173:",
+			"raise Fatal(_E_PROTOCOL)",
+			"return _E_INPUT",
+			"return _E_BOUNDS",
+		])
+			expect(decoder).toContain(exact);
+		expect(
+			tokensInOrder(decoder, [
+				"data_view = memoryview(payload)[169:]",
+				"computed = _digest(data_view)",
+				"data_view.release()",
+				"if not _same_at(payload, 137, computed):",
+				"_zero(computed)",
+			]),
+		).toBe(true);
+		expect(decoder).toContain(`if _range_zero(payload, 96, 128):
+            raise Fatal(_E_PROTOCOL)`);
+		expect(decoder).toContain(`if opcode == _WS_INVENTORY:
+        if len(payload) != 0:
+            raise Fatal(_E_PROTOCOL)`);
+
+		const dispatch = pythonFunction(source, "_dispatch_v5").body;
+		expect(
+			tokensInOrder(dispatch, [
+				"if opcode == _V5_HELLO:",
+				'return (v5_mode, "error", _E_PROTOCOL)',
+				"err = _v5_validate_request(opcode, payload)",
+				"if opcode == _WS_INVENTORY:",
+				'return (v5_mode, "done", None)',
+				"if opcode == _WS_BEGIN:",
+				'return (v5_mode, "error", _E_BUSY)',
+				'return (v5_mode, "error", _E_ABSENT)',
+			]),
+		).toBe(true);
+
+		const main = pythonFunction(source, "main").body;
+		expect(
+			tokensInOrder(main, [
+				"command_mark = fds.mark()",
+				"if v5_mode == _MODE_UNSELECTED:",
+				"next_mode, kind, value = _v5_handle_hello(root_fd, payload)",
+				"kind, value = _dispatch_v4(",
+				"elif v5_mode == _MODE_V4_COMPAT:",
+				"elif v5_mode == _MODE_V5_BLOCKED:",
+				"elif v5_mode == _MODE_V5_READY:",
+				"next_mode, kind, value = _dispatch_v5(current_opcode, payload, v5_mode)",
+				"fds.close_after(command_mark)",
+				"if fds.mark() != command_mark or fds.uncertain:",
+				"_root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)",
+				"v5_mode = next_mode",
+				'elif kind == "v5_ready":',
+				"response = bytearray(9)",
+				"response[0] = _V5_HELLO",
+				'response[1:9] = b"PISTOV05"',
+				"_write_frame(1, _V5_READY, response)",
+				'elif kind == "done":',
+				"_write_frame(1, _DONE, response)",
+				"_zero(payload)",
+			]),
+		).toBe(true);
+		expect(main).toContain(`if current_opcode not in _V5_OPCODES:
+                            raise Fatal(_E_PROTOCOL)`);
+		expect(main).toContain(`if current_opcode != _V5_HELLO:
+                            raise Fatal(_E_PROTOCOL)`);
 	});
 
 	test("static source keeps the hostile-input boundary and forbidden syntax closed", async () => {
 		const source = await readFile(HELPER, "utf8");
 		expect(/(^|[^.A-Za-z0-9_])open\s*\(/m.test(source)).toBe(false);
-		expect(/\b(os\.environ|os\.getenv|sys\.argv|traceback|subprocess|tempfile|socket|eval|exec|input|print)\b/.test(source)).toBe(false);
+		expect(
+			/\b(os\.environ|os\.getenv|sys\.argv|traceback|subprocess|tempfile|socket|eval|exec|input|print)\b/.test(
+				source,
+			),
+		).toBe(false);
 	});
 });
