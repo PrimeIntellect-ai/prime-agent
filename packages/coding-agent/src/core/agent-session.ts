@@ -9349,6 +9349,8 @@ export class AgentSession {
 			extensionsResult.runtime.getExecEnv = this._execEnvProvider;
 		}
 
+		// Rebuilds replace the runner: retire the old one (stale ctx, timers cancelled) without staling the shared/reused runtime.
+		this._extensionRunner?.retire();
 		this._extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,

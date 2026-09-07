@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -176,6 +176,56 @@ describe("AgentSession dynamic tool registration", () => {
 		expect(session.getActiveToolNames()).toContain("hidden_tool");
 		expect(session.systemPrompt).not.toContain("hidden_tool");
 		expect(session.systemPrompt).not.toContain("Description should not appear in available tools");
+
+		session.dispose();
+	});
+
+	it("cancels extension ctx timers when reload replaces the runner", async () => {
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const sessionManager = SessionManager.inMemory();
+		let ticks = 0;
+		let scheduled = false;
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						// Schedule only on the first session_start so the post-reload runner adds no replacement timer.
+						if (scheduled) return;
+						scheduled = true;
+						ctx.setInterval(() => {
+							ticks++;
+						}, 5);
+					});
+				},
+			],
+		});
+		await resourceLoader.reload();
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager,
+			sessionManager,
+			resourceLoader,
+		});
+
+		vi.useFakeTimers();
+		try {
+			await session.bindExtensions({});
+			await vi.advanceTimersByTimeAsync(20);
+			expect(ticks).toBeGreaterThan(0);
+
+			await session.reload();
+			const ticksAtReload = ticks;
+			await vi.advanceTimersByTimeAsync(200);
+			expect(ticks).toBe(ticksAtReload);
+		} finally {
+			vi.useRealTimers();
+		}
 
 		session.dispose();
 	});

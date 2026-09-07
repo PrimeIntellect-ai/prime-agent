@@ -541,6 +541,38 @@ describe("ExtensionRunner", () => {
 			expect(fs.existsSync(firedMarker)).toBe(false);
 		});
 
+		it("cannot reactivate a fired ctx timeout via handle.refresh()", async () => {
+			// Real timers on purpose: the guarantee rides on native Node clearTimeout semantics, which fake timers do not reproduce.
+			const countFile = path.join(tempDir, "refresh-fire-count");
+			fs.writeFileSync(
+				path.join(extensionsDir, "refreshing-timer.ts"),
+				`import * as fs from "node:fs";
+				export default function(pi) {
+					let handle;
+					pi.on("context", async (_event, ctx) => {
+						if (!handle) {
+							handle = ctx.setTimeout(() => {
+								const count = fs.existsSync(${JSON.stringify(countFile)}) ? Number(fs.readFileSync(${JSON.stringify(countFile)}, "utf8")) : 0;
+								fs.writeFileSync(${JSON.stringify(countFile)}, String(count + 1));
+							}, 5);
+						} else {
+							handle.refresh();
+						}
+					});
+				}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			await runner.emitContext([]);
+			await vi.waitFor(() => expect(fs.existsSync(countFile)).toBe(true));
+			await runner.emitContext([]);
+			await new Promise((resolve) => setTimeout(resolve, 40));
+
+			expect(fs.readFileSync(countFile, "utf8")).toBe("1");
+		});
+
 		it("clears a pending timer via ctx.clearTimeout", async () => {
 			const firedMarker = path.join(tempDir, "cleared-timer-fired");
 			fs.writeFileSync(

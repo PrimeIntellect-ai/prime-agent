@@ -473,12 +473,19 @@ export class ExtensionRunner {
 		message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 	): void {
 		if (!this.staleMessage) {
-			this.staleMessage = message;
+			this.retire(message);
 			this.runtime.invalidate(message);
-			// No ctx timer outlives its owner: unload cancels everything still pending.
-			for (const handle of this.hostTimers) clearTimeout(handle);
-			this.hostTimers.clear();
 		}
+	}
+
+	/** Runner-local retirement for runner replacement: ctx goes stale and no host timer outlives the runner, while the runtime object stays live for the replacement runner (it may be shared or reused). */
+	retire(
+		message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+	): void {
+		if (this.staleMessage) return;
+		this.staleMessage = message;
+		for (const handle of this.hostTimers) clearTimeout(handle);
+		this.hostTimers.clear();
 	}
 
 	private assertActive(): void {
@@ -523,7 +530,11 @@ export class ExtensionRunner {
 		ms: number,
 	): ReturnType<typeof setTimeout> {
 		const run = () => {
-			if (kind === "setTimeout") this.hostTimers.delete(handle);
+			// A fired timeout is dead: clearTimeout makes handle.refresh() a permanent no-op, so nothing revives it past unload.
+			if (kind === "setTimeout") {
+				this.hostTimers.delete(handle);
+				clearTimeout(handle);
+			}
 			try {
 				const result = callback();
 				if (result instanceof Promise) {
