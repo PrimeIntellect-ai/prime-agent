@@ -53,13 +53,15 @@ Prime Agent combines a persistent Python control environment with durable harnes
 
 ## Getting Started
 
+Windows, macOS, and Linux are supported. The release installer below is for macOS or Linux; Windows setup is documented in [Windows Setup](packages/coding-agent/docs/windows.md).
+
 Install the latest stable release on macOS or Linux:
 
 ```bash
 curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
-The installer requires HTTPS for release downloads, checks the selected archive against the release origin's SHA-256 inventory, installs the `prime-agent` command, and can prepare the Python runtime used by the agent. The checksum detects corruption or an inconsistent transfer; because the inventory and archive come from the same origin, HTTPS is the authenticity boundary.
+The installer requires HTTPS for release downloads, checks the selected archive against the release origin's SHA-256 inventory, installs the `prime-agent` command, and can prepare the Python runtime used by the agent. The checksum detects corruption or an inconsistent transfer; because the inventory and archive come from the same origin, HTTPS is the authenticity boundary. In this fork, `supreme` and `supreme-agent` are the primary CLI aliases; `prime-agent` and `pi` remain compatibility aliases.
 
 Start Prime Agent from the repository or directory you want it to work in:
 

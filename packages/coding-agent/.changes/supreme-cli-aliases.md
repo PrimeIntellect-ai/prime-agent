@@ -1,0 +1,2 @@
+- Added `supreme` and `supreme-agent` as primary CLI commands while preserving `prime-agent` and `pi` compatibility aliases.
+- Added native Windows runtime support, including hidden lifecycle subprocesses and platform-correct kernel venv paths.

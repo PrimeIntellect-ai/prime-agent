@@ -42,6 +42,8 @@ Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mon
 
 ## Quick Start
 
+Windows, macOS, and Linux are supported. The shell installer below targets macOS/Linux; see [Windows Setup](docs/windows.md) for native Windows setup.
+
 ```bash
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
@@ -68,7 +70,9 @@ prime-agent
 
 Then just talk to Prime Agent. By default, Prime Agent gives the model one tool: `ipython`. The model uses the persistent kernel to read files, run commands, edit code, and inspect data. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [Prime Agent packages](#prime-agent-packages).
 
-The Python kernel runtime is set up automatically on first invocation. Set `PRIME_AGENT_KERNEL_PYTHON` to use an existing Python environment with `prime-agent-runtime`.
+The Python kernel runtime is set up automatically on first invocation. On Windows the managed venv uses `~/.prime/agent/kernel-venv/Scripts/python.exe`; on POSIX it uses `~/.prime/agent/kernel-venv/bin/python`. Set `PRIME_AGENT_KERNEL_PYTHON` only when you want to use an existing Python environment with `prime-agent-runtime`.
+
+In this fork, `supreme` and `supreme-agent` are the primary CLI names. `prime-agent` and `pi` remain compatibility aliases.
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 

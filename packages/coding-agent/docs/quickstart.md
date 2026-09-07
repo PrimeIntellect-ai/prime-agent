@@ -4,6 +4,8 @@ This page gets you from install to a useful first Prime Agent session.
 
 ## Install
 
+Windows, Linux, and macOS are supported. The release installer below targets Linux/macOS; Windows setup is covered in [Windows Setup](windows.md).
+
 Install the latest stable release on Linux or macOS:
 
 ```bash
@@ -34,7 +36,7 @@ npm ci
 ./prime-agent.sh
 ```
 
-The source runner preserves the directory from which it is invoked, so you can also call `/path/to/prime-agent/prime-agent.sh` from another project.
+The source runner preserves the directory from which it is invoked, so you can also call `/path/to/prime-agent/prime-agent.sh` from another project. On Windows, install Node.js 22.8.0 or newer and Git for Windows, run `npm ci`, then `npm link` from `packages/coding-agent`; this exposes `supreme` and `supreme-agent` as the primary CLI names.
 
 ## Authenticate
 
@@ -71,7 +73,7 @@ Once Prime Agent starts, type a request and press Enter:
 Summarize this repository and tell me how to run its checks.
 ```
 
-Prime Agent gives the model one built-in tool, `ipython`. The long-lived kernel is a control environment for reading and editing files, running project commands, inspecting data, retaining Python state, and invoking installed skills. The kernel runtime is bootstrapped automatically on first use; set `PRIME_AGENT_KERNEL_PYTHON` to use an existing Python environment with `prime-agent-runtime`.
+Prime Agent gives the model one built-in tool, `ipython`. The long-lived kernel is a control environment for reading and editing files, running project commands, inspecting data, retaining Python state, and invoking installed skills. The kernel runtime is bootstrapped automatically on first use. Windows uses the venv interpreter under `kernel-venv\Scripts\python.exe`; POSIX uses `kernel-venv/bin/python`. Set `PRIME_AGENT_KERNEL_PYTHON` only to override the managed environment with an existing Python that already has `prime-agent-runtime`.
 
 Prime Agent runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback.
 

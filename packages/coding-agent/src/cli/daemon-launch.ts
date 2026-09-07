@@ -1,3 +1,4 @@
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../utils/child-process.js";
 /**
  * Daemon launch/readiness helpers.
  *
@@ -400,6 +401,7 @@ Then retry the original command.`,
 		{
 			cwd: spawnCwd ?? process.cwd(),
 			detached: true,
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			env,
 			// A pipe would tie the daemon's stderr to this short-lived CLI
 			// (EPIPE once it exits); crash details come from the daemon log,

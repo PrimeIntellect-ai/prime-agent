@@ -27,7 +27,12 @@ import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
-import { shouldUseWindowsShell, spawnHidden, spawnSyncHidden } from "../utils/child-process.js";
+import {
+	shouldUseWindowsShell,
+	spawnHidden,
+	spawnSyncHidden,
+	WINDOWS_HIDDEN_PROCESS_OPTIONS,
+} from "../utils/child-process.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
 import { canonicalizePath, isLocalPath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
@@ -2350,6 +2355,7 @@ export class DefaultPackageManager implements PackageManager {
 			cwd: options?.cwd,
 			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
 			shell: shouldUseWindowsShell(command),
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			env: getEnv(),
 		});
 	}

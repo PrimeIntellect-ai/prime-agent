@@ -279,3 +279,6 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 		}
 	});
 }
+
+/** Options for internal subprocesses that must not open a Windows console window. */
+export const WINDOWS_HIDDEN_PROCESS_OPTIONS = process.platform === "win32" ? { windowsHide: true } : {};

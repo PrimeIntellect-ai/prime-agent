@@ -122,6 +122,7 @@ function runProcessQuery(command: string, args: string[], options?: ProcessQuery
 	return execFileSyncHidden(command, args, {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
+		windowsHide: true,
 		env: options?.env,
 	});
 }

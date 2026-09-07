@@ -1,3 +1,4 @@
+import { WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../utils/child-process.js";
 /**
  * Background daemon mode.
  *
@@ -976,6 +977,7 @@ export class AgentDaemon {
 			const child = spawnHidden(launch.command, launch.args, {
 				cwd: this.options.defaultSessionConfig.cwd ?? process.cwd(),
 				detached: true,
+				...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 				env: environment,
 				stdio: "ignore",
 			});

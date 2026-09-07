@@ -8,7 +8,10 @@
 		"configDir": ".prime/agent"
 	},
 	"bin": {
-		"pi": "dist/bundle/cli.js"
+		"supreme": "bin/supreme-agent.cjs",
+		"supreme-agent": "bin/supreme-agent.cjs",
+		"prime-agent": "bin/supreme-agent.cjs",
+		"pi": "bin/supreme-agent.cjs"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -19,6 +22,7 @@
 		}
 	},
 	"files": [
+		"bin",
 		"dist",
 		"docs",
 		"examples",
