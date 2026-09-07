@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
-import { execFileSyncHidden } from "../utils/child-process.js";
+import { execFileSyncHidden, isProcessAlive } from "../utils/child-process.js";
 
 export const SESSION_LEASES_ENABLED_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
 export const SESSION_LEASE_OWNER_ID_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
@@ -50,7 +50,7 @@ export class SessionLease {
 		try {
 			withLeaseGuard(this.directory, () => {
 				const owner = readLeaseOwner(this.directory);
-				if (owner?.token === this.token) {
+				if (typeof owner === "object" && owner.token === this.token) {
 					reclaimStaleLease(this.directory);
 				}
 			});
@@ -83,20 +83,14 @@ export function canonicalSessionPath(sessionPath: string): string {
 	}
 }
 
-function readLeaseOwner(directory: string): SessionLeaseOwner | undefined {
+// An unreadable owner may hold a live lease. Only a missing owner is safely absent.
+function readLeaseOwner(directory: string): SessionLeaseOwner | "absent" | "unreadable" {
 	const ownerPath = join(directory, "owner.json");
 	let raw: string;
 	try {
 		raw = readFileSync(ownerPath, "utf8");
 	} catch (error) {
-		const err = error as NodeJS.ErrnoException;
-		// ENOENT means no lease file exists - no owner.
-		if (err.code === "ENOENT") {
-			return undefined;
-		}
-		// EACCES/EPERM or any other read failure - fail closed rather than
-		// reclaiming a possibly live lease we cannot read.
-		throw error;
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
 	}
 	try {
 		const parsed = JSON.parse(raw) as Partial<SessionLeaseOwner>;
@@ -111,20 +105,10 @@ function readLeaseOwner(directory: string): SessionLeaseOwner | undefined {
 		}
 		return parsed as SessionLeaseOwner;
 	} catch (error) {
-		// Invalid/corrupt JSON or schema - fail closed instead of reclaiming.
 		if (error instanceof SyntaxError || error instanceof TypeError) {
-			throw new Error(`Corrupt session lease owner file: ${ownerPath} - ${(error as Error).message}`);
+			throw new Error(`Corrupt session lease owner file: ${ownerPath} - ${error.message}`);
 		}
 		throw error;
-	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
 	}
 }
 
@@ -353,7 +337,10 @@ export function acquireSessionLease(
 				}
 				if (isRenameTargetContention(directory, err.code)) {
 					const existingOwner = readLeaseOwner(directory);
-					if (existingOwner && isLeaseOwnerAlive(existingOwner)) {
+					if (existingOwner === "unreadable") {
+						continue;
+					}
+					if (existingOwner !== "absent" && isLeaseOwnerAlive(existingOwner)) {
 						throw new SessionAlreadyActiveError(canonicalPath, existingOwner.activeSessionId);
 					}
 					reclaimStaleLease(directory);
@@ -364,7 +351,7 @@ export function acquireSessionLease(
 		}
 
 		const owner = existsSync(directory) ? readLeaseOwner(directory) : undefined;
-		if (owner && isLeaseOwnerAlive(owner)) {
+		if (typeof owner === "object" && isLeaseOwnerAlive(owner)) {
 			throw new SessionAlreadyActiveError(canonicalPath, owner.activeSessionId);
 		}
 		throw new Error(`Could not acquire session lease: ${canonicalPath}`);

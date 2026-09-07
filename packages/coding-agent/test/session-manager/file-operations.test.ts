@@ -1,7 +1,38 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+	appendFileSync,
+	chmodSync,
+	closeSync,
+	lstatSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	utimesSync,
+	writeFileSync,
+	writeSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const fullReadCounter = vi.hoisted(() => ({ suffix: undefined as string | undefined, count: 0 }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		readFileSync: ((path: Parameters<typeof actual.readFileSync>[0], options?: never) => {
+			// Suffix match: repair resolves the realpath (/private/var vs /var on macOS).
+			if (fullReadCounter.suffix !== undefined && String(path).endsWith(fullReadCounter.suffix)) {
+				fullReadCounter.count++;
+			}
+			return actual.readFileSync(path, options);
+		}) as typeof actual.readFileSync,
+	};
+});
+
 import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
 import {
 	findMostRecentSession,
@@ -529,6 +560,127 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	// The suspicion gate must keep clean opens at ONE full read (the loader's own).
+	it.each([
+		[
+			"a clean large session",
+			(): string[] => {
+				const filler = "x".repeat(2048);
+				const lines: string[] = [];
+				for (let index = 0; index < 2000; index++) {
+					lines.push(
+						JSON.stringify({
+							type: "message",
+							id: `m${index}`,
+							parentId: index === 0 ? null : `m${index - 1}`,
+							message: { role: "user", content: filler, timestamp: index },
+						}),
+					);
+				}
+				return lines;
+			},
+		],
+		[
+			"a benign trailing blank line",
+			(): string[] => [
+				JSON.stringify({
+					type: "message",
+					id: "m1",
+					parentId: null,
+					message: { role: "user", content: "hi", timestamp: 1 },
+				}),
+				"",
+			],
+		],
+	])("opens %s with exactly one full read", (_name, buildLines) => {
+		const file = join(tempDir, "gate.jsonl");
+		const header = {
+			type: "session",
+			version: 3,
+			id: "gate-session",
+			timestamp: "2026-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+		writeFileSync(file, `${[JSON.stringify(header), ...buildLines()].join("\n")}\n`);
+		fullReadCounter.suffix = "gate.jsonl";
+		fullReadCounter.count = 0;
+
+		try {
+			SessionManager.open(file, tempDir);
+			expect(fullReadCounter.count).toBe(1);
+		} finally {
+			fullReadCounter.suffix = undefined;
+		}
+	});
+
+	it("repairs crash damage at open: torn tail truncated, zero-filled record recovered, appends stay separate lines", () => {
+		const file = join(tempDir, "crashed.jsonl");
+		const header = {
+			type: "session",
+			version: 3,
+			id: "crashed-session",
+			timestamp: "2026-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+		const kept = {
+			type: "message",
+			id: "m1",
+			parentId: null,
+			message: { role: "user", content: "kept", timestamp: 1 },
+		};
+		const zeroFilled = {
+			type: "message",
+			id: "m2",
+			parentId: "m1",
+			message: { role: "user", content: "recovered", timestamp: 2 },
+		};
+		const damaged = `${JSON.stringify(header)}\n${JSON.stringify(kept)}\n\u0000\u0000\u0000\u0000${JSON.stringify(zeroFilled)}\n{"type":"message","id":"torn`;
+		writeFileSync(file, damaged);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			const sm = SessionManager.open(file, tempDir);
+			expect(sm.getHeader()?.id).toBe("crashed-session");
+			expect(sm.getEntries().map((entry) => entry.id)).toEqual(["m1", "m2"]);
+			sm.appendMessage({ role: "user", content: "after crash", timestamp: 3 });
+			sm.flushNow();
+
+			const lines = readFileSync(file, "utf-8").split("\n").filter(Boolean);
+			const parsed = lines.map((line) => JSON.parse(line));
+			expect(parsed.map((entry) => entry.id ?? entry.type)).toEqual([
+				"crashed-session",
+				"m1",
+				"m2",
+				expect.any(String),
+			]);
+			expect(parsed.at(-1)?.message?.content).toBe("after crash");
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("repairs a damaged transcript through its symlink alias at the real file", () => {
+		const realFile = join(tempDir, "real.jsonl");
+		const alias = join(tempDir, "alias.jsonl");
+		const header = { type: "session", version: 3, id: "sym-session", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" };
+		writeFileSync(realFile, `${JSON.stringify(header)}\n{"type":"message","id":"torn`);
+		chmodSync(realFile, 0o600);
+		symlinkSync(realFile, alias);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			SessionManager.open(alias, tempDir);
+			expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+			const repaired = readFileSync(realFile, "utf-8");
+			expect(repaired.endsWith("\n")).toBe(true);
+			expect(repaired).not.toContain("torn");
+			expect(statSync(realFile).mode & 0o777).toBe(0o600);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("truncates and rewrites empty file with valid header", () => {
 		const emptyFile = join(tempDir, "empty.jsonl");
 		writeFileSync(emptyFile, "");
@@ -650,5 +802,139 @@ describe("session info usage totals", () => {
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("readSessionInfo incremental scans", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-scan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	const header = { type: "session", version: 3, id: "scan1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" };
+	const msg = (id: string, parentId: string | null, role: string, text: string) => ({
+		type: "message",
+		id,
+		parentId,
+		timestamp: "2026-01-01T00:00:01Z",
+		message: { role, content: text, timestamp: 1 },
+	});
+	const line = (entry: unknown) => `${JSON.stringify(entry)}\n`;
+
+	it("coalesces concurrent unchanged readers and gives post-append readers the fresh snapshot", async () => {
+		const file = join(tempDir, "serialized.jsonl");
+		let content = line(header);
+		for (let i = 0; i < 20000; i++) {
+			content += line(msg(`m${i}`, i === 0 ? null : `m${i - 1}`, "user", `filler message ${i} ${"x".repeat(120)}`));
+		}
+		writeFileSync(file, content);
+
+		const [first, second] = await Promise.all([readSessionInfo(file), readSessionInfo(file)]);
+		expect(first?.messageCount).toBe(20000);
+		expect(second).toBe(first);
+
+		const early = readSessionInfo(file);
+		// Let the scan stat the file and start streaming before the append.
+		await new Promise((resolveTick) => setImmediate(resolveTick));
+		appendFileSync(file, line(msg("late", "m19999", "assistant", "post-append entry")));
+		const late = await readSessionInfo(file);
+		expect(late?.messageCount).toBe(20001);
+		expect((await early)?.messageCount).toBeLessThanOrEqual(20001);
+	});
+
+	it("resumes from the scanned offset: prefix never re-read, torn tail folded exactly once", async () => {
+		const file = join(tempDir, "incremental.jsonl");
+		const torn = line(msg("m2", "m1", "assistant", "answer"));
+		writeFileSync(file, line(header) + line(msg("m1", null, "user", "original question")) + torn.slice(0, 20));
+		expect((await readSessionInfo(file))?.messageCount).toBe(1);
+
+		// Same-length positional write into the scanned prefix, keeping the inode:
+		// outside the writer model, so consumed bytes are never re-read.
+		const position = readFileSync(file, "utf8").indexOf("original question");
+		const fd = openSync(file, "r+");
+		try {
+			writeSync(fd, Buffer.from("modified question"), 0, 17, position);
+		} finally {
+			closeSync(fd);
+		}
+		appendFileSync(file, torn.slice(20));
+
+		const info = await readSessionInfo(file);
+		expect(info?.messageCount).toBe(2);
+		expect(info?.firstMessage).toBe("original question");
+	});
+
+	// The rename row preserves the 16 bytes before the old offset, so only the
+	// replaced inode identifies it; the truncate row keeps the inode, so only
+	// the changed prefix tail does.
+	it.each([
+		{ mode: "rename", first: "name variant AAAA", rewrittenFirst: "name variant BBBB" },
+		{ mode: "truncate", first: "first draft AAAAAA", rewrittenFirst: "rewritten opening line" },
+	])("rescans from byte 0 after a grown $mode rewrite", async ({ mode, first, rewrittenFirst }) => {
+		const file = join(tempDir, `${mode}-rewrite.jsonl`);
+		writeFileSync(
+			file,
+			line(header) + line(msg("m1", null, "user", first)) + line(msg("m2", "m1", "assistant", "stable reply")),
+		);
+		expect((await readSessionInfo(file))?.firstMessage).toBe(first);
+
+		const rewritten =
+			line(header) +
+			line(msg("m1", null, "user", rewrittenFirst)) +
+			line(msg("m2", "m1", "assistant", "stable reply")) +
+			line(msg("m3", "m2", "assistant", "appended"));
+		if (mode === "rename") {
+			const tempPath = join(tempDir, "rewrite.tmp");
+			writeFileSync(tempPath, rewritten);
+			renameSync(tempPath, file);
+		} else {
+			writeFileSync(file, rewritten);
+		}
+
+		const info = await readSessionInfo(file);
+		expect(info?.messageCount).toBe(3);
+		expect(info?.firstMessage).toBe(rewrittenFirst);
+	});
+
+	it("invalidates scanned bytes after crash repair and resumes later appends", async () => {
+		const file = join(tempDir, "repaired-scan.jsonl");
+		writeFileSync(
+			file,
+			line(header) +
+				line(msg("m1", null, "user", "kept")) +
+				"\0\0" +
+				line(msg("m2", "m1", "user", "recovered")) +
+				'{"type":"message","id":"torn',
+		);
+		expect((await readSessionInfo(file))?.messageCount).toBe(1);
+		const manager = SessionManager.open(file, tempDir);
+		expect((await readSessionInfo(file))?.messageCount).toBe(2);
+		manager.appendMessage({ role: "user", content: "after repair", timestamp: 3 });
+		manager.flushNow();
+		const scanned = await readSessionInfo(file);
+		expect(scanned?.messageCount).toBe(3);
+		expect(scanned?.allMessagesText).toContain("recovered");
+		expect(scanned?.allMessagesText).toContain("after repair");
+	});
+
+	it("evicts scan state when the file disappears so a recreated file rescans", async () => {
+		const file = join(tempDir, "recreated.jsonl");
+		writeFileSync(file, line(header) + line(msg("m1", null, "user", "before delete")));
+		const fixedTime = new Date("2026-01-02T00:00:00Z");
+		utimesSync(file, fixedTime, fixedTime);
+		expect((await readSessionInfo(file))?.firstMessage).toBe("before delete");
+
+		rmSync(file);
+		expect(await readSessionInfo(file)).toBeNull();
+
+		writeFileSync(file, line(header) + line(msg("m1", null, "user", "after recreate")));
+		utimesSync(file, fixedTime, fixedTime);
+		expect((await readSessionInfo(file))?.firstMessage).toBe("after recreate");
 	});
 });

@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 
 /**
  * Per-child RLM subagent hydration/display metadata.
@@ -76,29 +76,19 @@ export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): bo
 		return false;
 	}
 	mkdirSync(entry.sessionDir, { recursive: true });
-	const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
-	const handle = openSync(tempPath, "wx", 0o600);
-	try {
-		try {
-			writeSync(handle, `${JSON.stringify(entry)}\n`);
-			fsyncSync(handle);
-		} finally {
-			closeSync(handle);
-		}
-		renameSync(tempPath, path);
-	} catch (error) {
-		// A failed write, fsync, or rename must not leak the temp file.
-		rmSync(tempPath, { force: true });
-		throw error;
-	}
+	writeFileAtomicSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600, fsync: true });
 	return true;
 }
 
-export async function readRlmSubagentDisplayEntry(sessionDir: string): Promise<RlmSubagentDisplayEntry | undefined> {
+export async function readRlmSubagentDisplayEntry(
+	sessionDir: string,
+	onReadError?: () => void,
+): Promise<RlmSubagentDisplayEntry | undefined> {
 	let contents: string;
 	try {
 		contents = await readFile(rlmSubagentDisplayPath(sessionDir), "utf8");
 	} catch {
+		onReadError?.();
 		return undefined;
 	}
 	try {

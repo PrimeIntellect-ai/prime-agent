@@ -15,10 +15,11 @@ import {
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
 import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, writeSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
+import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import {
 	clearPrimeCliCredentials,
 	getPrimeCliConfigPath,
@@ -116,9 +117,27 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 
 	private ensureFileExists(): void {
-		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", "utf-8");
-			chmodSync(this.authPath, 0o600);
+		let descriptor: number;
+		try {
+			// Exclusive create: a racing initializer must never replace saved credentials.
+			descriptor = openSync(this.authPath, "wx", 0o600);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				throw error;
+			}
+			return;
+		}
+		try {
+			const bytes = Buffer.from("{}");
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error(`Short write initializing ${this.authPath}`);
+				offset += written;
+			}
+			fchmodSync(descriptor, 0o600); // Exact bits despite the umask.
+		} finally {
+			closeSync(descriptor);
 		}
 	}
 
@@ -171,8 +190,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
-				chmodSync(this.authPath, 0o600);
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
 			}
 			return result;
 		} finally {
@@ -216,8 +234,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
-				chmodSync(this.authPath, 0o600);
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
 			}
 			throwIfCompromised();
 			return result;
@@ -609,6 +626,11 @@ export class AuthStorage {
 		}
 		this.staleAuthSources.set(token.provider, stale);
 		return true;
+	}
+
+	/** Forget every stale marking for a provider (explicit user re-selection). */
+	clearAuthStale(provider: string): void {
+		this.staleAuthSources.delete(provider);
 	}
 
 	private clearStaleAuthSource(provider: string, source: ActiveAuthStatusSource): void {
@@ -1059,7 +1081,8 @@ export class AuthStorage {
 		if (authSource === "runtime" || authSource === "environment") {
 			return undefined;
 		}
-		if (authSource === "prime_cli") {
+		// A stale CLI key must not erase the selected team used to validate cached model access.
+		if (authSource === "prime_cli" || (authSource === "stale" && config?.apiKey)) {
 			if (credential?.type === "api_key" && credential.primeTeam === null) {
 				return null;
 			}

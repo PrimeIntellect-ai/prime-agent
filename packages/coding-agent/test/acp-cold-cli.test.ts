@@ -27,7 +27,9 @@ afterEach(async () => {
 		await new Promise<void>((done) => server.close(() => done()));
 	}
 	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
+		// The CLI's daemon/kernel children may still be flushing caches under this
+		// dir when the child exits; retry the ENOTEMPTY/EBUSY window instead of failing cleanup.
+		rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -56,6 +58,9 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 	const projectDir = join(tempRoot, "project");
 	mkdirSync(agentDir, { recursive: true });
 	mkdirSync(projectDir, { recursive: true });
+	// One deterministic failed attempt: the session-layer auto-retry would
+	// otherwise re-issue the rejected request before reporting the failure.
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false } }), "utf-8");
 	writeFileSync(
 		join(agentDir, "models.json"),
 		JSON.stringify({
@@ -83,6 +88,7 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 			"--model",
 			"cold/test-model",
 			"--no-session",
+			"--no-tools",
 			"--offline",
 			"--daemon-socket",
 			join(tempRoot, "d.sock"),
