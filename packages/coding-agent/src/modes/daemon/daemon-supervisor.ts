@@ -2293,7 +2293,9 @@ export class DaemonSupervisor {
 				const workers = [...this.workers.values()].filter(
 					(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
 				);
-				await Promise.allSettled(openings);
+				for (const result of await Promise.allSettled(openings)) {
+					if (result.status === "fulfilled" && !workers.includes(result.value)) workers.push(result.value);
+				}
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
 					await Promise.all(

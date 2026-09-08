@@ -8,6 +8,7 @@ import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 
 interface SupervisorHarness {
 	workers: Map<string, unknown>;
+	openingWorkers: Map<string, Promise<unknown>>;
 	forwardToWorker(worker: unknown, command: DaemonCommand, timeoutMs?: number): Promise<DaemonResponse>;
 	handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonResponse | undefined>;
 	handleWorkerFrame(worker: unknown, frame: unknown): void;
@@ -30,7 +31,7 @@ function createSupervisorHarness(): SupervisorHarness {
 	}) as unknown as SupervisorHarness;
 }
 
-function worker(lifecycle: "ready" | "recovering" | "failed", connected = true) {
+function worker(lifecycle: "starting" | "ready" | "recovering" | "failed", connected = true) {
 	return {
 		descriptor: { lifecycle },
 		...(connected ? { client: {} } : {}),
@@ -38,6 +39,34 @@ function worker(lifecycle: "ready" | "recovering" | "failed", connected = true) 
 }
 
 describe("daemon supervisor heartbeat aggregation", () => {
+	it.each([true, false])("waits for startup before listing heartbeats (registered: %s)", async (registered) => {
+		const supervisor = createSupervisorHarness();
+		const target = worker("starting");
+		if (registered) supervisor.workers.set("target", target);
+		let finishStartup = () => {};
+		supervisor.openingWorkers.set(
+			"target",
+			new Promise<unknown>((resolve) => {
+				finishStartup = () => resolve(target);
+			}),
+		);
+		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
+		);
+
+		const pending = supervisor.handleCommand({} as DaemonSocketClient, { type: "heartbeats_list" });
+		expect(supervisor.forwardToWorker).not.toHaveBeenCalled();
+		target.descriptor.lifecycle = "ready";
+		supervisor.workers.set("target", target);
+		finishStartup();
+
+		await expect(pending).resolves.toMatchObject({
+			success: true,
+			data: { heartbeats: [{ job: { id: "heartbeat-1" } }] },
+		});
+		expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
+	});
+
 	it("uses the last complete worker snapshot during recovery", async () => {
 		const supervisor = createSupervisorHarness();
 		const first = worker("ready");
