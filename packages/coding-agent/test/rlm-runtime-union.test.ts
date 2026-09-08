@@ -6,6 +6,7 @@ import {
 	type LocalRlmChildAgentSnapshot,
 	type RlmChildAgentSnapshot,
 } from "../src/core/agent-session.js";
+import { createHostedRlmRuntimePort } from "../src/core/hosted-rlm-runtime-port.js";
 import {
 	type HostedRlmSpawnHandle,
 	type HostedRlmSubagentRegistryEntry,
@@ -649,6 +650,27 @@ describe("local host hosted-arm rejection", () => {
 		});
 		expect(r).not.toBeNull();
 		if (r !== null) expect(Object.isFrozen(r)).toBe(true);
+	});
+
+	test("preserves an already hardened hosted port without wrapping it twice", async () => {
+		const created = createHostedRlmRuntimePort(makeHostedPort());
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		const normalized = normalizeRlmSubagentRuntime(
+			{ hostedPort: created.value },
+			(_v: unknown): _v is never => false,
+			makeHostedIdentity(),
+		);
+		expect(normalized).not.toBeNull();
+		if (normalized === null || !("hostedPort" in normalized)) return;
+		expect(normalized.hostedPort).toBe(created.value);
+		expect(await normalized.hostedPort.startInitialTask({ prompt: "task" })).toEqual({
+			ok: true,
+			value: { code: "ADMITTED" },
+		});
+		const subscription = normalized.hostedPort.subscribe(() => undefined);
+		expect(subscription.ok).toBe(true);
+		if (subscription.ok) expect(subscription.value.unsubscribe()).toEqual({ ok: true });
 	});
 
 	test("empty expectedHostedIdentity rejected (all four fields required)", () => {

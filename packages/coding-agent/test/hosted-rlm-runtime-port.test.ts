@@ -142,6 +142,48 @@ async function withoutUnhandledRejection(action: () => Promise<void>): Promise<v
 afterEach(() => vi.useRealTimers());
 
 describe("hosted runtime port contract", () => {
+	test("returns the exact hardened port when wrapped again", () => {
+		const box = harness();
+		const repeated = createHostedRlmRuntimePort(box.port);
+		expect(repeated.ok).toBe(true);
+		if (repeated.ok) expect(repeated.value).toBe(box.port);
+		expect(createHostedRlmRuntimePort(new Proxy(box.port, {}))).toEqual({ ok: false, code: "INVALID_INPUT" });
+		expect(createHostedRlmRuntimePort(null)).toEqual({ ok: false, code: "INVALID_INPUT" });
+	});
+
+	test("uses captured WeakSet operations for registration and repeat lookup", () => {
+		const box = harness();
+		const hasDescriptor = Object.getOwnPropertyDescriptor(WeakSet.prototype, "has");
+		const addDescriptor = Object.getOwnPropertyDescriptor(WeakSet.prototype, "add");
+		expect(hasDescriptor).toBeDefined();
+		expect(addDescriptor).toBeDefined();
+		if (hasDescriptor === undefined || addDescriptor === undefined) return;
+		let created: ReturnType<typeof createHostedRlmRuntimePort> = { ok: false, code: "INVALID_INPUT" };
+		let repeated: ReturnType<typeof createHostedRlmRuntimePort> = { ok: false, code: "INVALID_INPUT" };
+		try {
+			Object.defineProperty(WeakSet.prototype, "has", {
+				value: (): boolean => false,
+				writable: true,
+				enumerable: false,
+				configurable: true,
+			});
+			Object.defineProperty(WeakSet.prototype, "add", {
+				value: (): WeakSet<object> => new WeakSet<object>(),
+				writable: true,
+				enumerable: false,
+				configurable: true,
+			});
+			created = createHostedRlmRuntimePort(box.raw);
+			if (created.ok) repeated = createHostedRlmRuntimePort(created.value);
+		} finally {
+			Object.defineProperty(WeakSet.prototype, "has", hasDescriptor);
+			Object.defineProperty(WeakSet.prototype, "add", addDescriptor);
+		}
+		expect(created.ok).toBe(true);
+		expect(repeated.ok).toBe(true);
+		if (created.ok && repeated.ok) expect(repeated.value).toBe(created.value);
+	});
+
 	test("normalizes an exact frozen seven-member capability in order", () => {
 		const box = harness();
 		expect(Object.keys(box.port)).toEqual([

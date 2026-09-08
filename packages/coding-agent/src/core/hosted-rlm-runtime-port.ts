@@ -121,6 +121,18 @@ const NativePromiseConstructorDescriptor = freezeDescriptor(
 	Object.getOwnPropertyDescriptor(Promise.prototype, "constructor"),
 );
 const NativeSpeciesDescriptor = freezeDescriptor(Object.getOwnPropertyDescriptor(Promise, Symbol.species));
+const AcceptedHostedRlmRuntimePorts = new WeakSet<object>();
+const NativeWeakSetHas = WeakSet.prototype.has;
+const NativeWeakSetAdd = WeakSet.prototype.add;
+const NativeReflectApply = Reflect.apply;
+const isAcceptedHostedPort = (value: unknown): value is HostedRlmRuntimePort => {
+	if (typeof value !== "object" || value === null) return false;
+	const present: unknown = NativeReflectApply(NativeWeakSetHas, AcceptedHostedRlmRuntimePorts, [value]);
+	return present === true;
+};
+const registerAcceptedHostedPort = (value: HostedRlmRuntimePort): void => {
+	NativeReflectApply(NativeWeakSetAdd, AcceptedHostedRlmRuntimePorts, [value]);
+};
 
 const IDENTITY_KEYS = Object.freeze(["childId", "sessionId", "sessionName", "modelSelector"]);
 const PORT_KEYS = Object.freeze([
@@ -627,7 +639,17 @@ function rawUnsubscribeCertain(raw: unknown): boolean {
 	return record !== null && record.status === "unsubscribed";
 }
 
+function reuseHostedRlmRuntimePort(raw: unknown): HostedRlmRuntimePort | null {
+	try {
+		return isAcceptedHostedPort(raw) ? raw : null;
+	} catch {
+		return null;
+	}
+}
+
 export function createHostedRlmRuntimePort(raw: unknown): HostedRlmRuntimePortFactoryResult {
+	const reusable = reuseHostedRlmRuntimePort(raw);
+	if (reusable !== null) return Object.freeze({ ok: true, value: reusable });
 	const record = exactRecord(raw, PORT_KEYS, false);
 	if (record === null) return Object.freeze({ ok: false, code: "INVALID_INPUT" });
 	const portIdentity = identity(record.identity);
@@ -1095,5 +1117,10 @@ export function createHostedRlmRuntimePort(raw: unknown): HostedRlmRuntimePortFa
 		subscribe,
 		close,
 	});
+	try {
+		registerAcceptedHostedPort(port);
+	} catch {
+		return Object.freeze({ ok: false, code: "INVALID_INPUT" });
+	}
 	return Object.freeze({ ok: true, value: port });
 }
