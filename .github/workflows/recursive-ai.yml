@@ -1,0 +1,46 @@
+name: Recursive AI laboratory
+
+on:
+  push:
+    branches: [recursive-ai-lab]
+    paths:
+      - "recursive-ai/**"
+      - ".github/workflows/recursive-ai.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Build isolated runner
+        working-directory: recursive-ai
+        run: docker build -t recursive-ai-runner:local sandbox/
+      - name: Controller and real sandbox tests
+        working-directory: recursive-ai
+        run: |
+          docker info
+          python3 -m unittest tests.test_lab tests.test_docker -v
+      - name: Run search and verify promotion
+        working-directory: recursive-ai
+        run: |
+          python3 main.py run --iterations 4 > "$RUNNER_TEMP/recursive-ai-telemetry.jsonl"
+          python3 main.py status
+          python3 - <<'PY'
+          from memory.skill_store import MemoryEngine
+          from core.rollback import VersionController
+          store = MemoryEngine('.lab-state')
+          checkpoint = store.current()
+          assert checkpoint, 'No candidate was promoted'
+          manifest = VersionController('.lab-state').read(checkpoint)
+          report = manifest['binary_search']['report']
+          assert report['passed'] and len(report['gates']) == 10
+          assert all(gate['passed'] for gate in report['gates'])
+          store.db.close()
+          PY
