@@ -3390,6 +3390,110 @@ describe("daemon mode helpers", () => {
 		expect(unrelatedHelper.acceptAgentMessagePrompt).not.toHaveBeenCalled();
 	});
 
+	it.each(["cli", "agent"] as const)(
+		"rejects duplicate resident child IDs across parents for %s messages",
+		async (origin) => {
+			const daemon = new AgentDaemon("/tmp/prime-agent-child-id-ambiguity.sock", {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				createRuntime: vi.fn(),
+			});
+			const otherRoot = makeAgentFamilyState("other-root", "other-root");
+			const unrelatedChild = makeAgentFamilyState("unrelated-child", "unrelated-child", otherRoot.state);
+			const observer = makeAgentFamilyState("observer", "observer");
+			const reachableChild = makeAgentFamilyState("reachable-child", "reachable-child", observer.state);
+			for (const child of [unrelatedChild, reachableChild]) {
+				Object.assign(child.state.runtime.metadata, { rlmChildId: "shared-child-id" });
+			}
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				sendAgentSessionMessage(options: {
+					targetSelector: string;
+					message: string;
+					origin: "cli" | "agent";
+					fromState?: ActiveSessionState;
+				}): Promise<unknown>;
+			};
+			for (const fixture of [otherRoot, unrelatedChild, observer, reachableChild]) {
+				internals.sessions.set(fixture.state.activeSessionId, fixture.state);
+			}
+			await expect(
+				internals.sendAgentSessionMessage({
+					targetSelector: "shared-child-id",
+					message: "report progress",
+					origin,
+					...(origin === "agent" ? { fromState: observer.state } : {}),
+				}),
+			).rejects.toThrow(/ambiguous/i);
+			expect(unrelatedChild.acceptAgentMessagePrompt).not.toHaveBeenCalled();
+			expect(reachableChild.acceptAgentMessagePrompt).not.toHaveBeenCalled();
+			expect(unrelatedChild.state.pendingAttaches).toBe(0);
+			expect(reachableChild.state.pendingAttaches).toBe(0);
+		},
+	);
+
+	it.each([
+		{ passiveCount: 2, ledgerResident: true },
+		{ passiveCount: 1, ledgerResident: false },
+	])(
+		"rejects child-ID ambiguity across resident and passive sessions ($passiveCount passive, ledger=$ledgerResident)",
+		async ({ passiveCount, ledgerResident }) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-mixed-child-id-"));
+			try {
+				const fixtures = Array.from({ length: passiveCount + (ledgerResident ? 1 : 0) }, (_, index) =>
+					makePersistedRlmDaemonFixture(join(tempDir, `family-${index}`)),
+				);
+				const fixture = fixtures[0]!;
+				const internals = fixture.daemon as unknown as {
+					sessions: Map<string, ActiveSessionState>;
+					createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+					rlmSpawnLedger(): RlmSpawnLedger;
+					listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string } }>>;
+					sendAgentSessionMessage(options: {
+						targetSelector: string;
+						message: string;
+						origin: "cli";
+					}): Promise<unknown>;
+				};
+				for (const family of fixtures) {
+					await internals.createRuntime({ type: "create", sessionPath: family.parentSessionFile });
+					await internals.rlmSpawnLedger().appendSpawn({
+						childId: family.childId,
+						parent: family.parentSessionFile,
+						child: family.childSessionFile,
+						depth: 1,
+						name: "renamed-worker",
+					});
+				}
+				if (ledgerResident) {
+					await internals.createRuntime({ type: "create", sessionPath: fixtures.at(-1)!.childSessionFile });
+				} else {
+					const parent = makeAgentFamilyState("ephemeral-parent", "ephemeral-parent");
+					const child = makeAgentFamilyState("ephemeral-child", "ephemeral-child", parent.state);
+					const childManager = SessionManager.create(tempDir, join(tempDir, "ephemeral-child"));
+					childManager.appendSessionInfo("ephemeral-child");
+					Object.assign(child.state.runtime.metadata, { rlmChildId: fixture.childId });
+					Object.assign(child.state.runtime.session, { sessionFile: childManager.getSessionFile() });
+					internals.sessions.set(parent.state.activeSessionId, parent.state);
+					internals.sessions.set(child.state.activeSessionId, child.state);
+				}
+				expect(
+					(await internals.listPassiveRlmSubagents()).filter(({ entry }) => entry.childId === fixture.childId),
+				).toHaveLength(passiveCount);
+				await expect(
+					internals.sendAgentSessionMessage({
+						targetSelector: fixture.childId,
+						message: "ambiguous target",
+						origin: "cli",
+					}),
+				).rejects.toThrow(/ambiguous/i);
+				expect(fixture.acceptAgentMessagePrompt).not.toHaveBeenCalled();
+				for (const state of internals.sessions.values()) expect(state.pendingAttaches).toBe(0);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("keeps a session ID ambiguous when a reachable agent uses it as its name", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-family-id-ambiguity.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
@@ -6871,6 +6975,193 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("keeps an ephemeral parent's child resident while resolving its child-ID message", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-ephemeral-child-message-"));
+		let releaseLookup = () => {};
+		const lookupGate = new Promise<void>((resolve) => {
+			releaseLookup = resolve;
+		});
+		let markLookup = () => {};
+		const lookupStarted = new Promise<void>((resolve) => {
+			markLookup = resolve;
+		});
+		let releaseAdmission = () => {};
+		const admissionGate = new Promise<void>((resolve) => {
+			releaseAdmission = resolve;
+		});
+		let markAdmission = () => {};
+		const admissionStarted = new Promise<void>((resolve) => {
+			markAdmission = resolve;
+		});
+		let admissionPending = false;
+		let delivery: Promise<unknown> | undefined;
+		try {
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					isStreaming: false,
+					isCompacting: false,
+					isBashRunning: false,
+					isRetrying: false,
+					isSessionActive: false,
+					unfinishedActionCount: 0,
+					state: { pendingToolCalls: new Set() },
+					hasRunningRlmChildren: () => false,
+					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+					acceptAgentMessagePrompt: vi.fn(
+						async (_message: string, options?: { preflightResult?: (ok: boolean) => void }) => {
+							admissionPending = true;
+							markAdmission();
+							try {
+								await admissionGate;
+								options?.preflightResult?.(true);
+							} finally {
+								admissionPending = false;
+							}
+						},
+					),
+				});
+				Object.defineProperty(session, "hasPendingAdmissionWaiters", { get: () => admissionPending });
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createRlmSubagentRuntime(
+					parent: ActiveSessionState,
+					options: CreateRlmSubagentRuntimeOptions,
+				): Promise<ActiveSessionState["runtime"]>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				rlmSpawnLedger(): RlmSpawnLedger;
+				findPassiveRlmSubagent(target: string, includeResident?: boolean): Promise<unknown>;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+				createAgentMessageController(
+					getCurrentState: () => ActiveSessionState | undefined,
+				): AgentSessionMessageController;
+			};
+			const parent = await internals.createRuntime({ type: "create", noSession: true });
+			expect(parent.runtime.session.sessionFile).toBeUndefined();
+			const childId = "ephemeral-child-id";
+			const childRuntime = await internals.createRlmSubagentRuntime(parent, {
+				parentSession: parent.runtime.session,
+				id: childId,
+				prompt: "complete",
+				sessionName: "ephemeral-worker",
+				sessionDir: join(tempDir, "child"),
+				model: { provider: "test", id: "model" } as Model<Api>,
+				thinkingLevel: "off",
+				serviceTier: null,
+				scopedModels: [],
+				activeToolNames: [],
+				customTools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				rlmParentNodeId: childId,
+			});
+			const child = [...internals.sessions.values()].find((state) => state.runtime.session === childRuntime.session);
+			if (!child?.runtime.session.sessionFile) throw new Error("Missing child state");
+			expect(
+				internals.createSubagentRuntimeHost(parent).completeRlmSubagentRuntime?.(childId, childRuntime.session),
+			).toBe(true);
+			expect(
+				(await internals.rlmSpawnLedger().edges()).some(
+					(edge) => edge.child === canonicalSessionPath(child.runtime.session.sessionFile!),
+				),
+			).toBe(false);
+			const realLookup = internals.findPassiveRlmSubagent.bind(internals);
+			vi.spyOn(internals, "findPassiveRlmSubagent").mockImplementation(async (target, includeResident) => {
+				const result = await realLookup(target, includeResident);
+				if (target === childId) {
+					markLookup();
+					await lookupGate;
+				}
+				return result;
+			});
+			delivery = internals
+				.createAgentMessageController(() => parent)
+				.sendAgentMessage({ target: childId, message: "stay resident for this message" });
+			void delivery.catch(() => undefined);
+			await Promise.race([lookupStarted, admissionStarted]);
+			const passivated = await internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1);
+			const resident = internals.sessions.get(child.activeSessionId) === child;
+			releaseLookup();
+			releaseAdmission();
+			const outcome = await delivery.then(
+				(receipt) => receipt,
+				(error: Error) => ({ error: error.message }),
+			);
+			expect({ passivated, resident, outcome }).toMatchObject({
+				passivated: 0,
+				resident: true,
+				outcome: { deliveryStatus: "delivered" },
+			});
+			expect(child.pendingAttaches).toBe(0);
+		} finally {
+			releaseLookup();
+			releaseAdmission();
+			await delivery?.catch(() => undefined);
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it.each(["lookup", "authorization"] as const)(
+		"releases a child-message reservation after %s failure",
+		async (failure) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-child-message-reservation-"));
+			let restoreLookup = () => {};
+			try {
+				const fixture = makePersistedRlmDaemonFixture(tempDir);
+				const internals = fixture.daemon as unknown as {
+					sessions: Map<string, ActiveSessionState>;
+					createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+					findPassiveRlmSubagent(target: string, includeResident?: boolean): Promise<unknown>;
+					sendAgentSessionMessage(options: {
+						targetSelector: string;
+						message: string;
+						origin: "agent";
+						fromState: ActiveSessionState;
+					}): Promise<unknown>;
+				};
+				await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+				const child = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+				const sender = makeAgentFamilyState("unrelated-sender", "unrelated-sender");
+				internals.sessions.set(sender.state.activeSessionId, sender.state);
+				if (failure === "lookup") {
+					const spy = vi.spyOn(internals, "findPassiveRlmSubagent").mockRejectedValue(new Error("lookup failed"));
+					restoreLookup = () => spy.mockRestore();
+				}
+				await expect(
+					internals.sendAgentSessionMessage({
+						targetSelector: fixture.childId,
+						message: "denied",
+						origin: "agent",
+						fromState: sender.state,
+					}),
+				).rejects.toThrow(failure === "lookup" ? "lookup failed" : AGENT_FAMILY_REACH_ERROR);
+				expect(child.pendingAttaches).toBe(0);
+				expect(fixture.acceptAgentMessagePrompt).not.toHaveBeenCalled();
+			} finally {
+				restoreLookup();
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("waits for passivation before rehydrating and delivering a racing a2a message", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passivation-race-"));
 		let releaseDispose!: () => void;
@@ -6881,6 +7172,10 @@ describe("daemon mode helpers", () => {
 		const disposeStarted = new Promise<void>((resolve) => {
 			markDisposeStarted = resolve;
 		});
+		let releaseLookup = () => {};
+		let releasePublication = () => {};
+		let explicitOpen: Promise<ActiveSessionState> | undefined;
+		let restoreLookups = () => {};
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir, {
 				childDisposeStarted: markDisposeStarted,
@@ -6893,12 +7188,60 @@ describe("daemon mode helpers", () => {
 					getCurrentState: () => ActiveSessionState | undefined,
 				): AgentSessionMessageController;
 				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+				findPassiveRlmSubagent(target: string, includeResident?: boolean): Promise<unknown>;
+				waitForHydratingChild(state: ActiveSessionState, selector: string): Promise<ActiveSessionState>;
 			};
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
 			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
 			(
 				parentState.runtime.session as unknown as { releaseRlmChildSession: ReturnType<typeof vi.fn> }
 			).releaseRlmChildSession = vi.fn(() => vi.fn());
+
+			let markLookupStarted = () => {};
+			const lookupStarted = new Promise<void>((resolve) => {
+				markLookupStarted = resolve;
+			});
+			const lookupGate = new Promise<void>((resolve) => {
+				releaseLookup = resolve;
+			});
+			let markPublicationHeld = () => {};
+			const publicationHeld = new Promise<void>((resolve) => {
+				markPublicationHeld = resolve;
+			});
+			const publicationGate = new Promise<void>((resolve) => {
+				releasePublication = resolve;
+			});
+			const realLookup = internals.findPassiveRlmSubagent.bind(internals);
+			const passiveLookup = vi
+				.spyOn(internals, "findPassiveRlmSubagent")
+				.mockImplementation(async (target, includeResident) => {
+					const result = await realLookup(target, includeResident);
+					if (target === fixture.childId) {
+						markLookupStarted();
+						await lookupGate;
+					}
+					return result;
+				});
+			const realWait = internals.waitForHydratingChild.bind(internals);
+			const residentLookup = vi.spyOn(internals, "waitForHydratingChild").mockImplementation((state, selector) => {
+				const waiting = realWait(state, selector);
+				if (state === childState && selector === fixture.childId) markLookupStarted();
+				return waiting;
+			});
+			const realCreateRuntime = fixture.createRuntime.getMockImplementation()!;
+			fixture.createRuntime.mockImplementation(async (options) => {
+				const result = await realCreateRuntime(options);
+				if (options.sessionManager.getSessionFile() === fixture.childSessionFile) {
+					markPublicationHeld();
+					await publicationGate;
+				}
+				return result;
+			});
+			restoreLookups = () => {
+				passiveLookup.mockRestore();
+				residentLookup.mockRestore();
+				fixture.createRuntime.mockImplementation(realCreateRuntime);
+			};
 
 			const passivation = internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1);
 			await disposeStarted;
@@ -6911,12 +7254,19 @@ describe("daemon mode helpers", () => {
 					target: fixture.childId,
 					message: "arrived while passivating",
 				});
-			const explicitOpen = internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			void delivery.catch(() => undefined);
+			await lookupStarted;
+			explicitOpen = internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
 			await Promise.resolve();
 			expect(fixture.createRuntime).toHaveBeenCalledTimes(2);
 			releaseDispose();
 
 			await expect(passivation).resolves.toBe(1);
+			await publicationHeld;
+			// Complete a real lookup with no resident child and reopening still unpublished.
+			releaseLookup();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			releasePublication();
 			await expect(delivery).resolves.toMatchObject({ deliveryStatus: "delivered" });
 			await expect(explicitOpen).resolves.toMatchObject({
 				runtime: { metadata: { rlmChildId: fixture.childId } },
@@ -6928,6 +7278,10 @@ describe("daemon mode helpers", () => {
 			);
 		} finally {
 			releaseDispose();
+			releaseLookup();
+			releasePublication();
+			await explicitOpen?.catch(() => undefined);
+			restoreLookups();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -10044,6 +10398,7 @@ function makeAgentFamilyState(
 	parent?: ActiveSessionState,
 ): { state: ActiveSessionState; acceptAgentMessagePrompt: ReturnType<typeof vi.fn> } {
 	const state = makeState(activeSessionId, parent?.activeSessionId);
+	state.pendingAttaches = 0;
 	const acceptAgentMessagePrompt = vi.fn(
 		(_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
 			options?.preflightResult?.(true);
