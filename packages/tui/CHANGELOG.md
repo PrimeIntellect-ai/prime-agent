@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.10.0] - 2026-09-08
+## [0.9.4] - 2026-09-08
 
 - Table cell selection markers no longer crash the renderer when cell content contains a lone UTF-16 surrogate; the surrogate is replaced before encoding.
 - Fixed console windows flashing on Windows from background path-completion and open-link spawns. ([Discussion #1461](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1461))

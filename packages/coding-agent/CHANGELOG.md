@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.10.0] - 2026-09-08
+## [0.9.4] - 2026-09-08
 
 - A Python kernel that dies after a successful startup is restarted on the next use instead of every call being handed the dead kernel forever, and skill-MCP tools advertise their real input schemas again under mcp>=2 (the SDK renamed the field to input_schema).
 - Moved the semantic-edge ledger's append and replay IO onto the shared event-log substrate. One behavior unified across both ledgers: an unterminated final line is an uncommitted append — skipped on read and truncated before the next append, never newline-completed.

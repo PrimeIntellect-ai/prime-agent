@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.10.0] - 2026-09-08
+## [0.9.4] - 2026-09-08
 
 - Fixed GitHub Copilot requests to omit unsupported service tiers while preserving explicit tiers for other providers, and corrected Anthropic cache-write pricing when streaming usage changes.
 - Changed authentication failure classification to require structured evidence. Permission denials now stop retries without marking provider credentials stale.
