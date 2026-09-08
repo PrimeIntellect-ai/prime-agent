@@ -161,8 +161,12 @@ function createExtensionUIContext(
 				opts?.signal?.removeEventListener("abort", onAbort);
 				state.extensionUiRequests.delete(requestId);
 			};
+			let settled = false;
 			const finish = (value: T) => {
+				if (settled) return;
+				settled = true;
 				cleanup();
+				broadcast(state, { type: "extension_ui_dismiss", activeSessionId: state.activeSessionId, id: requestId });
 				resolveDialog(value);
 			};
 			const onAbort = () => finish(fallback);

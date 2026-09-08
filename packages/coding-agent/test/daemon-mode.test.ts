@@ -46,6 +46,16 @@ import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js"
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("daemon mode helpers", () => {
+	it("gates dialog dismissal on the attached session capability", () => {
+		const client = makeClient("client", "active");
+		const event: DaemonOutbound = { type: "extension_ui_dismiss", activeSessionId: "active", id: "dialog" };
+		expect(shouldSendDaemonOutboundToClient(client, event)).toBe(false);
+		client.capabilities.add("extension_ui_dismiss");
+		expect(shouldSendDaemonOutboundToClient(client, event)).toBe(true);
+		client.capabilitiesByActiveSessionId = new Map([["active", new Set()]]);
+		expect(shouldSendDaemonOutboundToClient(client, event)).toBe(false);
+	});
+
 	it("preserves envelope client identity while registering prompt admission", () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },

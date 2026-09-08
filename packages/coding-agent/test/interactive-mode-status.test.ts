@@ -1634,6 +1634,51 @@ describe("InteractiveMode connection extension UI", () => {
 
 	const prototype = InteractiveMode.prototype as unknown as ConnectionExtensionUiHandlerHarness;
 
+	test("daemon dismissal aborts only its dialog and suppresses a late response", async () => {
+		type DismissEvent = { type: "extension_ui_dismiss"; id: string };
+		let listener: ((event: DismissEvent) => Promise<void> | void) | undefined;
+		let signal: AbortSignal | undefined;
+		let finish!: (response: AgentConnectionExtensionUiResponse) => void;
+		const response = new Promise<AgentConnectionExtensionUiResponse>((resolve) => {
+			finish = resolve;
+		});
+		const otherCancel = vi.fn();
+		const fakeThis = Object.assign(Object.create(InteractiveMode.prototype), {
+			activeConnectionExtensionUiRequests: new Map([["other", { cancelLocal: otherCancel }]]),
+			agentConnection: {
+				subscribe: vi.fn((callback) => {
+					listener = callback;
+					return vi.fn();
+				}),
+				respondToExtensionUiRequest: vi.fn(async () => {}),
+			},
+			sessionEventQueue: Promise.resolve(),
+			sessionEventGeneration: 0,
+			showError: vi.fn(),
+			resolveConnectionExtensionUiRequest: vi.fn((_request, optionsSignal: AbortSignal) => {
+				signal = optionsSignal;
+				return response;
+			}),
+		});
+		(InteractiveMode.prototype as unknown as { subscribeToAgent(this: typeof fakeThis): void }).subscribeToAgent.call(
+			fakeThis,
+		);
+		const handling = prototype.handleConnectionExtensionUiRequest.call(fakeThis, {
+			id: "dialog",
+			method: "select",
+			payload: {},
+		});
+		await listener?.({ type: "extension_ui_dismiss", id: "dialog" });
+		await handling;
+		expect(signal?.aborted).toBe(true);
+		expect(otherCancel).not.toHaveBeenCalled();
+		expect(fakeThis.activeConnectionExtensionUiRequests.has("other")).toBe(true);
+		finish({ value: "Approve" });
+		await Promise.resolve();
+		expect(fakeThis.agentConnection.respondToExtensionUiRequest).not.toHaveBeenCalled();
+		expect(fakeThis.showError).not.toHaveBeenCalled();
+	});
+
 	test("reset cancellation responds to active connection UI requests", async () => {
 		const cancelLocal = vi.fn();
 		const fakeThis = Object.create(InteractiveMode.prototype) as ConnectionExtensionUiCancelHarness;

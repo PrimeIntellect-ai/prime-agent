@@ -305,7 +305,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			capabilities: [
 				"attach_snapshot",
 				"event_sequence",
-				...(supportsExtensionUi ? (["extension_ui"] as const) : []),
+				...(supportsExtensionUi ? (["extension_ui", "extension_ui_dismiss"] as const) : []),
 				"slim_attach",
 				"chunked_snapshot",
 				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
@@ -1156,7 +1156,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				capabilities: [
 					"attach_snapshot",
 					"event_sequence",
-					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
+					...(supportsExtensionUi ? (["extension_ui", "extension_ui_dismiss"] as const) : []),
 					"slim_attach",
 					"chunked_snapshot",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
@@ -1542,6 +1542,10 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshot = latestSnapshot;
 			this.latestSnapshotIsFresh = true;
 			await this.emit({ type: "session_replaced", state: message.state, messages: message.messages });
+			return;
+		}
+		if (message.type === "extension_ui_dismiss") {
+			await this.emit({ type: "extension_ui_dismiss", id: message.id });
 			return;
 		}
 		if (message.type === "extension_ui_request") {

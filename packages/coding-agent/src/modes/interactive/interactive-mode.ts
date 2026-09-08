@@ -3906,23 +3906,19 @@ export class InteractiveMode {
 	/**
 	 * Show a multi-line editor for extensions (with Ctrl+G support).
 	 */
-	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
+	private showExtensionEditor(title: string, prefill?: string, signal?: AbortSignal): Promise<string | undefined> {
+		if (signal?.aborted) return Promise.resolve(undefined);
 		return new Promise((resolve) => {
-			this.extensionEditor = new ExtensionEditorComponent(
-				this.ui,
-				this.keybindings,
-				title,
-				prefill,
-				(value) => {
-					this.hideExtensionEditor();
-					resolve(value);
-				},
-				() => {
-					this.hideExtensionEditor();
-					resolve(undefined);
-				},
+			const finish = (value: string | undefined) => {
+				signal?.removeEventListener("abort", onAbort);
+				this.hideExtensionEditor();
+				resolve(value);
+			};
+			const onAbort = () => finish(undefined);
+			this.extensionEditor = new ExtensionEditorComponent(this.ui, this.keybindings, title, prefill, finish, () =>
+				finish(undefined),
 			);
-
+			signal?.addEventListener("abort", onAbort, { once: true });
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionEditor);
 			this.ui.setFocus(this.extensionEditor);
@@ -5133,6 +5129,10 @@ export class InteractiveMode {
 					this.renderRecap();
 				} else if (event.type === "side_question_event") {
 					this.handleSideQuestionEvent(event.event);
+				} else if (event.type === "extension_ui_dismiss") {
+					const pending = this.activeConnectionExtensionUiRequests.get(event.id);
+					this.activeConnectionExtensionUiRequests.delete(event.id);
+					pending?.cancelLocal();
 				} else if (event.type === "extension_ui_request") {
 					await this.handleConnectionExtensionUiRequest(event.request);
 				} else if (event.type === "connection_status") {
@@ -5164,10 +5164,17 @@ export class InteractiveMode {
 				const cancelled = new Promise<AgentConnectionExtensionUiResponse>((resolve) => {
 					cancelLocal = resolve;
 				});
+				const controller = new AbortController();
 				this.activeConnectionExtensionUiRequests.set(request.id, {
-					cancelLocal: () => cancelLocal({ cancelled: true }),
+					cancelLocal: () => {
+						controller.abort();
+						cancelLocal({ cancelled: true });
+					},
 				});
-				response = await Promise.race([this.resolveConnectionExtensionUiRequest(request), cancelled]);
+				response = await Promise.race([
+					this.resolveConnectionExtensionUiRequest(request, controller.signal),
+					cancelled,
+				]);
 			} else {
 				response = await this.resolveConnectionExtensionUiRequest(request);
 			}
@@ -5218,6 +5225,7 @@ export class InteractiveMode {
 
 	private async resolveConnectionExtensionUiRequest(
 		request: AgentConnectionExtensionUiRequest,
+		signal?: AbortSignal,
 	): Promise<AgentConnectionExtensionUiResponse | undefined> {
 		const { payload } = request;
 		switch (request.method) {
@@ -5229,6 +5237,7 @@ export class InteractiveMode {
 				}
 				const value = await this.showExtensionSelector(title, options, {
 					timeout: getPayloadNumber(payload, "timeout"),
+					signal,
 				});
 				return value === undefined ? { cancelled: true } : { value };
 			}
@@ -5240,6 +5249,7 @@ export class InteractiveMode {
 				}
 				const confirmed = await this.showExtensionConfirm(title, message, {
 					timeout: getPayloadNumber(payload, "timeout"),
+					signal,
 				});
 				return { confirmed };
 			}
@@ -5250,6 +5260,7 @@ export class InteractiveMode {
 				}
 				const value = await this.showExtensionInput(title, getPayloadString(payload, "placeholder"), {
 					timeout: getPayloadNumber(payload, "timeout"),
+					signal,
 				});
 				return value === undefined ? { cancelled: true } : { value };
 			}

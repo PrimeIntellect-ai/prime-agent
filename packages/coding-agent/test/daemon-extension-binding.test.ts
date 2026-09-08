@@ -112,6 +112,48 @@ describe("daemon extension binding", () => {
 		return runtime;
 	}
 
+	it("dismisses an aborted dialog once without converting it to a choice", async () => {
+		const controller = new AbortController();
+		let choice: string | undefined = "unresolved";
+		const runtime = await createRuntimeForTest((pi) => {
+			pi.registerCommand("consent-test", {
+				description: "synthetic dialog",
+				handler: async (_args, ctx) => {
+					choice = await ctx.ui.select("Synthetic approval", ["Approve", "Deny"], { signal: controller.signal });
+				},
+			});
+		}, []);
+		const outbound: DaemonOutbound[] = [];
+		const state: ActiveSessionState = {
+			activeSessionId: "active-dialog",
+			runtime,
+			clients: new Set([{ supportsExtensionUi: true } as never]),
+			pendingAttaches: 0,
+			extensionUiRequests: new Map(),
+			eventGeneration: "dialog",
+			lastEventSequence: 0,
+		};
+		await bindActiveSessionState(state, {
+			broadcast: (_state, message) => {
+				outbound.push(message);
+				if (message.type === "extension_ui_request") queueMicrotask(() => controller.abort());
+			},
+			shutdown: () => {},
+		});
+		await runtime.session.prompt("/consent-test");
+		expect(choice).toBeUndefined();
+		expect(state.extensionUiRequests.size).toBe(0);
+		const request = outbound.find((message) => message.type === "extension_ui_request");
+		expect(request).toBeDefined();
+		expect(outbound.filter((message) => message.type === "extension_ui_dismiss")).toEqual([
+			{
+				type: "extension_ui_dismiss",
+				activeSessionId: "active-dialog",
+				id: request && "id" in request ? request.id : undefined,
+			},
+		]);
+	});
+
 	it("strips the duplicated partial message from broadcast message_update events", async () => {
 		const runtime = await createRuntimeForTest(() => {}, ["streamed reply"]);
 

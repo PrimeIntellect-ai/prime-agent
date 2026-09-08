@@ -6905,6 +6905,11 @@ function isSequencedSessionOutbound(message: DaemonOutbound): message is Sequenc
 }
 
 export function shouldSendDaemonOutboundToClient(client: DaemonSocketClient, message: DaemonOutbound): boolean {
+	if (message.type === "extension_ui_dismiss") {
+		return (client.capabilitiesByActiveSessionId?.get(message.activeSessionId) ?? client.capabilities).has(
+			"extension_ui_dismiss",
+		);
+	}
 	return (
 		message.type !== "extension_ui_request" ||
 		!isDaemonDialogExtensionUiRequest(message.method) ||
