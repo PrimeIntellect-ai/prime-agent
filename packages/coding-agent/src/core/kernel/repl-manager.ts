@@ -993,9 +993,17 @@ export class ReplKernelManager {
 				return;
 			}
 			execution.status = "aborted";
+			if (opts.killOnAbortTimeout) {
+				execution.stderr +=
+					`${execution.stderr ? "\n" : ""}Python kernel was killed because the interrupted cell did not stop. ` +
+					"Live Python state was lost. The next call starts a new kernel and may restore the last saved snapshot.";
+			}
 			// The execution stays active until its done event arrives; clearing it
 			// early would let a new cell race the interrupted one (see busy-after-interrupt).
 			this.resolveExecution(execution, { clearActive: false });
+			if (opts.killOnAbortTimeout) {
+				void this.kill();
+			}
 		};
 		const onAbort = () => {
 			void this.interrupt().catch(() => undefined);

@@ -161,7 +161,7 @@ const BUSY_KERNEL_PROMPT = [
 ].join("\n");
 const KERNEL_RESTART_NOTICE = [
 	"<ipython_kernel_reset>",
-	"The Python kernel was restarted after a previous interrupted cell kept running. Variables, imports, async tasks, and open resources from before the restart are no longer available; recreate them before using them.",
+	"The Python kernel was restarted. Variables, imports, async tasks, and open resources from before the restart may no longer be available; check any restored state and recreate missing resources before using them.",
 	"</ipython_kernel_reset>",
 ].join("\n");
 
@@ -548,7 +548,7 @@ async function chooseBusyKernelAction(
 	signal: AbortSignal | undefined,
 ): Promise<"wait" | "kill" | "cancel"> {
 	if (!ctx?.hasUI) {
-		return "cancel";
+		return "kill";
 	}
 	const choice = await ctx.ui.select(BUSY_KERNEL_PROMPT, [BUSY_KERNEL_WAIT_CHOICE, BUSY_KERNEL_KILL_CHOICE], {
 		signal,
@@ -573,13 +573,14 @@ async function executeWithBusyKernelChoice(
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
 	ctx: ExtensionContext | undefined,
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
-	let kernelRestarted = false;
+	let kernelRestarted = provisioner.manager?.isDefunct === true;
 	while (true) {
 		const m = await provisioner.ensure(reportStartupProgress, signal);
 		try {
 			return {
 				result: await m.execute(code, {
 					signal,
+					killOnAbortTimeout: !ctx?.hasUI,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)

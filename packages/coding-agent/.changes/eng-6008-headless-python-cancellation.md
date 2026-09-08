@@ -1,0 +1,1 @@
+- Fixed headless Python cancellation leaving unresponsive kernels consuming CPU and blocking subsequent calls.
