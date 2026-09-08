@@ -1,0 +1,1 @@
+- Fixed Amazon Bedrock requests failing to load the provider in packaged CLI installations.
