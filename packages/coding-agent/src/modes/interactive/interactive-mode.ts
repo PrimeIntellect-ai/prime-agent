@@ -53,7 +53,6 @@ import {
 	APP_NAME,
 	APP_TITLE,
 	getAgentDir,
-	getAgentTracesLogPath,
 	getDebugLogPath,
 	getLogsDir,
 	getShareViewerUrl,
@@ -70,8 +69,11 @@ import {
 	type AgentTracePreviewResult,
 	type AgentTraceUploadAllResult,
 	type AgentTraceUploadResult,
-	getPrimeAgentTraceCredential,
+	cancelAgentTraceRequest,
+	cancelPendingAgentTraceRequests,
+	formatAgentTraceStatus,
 	previewAgentTraceFile,
+	readAgentTraceStatus,
 	uploadAgentTraceFile,
 	uploadAllAgentTraces,
 } from "../../core/agent-traces.js";
@@ -115,7 +117,6 @@ import {
 } from "../../core/messages.js";
 import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.js";
 import { parseNewSessionCommand } from "../../core/new-session-command.js";
-import { resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
 import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-inference-model-selection.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
@@ -1079,6 +1080,7 @@ export class InteractiveMode {
 
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
+	private traceUploadAllRequestId: string | undefined;
 	private traceUploadAllAbortController: AbortController | undefined = undefined;
 
 	private readonly queueSelection = new QueueSelection();
@@ -6784,6 +6786,7 @@ export class InteractiveMode {
 
 	private interruptOrClearInput(): void {
 		this.traceUploadAllAbortController?.abort(new Error("Trace upload cancelled"));
+		this.traceUploadAllAbortController = undefined;
 		if (this.sideQuestionEvent?.status === "running") {
 			this.abortSideQuestion(this.sideQuestionEvent.id, true);
 		}
@@ -9343,38 +9346,25 @@ export class InteractiveMode {
 
 	private formatTraceUploadResult(result: AgentTraceUploadResult): string {
 		switch (result.status) {
-			case "uploaded":
-				return `Trace uploaded (${result.bytesStored.toLocaleString()} bytes).`;
+			case "queued":
+				return "Trace queued for background delivery. Run /traces status for progress.";
 			case "disabled":
-				return "Trace sharing is disabled.";
-			case "unchanged":
-				return "Trace is already uploaded; no new content since the last upload.";
-			case "missing_credentials":
-				return "Trace sharing needs a Prime API key. Run /traces login.";
+				return "Automatic sharing is disabled by global or project settings.";
 			case "no_session_file":
-				return "Current session has no persisted trace yet.";
 			case "empty_session":
-				return "Current session trace is empty.";
-			case "invalid_session":
-				return `Trace upload skipped: ${result.message}.`;
-			case "too_large":
-				return `Trace upload skipped: session file is ${result.size.toLocaleString()} bytes; limit is ${result.maxBytes.toLocaleString()} bytes.`;
+				return "Current session has no persisted trace yet.";
 			case "failed":
-				if (result.statusCode === 404) {
-					return "Trace upload endpoint was not found. The platform API may not be deployed yet, or PRIME_AGENT_TRACES_BASE_URL points at the wrong API.";
-				}
-				return `Trace upload failed: ${result.statusCode ? `HTTP ${result.statusCode}: ` : ""}${result.message}. See ${getAgentTracesLogPath()} for details.`;
+				return result.message;
 		}
 	}
 
-	private async uploadCurrentTraceOnce(): Promise<AgentTraceUploadResult> {
+	private async uploadCurrentTraceOnce(requireEnabled = false): Promise<AgentTraceUploadResult> {
 		const state = await this.agentConnection.getState();
 		return uploadAgentTraceFile({
 			sessionFile: state.sessionFile,
 			authStorage: this.modelRegistry.authStorage,
 			settingsManager: this.settingsManager,
-			requireEnabled: false,
-			reloadConfig: false,
+			requireEnabled,
 		});
 	}
 
@@ -9441,15 +9431,7 @@ export class InteractiveMode {
 			settingsManager: this.settingsManager,
 			sessionDir,
 			requireEnabled: false,
-			reloadConfig: false,
 			signal,
-			onProgress: ({ completed, total }) => {
-				if (total > 0 && (completed === 0 || completed === total || completed % 10 === 0)) {
-					this.showStatus(
-						`Uploading traces: ${completed.toLocaleString()}/${total.toLocaleString()} (${keyText("app.clear")} to cancel)`,
-					);
-				}
-			},
 		});
 	}
 
@@ -9459,134 +9441,102 @@ export class InteractiveMode {
 				.replace(/^\/traces\b/, "")
 				.trim()
 				.toLowerCase() || "status";
-
 		if (command === "status") {
-			await this.settingsManager.reload().catch(() => undefined);
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
 			const state = await this.agentConnection.getState();
-			const info = [
-				theme.bold("Trace Sharing"),
-				"",
-				`${theme.fg("dim", "Automatic uploads:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
-				`${theme.fg("dim", "Credential:")} ${credential?.label ?? "Not configured"}`,
-				`${theme.fg("dim", "Endpoint:")} ${resolvePrimeAgentTracesBaseUrl()}`,
-				`${theme.fg("dim", "Session file:")} ${state.sessionFile ?? "In-memory"}`,
-				"",
-				theme.fg(
-					"dim",
-					"Commands: /traces on, /traces off, /traces preview, /traces upload-current, /traces upload-all, /traces login",
-				),
-			].join("\n");
+			const status = await readAgentTraceStatus({
+				settingsManager: this.settingsManager,
+				authStorage: this.modelRegistry.authStorage,
+				sessionFile: state.sessionFile,
+			});
 			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(info, 1, 0));
+			this.chatContainer.addChild(new Text(formatAgentTraceStatus(status), 1, 0));
 			this.ui.requestRender();
 			return;
 		}
-
 		if (command === "off" || command === "disable") {
 			this.settingsManager.setAgentTracesEnabled(false);
 			await this.settingsManager.flush();
-			this.showStatus("Trace sharing disabled.");
+			this.showStatus("Automatic trace sharing disabled. Pending automatic deliveries will pause.");
 			return;
 		}
-
 		if (command === "login") {
 			await this.createAuthFlows().runPrimeAgentTracesLogin();
 			return;
 		}
-
 		if (command === "preview") {
 			await this.previewCurrentTrace();
 			return;
 		}
-
 		if (command === "on" || command === "enable") {
-			let credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				const authResult = await this.createAuthFlows().runPrimeAgentTracesLogin();
-				if (authResult.status !== "success") {
-					return;
-				}
-				credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			}
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key.");
-				return;
-			}
-
 			this.settingsManager.setAgentTracesEnabled(true);
 			await this.settingsManager.flush();
-			const uploadResult = await this.uploadCurrentTraceOnce();
-			const uploadMessage =
-				uploadResult.status === "no_session_file" || uploadResult.status === "empty_session"
-					? "Current session will upload after the first assistant response."
-					: this.formatTraceUploadResult(uploadResult);
-			this.showStatus(`Trace sharing enabled. ${uploadMessage}`);
+			const result = await this.uploadCurrentTraceOnce(true);
+			const message =
+				result.status === "no_session_file" || result.status === "empty_session"
+					? "Current session will queue after the first assistant response."
+					: this.formatTraceUploadResult(result);
+			this.showStatus(`Global automatic trace sharing enabled. ${message}`);
 			return;
 		}
-
 		if (command === "upload" || command === "upload-current") {
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
-				return;
-			}
-			const uploadResult = await this.uploadCurrentTraceOnce();
-			const message = this.formatTraceUploadResult(uploadResult);
-			if (uploadResult.status === "failed") {
-				this.showError(message);
-			} else {
-				this.showStatus(message);
-			}
+			const result = await this.uploadCurrentTraceOnce();
+			if (result.status === "failed") this.showError(this.formatTraceUploadResult(result));
+			else this.showStatus(this.formatTraceUploadResult(result));
 			return;
 		}
-
-		if (command === "upload-all") {
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
+		if (command === "cancel") {
+			if (!this.traceUploadAllRequestId) {
+				this.showStatus(
+					"This task has no bulk trace request to cancel. Use /traces cancel-all to cancel pending one-shot requests across tasks.",
+				);
 				return;
 			}
-			if (this.traceUploadAllAbortController) {
-				this.showWarning("A trace upload is already running. Cancel it before starting another.");
-				return;
-			}
-			const state = await this.agentConnection.getState();
-			const abortController = new AbortController();
-			this.traceUploadAllAbortController = abortController;
-			let result: AgentTraceUploadAllResult;
 			try {
-				result = await this.uploadAllTraces(state.sessionDir, abortController.signal);
-			} finally {
-				if (this.traceUploadAllAbortController === abortController) {
-					this.traceUploadAllAbortController = undefined;
-				}
-			}
-			if (abortController.signal.aborted) {
-				this.showStatus("Trace upload cancelled.");
-				return;
-			}
-			if (result.total === 0) {
-				this.showStatus("No persisted traces were found.");
-				return;
-			}
-			const summary = [
-				`Uploaded ${result.uploaded.toLocaleString()} of ${result.total.toLocaleString()} traces`,
-				result.skipped > 0 ? `${result.skipped.toLocaleString()} skipped` : undefined,
-				result.failed > 0 ? `${result.failed.toLocaleString()} failed` : undefined,
-				`${result.bytesStored.toLocaleString()} bytes stored`,
-			]
-				.filter((part): part is string => part !== undefined)
-				.join("; ");
-			if (result.failed > 0) {
-				this.showWarning(`${summary}. See ${getAgentTracesLogPath()} for details.`);
-			} else {
-				this.showStatus(`${summary}.`);
+				await cancelAgentTraceRequest(this.traceUploadAllRequestId);
+				this.traceUploadAllAbortController?.abort();
+				this.traceUploadAllAbortController = undefined;
+				this.traceUploadAllRequestId = undefined;
+				this.showStatus(
+					"Cancellation recorded for this task's bulk trace request. Sent requests cannot be recalled.",
+				);
+			} catch {
+				this.showError("Could not record trace cancellation. Check access to the agent directory and retry.");
 			}
 			return;
 		}
-
-		this.showWarning("Usage: /traces [status|on|off|preview|upload|upload-current|upload-all|login]");
+		if (command === "cancel-all") {
+			const result = await cancelPendingAgentTraceRequests();
+			if (result.failed)
+				this.showError(
+					`Cancelled ${result.cancelled} one-shot requests; could not record ${result.failed} cancellations. Check access to the agent directory and retry.`,
+				);
+			else
+				this.showStatus(
+					`Cancellation recorded for ${result.cancelled} pending one-shot requests across tasks. Sent requests cannot be recalled.`,
+				);
+			return;
+		}
+		if (command === "upload-all") {
+			// Cancel a previous bulk request before replacing its cancellation handle.
+			this.traceUploadAllAbortController?.abort();
+			const state = await this.agentConnection.getState();
+			const controller = new AbortController();
+			this.traceUploadAllAbortController = controller;
+			const result = await this.uploadAllTraces(state.sessionDir, controller.signal);
+			if (result.status === "failed") {
+				this.traceUploadAllAbortController = undefined;
+				this.showError(result.message);
+			} else {
+				if (result.status === "queued") this.traceUploadAllRequestId = result.requestId;
+				this.showStatus(
+					`Bulk trace request queued for background delivery. Run /traces status for progress; /traces cancel or ${keyText("app.clear")} cancels it.`,
+				);
+			}
+			return;
+		}
+		this.showWarning(
+			"Usage: /traces [status|on|off|preview|upload|upload-current|upload-all|cancel|cancel-all|login]",
+		);
 	}
 
 	private async handleContextCommand(): Promise<void> {

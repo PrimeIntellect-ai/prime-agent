@@ -1,17 +1,36 @@
-import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ENV_AGENT_DIR, getAgentTracesLogPath } from "../src/config.js";
+import { CONFIG_DIR_NAME, ENV_AGENT_DIR } from "../src/config.js";
+import * as payloadWorker from "../src/core/agent-trace-payload.js";
 import {
+	AgentTraceDeliveryQueue,
+	type AgentTraceUploadInstallOptions,
+	cancelAgentTraceRequest,
+	cancelPendingAgentTraceRequests,
 	catchUpAgentTraceUploads,
 	findAgentTraceFiles,
+	formatAgentTraceStatus,
+	getPrimeAgentTraceCredential,
 	installAgentTraceUpload,
 	previewAgentTraceFile,
+	readAgentTraceStatus,
+	SEMANTIC_EDGES_OUTBOX_KIND,
+	stopAgentTraceUploads,
 	uploadAgentTraceFile,
 	uploadAllAgentTraces,
 } from "../src/core/agent-traces.js";
@@ -20,1550 +39,755 @@ import { PRIME_AGENT_TRACES_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID } from "../
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
-interface FetchCall {
-	url: string;
-	init: RequestInit;
+interface Job {
+	sessionFile: string;
+	state?: string;
+	nextAttemptAt?: number;
+	attempts?: number;
+	lastAttemptAt?: number;
+	failure?: { reason: string; at: number };
+	manual?: { snapshotReady?: boolean };
+	size?: number;
+	mtimeMs?: number;
 }
-
-function createAssistantMessage(text: string): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "mock",
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
-}
-
-function createUserMessage(text: string) {
-	return {
-		role: "user" as const,
-		content: text,
-		timestamp: Date.now(),
-	};
-}
-
-function createFetchRecorder(calls: FetchCall[]): typeof fetch {
-	return async (input, init) => {
-		calls.push({ url: String(input), init: init ?? {} });
-		return new Response(
-			JSON.stringify({
-				session_id: "uploaded-session",
-				trace_id: "uploaded-trace",
-				bytes_stored: 123,
-				key: "trace/key.jsonl",
-			}),
-			{ status: 200, headers: { "content-type": "application/json" } },
-		);
-	};
-}
-
-function writeSession(cwd: string, sessionDir: string, id: string, parentSession?: string): SessionManager {
-	const sessionManager = SessionManager.create(cwd, sessionDir);
-	sessionManager.newSession({ id, parentSession });
-	sessionManager.appendMessage(createUserMessage(`user ${id}`));
-	sessionManager.appendMessage(createAssistantMessage(`assistant ${id}`));
-	return sessionManager;
-}
-
-/** Mirrors the outbox on-disk format: one JSON entry per session file, named by path hash. */
-function outboxEntryPath(agentDir: string, sessionFile: string): string {
-	const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 32);
-	return join(agentDir, "agent-traces-outbox", `${key}.json`);
-}
-
-function writeOutboxEntry(agentDir: string, sessionFile: string, signature?: { size: number; mtimeMs: number }): void {
-	mkdirSync(join(agentDir, "agent-traces-outbox"), { recursive: true });
-	writeFileSync(outboxEntryPath(agentDir, sessionFile), JSON.stringify({ sessionFile, ...signature }));
-}
-
-function readOutboxEntry(
-	agentDir: string,
-	sessionFile: string,
-): { sessionFile: string; kind?: string; size?: number; mtimeMs?: number; uploadedBytes?: number } | undefined {
-	if (!existsSync(outboxEntryPath(agentDir, sessionFile))) {
-		return undefined;
-	}
-	return JSON.parse(readFileSync(outboxEntryPath(agentDir, sessionFile), "utf8")) as {
-		sessionFile: string;
-		kind?: string;
-		size?: number;
-		mtimeMs?: number;
-		uploadedBytes?: number;
-	};
-}
-
-function writeLedgerOutboxEntry(agentDir: string, ledgerFile: string, uploadedBytes?: number): void {
-	mkdirSync(join(agentDir, "agent-traces-outbox"), { recursive: true });
+let root: string;
+let agentDir: string;
+let dir: string;
+let now: number;
+let options: AgentTraceUploadInstallOptions;
+let fetchFn: ReturnType<typeof vi.fn<typeof fetch>>;
+function file(name = "trace", cwd = root, extra: object[] = []): string {
+	const path = join(root, `${name}.jsonl`);
+	mkdirSync(join(path, ".."), { recursive: true });
 	writeFileSync(
-		outboxEntryPath(agentDir, ledgerFile),
-		JSON.stringify({
-			sessionFile: ledgerFile,
-			kind: "semantic-edges",
-			...(uploadedBytes === undefined ? {} : { uploadedBytes }),
-		}),
+		path,
+		`${[
+			{ type: "session", version: 3, id: name, timestamp: "2026-09-08T00:00:00.000Z", cwd },
+			{
+				type: "message",
+				id: "msg",
+				parentId: null,
+				message: { role: "assistant", content: [{ type: "text", text: "synthetic response" }] },
+			},
+			...extra,
+		]
+			.map((value) => JSON.stringify(value))
+			.join("\n")}\n`,
 	);
+	return path;
+}
+function autoPath(sessionFile: string): string {
+	return join(dir, `${createHash("sha256").update(sessionFile).digest("hex").slice(0, 32)}.json`);
+}
+function entries(): Array<{ path: string; job: Job }> {
+	return readdirSync(dir)
+		.filter((name) => name.endsWith(".json") && !name.startsWith("batch-"))
+		.map((name) => {
+			const path = join(dir, name);
+			return { path, job: JSON.parse(readFileSync(path, "utf8")) as Job };
+		});
+}
+function job(sessionFile: string): Job {
+	return entries().find((entry) => entry.job.sessionFile === sessionFile)!.job;
+}
+async function queue(sessionFile: string, manual = false, signal?: AbortSignal) {
+	return uploadAgentTraceFile({ ...options, sessionFile, requireEnabled: !manual, signal });
+}
+async function run(): Promise<void> {
+	await new AgentTraceDeliveryQueue(options).runOnce();
+}
+function globalSettings(enabled: boolean): void {
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ agentTraces: { enabled } }));
+}
+function projectSettings(cwd: string, enabled: boolean): void {
+	mkdirSync(join(cwd, CONFIG_DIR_NAME), { recursive: true });
+	writeFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), JSON.stringify({ agentTraces: { enabled } }));
 }
 
-async function advanceTimersUntil(condition: () => boolean): Promise<void> {
-	for (let step = 0; step < 200 && !condition(); step += 1) {
-		await stat(new URL(import.meta.url));
-		if (!condition() && vi.getTimerCount() > 0) {
-			await vi.advanceTimersToNextTimerAsync();
-		}
-	}
-	if (!condition()) {
-		throw new Error("Timed out advancing fake timers to the expected condition");
-	}
-}
+beforeEach(async () => {
+	root = await mkdtemp(join(tmpdir(), "trace-queue-"));
+	agentDir = join(root, "agent");
+	dir = join(agentDir, "agent-traces-outbox");
+	now = Date.now() + 10_000;
+	vi.spyOn(Date, "now").mockImplementation(() => now);
+	vi.spyOn(AgentTraceDeliveryQueue.prototype, "start").mockImplementation(() => {});
+	vi.stubEnv(ENV_AGENT_DIR, agentDir);
+	vi.stubEnv("PRIME_AGENT_TRACES_API_KEY", "");
+	vi.stubEnv("PRIME_API_KEY", "");
+	vi.stubEnv("PRIME_AGENT_TRACES_BASE_URL", "");
+	fetchFn = vi.fn<typeof fetch>(async () => new Response("", { status: 200 }));
+	options = {
+		agentDir,
+		configPath: join(root, "missing-prime-config.json"),
+		authStorage: AuthStorage.inMemory({
+			[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "synthetic-key" },
+		}),
+		settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+		fetchFn,
+	};
+});
+afterEach(() => {
+	stopAgentTraceUploads(agentDir);
+	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
+	rmSync(root, { recursive: true, force: true });
+});
 
-describe("agent trace upload", () => {
-	let tempDir: string;
-	let originalTraceApiKey: string | undefined;
-	let originalPrimeApiKey: string | undefined;
-	let originalTraceBaseUrl: string | undefined;
-	let originalPrimeBaseUrl: string | undefined;
-	let originalAgentDir: string | undefined;
-
-	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "agent-traces-test-"));
-		originalAgentDir = process.env[ENV_AGENT_DIR];
-		process.env[ENV_AGENT_DIR] = tempDir;
-		originalTraceApiKey = process.env.PRIME_AGENT_TRACES_API_KEY;
-		originalPrimeApiKey = process.env.PRIME_API_KEY;
-		originalTraceBaseUrl = process.env.PRIME_AGENT_TRACES_BASE_URL;
-		originalPrimeBaseUrl = process.env.PRIME_API_BASE_URL;
-		delete process.env.PRIME_AGENT_TRACES_API_KEY;
-		delete process.env.PRIME_API_KEY;
-		delete process.env.PRIME_AGENT_TRACES_BASE_URL;
-		delete process.env.PRIME_API_BASE_URL;
+describe("durable background trace delivery", () => {
+	it("acknowledges current, bulk and startup work before any preparation or request", async () => {
+		const prepare = vi.spyOn(payloadWorker, "prepareTracePayload");
+		expect(await queue(file(), true)).toMatchObject({ status: "queued" });
+		expect(await uploadAllAgentTraces({ ...options, sessionDir: root, requireEnabled: false })).toMatchObject({
+			status: "queued",
+		});
+		expect(catchUpAgentTraceUploads(options)).toBeUndefined();
+		expect(fetchFn).not.toHaveBeenCalled();
+		expect(prepare).not.toHaveBeenCalled();
+		expect(readdirSync(dir).filter((name) => name.endsWith(".json"))).toHaveLength(2);
 	});
-
-	afterEach(() => {
-		vi.restoreAllMocks();
-		vi.useRealTimers();
-		if (originalAgentDir === undefined) {
-			delete process.env[ENV_AGENT_DIR];
-		} else {
-			process.env[ENV_AGENT_DIR] = originalAgentDir;
-		}
-		if (originalTraceApiKey === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_API_KEY;
-		} else {
-			process.env.PRIME_AGENT_TRACES_API_KEY = originalTraceApiKey;
-		}
-		if (originalPrimeApiKey === undefined) {
-			delete process.env.PRIME_API_KEY;
-		} else {
-			process.env.PRIME_API_KEY = originalPrimeApiKey;
-		}
-		if (originalTraceBaseUrl === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_BASE_URL;
-		} else {
-			process.env.PRIME_AGENT_TRACES_BASE_URL = originalTraceBaseUrl;
-		}
-		if (originalPrimeBaseUrl === undefined) {
-			delete process.env.PRIME_API_BASE_URL;
-		} else {
-			process.env.PRIME_API_BASE_URL = originalPrimeBaseUrl;
-		}
-		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
-
-	it("does not upload when trace sharing is disabled", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "disabled-session");
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: sessionManager.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result).toEqual({ status: "disabled" });
-		expect(calls).toHaveLength(0);
-	});
-
-	it("allows an explicit one-shot upload without enabling automatic sharing", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "one-shot-session");
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: sessionManager.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
-			requireEnabled: false,
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result.status).toBe("uploaded");
-		expect(calls).toHaveLength(1);
-	});
-
-	it("stops before reading the session body when trace sharing is disabled after upload starts", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "disabled-before-read-session");
-		const settingsManager = SettingsManager.inMemory({ agentTraces: { enabled: true } });
-		const enabledSpy = vi.spyOn(settingsManager, "getAgentTracesEnabled");
-		enabledSpy.mockReturnValueOnce(true).mockReturnValue(false);
-
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: sessionManager.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager,
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result).toEqual({ status: "disabled" });
-		expect(calls).toHaveLength(0);
-		expect(enabledSpy).toHaveBeenCalledTimes(2);
-	});
-
-	it("rechecks trace sharing before sending the upload request", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "disabled-before-fetch-session");
-		const settingsManager = SettingsManager.inMemory({ agentTraces: { enabled: true } });
-		const enabledSpy = vi.spyOn(settingsManager, "getAgentTracesEnabled");
-		enabledSpy.mockReturnValueOnce(true).mockReturnValueOnce(true).mockReturnValue(false);
-
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: sessionManager.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager,
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result).toEqual({ status: "disabled" });
-		expect(calls).toHaveLength(0);
-		expect(enabledSpy).toHaveBeenCalledTimes(3);
-	});
-
-	it("uploads raw session JSONL with trace headers", async () => {
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const parent = writeSession(cwd, sessionDir, "parent-session");
-		const child = writeSession(cwd, sessionDir, "child-session", parent.getSessionFile());
-		const childSessionFile = child.getSessionFile();
-		expect(childSessionFile).toBeDefined();
-
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: childSessionFile,
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result).toEqual({
-			status: "uploaded",
-			sessionId: "uploaded-session",
-			traceId: "uploaded-trace",
-			bytesStored: 123,
-			key: "trace/key.jsonl",
-		});
-		expect(calls).toHaveLength(1);
-		const call = calls[0];
-		expect(call.url).toBe("https://api.example.test/api/v1/agent-traces/sessions/child-session");
-		expect(call.init.method).toBe("PUT");
-		expect(call.init.body).toBe(readFileSync(childSessionFile!, "utf8"));
-
-		const headers = new Headers(call.init.headers);
-		expect(headers.get("authorization")).toBe("Bearer trace-key");
-		expect(headers.get("content-type")).toBe("application/x-ndjson");
-		expect(headers.get("x-trace-id")).toBe("parent-session");
-		expect(headers.get("x-parent-session")).toBe("parent-session");
-		expect(headers.get("x-cwd")).toBe(cwd);
-		expect(headers.get("x-agent-version")).toBeTruthy();
-		expect(headers.get("content-length")).toBeNull();
-	});
-
-	it("uses the production trace API unless a trace-specific base URL is configured", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "prod-session");
-		const configPath = join(tempDir, "prime-config.json");
-		writeFileSync(configPath, JSON.stringify({ base_url: "https://dev-api.example/api/v1" }));
-		process.env.PRIME_API_BASE_URL = "https://wrong-api.example";
-
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: sessionManager.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			configPath,
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result.status).toBe("uploaded");
-		expect(calls).toHaveLength(1);
-		expect(calls[0].url).toBe("https://api.primeintellect.ai/api/v1/agent-traces/sessions/prod-session");
-	});
-
-	it("uses PRIME_AGENT_TRACES_BASE_URL for trace API overrides", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "override-session");
-		process.env.PRIME_AGENT_TRACES_BASE_URL = "https://trace-api.example/api/v1";
-
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: sessionManager.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result.status).toBe("uploaded");
-		expect(calls).toHaveLength(1);
-		expect(calls[0].url).toBe("https://trace-api.example/api/v1/agent-traces/sessions/override-session");
-	});
-
-	it("runs a startup catch-up on the first trace-upload install", async () => {
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const missed = writeSession(cwd, sessionDir, "missed-session");
-		const missedFile = missed.getSessionFile();
-		expect(missedFile).toBeDefined();
-		writeOutboxEntry(tempDir, missedFile as string);
-
-		const live = SessionManager.create(cwd, sessionDir);
-		live.newSession({ id: "live-session" });
-		const calls: FetchCall[] = [];
-		installAgentTraceUpload(live, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-		});
-
-		await vi.waitFor(() => expect(calls).toHaveLength(1));
-		expect(calls[0].url).toBe("https://api.example.test/api/v1/agent-traces/sessions/missed-session");
-		expect(calls[0].init.body).toBe(readFileSync(missedFile as string, "utf8"));
-		const stats = await stat(missedFile as string);
-		await vi.waitFor(() =>
-			expect(readOutboxEntry(tempDir, missedFile as string)).toEqual({
-				sessionFile: missedFile,
-				size: stats.size,
-				mtimeMs: stats.mtimeMs,
-			}),
-		);
-	});
-
-	it("schedules upload only after the session file is persisted", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "listener-session" });
-
-		const calls: FetchCall[] = [];
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		expect(vi.getTimerCount()).toBe(0);
-
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		await advanceTimersUntil(() => calls.length === 1);
-		expect(calls[0].url).toBe("https://api.example.test/api/v1/agent-traces/sessions/listener-session");
-	});
-
-	it("coalesces new content that persists during an in-flight upload into one follow-up upload", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "concurrent-upload-session" });
-
-		let releaseFetch: () => void = () => {};
-		const fetchReleased = new Promise<void>((resolve) => {
-			releaseFetch = resolve;
-		});
-		const calls: FetchCall[] = [];
-		const fetchFn: typeof fetch = async (input, init) => {
-			calls.push({ url: String(input), init: init ?? {} });
-			if (calls.length === 1) {
-				await fetchReleased;
-			}
-			return new Response(JSON.stringify({ bytes_stored: 123 }), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			});
-		};
-
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		await advanceTimersUntil(() => calls.length === 1);
-
-		// New content lands while the first upload is still in flight.
-		sessionManager.appendMessage(createUserMessage("more"));
-		sessionManager.appendMessage(createAssistantMessage("content"));
-		await advanceTimersUntil(() => vi.getTimerCount() > 0);
-		await vi.advanceTimersToNextTimerAsync();
-		expect(calls).toHaveLength(1);
-
-		releaseFetch();
-		await advanceTimersUntil(() => calls.length === 2);
-		const finalBody = readFileSync(sessionManager.getSessionFile() as string, "utf8");
-		expect(calls[1].init.body).toBe(finalBody);
-		// Drain the follow-up upload's completion so its chain cannot leak into later fake-timer tests.
-		await advanceTimersUntil(
-			() =>
-				readOutboxEntry(tempDir, sessionManager.getSessionFile() as string)?.size === Buffer.byteLength(finalBody),
-		);
-	});
-
-	it("schedules automatic uploads at most once per minute and only after new entries persist", async () => {
-		vi.useFakeTimers();
-		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "throttled-session" });
-
-		const calls: FetchCall[] = [];
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(1_000);
-		await advanceTimersUntil(() => calls.length === 1);
-
-		setTimeoutSpy.mockClear();
-		sessionManager.appendMessage(createUserMessage("next"));
-		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(60_000);
-	});
-
-	it("surfaces the underlying fetch cause and logs the failure", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "failing-session");
-		const sessionFile = session.getSessionFile();
-
-		const failingFetch: typeof fetch = async () => {
-			const error = new TypeError("fetch failed");
-			(error as { cause?: unknown }).cause = { code: "ENOTFOUND", message: "getaddrinfo ENOTFOUND host" };
-			throw error;
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile,
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: failingFetch,
-			reloadConfig: false,
-		});
-
-		expect(result.status).toBe("failed");
-		if (result.status === "failed") {
-			expect(result.message).toBe("fetch failed (ENOTFOUND)");
-		}
-
-		const logContents = readFileSync(getAgentTracesLogPath(), "utf8");
-		expect(logContents).toContain("upload failed");
-		expect(logContents).toContain("fetch failed (ENOTFOUND)");
-		expect(logContents).toContain(sessionFile ?? "");
-	});
-
-	it("retries once on a transient connection failure, then succeeds", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "retry-session");
-		const calls: FetchCall[] = [];
-		let attempts = 0;
-		const flakyFetch: typeof fetch = async (input, init) => {
-			attempts += 1;
-			if (attempts === 1) {
-				const error = new TypeError("fetch failed");
-				(error as { cause?: unknown }).cause = { code: "ECONNRESET" };
-				throw error;
-			}
-			return createFetchRecorder(calls)(input, init);
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: flakyFetch,
-			reloadConfig: false,
-		});
-
-		expect(attempts).toBe(2);
-		expect(result.status).toBe("uploaded");
-		expect(calls).toHaveLength(1);
-	});
-
-	it("uses bounded exponential backoff with jitter for transient failures", async () => {
-		const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "bounded-retry-session");
-		let attempts = 0;
-		const failingFetch: typeof fetch = async () => {
-			attempts += 1;
-			const error = new TypeError("fetch failed");
-			(error as { cause?: unknown }).cause = { code: "ECONNRESET" };
-			throw error;
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: failingFetch,
-			reloadConfig: false,
-		});
-		expect(attempts).toBe(4);
-		expect(result.status).toBe("failed");
-		const retryDelays = timeoutSpy.mock.calls.map((call) => Number(call[1])).filter((delay) => delay < 15_000);
-		expect(retryDelays).toEqual([400, 800, 1_600]);
-		randomSpy.mockRestore();
-	});
-
-	it("retries request timeouts within the retry bound", async () => {
-		vi.useFakeTimers();
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "timeout-retry-session");
-		let markFirstAttemptStarted: () => void = () => {};
-		const firstAttemptStarted = new Promise<void>((resolve) => {
-			markFirstAttemptStarted = resolve;
-		});
-		let attempts = 0;
-		const timeoutFetch: typeof fetch = async (_input, init) => {
-			attempts += 1;
-			if (attempts === 1) {
-				markFirstAttemptStarted();
-			}
-			return await new Promise<Response>((_resolve, reject) => {
-				const signal = init?.signal;
-				signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-			});
-		};
-
-		const upload = uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: timeoutFetch,
-			requestTimeoutMs: 100,
-			reloadConfig: false,
-		});
-
-		await firstAttemptStarted;
-		await vi.runAllTimersAsync();
-		const result = await upload;
-		expect(attempts).toBe(4);
-		expect(result).toEqual({ status: "failed", message: "Trace upload timed out after 100ms" });
-	});
-
-	it("retries transient HTTP responses but not permanent HTTP responses", async () => {
-		const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "http-retry-session");
-		let attempts = 0;
-		const fetchFn: typeof fetch = async () => {
-			attempts += 1;
-			if (attempts < 3) {
-				return new Response(JSON.stringify({ detail: "temporarily unavailable" }), { status: 503 });
-			}
-			return new Response(JSON.stringify({ bytes_stored: 42 }), { status: 200 });
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-			reloadConfig: false,
-		});
-		expect(attempts).toBe(3);
-		expect(result.status).toBe("uploaded");
-		randomSpy.mockRestore();
-	});
-
-	it("returns a rate-limited upload immediately instead of sleeping in-request", async () => {
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "rate-limit-session");
-		let attempts = 0;
-		const fetchFn: typeof fetch = async () => {
-			attempts += 1;
-			return new Response(JSON.stringify({ detail: "Too Many Requests" }), { status: 429 });
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-			reloadConfig: false,
-		});
-
-		expect(attempts).toBe(1);
-		expect(result).toMatchObject({ status: "failed", statusCode: 429 });
-		expect(timeoutSpy.mock.calls.map((call) => Number(call[1]))).not.toContain(60_000);
-	});
-
-	it("reschedules a rate-limited automatic upload without blocking and retries on the next cycle", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "rate-limit-reschedule-session" });
-
-		let attempts = 0;
-		const calls: FetchCall[] = [];
-		const fetchFn: typeof fetch = async (input, init) => {
-			attempts += 1;
-			if (attempts === 1) {
-				return new Response(JSON.stringify({ detail: "Too Many Requests" }), { status: 429 });
-			}
-			return createFetchRecorder(calls)(input, init);
-		};
-
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		await advanceTimersUntil(() => attempts === 1);
-		// The rate-limited cycle re-arms itself; the retry succeeds without any caller waiting.
-		await advanceTimersUntil(() => calls.length === 1);
-		expect(attempts).toBe(2);
-	});
-
-	it.each([503])("honors Retry-After when retrying HTTP %i", async (status) => {
-		vi.useFakeTimers();
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), `retry-after-session-${status}`);
-		let markFirstAttemptStarted: () => void = () => {};
-		const firstAttemptStarted = new Promise<void>((resolve) => {
-			markFirstAttemptStarted = resolve;
-		});
-		let attempts = 0;
-		const fetchFn: typeof fetch = async () => {
-			attempts += 1;
-			if (attempts === 1) {
-				markFirstAttemptStarted();
-				return new Response(null, { status, headers: { "retry-after": "17" } });
-			}
-			return new Response(JSON.stringify({ bytes_stored: 42 }), { status: 200 });
-		};
-
-		const upload = uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-			reloadConfig: false,
-		});
-
-		await firstAttemptStarted;
-		await vi.runAllTimersAsync();
-		const result = await upload;
-		expect(attempts).toBe(2);
-		expect(result.status).toBe("uploaded");
-		expect(timeoutSpy.mock.calls.map((call) => Number(call[1]))).toContain(17_000);
-	});
-
-	it("caps Retry-After at the platform rate-limit window", async () => {
-		vi.useFakeTimers();
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "bounded-retry-after-session");
-		let markFirstAttemptStarted: () => void = () => {};
-		const firstAttemptStarted = new Promise<void>((resolve) => {
-			markFirstAttemptStarted = resolve;
-		});
-		let attempts = 0;
-		const fetchFn: typeof fetch = async () => {
-			attempts += 1;
-			if (attempts === 1) {
-				markFirstAttemptStarted();
-				return new Response(null, { status: 503, headers: { "retry-after": "3600" } });
-			}
-			return new Response(JSON.stringify({ bytes_stored: 42 }), { status: 200 });
-		};
-
-		const upload = uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-			reloadConfig: false,
-		});
-
-		await firstAttemptStarted;
-		await vi.runAllTimersAsync();
-		const result = await upload;
-		expect(attempts).toBe(2);
-		expect(result.status).toBe("uploaded");
-		expect(timeoutSpy.mock.calls.map((call) => Number(call[1]))).toContain(60_000);
-		expect(timeoutSpy.mock.calls.map((call) => Number(call[1]))).not.toContain(3_600_000);
-	});
-
-	it("surfaces the cancellation reason when aborted during the retry backoff", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "aborted-retry-session");
-		const controller = new AbortController();
-		const abortReason = new Error("upload cancelled");
-		let attempts = 0;
-		const flakyFetch: typeof fetch = async () => {
-			attempts += 1;
-			controller.abort(abortReason);
-			const error = new TypeError("fetch failed");
-			(error as { cause?: unknown }).cause = { code: "ECONNRESET" };
-			throw error;
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: flakyFetch,
-			signal: controller.signal,
-			reloadConfig: false,
-		});
-
-		expect(attempts).toBe(1);
-		expect(result.status).toBe("failed");
-		if (result.status === "failed") {
-			expect(result.message).toBe("upload cancelled");
-		}
-	});
-
-	it("does not back off when an HTTP response cleanup aborts the upload", async () => {
-		vi.useFakeTimers();
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "aborted-http-retry-session");
-		const controller = new AbortController();
-		const abortReason = new Error("upload cancelled during cleanup");
-		let attempts = 0;
-		const fetchFn: typeof fetch = async () => {
-			attempts += 1;
-			return {
-				status: 503,
-				headers: new Headers(),
-				body: {
-					cancel: async () => {
-						controller.abort(abortReason);
-					},
-				},
-			} as unknown as Response;
-		};
-
-		const upload = uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-			signal: controller.signal,
-			reloadConfig: false,
-		});
-
-		await vi.runAllTimersAsync();
-		const result = await upload;
-		expect(attempts).toBe(1);
-		expect(result).toEqual({ status: "failed", message: "upload cancelled during cleanup" });
-		const retryDelays = timeoutSpy.mock.calls.map((call) => Number(call[1])).filter((delay) => delay < 15_000);
-		expect(retryDelays).toEqual([]);
-	});
-
-	it("does not retry a permanent DNS failure", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "dns-failure-session");
-		let attempts = 0;
-		const dnsFailFetch: typeof fetch = async () => {
-			attempts += 1;
-			const error = new TypeError("fetch failed");
-			(error as { cause?: unknown }).cause = { code: "ENOTFOUND", message: "getaddrinfo ENOTFOUND host" };
-			throw error;
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: dnsFailFetch,
-			reloadConfig: false,
-		});
-
-		expect(attempts).toBe(1);
-		expect(result.status).toBe("failed");
-		if (result.status === "failed") {
-			expect(result.message).toBe("fetch failed (ENOTFOUND)");
-		}
-	});
-
-	it("does not retry on an HTTP error response", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "http-error-session");
-		let attempts = 0;
-		const erroringFetch: typeof fetch = async () => {
-			attempts += 1;
-			return new Response(JSON.stringify({ detail: "bad request" }), {
-				status: 400,
-				headers: { "content-type": "application/json" },
-			});
-		};
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: erroringFetch,
-			reloadConfig: false,
-		});
-
-		expect(attempts).toBe(1);
-		expect(result.status).toBe("failed");
-		if (result.status === "failed") {
-			expect(result.statusCode).toBe(400);
-		}
-	});
-
-	it("previews the current trace without requiring sharing or credentials", async () => {
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const parent = writeSession(cwd, sessionDir, "preview-parent");
-		const child = writeSession(cwd, sessionDir, "preview-child", parent.getSessionFile());
-
-		const result = await previewAgentTraceFile({
-			sessionFile: child.getSessionFile(),
-			baseUrl: "https://api.example.test",
-			maxContentChars: 256,
-		});
-
-		expect(result.status).toBe("ready");
-		if (result.status === "ready") {
-			expect(result).toMatchObject({
-				sessionId: "preview-child",
-				traceId: "preview-parent",
-				parentSessionId: "preview-parent",
-				cwd,
-				uploadable: true,
-				endpoint: "https://api.example.test/api/v1/agent-traces/sessions/preview-child",
-				truncated: true,
-			});
-			expect(result.contentPreview).toContain("middle of trace omitted");
-			expect(result.contentPreview).toContain("preview-child");
-		}
-	});
-
-	it("discovers and uploads saved parent and subagent traces", async () => {
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const parent = writeSession(cwd, sessionDir, "all-parent");
-		const childDir = join(tempDir, "session-artifacts", "all-parent", "sub-12345678");
-		const child = writeSession(cwd, childDir, "all-child", parent.getSessionFile());
-		const grandchildDir = join(childDir, "sub-87654321");
-		const grandchild = writeSession(cwd, grandchildDir, "all-grandchild", child.getSessionFile());
-		writeFileSync(join(childDir, "not-a-session.jsonl"), '{"type":"diagnostic"}\n');
-
-		const discovered = await findAgentTraceFiles(sessionDir);
-		expect(discovered).toEqual([child.getSessionFile(), grandchild.getSessionFile(), parent.getSessionFile()].sort());
-
-		vi.useFakeTimers();
-		const calls: FetchCall[] = [];
-		let resolveFirstCompletion: () => void = () => {};
-		const firstCompletion = new Promise<void>((resolve) => {
-			resolveFirstCompletion = resolve;
-		});
-		const progress: Array<{ completed: number; total: number }> = [];
-		const upload = uploadAllAgentTraces({
-			sessionDir,
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
-			requireEnabled: false,
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-			concurrency: 0.5,
-			onProgress: ({ completed, total }) => {
-				progress.push({ completed, total });
-				if (completed === 1) {
-					resolveFirstCompletion();
-				}
+	it("sends the unchanged raw JSONL PUT with parent/root and active-branch git headers", async () => {
+		const parent = file("parent");
+		const child = file("child", root, [
+			{
+				type: "git_state",
+				id: "git-main",
+				parentId: null,
+				git: { repoUrl: "https://example.invalid/repo", commit: "main" },
 			},
+			{ type: "message", id: "leaf", parentId: "git-main" },
+			{ type: "git_state", id: "sibling", parentId: null, git: { commit: "wrong" } },
+			{ type: "message", id: "active", parentId: "leaf" },
+		]);
+		const lines = readFileSync(child, "utf8").split("\n");
+		lines[0] = JSON.stringify({ ...JSON.parse(lines[0]!), parentSession: parent });
+		writeFileSync(child, lines.join("\n"));
+		await queue(child, true);
+		await run();
+		const [url, init] = fetchFn.mock.calls[0]!;
+		expect(url).toBe("https://api.primeintellect.ai/api/v1/agent-traces/sessions/child");
+		expect(init?.method).toBe("PUT");
+		expect(Buffer.from(init!.body as ArrayBuffer).toString()).toBe(readFileSync(child, "utf8"));
+		expect(init?.headers).toMatchObject({
+			Authorization: "Bearer synthetic-key",
+			"Content-Type": "application/x-ndjson",
+			"X-Trace-Id": "parent",
+			"X-Parent-Session": "parent",
+			"X-Cwd": root,
+			"X-Git-Commit": "main",
+			"X-Git-Repo": "https://example.invalid/repo",
 		});
-		await firstCompletion;
-		await advanceTimersUntil(() => calls.length === 3);
-		const result = await upload;
-
-		expect(result).toMatchObject({ total: 3, uploaded: 3, failed: 0, skipped: 0, bytesStored: 369 });
-		expect(calls.map((call) => call.url).sort()).toEqual(
-			[
-				"https://api.example.test/api/v1/agent-traces/sessions/all-child",
-				"https://api.example.test/api/v1/agent-traces/sessions/all-grandchild",
-				"https://api.example.test/api/v1/agent-traces/sessions/all-parent",
-			].sort(),
+		expect(job(child).state).toBe("delivered");
+	});
+	it("keeps automatic uploads disabled by default and lets project settings only restrict global consent", async () => {
+		globalSettings(false);
+		projectSettings(root, true);
+		options.settingsManager = SettingsManager.create(root, agentDir);
+		expect(await queue(file())).toEqual({ status: "disabled" });
+		globalSettings(true);
+		projectSettings(root, false);
+		expect(await queue(file())).toEqual({ status: "disabled" });
+		projectSettings(root, true);
+		expect(await queue(file())).toMatchObject({ status: "queued" });
+	});
+	it("reads each backlog session's own project instead of the queue owner's project", async () => {
+		globalSettings(true);
+		projectSettings(root, true);
+		const other = join(root, "other");
+		projectSettings(other, false);
+		options.settingsManager = SettingsManager.create(root, agentDir);
+		const allowed = file("allowed");
+		const blocked = file("blocked", other);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(autoPath(allowed), JSON.stringify({ sessionFile: allowed }));
+		writeFileSync(autoPath(blocked), JSON.stringify({ sessionFile: blocked }));
+		await run();
+		now += 61_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		expect(job(blocked).state).toBe("paused");
+		projectSettings(other, true);
+		now += 61_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+	});
+	it.each(["global", "project"])("rechecks %s consent after queueing and after backoff", async (scope) => {
+		globalSettings(true);
+		projectSettings(root, true);
+		options.settingsManager = SettingsManager.create(root, agentDir);
+		const path = file();
+		await queue(path);
+		const set = (enabled: boolean) => (scope === "global" ? globalSettings(enabled) : projectSettings(root, enabled));
+		set(false);
+		await run();
+		expect(fetchFn).not.toHaveBeenCalled();
+		set(true);
+		fetchFn.mockResolvedValueOnce(new Response("", { status: 503, headers: { "Retry-After": "180" } }));
+		await run();
+		set(false);
+		now += 181_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		set(true);
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+	});
+	it("aborts an in-flight automatic request when consent is revoked", async () => {
+		globalSettings(true);
+		options.settingsManager = SettingsManager.create(root, agentDir);
+		fetchFn.mockImplementation(
+			async (_url, init) =>
+				new Promise((_resolve, reject) =>
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)),
+				),
 		);
-		const grandchildCall = calls.find((call) => call.url.endsWith("/all-grandchild"));
-		const grandchildHeaders = new Headers(grandchildCall?.init.headers);
-		expect(grandchildHeaders.get("x-trace-id")).toBe("all-parent");
-		expect(grandchildHeaders.get("x-parent-session")).toBe("all-child");
-		expect(progress[0]).toEqual({ completed: 0, total: 3 });
-		expect(progress.at(-1)).toEqual({ completed: 3, total: 3 });
+		const path = file();
+		await queue(path);
+		const active = run();
+		await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledOnce());
+		globalSettings(false);
+		await active;
+		expect(fetchFn.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+		expect(job(path).state).toBe("paused");
 	});
-
-	it("paces batch request starts within the platform rate limit", async () => {
-		const sessionDir = join(tempDir, "sessions");
-		for (let index = 0; index < 6; index += 1) {
-			writeSession(tempDir, sessionDir, `rate-limited-all-${index}`);
+	it("rechecks consent after delayed credential resolution and preparation", async () => {
+		globalSettings(true);
+		options.settingsManager = SettingsManager.create(root, agentDir);
+		const real = payloadWorker.prepareTracePayload;
+		vi.spyOn(payloadWorker, "prepareTracePayload").mockImplementation(async (input) => {
+			const payload = await real(input);
+			globalSettings(false);
+			return payload;
+		});
+		await queue(file());
+		await run();
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+	it("persists Retry-After across replacement workers and new transcript content", async () => {
+		const path = file();
+		await queue(path);
+		fetchFn.mockResolvedValueOnce(new Response("", { status: 429, headers: { "Retry-After": "3600" } }));
+		await run();
+		const deadline = job(path).nextAttemptAt!;
+		appendFileSync(path, '{"id":"new-content"}\n');
+		now += 600_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		expect(job(path).nextAttemptAt).toBe(deadline);
+		now = deadline;
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		expect(job(path).state).toBe("delivered");
+	});
+	it("uses capped exponential jitter for repeated network failures, without sleeping in the queue", async () => {
+		const path = file();
+		await queue(path, true);
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		fetchFn.mockRejectedValue(new TypeError("fetch failed: secret synthetic-key"));
+		for (let attempt = 1; attempt <= 12; attempt++) {
+			await run();
+			const saved = job(path);
+			expect(saved.attempts).toBe(attempt);
+			const delay = saved.nextAttemptAt! - now;
+			expect(delay).toBe(Math.min(300_000, Math.min(300_000, 1_000 * 2 ** (attempt - 1)) * 0.8));
+			now = Math.max(saved.nextAttemptAt!, now + 12_100);
 		}
-
-		vi.useFakeTimers();
-		let markFirstRequestStarted: () => void = () => {};
-		const firstRequestStarted = new Promise<void>((resolve) => {
-			markFirstRequestStarted = resolve;
-		});
-		const requestStarts: number[] = [];
-		const fetchFn: typeof fetch = async () => {
-			requestStarts.push(Date.now());
-			if (requestStarts.length === 1) {
-				markFirstRequestStarted();
-			}
-			return new Response(JSON.stringify({ bytes_stored: 1 }), { status: 200 });
-		};
-
-		const upload = uploadAllAgentTraces({
-			sessionDir,
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
-			requireEnabled: false,
-			baseUrl: "https://api.example.test",
-			fetchFn,
-			reloadConfig: false,
-		});
-
-		await firstRequestStarted;
-		await advanceTimersUntil(() => requestStarts.length === 6);
-		const result = await upload;
-		expect(result).toMatchObject({ total: 6, uploaded: 6, failed: 0, skipped: 0 });
-		expect(requestStarts).toHaveLength(6);
-		for (let index = 1; index < requestStarts.length; index += 1) {
-			expect(requestStarts[index]! - requestStarts[index - 1]!).toBeGreaterThanOrEqual(12_000);
+		expect(readFileSync(join(agentDir, "logs", "agent-traces.log"), "utf8").match(/Trace delivery/g)).toHaveLength(1);
+	});
+	it("backs off preparation failures exponentially and isolates a corrupt entry", async () => {
+		const path = file();
+		await queue(path, true);
+		writeFileSync(join(dir, "000-corrupt.json"), JSON.stringify({ sessionFile: path, manual: true }));
+		vi.spyOn(payloadWorker, "prepareTracePayload").mockRejectedValue(new Error("disk read failed"));
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			await run();
+			expect(job(path).attempts).toBe(attempt);
+			expect(job(path).nextAttemptAt).toBe(now + 1_000 * 2 ** (attempt - 1));
+			now = job(path).nextAttemptAt!;
 		}
-		expect(requestStarts[5]! - requestStarts[0]!).toBeGreaterThanOrEqual(60_000);
+		expect(fetchFn).not.toHaveBeenCalled();
 	});
-
-	it("stops scheduling batch uploads after cancellation", async () => {
-		const sessionDir = join(tempDir, "sessions");
-		writeSession(tempDir, sessionDir, "abort-all-a");
-		writeSession(tempDir, sessionDir, "abort-all-b");
-		writeSession(tempDir, sessionDir, "abort-all-c");
-		const controller = new AbortController();
-		const calls: FetchCall[] = [];
-
-		const result = await uploadAllAgentTraces({
-			sessionDir,
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
-			requireEnabled: false,
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-			concurrency: 1,
-			signal: controller.signal,
-			onProgress: ({ completed }) => {
-				if (completed === 1) {
-					controller.abort(new Error("cancel batch"));
-				}
-			},
-		});
-
-		expect(calls).toHaveLength(1);
-		expect(result).toMatchObject({ total: 3, uploaded: 1, failed: 0, skipped: 2 });
-		expect(result.results).toHaveLength(1);
+	it("times out a stalled request and preserves its retry", async () => {
+		options.requestTimeoutMs = 30;
+		fetchFn.mockImplementation(
+			async (_url, init) =>
+				new Promise((_resolve, reject) =>
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)),
+				),
+		);
+		const path = file();
+		await queue(path, true);
+		await run();
+		expect(job(path)).toMatchObject({ state: "retrying", failure: { reason: "timeout" } });
 	});
-
-	it("counts in-flight batch cancellations as skipped", async () => {
-		const sessionDir = join(tempDir, "sessions");
-		writeSession(tempDir, sessionDir, "abort-in-flight-a");
-		writeSession(tempDir, sessionDir, "abort-in-flight-b");
-		writeSession(tempDir, sessionDir, "abort-in-flight-c");
-		const controller = new AbortController();
-		const abortReason = new Error("cancel in-flight batch");
-		vi.useFakeTimers();
-		let markFirstRequestStarted: () => void = () => {};
-		const firstRequestStarted = new Promise<void>((resolve) => {
-			markFirstRequestStarted = resolve;
-		});
-		let attempts = 0;
-		const fetchFn: typeof fetch = async (_input, init) => {
-			attempts += 1;
-			if (attempts === 1) {
-				markFirstRequestStarted();
-			}
-			return await new Promise<Response>((_resolve, reject) => {
-				init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
-				if (attempts === 2) {
-					queueMicrotask(() => controller.abort(abortReason));
-				}
+	it("shares ownership and request spacing between queue instances", async () => {
+		const one = file("one"),
+			two = file("two");
+		await queue(one, true);
+		await queue(two, true);
+		let finish!: (response: Response) => void;
+		fetchFn.mockImplementationOnce(
+			async () =>
+				new Promise((resolve) => {
+					finish = resolve;
+				}),
+		);
+		const first = run();
+		await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledOnce());
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		const status = await readAgentTraceStatus({ ...options, sessionFile: one });
+		expect(status.inProgress).toBe(1);
+		finish(new Response("", { status: 200 }));
+		await first;
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		now += 12_100;
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+	});
+	it.each(["credential", "response"] as const)(
+		"does not commit stale state after ownership is lost during %s",
+		async (phase) => {
+			const path = file();
+			await queue(path, true);
+			const realLock = lockfile.lock;
+			let loseOwnership: (() => void) | undefined;
+			vi.spyOn(lockfile, "lock").mockImplementation(async (path, lockOptions) => {
+				loseOwnership = () => lockOptions?.onCompromised?.(new Error("lost"));
+				return realLock(path, lockOptions);
 			});
-		};
-
-		const upload = uploadAllAgentTraces({
-			sessionDir,
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
-			requireEnabled: false,
-			baseUrl: "https://api.example.test",
-			fetchFn,
-			reloadConfig: false,
-			concurrency: 2,
-			signal: controller.signal,
-		});
-		await firstRequestStarted;
-		await advanceTimersUntil(() => attempts === 2);
-		const result = await upload;
-
-		expect(attempts).toBe(2);
-		expect(result).toMatchObject({ total: 3, uploaded: 0, failed: 0, skipped: 3 });
-		expect(result.results).toHaveLength(0);
+			if (phase === "credential")
+				vi.spyOn(options.authStorage, "readApiKeyConfig").mockImplementation(async () => {
+					loseOwnership?.();
+					throw new Error("aborted");
+				});
+			else
+				fetchFn.mockImplementation(async () => {
+					loseOwnership?.();
+					return new Response("", { status: 200 });
+				});
+			await run();
+			expect(job(path).state).toBe(phase === "credential" ? "queued" : "uploading");
+			expect(readdirSync(dir).some((name) => name.startsWith(".delivered-"))).toBe(false);
+			if (phase === "credential") expect(fetchFn).not.toHaveBeenCalled();
+		},
+	);
+	it("recovers an abandoned uploading job and a stale process lease", async () => {
+		const path = file();
+		await queue(path, true);
+		const entry = entries()[0]!;
+		writeFileSync(entry.path, JSON.stringify({ ...entry.job, state: "uploading" }));
+		mkdirSync(join(dir, ".delivery.lock"));
+		// Date.now is already ten seconds ahead; advance beyond the lock's stale interval.
+		now += 40_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		expect(job(path).state).toBe("delivered");
 	});
-
-	it("durably records upload intent on disk before any upload happens", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "unflushed-session" });
-
-		const calls: FetchCall[] = [];
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		const sessionFile = sessionManager.getSessionFile();
-		expect(sessionFile).toBeDefined();
-
-		// Synchronously durable: the intent marker is on disk the moment the persist returns.
-		expect(readOutboxEntry(tempDir, sessionFile as string)).toEqual({ sessionFile });
-		expect(calls).toHaveLength(0);
+	it("does not starve manual jobs behind continuously changing automatic sessions", async () => {
+		const automatic = Array.from({ length: 5 }, (_, index) => file(`auto-${index}`));
+		for (const path of automatic) await queue(path);
+		for (let i = 0; i < 5; i++) {
+			await run();
+			now += 12_100;
+		}
+		const manual = file("manual-last");
+		await queue(manual, true);
+		for (let i = 0; i < 6; i++) {
+			for (const path of automatic) appendFileSync(path, `{"id":"dirty-${i}"}\n`);
+			await run();
+			now += 12_100;
+		}
+		expect(job(manual).state).toBe("delivered");
 	});
-
-	it("catch-up uploads exactly the content a previous process never uploaded, then goes quiet", async () => {
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const missed = writeSession(cwd, sessionDir, "crash-lost-session");
-		const missedFile = missed.getSessionFile() as string;
-		writeOutboxEntry(tempDir, missedFile);
-
-		const calls: FetchCall[] = [];
-		const options = {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		};
-
-		const first = await catchUpAgentTraceUploads(options);
-		expect(first.results.map(({ result }) => result.status)).toEqual(["uploaded"]);
-		expect(calls).toHaveLength(1);
-		expect(calls[0].init.body).toBe(readFileSync(missedFile, "utf8"));
-		const stats = await stat(missedFile);
-		expect(readOutboxEntry(tempDir, missedFile)).toEqual({
-			sessionFile: missedFile,
-			size: stats.size,
-			mtimeMs: stats.mtimeMs,
-		});
-
-		// Unchanged content: subsequent cycles and restarts never re-POST.
-		const second = await catchUpAgentTraceUploads(options);
-		expect(second.results).toEqual([]);
-		const automatic = await uploadAgentTraceFile({ ...options, sessionFile: missedFile });
-		expect(automatic).toEqual({ status: "unchanged" });
-		expect(calls).toHaveLength(1);
+	it("pauses an invalid credential globally and resumes when it changes", async () => {
+		await queue(file("one"), true);
+		await queue(file("two"), true);
+		fetchFn.mockResolvedValueOnce(new Response("synthetic-key", { status: 401 }));
+		await run();
+		now += 61_000;
+		await run();
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		options.authStorage.set(PRIME_AGENT_TRACES_PROVIDER_ID, { type: "api_key", key: "replacement" });
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
 	});
-
-	it("prunes cursor entries whose session file was deleted", async () => {
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const kept = writeSession(cwd, sessionDir, "kept-session");
-		const keptFile = kept.getSessionFile() as string;
-		const keptStats = await stat(keptFile);
-		const keptSignature = { size: keptStats.size, mtimeMs: keptStats.mtimeMs };
-		const deletedFile = join(sessionDir, "deleted-session.jsonl");
-		writeOutboxEntry(tempDir, deletedFile);
-		writeOutboxEntry(tempDir, keptFile, keptSignature);
-
-		const calls: FetchCall[] = [];
-		const result = await catchUpAgentTraceUploads({
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		});
-
-		expect(result).toEqual({ pruned: 1, semanticEdgeLedgersPending: 0, results: [] });
-		expect(calls).toHaveLength(0);
-		expect(existsSync(outboxEntryPath(tempDir, deletedFile))).toBe(false);
-		expect(readOutboxEntry(tempDir, keptFile)).toEqual({ sessionFile: keptFile, ...keptSignature });
+	it("recovers missing credentials without a restart or explicit upload", async () => {
+		options.authStorage.remove(PRIME_AGENT_TRACES_PROVIDER_ID);
+		const path = file();
+		await queue(path, true);
+		await run();
+		expect(job(path).state).toBe("paused");
+		options.authStorage.set(PRIME_AGENT_TRACES_PROVIDER_ID, { type: "api_key", key: "restored" });
+		await run();
+		expect(job(path).state).toBe("delivered");
 	});
-
-	it("registers the semantic-edge ledger with a kind-tagged durable intent at persist", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "ledger-intent-session" });
-		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
-
-		const calls: FetchCall[] = [];
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			semanticEdgesLedgerPath: ledgerPath,
-		});
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-
-		// Synchronously durable, tagged with its own delivery kind, before any wire call.
-		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
-		expect(calls).toHaveLength(0);
-
-		// A re-install with a DIFFERENT ledger path registers the new ledger at the next persist.
-		const movedLedgerPath = join(tempDir, "artifacts-moved", "semantic-edges.jsonl");
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			semanticEdgesLedgerPath: movedLedgerPath,
-		});
-		sessionManager.appendMessage(createAssistantMessage("after re-install"));
-		expect(readOutboxEntry(tempDir, movedLedgerPath)).toEqual({
-			sessionFile: movedLedgerPath,
-			kind: "semantic-edges",
-		});
-		expect(calls).toHaveLength(0);
+	it("pauses permanent HTTP failures until the automatic file or endpoint changes", async () => {
+		const path = file();
+		await queue(path);
+		fetchFn.mockResolvedValueOnce(new Response("", { status: 404 }));
+		await run();
+		now += 61_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		options.baseUrl = "https://synthetic.invalid";
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
 	});
-
-	it("creates no outbox intent while trace sharing is disabled", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "opted-out-session" });
-		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
-
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder([]),
-			semanticEdgesLedgerPath: ledgerPath,
-		});
-		sessionManager.appendMessage(createUserMessage("private"));
-		sessionManager.appendMessage(createAssistantMessage("also private"));
-
-		// Neither kind leaves a durable entry: enabling sharing later must not
-		// retroactively collect sessions recorded while sharing was off.
-		expect(readOutboxEntry(tempDir, sessionManager.getSessionFile() as string)).toBeUndefined();
-		expect(readOutboxEntry(tempDir, ledgerPath)).toBeUndefined();
+	it("retries an oversized automatic file only after its signature changes", async () => {
+		const path = file();
+		appendFileSync(path, "x".repeat(21 * 1024 * 1024));
+		await queue(path);
+		await run();
+		expect(job(path)).toMatchObject({ state: "failed", failure: { reason: "too_large" } });
+		const prepare = vi.spyOn(payloadWorker, "prepareTracePayload");
+		now += 61_000;
+		await run();
+		expect(prepare).not.toHaveBeenCalled();
+		file();
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
 	});
+});
 
-	it("re-registers the ledger at the next persist after its entry is pruned", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "pruned-ledger-session" });
-		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
-
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder([]),
-			semanticEdgesLedgerPath: ledgerPath,
-		});
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
-
-		// A concurrent catch-up pruned the entry (missing ledger file at scan time).
-		rmSync(outboxEntryPath(tempDir, ledgerPath));
-		sessionManager.appendMessage(createUserMessage("still here"));
-		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
+describe("one-shot authorization", () => {
+	it.each(["append", "replace"])("expires safely when the file is changed by %s before capture", async (change) => {
+		options.settingsManager = SettingsManager.inMemory();
+		const path = file();
+		await queue(path, true);
+		if (change === "append") appendFileSync(path, '{"id":"later"}\n');
+		else {
+			const replacement = file("replacement");
+			renameSync(replacement, path);
+		}
+		await run();
+		expect(fetchFn).not.toHaveBeenCalled();
+		expect(job(path)).toMatchObject({ state: "failed", failure: { reason: "snapshot_changed" } });
+		expect(formatAgentTraceStatus(await readAgentTraceStatus({ ...options, sessionFile: path }))).toContain(
+			"authorize its current content",
+		);
 	});
-
-	it("counts appended ledger bytes as pending, stays quiet at the cursor, and prunes deleted ledgers", async () => {
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(sessionDir, { recursive: true });
-		const ledgerFile = join(sessionDir, "semantic-edges.jsonl");
-		writeFileSync(ledgerFile, `${JSON.stringify({ type: "session_registered", session_id: "s" })}\n`);
-		writeLedgerOutboxEntry(tempDir, ledgerFile);
-		const deletedLedger = join(sessionDir, "gone", "semantic-edges.jsonl");
-		writeLedgerOutboxEntry(tempDir, deletedLedger);
-
-		const calls: FetchCall[] = [];
-		const options = {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		};
-
-		// Catch-up after a kill: the never-delivered ledger is pending; the deleted one is pruned.
-		const first = await catchUpAgentTraceUploads(options);
-		expect(first).toEqual({ pruned: 1, semanticEdgeLedgersPending: 1, results: [] });
-		expect(existsSync(outboxEntryPath(tempDir, deletedLedger))).toBe(false);
-		// The cursor stays untouched: the first real sender must deliver the whole backlog.
-		expect(readOutboxEntry(tempDir, ledgerFile)).toEqual({ sessionFile: ledgerFile, kind: "semantic-edges" });
-
-		// A cursor at the file size means unchanged: never re-counted, never resent.
-		const { size } = await stat(ledgerFile);
-		writeLedgerOutboxEntry(tempDir, ledgerFile, size);
-		const second = await catchUpAgentTraceUploads(options);
-		expect(second).toEqual({ pruned: 0, semanticEdgeLedgersPending: 0, results: [] });
-
-		// Appended bytes beyond the cursor become pending again.
-		writeFileSync(ledgerFile, `${JSON.stringify({ type: "request_started", request_id: "r", session_id: "s" })}\n`, {
-			flag: "a",
-		});
-		const third = await catchUpAgentTraceUploads(options);
-		expect(third).toEqual({ pruned: 0, semanticEdgeLedgersPending: 1, results: [] });
-		expect(calls).toHaveLength(0);
+	it.each(["append", "replace", "delete"])(
+		"retries only the captured bytes after %s and owner replacement",
+		async (change) => {
+			options.settingsManager = SettingsManager.inMemory();
+			const path = file();
+			const original = readFileSync(path, "utf8");
+			await queue(path, true);
+			fetchFn.mockRejectedValueOnce(new TypeError("offline"));
+			await run();
+			if (change === "append") appendFileSync(path, '{"id":"later"}\n');
+			else if (change === "replace") renameSync(file("replacement"), path);
+			else rmSync(path);
+			now += 61_000;
+			await run();
+			expect(fetchFn).toHaveBeenCalledTimes(2);
+			expect(Buffer.from(fetchFn.mock.calls[1]![1]!.body as ArrayBuffer).toString()).toBe(original);
+			expect(options.settingsManager.getAgentTracesEnabled()).toBe(false);
+			expect(existsSync(autoPath(path))).toBe(false);
+		},
+	);
+	it("does not let an older manual retry overwrite a newer automatic delivery", async () => {
+		const path = file();
+		await queue(path, true);
+		fetchFn.mockRejectedValueOnce(new TypeError("offline"));
+		await run();
+		const manualEntry = entries()[0]!;
+		const deadline = now + 120_000;
+		writeFileSync(manualEntry.path, JSON.stringify({ ...job(path), nextAttemptAt: deadline }));
+		appendFileSync(path, '{"id":"newer"}\n');
+		await queue(path);
+		now += 61_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		now = deadline;
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		expect(JSON.parse(readFileSync(manualEntry.path, "utf8")).state).toBe("superseded");
 	});
-
-	it("arms upload timers that never hold the process open", async () => {
-		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "unref-session" });
-
-		const calls: FetchCall[] = [];
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		const timer = setTimeoutSpy.mock.results.at(-1)?.value as NodeJS.Timeout;
-		expect(timer.hasRef()).toBe(false);
+	it("persists cancellation before owner replacement and does not resume a cancelled retry", async () => {
+		const controller = new AbortController();
+		const path = file();
+		const receipt = await queue(path, true, controller.signal);
+		expect(receipt.status).toBe("queued");
+		fetchFn.mockRejectedValueOnce(new TypeError("offline"));
+		await run();
+		controller.abort();
+		now += 61_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		expect(job(path).state).toBe("cancelled");
 	});
-
-	it("honors an advertised Retry-After on the next scheduled cycle without blocking", async () => {
-		vi.useFakeTimers();
-		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "retry-after-reschedule-session" });
-
-		let attempts = 0;
-		const calls: FetchCall[] = [];
-		const fetchFn: typeof fetch = async (input, init) => {
-			attempts += 1;
-			if (attempts === 1) {
-				return new Response(null, { status: 429, headers: { "retry-after": "300" } });
-			}
-			return createFetchRecorder(calls)(input, init);
-		};
-
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		await advanceTimersUntil(() => attempts === 1);
-		await advanceTimersUntil(() => vi.getTimerCount() > 0);
-		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(300_000);
-
-		// A fresh persist must not re-arm inside the advertised window.
-		sessionManager.appendMessage(createUserMessage("more"));
-		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBeGreaterThanOrEqual(299_000);
-
-		await advanceTimersUntil(() => calls.length === 1);
-		expect(attempts).toBe(2);
+	it("cancels an active owner through a separately persisted request cancellation", async () => {
+		const receipt = await queue(file(), true);
+		if (receipt.status !== "queued") throw new Error("not queued");
+		fetchFn.mockImplementation(
+			async (_url, init) =>
+				new Promise((_resolve, reject) =>
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)),
+				),
+		);
+		const running = run();
+		await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledOnce());
+		await cancelAgentTraceRequest(receipt.requestId, agentDir);
+		await running;
+		expect(entries()[0]!.job.state).toBe("cancelled");
 	});
-
-	it("retries the intent marker on the next persist after a failed write", async () => {
-		vi.useFakeTimers();
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "marker-retry-session" });
-		const blocker = join(tempDir, "agent-traces-outbox");
-		writeFileSync(blocker, "not a directory");
-
-		const calls: FetchCall[] = [];
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		const sessionFile = sessionManager.getSessionFile() as string;
-		expect(readOutboxEntry(tempDir, sessionFile)).toBeUndefined();
-
-		rmSync(blocker);
-		sessionManager.appendMessage(createUserMessage("again"));
-		expect(readOutboxEntry(tempDir, sessionFile)).toEqual({ sessionFile });
+	it("does bulk discovery in the background and excludes versions created after the request", async () => {
+		const existing = file("existing");
+		await uploadAllAgentTraces({ ...options, sessionDir: root, requireEnabled: false });
+		now += 1;
+		const later = file("later");
+		// Simulate a file created after the request despite the synthetic clock.
+		const batch = readdirSync(dir).find((name) => name.startsWith("batch-"))!;
+		const data = JSON.parse(readFileSync(join(dir, batch), "utf8"));
+		data.requestedAt = statSync(existing).ctimeMs + 0.1;
+		writeFileSync(join(dir, batch), JSON.stringify(data));
+		await run();
+		expect(fetchFn).not.toHaveBeenCalled();
+		expect(entries().map((item) => item.job.sessionFile)).toEqual([existing]);
+		expect(entries().some((item) => item.job.sessionFile === later)).toBe(false);
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
 	});
-
-	it("caps an absurd Retry-After at the max timer delay instead of retrying immediately", async () => {
-		vi.useFakeTimers();
-		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "absurd-retry-after-session" });
-
-		let attempts = 0;
-		const fetchFn: typeof fetch = async () => {
-			attempts += 1;
-			// 30 days, far beyond Node's ~24.8-day timer maximum.
-			return new Response(null, { status: 429, headers: { "retry-after": "2592000" } });
-		};
-
-		installAgentTraceUpload(sessionManager, {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn,
-		});
-
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
-		await advanceTimersUntil(() => attempts === 1);
-		await advanceTimersUntil(() => vi.getTimerCount() > 0);
-		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(2_147_483_647);
+	it("cancels persisted manual and bulk requests after the client has restarted", async () => {
+		await queue(file("one"), true);
+		await uploadAllAgentTraces({ ...options, sessionDir: root, requireEnabled: false });
+		expect(await cancelPendingAgentTraceRequests(agentDir)).toEqual({ cancelled: 2, failed: 0 });
+		await run();
+		expect(fetchFn).not.toHaveBeenCalled();
 	});
+	it("contains cancellation marker failures instead of throwing from an AbortSignal listener", async () => {
+		const controller = new AbortController();
+		await queue(file(), true, controller.signal);
+		rmSync(dir, { recursive: true });
+		writeFileSync(dir, "not a directory");
+		expect(() => controller.abort()).not.toThrow();
+		expect(readFileSync(join(agentDir, "logs", "agent-traces.log"), "utf8")).toContain("could not be recorded");
+	});
+	it("keeps a cancelled bulk request cancelled after discovery and retries", async () => {
+		file("one");
+		file("two");
+		const controller = new AbortController();
+		await uploadAllAgentTraces({ ...options, sessionDir: root, requireEnabled: false, signal: controller.signal });
+		await run();
+		controller.abort();
+		await run();
+		expect(fetchFn).not.toHaveBeenCalled();
+		expect(entries().every((entry) => entry.job.state === "cancelled")).toBe(true);
+	});
+});
 
-	it("returns a retryable failure when the upload cursor cannot be persisted", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "cursor-persist-failure");
-		writeFileSync(join(tempDir, "agent-traces-outbox"), "not a directory");
-
-		const calls: FetchCall[] = [];
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
+describe("status and responsiveness", () => {
+	it("reads shared progress without credential resolution, network, writes, or secrets", async () => {
+		const path = file();
+		await queue(path, true);
+		fetchFn.mockResolvedValueOnce(new Response("payload secret synthetic-key", { status: 403 }));
+		await run();
+		const key = vi
+			.spyOn(options.authStorage, "getApiKey")
+			.mockRejectedValue(new Error("must not resolve credentials"));
+		const before = readdirSync(dir).map((name) => [name, statSync(join(dir, name)).mtimeMs]);
+		const status = await readAgentTraceStatus({
+			...options,
+			sessionFile: path,
+			baseUrl: "https://user:synthetic-key@host.invalid/custom?key=synthetic-key",
 		});
-
-		expect(calls).toHaveLength(1);
-		expect(result.status).toBe("failed");
-		if (result.status === "failed") {
-			expect(result.message).toContain("cursor");
+		const output = formatAgentTraceStatus(status);
+		expect(key).not.toHaveBeenCalled();
+		expect(fetchFn).toHaveBeenCalledOnce();
+		expect(status.paused).toBe(1);
+		expect(output).toContain("run /traces login");
+		expect(output).toContain("https://host.invalid/custom");
+		expect(output).toContain(`Session file: ${path}`);
+		expect(output).toContain("Prime Agent Traces credential");
+		expect(output).not.toContain("synthetic-key");
+		expect(output).not.toContain("payload secret");
+		expect(readdirSync(dir).map((name) => [name, statSync(join(dir, name)).mtimeMs])).toEqual(before);
+	});
+	it("isolates malformed delivery metadata during status reads and queue scans", async () => {
+		const path = file();
+		await queue(path, true);
+		writeFileSync(
+			join(dir, "malformed.json"),
+			JSON.stringify({ sessionFile: path, failure: { reason: "http", at: 1e99, statusCode: "secret" } }),
+		);
+		expect(formatAgentTraceStatus(await readAgentTraceStatus(options))).not.toContain("secret");
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+	});
+	it("reports queued, retrying, delivered and changed current content without claiming future content was shared", async () => {
+		const path = file();
+		await queue(path, true);
+		expect((await readAgentTraceStatus({ ...options, sessionFile: path })).pending).toBe(1);
+		fetchFn.mockRejectedValueOnce(new TypeError("offline"));
+		await run();
+		expect((await readAgentTraceStatus({ ...options, sessionFile: path })).currentSession).toContain("retrying");
+		now += 61_000;
+		await run();
+		appendFileSync(path, '{"id":"unshared"}\n');
+		const status = await readAgentTraceStatus({ ...options, sessionFile: path });
+		expect(status.lastSuccessAt).toBe(now);
+		expect(status.currentSession).toContain("newer or changed content");
+	});
+	it("preserves semantic-edge and unknown-kind entries and excludes them from JSONL counts", async () => {
+		mkdirSync(dir, { recursive: true });
+		const ledger = join(root, "semantic-edges.jsonl");
+		writeFileSync(ledger, "edge\n");
+		const saved = JSON.stringify({ sessionFile: ledger, kind: SEMANTIC_EDGES_OUTBOX_KIND, uploadedBytes: 1 });
+		writeFileSync(join(dir, "edges.json"), saved);
+		writeFileSync(join(dir, "future.json"), '{"kind":"future","cursor":7}');
+		await run();
+		expect(readFileSync(join(dir, "edges.json"), "utf8")).toBe(saved);
+		const status = await readAgentTraceStatus(options);
+		expect(status.pending + status.inProgress + status.paused + status.failed).toBe(0);
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+	it("registers persisted sessions synchronously without waiting for a stalled network", () => {
+		const session = SessionManager.create(root, join(root, "sessions"));
+		installAgentTraceUpload(session, options);
+		session.appendMessage({ role: "user", content: "synthetic user", timestamp: now });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "synthetic assistant" }],
+			api: "openai-completions",
+			provider: "faux",
+			model: "faux",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: now,
+		});
+		expect(existsSync(autoPath(session.getSessionFile()!))).toBe(true);
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+	it("observes enablement in another process before the first response without retroactive registration", async () => {
+		globalSettings(false);
+		options.settingsManager = SettingsManager.create(root, agentDir);
+		const session = SessionManager.create(root, join(root, "sessions"));
+		installAgentTraceUpload(session, options);
+		session.appendMessage({ role: "user", content: "synthetic", timestamp: now });
+		expect(existsSync(dir)).toBe(false);
+		globalSettings(true);
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "synthetic" }],
+			api: "openai-completions",
+			provider: "faux",
+			model: "faux",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: now,
+		});
+		expect(options.settingsManager.getAgentTracesEnabled()).toBe(false);
+		expect(existsSync(autoPath(session.getSessionFile()!))).toBe(true);
+		await run();
+		expect(fetchFn).toHaveBeenCalledOnce();
+	});
+	it("monitors the prepared transcript's project after an atomic replacement", async () => {
+		globalSettings(true);
+		projectSettings(root, true);
+		const other = join(root, "other");
+		projectSettings(other, true);
+		options.settingsManager = SettingsManager.create(root, agentDir);
+		const path = file();
+		await queue(path);
+		const original = payloadWorker.prepareTracePayload;
+		vi.spyOn(payloadWorker, "prepareTracePayload").mockImplementation(async (input) => {
+			renameSync(file("replacement", other), path);
+			return original(input);
+		});
+		fetchFn.mockImplementation(
+			async (_url, init) =>
+				new Promise((_resolve, reject) =>
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)),
+				),
+		);
+		const running = run();
+		await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledOnce());
+		projectSettings(other, false);
+		await running;
+		expect(job(path).state).toBe("paused");
+		expect(fetchFn.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+	});
+	it("keeps event-loop timers running while preparing a large transcript", async () => {
+		const path = file();
+		appendFileSync(
+			path,
+			JSON.stringify({ type: "message", id: "large", parentId: "msg", content: "x".repeat(15 * 1024 * 1024) }) +
+				"\n",
+		);
+		let ticks = 0;
+		const timer = setInterval(() => {
+			ticks++;
+		}, 2);
+		try {
+			const prepared = await payloadWorker.prepareTracePayload({
+				sessionFile: path,
+				signal: new AbortController().signal,
+			});
+			expect(prepared.body.byteLength).toBe(statSync(path).size);
+			expect(ticks).toBeGreaterThan(5);
+		} finally {
+			clearInterval(timer);
 		}
 	});
-
-	it("a corrupt outbox entry costs only itself; other cursors survive", async () => {
-		const cwd = join(tempDir, "project");
-		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const kept = writeSession(cwd, sessionDir, "kept-cursor-session");
-		const keptFile = kept.getSessionFile() as string;
-		const keptStats = await stat(keptFile);
-		writeOutboxEntry(tempDir, keptFile, { size: keptStats.size, mtimeMs: keptStats.mtimeMs });
-		writeFileSync(join(tempDir, "agent-traces-outbox", "deadbeef.json"), "not json");
-
-		const calls: FetchCall[] = [];
-		const options = {
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
-		};
-
-		const result = await catchUpAgentTraceUploads(options);
-		expect(result).toEqual({ pruned: 1, semanticEdgeLedgersPending: 0, results: [] });
-		expect(calls).toHaveLength(0);
-		expect(existsSync(join(tempDir, "agent-traces-outbox", "deadbeef.json"))).toBe(false);
-		expect(await uploadAgentTraceFile({ ...options, sessionFile: keptFile })).toEqual({ status: "unchanged" });
-		expect(calls).toHaveLength(0);
-	});
-
-	it("prefers the prime-inference credential over the prime-cli config key", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "credential-order-session");
-		const calls: FetchCall[] = [];
-		const configPath = join(tempDir, "prime-config.json");
-		writeFileSync(configPath, JSON.stringify({ api_key: "cli-fallback-key" }));
-
-		const result = await uploadAgentTraceFile({
-			sessionFile: session.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_INFERENCE_PROVIDER_ID]: { type: "api_key", key: "inference-key" },
-			}),
-			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			baseUrl: "https://api.example.test",
-			configPath,
-			fetchFn: createFetchRecorder(calls),
-			reloadConfig: false,
+	it("keeps timers and status responsive during a stalled credential command", async () => {
+		options.authStorage.set(PRIME_AGENT_TRACES_PROVIDER_ID, {
+			type: "api_key",
+			key: `!"${process.execPath}" -e "setTimeout(()=>process.stdout.write('synthetic-command-key'),200)"`,
 		});
-
-		expect(result.status).toBe("uploaded");
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.init.headers).toMatchObject({ Authorization: "Bearer inference-key" });
+		const path = file();
+		await queue(path, true);
+		let ticks = 0;
+		const timer = setInterval(() => {
+			ticks++;
+		}, 5);
+		try {
+			const running = run();
+			const status = await readAgentTraceStatus({ ...options, sessionFile: path });
+			expect(status.pending).toBe(1);
+			await running;
+			expect(ticks).toBeGreaterThan(10);
+			expect(fetchFn).toHaveBeenCalledOnce();
+		} finally {
+			clearInterval(timer);
+		}
+	});
+	it("previews without credentials and recursively discovers valid parent/child traces", async () => {
+		const parent = file("parent"),
+			child = file("artifacts/child");
+		writeFileSync(join(root, "non-session.jsonl"), '{"type":"edge"}\n');
+		const preview = await previewAgentTraceFile({ sessionFile: parent });
+		expect(preview).toMatchObject({ status: "ready", sessionId: "parent", uploadable: true });
+		expect(await findAgentTraceFiles(root)).toEqual([child, parent].sort());
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+	it("retains trace/environment/inference/CLI credential preference using async reads", async () => {
+		options.authStorage.set(PRIME_INFERENCE_PROVIDER_ID, { type: "api_key", key: "inference" });
+		writeFileSync(options.configPath!, JSON.stringify({ api_key: "cli" }));
+		expect((await getPrimeAgentTraceCredential(options.authStorage, options))?.apiKey).toBe("synthetic-key");
+		options.authStorage.remove(PRIME_AGENT_TRACES_PROVIDER_ID);
+		expect((await getPrimeAgentTraceCredential(options.authStorage, options))?.apiKey).toBe("inference");
+		options.authStorage.remove(PRIME_INFERENCE_PROVIDER_ID);
+		expect((await getPrimeAgentTraceCredential(options.authStorage, options))?.apiKey).toBe("cli");
+		vi.stubEnv("PRIME_AGENT_TRACES_API_KEY", "environment");
+		expect((await getPrimeAgentTraceCredential(options.authStorage, options))?.apiKey).toBe("environment");
 	});
 });

@@ -1,0 +1,3 @@
+- Fixed automatic trace sharing to respect global and per-project consent across queued work, retries, and active requests.
+- Changed trace uploads to acknowledge background queueing, with durable retries, shared request pacing, cancellation, and one-shot snapshots.
+- Added shared delivery counts, current-session progress, recent outcomes, and actionable retry and pause details to `/traces status`.
