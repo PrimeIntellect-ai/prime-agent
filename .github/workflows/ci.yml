@@ -458,6 +458,7 @@ jobs:
           & $binary ./test/fixtures/windows-powershell-launch-native.ts --expect-runtime $binary --expect-sha256 $hash --expect-kind bun
 
       - name: Cross-compile and inspect the Windows Arm64 executable
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
         working-directory: packages/coding-agent
         shell: pwsh
         run: |
@@ -479,10 +480,12 @@ jobs:
           }
 
       - name: Test the PowerShell 5.1 installer end to end
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
         shell: powershell
         run: ./scripts/test-windows-installer.ps1
 
       - name: Smoke test the native Windows executable
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
         shell: pwsh
         run: |
           & ./packages/coding-agent/dist/pi.exe --version

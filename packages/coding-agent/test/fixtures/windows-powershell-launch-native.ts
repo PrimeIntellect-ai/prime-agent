@@ -54,15 +54,19 @@ function runtimeArguments(bun: boolean, script: string): string[] {
 		: ["--input-type=commonjs", "--eval", script];
 }
 
-function isNoConsoleMode(ready: string[] | undefined, observed: string[] | undefined): boolean {
+const sentinelReadyPattern = /^\d+\|-?\d+\|(True|False)\|\d+\|\d+\|\d+\|\d+\|\d+$/;
+
+function isWindowlessConsole(ready: string[] | undefined, observed: string[] | undefined): boolean {
 	return Boolean(
 		ready &&
+			/^[1-9]\d*$/.test(ready[0] ?? "") &&
 			ready[1] === "0" &&
 			ready[2] === "False" &&
 			(Number(ready[3]) & 1) !== 0 &&
 			ready[4] === "0" &&
-			ready[5] === "0" &&
-			ready[6] === "6" &&
+			// The query has one slot; success must identify this sentinel.
+			ready[5] === "1" &&
+			ready[7] === ready[0] &&
 			observed?.[4] === "0" &&
 			observed[5] === "False" &&
 			observed[6] === "False",
@@ -96,9 +100,10 @@ public static class SentinelConsole {
     $info = New-Object SentinelConsole+StartupInfo
     [SentinelConsole]::GetStartupInfo([ref]$info)
     $console = [SentinelConsole]::GetConsoleWindow()
-    $consoleCount = [SentinelConsole]::GetConsoleProcessList([uint32[]]@(0), 1)
+    $consoleIds = [uint32[]]@(0)
+    $consoleCount = [SentinelConsole]::GetConsoleProcessList($consoleIds, $consoleIds.Length)
     $consoleError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    [IO.File]::WriteAllText(${path("ready.tmp")}, "$PID|$($console.ToInt64())|$([SentinelConsole]::IsWindowVisible($console))|$($info.flags)|$($info.show)|$consoleCount|$consoleError")
+    [IO.File]::WriteAllText(${path("ready.tmp")}, "$PID|$($console.ToInt64())|$([SentinelConsole]::IsWindowVisible($console))|$($info.flags)|$($info.show)|$consoleCount|$consoleError|$($consoleIds[0])")
     [IO.File]::Move(${path("ready.tmp")}, ${path("ready")})
     while (![IO.File]::Exists(${path("gate")})) { Start-Sleep -Milliseconds 25 }
     [IO.File]::WriteAllText(${path("done.tmp")}, 'fixed launch sentinel v1 completed')
@@ -137,13 +142,28 @@ if (process.argv[2] === "--construction-check") {
 	const data = { command: "C:\\owned space path\\powershell.exe", args: ["-EncodedCommand", encoded] };
 	assert.deepEqual(JSON.parse(JSON.stringify(data)), data);
 	const observed = ["C|audit", "time", "console", "0", "0", "False", "False", ""];
-	assert(isNoConsoleMode("1|0|False|257|0|0|6".split("|"), observed));
-	for (const incomplete of ["1|0|False|0|1|0|6", "1|0|False|257|0|1|0", "1|0|False|257|0", "1|0|False|257|0|0|0"]) {
-		assert(!isNoConsoleMode(incomplete.split("|"), observed));
+	for (const error of ["0", "6", "203"]) {
+		const ready = `1|0|False|257|0|1|${error}|1`;
+		assert(sentinelReadyPattern.test(ready));
+		assert(isWindowlessConsole(ready.split("|"), observed));
 	}
-	assert(!isNoConsoleMode("1|0|False|257|0|0|6".split("|"), undefined));
+	assert(!sentinelReadyPattern.test("1|0|False|257|0|1|203"));
+	assert(!sentinelReadyPattern.test("1|0|False|257|0|1|203|invalid"));
+	for (const invalid of [
+		"1|0|False|0|1|1|203|1",
+		"1|0|False|257|0|1|203|2",
+		"0|0|False|257|0|1|203|0",
+		"1|0|False|257|0|2|203|1",
+		"1|0|False|257|0|0|6|0",
+		"1|0|False|257|0|0|0|0",
+		"1|0|False|257|0|1|203",
+		"1|0|False|257|0",
+	]) {
+		assert(!isWindowlessConsole(invalid.split("|"), observed));
+	}
+	assert(!isWindowlessConsole("1|0|False|257|0|1|203|1".split("|"), undefined));
 	console.log(
-		"PASS sentinel/transport, runtime argv, startup-env scrub, parent-env preservation and no-console guards",
+		"PASS sentinel/transport, runtime argv, startup-env scrub, parent-env preservation and windowless-console guards",
 	);
 	process.exit(0);
 }
@@ -303,16 +323,18 @@ function audit(name: string): void {
 			);
 		else {
 			const ready = readyByCase.get(name);
-			const noConsole = isNoConsoleMode(ready, console);
+			const windowlessConsole = isWindowlessConsole(ready, console);
 			const hiddenClassic =
 				console?.[4] !== "0" &&
 				console?.[5] === "False" &&
 				console?.[6] === "True" &&
 				console?.[7] === "ConsoleWindowClass";
-			record("console-mode", { name, ready, noConsole, hiddenClassic });
-			if (!noConsole && !hiddenClassic)
+			record("console-mode", { name, ready, windowlessConsole, hiddenClassic });
+			if (!windowlessConsole && !hiddenClassic)
 				auditErrors.push(
-					new Error(`${name}: visibility INCONCLUSIVE (no validated no-console mode or hidden classic console)`),
+					new Error(
+						`${name}: visibility INCONCLUSIVE (no validated windowless console or hidden classic console)`,
+					),
 				);
 		}
 	} catch (error) {
@@ -352,7 +374,7 @@ async function run(name: string, detached: boolean, trampoline: boolean, image =
 		);
 		if (existsSync(join(directory, `${payloadName}-ready`))) {
 			const ready = readFileSync(join(directory, `${payloadName}-ready`), "utf8");
-			assert(/^\d+\|-?\d+\|(True|False)\|\d+\|\d+\|\d+\|\d+$/.test(ready));
+			assert(sentinelReadyPattern.test(ready));
 			readyByCase.set(name, ready.split("|"));
 			record("sentinel-ready", {
 				name,
@@ -482,7 +504,7 @@ try {
 				`${name} sentinel after caller exit`,
 			);
 			const ready = readFileSync(join(directory, `${name}-ready`), "utf8");
-			assert(/^\d+\|-?\d+\|(True|False)\|\d+\|\d+\|\d+\|\d+$/.test(ready));
+			assert(sentinelReadyPattern.test(ready));
 			const fields = ready.split("|");
 			readyByCase.set(name, fields);
 			const sentinelPid = Number(fields[0]);
