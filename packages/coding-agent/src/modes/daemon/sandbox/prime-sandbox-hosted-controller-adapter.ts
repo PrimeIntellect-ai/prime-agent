@@ -1,11 +1,26 @@
 import { types } from "node:util";
 import type { AgentFamilyRelationship } from "../../../core/agent-messages.js";
-import { decodeReply, encodeReply, type V16WireIdentity } from "./prime-sandbox-v16-reply-codec.js";
-import { utf8ByteCount, type V16Method, validateUtf8String } from "./prime-sandbox-v16-request-codec.js";
+import { copySandboxStrictBytes, type SandboxStrictByteCopyResult } from "./prime-sandbox-strict-bytes.js";
+import {
+	decodeReply,
+	encodeReply,
+	type V16ReplyEncodeResult,
+	type V16WireIdentity,
+} from "./prime-sandbox-v16-reply-codec.js";
+import {
+	decodeRequest,
+	utf8ByteCount,
+	type V16DecodeCorrelated,
+	type V16Method,
+	validateUtf8String,
+} from "./prime-sandbox-v16-request-codec.js";
+import type { ApplicationBundle, ComposedReplyResult } from "./prime-sandbox-v31-multiplexer.js";
 
 const MAX_MESSAGE_BYTES: number = 16_384;
 const MAX_NAME_BYTES: number = 256;
 const MAX_SELECTOR_BYTES: number = 128;
+const MAX_REQUEST_BYTES: number = 262128;
+const MAX_RECORDS: number = 64;
 
 const _freeze: typeof Object.freeze = Object.freeze;
 const _getOwnPropertyDescriptors: typeof Object.getOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
@@ -22,10 +37,16 @@ const _promisePrototype: object = Promise.prototype;
 const _promiseThen: typeof Promise.prototype.then = Promise.prototype.then;
 const _create: typeof Object.create = Object.create;
 const _defineProperty: typeof Object.defineProperty = Object.defineProperty;
-const _abortSignalAborted: ((this: AbortSignal) => boolean) | undefined = Object.getOwnPropertyDescriptor(
-	AbortSignal.prototype,
-	"aborted",
-)?.get;
+let _abortSignalAborted: ((this: AbortSignal) => boolean) | undefined;
+try {
+	const desc: PropertyDescriptor | undefined = Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted");
+	if (desc !== undefined && typeof desc.get === "function") {
+		_abortSignalAborted = desc.get;
+	}
+} catch {
+	_abortSignalAborted = undefined;
+}
+const _queueMicrotask: (fn: () => void) => void = queueMicrotask;
 
 interface DescriptorTable {
 	readonly names: ReadonlyArray<string>;
@@ -686,25 +707,48 @@ function resolvedOperation(value: unknown): Promise<unknown> {
  * atomically. Callers cannot combine controllers and identity from different
  * accepted owners through this factory input.
  */
-function createPrimeSandboxHostedControllerAdapter(raw: unknown): CreateHostedControllerAdapterResult {
+
+interface CapturedBundle {
+	readonly identity: V16WireIdentity;
+	readonly messageController: CapturedMessageController;
+	readonly observeController: CapturedObserveController;
+}
+
+type CapturedBundleResult =
+	| Readonly<{ ok: true; value: CapturedBundle }>
+	| Readonly<{ ok: false; code: "INPUT_INVALID" | "WRONG_OWNER" }>;
+
+function _captureIdentityAndControllers(raw: unknown): CapturedBundleResult {
 	const factory: DescriptorTable | undefined = captureExact(raw, _freeze(["sessionOwner", "authorizeIdentity"]));
-	if (factory === undefined) return inputFailure();
+	if (factory === undefined) {
+		const result: CapturedBundleResult = _freeze({ ok: false, code: "INPUT_INVALID" });
+		return result;
+	}
 	const owner: unknown = factory.table.sessionOwner.value;
 	const authorizeIdentity: unknown = factory.table.authorizeIdentity.value;
-	if (!isRecord(owner) || safeIsProxy(owner)) return inputFailure();
-	if (typeof authorizeIdentity !== "function" || safeIsProxy(authorizeIdentity)) return inputFailure();
-
+	if (!isRecord(owner) || safeIsProxy(owner)) {
+		const result: CapturedBundleResult = _freeze({ ok: false, code: "INPUT_INVALID" });
+		return result;
+	}
+	if (typeof authorizeIdentity !== "function" || safeIsProxy(authorizeIdentity)) {
+		const result: CapturedBundleResult = _freeze({ ok: false, code: "INPUT_INVALID" });
+		return result;
+	}
 	let bundleRaw: unknown;
 	try {
 		bundleRaw = _ReflectApply(authorizeIdentity, null, [owner]);
 	} catch {
-		return ownerFailure();
+		const result: CapturedBundleResult = _freeze({ ok: false, code: "WRONG_OWNER" });
+		return result;
 	}
 	const bundle: DescriptorTable | undefined = captureExact(
 		bundleRaw,
 		_freeze(["identity", "messageController", "observeController"]),
 	);
-	if (bundle === undefined) return ownerFailure();
+	if (bundle === undefined) {
+		const result: CapturedBundleResult = _freeze({ ok: false, code: "WRONG_OWNER" });
+		return result;
+	}
 	const identity: V16WireIdentity | undefined = captureIdentity(bundle.table.identity.value);
 	const message: CapturedMessageController | undefined = captureMessageController(
 		bundle.table.messageController.value,
@@ -712,9 +756,27 @@ function createPrimeSandboxHostedControllerAdapter(raw: unknown): CreateHostedCo
 	const observe: CapturedObserveController | undefined = captureObserveController(
 		bundle.table.observeController.value,
 	);
-	if (identity === undefined || message === undefined || observe === undefined) return ownerFailure();
+	if (identity === undefined || message === undefined || observe === undefined) {
+		const result: CapturedBundleResult = _freeze({ ok: false, code: "WRONG_OWNER" });
+		return result;
+	}
+	const result: CapturedBundleResult = _freeze({
+		ok: true,
+		value: _freeze({
+			identity: identity,
+			messageController: message,
+			observeController: observe,
+		}),
+	});
+	return result;
+}
 
-	const invoke = (methodRaw: string, body: unknown, signal: AbortSignal): Promise<unknown> => {
+function _makeInvokeCaptured(
+	identity: V16WireIdentity,
+	message: CapturedMessageController,
+	observe: CapturedObserveController,
+): (methodRaw: string, body: unknown, signal: AbortSignal) => Promise<unknown> {
+	const invokeCaptured = (methodRaw: string, body: unknown, signal: AbortSignal): Promise<unknown> => {
 		if (typeof methodRaw !== "string" || !isMethod(methodRaw)) {
 			return resolvedOperation(operationFailure("INPUT_INVALID"));
 		}
@@ -724,7 +786,6 @@ function createPrimeSandboxHostedControllerAdapter(raw: unknown): CreateHostedCo
 			return resolvedOperation(operationFailure("INPUT_INVALID"));
 		}
 		if (abortedBefore) return resolvedOperation(operationFailure("CONTROLLER_FAILURE"));
-
 		let dispatched: { readonly available: boolean; readonly value?: unknown };
 		try {
 			dispatched = dispatch(methodRaw, request, message, observe, signal);
@@ -732,7 +793,6 @@ function createPrimeSandboxHostedControllerAdapter(raw: unknown): CreateHostedCo
 			return resolvedOperation(operationFailure("CONTROLLER_FAILURE"));
 		}
 		if (!dispatched.available) return resolvedOperation(operationFailure("METHOD_UNAVAILABLE"));
-
 		const settled = function settled(rawOutput: unknown): unknown {
 			if (signalAborted(signal) !== false) return operationFailure("CONTROLLER_FAILURE");
 			const normalizedOutput: unknown = methodRaw === "await_pending" && rawOutput === undefined ? null : rawOutput;
@@ -744,19 +804,309 @@ function createPrimeSandboxHostedControllerAdapter(raw: unknown): CreateHostedCo
 		const rejected = function rejected(): unknown {
 			return operationFailure("CONTROLLER_FAILURE");
 		};
-
 		if (!isNativePromise(dispatched.value)) return resolvedOperation(settled(dispatched.value));
 		const operationPromise: Promise<unknown> = _ReflectApply(_promiseThen, dispatched.value, [settled, rejected]);
 		return operationPromise;
 	};
+	return invokeCaptured;
+}
 
+function createPrimeSandboxHostedControllerAdapter(raw: unknown): CreateHostedControllerAdapterResult {
+	const capture: CapturedBundleResult = _captureIdentityAndControllers(raw);
+	if (!capture.ok) {
+		if (capture.code === "INPUT_INVALID") return inputFailure();
+		return ownerFailure();
+	}
+	const invoke: (methodRaw: string, body: unknown, signal: AbortSignal) => Promise<unknown> = _makeInvokeCaptured(
+		capture.value.identity,
+		capture.value.messageController,
+		capture.value.observeController,
+	);
 	return _freeze({ ok: true, adapter: _freeze({ invoke: invoke }) });
+}
+
+// ---------- dispatcher types ----------
+
+type RouteResult = "HANDLED" | "NOT_HANDLED" | "CLOSED" | "INVALID" | "NO_CAPACITY";
+
+interface HostedControllerDispatcher {
+	readonly route: (bundle: ApplicationBundle) => RouteResult;
+	readonly close: () => void;
+}
+
+interface CreateHostedControllerDispatcherSuccess {
+	readonly ok: true;
+	readonly value: HostedControllerDispatcher;
+}
+
+interface CreateHostedControllerDispatcherFailure {
+	readonly ok: false;
+	readonly code: "INPUT_INVALID" | "WRONG_OWNER";
+}
+
+type CreateHostedControllerDispatcherResult =
+	| CreateHostedControllerDispatcherSuccess
+	| CreateHostedControllerDispatcherFailure;
+
+interface PerFlowRecord {
+	operationPromise: Promise<unknown> | null;
+	dispatchThenPromise: Promise<unknown> | null;
+	replyPromise: Promise<ComposedReplyResult> | null;
+	replyThenPromise: Promise<unknown> | null;
+	replyBytes: Uint8Array | null;
+}
+
+// ---------- dispatcher factory ----------
+
+function createPrimeSandboxHostedControllerDispatcher(raw: unknown): CreateHostedControllerDispatcherResult {
+	const capture: CapturedBundleResult = _captureIdentityAndControllers(raw);
+	if (!capture.ok) {
+		if (capture.code === "INPUT_INVALID") {
+			const result: CreateHostedControllerDispatcherFailure = _freeze({ ok: false, code: "INPUT_INVALID" });
+			return result;
+		}
+		const result: CreateHostedControllerDispatcherFailure = _freeze({ ok: false, code: "WRONG_OWNER" });
+		return result;
+	}
+	const { identity, messageController, observeController } = capture.value;
+	const invokeCaptured: (methodRaw: string, body: unknown, signal: AbortSignal) => Promise<unknown> =
+		_makeInvokeCaptured(identity, messageController, observeController);
+
+	// ---- per-instance mutable routing state ----
+	const records: Array<PerFlowRecord | null> = new Array(MAX_RECORDS).fill(null);
+	let closed: boolean = false;
+	let generation: number = 0;
+
+	function checkAborted(signal: AbortSignal): boolean {
+		if (_abortSignalAborted === undefined) return false;
+		return _ReflectApply(_abortSignalAborted, signal, []) === true;
+	}
+
+	function allocateCell(): number | null {
+		for (let i: number = 0; i < MAX_RECORDS; i++) {
+			if (records[i] === null) return i;
+		}
+		return null;
+	}
+
+	function maybeFree(cellIndex: number): void {
+		const record: PerFlowRecord | null = records[cellIndex];
+		if (record === null) return;
+		if (record.operationPromise !== null) return;
+		if (record.dispatchThenPromise !== null) return;
+		if (record.replyPromise !== null) return;
+		if (record.replyThenPromise !== null) return;
+		if (record.replyBytes !== null) return;
+		records[cellIndex] = null;
+	}
+
+	function makeZeroAndClear(cellIndex: number, replyBytes: Uint8Array | null): () => void {
+		function zeroAndClear(): void {
+			const record: PerFlowRecord | null = records[cellIndex];
+			if (record === null) return;
+			if (replyBytes !== null) {
+				for (let i: number = 0; i < replyBytes.length; i++) replyBytes[i] = 0;
+			}
+			record.replyBytes = null;
+			record.replyPromise = null;
+			function clearReplyThen(): void {
+				const r: PerFlowRecord | null = records[cellIndex];
+				if (r !== null) {
+					r.replyThenPromise = null;
+					maybeFree(cellIndex);
+				}
+			}
+			_queueMicrotask(clearReplyThen);
+		}
+		return zeroAndClear;
+	}
+
+	function retainedReply(
+		cellIndex: number,
+		reply: (payloadRaw: unknown) => Promise<ComposedReplyResult>,
+		payloadRaw: unknown,
+		replyBytes: Uint8Array | null,
+	): void {
+		const record: PerFlowRecord | null = records[cellIndex];
+		if (record === null) return;
+		const replyPromise: Promise<ComposedReplyResult> = reply(payloadRaw);
+		record.replyPromise = replyPromise;
+		record.replyBytes = replyBytes;
+		const zc: () => void = makeZeroAndClear(cellIndex, replyBytes);
+		const replyThenPromise: Promise<unknown> = _ReflectApply(_promiseThen, replyPromise, [zc, zc]);
+		record.replyThenPromise = replyThenPromise;
+	}
+
+	function makeDispatchSettled(
+		cellIndex: number,
+		method: string,
+		signal: AbortSignal,
+		generationAtDispatch: number,
+		reply: (payloadRaw: unknown) => Promise<ComposedReplyResult>,
+	): (rawOutput: unknown) => void {
+		return function settled(rawOutput: unknown): void {
+			const record: PerFlowRecord | null = records[cellIndex];
+			if (record === null) return;
+			function clearDispatchRefs(): void {
+				const r: PerFlowRecord | null = records[cellIndex];
+				if (r !== null) {
+					r.operationPromise = null;
+					r.dispatchThenPromise = null;
+					maybeFree(cellIndex);
+				}
+			}
+			_queueMicrotask(clearDispatchRefs);
+			if (generation !== generationAtDispatch) return;
+			if (checkAborted(signal)) return;
+			const encoded: V16ReplyEncodeResult = encodeReply(method, rawOutput, identity);
+			if (!encoded.ok) {
+				retainedReply(cellIndex, reply, new Uint8Array(0), null);
+				return;
+			}
+			retainedReply(cellIndex, reply, encoded.bytes, encoded.bytes);
+		};
+	}
+
+	function makeDispatchRejected(
+		cellIndex: number,
+		method: string,
+		signal: AbortSignal,
+		generationAtDispatch: number,
+		reply: (payloadRaw: unknown) => Promise<ComposedReplyResult>,
+	): () => void {
+		return function rejected(): void {
+			const record: PerFlowRecord | null = records[cellIndex];
+			if (record === null) return;
+			function clearDispatchRefs(): void {
+				const r: PerFlowRecord | null = records[cellIndex];
+				if (r !== null) {
+					r.operationPromise = null;
+					r.dispatchThenPromise = null;
+					maybeFree(cellIndex);
+				}
+			}
+			_queueMicrotask(clearDispatchRefs);
+			if (generation !== generationAtDispatch) return;
+			if (checkAborted(signal)) return;
+			const encoded: V16ReplyEncodeResult = encodeReply(method, { error: "CONTROLLER_FAILURE" }, identity);
+			if (!encoded.ok) {
+				retainedReply(cellIndex, reply, new Uint8Array(0), null);
+				return;
+			}
+			retainedReply(cellIndex, reply, encoded.bytes, encoded.bytes);
+		};
+	}
+
+	function route(bundle: ApplicationBundle): RouteResult {
+		if (closed) return "CLOSED";
+		if (bundle.origin !== "Runtime") return "NOT_HANDLED";
+		if (bundle.stream === 0) return "NOT_HANDLED";
+		if (bundle.stream === 1) return "NOT_HANDLED";
+		if (bundle.stream === 4) return "NOT_HANDLED";
+		if (bundle.stream !== 2 && bundle.stream !== 3) return "NOT_HANDLED";
+
+		const rawCellIndex: number | null = allocateCell();
+		if (rawCellIndex === null) return "NO_CAPACITY";
+		const cellIndex: number = rawCellIndex;
+		records[cellIndex] = {
+			operationPromise: null,
+			dispatchThenPromise: null,
+			replyPromise: null,
+			replyThenPromise: null,
+			replyBytes: null,
+		};
+
+		const copyResult: SandboxStrictByteCopyResult = copySandboxStrictBytes(bundle.payload, MAX_REQUEST_BYTES);
+		if (!copyResult.ok) {
+			for (let i: number = 0; i < bundle.payload.length; i++) bundle.payload[i] = 0;
+			retainedReply(cellIndex, bundle.reply, new Uint8Array(0), null);
+			return "INVALID";
+		}
+		const requestBytes: Uint8Array = copyResult.value;
+		for (let i: number = 0; i < bundle.payload.length; i++) bundle.payload[i] = 0;
+
+		const generationAtDispatch: number = generation;
+
+		const decodeResult: V16DecodeCorrelated = decodeRequest(requestBytes);
+		if (!decodeResult.ok) {
+			for (let i: number = 0; i < requestBytes.length; i++) requestBytes[i] = 0;
+			retainedReply(cellIndex, bundle.reply, new Uint8Array(0), null);
+			return "INVALID";
+		}
+		const method: string = decodeResult.request.method;
+
+		const validStream2: boolean =
+			method === "list_agents" ||
+			method === "roster" ||
+			method === "await_pending" ||
+			method === "assert_name" ||
+			method === "set_name" ||
+			method === "send_message";
+		const validStream3: boolean =
+			method === "observe_list" || method === "observe_get" || method === "observe_recent";
+		if (!((bundle.stream === 2 && validStream2) || (bundle.stream === 3 && validStream3))) {
+			for (let i: number = 0; i < requestBytes.length; i++) requestBytes[i] = 0;
+			retainedReply(cellIndex, bundle.reply, new Uint8Array(0), null);
+			return "INVALID";
+		}
+
+		for (let i: number = 0; i < requestBytes.length; i++) requestBytes[i] = 0;
+
+		if (checkAborted(bundle.signal)) {
+			const idx: number = cellIndex;
+			function freeCell(): void {
+				if (records[idx] !== null) records[idx] = null;
+			}
+			_queueMicrotask(freeCell);
+			return "HANDLED";
+		}
+
+		const operationPromise: Promise<unknown> = invokeCaptured(method, decodeResult.request.body, bundle.signal);
+		records[cellIndex].operationPromise = operationPromise;
+
+		const settled: (rawOutput: unknown) => void = makeDispatchSettled(
+			cellIndex,
+			method,
+			bundle.signal,
+			generationAtDispatch,
+			bundle.reply,
+		);
+		const rejected: () => void = makeDispatchRejected(
+			cellIndex,
+			method,
+			bundle.signal,
+			generationAtDispatch,
+			bundle.reply,
+		);
+		const dispatchThenPromise: Promise<unknown> = _ReflectApply(_promiseThen, operationPromise, [settled, rejected]);
+		records[cellIndex].dispatchThenPromise = dispatchThenPromise;
+
+		return "HANDLED";
+	}
+
+	function closeHandler(): void {
+		if (closed) return;
+		closed = true;
+		generation += 1;
+	}
+
+	const dispatcher: HostedControllerDispatcher = _freeze({
+		route: route,
+		close: closeHandler,
+	});
+	const result: CreateHostedControllerDispatcherSuccess = _freeze({ ok: true, value: dispatcher });
+	return result;
 }
 
 export type {
 	CreateHostedControllerAdapterFailure,
 	CreateHostedControllerAdapterResult,
 	CreateHostedControllerAdapterSuccess,
+	CreateHostedControllerDispatcherFailure,
+	CreateHostedControllerDispatcherResult,
+	CreateHostedControllerDispatcherSuccess,
+	HostedControllerDispatcher,
 	PrimeSandboxHostedControllerAdapter,
+	RouteResult,
 };
-export { createPrimeSandboxHostedControllerAdapter };
+export { createPrimeSandboxHostedControllerAdapter, createPrimeSandboxHostedControllerDispatcher };
