@@ -1,2 +1,2 @@
-- Added a base URL option for resolving relative Markdown links.
-- Fixed Windows drive paths in Markdown links to open as file URLs.
+- Added a base URL option for resolving relative Markdown links ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).
+- Fixed Windows drive paths in Markdown links to open as file URLs ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).

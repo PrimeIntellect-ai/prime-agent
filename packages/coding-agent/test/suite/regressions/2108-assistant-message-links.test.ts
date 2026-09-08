@@ -1,33 +1,19 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Container, getCapabilities, setCapabilities, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
-import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { AssistantMessageComponent } from "../../../src/modes/interactive/components/assistant-message.js";
+import { buildConversationComponents } from "../../../src/modes/interactive/components/conversation-components.js";
+import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
+import { getMarkdownTheme, initTheme } from "../../../src/modes/interactive/theme/theme.js";
+
+import { createHarness } from "../harness.js";
 
 const cwd = resolve("/tmp/session #1 100%/project");
 const reportUrl = pathToFileURL(resolve(cwd, "audit-out/report.md")).href;
-const message: AssistantMessage = {
-	role: "assistant",
-	content: [{ type: "text", text: "[Audit report](audit-out/report.md)" }],
-	api: "openai-responses",
-	provider: "openai",
-	model: "test",
-	usage: {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	},
-	stopReason: "stop",
-	timestamp: 0,
-};
+let message: AssistantMessage;
 
 function linkTargets(lines: string[]): string[] {
 	return [...new Set([...lines.join("\n").matchAll(/\x1b\]8;;([^\x1b]+)\x1b\\/g)].map((match) => match[1]))];
@@ -35,6 +21,18 @@ function linkTargets(lines: string[]): string[] {
 
 describe("assistant Markdown file links", () => {
 	const capabilities = getCapabilities();
+	beforeAll(async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage("[Audit report](audit-out/report.md)")]);
+			await harness.session.prompt("Link the audit report.");
+			const response = harness.session.messages.find((entry) => entry.role === "assistant");
+			if (!response || response.role !== "assistant") throw new Error("Missing faux assistant response");
+			message = response;
+		} finally {
+			harness.cleanup();
+		}
+	});
 	beforeEach(() => {
 		initTheme("dark");
 		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
@@ -43,6 +41,7 @@ describe("assistant Markdown file links", () => {
 
 	test.each([
 		["audit-out/report.md", reportUrl],
+		["#overview", "#overview"],
 		["./audit-out/report.md", reportUrl],
 		["../report.md", pathToFileURL(resolve(cwd, "../report.md")).href],
 		["/tmp/report.md", pathToFileURL("/tmp/report.md").href],
