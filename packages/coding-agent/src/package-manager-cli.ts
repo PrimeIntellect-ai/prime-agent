@@ -1013,7 +1013,7 @@ async function restoreDaemonUpdateRestartSession(
 					activeSessionId,
 					message: {
 						customType: "prime-agent.update_complete",
-						content: `Prime Agent updated to v${VERSION}. This daemon session was restored after the update.`,
+						content: `[update-complete]\n\nPrime Agent updated to v${VERSION}. This daemon session was restored after the update.`,
 						display: true,
 						details: { version: VERSION },
 					},

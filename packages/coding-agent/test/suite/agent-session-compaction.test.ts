@@ -129,7 +129,7 @@ describe("AgentSession compaction characterization", () => {
 			expect.objectContaining({
 				role: "custom",
 				customType: "ipython_state",
-				content: expect.stringContaining("were removed: large_text"),
+				content: expect.stringMatching(/^\[python-state\]\n\n.*were removed: large_text/s),
 			}),
 		);
 		expect(result.summary).toBe("summary from extension");

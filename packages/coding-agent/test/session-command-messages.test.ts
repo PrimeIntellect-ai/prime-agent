@@ -12,6 +12,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionOutcomeMessage,
 	createCompactionSummaryMessage,
+	createHarnessDigestMessage,
 	createHeartbeatPromptMessage,
 	createRlmChildFailureMessage,
 	createRlmChildTerminalNoticeMessage,
@@ -268,6 +269,54 @@ describe("session command messages", () => {
 				runCount: 1,
 			}).content,
 		).toBe("[heartbeat: every 10 minutes run#1]\n\ncheck in");
+	});
+
+	test("every constructor-backed synthetic kind opens with a grammar-conforming bracket line", () => {
+		const goal: GoalState = {
+			active: true,
+			status: "active",
+			objective: "ship it",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+		};
+		const firstLines = [
+			createAgentSessionMessage({
+				id: "agentmsg_grammar",
+				source: AGENT_MESSAGE_SOURCE,
+				message: "hello",
+				fromRelationship: "sibling",
+				from: { sessionName: "peer" },
+				target: { activeSessionId: "a", sessionId: "s" },
+			}).content,
+			createAsyncBashCompletionMessage({ pid: 7, command: "ls", exitCode: 0 }).content,
+			createRlmChildFailureMessage({ childId: "c", sessionName: "worker", error: "boom" }).content,
+			createRlmChildTerminalNoticeMessage({ kind: "cancelled", childId: "c", sessionName: "worker" }).content,
+			createRlmChildTerminalNoticeMessage({ kind: "completed_without_reply", childId: "c", sessionName: "worker" })
+				.content,
+			createHarnessDigestMessage("digest body").content,
+			createGoalContextMessage(goal, "continuation").content as string,
+			createHeartbeatPromptMessage({
+				id: "hb2",
+				status: "active",
+				source: "heartbeat",
+				activeSessionId: "a",
+				sessionId: "s",
+				sessionFile: "/tmp/s.jsonl",
+				cwd: "/tmp",
+				prompt: "check in",
+				schedule: { kind: "interval", expression: "every 5m", intervalMs: 300_000 },
+				createdAt: "2026-01-01T00:00:00.000Z",
+				updatedAt: "2026-01-01T00:00:00.000Z",
+				runCount: 1,
+			}).content,
+			getText(convertToLlm([createCompactionSummaryMessage("s", 1, "2026-01-01T00:00:00.000Z")])[0]!),
+			getText(convertToLlm([createBranchSummaryMessage("s", "e", "2026-01-01T00:00:00.000Z")])[0]!),
+		].map((content) => (typeof content === "string" ? content : "").split("\n")[0]!);
+		// `[<kind>(: <qualifier>)( <address>)]`: kebab-case kind, no stray brackets or blank first lines.
+		for (const line of firstLines) {
+			expect(line).toMatch(/^\[[a-z][a-z0-9-]*(?:: [^\][\n]+)?(?: [^\][\n]+)?\]$/);
+		}
 	});
 
 	test("labels compaction and branch summaries with bracket grammar headers in LLM context", () => {
