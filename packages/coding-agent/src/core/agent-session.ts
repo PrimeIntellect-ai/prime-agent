@@ -7536,7 +7536,8 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		if (!options.skipAbort) await this.abort();
 		let didCompact = false;
-		this._compactionAbortController = new AbortController();
+		const compactionAbortController = new AbortController();
+		this._compactionAbortController = compactionAbortController;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
@@ -7559,7 +7560,7 @@ export class AgentSession {
 				apiKey,
 				headers,
 				customInstructions,
-				signal: this._compactionAbortController.signal,
+				signal: compactionAbortController.signal,
 			});
 
 			this._emit({
@@ -7592,8 +7593,10 @@ export class AgentSession {
 			throw error;
 		} finally {
 			const resumeGoal =
-				didCompact && !this._compactionAbortController.signal.aborted && this._goalState.status === "active";
-			this._compactionAbortController = undefined;
+				didCompact && !compactionAbortController.signal.aborted && this._goalState.status === "active";
+			if (this._compactionAbortController === compactionAbortController) {
+				this._compactionAbortController = undefined;
+			}
 			this._reconnectToAgent();
 			if (this._compactionOperation === compactionOperation) {
 				this._compactionOperation = undefined;

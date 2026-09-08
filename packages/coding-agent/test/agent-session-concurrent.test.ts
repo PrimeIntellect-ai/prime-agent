@@ -1108,4 +1108,30 @@ describe("AgentSession concurrent prompt guard", () => {
 			"assistant",
 		]);
 	});
+
+	it("concurrent compact(undefined,{skipAbort:true}) both resolve after overlap", async () => {
+		createSession();
+		let callIndex = 0;
+		const releaseGates: Array<(result: CompactionResult) => void> = [];
+		const gatePromises: Array<Promise<CompactionResult>> = [];
+		for (let i = 0; i < 2; i++) {
+			gatePromises.push(
+				new Promise<CompactionResult>((resolve) => {
+					releaseGates.push(resolve);
+				}),
+			);
+		}
+		const internals = session as unknown as {
+			_performCompaction: () => Promise<CompactionResult>;
+		};
+		vi.spyOn(internals, "_performCompaction").mockImplementation(() => gatePromises[callIndex++]);
+		const compact1 = session.compact(undefined, { skipAbort: true });
+		await vi.waitFor(() => expect(session.isCompacting).toBe(true));
+		const compact2 = session.compact(undefined, { skipAbort: true });
+		await vi.waitFor(() => expect(callIndex).toBe(2));
+		releaseGates[0]({ summary: "c1", firstKeptEntryId: "e1", tokensBefore: 1 });
+		releaseGates[1]({ summary: "c2", firstKeptEntryId: "e2", tokensBefore: 1 });
+		await expect(compact1).resolves.toBeDefined();
+		await expect(compact2).resolves.toBeDefined();
+	});
 });
