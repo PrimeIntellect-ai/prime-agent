@@ -161,6 +161,23 @@ describe("AgentSession goals", () => {
 		return harness;
 	}
 
+	it("resumes an active goal after manual compaction", async () => {
+		const harness = await createGoalHarness();
+		const internals = harness.session as unknown as { _performCompaction(): Promise<unknown> };
+		vi.spyOn(internals, "_performCompaction").mockResolvedValue({ summary: "compacted" });
+		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ipython", COMPLETE_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Goal complete."),
+		]);
+
+		await harness.session.compact();
+		await harness.session.waitForHeadlessIdle();
+
+		expect(harness.session.goalState.status).toBe("complete");
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
 	it("keeps continuing until the model completes the goal through ipython", async () => {
 		const harness = await createGoalHarness();
 		harness.setResponses([

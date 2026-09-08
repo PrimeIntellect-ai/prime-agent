@@ -7603,7 +7603,7 @@ export class AgentSession {
 			if (didCompact) {
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 				if (this._goalState.status === "active" && !compactionAbort.signal.aborted) {
-					this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages() && !this.hasPendingSessionWork;
+					this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages();
 					this.resumeQueuedWork();
 					if (this.agent.hasQueuedMessages()) this._schedulePostCompactionContinue();
 				}
