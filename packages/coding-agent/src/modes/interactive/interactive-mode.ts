@@ -8693,7 +8693,7 @@ export class InteractiveMode {
 				);
 			}
 		} else if (!selectedModel) {
-			this.showError("Prime Inference login succeeded, but the default GLM 5.2 model is unavailable.");
+			this.showError("Prime Inference login succeeded, but the default GLM 5.3 model is unavailable.");
 		}
 
 		return true;
