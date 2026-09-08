@@ -2497,6 +2497,13 @@ export class AgentDaemon {
 		return state;
 	}
 
+	private findResidentRlmSubagent(childId: string): ActiveSessionState | undefined {
+		for (const state of this.sessions.values()) {
+			if (state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === childId) return state;
+		}
+		return undefined;
+	}
+
 	private async getOrHydrateBoundSessionState(id: string): Promise<ActiveSessionState> {
 		let lookupError: unknown;
 		try {
@@ -2510,13 +2517,15 @@ export class AgentDaemon {
 			}
 			lookupError = error;
 		}
+		// Capture a resident child before passive discovery yields. Passivation can
+		// remove it from the active map before its passive row is discoverable.
+		const residentSubagent = this.findResidentRlmSubagent(id);
+		if (residentSubagent) return this.waitForHydratingChild(residentSubagent, id);
 		const passiveSubagent = await this.findPassiveRlmSubagent(id);
 		if (passiveSubagent) {
 			return this.hydratePassiveRlmSubagent(passiveSubagent);
 		}
-		const hydratingChild = [...this.sessions.values()].find(
-			(state) => state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === id,
-		);
+		const hydratingChild = this.findResidentRlmSubagent(id);
 		if (hydratingChild) {
 			return this.waitForHydratingChild(hydratingChild, id);
 		}
@@ -6161,29 +6170,33 @@ export class AgentDaemon {
 					const resolved = this.resolveAgentFamilySessionName(options.fromState, targetSelector, error);
 					targetState = await this.getOrHydrateBoundSessionState(resolved.activeSessionId);
 				} else {
-					const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector);
-					if (passiveSubagent) {
+					const residentSubagent = this.findResidentRlmSubagent(targetSelector);
+					if (residentSubagent) {
 						if (options.origin === "agent" && options.fromState) {
-							assertAgentFamilyReach(
-								this.agentFamilyEntry(options.fromState),
-								this.passiveAgentFamilyEntry(passiveSubagent),
-							);
+							this.assertAgentFamilyReachable(options.fromState, residentSubagent);
 						}
-						targetState = await this.hydratePassiveRlmSubagent(passiveSubagent);
+						targetState = await this.waitForHydratingChild(residentSubagent, targetSelector);
 					} else {
-						const hydratingChild = [...this.sessions.values()].find(
-							(state) =>
-								state.runtime.metadata.kind === "subagent" &&
-								state.runtime.metadata.rlmChildId === targetSelector,
-						);
-						if (hydratingChild) {
-							targetState = await this.waitForHydratingChild(hydratingChild, targetSelector);
-						} else if (this.options.worker && options.fromState) {
-							// The supervisor can resolve and wake a saved worker even when it is no longer
-							// present in this worker's resident peer snapshot.
-							return this.sendRemoteAgentSessionMessage(options.fromState, targetSelector, message);
+						const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector);
+						if (passiveSubagent) {
+							if (options.origin === "agent" && options.fromState) {
+								assertAgentFamilyReach(
+									this.agentFamilyEntry(options.fromState),
+									this.passiveAgentFamilyEntry(passiveSubagent),
+								);
+							}
+							targetState = await this.hydratePassiveRlmSubagent(passiveSubagent);
 						} else {
-							throw error;
+							const hydratingChild = this.findResidentRlmSubagent(targetSelector);
+							if (hydratingChild) {
+								targetState = await this.waitForHydratingChild(hydratingChild, targetSelector);
+							} else if (this.options.worker && options.fromState) {
+								// The supervisor can resolve and wake a saved worker even when it is no longer
+								// present in this worker's resident peer snapshot.
+								return this.sendRemoteAgentSessionMessage(options.fromState, targetSelector, message);
+							} else {
+								throw error;
+							}
 						}
 					}
 				}
