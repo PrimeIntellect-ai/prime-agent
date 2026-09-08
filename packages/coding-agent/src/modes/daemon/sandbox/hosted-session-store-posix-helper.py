@@ -99,6 +99,7 @@ _MODE_V5_BLOCKED = 3
 
 _V5_OPCODES = frozenset((_V5_HELLO, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17))
 _WORKSPACE_EVIDENCE = b"workspace-evidence"
+_INPUT_MANIFEST = b"\x69nput.manifest"
 _INPUT_MANIFEST_TEMP_PREFIX = b".ws-\x69nput-manifest-tmp."
 _PLAN_DRAFT_PREFIX = b".ws-plan."
 _CONTENT_DRAFT_PREFIX = b".ws-content."
@@ -2858,9 +2859,57 @@ def _v5_require_absent(parent, name):
         raise Fatal(_E_UNCERTAIN)
 
 
+def _v5_read_open_file(fd, size):
+    result = bytearray(size)
+    complete = False
+    view = memoryview(result)
+    try:
+        offset = 0
+        while offset < size:
+            try:
+                count = os.readv(fd, (view[offset:],))
+            except InterruptedError:
+                continue
+            except OSError:
+                raise Fatal(_E_IO)
+            if count <= 0:
+                raise Fatal(_E_UNCERTAIN)
+            offset += count
+        complete = True
+        return result
+    finally:
+        view.release()
+        if not complete:
+            _zero(result)
+
+
+def _v5_same_inode(left, right):
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _v5_validate_retained_file(fd, expected_stat, uid, device, links):
+    found = _fstat(fd)
+    _validate_file_stat(found, uid, device, links)
+    if not _v5_same_inode(found, expected_stat) or found.st_size != _INPUT_MANIFEST_SIZE:
+        raise Fatal(_E_UNCERTAIN)
+    return found
+
+
+def _v5_validate_named_file(parent, name, expected_stat, uid, device, links):
+    found, error = _lstat(parent, name)
+    if found is None or error is not None:
+        raise Fatal(_E_UNCERTAIN)
+    _validate_file_stat(found, uid, device, links)
+    if not _v5_same_inode(found, expected_stat) or found.st_size != _INPUT_MANIFEST_SIZE:
+        raise Fatal(_E_UNCERTAIN)
+    return found
+
+
 def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, uid, device):
     mark = fds.mark()
     evidence_fd = None
+    manifest_source_fd = None
+    manifest_destination_fd = None
     plan_data = None
     content_data = None
     manifest_data = None
@@ -2877,6 +2926,7 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
         plan_name = None
         content_name = None
         manifest_name = None
+        canonical_present = False
         index = 0
         while index < len(entries):
             entry = entries[index]
@@ -2904,6 +2954,10 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
                     raise Fatal(_E_STATE)
                 manifest_name = entry
                 manifest_suffix = suffix
+            elif entry == _INPUT_MANIFEST:
+                if canonical_present:
+                    raise Fatal(_E_STATE)
+                canonical_present = True
             else:
                 raise Fatal(_E_STATE)
             index += 1
@@ -2916,7 +2970,7 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
         plan_complete = False
         plan_length = 0
         if plan_name is None:
-            if content_name is not None or manifest_name is not None:
+            if content_name is not None or manifest_name is not None or canonical_present:
                 raise Fatal(_E_STATE)
         else:
             plan_data, plan_error = _read_file(
@@ -2932,7 +2986,7 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
         content_complete = False
         content_length = 0
         if content_name is None:
-            if manifest_name is not None:
+            if manifest_name is not None or canonical_present:
                 raise Fatal(_E_STATE)
         else:
             if not plan_complete:
@@ -2947,6 +3001,93 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
             )
             if not valid:
                 raise Fatal(_E_STATE)
+        if canonical_present:
+            if not plan_complete or not content_complete or plan_suffix is None or content_suffix is None:
+                raise Fatal(_E_STATE)
+            if manifest_name is not None:
+                manifest_source_fd, source_error = _open_file(
+                    fds,
+                    evidence_fd,
+                    manifest_name,
+                    uid,
+                    device,
+                    _INPUT_MANIFEST_SIZE,
+                    _INPUT_MANIFEST_SIZE,
+                    2,
+                )
+                if manifest_source_fd is None or source_error is not None:
+                    raise Fatal(_E_UNCERTAIN)
+                source_stat = _fstat(manifest_source_fd)
+                _validate_file_stat(source_stat, uid, device, 2)
+                manifest_data = _v5_read_open_file(manifest_source_fd, _INPUT_MANIFEST_SIZE)
+                manifest_destination_fd, destination_error = _open_file(
+                    fds,
+                    evidence_fd,
+                    _INPUT_MANIFEST,
+                    uid,
+                    device,
+                    _INPUT_MANIFEST_SIZE,
+                    _INPUT_MANIFEST_SIZE,
+                    2,
+                )
+                if manifest_destination_fd is None or destination_error is not None:
+                    raise Fatal(_E_UNCERTAIN)
+                destination_stat = _fstat(manifest_destination_fd)
+                _validate_file_stat(destination_stat, uid, device, 2)
+                if not _v5_same_inode(source_stat, destination_stat):
+                    raise Fatal(_E_STATE)
+            else:
+                manifest_destination_fd, destination_error = _open_file(
+                    fds,
+                    evidence_fd,
+                    _INPUT_MANIFEST,
+                    uid,
+                    device,
+                    _INPUT_MANIFEST_SIZE,
+                    _INPUT_MANIFEST_SIZE,
+                    1,
+                )
+                if manifest_destination_fd is None or destination_error is not None:
+                    raise Fatal(_E_UNCERTAIN)
+                destination_stat = _fstat(manifest_destination_fd)
+                _validate_file_stat(destination_stat, uid, device, 1)
+                manifest_data = _v5_read_open_file(manifest_destination_fd, _INPUT_MANIFEST_SIZE)
+            if not _v5_input_manifest_prefix(
+                manifest_data,
+                lifecycle,
+                generation,
+                plan_suffix,
+                content_suffix,
+                plan_length,
+                content_length,
+            ):
+                raise Fatal(_E_STATE)
+            if manifest_name is not None:
+                _v5_validate_retained_file(
+                    manifest_destination_fd, destination_stat, uid, device, 2
+                )
+                _fsync(evidence_fd)
+                _v5_validate_named_file(
+                    evidence_fd, manifest_name, destination_stat, uid, device, 2
+                )
+                _v5_validate_named_file(
+                    evidence_fd, _INPUT_MANIFEST, destination_stat, uid, device, 2
+                )
+                _unlink(evidence_fd, manifest_name)
+                _fsync(evidence_fd)
+                _v5_require_absent(evidence_fd, manifest_name)
+            else:
+                _fsync(evidence_fd)
+            final_entries = _list(evidence_fd)
+            if len(final_entries) != 3 or plan_name not in final_entries or content_name not in final_entries or _INPUT_MANIFEST not in final_entries:
+                raise Fatal(_E_STATE)
+            final_stat = _v5_validate_retained_file(
+                manifest_destination_fd, destination_stat, uid, device, 1
+            )
+            _v5_validate_named_file(
+                evidence_fd, _INPUT_MANIFEST, final_stat, uid, device, 1
+            )
+            return True
         if manifest_name is not None:
             if not plan_complete or not content_complete or plan_suffix is None or content_suffix is None:
                 raise Fatal(_E_STATE)
@@ -2978,6 +3119,12 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
             _v5_require_absent(evidence_fd, plan_name)
         if len(_list(evidence_fd)) != 0:
             raise Fatal(_E_STATE)
+        if manifest_destination_fd is not None:
+            fds.close_for_recovery(manifest_destination_fd)
+            manifest_destination_fd = None
+        if manifest_source_fd is not None:
+            fds.close_for_recovery(manifest_source_fd)
+            manifest_source_fd = None
         fds.close_for_recovery(evidence_fd)
         evidence_fd = None
         _rmdir(generation_fd, _WORKSPACE_EVIDENCE)
@@ -2997,9 +3144,14 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
             _zero(content_suffix)
         if plan_suffix is not None:
             _zero(plan_suffix)
+        if manifest_destination_fd is not None:
+            fds.close_for_recovery(manifest_destination_fd)
+        if manifest_source_fd is not None:
+            fds.close_for_recovery(manifest_source_fd)
         if evidence_fd is not None:
             fds.close_for_recovery(evidence_fd)
-        if fds.mark() != mark:
+        fds.close_after(mark)
+        if fds.mark() != mark or fds.uncertain:
             raise Fatal(_E_UNCERTAIN)
 
 

@@ -2045,6 +2045,40 @@ print("V5_B00_B13_PREFIX_MATRIX_OK 304")
 		expect(stdout).toBe("V5_B00_B13_PREFIX_MATRIX_OK 304\n");
 	});
 
+	test("V5 B14-B21 recovery preserves canonical drafts and finishes publication", async () => {
+		const source = await readFile(HELPER, "utf8");
+		const recovery = pythonFunction(source, "_v5_recover_input_begin_prefix").body;
+		for (const exact of [
+			'_INPUT_MANIFEST = b"\\x69nput.manifest"',
+			"def _v5_read_open_file(",
+			"def _v5_validate_retained_file(",
+			"def _v5_validate_named_file(",
+		])
+			expect(source).toContain(exact);
+		expect(
+			tokensInOrder(recovery, [
+				"if canonical_present:",
+				"manifest_source_fd, source_error = _open_file(",
+				"manifest_destination_fd, destination_error = _open_file(",
+				"if not _v5_same_inode(source_stat, destination_stat):",
+				"_v5_input_manifest_prefix(",
+				"manifest_destination_fd, destination_stat, uid, device, 2",
+				"_fsync(evidence_fd)",
+				"evidence_fd, manifest_name, destination_stat, uid, device, 2",
+				"evidence_fd, _INPUT_MANIFEST, destination_stat, uid, device, 2",
+				"_unlink(evidence_fd, manifest_name)",
+				"_fsync(evidence_fd)",
+				"_v5_require_absent(evidence_fd, manifest_name)",
+				"final_entries = _list(evidence_fd)",
+				"manifest_destination_fd, destination_stat, uid, device, 1",
+				"evidence_fd, _INPUT_MANIFEST, final_stat, uid, device, 1",
+			]),
+		).toBe(true);
+		const dispatch = pythonFunction(source, "_dispatch_v5").body;
+		expect(dispatch).toContain(`if opcode == _WS_BEGIN:
+        return (v5_mode, "error", _E_BUSY)`);
+	});
+
 	test("static source keeps the hostile-input boundary and forbidden syntax closed", async () => {
 		const source = await readFile(HELPER, "utf8");
 		expect(/(^|[^.A-Za-z0-9_])open\s*\(/m.test(source)).toBe(false);

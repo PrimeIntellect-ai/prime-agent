@@ -196,8 +196,8 @@ const _ObjectPrototype = Object.prototype;
 const _ArrayPrototype = Array.prototype;
 
 const HELPER_NAME = "hosted-session-store-posix-helper.py";
-const HELPER_SIZE = 180518;
-const HELPER_DIGEST = "12b47d64cefb847817b41d57754162d610fa58fa246156d0746e3302f130c373";
+const HELPER_SIZE = 186665;
+const HELPER_DIGEST = "e0d38b550a1652d5b485c3d20e6918cf2a9933e0eb82b2e552b361d5136b48fb";
 const MAX_PAYLOAD = 1_048_576;
 const MAX_UNPARSED = 1_048_581;
 const MAX_STDERR = 65_536;

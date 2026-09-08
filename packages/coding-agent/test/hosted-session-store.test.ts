@@ -681,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(180518);
+		expect(bytes.byteLength).toBe(186665);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"12b47d64cefb847817b41d57754162d610fa58fa246156d0746e3302f130c373",
+			"e0d38b550a1652d5b485c3d20e6918cf2a9933e0eb82b2e552b361d5136b48fb",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -1185,20 +1185,41 @@ bWriteDurable(bEvidencePath + "/.ws-plan." + bPlanNonce.toString("hex"), bPlan);
 bSyncEvidence();
 bWriteDurable(bEvidencePath + "/.ws-content." + bContentNonce.toString("hex"), bContent);
 bSyncEvidence();
-bWriteDurable(bEvidencePath + "/.ws-input-manifest-tmp." + bManifestNonce.toString("hex"), bManifest);
+const bManifestTempPath = bEvidencePath + "/.ws-input-manifest-tmp." + bManifestNonce.toString("hex");
+bWriteDurable(bManifestTempPath, bManifest);
+const bManifestCanonicalPath = bEvidencePath + "/input.manifest";
+linkSync(bManifestTempPath, bManifestCanonicalPath);
+bSyncEvidence();
 const v5NonemptyReady = await createStartupV5HostedSessionStore(registry);
-check(v5NonemptyReady.code === "READY", "V5 nonempty root ready");
+check(v5NonemptyReady.code === "READY", "V5 B17 root ready");
 if (v5NonemptyReady.code !== "READY") process.exit(49);
-check(readdirSync(bGenerationPath).sort().join(",") === "wal", "B13 recovered exact absence");
+const bPublishedNames = [
+	".ws-content." + bContentNonce.toString("hex"),
+	".ws-plan." + bPlanNonce.toString("hex"),
+	"input.manifest",
+];
+check(readdirSync(bEvidencePath).sort().join(",") === bPublishedNames.join(","), "B17 exact published names");
+check(lstatSync(bManifestCanonicalPath).nlink === 1, "B17 canonical one link");
 check(Object.getPrototypeOf(v5NonemptyReady) === Object.prototype && Object.isFrozen(v5NonemptyReady), "V5 nonempty ready exact ordinary");
 check(Object.getOwnPropertyNames(v5NonemptyReady).join(",") === "code,store" && Object.getOwnPropertySymbols(v5NonemptyReady).length === 0, "V5 nonempty ready keys");
 const v5NonemptyStore = v5NonemptyReady.store;
 check(Object.getPrototypeOf(v5NonemptyStore) === Object.prototype && Object.isFrozen(v5NonemptyStore), "V5 nonempty store exact ordinary");
 check(Object.getOwnPropertyNames(v5NonemptyStore).join(",") === "close" && Object.getOwnPropertySymbols(v5NonemptyStore).length === 0, "V5 nonempty close-only authority");
+const bPublishedState = (): string => bPublishedNames.map((name) => {
+	const path = bEvidencePath + "/" + name;
+	const found = lstatSync(path);
+	return name + ":" + found.ino + ":" + found.nlink + ":" + createHash("sha256").update(readFileSync(path)).digest("hex");
+}).join("|");
+const b17State = bPublishedState();
 const v5NonemptyCloseOne = v5NonemptyStore.close();
 const v5NonemptyCloseTwo = v5NonemptyStore.close();
 check(v5NonemptyCloseOne === v5NonemptyCloseTwo && utilTypes.isPromise(v5NonemptyCloseOne), "V5 nonempty memoized close");
 check((await v5NonemptyCloseOne).code === "CLOSED", "V5 nonempty closed");
+const b21Ready = await createStartupV5HostedSessionStore(registry);
+check(b21Ready.code === "READY", "B21 retry ready");
+if (b21Ready.code !== "READY") process.exit(63);
+check(bPublishedState() === b17State, "B21 retry exact preservation");
+check((await b21Ready.store.close()).code === "CLOSED", "B21 retry close");
 rmSync(blockedRoot, { recursive: true, force: true });
 console.log("V5_NONEMPTY_READY_OK");
 // T3: One running lifecycle (with head)
@@ -2434,10 +2455,10 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"7c444539bd34ac3381a9aaabfa46e857b819f9440fb9d79f9f3f1bb00fe474e6",
+			"3679c3a52d8d73eeb0bfd6c74bede5ac0cfe0d541ae339b662763a8a6a3c5c61",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
-			"caf6a65f16a35b3567d4f64c0a461891dff475382d612463b73048adfef1a0be",
+			"cfd90d1a9dc4cbe0482a525139012e33efb710a6c0dc8465dff1237f2d2a11e5",
 		);
 		expect(createHash("sha256").update(readFileSync(v5ProbePath)).digest("hex")).toBe(
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
