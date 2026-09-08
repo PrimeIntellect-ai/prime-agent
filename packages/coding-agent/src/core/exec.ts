@@ -2,7 +2,7 @@
  * Shared command execution utilities for extensions and custom tools.
  */
 
-import { spawnHidden, waitForChildProcess } from "../utils/child-process.js";
+import { signalProcessGroupOrProcess, spawnHidden, waitForChildProcess } from "../utils/child-process.js";
 
 /**
  * Options for executing shell commands.
@@ -69,21 +69,70 @@ export async function execCommand(
 		let stdout = "";
 		let stderr = "";
 		let killed = false;
+		let settled = false;
 		let timeoutId: NodeJS.Timeout | undefined;
 		let forceKillTimeoutId: NodeJS.Timeout | undefined;
 
 		const killProcess = () => {
 			if (!killed) {
 				killed = true;
-				proc.kill("SIGTERM");
+				if (process.platform === "win32" && proc.pid) {
+					signalProcessGroupOrProcess(proc.pid, "SIGTERM");
+				} else {
+					proc.kill("SIGTERM");
+				}
 				forceKillTimeoutId = setTimeout(() => {
 					forceKillTimeoutId = undefined;
 					if (proc.exitCode === null && proc.signalCode === null) {
-						proc.kill("SIGKILL");
+						if (proc.pid) {
+							signalProcessGroupOrProcess(proc.pid, "SIGKILL", (error) => {
+								if (proc.exitCode !== null || proc.signalCode !== null) return;
+								finish({
+									stdout,
+									stderr: `${stderr}\nCould not terminate owned process ${proc.pid}; it may still be running: ${error.message}`,
+									code: 1,
+									killed: false,
+								});
+							});
+						}
 					}
 				}, 5000);
 			}
 		};
+
+		proc.stdout?.on("data", (data) => {
+			if (!settled) stdout += data.toString();
+		});
+
+		proc.stderr?.on("data", (data) => {
+			if (!settled) stderr += data.toString();
+		});
+
+		const cleanup = () => {
+			if (timeoutId) clearTimeout(timeoutId);
+			if (forceKillTimeoutId) clearTimeout(forceKillTimeoutId);
+			if (options?.signal) {
+				options.signal.removeEventListener("abort", killProcess);
+			}
+		};
+
+		const finish = (result: ExecResult) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve(result);
+			stdout = "";
+			stderr = "";
+		};
+
+		// Failed cancellation settles the result, not ownership: keep draining and waiting for real exit.
+		waitForChildProcess(proc)
+			.then((code) => {
+				finish({ stdout, stderr, code: code ?? 0, killed });
+			})
+			.catch((_err) => {
+				finish({ stdout, stderr, code: 1, killed });
+			});
 
 		if (options?.signal) {
 			if (options.signal.aborted) {
@@ -98,33 +147,5 @@ export async function execCommand(
 				killProcess();
 			}, options.timeout);
 		}
-
-		proc.stdout?.on("data", (data) => {
-			stdout += data.toString();
-		});
-
-		proc.stderr?.on("data", (data) => {
-			stderr += data.toString();
-		});
-
-		const cleanup = () => {
-			if (timeoutId) clearTimeout(timeoutId);
-			if (forceKillTimeoutId) clearTimeout(forceKillTimeoutId);
-			if (options?.signal) {
-				options.signal.removeEventListener("abort", killProcess);
-			}
-		};
-
-		// Wait for process termination without hanging on inherited stdio handles
-		// held open by detached descendants.
-		waitForChildProcess(proc)
-			.then((code) => {
-				cleanup();
-				resolve({ stdout, stderr, code: code ?? 0, killed });
-			})
-			.catch((_err) => {
-				cleanup();
-				resolve({ stdout, stderr, code: 1, killed });
-			});
 	});
 }

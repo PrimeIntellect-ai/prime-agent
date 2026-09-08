@@ -1,0 +1,1 @@
+- Fixed modified-key input in native Windows terminals running the compiled executable.

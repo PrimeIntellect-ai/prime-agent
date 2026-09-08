@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,11 +18,32 @@ vi.mock("../src/core/kernel/bootstrap.js", () => {
 let tempDir = "";
 const savedJournalPath = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
 
-function writeFakePython(script: string[]): string {
+function writeEarlyExitKernel(envDump: string): { python: string; env?: Record<string, string> } {
+	if (process.platform === "win32") {
+		const venv = process.env.PRIME_AGENT_KERNEL_VENV;
+		if (!venv) throw new Error("PRIME_AGENT_KERNEL_VENV is required for this Windows kernel test");
+		const python = join(venv, "Scripts", "python.exe");
+		const runtimeRoot = join(tempDir, "early-exit-runtime");
+		const rlmDir = join(runtimeRoot, "rlm");
+		mkdirSync(rlmDir, { recursive: true });
+		writeFileSync(join(rlmDir, "__init__.py"), "");
+		writeFileSync(
+			join(rlmDir, "repl.py"),
+			[
+				"import os",
+				"from pathlib import Path",
+				`Path(${JSON.stringify(envDump)}).write_text("\\n".join(f"{key}={value}" for key, value in os.environ.items()))`,
+				"raise SystemExit(42)",
+				"",
+			].join("\n"),
+		);
+		return { python, env: { PYTHONPATH: runtimeRoot } };
+	}
+
 	const python = join(tempDir, "python");
-	writeFileSync(python, script.join("\n"));
+	writeFileSync(python, ["#!/bin/sh", `env > "${envDump}"`, "exit 42", ""].join("\n"));
 	chmodSync(python, 0o755);
-	return python;
+	return { python };
 }
 
 interface JournalRecord {
@@ -55,11 +76,11 @@ describe("repl kernel parent watchdog", () => {
 
 	it("spawn sets PRIME_AGENT_KERNEL_OWNER_PID and journals the kernel pid", async () => {
 		const envDump = join(tempDir, "kernel-env");
-		const python = writeFakePython(["#!/bin/sh", `env > "${envDump}"`, "exit 42", ""]);
+		const { python, env } = writeEarlyExitKernel(envDump);
 		const journalPath = join(tempDir, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const manager = new ReplKernelManager({ python, cwd: tempDir });
+		const manager = new ReplKernelManager({ python, cwd: tempDir, env });
 
 		try {
 			await expect(manager.execute("x")).rejects.toThrow(/Kernel exited before ready/);

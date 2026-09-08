@@ -59,7 +59,13 @@ Install the latest stable release on macOS or Linux:
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
-The installer downloads a versioned release, verifies its SHA-256 checksum, installs the `prime-agent` command, and can prepare the Python runtime used by the agent.
+On Windows, use PowerShell. WSL is not required; Git Bash is required for shell commands.
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
+The installers download a versioned release, verify its SHA-256 checksum, install the `prime-agent` command, and can prepare the Python runtime used by the agent. See [Windows Setup](packages/coding-agent/docs/windows.md) for PATH, update, uninstall, and troubleshooting guidance.
 
 Start Prime Agent from the repository or directory you want it to work in:
 
