@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	closeSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmdirSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, win32 } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../src/utils/child-process.js";
 import { createWindowsProcessTreeSignal } from "../../src/utils/windows-process-signal.js";
 import { visibilityObserverScript } from "./windows-launch-observer.js";
@@ -15,9 +28,45 @@ function safeImage(path: string): string {
 	assert(win32.isAbsolute(path) && !/["%!&|<>^\r\n]/.test(path), `Unsafe command image: ${path}`);
 	return path;
 }
-function cmdArguments(image: string, encoded: string): string[] {
-	assert(/^[A-Za-z0-9+/]+={0,2}$/.test(encoded), "Payload must be one base64 argument");
-	return ["/d", "/s", "/c", `""${safeImage(image)}" -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}"`];
+const brokerProgram = String.raw`
+const { spawn } = require("node:child_process");
+const { appendFileSync } = require("node:fs");
+const spec = JSON.parse(process.env.PRIME_AGENT_LAUNCH_PROBE_SPEC);
+const report = (event, data) => appendFileSync(spec.trace, JSON.stringify({ event, pid: process.pid, data }) + "\n");
+report("start", { runtime: process.execPath, kind: process.versions.bun ? "bun" : "node", revision: globalThis.Bun?.revision, cwd: process.cwd() });
+const child = spawn(spec.command, spec.args, { detached: false, windowsHide: true, stdio: "ignore" });
+report("spawned", { pid: child.pid });
+child.once("error", (error) => { report("error", String(error)); process.exitCode = 1; });
+child.once("exit", (code, signal) => {
+    report("exit", { code, signal });
+    process.exitCode = signal || code === null ? 1 : code;
+});
+// Do not unref the inner child or exit before its actual exit event.
+`;
+function runtimeEnvironment(source: NodeJS.ProcessEnv, bun: boolean): NodeJS.ProcessEnv {
+	const env = Object.fromEntries(Object.entries(source).filter(([key]) => !/^(BUN|NODE)_/i.test(key)));
+	if (bun) env.BUN_BE_BUN = "1";
+	return env;
+}
+function runtimeArguments(bun: boolean, script: string): string[] {
+	return bun
+		? ["--no-env-file", "--no-install", "--config=broker-empty.toml", "--eval", script]
+		: ["--input-type=commonjs", "--eval", script];
+}
+
+function isNoConsoleMode(ready: string[] | undefined, observed: string[] | undefined): boolean {
+	return Boolean(
+		ready &&
+			ready[1] === "0" &&
+			ready[2] === "False" &&
+			(Number(ready[3]) & 1) !== 0 &&
+			ready[4] === "0" &&
+			ready[5] === "0" &&
+			ready[6] === "6" &&
+			observed?.[4] === "0" &&
+			observed[5] === "False" &&
+			observed[6] === "False",
+	);
 }
 
 function sentinel(directory: string, name: string): string {
@@ -41,12 +90,15 @@ public static class SentinelConsole {
         public IntPtr reservedData, stdin, stdout, stderr;
     }
     [DllImport("kernel32.dll")] public static extern void GetStartupInfo(out StartupInfo info);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern uint GetConsoleProcessList([Out] uint[] ids, uint count);
 }
 '@
     $info = New-Object SentinelConsole+StartupInfo
     [SentinelConsole]::GetStartupInfo([ref]$info)
     $console = [SentinelConsole]::GetConsoleWindow()
-    [IO.File]::WriteAllText(${path("ready.tmp")}, "$PID|$($console.ToInt64())|$([SentinelConsole]::IsWindowVisible($console))|$($info.flags)|$($info.show)")
+    $consoleCount = [SentinelConsole]::GetConsoleProcessList([uint32[]]@(0), 1)
+    $consoleError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    [IO.File]::WriteAllText(${path("ready.tmp")}, "$PID|$($console.ToInt64())|$([SentinelConsole]::IsWindowVisible($console))|$($info.flags)|$($info.show)|$consoleCount|$consoleError")
     [IO.File]::Move(${path("ready.tmp")}, ${path("ready")})
     while (![IO.File]::Exists(${path("gate")})) { Start-Sleep -Milliseconds 25 }
     [IO.File]::WriteAllText(${path("done.tmp")}, 'fixed launch sentinel v1 completed')
@@ -66,16 +118,33 @@ if (process.argv[2] === "--construction-check") {
 	assert.equal(Buffer.from(encoded, "base64").toString("utf16le"), script);
 	assert(!script.toLowerCase().includes("taskkill"));
 	assert(script.includes("exit 37"));
-	const image = "C:\\owned path\\PowerShell junction\\powershell.exe";
-	assert.equal(
-		cmdArguments(image, encoded)[3],
-		`""${image}" -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}"`,
-	);
-	for (const bad of ["C:\\%TEMP%\\x.exe", "C:\\x!y.exe", 'C:\\x"y.exe', "C:\\x&y.exe", "relative.exe"]) {
-		assert.throws(() => cmdArguments(bad, encoded));
+	const inherited = {
+		NODE_OPTIONS: "bad",
+		nOdE_InSpEcT: "bad",
+		BUN_OPTIONS: "bad",
+		bun_inspect: "bad",
+		HOME: "owned-home",
+	};
+	assert.deepEqual(runtimeEnvironment(inherited, false), { HOME: "owned-home" });
+	assert.deepEqual(runtimeEnvironment(inherited, true), { HOME: "owned-home", BUN_BE_BUN: "1" });
+	assert.equal(inherited.NODE_OPTIONS, "bad");
+	assert.deepEqual(runtimeArguments(false, brokerProgram), ["--input-type=commonjs", "--eval", brokerProgram]);
+	assert.deepEqual(runtimeArguments(true, brokerProgram).slice(0, 3), [
+		"--no-env-file",
+		"--no-install",
+		"--config=broker-empty.toml",
+	]);
+	const data = { command: "C:\\owned space path\\powershell.exe", args: ["-EncodedCommand", encoded] };
+	assert.deepEqual(JSON.parse(JSON.stringify(data)), data);
+	const observed = ["C|audit", "time", "console", "0", "0", "False", "False", ""];
+	assert(isNoConsoleMode("1|0|False|257|0|0|6".split("|"), observed));
+	for (const incomplete of ["1|0|False|0|1|0|6", "1|0|False|257|0|1|0", "1|0|False|257|0", "1|0|False|257|0|0|0"]) {
+		assert(!isNoConsoleMode(incomplete.split("|"), observed));
 	}
-	assert.throws(() => cmdArguments(image, "not-base64&exit"));
-	console.log("PASS fixed sentinel roundtrip, quoted space path and unsafe expansion rejection");
+	assert(!isNoConsoleMode("1|0|False|257|0|0|6".split("|"), undefined));
+	console.log(
+		"PASS sentinel/transport, runtime argv, startup-env scrub, parent-env preservation and no-console guards",
+	);
 	process.exit(0);
 }
 
@@ -91,33 +160,66 @@ const hash = (path: string) => createHash("sha256").update(readFileSync(path)).d
 // Obtain canonical paths/flags, but NEVER launch the factory's original target-signal payload.
 const template = createWindowsProcessTreeSignal(process.pid, "SIGKILL");
 const powershell = safeImage(template.command);
-const cmd = safeImage(win32.join(win32.dirname(win32.dirname(win32.dirname(powershell))), "cmd.exe"));
+const isBun = Boolean(process.versions.bun);
+const bunRevision = (Reflect.get(globalThis, "Bun") as { revision?: string } | undefined)?.revision;
+if (isBun) assert.equal(bunRevision, "34cbb9a40b4bd1bd767d134a7065e66c2432a676");
+if (process.argv[2] === "--expect-runtime") {
+	assert.equal(process.argv[4], "--expect-sha256");
+	assert.equal(process.argv[6], "--expect-kind");
+	assert.equal(process.argv.length, 8);
+	assert(win32.isAbsolute(process.argv[3]!));
+	assert.equal(win32.normalize(process.execPath).toLowerCase(), win32.normalize(process.argv[3]!).toLowerCase());
+	assert.equal(hash(process.execPath), process.argv[5]!.toLowerCase());
+	assert.equal(isBun ? "bun" : "node", process.argv[7]);
+}
 assert.deepEqual(template.args.slice(0, -1), ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"]);
-function launchSpec(directory: string, name: string, trampoline: boolean, image = powershell) {
+function launchSpec(directory: string, name: string, broker: boolean, image = powershell) {
 	const script = sentinel(directory, name);
 	const encoded = encode(script);
 	assert.equal(Buffer.from(encoded, "base64").toString("utf16le"), script);
 	assert(!script.toLowerCase().includes("taskkill"));
-	const args = trampoline ? cmdArguments(image, encoded) : [...template.args.slice(0, -1), encoded];
-	assert(trampoline ? args[3]!.endsWith(` ${encoded}"`) : args.at(-1) === encoded);
-	return { command: trampoline ? cmd : image, args, scriptHash: createHash("sha256").update(script).digest("hex") };
+	const args = [...template.args.slice(0, -1), encoded];
+	assert.equal(args.at(-1), encoded);
+	const options: SpawnOptions = {};
+	if (broker) {
+		options.cwd = join(directory, "runtime-cwd");
+		assert.equal(readFileSync(join(options.cwd, "broker-empty.toml"), "utf8"), "");
+		options.env = runtimeEnvironment(process.env, isBun);
+		options.env.PRIME_AGENT_LAUNCH_PROBE_SPEC = JSON.stringify({
+			command: image,
+			args,
+			trace: join(directory, `${name}-runtime.jsonl`),
+		});
+	}
+	return {
+		command: broker ? process.execPath : image,
+		args: broker ? runtimeArguments(isBun, brokerProgram) : args,
+		options,
+		payload: { command: image, args },
+		scriptHash: createHash("sha256").update(script).digest("hex"),
+	};
 }
 
 if (process.argv[2] === "--caller") {
 	const directory = process.argv[3]!;
-	const spec = launchSpec(directory, "D", true);
-	const child = spawnHidden(spec.command, spec.args, {
-		detached: true,
-		stdio: "ignore",
-		windowsVerbatimArguments: true,
-		argv0: `"${cmd}"`,
-	});
-	writeFileSync(join(directory, "D-broker"), String(child.pid));
+	const name = process.argv[4]!;
+	assert(["D", "D-stderr"].includes(name));
+	const stage = (text: string) => {
+		if (name === "D-stderr") appendFileSync(join(directory, `${name}-caller-stages`), `${text}\n`);
+	};
+	stage("after native factory");
+	const spec = launchSpec(directory, name, true);
+	stage("before spawn");
+	const child = spawnHidden(spec.command, spec.args, { ...spec.options, detached: true, stdio: "ignore" });
+	writeFileSync(join(directory, `${name}-broker`), String(child.pid));
+	stage("after spawn; before immediate unref + process.exit(0)");
 	child.unref();
 	process.exit(0);
 }
 
 const directory = mkdtempSync(join(tmpdir(), "prime-agent launch probe-"));
+mkdirSync(join(directory, "runtime-cwd"));
+writeFileSync(join(directory, "runtime-cwd", "broker-empty.toml"), "");
 const junction = join(directory, "PowerShell path with spaces");
 let junctionCreated = false;
 const owners: ChildProcess[] = [];
@@ -126,6 +228,7 @@ const errors: unknown[] = [];
 const auditErrors: unknown[] = [];
 const departedPids: number[] = [];
 const trampolineCases = new Set<string>();
+const readyByCase = new Map<string, string[]>();
 let observerResult: Promise<number | null> | undefined;
 let observerReady = false;
 const observerCode = visibilityObserverScript(directory);
@@ -134,10 +237,11 @@ record("provenance", {
 	runtime: process.execPath,
 	node: process.versions.node,
 	bun: process.versions.bun,
+	bunRevision,
 	powershell,
 	powershellHash: hash(powershell),
-	cmd,
-	cmdHash: hash(cmd),
+	runtimeHash: hash(process.execPath),
+	startupCwd: join(directory, "runtime-cwd"),
 });
 function own(child: ChildProcess): Promise<number | null> {
 	owners.push(child);
@@ -145,6 +249,19 @@ function own(child: ChildProcess): Promise<number | null> {
 	result.catch((error) => record("owned-process-error", String(error)));
 	exits.push(result);
 	return result;
+}
+function verifyBroker(name: string): void {
+	const events = readFileSync(join(directory, `${name}-runtime.jsonl`), "utf8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	const started = events.find((event) => event.event === "start");
+	assert.equal(win32.normalize(started?.data.runtime).toLowerCase(), win32.normalize(process.execPath).toLowerCase());
+	assert.equal(started.data.kind, isBun ? "bun" : "node");
+	if (isBun) assert.equal(started.data.revision, bunRevision);
+	assert.equal(realpathSync(started.data.cwd), realpathSync(join(directory, "runtime-cwd")));
+	assert(!events.some((event) => event.event === "error"), `${name}: runtime broker reported an error`);
+	assert.deepEqual(events.filter((event) => event.event === "exit").at(-1)?.data, { code: 37, signal: null });
 }
 async function setPhase(name: string, kind: "armed" | "audit", console = "0"): Promise<void> {
 	const request = `${name}|${kind}|${console}`;
@@ -184,18 +301,19 @@ function audit(name: string): void {
 			auditErrors.push(
 				new Error(`${name}: visible window/foreground event observed; hidden startup not established`),
 			);
-		else if (
-			!console ||
-			console[4] === "0" ||
-			console[5] !== "False" ||
-			console[6] !== "True" ||
-			console[7] !== "ConsoleWindowClass"
-		) {
-			auditErrors.push(
-				new Error(
-					`${name}: visibility INCONCLUSIVE (console not enumerable/classic; terminal handoff not excluded)`,
-				),
-			);
+		else {
+			const ready = readyByCase.get(name);
+			const noConsole = isNoConsoleMode(ready, console);
+			const hiddenClassic =
+				console?.[4] !== "0" &&
+				console?.[5] === "False" &&
+				console?.[6] === "True" &&
+				console?.[7] === "ConsoleWindowClass";
+			record("console-mode", { name, ready, noConsole, hiddenClassic });
+			if (!noConsole && !hiddenClassic)
+				auditErrors.push(
+					new Error(`${name}: visibility INCONCLUSIVE (no validated no-console mode or hidden classic console)`),
+				);
 		}
 	} catch (error) {
 		auditErrors.push(new Error(`${name}: visibility INCONCLUSIVE: ${String(error)}`));
@@ -205,12 +323,15 @@ async function run(name: string, detached: boolean, trampoline: boolean, image =
 	assert(Date.now() < workDeadline, "Launch probe work budget expired");
 	await setPhase(name, "armed");
 	const spec = launchSpec(directory, payloadName, trampoline, image);
-	const options: SpawnOptions = {
-		detached,
-		stdio: "ignore",
-		...(trampoline ? { windowsVerbatimArguments: true, argv0: `"${cmd}"` } : {}),
-	};
-	record("launch", { name, ...spec, options: { ...options, windowsHide: true } });
+	const options: SpawnOptions = { ...spec.options, detached, stdio: "ignore" };
+	record("launch", {
+		name,
+		command: spec.command,
+		args: spec.args,
+		payload: spec.payload,
+		scriptHash: spec.scriptHash,
+		options: { detached, stdio: "ignore", windowsHide: true, cwd: options.cwd },
+	});
 	const child = spawnHidden(spec.command, spec.args, options);
 	const result = own(child);
 	if (trampoline) trampolineCases.add(name);
@@ -231,6 +352,8 @@ async function run(name: string, detached: boolean, trampoline: boolean, image =
 		);
 		if (existsSync(join(directory, `${payloadName}-ready`))) {
 			const ready = readFileSync(join(directory, `${payloadName}-ready`), "utf8");
+			assert(/^\d+\|-?\d+\|(True|False)\|\d+\|\d+\|\d+\|\d+$/.test(ready));
+			readyByCase.set(name, ready.split("|"));
 			record("sentinel-ready", {
 				name,
 				ready,
@@ -252,6 +375,7 @@ async function run(name: string, detached: boolean, trampoline: boolean, image =
 		readFileSync(join(directory, `${payloadName}-done`), "utf8") === "fixed launch sentinel v1 completed" &&
 		!existsSync(join(directory, `${payloadName}-error`));
 	record("result", { name, pid: child.pid, code, started, done });
+	if (trampoline) verifyBroker(name);
 	if (payloadName !== name) {
 		for (const suffix of ["started", "metadata", "ready", "ready.tmp", "gate", "done", "done.tmp", "error"]) {
 			const path = join(directory, `${payloadName}-${suffix}`);
@@ -316,7 +440,7 @@ try {
 	if (b.code !== 37 || !b.started || !b.done) errors.push(new Error("B did not execute the identical sentinel"));
 
 	const c = await run("C", true, true);
-	assert(c.code === 37 && c.started && c.done, "C trampoline failed; stop without another launcher");
+	assert(c.code === 37 && c.started && c.done, "C runtime broker failed; stop");
 	symlinkSync(win32.dirname(powershell), junction, "junction");
 	junctionCreated = true;
 	record("owned-junction", { junction, target: win32.dirname(powershell) });
@@ -325,45 +449,69 @@ try {
 	const space = await run("C-space", true, true, spaceImage);
 	assert(space.code === 37 && space.started && space.done, "C-space quoting failed; stop");
 
-	assert(Date.now() < workDeadline, "Launch probe work budget expired");
-	await setPhase("D", "armed");
-	record("D-launch-plan", launchSpec(directory, "D", true));
-	const caller = spawnHidden(process.execPath, [process.argv[1]!, "--caller", directory], { stdio: "ignore" });
-	trampolineCases.add("D");
-	assert.equal(await observe(own(caller), budget(5000), "D original caller exit"), 0);
-	const broker = Number(readFileSync(join(directory, "D-broker"), "utf8"));
-	assert(Number.isInteger(broker) && broker > 0);
-	departedPids.push(broker);
-	record("D-caller-exited-before-gate", { caller: caller.pid, broker });
-	assert(!existsSync(join(directory, "D-gate")));
-	await waitUntil(() => existsSync(join(directory, "D-ready")), budget(15000), "D sentinel after caller exit");
-	const dReady = readFileSync(join(directory, "D-ready"), "utf8");
-	const sentinelPid = Number(dReady.split("|")[0]);
-	assert(Number.isInteger(sentinelPid) && sentinelPid > 0);
-	departedPids.push(sentinelPid);
-	record("sentinel-ready", {
-		name: "D",
-		ready: dReady,
-		metadata: readFileSync(join(directory, "D-metadata"), "utf8"),
-	});
-	await setPhase("D", "audit", dReady.split("|")[1]);
-	if (dReady.split("|")[2] === "True") auditErrors.push(new Error("D: sentinel console is visible"));
-	writeFileSync(join(directory, "D-gate"), "release");
-	await waitUntil(
-		() =>
-			existsSync(join(directory, "D-done")) &&
-			readFileSync(join(directory, "D-done"), "utf8") === "fixed launch sentinel v1 completed",
-		budget(15000),
-		"D sentinel completion",
-	);
-	await waitUntil(
-		() => departedPids.every((pid) => !isProcessAlive(pid)),
-		budget(15000),
-		"D broker and sentinel exit",
-	);
-	assert.equal(readFileSync(join(directory, "D-done"), "utf8"), "fixed launch sentinel v1 completed");
-	assert(!existsSync(join(directory, "D-error")), "D sentinel reported an error before exit");
-	record("D-completed-after-caller-exit", { departedPids });
+	for (const name of ["D", "D-stderr"]) {
+		let stderrFd: number | undefined;
+		try {
+			assert(Date.now() < workDeadline, "Launch probe work budget expired");
+			await setPhase(name, "armed");
+			if (name === "D-stderr") stderrFd = openSync(join(directory, `${name}-caller-stderr`), "w");
+			const args = isBun ? runtimeArguments(true, "").slice(0, 3) : [];
+			args.push(resolve(process.argv[1]!), "--caller", directory, name);
+			const caller = spawnHidden(process.execPath, args, {
+				cwd: join(directory, "runtime-cwd"),
+				env: runtimeEnvironment(process.env, isBun),
+				stdio: stderrFd === undefined ? "ignore" : ["ignore", "ignore", stderrFd],
+			});
+			trampolineCases.add(name);
+			const code = await observe(own(caller), budget(5000), `${name} original caller exit`);
+			const callerSucceeded = code === 0;
+			record("original-caller-exit", {
+				name,
+				pid: caller.pid,
+				code,
+				stdio: name === "D" ? "ignore" : "stderr-file",
+			});
+			if (!callerSucceeded) errors.push(new Error(`${name}: explicit original caller exit failed: ${code}`));
+			const broker = Number(readFileSync(join(directory, `${name}-broker`), "utf8"));
+			assert(Number.isInteger(broker) && broker > 0);
+			departedPids.push(broker);
+			assert(!existsSync(join(directory, `${name}-gate`)));
+			await waitUntil(
+				() => existsSync(join(directory, `${name}-ready`)),
+				budget(15000),
+				`${name} sentinel after caller exit`,
+			);
+			const ready = readFileSync(join(directory, `${name}-ready`), "utf8");
+			assert(/^\d+\|-?\d+\|(True|False)\|\d+\|\d+\|\d+\|\d+$/.test(ready));
+			const fields = ready.split("|");
+			readyByCase.set(name, fields);
+			const sentinelPid = Number(fields[0]);
+			assert(Number.isInteger(sentinelPid) && sentinelPid > 0);
+			departedPids.push(sentinelPid);
+			record("sentinel-ready", { name, ready, metadata: readFileSync(join(directory, `${name}-metadata`), "utf8") });
+			await setPhase(name, "audit", fields[1]);
+			if (fields[2] === "True") auditErrors.push(new Error(`${name}: sentinel console is visible`));
+			writeFileSync(join(directory, `${name}-gate`), "release");
+			await waitUntil(
+				() => !isProcessAlive(broker) && !isProcessAlive(sentinelPid),
+				budget(15000),
+				`${name} broker and sentinel exit`,
+			);
+			assert.equal(readFileSync(join(directory, `${name}-done`), "utf8"), "fixed launch sentinel v1 completed");
+			assert(!existsSync(join(directory, `${name}-error`)), `${name} sentinel reported an error before exit`);
+			verifyBroker(name);
+			record(callerSucceeded ? "D-completed-after-caller-exit" : "D-cleanup-completion-NOT-survival-proof", {
+				name,
+				broker,
+				sentinelPid,
+			});
+		} catch (error) {
+			errors.push(error);
+		} finally {
+			writeFileSync(join(directory, `${name}-gate`), "release");
+			if (stderrFd !== undefined) closeSync(stderrFd);
+		}
+	}
 } catch (error) {
 	errors.push(error);
 } finally {
@@ -372,7 +520,7 @@ try {
 		owners: owners.map((child) => ({ pid: child.pid, exit: child.exitCode, signal: child.signalCode })),
 		errors: [...errors, ...auditErrors].map(String),
 	});
-	for (const name of ["AB", "A", "B", "C", "C-space", "D"]) {
+	for (const name of ["AB", "A", "B", "C", "C-space", "D", "D-stderr"]) {
 		try {
 			writeFileSync(join(directory, `${name}-gate`), "release");
 		} catch (error) {
@@ -408,8 +556,20 @@ try {
 		auditErrors.push(error);
 	}
 	for (const name of trampolineCases) audit(name);
-	for (const name of ["AB", "A", "B", "C", "C-space", "D"]) {
-		for (const suffix of ["started", "metadata", "ready", "ready.tmp", "done", "done.tmp", "error", "broker"]) {
+	for (const name of ["AB", "A", "B", "C", "C-space", "D", "D-stderr"]) {
+		for (const suffix of [
+			"started",
+			"metadata",
+			"ready",
+			"ready.tmp",
+			"done",
+			"done.tmp",
+			"error",
+			"broker",
+			"runtime.jsonl",
+			"caller-stages",
+			"caller-stderr",
+		]) {
 			const path = join(directory, `${name}-${suffix}`);
 			if (existsSync(path))
 				record("preserved-sentinel-artifact", { name, suffix, text: readFileSync(path, "utf8") });
@@ -429,4 +589,4 @@ try {
 }
 if (errors.length || auditErrors.length)
 	throw new AggregateError([...errors, ...auditErrors], "Launch probe failed or visibility is inconclusive");
-record("PASS-launch-and-observed-hidden-console", { directory });
+record("PASS-runtime-broker-hidden-startup", { directory });

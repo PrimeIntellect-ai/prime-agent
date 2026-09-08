@@ -442,7 +442,20 @@ jobs:
           test.test_repl.ReplTest.test_interrupt_await_suspended
 
       - name: Build the native Windows executable
+        id: windows_native_binary
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
         run: bun run build:binary
+
+      - name: Probe the compiled Windows runtime broker
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: packages/coding-agent
+        env:
+          BUN_BE_BUN: "1"
+        run: |
+          $binary = (Resolve-Path "./dist/pi.exe").Path
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          & $binary ./test/fixtures/windows-powershell-launch-native.ts --expect-runtime $binary --expect-sha256 $hash --expect-kind bun
 
       - name: Cross-compile and inspect the Windows Arm64 executable
         working-directory: packages/coding-agent
