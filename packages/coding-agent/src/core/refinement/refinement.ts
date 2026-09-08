@@ -9,6 +9,7 @@ import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import type { CustomEntry } from "../session-manager.js";
+import { getAuxiliaryThinkingLevel } from "../thinking-levels.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 
@@ -904,12 +905,6 @@ export async function planRefinement(
 		.filter(Boolean)
 		.join("\n\n");
 
-	// /refine requires a parseable JSON object in the final text. Some reasoning-capable
-	// OpenAI-compatible models can spend the response on visible thinking and return no
-	// final text, which makes otherwise successful daemon /refine calls fail parsing.
-	// Keep the refinement request non-reasoning regardless of the interactive session
-	// thinking level so the model uses its output budget for the JSON object.
-	void thinkingLevel;
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
@@ -918,7 +913,13 @@ export async function planRefinement(
 					systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+				{
+					reasoning: getAuxiliaryThinkingLevel(model, thinkingLevel),
+					maxTokens: refinementMaxOutputTokens(model),
+					signal,
+					apiKey,
+					headers,
+				},
 			),
 		{ policy: options.retry, signal },
 	);
@@ -978,9 +979,6 @@ ${conversationText}
 </conversation>`,
 		"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
 	].join("\n\n");
-	// Auto-refine review requires parseable JSON. Keep it non-reasoning so
-	// reasoning-capable models use final text budget for the JSON object.
-	void thinkingLevel;
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
@@ -989,7 +987,13 @@ ${conversationText}
 					systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+				{
+					reasoning: getAuxiliaryThinkingLevel(model, thinkingLevel),
+					maxTokens: autoRefineReviewMaxOutputTokens(model),
+					signal,
+					apiKey,
+					headers,
+				},
 			),
 		{ policy: retry, signal },
 	);

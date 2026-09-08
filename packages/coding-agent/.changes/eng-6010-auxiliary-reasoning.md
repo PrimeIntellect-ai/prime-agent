@@ -1,0 +1,1 @@
+- Fixed refinement and side questions disabling reasoning when the session uses it, while respecting the selected model's supported thinking levels.
