@@ -12,11 +12,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
 HarnessScope = Literal["local", "global"]
@@ -25,6 +28,54 @@ _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
+
+
+@contextmanager
+def _harness_file_lock(state_path: Path) -> Iterator[None]:
+    # Shared with core/refinement/harness-persistence.ts. Never steal a live lock.
+    lock_path = state_path.with_name(f"{state_path.name}.lock")
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            lock_path.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Harness state is locked: {lock_path}. Retry; if a writer crashed, "
+                    "stop all writers before removing the lock directory."
+                )
+            time.sleep(0.01)
+    try:
+        yield
+    finally:
+        lock_path.rmdir()
+
+
+def _merge_harness_changes(baseline: dict, proposed: dict, latest: dict) -> dict:
+    merged = deepcopy(latest)
+    for kind in _KINDS:
+        before, after = baseline["entries"][kind], proposed["entries"][kind]
+        for entry_id in before.keys() | after.keys():
+            if before.get(entry_id) == after.get(entry_id):
+                continue
+            if before.get(entry_id) != latest["entries"][kind].get(entry_id):
+                raise RuntimeError(
+                    f"Harness entry changed before save: {kind}:{entry_id}. Reload and retry."
+                )
+            if entry_id in after:
+                merged["entries"][kind][entry_id] = deepcopy(after[entry_id])
+            else:
+                del merged["entries"][kind][entry_id]
+    events = proposed["refinements"]
+    baseline_events = baseline["refinements"]
+    if events[:len(baseline_events)] == baseline_events:
+        merged["refinements"].extend(deepcopy(events[len(baseline_events):]))
+    else:
+        if baseline_events != latest["refinements"]:
+            raise RuntimeError("Harness refinement history changed before save. Reload and retry.")
+        merged["refinements"] = deepcopy(events)
+    return merged
 
 
 def _now() -> str:
@@ -168,9 +219,10 @@ class HarnessState:
         self._local_write_error = local_write_error
         self.entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         self.refinements: list[RefinementEvent] = []
+        self._loaded_data = self._serialize()
         self._global_target_state_dir: Path | None = None
         # mtime of the file as of the last load/save, used to detect out-of-process
-        # writes (e.g. the host `/refine` command) and avoid clobbering them.
+        # writes for reads. save() separately merges mutations under a shared lock.
         self._loaded_mtime: int | None = None
         self.load()
 
@@ -199,7 +251,12 @@ class HarnessState:
             self.load()
 
     def load(self) -> "HarnessState":
-        if self.file_path is None or not self.file_path.exists():
+        if self.file_path is None:
+            return self
+        if not self.file_path.exists():
+            self.entries = {kind: {} for kind in _KINDS}
+            self.refinements = []
+            self._loaded_data = self._serialize()
             self._loaded_mtime = None
             return self
         mtime = self._disk_mtime()
@@ -237,6 +294,10 @@ class HarnessState:
                             entry_data["scope"] = self.scope
                         if not isinstance(entry_data.get("source"), str):
                             entry_data["source"] = "agent"
+                        # Missing persisted timestamps must normalize identically on every read.
+                        for timestamp in ("created_at", "updated_at"):
+                            if not isinstance(entry_data.get(timestamp), str):
+                                entry_data[timestamp] = ""
                         version = entry_data.get("version", 1)
                         if isinstance(version, str):
                             try:
@@ -272,8 +333,11 @@ class HarnessState:
                         event_data["changes"] = [str(change) for change in changes]
                     elif not isinstance(changes, list):
                         continue
+                    if not isinstance(event_data.get("created_at"), str):
+                        event_data["created_at"] = ""
                     self.refinements.append(RefinementEvent(**event_data))
         self._loaded_mtime = mtime
+        self._loaded_data = self._serialize()
         return self
 
     def _global_target(self, global_: bool, extra: dict[str, Any] | None = None) -> "HarnessState | None":
@@ -289,7 +353,21 @@ class HarnessState:
             # in_memory fallback: nothing to persist.
             return self
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        target_path = Path(os.path.realpath(self.file_path))
+        try:
+            with _harness_file_lock(target_path):
+                latest = HarnessState(target_path, scope=self.scope)
+                data = _merge_harness_changes(self._loaded_data, self._serialize(), latest._loaded_data)
+                self._write_state(target_path, data)
+                self.load()
+        except Exception:
+            # A rejected mutation must not leak into a later successful save.
+            self.load()
+            raise
+        return self
+
+    def _serialize(self) -> dict[str, Any]:
+        return {
             "schema": 1,
             "entries": {
                 kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
@@ -297,8 +375,9 @@ class HarnessState:
             },
             "refinements": [asdict(event) for event in self.refinements],
         }
+
+    def _write_state(self, target_path: Path, data: dict[str, Any]) -> None:
         # Atomic replace on the real file: aliases survive, readers never see a torn file.
-        target_path = Path(os.path.realpath(self.file_path))
         temp_path = target_path.with_name(f"{target_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
             existing_mode = stat.S_IMODE(os.stat(target_path).st_mode)
@@ -315,8 +394,6 @@ class HarnessState:
             os.replace(temp_path, target_path)
         finally:
             temp_path.unlink(missing_ok=True)
-        self._loaded_mtime = self._disk_mtime()
-        return self
 
     def upsert(
         self,

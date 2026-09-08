@@ -1,5 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
@@ -9,6 +9,7 @@ import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import type { CustomEntry } from "../session-manager.js";
+import { mergeHarnessStateChanges, withHarnessFileLock } from "./harness-persistence.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 
@@ -53,6 +54,8 @@ export interface HarnessState {
 	entries: Record<RefinementKind, Record<string, HarnessEntry>>;
 	refinements: HarnessRefinementEvent[];
 }
+
+const harnessSnapshots = new WeakMap<HarnessState, { state: HarnessState; scope: HarnessScope }>();
 
 export interface RefinementEdit {
 	action: RefinementAction;
@@ -275,7 +278,12 @@ export function loadHarnessState(
 	harnessStateDir: string = getGlobalHarnessStateDir(),
 	scope: HarnessScope = "global",
 ): HarnessState {
-	const statePath = getHarnessStatePath(harnessStateDir);
+	const state = readHarnessState(getHarnessStatePath(harnessStateDir), scope);
+	harnessSnapshots.set(state, { state: structuredClone(state), scope });
+	return state;
+}
+
+function readHarnessState(statePath: string, scope: HarnessScope): HarnessState {
 	if (!existsSync(statePath)) {
 		return emptyHarnessState();
 	}
@@ -338,9 +346,18 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
-	const targetPath = realpathIfPresentSync(statePath);
-	const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
-	writeFileAtomicSync(targetPath, `${JSON.stringify(state, null, 2)}\n`, { mode });
+	const resolvedPath = realpathIfPresentSync(statePath);
+	const targetPath = join(realpathSync(dirname(resolvedPath)), basename(resolvedPath));
+	const snapshot = harnessSnapshots.get(state);
+	const scope = snapshot?.scope ?? "global";
+	withHarnessFileLock(targetPath, () => {
+		const latest = readHarnessState(targetPath, scope);
+		const merged = mergeHarnessStateChanges(snapshot?.state ?? emptyHarnessState(), state, latest);
+		const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
+		writeFileAtomicSync(targetPath, `${JSON.stringify(merged, null, 2)}\n`, { mode });
+		Object.assign(state, merged);
+		harnessSnapshots.set(state, { state: structuredClone(merged), scope });
+	});
 	return statePath;
 }
 
