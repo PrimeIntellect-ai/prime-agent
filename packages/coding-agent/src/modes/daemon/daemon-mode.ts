@@ -155,6 +155,7 @@ import { DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
+import { bindDaemonHostedRuntime, type DaemonHostedRuntimeActivation } from "./daemon-hosted-runtime-binding.js";
 import {
 	collectDaemonLaunchEnv,
 	createDaemonEventMeta,
@@ -602,6 +603,7 @@ export class AgentDaemon {
 	constructor(
 		private readonly socketPath: string,
 		private readonly options: DaemonModeOptions,
+		private readonly hostedRuntimeActivation?: DaemonHostedRuntimeActivation,
 	) {
 		if (!options.defaultSessionConfig.agentDir) {
 			throw new Error("Daemon config is missing agentDir");
@@ -2551,7 +2553,7 @@ export class AgentDaemon {
 	}
 
 	private createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost {
-		return {
+		const host: SubagentRuntimeHost = {
 			createRlmSubagentRuntime: async (options) => this.createRlmSubagentRuntime(parentState, options),
 			createRlmRootSession: async (options) => this.createRlmRootSession(parentState, options),
 			completeRlmSubagentRuntime: (childId, runtime) => {
@@ -2713,6 +2715,7 @@ export class AgentDaemon {
 				}
 			},
 		};
+		return bindDaemonHostedRuntime(host, this.hostedRuntimeActivation, parentState.runtime.session);
 	}
 
 	private async createRlmRootSession(
