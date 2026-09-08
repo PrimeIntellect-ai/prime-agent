@@ -66,7 +66,7 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 
 ### Pseudonymous usage analytics
 
-Prime Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
+Prime Agent sends pseudonymous usage, timing, and safe error reports to Prime Intellect by default. These include version and operating-system category, setup stages, feature outcomes, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, measured delays, token usage, optional estimated cost, tool success counts, retries, and compactions. Error reports contain reviewed categories, status codes, and fixed safe messages; they do not contain the original error text. See [telemetry definitions and delivery limits](telemetry.md).
 
 Prime Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.prime/agent/`).
 
@@ -74,7 +74,7 @@ Telemetry can be disabled globally or for an individual project. Project setting
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `telemetry.enabled` | boolean | `true` | Send pseudonymous aggregate usage and performance events |
+| `telemetry.enabled` | boolean | `true` | Send pseudonymous usage, timing, and safe error reports |
 
 Disable analytics with any of:
 
@@ -92,7 +92,9 @@ DO_NOT_TRACK=1 prime-agent
 prime-agent --offline
 ```
 
-`PRIME_AGENT_TELEMETRY_ENDPOINT` overrides the ingestion endpoint for development and self-hosted deployments.
+`PRIME_AGENT_TELEMETRY_ENDPOINT` overrides the ingestion endpoint for development and self-hosted deployments. `PRIME_AGENT_TELEMETRY_ORIGIN=internal` or `test` explicitly marks those populations; other arbitrary values are not sent.
+
+Settings changes immediately discard queued reports and in-progress analytics when effective telemetry becomes disabled. `PRIME_AGENT_TELEMETRY=1` retains its explicit override of settings, while Do Not Track and offline mode always disable reporting. `/feedback` offers optional fixed-choice feedback and follows the same opt-out.
 
 ### Warnings
 

@@ -518,6 +518,95 @@ describe("SettingsManager", () => {
 	});
 
 	describe("telemetry privacy controls", () => {
+		it("notifies synchronously when telemetry is disabled and re-enabled before flushing", async () => {
+			const manager = SettingsManager.inMemory();
+			const observed: boolean[] = [];
+			manager.subscribeTelemetryEnabled(() => observed.push(manager.getTelemetryEnabled()));
+
+			manager.setTelemetryEnabled(false);
+			expect(observed).toEqual([false]);
+			manager.setTelemetryEnabled(true);
+			expect(observed).toEqual([false, true]);
+			await manager.flush();
+		});
+
+		it("ignores unchanged values and unrelated settings and allows unsubscribe", async () => {
+			const manager = SettingsManager.inMemory();
+			const observed: boolean[] = [];
+			const unsubscribe = manager.subscribeTelemetryEnabled(() => observed.push(manager.getTelemetryEnabled()));
+
+			manager.setTelemetryEnabled(true);
+			manager.setTelemetryNoticeShown(true);
+			manager.setTheme("dark");
+			manager.setProjectPackages([]);
+			manager.applyOverrides({ telemetry: { enabled: true } });
+			await manager.reload();
+			expect(observed).toEqual([]);
+
+			manager.setTelemetryEnabled(false);
+			unsubscribe();
+			manager.setTelemetryEnabled(true);
+			expect(observed).toEqual([false]);
+			await manager.flush();
+		});
+
+		it("notifies for effective runtime overrides while preserving a global opt-out", async () => {
+			const manager = SettingsManager.inMemory();
+			const observed: boolean[] = [];
+			manager.subscribeTelemetryEnabled(() => observed.push(manager.getTelemetryEnabled()));
+
+			manager.applyOverrides({ telemetry: { enabled: false } });
+			manager.setTelemetryEnabled(false);
+			manager.applyOverrides({ telemetry: { enabled: true } });
+			expect(observed).toEqual([false]);
+			manager.setTelemetryEnabled(true);
+			expect(observed).toEqual([false, true]);
+			await manager.flush();
+		});
+
+		it.each(["global", "project"] as const)("notifies for %s opt-out changes loaded from storage", async (scope) => {
+			const settingsPath =
+				scope === "global" ? join(agentDir, "settings.json") : join(projectDir, ".prime", "agent", "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const observed: boolean[] = [];
+			manager.subscribeTelemetryEnabled(() => observed.push(manager.getTelemetryEnabled()));
+
+			writeFileSync(settingsPath, JSON.stringify({ telemetry: { enabled: false } }));
+			await manager.reload();
+			expect(observed).toEqual([false]);
+			await manager.reload();
+			expect(observed).toEqual([false]);
+			writeFileSync(settingsPath, JSON.stringify({ telemetry: { enabled: true } }));
+			await manager.reload();
+			expect(observed).toEqual([false, true]);
+		});
+
+		it("continues notifying and persisting when one listener fails", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.subscribeTelemetryEnabled(() => {
+				throw new Error("observer failed");
+			});
+			const observed: boolean[] = [];
+			manager.subscribeTelemetryEnabled(() => observed.push(manager.getTelemetryEnabled()));
+
+			expect(() => manager.setTelemetryEnabled(false)).not.toThrow();
+			expect(observed).toEqual([false]);
+			await manager.flush();
+			expect(SettingsManager.create(projectDir, agentDir).getTelemetryEnabled()).toBe(false);
+		});
+
+		it("notifies of an in-memory opt-out even when invalid storage prevents saving", async () => {
+			writeFileSync(join(agentDir, "settings.json"), "{ invalid json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const observed: boolean[] = [];
+			manager.subscribeTelemetryEnabled(() => observed.push(manager.getTelemetryEnabled()));
+
+			manager.setTelemetryEnabled(false);
+			expect(observed).toEqual([false]);
+			await manager.reload();
+			expect(observed).toEqual([false]);
+		});
+
 		it("does not let project settings override a global opt-out or disclosure state", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),

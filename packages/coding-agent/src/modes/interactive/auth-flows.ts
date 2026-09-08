@@ -18,6 +18,7 @@ import {
 	resolvePrimeAgentTracesBaseUrl,
 } from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
+import type { TelemetryAcquisitionMethod, TelemetryValidationScope } from "../../core/telemetry-journeys.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
 import { showFullPaneOverlay } from "./components/centered-overlay.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
@@ -103,6 +104,22 @@ export interface ProviderAuthFlowsHost {
 	onAuthChanged?(): void | Promise<void>;
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
+	onAuthenticationStarted?(
+		providerId: string,
+		method: TelemetryAcquisitionMethod,
+	): (result: AuthenticationResult) => void;
+	onAuthObservation?(observation: AuthFlowObservation): void;
+	onAuthError?(error: unknown, providerId: string, operation: "login" | "logout" | "discover"): void;
+}
+
+export interface AuthFlowObservation {
+	providerId: string;
+	stage: "credential_discovery" | "credential_validation";
+	outcome: "configured" | "completed" | "failed" | "unavailable";
+	method: TelemetryAcquisitionMethod;
+	validationScope: TelemetryValidationScope;
+	durationMs?: number;
+	systemWork?: boolean;
 }
 
 export interface ProviderLoginOptions {
@@ -113,6 +130,48 @@ export interface ProviderLoginOptions {
 /** Shared auth dialogs: host-specific refresh and billing effects remain outside the flow. */
 export class ProviderAuthFlows {
 	constructor(private readonly host: ProviderAuthFlowsHost) {}
+
+	private observeAuthentication(
+		providerId: string,
+		method: TelemetryAcquisitionMethod,
+		run: () => Promise<AuthenticationResult>,
+	): Promise<AuthenticationResult> {
+		let finish: ((result: AuthenticationResult) => void) | undefined;
+		try {
+			finish = this.host.onAuthenticationStarted?.(providerId, method);
+		} catch {
+			// Optional telemetry must not interfere with authentication.
+		}
+		const complete = (result: AuthenticationResult) => {
+			try {
+				finish?.(result);
+			} catch {
+				// Optional telemetry must not interfere with authentication.
+			}
+			return result;
+		};
+		return run().then(complete, (error: unknown) => {
+			this.reportAuthError(error, providerId, "login");
+			complete({ status: "failed" });
+			throw error;
+		});
+	}
+
+	private observeAuth(observation: AuthFlowObservation): void {
+		try {
+			this.host.onAuthObservation?.(observation);
+		} catch {
+			// Optional telemetry must not interfere with authentication.
+		}
+	}
+
+	private reportAuthError(error: unknown, providerId: string, operation: "login" | "logout" | "discover"): void {
+		try {
+			this.host.onAuthError?.(error, providerId, operation);
+		} catch {
+			// Optional telemetry must not interfere with authentication.
+		}
+	}
 
 	/**
 	 * Run the OAuth login flow for an MCP integration server.
@@ -125,8 +184,11 @@ export class ProviderAuthFlows {
 		const providerId = `mcp:${server}`;
 		const provider = this.host.modelRegistry.authStorage.getOAuthProviders().find((p) => p.id === providerId);
 		if (!provider) {
-			this.host.showError(`Unknown MCP integration: ${server}`);
-			return Promise.resolve({ status: "failed" });
+			return this.observeAuthentication(providerId, "oauth", async () => {
+				this.reportAuthError(new Error("Unknown MCP integration"), providerId, "login");
+				this.host.showError(`Unknown MCP integration: ${server}`);
+				return { status: "failed" };
+			});
 		}
 		return this.showLoginDialog(providerId, label ?? provider.name, "service");
 	}
@@ -184,9 +246,19 @@ export class ProviderAuthFlows {
 		return this.showApiKeyLoginDialog(providerOption.id, providerOption.name, kind);
 	}
 
-	runLogout(): Promise<string | null> {
+	runLogout(
+		onOutcome?: (outcome: "completed" | "failed" | "canceled" | "unavailable") => void,
+	): Promise<string | null> {
+		const finish = (outcome: "completed" | "failed" | "canceled" | "unavailable") => {
+			try {
+				onOutcome?.(outcome);
+			} catch {
+				// Optional telemetry must not interfere with authentication.
+			}
+		};
 		const providerOptions = this.getLogoutProviderOptions();
 		if (providerOptions.length === 0) {
+			finish("unavailable");
 			this.host.showStatus(
 				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
 			);
@@ -215,14 +287,18 @@ export class ProviderAuthFlows {
 								? `Logged out of ${providerOption.name}`
 								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
 						this.host.showStatus(message);
+						finish("completed");
 						resolve(providerOption.id);
 					} catch (error: unknown) {
+						finish("failed");
+						this.reportAuthError(error, providerOption.id, "logout");
 						this.host.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
 						resolve(null);
 					}
 				},
 				() => {
 					close();
+					finish("canceled");
 					resolve(null);
 				},
 				undefined,
@@ -353,6 +429,12 @@ export class ProviderAuthFlows {
 	}
 
 	private async showBedrockSetupDialog(providerId: string, providerName: string): Promise<AuthenticationResult> {
+		return this.observeAuthentication(providerId, "external_credentials", () =>
+			this.showBedrockSetupDialogFlow(providerId, providerName),
+		);
+	}
+
+	private async showBedrockSetupDialogFlow(providerId: string, providerName: string): Promise<AuthenticationResult> {
 		const dialog = new LoginDialogComponent(this.host.ui, providerId, () => {}, providerName, "Amazon Bedrock setup");
 		const handle = showFullPaneOverlay(this.host.ui, dialog, 88);
 		const closeDialog = () => {
@@ -369,14 +451,36 @@ export class ProviderAuthFlows {
 			]);
 			closeDialog();
 			if (!(await this.hasAvailableProviderModels(providerId))) {
+				this.observeAuth({
+					providerId,
+					stage: "credential_discovery",
+					outcome: "unavailable",
+					method: "external_credentials",
+					validationScope: "configuration",
+				});
 				this.host.showStatus(`${providerName} credentials were not detected. Configure them, then reopen /model.`);
 				return { status: "cancelled" };
 			}
+			this.observeAuth({
+				providerId,
+				stage: "credential_discovery",
+				outcome: "configured",
+				method: "external_credentials",
+				validationScope: "configuration",
+			});
+			this.observeAuth({
+				providerId,
+				stage: "credential_validation",
+				outcome: "unavailable",
+				method: "external_credentials",
+				validationScope: "unchecked",
+			});
 			return await this.completeExternalProviderSetup(providerId, providerName);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (errorMsg !== "Login cancelled") {
+				this.reportAuthError(error, providerId, "login");
 				this.host.showError(`Failed to set up ${providerName}: ${errorMsg}`);
 				return { status: "failed" };
 			}
@@ -469,7 +573,8 @@ export class ProviderAuthFlows {
 				: selectedTeam === null
 					? "Using personal account."
 					: this.getPrimeInferenceDefaultTeamStatus();
-		} catch {
+		} catch (error) {
+			if (!dialog.signal.aborted) this.reportAuthError(error, PRIME_INFERENCE_PROVIDER_ID, "discover");
 			this.host.modelRegistry.authStorage.reload();
 			return this.getPrimeInferenceDefaultTeamStatus();
 		}
@@ -479,8 +584,16 @@ export class ProviderAuthFlows {
 		apiKey: string,
 		dialog: LoginDialogComponent,
 		closeDialog: () => void,
+		method: TelemetryAcquisitionMethod,
 	): Promise<AuthenticationResult> {
 		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey);
+		this.observeAuth({
+			providerId: PRIME_INFERENCE_PROVIDER_ID,
+			stage: "credential_discovery",
+			outcome: "configured",
+			method,
+			validationScope: "configuration",
+		});
 		const teamStatus = await this.selectPrimeInferenceTeam(apiKey, dialog);
 
 		closeDialog();
@@ -494,10 +607,21 @@ export class ProviderAuthFlows {
 		);
 	}
 
-	private async completePrimeAgentTracesLogin(apiKey: string, closeDialog: () => void): Promise<AuthenticationResult> {
+	private async completePrimeAgentTracesLogin(
+		apiKey: string,
+		closeDialog: () => void,
+		method: TelemetryAcquisitionMethod,
+	): Promise<AuthenticationResult> {
 		this.host.modelRegistry.authStorage.set(PRIME_AGENT_TRACES_PROVIDER_ID, {
 			type: "api_key",
 			key: apiKey,
+		});
+		this.observeAuth({
+			providerId: PRIME_AGENT_TRACES_PROVIDER_ID,
+			stage: "credential_discovery",
+			outcome: "configured",
+			method,
+			validationScope: "configuration",
 		});
 
 		closeDialog();
@@ -509,6 +633,13 @@ export class ProviderAuthFlows {
 	}
 
 	async runPrimeInferenceLogin(): Promise<AuthenticationResult> {
+		return this.observeAuthentication(PRIME_INFERENCE_PROVIDER_ID, "unknown", () =>
+			this.runPrimeInferenceLoginFlow(),
+		);
+	}
+
+	private async runPrimeInferenceLoginFlow(): Promise<AuthenticationResult> {
+		let validationMethod: TelemetryAcquisitionMethod = "existing_configuration";
 		const dialog = new LoginDialogComponent(
 			this.host.ui,
 			PRIME_INFERENCE_PROVIDER_ID,
@@ -554,11 +685,24 @@ export class ProviderAuthFlows {
 			const browserLogin = loginPrimeInference(
 				{
 					onAuth: (info) => {
+						validationMethod = "prime_browser";
 						dialog.showAuth(info.url, info.instructions);
 						armManualInput("Complete the sign-in in your browser, or paste an API key below:");
 					},
 					onProgress: (message) => {
 						dialog.showProgress(message);
+					},
+					onValidation: (result) => {
+						if (!browserAbort.signal.aborted)
+							this.observeAuth({
+								providerId: PRIME_INFERENCE_PROVIDER_ID,
+								stage: "credential_validation",
+								outcome: result.outcome,
+								method: validationMethod,
+								validationScope: result.scope,
+								durationMs: result.durationMs,
+								systemWork: true,
+							});
 					},
 					signal: browserAbort.signal,
 				},
@@ -573,6 +717,7 @@ export class ProviderAuthFlows {
 					throw error;
 				}
 				const errorMsg = error instanceof Error ? error.message : String(error);
+				this.reportAuthError(error, PRIME_INFERENCE_PROVIDER_ID, "login");
 				dialog.showProgress(`Browser sign-in unavailable (${errorMsg}).`);
 				if (!manualInputArmed) {
 					armManualInput("Paste a Prime API key below:");
@@ -600,22 +745,43 @@ export class ProviderAuthFlows {
 				browserAbort.abort();
 				dialog.showProgress("Checking Prime Inference access...");
 				const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
+				const validationStartedAt = performance.now();
 				const access = await checkPrimeInferenceAccess(result.apiKey, config.baseUrl, { signal: dialog.signal });
 				if (dialog.signal.aborted) {
 					closeDialog();
 					return { status: "cancelled" };
 				}
+				this.observeAuth({
+					providerId: PRIME_INFERENCE_PROVIDER_ID,
+					stage: "credential_validation",
+					outcome: access.ok ? "completed" : "failed",
+					method: "prime_key_entry",
+					validationScope: "identity_scope",
+					durationMs: performance.now() - validationStartedAt,
+					systemWork: true,
+				});
 				if (!access.ok) {
 					const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-					throw new Error(`Prime API key does not have Prime Inference access (${status}${access.message})`);
+					throw new Error(`Prime API key does not have Prime Inference access (${status}${access.message})`, {
+						cause: access,
+					});
 				}
 			}
-
-			return await this.completePrimeInferenceLogin(result.apiKey, dialog, closeDialog);
+			return await this.completePrimeInferenceLogin(
+				result.apiKey,
+				dialog,
+				closeDialog,
+				result.source === "manual"
+					? "prime_key_entry"
+					: result.source === "browser"
+						? "prime_browser"
+						: "existing_configuration",
+			);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (!dialog.signal.aborted && errorMsg !== "Login cancelled") {
+				this.reportAuthError(error, PRIME_INFERENCE_PROVIDER_ID, "login");
 				this.host.showError(`Failed to login to ${PRIME_INFERENCE_PROVIDER_NAME}: ${errorMsg}`);
 				return { status: "failed" };
 			}
@@ -626,6 +792,13 @@ export class ProviderAuthFlows {
 	}
 
 	async runPrimeAgentTracesLogin(): Promise<AuthenticationResult> {
+		return this.observeAuthentication(PRIME_AGENT_TRACES_PROVIDER_ID, "unknown", () =>
+			this.runPrimeAgentTracesLoginFlow(),
+		);
+	}
+
+	private async runPrimeAgentTracesLoginFlow(): Promise<AuthenticationResult> {
+		let validationMethod: TelemetryAcquisitionMethod = "existing_configuration";
 		const dialog = new LoginDialogComponent(
 			this.host.ui,
 			PRIME_AGENT_TRACES_PROVIDER_ID,
@@ -668,11 +841,24 @@ export class ProviderAuthFlows {
 		try {
 			const browserLogin = loginPrimeAgentTraces({
 				onAuth: (info) => {
+					validationMethod = "prime_browser";
 					dialog.showAuth(info.url, info.instructions);
 					armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
 				},
 				onProgress: (message) => {
 					dialog.showProgress(message);
+				},
+				onValidation: (result) => {
+					if (!browserAbort.signal.aborted)
+						this.observeAuth({
+							providerId: PRIME_AGENT_TRACES_PROVIDER_ID,
+							stage: "credential_validation",
+							outcome: result.outcome,
+							method: validationMethod,
+							validationScope: result.scope,
+							durationMs: result.durationMs,
+							systemWork: true,
+						});
 				},
 				signal: browserAbort.signal,
 			});
@@ -681,6 +867,7 @@ export class ProviderAuthFlows {
 					throw error;
 				}
 				const errorMsg = error instanceof Error ? error.message : String(error);
+				this.reportAuthError(error, PRIME_AGENT_TRACES_PROVIDER_ID, "login");
 				dialog.showProgress(`Browser sign-in unavailable (${errorMsg}).`);
 				if (!manualInputArmed) {
 					armManualInput("Paste a Prime API key below:");
@@ -702,6 +889,7 @@ export class ProviderAuthFlows {
 			if (result.source === "manual") {
 				browserAbort.abort();
 				dialog.showProgress("Checking Prime Agent trace access...");
+				const validationStartedAt = performance.now();
 				const access = await checkPrimeAgentTracesAccess(result.apiKey, resolvePrimeAgentTracesBaseUrl(), {
 					signal: dialog.signal,
 				});
@@ -709,17 +897,36 @@ export class ProviderAuthFlows {
 					closeDialog();
 					return { status: "cancelled" };
 				}
+				this.observeAuth({
+					providerId: PRIME_AGENT_TRACES_PROVIDER_ID,
+					stage: "credential_validation",
+					outcome: access.ok ? "completed" : "failed",
+					method: "prime_key_entry",
+					validationScope: "identity_scope",
+					durationMs: performance.now() - validationStartedAt,
+					systemWork: true,
+				});
 				if (!access.ok) {
 					const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-					throw new Error(`Prime API key does not have Prime Agent trace access (${status}${access.message})`);
+					throw new Error(`Prime API key does not have Prime Agent trace access (${status}${access.message})`, {
+						cause: access,
+					});
 				}
 			}
-
-			return await this.completePrimeAgentTracesLogin(result.apiKey, closeDialog);
+			return await this.completePrimeAgentTracesLogin(
+				result.apiKey,
+				closeDialog,
+				result.source === "manual"
+					? "prime_key_entry"
+					: result.source === "browser"
+						? "prime_browser"
+						: "existing_configuration",
+			);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (!dialog.signal.aborted && errorMsg !== "Login cancelled") {
+				this.reportAuthError(error, PRIME_AGENT_TRACES_PROVIDER_ID, "login");
 				this.host.showError(`Failed to login to ${PRIME_AGENT_TRACES_PROVIDER_NAME}: ${errorMsg}`);
 				return { status: "failed" };
 			}
@@ -733,6 +940,16 @@ export class ProviderAuthFlows {
 		providerId: string,
 		providerName: string,
 		kind: "provider" | "service" = "provider",
+	): Promise<AuthenticationResult> {
+		return this.observeAuthentication(providerId, "api_key_entry", () =>
+			this.showApiKeyLoginDialogFlow(providerId, providerName, kind),
+		);
+	}
+
+	private async showApiKeyLoginDialogFlow(
+		providerId: string,
+		providerName: string,
+		kind: "provider" | "service",
 	): Promise<AuthenticationResult> {
 		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
 
@@ -750,6 +967,20 @@ export class ProviderAuthFlows {
 			}
 
 			this.host.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+			this.observeAuth({
+				providerId,
+				stage: "credential_discovery",
+				outcome: "configured",
+				method: "api_key_entry",
+				validationScope: "configuration",
+			});
+			this.observeAuth({
+				providerId,
+				stage: "credential_validation",
+				outcome: "unavailable",
+				method: "api_key_entry",
+				validationScope: "unchecked",
+			});
 
 			closeDialog();
 			return await this.completeProviderAuthentication(providerId, providerName, "api_key", undefined, kind);
@@ -757,6 +988,7 @@ export class ProviderAuthFlows {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (errorMsg !== "Login cancelled") {
+				this.reportAuthError(error, providerId, "login");
 				this.host.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
 				return { status: "failed" };
 			}
@@ -796,6 +1028,16 @@ export class ProviderAuthFlows {
 		providerId: string,
 		providerName: string,
 		kind: "provider" | "service" = "provider",
+	): Promise<AuthenticationResult> {
+		return this.observeAuthentication(providerId, "oauth", () =>
+			this.showLoginDialogFlow(providerId, providerName, kind),
+		);
+	}
+
+	private async showLoginDialogFlow(
+		providerId: string,
+		providerName: string,
+		kind: "provider" | "service",
 	): Promise<AuthenticationResult> {
 		const providerInfo = this.host.modelRegistry.authStorage
 			.getOAuthProviders()
@@ -862,12 +1104,27 @@ export class ProviderAuthFlows {
 				signal: dialog.signal,
 			});
 
+			this.observeAuth({
+				providerId,
+				stage: "credential_discovery",
+				outcome: "configured",
+				method: "oauth",
+				validationScope: "configuration",
+			});
+			this.observeAuth({
+				providerId,
+				stage: "credential_validation",
+				outcome: "unavailable",
+				method: "oauth",
+				validationScope: "unchecked",
+			});
 			closeDialog();
 			return await this.completeProviderAuthentication(providerId, providerName, "oauth", undefined, kind);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (errorMsg !== "Login cancelled") {
+				this.reportAuthError(error, providerId, "login");
 				this.host.showError(`Failed to login to ${providerName}: ${errorMsg}`);
 				return { status: "failed" };
 			}

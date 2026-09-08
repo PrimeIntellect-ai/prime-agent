@@ -69,6 +69,11 @@ export function streamFailureMessage(info: StreamFailureInfo, detail?: string): 
 
 export function classifyStreamFailure(providerErrorType?: string, status?: number): StreamFailureKind {
 	const type = providerErrorType?.toLowerCase() ?? "";
+	if (status === 529) return "overloaded";
+	if (status !== undefined && status >= 500) return "server_error";
+	if (status === 402 || /^(insufficient_funds|insufficient_balance|insufficient_quota|quota_exceeded)$/.test(type)) {
+		return "invalid_request";
+	}
 	if (type === "refusal") return "refusal";
 	if (/sensitive|safety|prohibited_content|blocklist|spii|recitation|content.?filter|guardrail|flagged/.test(type)) {
 		return "safety";
@@ -79,6 +84,8 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 		return "rate_limit";
 	}
 	// Permission/403 shapes are entitlement or policy denials, not bad credentials: never auth-stale.
+	if (status === 403) return "permission";
+	if (/^(invalid_api_key|invalid_token|invalid_grant|token_expired|expired_token)$/.test(type)) return "auth";
 	if (/authentication|unauthorized/.test(type) || status === 401) return "auth";
 	if (/permission|forbidden|access.?denied/.test(type) || status === 403) return "permission";
 	if (type.includes("invalid_request") || type.includes("not_found_error") || status === 400 || status === 404) {
@@ -148,7 +155,7 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 	if (body && typeof body === "object" && body.error && typeof body.error === "object") {
 		body = body.error as { type?: unknown; code?: unknown; message?: unknown };
 	}
-	const bodyType = body && typeof body === "object" ? (body.type ?? body.code) : undefined;
+	const bodyType = body && typeof body === "object" ? (body.code ?? body.type) : undefined;
 	const bodyMessage = body && typeof body === "object" ? body.message : undefined;
 	const providerErrorType =
 		typeof bodyType === "string"

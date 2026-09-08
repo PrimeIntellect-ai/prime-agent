@@ -5,10 +5,13 @@ import { createRequire } from "node:module";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
-import { getPackageDir, isBunBinary } from "../../config.js";
+import { getAgentDir, getPackageDir, isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import { SettingsManager } from "../../core/settings-manager.js";
+import { flushTelemetry } from "../../core/telemetry.js";
+import { captureTelemetryError } from "../../core/telemetry-errors.js";
 import { spawnHidden } from "../../utils/child-process.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
@@ -132,14 +135,35 @@ export function isDaemonCatalogProcess(environment: NodeJS.ProcessEnv = process.
 }
 
 export async function runDaemonCatalogProcess(): Promise<never> {
-	process.on("disconnect", () => process.exit(0));
-	process.on("message", (value: unknown) => {
-		if (!isCatalogRequest(value)) {
-			return;
+	try {
+		process.on("disconnect", () => process.exit(0));
+		process.on("message", (value: unknown) => {
+			if (!isCatalogRequest(value)) {
+				return;
+			}
+			void handleCatalogRequest(value);
+		});
+		sendCatalogMessage({ type: "ready" });
+	} catch (error) {
+		try {
+			const agentDir = getAgentDir();
+			const settingsManager = SettingsManager.create(process.cwd(), agentDir);
+			if (settingsManager.drainErrors().length === 0) {
+				captureTelemetryError({
+					agentDir,
+					settingsManager,
+					error,
+					component: "daemon",
+					operation: "startup",
+					stage: "startup",
+				});
+				await flushTelemetry({ agentDir, settingsManager });
+			}
+		} catch {
+			// Startup reporting must preserve the original failure.
 		}
-		void handleCatalogRequest(value);
-	});
-	sendCatalogMessage({ type: "ready" });
+		throw error;
+	}
 	return new Promise(() => {});
 }
 

@@ -10,6 +10,7 @@ import {
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
+import { captureTelemetryError, reportTelemetryError, type TelemetryErrorContext } from "../telemetry-errors.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
 
 export interface McpManagerOptions {
@@ -18,6 +19,7 @@ export interface McpManagerOptions {
 	getUserServers?: () => Record<string, McpServerConfig> | undefined;
 	/** Start an interactive host-side login for a server. Provided by the UI mode. */
 	beginLogin?: (server: string) => Promise<void>;
+	telemetryErrorContext?: TelemetryErrorContext;
 }
 
 /** A resolved integration: a catalog/user entry plus its provider id. */
@@ -36,6 +38,7 @@ export class McpManager {
 	private readonly authStorage: AuthStorage;
 	private readonly getUserServers: () => Record<string, McpServerConfig> | undefined;
 	private readonly beginLogin?: (server: string) => Promise<void>;
+	private readonly telemetryErrorContext?: TelemetryErrorContext;
 	private integrations = new Map<string, ResolvedIntegration>();
 	private acpServers = new Map<string, AcpMcpServerConfig>();
 	private acpOwnerId?: string;
@@ -46,6 +49,7 @@ export class McpManager {
 		this.authStorage = options.authStorage;
 		this.getUserServers = options.getUserServers ?? (() => undefined);
 		this.beginLogin = options.beginLogin;
+		this.telemetryErrorContext = options.telemetryErrorContext;
 		this.resolveIntegrations();
 		this.registerProviders();
 	}
@@ -215,7 +219,26 @@ export class McpManager {
 				return {};
 			};
 		}
-		return handlers;
+		return Object.fromEntries(
+			Object.entries(handlers).map(([name, handler]) => [
+				name,
+				async (payload: Record<string, unknown>) => {
+					try {
+						return await handler(payload);
+					} catch (error) {
+						const details = {
+							error,
+							component: "mcp",
+							operation: name === "mcp.refresh" ? "refresh" : name === "mcp.begin_login" ? "login" : "load",
+							stage: "tool_execution",
+						} as const;
+						if (this.telemetryErrorContext) captureTelemetryError({ ...this.telemetryErrorContext, ...details });
+						else reportTelemetryError(details);
+						throw error;
+					}
+				},
+			]),
+		);
 	}
 
 	/** Session-scoped servers supplied by the active ACP client. */

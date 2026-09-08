@@ -7,7 +7,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
-import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
+import {
+	type AuthFlowObservation,
+	ProviderAuthFlows,
+	type ProviderAuthFlowsHost,
+} from "../src/modes/interactive/auth-flows.js";
+import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
@@ -140,12 +145,34 @@ describe("ProviderAuthFlows", () => {
 			}),
 		);
 		const { host, statusMessages, errorMessages } = createHost(authStorage);
+		const observations: AuthFlowObservation[] = [];
+		host.onAuthObservation = (observation) => observations.push(observation);
+		const finish = vi.fn();
+		host.onAuthenticationStarted = vi.fn(() => finish);
 
 		const result = await new ProviderAuthFlows(host).runPrimeInferenceLogin();
 
 		expect(errorMessages).toEqual([]);
 		expect(result.status).toBe("success");
 		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(finish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ status: "success" }));
+		expect(observations).toContainEqual(
+			expect.objectContaining({
+				stage: "credential_validation",
+				outcome: "completed",
+				method: "existing_configuration",
+				validationScope: "identity_scope",
+				durationMs: expect.any(Number),
+				systemWork: true,
+			}),
+		);
+		expect(
+			observations.some(
+				(observation) =>
+					observation.validationScope === "inference" || observation.validationScope === "selected_context",
+			),
+		).toBe(false);
+		expect(JSON.stringify(observations)).not.toContain("prime-cli-key");
 		expect(statusMessages.join("\n")).toContain("Using team from PRIME_TEAM_ID.");
 
 		const config = JSON.parse(readFileSync(primeConfigPath, "utf-8")) as Record<string, unknown>;
@@ -219,5 +246,95 @@ describe("ProviderAuthFlows", () => {
 		expect(output).not.toContain("Anthropic");
 		overlays[0]?.handleInput?.("\x1b");
 		await expect(loginResult).resolves.toEqual({ status: "cancelled" });
+	});
+
+	it("reports an API key save as configured without claiming a provider check", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const observations: AuthFlowObservation[] = [];
+		host.onAuthObservation = (observation) => observations.push(observation);
+		const finish = vi.fn();
+		host.onAuthenticationStarted = () => finish;
+		const fetchMock = vi.spyOn(globalThis, "fetch");
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("private-api-key");
+
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "openai",
+			name: "OpenAI",
+			authType: "api_key",
+		});
+
+		expect(result.status).toBe("success");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(finish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ status: "success" }));
+		expect(observations).toEqual([
+			{
+				providerId: "openai",
+				stage: "credential_discovery",
+				outcome: "configured",
+				method: "api_key_entry",
+				validationScope: "configuration",
+			},
+			{
+				providerId: "openai",
+				stage: "credential_validation",
+				outcome: "unavailable",
+				method: "api_key_entry",
+				validationScope: "unchecked",
+			},
+		]);
+		expect(JSON.stringify(observations)).not.toContain("private-api-key");
+	});
+
+	it("reports cancellation without manufacturing a failed authentication check", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const finish = vi.fn();
+		host.onAuthenticationStarted = () => finish;
+		host.onAuthObservation = vi.fn();
+		host.onAuthError = vi.fn();
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockRejectedValue(new Error("Login cancelled"));
+
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
+		).resolves.toEqual({ status: "cancelled" });
+		expect(finish).toHaveBeenCalledExactlyOnceWith({ status: "cancelled" });
+		expect(host.onAuthObservation).not.toHaveBeenCalled();
+		expect(host.onAuthError).not.toHaveBeenCalled();
+	});
+
+	it("reports failed logout separately from cancel and unavailable credentials", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		authStorage.set("openai", { type: "api_key", key: "private-api-key" });
+		const { host, overlays } = createHost(authStorage);
+		const failure = new Error("Permission denied");
+		vi.spyOn(authStorage, "logout").mockImplementation(() => {
+			throw failure;
+		});
+		host.onAuthError = vi.fn();
+		const finish = vi.fn();
+
+		const result = new ProviderAuthFlows(host).runLogout(finish);
+		overlays[0]?.handleInput?.("\r");
+
+		await expect(result).resolves.toBeNull();
+		expect(finish).toHaveBeenCalledExactlyOnceWith("failed");
+		expect(host.onAuthError).toHaveBeenCalledExactlyOnceWith(failure, "openai", "logout");
+	});
+
+	it("does not let optional observation callbacks interrupt a login", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		host.onAuthenticationStarted = () => {
+			throw new Error("observer failed");
+		};
+		host.onAuthObservation = () => {
+			throw new Error("observer failed");
+		};
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("private-api-key");
+
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
+		).resolves.toMatchObject({ status: "success" });
 	});
 });

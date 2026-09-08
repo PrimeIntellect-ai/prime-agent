@@ -329,6 +329,7 @@ export class SettingsManager {
 	private projectSettings: Settings;
 	private settings: Settings;
 	private runtimeOverrides: Settings = {};
+	private telemetryEnabledListeners = new Set<() => void>();
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
@@ -497,6 +498,7 @@ export class SettingsManager {
 
 	async reload(): Promise<void> {
 		await this.writeQueue;
+		const telemetryEnabled = this.getTelemetryEnabled();
 		const globalLoad = SettingsManager.tryLoadFromStorage(this.storage, "global");
 		if (!globalLoad.error) {
 			this.globalSettings = globalLoad.settings;
@@ -521,12 +523,15 @@ export class SettingsManager {
 		}
 
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.notifyTelemetryEnabledChanged(telemetryEnabled);
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
+		const telemetryEnabled = this.getTelemetryEnabled();
 		this.runtimeOverrides = deepMergeSettings(this.runtimeOverrides, overrides);
 		this.settings = deepMergeSettings(this.settings, overrides);
+		this.notifyTelemetryEnabledChanged(telemetryEnabled);
 	}
 
 	/** Mark a global field as modified during this session */
@@ -640,8 +645,10 @@ export class SettingsManager {
 	}
 
 	private saveProjectSettings(settings: Settings): void {
+		const telemetryEnabled = this.getTelemetryEnabled();
 		this.projectSettings = structuredClone(settings);
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.notifyTelemetryEnabledChanged(telemetryEnabled);
 
 		if (this.projectSettingsLoadError) {
 			this.recordError(
@@ -858,6 +865,22 @@ export class SettingsManager {
 		return globalEnabled && projectEnabled && runtimeEnabled;
 	}
 
+	subscribeTelemetryEnabled(listener: () => void): () => void {
+		this.telemetryEnabledListeners.add(listener);
+		return () => this.telemetryEnabledListeners.delete(listener);
+	}
+
+	private notifyTelemetryEnabledChanged(previous: boolean): void {
+		if (this.getTelemetryEnabled() === previous) return;
+		for (const listener of [...this.telemetryEnabledListeners]) {
+			try {
+				listener();
+			} catch {
+				// A failing observer must not prevent other clients from applying an opt-out.
+			}
+		}
+	}
+
 	private getOrCreateGlobalTelemetrySettings(): TelemetrySettings {
 		const telemetry = this.globalSettings.telemetry;
 		if (typeof telemetry !== "object" || telemetry === null || Array.isArray(telemetry)) {
@@ -867,9 +890,11 @@ export class SettingsManager {
 	}
 
 	setTelemetryEnabled(enabled: boolean): void {
+		const telemetryEnabled = this.getTelemetryEnabled();
 		this.getOrCreateGlobalTelemetrySettings().enabled = enabled;
 		this.markModified("telemetry", "enabled");
 		this.save();
+		this.notifyTelemetryEnabledChanged(telemetryEnabled);
 	}
 
 	getTelemetryNoticeShown(): boolean {

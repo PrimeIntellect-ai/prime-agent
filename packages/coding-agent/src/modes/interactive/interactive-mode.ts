@@ -132,8 +132,16 @@ import {
 import {
 	captureAgentCommandUsed,
 	captureOnboardingCompleted,
+	isTelemetryEnabled,
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
+import { captureTelemetryError } from "../../core/telemetry-errors.js";
+import {
+	type TelemetryFeatureAttempt,
+	TelemetryJourneys,
+	type TelemetryOnboardingAttempt,
+	type TelemetryTaskFeedback,
+} from "../../core/telemetry-journeys.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
@@ -843,6 +851,9 @@ export interface InteractiveInitialPrompt {
 }
 
 export interface InteractiveModeOptions {
+	/** Monotonic origin in this process; zero includes module loading since process start. */
+	startupStartedAt?: number;
+	startupKind?: "cold" | "warm_attach" | "resumed";
 	/** Providers that were migrated to auth.json (shows warning) */
 	migratedProviders?: string[];
 	/** Warning message if session model couldn't be restored */
@@ -944,6 +955,10 @@ export class InteractiveMode {
 	private version: string;
 	private readonly startHint = getRandomStartHint();
 	private isInitialized = false;
+	private journeyTelemetry?: TelemetryJourneys;
+	private onboardingTelemetry?: TelemetryOnboardingAttempt;
+	private onboardingExitOutcome: "failed" | "canceled" = "canceled";
+	private onboardingValidationObserved = false;
 	private onInputCallback?: (text: string | undefined) => void;
 	private submittedInputBehavior: "steer" | "followUp" = "steer";
 	private latestEditorPromptStash: PromptStash | undefined;
@@ -1131,6 +1146,10 @@ export class InteractiveMode {
 			throw new Error("InteractiveMode requires uiServices when no localSessionHost is supplied");
 		}
 		this.uiServices = uiServices;
+		this.journeyTelemetry = new TelemetryJourneys({
+			agentDir: getAgentDir(),
+			settingsManager: uiServices.settingsManager,
+		});
 		this.agentConnection = options.agentConnection;
 		this.promptStashStore = options.promptStashStore;
 		this.promptStashSessionId = options.promptStashSessionId;
@@ -1419,6 +1438,7 @@ export class InteractiveMode {
 
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
+		const readyStartedAt = this.options.startupStartedAt ?? performance.now();
 
 		this.registerSignalHandlers();
 
@@ -1527,6 +1547,13 @@ export class InteractiveMode {
 		});
 
 		await this.updateAvailableProviderCount();
+		this.journeyTelemetry?.startupStage(
+			"ui_ready",
+			"completed",
+			performance.now() - readyStartedAt,
+			this.options.startupKind ?? (this.options.returnToAgentsView ? "warm_attach" : "cold"),
+			"elapsed_including_user_wait",
+		);
 	}
 
 	private updateTerminalTitle(): void {
@@ -1784,10 +1811,30 @@ export class InteractiveMode {
 
 	private async runStartupOnboarding(): Promise<boolean> {
 		if (!this.shouldRunOnboarding()) {
+			const previouslyShown = this.settingsManager.getOnboardingShown();
+			const model = this.getCurrentModel();
+			const authStatus = model ? this.modelRegistry.getProviderAuthStatus(model.provider) : undefined;
+			const attempt = this.journeyTelemetry?.beginOnboarding(
+				previouslyShown ? "previously_shown" : "existing_configuration",
+				false,
+			);
+			attempt?.stage("credential_discovery", authStatus?.configured ? "configured" : "unavailable", {
+				provider: model?.provider,
+				authSource: authStatus?.source,
+				storedCredentialType: model ? this.modelRegistry.authStorage.get(model.provider)?.type : undefined,
+				acquisitionMethod: "existing_configuration",
+				validationScope: "configuration",
+			});
+			attempt?.stage("credential_validation", "unavailable", { validationScope: "unchecked" });
+			attempt?.stage("model_access", "unavailable", { validationScope: "unchecked" });
+			attempt?.finish("skipped");
 			return false;
 		}
 
 		const startedAt = Date.now();
+		this.onboardingTelemetry = this.journeyTelemetry?.beginOnboarding("first_setup");
+		this.onboardingExitOutcome = "canceled";
+		this.onboardingValidationObserved = false;
 		const showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash();
 		let outcome: TelemetryOnboardingOutcome = "aborted";
 		try {
@@ -1803,6 +1850,32 @@ export class InteractiveMode {
 			const model = this.getCurrentModel();
 			const authStatus = model ? this.modelRegistry.getProviderAuthStatus(model.provider) : undefined;
 			const storedCredential = model ? this.modelRegistry.authStorage.get(model.provider) : undefined;
+			const observation = {
+				provider: model?.provider,
+				authSource: authStatus?.source,
+				storedCredentialType: storedCredential?.type,
+				validationScope: "configuration" as const,
+			};
+			this.onboardingTelemetry?.stage(
+				"credential_discovery",
+				authStatus?.configured ? "configured" : "unavailable",
+				observation,
+			);
+			if (!this.onboardingValidationObserved)
+				this.onboardingTelemetry?.stage("credential_validation", "unavailable", {
+					...observation,
+					validationScope: "unchecked",
+				});
+			this.onboardingTelemetry?.stage("model_access", "unavailable", {
+				...observation,
+				validationScope: "unchecked",
+			});
+			this.onboardingTelemetry?.stage("ready", outcome === "success" ? "configured" : "unavailable", observation);
+			this.onboardingTelemetry?.finish(
+				outcome === "success" ? "completed" : outcome === "error" ? "failed" : this.onboardingExitOutcome,
+				observation,
+			);
+			this.onboardingTelemetry = undefined;
 			void captureOnboardingCompleted({
 				agentDir: getAgentDir(),
 				settingsManager: this.settingsManager,
@@ -1849,6 +1922,7 @@ export class InteractiveMode {
 		splash.showProgress("Signing in to Prime Intellect...");
 		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
 		if (authResult.status !== "success") {
+			this.onboardingExitOutcome = authResult.status === "failed" ? "failed" : "canceled";
 			splash.dismiss();
 			return;
 		}
@@ -2849,6 +2923,7 @@ export class InteractiveMode {
 	}
 
 	private async rebindCurrentSession(): Promise<void> {
+		const attachStartedAt = performance.now();
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		void this.rosterBar?.dispose();
@@ -2879,6 +2954,12 @@ export class InteractiveMode {
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
 		this.syncWorkingLoader();
+		this.journeyTelemetry?.startupStage(
+			"session_ui_rebind",
+			"completed",
+			performance.now() - attachStartedAt,
+			this.connectionState?.messageCount ? "resumed" : this.options.returnToAgentsView ? "warm_attach" : "cold",
+		);
 	}
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
@@ -4175,6 +4256,15 @@ export class InteractiveMode {
 	 * Show an extension error in the UI.
 	 */
 	private showExtensionError(extensionPath: string, error: string, stack?: string): void {
+		if (this.uiServices)
+			captureTelemetryError({
+				agentDir: getAgentDir(),
+				settingsManager: this.settingsManager,
+				executionMode: "interactive",
+				error,
+				component: "extensions",
+				operation: "execute",
+			});
 		const errorMsg = `Extension "${extensionPath}" error: ${error}`;
 		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
 		this.chatContainer.addChild(errorText);
@@ -4758,6 +4848,11 @@ export class InteractiveMode {
 				if (commandName === "effort") {
 					this.editor.setText("");
 					this.handleEffortCommand(commandArgs);
+					return;
+				}
+				if (commandName === "feedback") {
+					this.editor.setText("");
+					await this.handleFeedbackCommand(commandArgs);
 					return;
 				}
 				if (commandName === "fast") {
@@ -7465,7 +7560,16 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	showError(errorMessage: string): void {
+	showError(errorMessage: string, reportTelemetry = true): void {
+		if (reportTelemetry && this.uiServices)
+			captureTelemetryError({
+				agentDir: getAgentDir(),
+				settingsManager: this.settingsManager,
+				executionMode: "interactive",
+				error: errorMessage,
+				component: "session",
+				operation: "unknown",
+			});
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
 		this.ui.requestRender();
@@ -7743,12 +7847,18 @@ export class InteractiveMode {
 
 		const model = await this.findExactModelMatch(searchTerm);
 		if (model) {
+			const feature = this.journeyTelemetry?.beginFeature("model");
 			try {
 				const authFlows = this.createAuthFlows();
 				const providerOptions = authFlows.getLoginProviderOptions();
-				if (!(await this.ensureModelProviderConfigured(model, authFlows, providerOptions))) return;
+				if (!(await this.ensureModelProviderConfigured(model, authFlows, providerOptions, feature))) {
+					feature?.finish("canceled");
+					return;
+				}
 				await this.completeModelSelection(model);
+				feature?.finish("completed");
 			} catch (error) {
+				feature?.finish("failed");
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
 			return;
@@ -7801,8 +7911,14 @@ export class InteractiveMode {
 	}
 
 	private async completeModelSelection(model: AgentConnectionModel): Promise<void> {
+		const previousProvider = this.getCurrentModel()?.provider;
 		this.showStatus(`Switching model: ${model.id}`);
 		await this.applySelectedModel(model);
+		this.onboardingTelemetry?.stage(
+			"provider_selection",
+			previousProvider && previousProvider !== model.provider ? "provider_switched" : "completed",
+			{ provider: model.provider },
+		);
 		this.showStatus(`Model: ${model.id}`);
 		void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
 		this.checkDaxnutsEasterEgg(model);
@@ -7812,6 +7928,7 @@ export class InteractiveMode {
 		model: AgentConnectionModel,
 		authFlows: ProviderAuthFlows,
 		providerOptions: ReadonlyArray<AuthSelectorProvider>,
+		feature?: TelemetryFeatureAttempt,
 	): Promise<boolean> {
 		if (this.isModelProviderConfigured(model)) return true;
 
@@ -7819,17 +7936,22 @@ export class InteractiveMode {
 			(option) => option.id === model.provider && (option.category ?? "provider") === "provider",
 		);
 		if (!provider) {
+			feature?.finish("unavailable");
 			this.showError(`Authentication for ${model.provider} must be configured externally.`);
 			return false;
 		}
 
 		const result = await authFlows.loginProvider(provider);
-		if (result.status !== "success") return false;
+		if (result.status !== "success") {
+			feature?.finish(result.status === "failed" ? "failed" : "canceled");
+			return false;
+		}
 
 		this.invalidateConnectionModels();
 		await this.getConnectionAvailableModels();
 		if (this.isModelProviderConfigured(model)) return true;
 
+		feature?.finish("unavailable");
 		this.showError(`Authentication completed, but ${model.provider} is still unavailable.`);
 		return false;
 	}
@@ -8063,6 +8185,7 @@ export class InteractiveMode {
 	private handleEffortCommand(arg: string): void {
 		const levels = this.getAvailableThinkingLevels();
 		if (levels.length === 0) {
+			this.journeyTelemetry?.beginFeature("effort").finish("unavailable");
 			this.showStatus("Current model does not support thinking");
 			return;
 		}
@@ -8072,6 +8195,7 @@ export class InteractiveMode {
 			return;
 		}
 		if (!levels.includes(requested as ThinkingLevel)) {
+			this.journeyTelemetry?.beginFeature("effort").finish("failed");
 			this.showError(`Unknown thinking level '${requested}'. Available: ${levels.join(", ")}`);
 			return;
 		}
@@ -8079,8 +8203,10 @@ export class InteractiveMode {
 	}
 
 	private showThinkingSelector(levels: ThinkingLevel[] = this.getAvailableThinkingLevels()): void {
+		const feature = this.journeyTelemetry?.beginFeature("effort");
 		const currentLevel = this.connectionState?.thinkingLevel ?? levels[0];
 		if (!currentLevel) {
+			feature?.finish("unavailable");
 			this.showStatus("Current model does not support thinking");
 			return;
 		}
@@ -8090,9 +8216,10 @@ export class InteractiveMode {
 				levels,
 				(level) => {
 					done();
-					this.applyThinkingLevel(level);
+					this.applyThinkingLevel(level, feature);
 				},
 				() => {
+					feature?.finish("canceled");
 					done();
 					this.ui.requestRender();
 				},
@@ -8101,16 +8228,19 @@ export class InteractiveMode {
 		});
 	}
 
-	private applyThinkingLevel(level: ThinkingLevel): void {
+	private applyThinkingLevel(level: ThinkingLevel, existingFeature?: TelemetryFeatureAttempt): void {
+		const feature = existingFeature ?? this.journeyTelemetry?.beginFeature("effort", level);
 		void this.agentConnection
 			.setThinkingLevel(level)
 			.then(() => {
+				feature?.finish("completed", level);
 				this.patchConnectionState({ thinkingLevel: level });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
 				this.showStatus(`Thinking level: ${level}`);
 			})
 			.catch((error) => {
+				feature?.finish("failed", level);
 				this.showError(error instanceof Error ? error.message : String(error));
 			});
 	}
@@ -8119,10 +8249,58 @@ export class InteractiveMode {
 		void this.showConfigurationMenu("models", initialSearchInput);
 	}
 
+	private async handleFeedbackCommand(argument: string): Promise<void> {
+		if (!isTelemetryEnabled(this.settingsManager)) {
+			this.showStatus("Telemetry is disabled; feedback was not sent.");
+			return;
+		}
+		const choices: Record<string, TelemetryTaskFeedback> = {
+			helpful: "helpful",
+			"partly-helpful": "partly_helpful",
+			"not-helpful": "not_helpful",
+		};
+		let feedback = Object.hasOwn(choices, argument) ? choices[argument] : undefined;
+		if (argument && !feedback) {
+			this.showStatus("Usage: /feedback [helpful|partly-helpful|not-helpful]");
+			return;
+		}
+		if (!feedback) {
+			const selected = await this.showExtensionSelector("Was the agent helpful for your task? (optional)", [
+				"Helpful",
+				"Partly helpful",
+				"Not helpful",
+			]);
+			feedback =
+				selected === "Helpful"
+					? "helpful"
+					: selected === "Partly helpful"
+						? "partly_helpful"
+						: selected === "Not helpful"
+							? "not_helpful"
+							: undefined;
+		}
+		if (!feedback) return;
+		if (!isTelemetryEnabled(this.settingsManager)) {
+			this.showStatus("Telemetry is disabled; feedback was not sent.");
+			return;
+		}
+		this.journeyTelemetry?.feedback(feedback);
+		this.showStatus("Feedback recorded. No task content is included.");
+	}
+
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
 		const modelCatalog = this.getCachedModelCandidates();
-		const authFlows = this.createAuthFlows();
+		const loginMenuFeature = initialTab !== "models" ? this.journeyTelemetry?.beginFeature("login") : undefined;
+		const authFlows = this.createAuthFlows(loginMenuFeature);
 		const providerOptions = authFlows.getLoginProviderOptions();
+		let feature = initialTab === "models" ? this.journeyTelemetry?.beginFeature("model") : undefined;
+		const reenteredOnboarding =
+			this.journeyTelemetry && !this.onboardingTelemetry && !isOnboardingModelReady(this.getOnboardingState());
+		if (reenteredOnboarding) {
+			this.onboardingTelemetry = this.journeyTelemetry?.beginOnboarding("reentered");
+			this.onboardingExitOutcome = "canceled";
+			this.onboardingValidationObserved = false;
+		}
 
 		return new Promise((resolve) => {
 			let handle: OverlayHandle | undefined;
@@ -8154,6 +8332,22 @@ export class InteractiveMode {
 				if (settled) return;
 				settled = true;
 				hide();
+				feature?.finish("canceled");
+				loginMenuFeature?.finish("canceled");
+				if (reenteredOnboarding) {
+					const ready = isOnboardingModelReady(this.getOnboardingState());
+					this.onboardingTelemetry?.stage("ready", ready ? "configured" : "unavailable", {
+						provider: this.getCurrentModel()?.provider,
+						validationScope: "configuration",
+					});
+					this.onboardingTelemetry?.stage("model_access", "unavailable", { validationScope: "unchecked" });
+					if (!this.onboardingValidationObserved)
+						this.onboardingTelemetry?.stage("credential_validation", "unavailable", {
+							validationScope: "unchecked",
+						});
+					this.onboardingTelemetry?.finish(ready ? "completed" : "canceled");
+					this.onboardingTelemetry = undefined;
+				}
 				resolve();
 			};
 			const refreshModels = (force: boolean) => {
@@ -8220,10 +8414,11 @@ export class InteractiveMode {
 				onSelectProvider: (provider) => authenticate(provider, "providers"),
 				onSelectMcpConnection: (provider) => authenticate(provider, "mcp-connections"),
 				onSelectModel: (model) => {
+					feature ??= this.journeyTelemetry?.beginFeature("model");
 					void (async () => {
 						let completed = false;
 						try {
-							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions);
+							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions, feature);
 							handle?.focus();
 							menu.refreshAuthentication();
 							menu.updateModels(
@@ -8231,11 +8426,18 @@ export class InteractiveMode {
 								this.getCachedModelCandidates(),
 								this.connectionConfiguredProviders,
 							);
-							if (!ready || settled) return;
+							if (!ready || settled) {
+								feature?.finish("canceled");
+								feature = undefined;
+								return;
+							}
 							conceal();
 							await this.completeModelSelection(model);
+							feature?.finish("completed");
 							completed = true;
 						} catch (error) {
+							feature?.finish("failed");
+							feature = undefined;
 							show();
 							this.showError(error instanceof Error ? error.message : String(error));
 						} finally {
@@ -8329,15 +8531,18 @@ export class InteractiveMode {
 	}
 
 	private async showUserMessageSelector(): Promise<void> {
+		const feature = this.journeyTelemetry?.beginFeature("fork");
 		let userMessages: Array<{ entryId: string; text: string }>;
 		try {
 			userMessages = await this.agentConnection.getUserMessagesForForking();
 		} catch (error) {
+			feature?.finish("failed");
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}
 
 		if (userMessages.length === 0) {
+			feature?.finish("unavailable");
 			this.showStatus("No messages to fork from");
 			return;
 		}
@@ -8351,6 +8556,7 @@ export class InteractiveMode {
 					try {
 						const result = await this.agentConnection.fork(entryId);
 						if (result.cancelled) {
+							feature?.finish("canceled");
 							done();
 							this.ui.requestRender();
 							return;
@@ -8360,12 +8566,15 @@ export class InteractiveMode {
 						this.editor.setText(result.selectedText ?? "");
 						done();
 						this.showStatus("Forked to new session");
+						feature?.finish("completed");
 					} catch (error: unknown) {
+						feature?.finish("failed");
 						done();
 						this.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
 				() => {
+					feature?.finish("canceled");
 					done();
 					this.ui.requestRender();
 				},
@@ -8376,15 +8585,18 @@ export class InteractiveMode {
 	}
 
 	private async handleCloneCommand(): Promise<void> {
+		const feature = this.journeyTelemetry?.beginFeature("clone");
 		try {
 			const { leafId } = await this.agentConnection.getSessionTree();
 			if (!leafId) {
+				feature?.finish("unavailable");
 				this.showStatus("Nothing to clone yet");
 				return;
 			}
 
 			const result = await this.agentConnection.fork(leafId, { position: "at" });
 			if (result.cancelled) {
+				feature?.finish("canceled");
 				this.ui.requestRender();
 				return;
 			}
@@ -8392,12 +8604,15 @@ export class InteractiveMode {
 			await this.renderCurrentSessionState();
 			this.editor.setText("");
 			this.showStatus("Cloned to new session");
+			feature?.finish("completed");
 		} catch (error: unknown) {
+			feature?.finish("failed");
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
 
 	private async showTreeSelector(initialSelectedId?: string): Promise<void> {
+		const feature = this.journeyTelemetry?.beginFeature("tree");
 		let tree: AgentConnectionSessionTreeNode[];
 		let realLeafId: string | null;
 		try {
@@ -8405,12 +8620,14 @@ export class InteractiveMode {
 			tree = sessionTree.tree;
 			realLeafId = sessionTree.leafId;
 		} catch (error) {
+			feature?.finish("failed");
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}
 		const initialFilterMode = this.settingsManager.getTreeFilterMode();
 
 		if (tree.length === 0) {
+			feature?.finish("unavailable");
 			this.showStatus("No entries in session");
 			return;
 		}
@@ -8423,6 +8640,7 @@ export class InteractiveMode {
 				async (entryId) => {
 					// Selecting the current leaf is a no-op (already there)
 					if (entryId === realLeafId) {
+						feature?.finish("completed", "status");
 						done();
 						this.showStatus("Already at this point");
 						return;
@@ -8445,6 +8663,7 @@ export class InteractiveMode {
 							]);
 
 							if (summaryChoice === undefined) {
+								feature?.finish("canceled");
 								// User pressed escape - re-show tree selector with same selection
 								void this.showTreeSelector(entryId);
 								return;
@@ -8486,18 +8705,22 @@ export class InteractiveMode {
 						});
 
 						if (result.aborted) {
+							feature?.finish("canceled");
 							// Summarization aborted - re-show tree selector with same selection
 							this.showStatus("Branch summarization cancelled");
 							void this.showTreeSelector(entryId);
 							return;
 						}
 						if (result.cancelled) {
+							feature?.finish("canceled");
 							this.showStatus("Navigation cancelled");
 							return;
 						}
 
 						await this.renderTreeNavigation(result);
+						feature?.finish("completed");
 					} catch (error) {
+						feature?.finish("failed");
 						this.showError(error instanceof Error ? error.message : String(error));
 					} finally {
 						if (summaryLoader) {
@@ -8507,6 +8730,7 @@ export class InteractiveMode {
 					}
 				},
 				() => {
+					feature?.finish("canceled");
 					done();
 					this.ui.requestRender();
 				},
@@ -8533,11 +8757,13 @@ export class InteractiveMode {
 			await this.requestAgentsView();
 			return;
 		}
+		const feature = this.journeyTelemetry?.beginFeature("resume");
 		let sessionPath: string;
 		try {
 			sessionPath = (await resolveSessionPath(selector, this.getCurrentCwd(), this.connectionState?.sessionDir))
 				.path;
 		} catch (error) {
+			feature?.finish("failed");
 			if (error instanceof SessionSelectorError) {
 				const suggestion =
 					error instanceof SessionSelectorNotFoundError && error.suggestion
@@ -8548,13 +8774,16 @@ export class InteractiveMode {
 			}
 			throw error;
 		}
-		await this.handleResumeSession(sessionPath);
+		if (feature) await this.handleResumeSession(sessionPath, undefined, feature);
+		else await this.handleResumeSession(sessionPath);
 	}
 
 	private async handleResumeSession(
 		sessionPath: string,
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
+		existingFeature?: TelemetryFeatureAttempt,
 	): Promise<{ cancelled: boolean }> {
+		const feature = existingFeature ?? this.journeyTelemetry?.beginFeature("resume");
 		this.stopWorkingLoader();
 		try {
 			const result = options?.withSession
@@ -8563,15 +8792,18 @@ export class InteractiveMode {
 					})
 				: await this.agentConnection.switchSession(sessionPath);
 			if (result.cancelled) {
+				feature?.finish("canceled");
 				return result;
 			}
 			await this.renderCurrentSessionState();
 			this.showStatus("Resumed session");
+			feature?.finish("completed");
 			return result;
 		} catch (error: unknown) {
 			if (error instanceof MissingSessionCwdError) {
 				const selectedCwd = await this.promptForMissingSessionCwd(error);
 				if (!selectedCwd) {
+					feature?.finish("canceled");
 					this.showStatus("Resume cancelled");
 					return { cancelled: true };
 				}
@@ -8582,13 +8814,18 @@ export class InteractiveMode {
 						})
 					: await this.agentConnection.switchSession(sessionPath, { cwdOverride: selectedCwd });
 				if (result.cancelled) {
+					feature?.finish("canceled");
 					return result;
 				}
 				await this.renderCurrentSessionState();
 				this.showStatus("Resumed session in current cwd");
+				feature?.finish("completed");
 				return result;
 			}
+			feature?.finish("failed");
 			return this.handleFatalRuntimeError("Failed to resume session", error);
+		} finally {
+			feature?.finish("failed");
 		}
 	}
 
@@ -8641,12 +8878,63 @@ export class InteractiveMode {
 		});
 	}
 
-	private createAuthFlows(): ProviderAuthFlows {
+	private createAuthFlows(initialLoginFeature?: TelemetryFeatureAttempt): ProviderAuthFlows {
+		let pendingLoginFeature = initialLoginFeature;
 		return new ProviderAuthFlows({
 			ui: this.ui,
 			modelRegistry: this.modelRegistry,
 			showStatus: (message) => this.showStatus(message),
-			showError: (message) => this.showError(message),
+			showError: (message) => this.showError(message, false),
+			onAuthenticationStarted: (providerId, method) => {
+				const feature = pendingLoginFeature ?? this.journeyTelemetry?.beginFeature("login");
+				pendingLoginFeature = undefined;
+				this.onboardingTelemetry?.stage(
+					"provider_selection",
+					this.getCurrentModel()?.provider && this.getCurrentModel()?.provider !== providerId
+						? "provider_switched"
+						: "completed",
+					{ provider: providerId, acquisitionMethod: method },
+				);
+				return (result) => {
+					feature?.finish(
+						result.status === "success" ? "completed" : result.status === "cancelled" ? "canceled" : "failed",
+					);
+				};
+			},
+			onAuthObservation: (observation) => {
+				if (observation.stage === "credential_validation") this.onboardingValidationObserved = true;
+				const authStatus = this.modelRegistry.getProviderAuthStatus(observation.providerId);
+				this.onboardingTelemetry?.stage(observation.stage, observation.outcome, {
+					provider: observation.providerId,
+					authSource: authStatus.source,
+					storedCredentialType: this.modelRegistry.authStorage.get(observation.providerId)?.type,
+					acquisitionMethod: observation.method,
+					validationScope: observation.validationScope,
+					durationMs: observation.durationMs,
+					systemWork: observation.systemWork,
+				});
+				if (
+					observation.stage === "credential_validation" &&
+					observation.durationMs !== undefined &&
+					observation.systemWork
+				)
+					this.journeyTelemetry?.startupStage(
+						"credential_validation",
+						observation.outcome === "failed" ? "failed" : "completed",
+						observation.durationMs,
+					);
+			},
+			onAuthError: (error, provider, operation) =>
+				captureTelemetryError({
+					agentDir: getAgentDir(),
+					settingsManager: this.settingsManager,
+					executionMode: "interactive",
+					error,
+					provider,
+					component: "authentication",
+					operation,
+					stage: "authentication",
+				}),
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
@@ -8775,9 +9063,10 @@ export class InteractiveMode {
 	}
 
 	private async showLogoutSelector(): Promise<void> {
+		const feature = this.journeyTelemetry?.beginFeature("logout");
 		// Only reload when an MCP integration was actually removed (its skill must
 		// be disabled); a cancelled or non-MCP logout needs no reload.
-		const loggedOut = await this.createAuthFlows().runLogout();
+		const loggedOut = await this.createAuthFlows().runLogout((outcome) => feature?.finish(outcome));
 		if (loggedOut?.startsWith("mcp:")) {
 			await this.handleReloadCommand();
 		}
@@ -10016,6 +10305,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	private async handleClearCommand(options: { name?: string; prompt?: string } = {}): Promise<void> {
+		const feature = this.journeyTelemetry?.beginFeature("new");
 		this.stopWorkingLoader();
 		const retainedImages = options.prompt ? this.getPromptStashImages(options.prompt) : [];
 		const restorePrompt = () => {
@@ -10027,10 +10317,12 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		try {
 			const result = await this.agentConnection.newSession();
 			if (result.cancelled) {
+				feature?.finish("canceled");
 				restorePrompt();
 				return;
 			}
 			created = true;
+			feature?.finish("completed");
 			await this.renderCurrentSessionState();
 			for (const [id, image] of retainedImages) this.pastedImages.set(id, image);
 			this.chatContainer.addChild(new Spacer(1));
@@ -10044,6 +10336,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 			}
 		} catch (error: unknown) {
 			if (!created) {
+				feature?.finish("failed");
 				await this.handleFatalRuntimeError("Failed to create session", error);
 				return;
 			}
@@ -10114,6 +10407,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		this.journeyTelemetry?.dispose();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
 		this.clearEscapeRepeat();

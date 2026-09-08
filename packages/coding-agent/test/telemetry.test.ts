@@ -17,6 +17,16 @@ import {
 	type TelemetrySink,
 	telemetryAuthCategory,
 } from "../src/core/telemetry.js";
+import { saveOnboardingTelemetryContext } from "../src/core/telemetry-journey-state.js";
+
+const base = {
+	session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+	version: "1.2.3",
+	os_family: "darwin",
+	architecture: "arm64",
+	install_method: "npm",
+	execution_mode: "interactive",
+};
 
 function uuidGenerator(): () => string {
 	let counter = 0;
@@ -68,6 +78,11 @@ class FakeTelemetrySink implements TelemetrySink {
 }
 
 class FakeAgentSession {
+	model?: {
+		id: string;
+		provider: string;
+		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	};
 	private listener?: (event: AgentSessionEvent) => void;
 	private disposeCallback?: () => void | Promise<void>;
 
@@ -100,6 +115,7 @@ afterEach(() => {
 });
 
 describe("telemetry identity and transport", () => {
+	beforeEach(() => vi.stubEnv("DO_NOT_TRACK", "0"));
 	it("creates a private stable installation ID", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-telemetry-"));
 		const randomId = uuidGenerator();
@@ -139,7 +155,7 @@ describe("telemetry identity and transport", () => {
 		symlinkSync(targetPath, telemetryPath);
 		const client = new TelemetryClient({ agentDir, randomId: uuidGenerator() });
 
-		expect(() => client.capture("agent started", {})).not.toThrow();
+		expect(() => client.capture("agent started", base)).not.toThrow();
 		await expect(client.flush()).resolves.toBeUndefined();
 
 		expect(readFileSync(targetPath, "utf8")).toBe("do not overwrite");
@@ -150,6 +166,7 @@ describe("telemetry identity and transport", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-telemetry-"));
 		const requests: Array<{ url: string; init: RequestInit }> = [];
 		const fetchMock: typeof fetch = async (input, init) => {
+			if (init?.method === "GET") return new Response(null, { status: 404 });
 			requests.push({ url: String(input), init: init ?? {} });
 			return new Response(null, { status: 204 });
 		};
@@ -161,10 +178,7 @@ describe("telemetry identity and transport", () => {
 			now: () => Date.UTC(2026, 6, 23),
 		});
 
-		client.capture("agent started", {
-			version: "1.2.3",
-			os_family: "darwin",
-		});
+		client.capture("agent started", base);
 		await client.flush();
 
 		expect(requests).toHaveLength(1);
@@ -178,10 +192,7 @@ describe("telemetry identity and transport", () => {
 			expect.objectContaining({
 				name: "agent started",
 				timestamp: "2026-07-23T00:00:00.000Z",
-				properties: {
-					version: "1.2.3",
-					os_family: "darwin",
-				},
+				properties: base,
 			}),
 		]);
 	});
@@ -195,7 +206,7 @@ describe("telemetry identity and transport", () => {
 			randomId: uuidGenerator(),
 		});
 
-		client.capture("agent started", {});
+		client.capture("agent started", base);
 		await expect(client.flush()).resolves.toBeUndefined();
 	});
 
@@ -204,6 +215,7 @@ describe("telemetry identity and transport", () => {
 		const client = new TelemetryClient({
 			agentDir: mkdtempSync(join(tmpdir(), "prime-agent-telemetry-")),
 			fetch: async (_input, init) => {
+				if (init?.method === "GET") return new Response(null, { status: 404 });
 				const body = JSON.parse(String(init?.body)) as { events: TelemetryEvent[] };
 				batchSizes.push(body.events.length);
 				return new Response(null, { status: 204 });
@@ -213,7 +225,7 @@ describe("telemetry identity and transport", () => {
 		});
 
 		for (let index = 0; index < 5; index++) {
-			client.capture("agent started", { index });
+			client.capture("agent started", { ...base, index });
 		}
 		await client.flush();
 
@@ -227,12 +239,18 @@ describe("telemetry identity and transport", () => {
 		writeFileSync(agentDir, "occupied");
 		const client = new TelemetryClient({ agentDir, randomId: uuidGenerator() });
 
-		expect(() => client.capture("agent started", {})).not.toThrow();
+		expect(() => client.capture("agent started", base)).not.toThrow();
 		await expect(client.flush()).resolves.toBeUndefined();
 	});
 });
 
 describe("telemetry controls", () => {
+	it("is enabled by default without an override", () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+		vi.stubEnv("PI_OFFLINE", "0");
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "");
+		expect(isTelemetryEnabled(SettingsManager.inMemory())).toBe(true);
+	});
 	it("honors settings and environment opt-outs", () => {
 		const settings = SettingsManager.inMemory({ telemetry: { enabled: true } });
 
@@ -520,5 +538,219 @@ describe("agent telemetry aggregation", () => {
 		releaseFlush();
 		await disposal;
 		expect(disposed).toBe(true);
+	});
+});
+
+describe("run lifecycle observations", () => {
+	beforeEach(() => vi.stubEnv("DO_NOT_TRACK", "0"));
+	function setup() {
+		let time = 0;
+		const sink = new FakeTelemetrySink();
+		const session = new FakeAgentSession();
+		const agentDir = mkdtempSync(join(tmpdir(), "telemetry-runs-"));
+		const options = {
+			agentDir,
+			settingsManager: SettingsManager.inMemory(),
+			sink,
+			now: () => time,
+			randomId: uuidGenerator(),
+		};
+		installAgentTelemetry(session as unknown as AgentSession, options);
+		return {
+			sink,
+			session,
+			options,
+			advance: (value: number) => {
+				time += value;
+			},
+		};
+	}
+	it("installs one observer and pairs one run terminal with its start", async () => {
+		const { sink, session, options } = setup();
+		installAgentTelemetry(session as unknown as AgentSession, options);
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		session.emit({ type: "agent_end", messages: [] });
+		await session.disposeAsync();
+		await session.disposeAsync();
+		const starts = sink.events.filter((event) => event.name === "agent run started");
+		const ends = sink.events.filter((event) => event.name === "agent run completed");
+		expect(starts).toHaveLength(1);
+		expect(ends).toHaveLength(1);
+		expect(ends[0].properties).toMatchObject({
+			run_id: starts[0].properties.run_id,
+			run_index: 1,
+			terminal_outcome: "success",
+		});
+		expect(sink.events.filter((event) => event.name === "agent session ended")).toHaveLength(1);
+	});
+	it("keeps missing completion distinct from a crash or a successful earlier turn", async () => {
+		const { sink, session } = setup();
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage({ stopReason: "toolUse" }) });
+		await session.disposeAsync();
+		expect(sink.events.find((event) => event.name === "agent run completed")?.properties.terminal_outcome).toBe(
+			"shutdown_interrupted",
+		);
+		const unknown = setup();
+		unknown.session.emit({ type: "agent_start" });
+		unknown.session.emit({ type: "agent_end", messages: [] });
+		expect(
+			unknown.sink.events.find((event) => event.name === "agent run completed")?.properties.terminal_outcome,
+		).toBe("unknown");
+	});
+	it("preserves a provider failure after retry cancellation without treating cancellation as another failure", () => {
+		const { sink, session, advance } = setup();
+		session.emit({
+			type: "session_action_update",
+			actions: { queuedCount: 0, steering: [], followUps: [], active: { kind: "turn", phase: "running" } },
+		});
+		session.emit({ type: "agent_start" });
+		session.emit({
+			type: "message_end",
+			message: assistantMessage({
+				stopReason: "error",
+				errorMessage: "private provider output",
+				diagnostics: [{ type: "provider_stream_failure", timestamp: 0, details: { status: 503 } }],
+			}),
+		});
+		session.emit({ type: "agent_end", messages: [] });
+		session.emit({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 100,
+			errorMessage: "private provider output",
+		});
+		advance(40);
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage({ stopReason: "aborted" }) });
+		session.emit({ type: "agent_end", messages: [] });
+		session.emit({ type: "session_action_update", actions: { queuedCount: 0, steering: [], followUps: [] } });
+		const errors = sink.events.filter((event) => event.name === "agent error");
+		expect(new Set(errors.map((event) => event.properties.error_id)).size).toBe(1);
+		expect(errors.at(-1)?.properties).toMatchObject({
+			error_subtype: "provider_unavailable",
+			recovery_outcome: "cancelled",
+		});
+		expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+			terminal_outcome: "cancelled",
+			retry_wait_ms: 40,
+		});
+		expect(JSON.stringify(sink.events)).not.toContain("private tool output");
+		expect(JSON.stringify(sink.events)).not.toContain("private.custom");
+		expect(JSON.stringify(sink.events)).not.toContain("private provider output");
+	});
+	it("keeps cancellation during retry backoff separate from the preceding error", () => {
+		const { sink, session, advance } = setup();
+		session.emit({
+			type: "session_action_update",
+			actions: { queuedCount: 0, steering: [], followUps: [], active: { kind: "turn", phase: "running" } },
+		});
+		session.emit({ type: "agent_start" });
+		session.emit({
+			type: "message_end",
+			message: assistantMessage({ stopReason: "error", errorMessage: "rate limit" }),
+		});
+		session.emit({ type: "agent_end", messages: [] });
+		session.emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 100, errorMessage: "rate limit" });
+		advance(25);
+		session.emit({ type: "auto_retry_end", success: false, attempt: 1, finalError: "Retry cancelled" });
+		session.emit({ type: "session_action_update", actions: { queuedCount: 0, steering: [], followUps: [] } });
+		expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+			terminal_outcome: "cancelled",
+			retry_wait_ms: 25,
+		});
+		expect(sink.events.filter((event) => event.name === "agent error").at(-1)?.properties).toMatchObject({
+			recovery_outcome: "cancelled",
+			retry_backoff_ms: 100,
+		});
+	});
+	it("discards in-progress aggregates when telemetry toggles off and on between events", async () => {
+		const { sink, session, options } = setup();
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		options.settingsManager.setTelemetryEnabled(false);
+		options.settingsManager.setTelemetryEnabled(true);
+		session.emit({ type: "agent_end", messages: [] });
+		await session.disposeAsync();
+		expect(sink.events.filter((event) => event.name === "agent run completed")).toHaveLength(0);
+		expect(sink.events.find((event) => event.name === "agent session ended")?.properties).toMatchObject({
+			run_count: 0,
+			total_tokens: 0,
+		});
+	});
+
+	it("reports missing tool timing and unknown pricing as null, not zero", () => {
+		const { sink, session } = setup();
+		session.emit({ type: "agent_start" });
+		session.emit({
+			type: "tool_execution_end",
+			toolCallId: "private",
+			toolName: "private.custom",
+			isError: true,
+			result: { content: [{ type: "text", text: "private tool output" }] },
+		});
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		expect(sink.events.find((event) => event.name === "agent tool summary")?.properties).toMatchObject({
+			tool_category: "custom",
+			call_count: 1,
+			failure_count: 1,
+			duration_ms: null,
+		});
+		expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+			tool_duration_ms: null,
+			estimated_cost_usd: null,
+			first_reasoning_ms: null,
+			run_to_first_text_ms: null,
+		});
+		expect(JSON.stringify(sink.events)).not.toContain("private tool output");
+		expect(JSON.stringify(sink.events)).not.toContain("private.custom");
+		expect(JSON.stringify(sink.events)).not.toContain("private provider output");
+	});
+	it("requires pricing for every model call and terminal usage for active requests", async () => {
+		const { sink, session } = setup();
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.model = { id: "gpt-5", provider: "openai", cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 0 } };
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		expect(
+			sink.events.find((event) => event.name === "agent run completed")?.properties.estimated_cost_usd,
+		).toBeNull();
+		const pending = setup();
+		pending.session.emit({ type: "agent_start" });
+		pending.session.emit({ type: "message_end", message: assistantMessage() });
+		pending.session.emit({ type: "turn_start" });
+		pending.session.emit({ type: "tool_execution_start", toolCallId: "private", toolName: "read", args: {} });
+		await pending.session.disposeAsync();
+		expect(pending.sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+			usage_complete: false,
+			estimated_cost_usd: null,
+			tool_duration_ms: null,
+		});
+	});
+
+	it("carries explicit onboarding correlation and increasing run indices without copying session content", () => {
+		const { sink, session, options } = setup();
+		saveOnboardingTelemetryContext(options.agentDir, {
+			onboardingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			clientSessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+			startedAt: Date.now() - 1000,
+		});
+		for (let i = 0; i < 2; i++) {
+			session.emit({ type: "agent_start" });
+			session.emit({ type: "message_end", message: assistantMessage() });
+			session.emit({ type: "agent_end", messages: [] });
+		}
+		const starts = sink.events.filter((event) => event.name === "agent run started");
+		expect(starts.map((event) => event.properties.run_index)).toEqual([1, 2]);
+		expect(starts[1].properties).toMatchObject({
+			onboarding_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			client_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		});
+		expect(starts[1].properties.elapsed_since_onboarding_ms).toBeGreaterThanOrEqual(1000);
 	});
 });

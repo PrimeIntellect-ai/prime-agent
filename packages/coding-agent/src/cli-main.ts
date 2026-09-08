@@ -7,8 +7,14 @@ import {
 	maybeRunOwnedSessionWorkerFrontend,
 } from "./cli/owned-session-worker.js";
 import { APP_NAME } from "./config.js";
+import {
+	flushTelemetryErrorReporting,
+	installTelemetryExceptionMonitor,
+	reportTelemetryError,
+} from "./core/telemetry-errors.js";
 
 export async function runCli(): Promise<void> {
+	installTelemetryExceptionMonitor();
 	try {
 		enableCompileCache?.();
 	} catch {
@@ -39,6 +45,10 @@ export async function runCli(): Promise<void> {
 
 		try {
 			await main(process.argv.slice(2));
+		} catch (error) {
+			reportTelemetryError({ error, component: "startup", operation: "startup", stage: "startup" });
+			await flushTelemetryErrorReporting();
+			throw error;
 		} finally {
 			closeOwnedSessionWorkerOwnerWatch();
 		}

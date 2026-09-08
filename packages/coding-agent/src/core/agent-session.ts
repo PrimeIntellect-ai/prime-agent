@@ -297,6 +297,7 @@ import {
 } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { classifyTelemetryError } from "./telemetry-error-classification.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
@@ -3655,7 +3656,7 @@ export class AgentSession {
 		if (!message || message.stopReason !== "error" || !message.errorMessage) {
 			return;
 		}
-		if (!isLikelyAuthenticationError(message.errorMessage)) {
+		if (!isLikelyAuthenticationError(message.errorMessage, message)) {
 			return;
 		}
 		message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
@@ -11245,8 +11246,8 @@ export class AgentSession {
 
 	private _isConcreteProviderAuthFailure(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
-		// Only the provider's structured classification counts as an auth failure.
-		return this._getProviderStreamFailureKind(message) === "auth";
+		const { error_subtype: subtype } = classifyTelemetryError(message);
+		return subtype === "credential_invalid" || subtype === "credential_expired" || subtype === "credential_missing";
 	}
 
 	private _captureRetryAuthFailureSource(message: AssistantMessage): AuthSourceToken | undefined {
