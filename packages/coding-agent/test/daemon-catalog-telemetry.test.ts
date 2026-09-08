@@ -53,15 +53,24 @@ describe("daemon catalog startup telemetry", () => {
 
 	it("reports bootstrap failures with effective settings and a bounded flush before rethrowing", async () => {
 		const createSettings = vi.spyOn(SettingsManager, "create");
-		const failure = Object.assign(new Error("private-path-and-request"), { code: "EPIPE" });
+		const failure = Object.assign(new Error("Catalog pipe failed. Authorization: Bearer catalog-secret"), {
+			code: "EPIPE",
+		});
 		await expect(failStartup(failure)).rejects.toBe(failure);
 		expect(createSettings).toHaveBeenCalledWith(cwd, agentDir);
 		expect(capture).toHaveBeenCalledTimes(1);
 		expect(capture).toHaveBeenCalledWith(
 			"agent error",
-			expect.objectContaining({ component: "daemon", operation: "startup", stage: "startup" }),
+			expect.objectContaining({
+				component: "daemon",
+				operation: "startup",
+				stage: "startup",
+				error_code_group: "EPIPE",
+				error_message: "Catalog pipe failed. Authorization: [REDACTED]",
+				error_message_redacted: true,
+			}),
 		);
-		expect(JSON.stringify(capture.mock.calls)).not.toContain("private-path-and-request");
+		expect(JSON.stringify(capture.mock.calls)).not.toContain("catalog-secret");
 		expect(flush).toHaveBeenCalledWith({ timeoutMs: 1_500 });
 		expect(
 			reportTelemetryError({ error: new Error("later failure"), component: "daemon", operation: "execute" }),
