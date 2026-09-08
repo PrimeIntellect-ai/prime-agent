@@ -1,4 +1,5 @@
 import { clearApiProviders, registerApiProvider } from "../api-registry.js";
+import type { CompactFunction } from "../compaction.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -17,6 +18,7 @@ import type { GoogleOptions } from "./google.js";
 import type { GoogleVertexOptions } from "./google-vertex.js";
 import type { MistralOptions } from "./mistral.js";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.js";
+import { supportsOpenAICompaction } from "./openai-compaction.js";
 import type { OpenAICompletionsOptions } from "./openai-completions.js";
 import type { OpenAIResponsesOptions } from "./openai-responses.js";
 
@@ -25,6 +27,7 @@ interface LazyProviderModule<
 	TOptions extends StreamOptions,
 	TSimpleOptions extends SimpleStreamOptions,
 > {
+	compact?: CompactFunction<TApi>;
 	stream: (model: Model<TApi>, context: Context, options?: TOptions) => AsyncIterable<AssistantMessageEvent>;
 	streamSimple: (
 		model: Model<TApi>,
@@ -59,6 +62,7 @@ interface MistralProviderModule {
 }
 
 interface OpenAICodexResponsesProviderModule {
+	compactOpenAICodexResponses: CompactFunction<"openai-codex-responses">;
 	streamOpenAICodexResponses: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions>;
 	streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
 }
@@ -69,6 +73,7 @@ interface OpenAICompletionsProviderModule {
 }
 
 interface OpenAIResponsesProviderModule {
+	compactOpenAIResponses: CompactFunction<"openai-responses">;
 	streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIResponsesOptions>;
 	streamSimpleOpenAIResponses: StreamFunction<"openai-responses", SimpleStreamOptions>;
 }
@@ -273,6 +278,7 @@ function loadOpenAICodexResponsesProviderModule(): Promise<
 		return {
 			stream: provider.streamOpenAICodexResponses,
 			streamSimple: provider.streamSimpleOpenAICodexResponses,
+			compact: provider.compactOpenAICodexResponses,
 		};
 	});
 	return openAICodexResponsesProviderModulePromise;
@@ -299,6 +305,7 @@ function loadOpenAIResponsesProviderModule(): Promise<
 		return {
 			stream: provider.streamOpenAIResponses,
 			streamSimple: provider.streamSimpleOpenAIResponses,
+			compact: provider.compactOpenAIResponses,
 		};
 	});
 	return openAIResponsesProviderModulePromise;
@@ -360,8 +367,11 @@ export function registerBuiltInApiProviders(): void {
 
 	registerApiProvider({
 		api: "openai-responses",
+		supportsCompaction: supportsOpenAICompaction,
 		stream: streamOpenAIResponses,
 		streamSimple: streamSimpleOpenAIResponses,
+		compact: async (model, context, options) =>
+			(await loadOpenAIResponsesProviderModule()).compact?.(model, context, options),
 	});
 
 	registerApiProvider({
@@ -372,8 +382,11 @@ export function registerBuiltInApiProviders(): void {
 
 	registerApiProvider({
 		api: "openai-codex-responses",
+		supportsCompaction: supportsOpenAICompaction,
 		stream: streamOpenAICodexResponses,
 		streamSimple: streamSimpleOpenAICodexResponses,
+		compact: async (model, context, options) =>
+			(await loadOpenAICodexResponsesProviderModule()).compact?.(model, context, options),
 	});
 
 	registerApiProvider({

@@ -1,3 +1,4 @@
+import type { ProviderCompactionCheckpoint } from "./compaction.js";
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
 
@@ -206,6 +207,8 @@ export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Provider-owned replacement for this message, supplied by a durable compaction checkpoint. */
+	providerContext?: ProviderCompactionCheckpoint;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
@@ -444,6 +447,8 @@ export interface Model<TApi extends Api> {
 		cacheWrite: number; // $/million tokens
 	};
 	contextWindow: number;
+	/** Separate input ceiling when the provider reserves part of the context for output. */
+	maxInputTokens?: number;
 	maxTokens: number;
 	/** Flagship model surfaced above non-featured models of the same provider in pickers. */
 	featured?: boolean;

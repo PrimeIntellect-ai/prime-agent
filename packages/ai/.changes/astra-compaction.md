@@ -1,0 +1,2 @@
+- Added explicit Astra server compaction for OpenAI API keys and ChatGPT login, with opaque checkpoint replay, response validation, and input-limit metadata.
+- Enabled Astra Fast mode for OpenAI providers.

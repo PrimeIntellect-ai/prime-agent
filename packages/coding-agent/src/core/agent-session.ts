@@ -28,6 +28,7 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	getModelInputLimit,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
@@ -92,6 +93,7 @@ import {
 	setAutonomousEnabled,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
+import { hasProviderCheckpoint } from "./compaction/checkpoint.js";
 import {
 	COMPACT_SKILL_NAME,
 	type CompactionResult,
@@ -99,10 +101,11 @@ import {
 	collectEntriesForBranchSummary,
 	compact,
 	estimateContextTokens,
+	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	serializeConversation,
-	shouldCompact,
+	shouldCompactForModel,
 } from "./compaction/index.js";
 import {
 	type ContextTreeNode,
@@ -1397,6 +1400,7 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		this._restoreProviderContextForModel();
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -2850,15 +2854,13 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
+		const compactionTimestamp = this._activeCompactionTimestamp();
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
 			return false;
 		}
 
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
-		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) {
+		if (contextTokens === undefined || !this.model || !shouldCompactForModel(contextTokens, this.model, settings)) {
 			return false;
 		}
 
@@ -4352,7 +4354,7 @@ export class AgentSession {
 	}
 
 	buildSessionContext(): SessionContext {
-		const context = this.sessionManager.buildSessionContext();
+		const context = this.sessionManager.buildSessionContext(this.model);
 		for (const message of context.messages) {
 			this._applyLateIpythonSentAgentMessages(message);
 		}
@@ -4571,7 +4573,18 @@ export class AgentSession {
 
 	private async _runPreTurnCompaction(): Promise<void> {
 		const lastAssistant = this._findLastAssistantMessage();
-		if (lastAssistant) await this._checkCompaction(lastAssistant, false, false);
+		if (lastAssistant) {
+			await this._checkCompaction(lastAssistant, false, false);
+		} else if (
+			this.model &&
+			shouldCompactForModel(
+				estimateContextTokens(this.agent.state.messages).tokens,
+				this.model,
+				this.settingsManager.getCompactionSettings(),
+			)
+		) {
+			await this._runAutoCompaction("threshold", false);
+		}
 	}
 
 	private async _prepareForCommit<TPrepared, TCommitted>(
@@ -7213,6 +7226,7 @@ export class AgentSession {
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = model;
 		this.sessionManager.appendModelChange(model.provider, model.id);
+		this._restoreProviderContextForModel();
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
 		this.setThinkingLevel(thinkingLevel);
@@ -7280,6 +7294,7 @@ export class AgentSession {
 
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+		this._restoreProviderContextForModel();
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
 		this.setThinkingLevel(thinkingLevel);
@@ -7319,6 +7334,7 @@ export class AgentSession {
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = nextModel;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+		this._restoreProviderContextForModel();
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
 		this.setThinkingLevel(thinkingLevel);
@@ -7710,6 +7726,14 @@ export class AgentSession {
 					this.thinkingLevel,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
+					{
+						context: {
+							systemPrompt: this.agent.state.systemPrompt,
+							messages: convertToLlm(this.agent.state.messages),
+							tools: this.agent.state.tools,
+						},
+						options: { sessionId: this.sessionId, serviceTier: this.serviceTier, reasoning: this.thinkingLevel },
+					},
 				));
 			}
 
@@ -7745,10 +7769,10 @@ export class AgentSession {
 					error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
 				this._semanticEdges.finishCompaction(semanticCompaction.compactionId, cancelled ? "cancelled" : "failed");
 			}
-			throw error;
+			throw signal.aborted ? new Error("Compaction cancelled") : error;
 		}
 		const newEntries = this.sessionManager.getEntries();
-		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		this.agent.state.messages = this.sessionManager.buildSessionContext(this.model).messages;
 		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
@@ -8624,6 +8648,29 @@ export class AgentSession {
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 */
+	private _providerContextRebuiltAt: number | undefined;
+
+	private _restoreProviderContextForModel(): void {
+		if (
+			!this.sessionManager
+				.getBranch()
+				.some((entry) => entry.type === "compaction" && hasProviderCheckpoint(entry.details))
+		)
+			return;
+		this.agent.state.messages = this.buildSessionContext().messages;
+		// Old usage may describe a window encrypted for a different model or endpoint.
+		this._providerContextRebuiltAt = Date.now();
+	}
+
+	private _activeCompactionTimestamp(): number | undefined {
+		const marker = this.agent.state.messages.find((message) => message.role === "compactionSummary");
+		if (marker) return marker.timestamp;
+		const branch = this.sessionManager.getBranch();
+		if (branch.some((entry) => entry.type === "compaction" && hasProviderCheckpoint(entry.details))) return undefined;
+		const entry = getLatestCompactionEntry(branch);
+		return entry ? new Date(entry.timestamp).getTime() : undefined;
+	}
+
 	private _getThresholdContextTokens(
 		assistantMessage: AssistantMessage,
 		compactionTimestamp: number | undefined,
@@ -8635,6 +8682,14 @@ export class AgentSession {
 			// have stale usage reflecting the old (larger) context and would falsely
 			// trigger compaction right after one just finished.
 			const usageMsg = messages[estimate.lastUsageIndex];
+			if (
+				usageMsg.role === "assistant" &&
+				((this._providerContextRebuiltAt !== undefined && usageMsg.timestamp <= this._providerContextRebuiltAt) ||
+					usageMsg.model !== this.model?.id ||
+					usageMsg.provider !== this.model?.provider)
+			) {
+				return messages.reduce((tokens, message) => tokens + estimateTokens(message), 0);
+			}
 			if (
 				compactionTimestamp !== undefined &&
 				usageMsg.role === "assistant" &&
@@ -8677,7 +8732,7 @@ export class AgentSession {
 		}
 
 		const settings = this.settingsManager.getCompactionSettings();
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this.model ? getModelInputLimit(this.model) : 0;
 
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
@@ -8689,8 +8744,7 @@ export class AgentSession {
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
+		const compactionTimestamp = this._activeCompactionTimestamp();
 		const assistantIsFromBeforeCompaction =
 			compactionTimestamp !== undefined && assistantMessage.timestamp <= compactionTimestamp;
 
@@ -8735,7 +8789,7 @@ export class AgentSession {
 		// assistant usage are included, matching the /usage context display.
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
+		if (this.model && shouldCompactForModel(contextTokens, this.model, settings)) {
 			if (queueAutonomousContinuation && this._queueGoalContinuationForThresholdCompaction(assistantMessage)) {
 				this._continueAfterThresholdCompaction = true;
 			} else if (
@@ -12027,7 +12081,7 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			const sessionContext = this.sessionManager.buildSessionContext();
+			const sessionContext = this.sessionManager.buildSessionContext(this.model);
 			this.agent.state.messages = sessionContext.messages;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();

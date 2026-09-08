@@ -1,5 +1,15 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	compactionMatchesModel,
+	type ImageContent,
+	type Message,
+	type Model,
+	type ServiceTier,
+	type TextContent,
+	type Usage,
+} from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -21,6 +31,7 @@ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js"
 import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import { readBytesSync, readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
+import { getProviderCheckpoint, hasProviderCheckpoint } from "./compaction/checkpoint.js";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -420,6 +431,7 @@ export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	targetModel?: Model<Api>,
 ): SessionContext {
 	if (!byId) {
 		byId = new Map<string, SessionEntry>();
@@ -466,9 +478,18 @@ export function buildSessionContext(
 			model = { provider: entry.provider, modelId: entry.modelId };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			model = { provider: entry.message.provider, modelId: entry.message.model };
-		} else if (entry.type === "compaction") {
-			compaction = entry;
 		}
+	}
+	// Opaque windows belong to one provider/model/endpoint. A switch or an unknown
+	// checkpoint version reconstructs context from the durable original transcript.
+	const checkpointModel = targetModel ?? (model ? { provider: model.provider, id: model.modelId } : undefined);
+	for (const entry of path) {
+		if (entry.type !== "compaction") continue;
+		if (hasProviderCheckpoint(entry.details)) {
+			const checkpoint = getProviderCheckpoint(entry.details);
+			if (!checkpoint || !checkpointModel || !compactionMatchesModel(checkpoint, checkpointModel)) continue;
+		}
+		compaction = entry;
 	}
 
 	// Build messages and collect corresponding entries
@@ -490,13 +511,14 @@ export function buildSessionContext(
 
 	if (compaction) {
 		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
+		const providerContext = getProviderCheckpoint(compaction.details);
 
 		// Collect kept messages (before compaction, starting from firstKeptEntryId).
 		// The context remains summary-first for the model; retainedMessageCount records
 		// the exact chronological presentation boundary for clients.
 		const retainedMessages: AgentMessage[] = [];
 		let foundFirstKept = false;
-		for (let i = 0; i < compactionIdx; i++) {
+		for (let i = 0; !providerContext && i < compactionIdx; i++) {
 			const entry = path[i];
 			if (entry.id === compaction.firstKeptEntryId) {
 				foundFirstKept = true;
@@ -513,6 +535,7 @@ export function buildSessionContext(
 				compaction.timestamp,
 				compaction.customInstructions,
 				retainedMessages.length,
+				providerContext,
 			),
 			...retainedMessages,
 		);
@@ -1767,8 +1790,10 @@ export class SessionManager {
 			customInstructions,
 			usage,
 		};
-		this._appendEntry(entry);
-		return entry.id;
+		return this._appendEntryWithRollback(() => {
+			this._appendEntry(entry);
+			return entry.id;
+		});
 	}
 
 	appendCustomEntry(customType: string, data?: unknown): string {
@@ -2070,13 +2095,13 @@ export class SessionManager {
 		return path;
 	}
 
-	buildSessionContext(): SessionContext {
+	buildSessionContext(targetModel?: Model<Api>): SessionContext {
 		// Pass fileEntries directly rather than getEntries(): the resolved context
 		// is computed from the leaf-to-root walk over byId (which already excludes
 		// the header), so the entries argument is only a fallback for an undefined
 		// leaf — never hit here since leafId is always set or null. Avoids an O(n)
 		// array copy on every call (attach, get_session_context, agent init, ...).
-		return buildSessionContext(this.fileEntries as SessionEntry[], this.leafId, this.byId);
+		return buildSessionContext(this.fileEntries as SessionEntry[], this.leafId, this.byId, targetModel);
 	}
 
 	getHeader(): SessionHeader | null {

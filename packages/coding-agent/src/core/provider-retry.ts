@@ -125,3 +125,30 @@ export const DEFAULT_PROVIDER_RETRY_POLICY: ProviderRetryPolicy = {
 	baseDelayMs: 2000,
 	maxRetryDelayMs: 60000,
 };
+
+/** Unary provider requests throw instead of returning an assistant error message. */
+export async function requestWithProviderRetry<T>(
+	attemptRequest: () => Promise<T>,
+	options?: { policy?: ProviderRetryPolicy; signal?: AbortSignal },
+): Promise<T> {
+	const policy = options?.policy ?? DEFAULT_PROVIDER_RETRY_POLICY;
+	const maxRetries = policy.enabled ? policy.maxRetries : 0;
+	for (let attempt = 0; ; attempt++) {
+		options?.signal?.throwIfAborted();
+		try {
+			return await attemptRequest();
+		} catch (error) {
+			options?.signal?.throwIfAborted();
+			const status = error !== null && typeof error === "object" && "status" in error ? error.status : undefined;
+			const retryAfter =
+				error !== null && typeof error === "object" && "retryAfterMs" in error ? error.retryAfterMs : undefined;
+			const transient =
+				(typeof status === "number" && (status === 408 || status === 429 || status >= 500)) ||
+				(error instanceof TypeError && /fetch|network|socket/i.test(error.message));
+			if (!transient || attempt >= maxRetries) throw error;
+			const delay = providerRetryDelay(attempt + 1, typeof retryAfter === "number" ? retryAfter : undefined, policy);
+			if (delay.kind === "exceeds-cap") throw error;
+			await sleep(delay.delayMs, options?.signal);
+		}
+	}
+}

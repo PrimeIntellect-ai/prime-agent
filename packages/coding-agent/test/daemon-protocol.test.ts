@@ -22,6 +22,7 @@ import {
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
+	meetsDaemonCommandCompatibility,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
 import {
@@ -30,6 +31,24 @@ import {
 } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("daemon protocol helpers", () => {
+	it("keeps provider compaction metadata optional for older clients and workers", () => {
+		const olderPeer = { protocol: { name: DAEMON_PROTOCOL_INFO.name, version: 7 }, schemaRevision: 27 };
+		for (const command of ["compact", "get_messages", "get_session_context"] as const) {
+			expect(meetsDaemonCommandCompatibility(olderPeer, DAEMON_COMMAND_COMPATIBILITY[command])).toBe(true);
+		}
+		for (const event of ["response", "session_event", "session_attached", "session_resynced"] as const) {
+			expect(meetsDaemonCommandCompatibility(olderPeer, DAEMON_OUTBOUND_COMPATIBILITY[event])).toBe(true);
+		}
+		// New readers accept a legacy summary without providerContext; old readers can
+		// continue rendering summary text from the extended JSON shape.
+		const legacy = { role: "compactionSummary", summary: "Readable summary", tokensBefore: 100, timestamp: 1 };
+		const extended = {
+			...legacy,
+			providerContext: { version: 1, items: [{ type: "compaction", encrypted_content: "opaque" }] },
+		};
+		expect(JSON.parse(JSON.stringify(extended)).summary).toBe(legacy.summary);
+		expect(JSON.parse(JSON.stringify(legacy)).providerContext).toBeUndefined();
+	});
 	it("serializes worker descriptors as identity-only version 2 state", () => {
 		const descriptor = {
 			version: 1,

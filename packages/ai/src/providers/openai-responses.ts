@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import type { CompactFunction } from "../compaction.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { clampThinkingLevel } from "../models.js";
 import type {
@@ -23,8 +24,34 @@ import {
 } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
+import { requestOpenAICompaction, supportsOpenAICompaction } from "./openai-compaction.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
+
+export const compactOpenAIResponses: CompactFunction<"openai-responses"> = async (model, context, options) => {
+	if (!supportsOpenAICompaction(model)) return undefined;
+	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	if (!apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+	const headers = new Headers({ ...model.headers, ...options?.headers });
+	headers.set("Authorization", `Bearer ${apiKey}`);
+	headers.set("Content-Type", "application/json");
+	const instructions = [context.systemPrompt, options?.customInstructions].filter(Boolean).join("\n\n");
+	const result = await requestOpenAICompaction(
+		model,
+		`${model.baseUrl.replace(/\/+$/, "")}/responses/compact`,
+		headers,
+		{
+			model: model.id,
+			input: convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { includeSystemPrompt: false }),
+			instructions,
+			prompt_cache_key: options?.sessionId,
+			service_tier: options?.serviceTier,
+		},
+		options,
+	);
+	if (result?.usage) applyServiceTierPricing(result.usage, options?.serviceTier, model);
+	return result;
+};
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 

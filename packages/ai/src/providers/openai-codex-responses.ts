@@ -20,6 +20,7 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 	});
 }
 
+import type { CompactFunction } from "../compaction.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { clampThinkingLevel } from "../models.js";
 import { registerSessionResourceCleanup } from "../session-resources.js";
@@ -41,8 +42,86 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseRetryAfterMs, recordStreamFailure } from "../utils/stream-failure.js";
+import {
+	buildCodexCompactedWindow,
+	CompactionRequestError,
+	requestOpenAICompaction,
+	supportsOpenAICompaction,
+} from "./openai-compaction.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
+
+export const compactOpenAICodexResponses: CompactFunction<"openai-codex-responses"> = async (
+	model,
+	context,
+	options,
+) => {
+	if (!supportsOpenAICompaction(model)) return undefined;
+	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	if (!apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+	const headers = buildSSEHeaders(
+		model.headers,
+		options?.headers,
+		extractAccountId(apiKey),
+		apiKey,
+		options?.sessionId,
+	);
+	const instructions = [context.systemPrompt, options?.customInstructions].filter(Boolean).join("\n\n");
+	const body = buildRequestBody(
+		model,
+		{ ...context, systemPrompt: instructions },
+		{
+			...options,
+			reasoningEffort:
+				options?.reasoning && options.reasoning !== "off"
+					? (clampThinkingLevel(model, options.reasoning) as OpenAICodexResponsesOptions["reasoningEffort"])
+					: undefined,
+		},
+	);
+	const input = body.input as unknown as Record<string, unknown>[];
+	// This is a request control, never part of the durable checkpoint window.
+	body.input = [...input, { type: "compaction_trigger" }] as unknown as ResponseInput;
+	const result = await requestOpenAICompaction(
+		model,
+		resolveCodexUrl(model.baseUrl),
+		headers,
+		{ ...body },
+		options,
+		async (response) => {
+			const checkpoints: Record<string, unknown>[] = [];
+			let completed: Record<string, unknown> | undefined;
+			for await (const event of parseSSE(response)) {
+				if (event.type === "response.output_item.done" && event.item && typeof event.item === "object") {
+					const item = event.item as Record<string, unknown>;
+					if (item.type === "compaction" || item.type === "compaction_summary")
+						checkpoints.push({ ...item, type: "compaction" });
+				} else if (event.type === "response.completed" || event.type === "response.done") {
+					completed = event.response as Record<string, unknown> | undefined;
+					break;
+				} else if (["error", "response.failed", "response.incomplete"].includes(String(event.type))) {
+					const failedResponse = event.response as { error?: { code?: string } } | undefined;
+					const error = event.error as { code?: string } | undefined;
+					const code = error?.code ?? failedResponse?.error?.code ?? event.code;
+					if (code === "context_length_exceeded") return undefined;
+					if (code === "rate_limit_exceeded" || code === "server_error") {
+						throw new CompactionRequestError(
+							"Server compaction stream failed",
+							code === "rate_limit_exceeded" ? 429 : 503,
+						);
+					}
+					throw new Error("Server compaction stream failed before completion");
+				}
+			}
+			if (!completed) throw new CompactionRequestError("Server compaction stream closed before completion", 502);
+			if ((completed.status !== undefined && completed.status !== "completed") || checkpoints.length !== 1) {
+				throw new Error("Server compaction requires a completed response with exactly one encrypted checkpoint");
+			}
+			return { output: buildCodexCompactedWindow(input, checkpoints[0]), usage: completed.usage };
+		},
+	);
+	if (result?.usage) applyServiceTierPricing(result.usage, options?.serviceTier, model);
+	return result;
+};
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;

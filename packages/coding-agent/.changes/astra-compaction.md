@@ -1,0 +1,3 @@
+- Persisted Astra server compaction checkpoints across session resumes and rebuilt compatible context after model or endpoint changes.
+- Respected Astra input budgets, bounded local fallback summaries, and preserved history on compaction cancellation or persistence failure.
+- Added backward-compatible daemon metadata for provider checkpoints and model input limits.

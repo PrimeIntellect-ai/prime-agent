@@ -6,17 +6,33 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	CompactionOptions,
+	Context,
+	Model,
+	ProviderCompactionCheckpoint,
+	Usage,
+} from "@earendil-works/pi-ai";
+import {
+	compactionMatchesModel,
+	compactSimple,
+	completeSimple,
+	getModelInputLimit,
+	isCompactionCheckpoint,
+	supportsCompaction,
+} from "@earendil-works/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
-import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
+import { completeWithProviderRetry, type ProviderRetryPolicy, requestWithProviderRetry } from "../provider-retry.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
 import { addAssistantUsage, emptyUsage } from "../usage.js";
+import { hasProviderCheckpoint } from "./checkpoint.js";
 import {
 	computeFileLists,
 	createFileOps,
@@ -30,6 +46,7 @@ import {
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	providerCheckpoint?: ProviderCompactionCheckpoint;
 }
 
 export interface SummarySlice {
@@ -217,11 +234,23 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 	if (contextWindow <= 0) return false;
 	return contextTokens > contextWindow - settings.reserveTokens;
 }
+
+export function shouldCompactForModel(contextTokens: number, model: Model<Api>, settings: CompactionSettings): boolean {
+	const inputLimit = getModelInputLimit(model);
+	const reserveTokens =
+		model.provider === "openai-codex" && model.api === "openai-codex-responses" && model.id === "gpt-6-astra"
+			? Math.max(settings.reserveTokens, Math.ceil(inputLimit * 0.1))
+			: settings.reserveTokens;
+	return shouldCompact(contextTokens, inputLimit, { ...settings, reserveTokens });
+}
 /**
  * Estimate token count for a message using chars/4 heuristic.
  * This is conservative (overestimates tokens).
  */
 export function estimateTokens(message: AgentMessage): number {
+	if ((message.role === "user" || message.role === "compactionSummary") && message.providerContext) {
+		return message.providerContext.estimatedTokens;
+	}
 	let chars = 0;
 
 	switch (message.role) {
@@ -527,52 +556,93 @@ export async function generateSummary(
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
 	retry?: ProviderRetryPolicy,
+	summaryCall: SummaryCallRunner = (call) => call(headers),
 ): Promise<SummarySlice> {
-	const maxTokens = Math.floor(0.8 * reserveTokens);
-
-	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
-	// Serialize before the LLM call so it summarizes rather than continues this conversation.
-	const llmMessages = convertToLlm(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
-	}
-	promptText += basePrompt;
-
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
-
-	const completionOptions =
-		model.reasoning && thinkingLevel && thinkingLevel !== "off"
-			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-			: { maxTokens, signal, apiKey, headers };
-
-	const response = await completeWithProviderRetry(
-		() =>
-			completeSimple(
-				model,
-				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-				completionOptions,
-			),
-		{ policy: retry, signal },
+	return generateBoundedSummary(
+		currentMessages,
+		model,
+		Math.floor(0.8 * reserveTokens),
+		apiKey,
+		signal,
+		thinkingLevel,
+		retry,
+		summaryCall,
+		(summary) => buildSummarizationPrompt(customInstructions, summary),
+		previousSummary,
 	);
+}
 
-	if (response.stopReason === "error") {
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-
-	const textContent = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
-
-	return { summary: textContent, usage: response.usage };
+/** Reconstructing history after a model switch can exceed the destination's input limit. */
+async function generateBoundedSummary(
+	messages: AgentMessage[],
+	model: Model<Api>,
+	requestedMaxTokens: number,
+	apiKey: string,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	retry: ProviderRetryPolicy | undefined,
+	summaryCall: SummaryCallRunner,
+	instructions: (previousSummary?: string) => string,
+	previousSummary?: string,
+): Promise<SummarySlice> {
+	const inputLimit = getModelInputLimit(model);
+	const maxTokens = Math.max(1, Math.min(requestedMaxTokens, model.maxTokens, Math.floor(inputLimit / 4)));
+	const conversation = serializeConversation(convertToLlm(messages));
+	let offset = 0;
+	let summary = previousSummary;
+	const usage = emptyUsage();
+	do {
+		signal?.throwIfAborted();
+		const suffix = `${summary ? `<previous-summary>\n${summary}\n</previous-summary>\n\n` : ""}${instructions(summary)}`;
+		// Leave output headroom and use a conservative chars/3 estimate for fallback calls.
+		const budget =
+			Math.floor((Math.min(inputLimit, model.contextWindow - maxTokens) - 1024) * 3) -
+			suffix.length -
+			SUMMARIZATION_SYSTEM_PROMPT.length -
+			64;
+		if (budget <= 0) throw new Error("Compaction instructions and previous summary exceed the model input budget");
+		const chunk = conversation.slice(offset, offset + budget);
+		offset += chunk.length;
+		const response = await summaryCall((callHeaders) =>
+			completeWithProviderRetry(
+				() =>
+					completeSimple(
+						model,
+						{
+							systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+							messages: [
+								{
+									role: "user",
+									content: `<conversation>\n${chunk}\n</conversation>\n\n${suffix}`,
+									timestamp: Date.now(),
+								},
+							],
+						},
+						{
+							maxTokens,
+							signal,
+							apiKey,
+							headers: callHeaders,
+							...(model.reasoning && thinkingLevel && thinkingLevel !== "off"
+								? { reasoning: thinkingLevel }
+								: {}),
+						},
+					),
+				{ policy: retry, signal },
+			),
+		);
+		signal?.throwIfAborted();
+		if (response.stopReason === "error" || response.stopReason === "aborted") {
+			throw new Error(`Summarization failed: ${response.errorMessage || response.stopReason}`);
+		}
+		summary = response.content
+			.filter((part) => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+		if (!summary.trim()) throw new Error("Summarization returned an empty summary");
+		addAssistantUsage(usage, response.usage);
+	} while (offset < conversation.length);
+	return { summary, usage };
 }
 export interface CompactionPreparation {
 	/** UUID of first entry to keep */
@@ -602,7 +672,8 @@ export function prepareCompaction(
 
 	let prevCompactionIndex = -1;
 	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
+		const entry = pathEntries[i];
+		if (entry.type === "compaction" && !hasProviderCheckpoint(entry.details)) {
 			prevCompactionIndex = i;
 			break;
 		}
@@ -701,6 +772,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	summaryCall: SummaryCallRunner = (call) => call(headers),
 	retry?: ProviderRetryPolicy,
+	providerContext?: { context: Context; options?: CompactionOptions },
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -712,6 +784,36 @@ export async function compact(
 		fileOps,
 		settings,
 	} = preparation;
+	if (providerContext && supportsCompaction(model)) {
+		const remote = await summaryCall((callHeaders) =>
+			requestWithProviderRetry(
+				() =>
+					compactSimple(model, providerContext.context, {
+						...providerContext.options,
+						apiKey,
+						headers: callHeaders,
+						customInstructions,
+						signal,
+					}),
+				{ policy: retry, signal },
+			),
+		);
+		if (remote) {
+			signal?.throwIfAborted();
+			if (!isCompactionCheckpoint(remote.checkpoint) || !compactionMatchesModel(remote.checkpoint, model)) {
+				throw new Error("Provider compaction returned an incompatible checkpoint");
+			}
+			const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+			return {
+				summary:
+					"Conversation compacted on the server. The original transcript remains available in session history.",
+				firstKeptEntryId,
+				tokensBefore,
+				usage: remote.usage,
+				details: { readFiles, modifiedFiles, providerCheckpoint: remote.checkpoint } satisfies CompactionDetails,
+			};
+		}
+	}
 	let summary: string;
 	const slices: SummarySlice[] = [];
 
@@ -719,50 +821,47 @@ export async function compact(
 		// Split turns make two wire calls with different bodies; each needs its own identity.
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0
-				? summaryCall((callHeaders) =>
-						generateSummary(
-							messagesToSummarize,
-							model,
-							settings.reserveTokens,
-							apiKey,
-							callHeaders,
-							signal,
-							customInstructions,
-							previousSummary,
-							thinkingLevel,
-							retry,
-						),
+				? generateSummary(
+						messagesToSummarize,
+						model,
+						settings.reserveTokens,
+						apiKey,
+						headers,
+						signal,
+						customInstructions,
+						previousSummary,
+						thinkingLevel,
+						retry,
+						summaryCall,
 					)
 				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
-			summaryCall((callHeaders) =>
-				generateTurnPrefixSummary(
-					turnPrefixMessages,
-					model,
-					settings.reserveTokens,
-					apiKey,
-					callHeaders,
-					signal,
-					thinkingLevel,
-					retry,
-				),
+			generateTurnPrefixSummary(
+				turnPrefixMessages,
+				model,
+				settings.reserveTokens,
+				apiKey,
+				headers,
+				signal,
+				thinkingLevel,
+				retry,
+				summaryCall,
 			),
 		]);
 		slices.push(historyResult, turnPrefixResult);
 		summary = `${historyResult.summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.summary}`;
 	} else {
-		const result = await summaryCall((callHeaders) =>
-			generateSummary(
-				messagesToSummarize,
-				model,
-				settings.reserveTokens,
-				apiKey,
-				callHeaders,
-				signal,
-				customInstructions,
-				previousSummary,
-				thinkingLevel,
-				retry,
-			),
+		const result = await generateSummary(
+			messagesToSummarize,
+			model,
+			settings.reserveTokens,
+			apiKey,
+			headers,
+			signal,
+			customInstructions,
+			previousSummary,
+			thinkingLevel,
+			retry,
+			summaryCall,
 		);
 		slices.push(result);
 		summary = result.summary;
@@ -801,40 +900,17 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	retry?: ProviderRetryPolicy,
+	summaryCall: SummaryCallRunner = (call) => call(headers),
 ): Promise<SummarySlice> {
-	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
-
-	const response = await completeWithProviderRetry(
-		() =>
-			completeSimple(
-				model,
-				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-				model.reasoning && thinkingLevel && thinkingLevel !== "off"
-					? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-					: { maxTokens, signal, apiKey, headers },
-			),
-		{ policy: retry, signal },
+	return generateBoundedSummary(
+		messages,
+		model,
+		Math.floor(0.5 * reserveTokens),
+		apiKey,
+		signal,
+		thinkingLevel,
+		retry,
+		summaryCall,
+		() => TURN_PREFIX_SUMMARIZATION_PROMPT,
 	);
-
-	if (response.stopReason === "error") {
-		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-
-	return {
-		summary: response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join("\n"),
-		usage: response.usage,
-	};
 }

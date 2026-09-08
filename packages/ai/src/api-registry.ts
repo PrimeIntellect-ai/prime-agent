@@ -1,3 +1,4 @@
+import type { CompactFunction } from "./compaction.js";
 import type {
 	Api,
 	AssistantMessageEventStream,
@@ -24,12 +25,16 @@ export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOpti
 	api: TApi;
 	stream: StreamFunction<TApi, TOptions>;
 	streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+	compact?: CompactFunction<TApi>;
+	supportsCompaction?: (model: Model<TApi>) => boolean;
 }
 
 interface ApiProviderInternal {
 	api: Api;
 	stream: ApiStreamFunction;
 	streamSimple: ApiStreamSimpleFunction;
+	compact?: CompactFunction;
+	supportsCompaction?: (model: Model<Api>) => boolean;
 }
 
 type RegisteredApiProvider = {
@@ -72,6 +77,15 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 			api: provider.api,
 			stream: wrapStream(provider.api, provider.stream),
 			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
+			supportsCompaction: provider.supportsCompaction
+				? (model) => model.api === provider.api && provider.supportsCompaction!(model as Model<TApi>)
+				: undefined,
+			compact: provider.compact
+				? (model, context, options) => {
+						if (model.api !== provider.api) throw new Error(`Mismatched compaction api: ${model.api}`);
+						return provider.compact!(model as Model<TApi>, context, options);
+					}
+				: undefined,
 		},
 		sourceId,
 	});

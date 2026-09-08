@@ -37,11 +37,29 @@ export function getModels<TProvider extends KnownProvider>(
 
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
 	const eligibleId =
-		model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-");
+		model.id === "gpt-5.4" ||
+		model.id === "gpt-5.5" ||
+		model.id === "gpt-5.6" ||
+		model.id.startsWith("gpt-5.6-") ||
+		model.id === "gpt-6-astra";
 	return (
 		eligibleId &&
 		((model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
 			(model.provider === "openai" && model.api === "openai-responses"))
+	);
+}
+
+/** Input limits can be smaller than the total input + output context window. */
+export function getModelInputLimit<TApi extends Api>(model: Model<TApi>): number {
+	const astraLimit =
+		model.provider === "openai" && model.api === "openai-responses" && model.id === "gpt-6-astra"
+			? 922_000
+			: model.contextWindow;
+	const configured = model.maxInputTokens;
+	return Math.min(
+		model.contextWindow,
+		astraLimit,
+		configured !== undefined && Number.isFinite(configured) && configured > 0 ? configured : model.contextWindow,
 	);
 }
 

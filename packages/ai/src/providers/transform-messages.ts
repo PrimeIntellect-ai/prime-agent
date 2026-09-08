@@ -1,3 +1,4 @@
+import { compactionMatchesModel } from "../compaction.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -71,6 +72,11 @@ export function transformMessages<TApi extends Api>(
 
 	const transformed = imageAwareMessages.map((msg) => {
 		if (msg.role === "user") {
+			if (msg.providerContext && !compactionMatchesModel(msg.providerContext, model)) {
+				throw new Error(
+					"Compaction checkpoint belongs to another model or provider; rebuild context from the session transcript",
+				);
+			}
 			return msg;
 		}
 

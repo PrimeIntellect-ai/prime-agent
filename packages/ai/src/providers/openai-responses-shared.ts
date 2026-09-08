@@ -127,6 +127,11 @@ export function convertResponsesMessages<TApi extends Api>(
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
+			if (msg.providerContext) {
+				// The server owns this opaque window; SDK unions can lag new response item types.
+				messages.push(...(msg.providerContext.items as unknown as ResponseInput));
+				continue;
+			}
 			if (typeof msg.content === "string") {
 				messages.push({
 					role: "user",

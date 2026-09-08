@@ -73,8 +73,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
-export const DAEMON_SCHEMA_REVISION = 27;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-962b8b4c5e35";
+// Revision 28 adds optional providerContext to compaction summary messages and maxInputTokens to models.
+// Both are backward-compatible response metadata; older clients render the existing summary text.
+export const DAEMON_SCHEMA_REVISION = 28;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-962b8b4c5e35";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -1198,6 +1200,8 @@ export type DaemonOutbound =
 	  };
 
 export const DAEMON_OUTBOUND_COMPATIBILITY = {
+	// Revision 28's opaque context is owned by the worker. Message/snapshot consumers
+	// may ignore it, so response and session channels retain their protocol-7 floor.
 	response: LEGACY_DAEMON_COMMAND,
 	session_list_progress: LEGACY_DAEMON_COMMAND,
 	session_list_item: LEGACY_DAEMON_COMMAND,

@@ -166,6 +166,7 @@ const ModelDefinitionSchema = Type.Object({
 		}),
 	),
 	contextWindow: Type.Optional(Type.Number()),
+	maxInputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
@@ -185,6 +186,7 @@ const ModelOverrideSchema = Type.Object({
 		}),
 	),
 	contextWindow: Type.Optional(Type.Number()),
+	maxInputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
@@ -340,6 +342,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	}
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
+	if (override.maxInputTokens !== undefined) result.maxInputTokens = override.maxInputTokens;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
 
 	if (override.cost) {
@@ -779,6 +782,7 @@ export class ModelRegistry {
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
 					contextWindow: modelDef.contextWindow ?? 128000,
+					maxInputTokens: modelDef.maxInputTokens,
 					maxTokens: modelDef.maxTokens ?? 16384,
 					headers: undefined,
 					compat,
@@ -1681,6 +1685,7 @@ export class ModelRegistry {
 					input: modelDef.input as ("text" | "image")[],
 					cost: modelDef.cost,
 					contextWindow: modelDef.contextWindow,
+					maxInputTokens: modelDef.maxInputTokens,
 					maxTokens: modelDef.maxTokens,
 					headers: undefined,
 					compat: modelDef.compat,
@@ -1727,6 +1732,7 @@ export interface ProviderConfigInput {
 		input: ("text" | "image")[];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
+		maxInputTokens?: number;
 		maxTokens: number;
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];

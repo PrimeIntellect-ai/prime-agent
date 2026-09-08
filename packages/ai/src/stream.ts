@@ -1,6 +1,7 @@
 import "./providers/register-builtins.js";
 
 import { getApiProvider } from "./api-registry.js";
+import type { CompactionOptions, ProviderCompactionResult } from "./compaction.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -13,6 +14,20 @@ import type {
 } from "./types.js";
 
 export { getEnvApiKey } from "./env-api-keys.js";
+
+export function supportsCompaction<TApi extends Api>(model: Model<TApi>): boolean {
+	const provider = resolveApiProvider(model.api);
+	return provider.compact !== undefined && (provider.supportsCompaction?.(model) ?? true);
+}
+
+export async function compactSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: CompactionOptions,
+): Promise<ProviderCompactionResult | undefined> {
+	if (!supportsCompaction(model)) return undefined;
+	return resolveApiProvider(model.api).compact?.(model, context, options);
+}
 
 function resolveApiProvider(api: Api) {
 	const provider = getApiProvider(api);
