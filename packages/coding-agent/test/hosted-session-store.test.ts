@@ -681,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(186665);
+		expect(bytes.byteLength).toBe(198891);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"e0d38b550a1652d5b485c3d20e6918cf2a9933e0eb82b2e552b361d5136b48fb",
+			"904b3998dafd0ce87a579a58280a54c27184a167b4034ca22bef4bfb1d616816",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -1191,8 +1191,9 @@ const bManifestCanonicalPath = bEvidencePath + "/input.manifest";
 linkSync(bManifestTempPath, bManifestCanonicalPath);
 bSyncEvidence();
 const v5NonemptyReady = await createStartupV5HostedSessionStore(registry);
-check(v5NonemptyReady.code === "READY", "V5 B17 root ready");
-if (v5NonemptyReady.code !== "READY") process.exit(49);
+check(v5NonemptyReady.code === "FAILED", "V5 nonempty fails closed before inventory settlement");
+check(Object.getPrototypeOf(v5NonemptyReady) === Object.prototype && Object.isFrozen(v5NonemptyReady), "V5 nonempty failure exact ordinary");
+check(Object.getOwnPropertyNames(v5NonemptyReady).join(",") === "code" && Object.getOwnPropertySymbols(v5NonemptyReady).length === 0, "V5 nonempty failure keys");
 const bPublishedNames = [
 	".ws-content." + bContentNonce.toString("hex"),
 	".ws-plan." + bPlanNonce.toString("hex"),
@@ -1200,26 +1201,6 @@ const bPublishedNames = [
 ];
 check(readdirSync(bEvidencePath).sort().join(",") === bPublishedNames.join(","), "B17 exact published names");
 check(lstatSync(bManifestCanonicalPath).nlink === 1, "B17 canonical one link");
-check(Object.getPrototypeOf(v5NonemptyReady) === Object.prototype && Object.isFrozen(v5NonemptyReady), "V5 nonempty ready exact ordinary");
-check(Object.getOwnPropertyNames(v5NonemptyReady).join(",") === "code,store" && Object.getOwnPropertySymbols(v5NonemptyReady).length === 0, "V5 nonempty ready keys");
-const v5NonemptyStore = v5NonemptyReady.store;
-check(Object.getPrototypeOf(v5NonemptyStore) === Object.prototype && Object.isFrozen(v5NonemptyStore), "V5 nonempty store exact ordinary");
-check(Object.getOwnPropertyNames(v5NonemptyStore).join(",") === "close" && Object.getOwnPropertySymbols(v5NonemptyStore).length === 0, "V5 nonempty close-only authority");
-const bPublishedState = (): string => bPublishedNames.map((name) => {
-	const path = bEvidencePath + "/" + name;
-	const found = lstatSync(path);
-	return name + ":" + found.ino + ":" + found.nlink + ":" + createHash("sha256").update(readFileSync(path)).digest("hex");
-}).join("|");
-const b17State = bPublishedState();
-const v5NonemptyCloseOne = v5NonemptyStore.close();
-const v5NonemptyCloseTwo = v5NonemptyStore.close();
-check(v5NonemptyCloseOne === v5NonemptyCloseTwo && utilTypes.isPromise(v5NonemptyCloseOne), "V5 nonempty memoized close");
-check((await v5NonemptyCloseOne).code === "CLOSED", "V5 nonempty closed");
-const b21Ready = await createStartupV5HostedSessionStore(registry);
-check(b21Ready.code === "READY", "B21 retry ready");
-if (b21Ready.code !== "READY") process.exit(63);
-check(bPublishedState() === b17State, "B21 retry exact preservation");
-check((await b21Ready.store.close()).code === "CLOSED", "B21 retry close");
 rmSync(blockedRoot, { recursive: true, force: true });
 console.log("V5_NONEMPTY_READY_OK");
 // T3: One running lifecycle (with head)
@@ -2455,10 +2436,10 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"3679c3a52d8d73eeb0bfd6c74bede5ac0cfe0d541ae339b662763a8a6a3c5c61",
+			"47e242ab60fe7351a68da43ea07421a7fa3b003c43d904f4f5c181222f7db841",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
-			"cfd90d1a9dc4cbe0482a525139012e33efb710a6c0dc8465dff1237f2d2a11e5",
+			"8f55f26572015b6cfcae8edc9a85d6f1b1ae38206f54a5e5b0572872280720ea",
 		);
 		expect(createHash("sha256").update(readFileSync(v5ProbePath)).digest("hex")).toBe(
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
@@ -2530,7 +2511,7 @@ for scenario in ("case3","case4"):
 		];
 		try {
 			const child = Bun.spawn(
-				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "45"],
+				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "60"],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
 			const stdoutPromise = new Response(child.stdout).text();

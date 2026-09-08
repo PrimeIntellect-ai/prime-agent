@@ -1928,7 +1928,7 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 				"elif v5_mode == _MODE_V4_COMPAT:",
 				"elif v5_mode == _MODE_V5_BLOCKED:",
 				"elif v5_mode == _MODE_V5_READY:",
-				"next_mode, kind, value = _dispatch_v5(current_opcode, payload, v5_mode)",
+				"next_mode, kind, value = _dispatch_v5(",
 				"fds.close_after(command_mark)",
 				"if fds.mark() != command_mark or fds.uncertain:",
 				"_root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)",
@@ -2077,6 +2077,96 @@ print("V5_B00_B13_PREFIX_MATRIX_OK 304")
 		const dispatch = pythonFunction(source, "_dispatch_v5").body;
 		expect(dispatch).toContain(`if opcode == _WS_BEGIN:
         return (v5_mode, "error", _E_BUSY)`);
+	});
+
+	test("V5 draft inventory reconstructs bounded reservations and emits exact transactions", async () => {
+		const source = await readFile(HELPER, "utf8");
+		for (const exact of [
+			"_WS_TRANSACTION = 0x83",
+			"_MAX_V5_ITEMS = 8",
+			"_V5_ITEM_RESERVATION = 1100000000",
+			"_V5_GLOBAL_RESERVATION = 8800000000",
+			"_WS_TRANSACTION_SIZE = 401",
+			"def _v5_collect_draft_transaction(",
+			"def _v5_collect_inventory(",
+			"def _cmd_v5_inventory(",
+		])
+			expect(source).toContain(exact);
+		const collect = pythonFunction(source, "_v5_collect_inventory").body;
+		expect(
+			tokensInOrder(collect, [
+				"entries = _list(root_fd)",
+				"lifecycle_count > 1024",
+				"_scan_lifecycle(",
+				"allow_v5_evidence=True",
+				"generation[0] != current_name",
+				"_v5_collect_draft_transaction(",
+				"items.append(item)",
+				"len(items) > _MAX_V5_ITEMS",
+				"outstanding += _V5_ITEM_RESERVATION - allocated",
+				"len(items) * _V5_ITEM_RESERVATION > _V5_GLOBAL_RESERVATION",
+				"return items, outstanding",
+			]),
+		).toBe(true);
+		const command = pythonFunction(source, "_cmd_v5_inventory").body;
+		expect(
+			tokensInOrder(command, [
+				"_v5_collect_inventory(",
+				"_write_frame(1, _WS_TRANSACTION, items[index])",
+				"_v5_zero_transactions(items)",
+			]),
+		).toBe(true);
+		const hello = pythonFunction(source, "_v5_handle_hello").body;
+		expect(
+			tokensInOrder(hello, [
+				"recover_v5_evidence=True",
+				"items, reconstructed = _v5_collect_inventory(",
+				"_v5_zero_transactions(items)",
+				'return (_MODE_V5_READY, "v5_ready", None)',
+			]),
+		).toBe(true);
+		const dispatch = pythonFunction(source, "_dispatch_v5").body;
+		expect(
+			tokensInOrder(dispatch, [
+				"if opcode == _WS_INVENTORY:",
+				"_cmd_v5_inventory(",
+				'return (v5_mode, "done", None)',
+				"if opcode == _WS_BEGIN:",
+				'return (v5_mode, "error", _E_BUSY)',
+			]),
+		).toBe(true);
+		const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+spec=importlib.util.spec_from_file_location("store_v5_inventory_probe",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128));plan_nonce=bytes((7,))*32;content_nonce=bytes((8,))*32
+plan=b"PIWSPLN1"+struct.pack(">I",17);content=b"PIWSCNT1"+struct.pack(">Q",23);manifest=b"PIWSIMF5"+bytes(8)+bytes(lifecycle)+bytes(generation)+binding+tx+plan_digest+struct.pack(">I",17)+struct.pack(">Q",23)+plan_nonce+content_nonce+bytes(20)
+parent="/private/tmp" if sys.platform=="darwin" else "/tmp";root=tempfile.mkdtemp(prefix="store-v5-inventory-",dir=parent)
+try:
+ generation_path=os.path.join(root,"generation");evidence=os.path.join(generation_path,"workspace-evidence");os.mkdir(generation_path,0o700);os.mkdir(evidence,0o700)
+ for name,data in ((".ws-plan."+plan_nonce.hex(),plan),(".ws-content."+content_nonce.hex(),content),("input.manifest",manifest)):
+  path=os.path.join(evidence,name);fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(fd,data);os.close(fd)
+ generation_fd=os.open(generation_path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds=module.Fds();fds.add(generation_fd)
+ try:
+  row,allocated=module._v5_collect_draft_transaction(fds,generation_fd,lifecycle,generation,os.getuid(),os.fstat(generation_fd).st_dev)
+  expected=bytearray(401);expected[0:32]=lifecycle;expected[32:64]=generation;expected[64:96]=binding;expected[96:128]=tx;expected[128:160]=plan_digest;struct.pack_into(">I",expected,160,17);struct.pack_into(">Q",expected,164,23);expected[216:224]=bytes((255,))*8;expected[384:392]=bytes((255,))*8;struct.pack_into(">Q",expected,392,1100000000);expected[400]=1
+  if allocated!=300 or row!=expected or fds.uncertain or fds.items!=[generation_fd]:raise RuntimeError("transaction")
+  module._zero(row);module._zero(expected)
+ finally:
+  if generation_fd in fds.items:fds.close(generation_fd)
+finally:shutil.rmtree(root,ignore_errors=True)
+print("V5_DRAFT_TRANSACTION_OK 401 300")
+`;
+		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+		const child = Bun.spawn([hostPython, "-c", probe, HELPER], { cwd: "/", env: {}, stdout: "pipe", stderr: "pipe" });
+		const stdoutPromise = new Response(child.stdout).text();
+		const stderrPromise = new Response(child.stderr).text();
+		const exitCode = await child.exited;
+		const stdout = await stdoutPromise;
+		const stderr = await stderrPromise;
+		expect(exitCode, stderr).toBe(0);
+		expect(stderr).toBe("");
+		expect(stdout).toBe("V5_DRAFT_TRANSACTION_OK 401 300\n");
 	});
 
 	test("static source keeps the hostile-input boundary and forbidden syntax closed", async () => {
