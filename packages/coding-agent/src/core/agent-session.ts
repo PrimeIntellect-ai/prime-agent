@@ -1154,7 +1154,7 @@ export class AgentSession {
 
 	private _goalState: GoalState = emptyGoalState();
 	private _goalAccountingStartedAt: number | undefined = undefined;
-	private _goalContinuationDeferred = false;
+	private _goalContinuationAwaitsRlmWork = false;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
@@ -1887,7 +1887,7 @@ export class AgentSession {
 	}
 
 	private _clearQueuedGoalContexts(): void {
-		this._goalContinuationDeferred = false;
+		this._goalContinuationAwaitsRlmWork = false;
 		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter(
 			(message) => message.customType !== GOAL_CONTEXT_CUSTOM_TYPE,
 		);
@@ -1919,7 +1919,7 @@ export class AgentSession {
 			updatedAt: now,
 		};
 		this._goalAccountingStartedAt = now;
-		this._goalContinuationDeferred = false;
+		this._goalContinuationAwaitsRlmWork = false;
 		this._setGoalState(goal);
 		return this._goalState;
 	}
@@ -2180,11 +2180,11 @@ export class AgentSession {
 		}
 	}
 
-	private _maybeResumeDeferredGoalContinuation(): void {
-		if (!this._goalContinuationDeferred) return;
+	private _maybeResumeGoalContinuationAfterRlmWork(): void {
+		if (!this._goalContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
-			this._goalContinuationDeferred = false;
+			this._goalContinuationAwaitsRlmWork = false;
 			return;
 		}
 		// Keep the deferral while admission is paused or the pump is suspended
@@ -2208,7 +2208,7 @@ export class AgentSession {
 					resumeIfIdle: true,
 				}),
 			);
-			this._goalContinuationDeferred = false;
+			this._goalContinuationAwaitsRlmWork = false;
 		} catch {
 			// Admission can race a new pause; roll back so the retry re-counts.
 			this._setGoalState(goalBeforeResume);
@@ -3411,10 +3411,10 @@ export class AgentSession {
 		// Delegating and ending the turn is correct behavior; hold the continuation
 		// until descendants settle instead of re-prompting a waiting parent.
 		if (this._hasUnsettledRlmQuiescenceWork()) {
-			this._goalContinuationDeferred = true;
+			this._goalContinuationAwaitsRlmWork = true;
 			return [];
 		}
-		this._goalContinuationDeferred = false;
+		this._goalContinuationAwaitsRlmWork = false;
 		try {
 			this._ensureGoalRuntimeActive(context.context);
 			const nextGoal = {
@@ -6854,7 +6854,7 @@ export class AgentSession {
 				this._sessionInputPumpEpoch++;
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
-				this._maybeResumeDeferredGoalContinuation();
+				this._maybeResumeGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6971,7 +6971,7 @@ export class AgentSession {
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
 		this._resumeSessionInputAdmission();
-		this._maybeResumeDeferredGoalContinuation();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
 	}
@@ -7536,8 +7536,8 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		if (!options.skipAbort) await this.abort();
 		let didCompact = false;
-		const compactionAbortController = new AbortController();
-		this._compactionAbortController = compactionAbortController;
+		const compactionAbort = new AbortController();
+		this._compactionAbortController = compactionAbort;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
@@ -7560,7 +7560,7 @@ export class AgentSession {
 				apiKey,
 				headers,
 				customInstructions,
-				signal: compactionAbortController.signal,
+				signal: compactionAbort.signal,
 			});
 
 			this._emit({
@@ -7592,11 +7592,7 @@ export class AgentSession {
 			});
 			throw error;
 		} finally {
-			const resumeGoal =
-				didCompact && !compactionAbortController.signal.aborted && this._goalState.status === "active";
-			if (this._compactionAbortController === compactionAbortController) {
-				this._compactionAbortController = undefined;
-			}
+			this._compactionAbortController = undefined;
 			this._reconnectToAgent();
 			if (this._compactionOperation === compactionOperation) {
 				this._compactionOperation = undefined;
@@ -7606,19 +7602,21 @@ export class AgentSession {
 			this._scheduleSessionInputPump();
 			if (didCompact) {
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+				if (this._goalState.status === "active" && !compactionAbort.signal.aborted) {
+					this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages() && !this.hasPendingSessionWork;
+					this.resumeQueuedWork();
+					if (this.agent.hasQueuedMessages()) this._schedulePostCompactionContinue();
+				}
 				if (hadPostCompactionContinue) {
 					this._schedulePostCompactionContinue(continueAfterSessionInput);
-				}
-				if (resumeGoal) {
-					if (!this.agent.hasQueuedMessages() && !this.hasPendingSessionWork) {
-						this._goalContinuationDeferred = true;
-					}
-					this.resumeQueuedWork();
 				}
 				// Queued agent or session-owned inputs resume the loop; defer refine
 				// behind them instead of interleaving it before their turns.
 				this._scheduleAutoRefineAfterCompaction(
-					hadPostCompactionContinue || this.agent.hasQueuedMessages() || this.unfinishedActionCount > 0,
+					this._goalContinuationAwaitsRlmWork ||
+						hadPostCompactionContinue ||
+						this.agent.hasQueuedMessages() ||
+						this.unfinishedActionCount > 0,
 				);
 			}
 		}
@@ -9831,7 +9829,7 @@ export class AgentSession {
 		this._abandonedRlmQuiescenceChildIds.add(run.id);
 		this._unsettledRlmChildRuns.delete(run);
 		run.settlement.resolve();
-		this._maybeResumeDeferredGoalContinuation();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
@@ -10160,7 +10158,7 @@ export class AgentSession {
 		run.settlement.resolve();
 		run.deletionReservation.resolve();
 		this._unsettledRlmChildRuns.delete(run);
-		this._maybeResumeDeferredGoalContinuation();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _observeRlmRunDeletionCleanup(
@@ -11138,7 +11136,7 @@ export class AgentSession {
 					run.settled = true;
 					run.settlement.resolve();
 					this._unsettledRlmChildRuns.delete(run);
-					this._maybeResumeDeferredGoalContinuation();
+					this._maybeResumeGoalContinuationAfterRlmWork();
 				}
 			}
 		})().catch(() => undefined);
