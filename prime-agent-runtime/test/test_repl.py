@@ -109,6 +109,19 @@ def one(events: list[dict], kind: str) -> dict | None:
     return matches[0] if matches else None
 
 
+def wait_for_host_request(repl: ReplProcess, events: list[dict]) -> dict:
+    request = one(events, "host_request")
+    while request is None:
+        event = repl.read_event()
+        if event.get("event") == "host_request":
+            request = event
+    return request
+
+
+def reply_ok(repl: ReplProcess, request: dict) -> None:
+    repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "result": {}}})
+
+
 class ReplTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repl = ReplProcess()
@@ -712,6 +725,335 @@ class ReplTest(unittest.TestCase):
                 return
             time.sleep(0.05)
         self.fail(f"bash child {pid} survived runtime shutdown")
+
+    def test_async_bash_completion_notifies_only_after_an_unawaited_creating_cell(self):
+        direct = self.repl.execute(
+            "bash-direct", "from rlm import bash\n(await bash('printf direct')).exit_code"
+        )
+        self.assertIsNone(one(direct, "host_request"))
+
+        eventual = self.repl.execute(
+            "bash-eventual",
+            "import asyncio\nhandle = bash('printf eventual')\nawait asyncio.sleep(0.1)\n(await handle).exit_code",
+        )
+        self.assertIsNone(one(eventual, "host_request"))
+
+        started = self.repl.execute(
+            "bash-detached", "handle = bash('sleep 0.05; printf detached')\nhandle.pid"
+        )
+        pid = int(one(started, "result")["text"])
+        request = wait_for_host_request(self.repl, started)
+        self.assertEqual(
+            request["data"],
+            {
+                "type": "bash.completed",
+                "pid": pid,
+                "command": "sleep 0.05; printf detached",
+                "exitCode": 0,
+            },
+        )
+        reply_ok(self.repl, request)
+        inspected = self.repl.execute("bash-inspect", "handle.poll().output")
+        self.assertIn("detached", one(inspected, "result")["text"])
+
+    def test_wrapper_awaits_in_creating_cell_suppress_bash_completion(self):
+        def task_group(label: str, await_expression: str) -> str:
+            return "\n".join(
+                [
+                    f"handle = bash('printf {label}')",
+                    "async def consume():",
+                    f"    return {await_expression}",
+                    "async with asyncio.TaskGroup() as group:",
+                    "    task = group.create_task(consume())",
+                    "task.result().output",
+                ]
+            )
+
+        snippets = {
+            "gather": "(await asyncio.gather(bash('printf gather')))[0].output",
+            "wait-for": "(await asyncio.wait_for(bash('printf wait-for'), 1)).output",
+            "shield": "(await asyncio.shield(bash('printf shield'))).output",
+            "nested": "(await asyncio.shield(asyncio.gather(bash('printf nested'))))[0].output",
+            "as-completed": (
+                "[(await completed).output for completed in "
+                "asyncio.as_completed([bash('printf as-completed')])]"
+            ),
+            "as-completed-delayed-consumer": (
+                "handle = bash('sleep 0.15; printf as-completed-delayed-consumer')\n"
+                "completed = next(iter(asyncio.as_completed([handle])))\n"
+                "await asyncio.sleep(0)\n"
+                "(await completed).output"
+            ),
+            "as-completed-finished-handle": (
+                "handle = bash('printf as-completed-finished-handle')\n"
+                "task = asyncio.ensure_future(handle)\n"
+                "await asyncio.to_thread(handle._done.wait)\n"
+                "await asyncio.sleep(0.01)\n"
+                "assert task.done()\n"
+                "(await handle).output"
+            ),
+            "as-completed-nested": (
+                "[(await completed)[0].output for completed in "
+                "asyncio.as_completed([asyncio.shield(asyncio.gather(bash('printf as-completed-nested')))])]"
+            ),
+            "wait": "\n".join(
+                [
+                    "handle = bash('printf wait')",
+                    "task = asyncio.ensure_future(handle)",
+                    "await asyncio.wait({task})",
+                    "task.result().output",
+                ]
+            ),
+            "task-group": task_group("task-group", "await handle"),
+            "task-group-gather": task_group("task-group-gather", "(await asyncio.gather(handle))[0]"),
+            "task-group-shield": task_group("task-group-shield", "await asyncio.shield(handle)"),
+        }
+        if sys.version_info >= (3, 13):
+            snippets["as-completed-async"] = (
+                "[completed.result().output async for completed in "
+                "asyncio.as_completed([bash('printf as-completed-async')])]"
+            )
+        for label, snippet in snippets.items():
+            with self.subTest(label=label):
+                completed = self.repl.execute(
+                    f"bash-wrapper-{label}",
+                    f"from rlm import bash\nimport asyncio\n{snippet}",
+                )
+                self.assertIn(label, one(completed, "result")["text"])
+                probe = self.repl.execute(f"bash-wrapper-{label}-probe", "await asyncio.sleep(0.05)")
+                request = one(probe, "host_request")
+                if request is not None:
+                    reply_ok(self.repl, request)
+                self.assertIsNone(request)
+
+    def test_as_completed_outside_creating_cell_keeps_one_bash_completion(self):
+        snippets = {
+            "no-await": (
+                "iterator = asyncio.as_completed([handle])\n"
+                "next(iterator).close()\n"
+                "await asyncio.sleep(0.05)"
+            ),
+            "detached": (
+                "async def consume():\n"
+                "    for completed in asyncio.as_completed([handle]):\n"
+                "        await completed\n"
+                "consumer = asyncio.create_task(consume())\n"
+                "await asyncio.sleep(0.05)"
+            ),
+            "later-cell": "iterator = asyncio.as_completed([handle])",
+        }
+        for label, snippet in snippets.items():
+            with self.subTest(label=label):
+                command = f"printf {label}"
+                events = self.repl.execute(
+                    f"as-completed-{label}",
+                    f"from rlm import bash\nimport asyncio\nhandle = bash({command!r})\n{snippet}",
+                )
+                if label == "later-cell":
+                    events += self.repl.execute(
+                        "as-completed-later-await",
+                        "for completed in iterator:\n    await completed",
+                    )
+                events += self.repl.execute(
+                    f"as-completed-{label}-probe", "await asyncio.sleep(0.05)"
+                )
+                requests = [event for event in events if event.get("event") == "host_request"]
+                for request in requests:
+                    reply_ok(self.repl, request)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]["data"]["type"], "bash.completed")
+                self.assertEqual(requests[0]["data"]["command"], command)
+                self.assertFalse(any(event.get("event") == "error" for event in events))
+
+    def test_background_task_await_does_not_suppress_bash_completion(self):
+        code = "\n".join(
+            [
+                "from rlm import bash",
+                "import asyncio",
+                "task_handle = bash('sleep 0.05; printf background-waiter')",
+                "async def consume():",
+                "    globals()['task_result'] = await task_handle",
+                "waiter = asyncio.create_task(consume())",
+                "bookkeeping = asyncio.get_running_loop().create_future()",
+                "def callback_for(marker):",
+                "    return lambda _: marker.cancelled()",
+                "waiter.add_done_callback(callback_for(bookkeeping))",
+                "asyncio.get_running_loop().call_later(0.02, bookkeeping.set_result, None)",
+                "await bookkeeping",
+                "task_handle.pid",
+            ]
+        )
+        started = self.repl.execute("bash-task-waiter", code)
+        pid = int(one(started, "result")["text"])
+        request = wait_for_host_request(self.repl, started)
+        self.assertEqual(request["data"]["type"], "bash.completed")
+        self.assertEqual(request["data"]["pid"], pid)
+        reply_ok(self.repl, request)
+
+    def test_bash_activity_and_notice_wait_for_group_reap(self):
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        for awaited in (False, True):
+            with self.subTest(awaited=awaited):
+                events = self.repl.execute(
+                    "group-start",
+                    "from rlm import bash\nimport asyncio\n"
+                    "handle = bash('sleep 30 &')\n"
+                    + ("await handle\n" if awaited else "")
+                    + "await asyncio.wait_for(handle._wait(), 3)\nhandle._group_alive()",
+                )
+                self.assertEqual(one(events, "result")["text"], "True")
+                self.assertIsNone(one(events, "host_request"))
+                self.assertFalse(
+                    any(event.get("data", {}).get(mime, {}).get("active") is False for event in events)
+                )
+                events += self.repl.execute("group-stop", "handle.kill()")
+                requests = []
+                cursor = 0
+                while True:
+                    for event in events[cursor:]:
+                        if event.get("event") == "host_request":
+                            requests.append(event)
+                            reply_ok(self.repl, event)
+                    cursor = len(events)
+                    if any(event.get("data", {}).get(mime, {}).get("active") is False for event in events):
+                        break
+                    events.append(self.repl.read_event())
+                self.assertEqual(len(requests), 0 if awaited else 1)
+                checked = self.repl.execute(
+                    "group-reaped", "await asyncio.wait_for(handle._wait_reaped(), 1)\nhandle._reaped"
+                )
+                self.assertEqual(one(checked, "result")["text"], "True")
+
+    def test_cancelled_released_bash_await_keeps_completion_notice(self):
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        for released in (False, True):
+            with self.subTest(released=released):
+                events = self.repl.execute(
+                    "cancel-start",
+                    "from rlm import bash\nimport asyncio\n"
+                    "handle = bash('sleep 0.15; printf finished')\n"
+                    + ("handle.pid\n" if released else "")
+                    + "try:\n    await asyncio.wait_for(handle, 0.01)\n"
+                    "except TimeoutError:\n    pass\nhandle._group_alive()",
+                )
+                self.assertEqual(one(events, "result")["text"], str(released))
+                requests = []
+                cursor = 0
+                while True:
+                    for event in events[cursor:]:
+                        if event.get("event") == "host_request":
+                            requests.append(event)
+                            reply_ok(self.repl, event)
+                    cursor = len(events)
+                    if any(event.get("data", {}).get(mime, {}).get("active") is False for event in events):
+                        break
+                    events.append(self.repl.read_event())
+                self.assertEqual(len(requests), 1 if released else 0)
+                checked = self.repl.execute("cancel-result", "handle.poll().output")
+                self.assertEqual(one(checked, "result")["text"], "'finished'" if released else "''")
+
+    def test_interrupt_during_bash_notifier_construction_rolls_back_activity(self):
+        code = "\n".join(
+            [
+                "from rlm import bash, repl as bridge",
+                "import sys, threading, asyncio, inspect",
+                "def stop_at_notice_construction(frame, event, arg):",
+                "    coro = frame.f_locals.get('coro')",
+                "    if (event == 'call' and frame.f_code.co_name == 'create_task'",
+                "            and getattr(getattr(coro, 'cr_code', None), 'co_name', None)",
+                "            == '_notify_background_completion'):",
+                "        globals()['unscheduled_notice'] = coro",
+                "        globals()['interrupted_handle'] = coro.cr_frame.f_locals['self']",
+                "        bridge.emit({'application/json': {'at_notice_create_task': True}})",
+                "        threading.Event().wait(10)",
+                "    return stop_at_notice_construction",
+                "sys.settrace(stop_at_notice_construction)",
+                "handle = bash('sleep 30')",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "construct", "code": code})
+        events = []
+        while True:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("data", {}).get("application/json", {}).get("at_notice_create_task"):
+                break
+        self.repl.send({"type": "interrupt", "id": "construct"})
+        events += self.repl.until_done("construct")
+        self.assertEqual(one(events, "done")["status"], "error")
+        self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        activity = [event["data"][mime] for event in events if mime in event.get("data", {})]
+        self.assertEqual([item["active"] for item in activity], [True, False])
+        self.assertEqual(activity[0]["id"], activity[1]["id"])
+        checked = self.repl.execute(
+            "construct-check",
+            "sys.settrace(None)\n"
+            "assert await interrupted_handle._await_group_death(3)\n"
+            "(inspect.getcoroutinestate(unscheduled_notice), interrupted_handle._reap_callback, "
+            "interrupted_handle._group_alive())",
+        )
+        self.assertEqual(one(checked, "result")["text"], "('CORO_CLOSED', None, False)")
+
+    def test_rejected_bash_completion_reports_safe_stderr_and_releases_activity(self):
+        mime = "application/vnd.prime-agent.bash-activity+json"
+        for reply in ({"status": "error", "error": "secret-host-error"}, {}, {"status": "ok"}):
+            with self.subTest(reply=reply):
+                events = self.repl.execute(
+                    "ack-start", "from rlm import bash\nhandle = bash('printf secret-command')"
+                )
+                request = wait_for_host_request(self.repl, events)
+                self.repl.send({"type": "host_reply", "id": request["id"], "data": reply})
+                after = []
+                while not any(
+                    event.get("data", {}).get(mime, {}).get("active") is False for event in after
+                ):
+                    after.append(self.repl.read_event())
+                diagnostic = stream_text(after, "stderr")
+                if reply.get("status") == "ok":
+                    self.assertEqual(diagnostic, "")
+                else:
+                    self.assertEqual(
+                        diagnostic,
+                        f"Background bash completion follow-up for pid {request['data']['pid']} "
+                        "was not accepted. Inspect the saved handle with poll(), output(), or tail().\n",
+                    )
+                self.assertIsNone(one(after, "host_request"))
+                checked = self.repl.execute("ack-check", "handle._reaped, handle.poll().exit_code")
+                self.assertEqual(one(checked, "result")["text"], "(True, 0)")
+
+    def test_reused_request_id_does_not_capture_old_cell_bash_completion(self):
+        setup = "\n".join(
+            [
+                "from rlm import bash",
+                "import asyncio",
+                "reuse_gate = asyncio.Event()",
+                "async def launch_after_cell():",
+                "    await reuse_gate.wait()",
+                "    globals()['reused_handle'] = bash('printf reused-id')",
+                "asyncio.create_task(launch_after_cell())",
+            ]
+        )
+        self.repl.execute("reused-cell-id", setup)
+
+        self.repl.send(
+            {
+                "type": "execute",
+                "id": "reused-cell-id",
+                "code": "reuse_gate.set()\nawait asyncio.sleep(0.2)",
+            }
+        )
+        request = None
+        while True:
+            event = self.repl.read_event()
+            if event.get("event") == "host_request":
+                request = event
+                break
+            self.assertFalse(event.get("event") == "done" and event.get("id") == "reused-cell-id")
+        self.assertEqual(request["data"]["type"], "bash.completed")
+        self.assertEqual(request["data"]["command"], "printf reused-id")
+        reply_ok(self.repl, request)
+        self.assertEqual(one(self.repl.until_done("reused-cell-id"), "done")["status"], "ok")
 
     def test_protocol_framing_under_noise(self):
         setup = "\n".join(

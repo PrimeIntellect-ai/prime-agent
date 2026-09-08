@@ -13,6 +13,7 @@ import {
 	statSync,
 	symlinkSync,
 	type writeFileSync,
+	type writeSync as writeSyncFs,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -22,27 +23,33 @@ type ChmodSync = typeof chmodSync;
 type ChownSync = typeof chownSync;
 type RenameSync = typeof renameSync;
 type WriteFileSync = typeof writeFileSync;
+type WriteSync = typeof writeSyncFs;
 
 const fsMocks = vi.hoisted(() => ({
 	actualWriteFileSync: undefined as WriteFileSync | undefined,
+	actualWriteSync: undefined as WriteSync | undefined,
 	chmodSync: vi.fn<ChmodSync>(),
 	chownSync: vi.fn<ChownSync>(),
 	renameSync: vi.fn<RenameSync>(),
 	writeFileSync: vi.fn<WriteFileSync>(),
+	writeSync: vi.fn<WriteSync>(),
 }));
 vi.mock("node:fs", () => {
 	const actual = require("node:fs");
 	fsMocks.actualWriteFileSync = actual.writeFileSync;
+	fsMocks.actualWriteSync = actual.writeSync;
 	fsMocks.chmodSync.mockImplementation(actual.chmodSync);
 	fsMocks.chownSync.mockImplementation(actual.chownSync);
 	fsMocks.renameSync.mockImplementation(actual.renameSync);
 	fsMocks.writeFileSync.mockImplementation(actual.writeFileSync);
+	fsMocks.writeSync.mockImplementation(actual.writeSync);
 	return {
 		...actual,
 		chmodSync: fsMocks.chmodSync,
 		chownSync: fsMocks.chownSync,
 		renameSync: fsMocks.renameSync,
 		writeFileSync: fsMocks.writeFileSync,
+		writeSync: fsMocks.writeSync,
 	};
 });
 
@@ -100,13 +107,13 @@ describe("SessionManager.flushNow", () => {
 		mgr.flushNow();
 		const file = mgr.getSessionFile()!;
 		const before = readFileSync(file);
-		const tempPrefix = `.${basename(file)}.`;
+		const tempPrefix = `${basename(file)}.`;
 
 		mgr.appendMessage({ role: "user", content: "pending", timestamp: Date.now() });
-		fsMocks.writeFileSync.mockImplementationOnce((path, data, options) => {
-			fsMocks.actualWriteFileSync!(path, Buffer.from(String(data)).subarray(0, 12), options);
+		fsMocks.writeSync.mockImplementationOnce(((fd: number, data: string) => {
+			fsMocks.actualWriteSync!(fd, Buffer.from(String(data)).subarray(0, 12));
 			throw new Error("disk full");
-		});
+		}) as unknown as WriteSync);
 
 		expect(() => mgr.flushNow()).toThrow("disk full");
 		expect(readFileSync(file)).toEqual(before);
@@ -137,7 +144,7 @@ describe("SessionManager.flushNow", () => {
 		expect(fsMocks.chmodSync).toHaveBeenCalledWith(tempPath, before.mode & 0o777);
 		expect(fsMocks.renameSync).toHaveBeenCalledWith(tempPath, join(dirname(tempPath as string), basename(file)));
 		expect(fsMocks.chownSync.mock.invocationCallOrder[0]!).toBeLessThan(
-			fsMocks.chmodSync.mock.invocationCallOrder[0]!,
+			fsMocks.renameSync.mock.invocationCallOrder[0]!,
 		);
 		expect(fsMocks.chmodSync.mock.invocationCallOrder[0]!).toBeLessThan(
 			fsMocks.renameSync.mock.invocationCallOrder[0]!,
@@ -157,7 +164,7 @@ describe("SessionManager.flushNow", () => {
 		mgr.flushNow();
 		const file = mgr.getSessionFile()!;
 		const before = readFileSync(file);
-		const tempPrefix = `.${basename(file)}.`;
+		const tempPrefix = `${basename(file)}.`;
 		const permissionError = Object.assign(new Error("operation not permitted"), { code: "EPERM" });
 		fsMocks.chownSync.mockImplementationOnce(() => {
 			throw permissionError;
@@ -346,8 +353,10 @@ function failNextOutcomeAppend(mgr: SessionManager, file: string): void {
 	};
 }
 
-const failAfterPartialTempWrite: WriteFileSync = (path, data, options) => {
-	fsMocks.actualWriteFileSync!(path, Buffer.from(String(data)).subarray(0, 12), options);
+const failAfterPartialTempWrite: WriteSync = (fd: number, data: NodeJS.ArrayBufferView | string) => {
+	const bytes =
+		typeof data === "string" ? Buffer.from(data) : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+	fsMocks.actualWriteSync!(fd, bytes.subarray(0, 12));
 	throw new Error("repair failed");
 };
 
@@ -416,7 +425,7 @@ describe("SessionManager.appendCustomMessageEntryWithRollback", () => {
 	it("preserves old history when rollback repair fails", () => {
 		const { mgr, file, before } = createPersistedSessionForRollbackTest();
 		failNextOutcomeAppend(mgr, file);
-		fsMocks.writeFileSync.mockImplementationOnce(failAfterPartialTempWrite);
+		fsMocks.writeSync.mockImplementationOnce(failAfterPartialTempWrite);
 
 		expect(() => mgr.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).toThrow("append failed");
 		expect(readFileSync(file).subarray(0, before.length)).toEqual(before);
@@ -425,7 +434,7 @@ describe("SessionManager.appendCustomMessageEntryWithRollback", () => {
 	it("repairs a torn tail on the next successful retry", () => {
 		const { mgr, file, before } = createPersistedSessionForRollbackTest();
 		failNextOutcomeAppend(mgr, file);
-		fsMocks.writeFileSync.mockImplementationOnce(failAfterPartialTempWrite);
+		fsMocks.writeSync.mockImplementationOnce(failAfterPartialTempWrite);
 		expect(() => mgr.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).toThrow();
 
 		mgr.flushNow();

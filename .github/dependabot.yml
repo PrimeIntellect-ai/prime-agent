@@ -3,7 +3,7 @@
 # from cooldown by design, so CVE fixes still arrive promptly.
 version: 2
 updates:
-  - package-ecosystem: npm
+  - package-ecosystem: bun
     directory: /
     schedule:
       interval: weekly

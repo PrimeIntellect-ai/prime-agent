@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
-import { afterEach, describe, expect, it } from "vitest";
+import { lockSync } from "proper-lockfile";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
 	getWindowsProcessStartId,
+	isRenameTargetContention,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 	SessionAlreadyActiveError,
@@ -116,31 +117,50 @@ describe("session leases", () => {
 		lease?.release();
 	});
 
+	it("never reclaims a lease whose owner file cannot be read", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "unreadable.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		// owner.json as a directory: every read fails with a non-ENOENT error, the
+		// same shape as a transient EPERM/EBUSY on Windows. That may be a LIVE
+		// lease, so acquisition must fail instead of destroying it.
+		mkdirSync(join(lockDirectory, "owner.json"), { recursive: true });
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("intruder"))).toThrow(
+			"Could not acquire session lease",
+		);
+		expect(existsSync(join(lockDirectory, "owner.json"))).toBe(true);
+	});
+
 	it("reports guard contention as a coordination failure", () => {
 		const agentDir = createTempDir();
 		const sessionPath = canonicalSessionPath(join(agentDir, "session.jsonl"));
 		const key = createHash("sha256").update(sessionPath).digest("hex");
 		const leaseRoot = join(agentDir, "session-leases");
 		const lockDirectory = join(leaseRoot, `${key}.lock`);
-		mkdirSync(lockDirectory, { recursive: true });
-		// Create a guard directory (same structure proper-lockfile uses for a held lock)
-		// with a far-future mtime. This simulates an externally-held guard whose owner is
-		// not in this process, so withLeaseGuard's retry loop cannot acquire it. The future
-		// mtime prevents Bun's slow Atomics.wait(~81ms per 10ms tick, ~6.6s for 100 retries)
-		// from exceeding the 5000ms stale threshold and having proper-lockfile reclaim it.
-		mkdirSync(`${lockDirectory}.guard`);
-		const futureMtime = new Date(Date.now() + 60_000);
-		utimesSync(`${lockDirectory}.guard`, futureMtime, futureMtime);
-
-		let thrown: unknown;
+		mkdirSync(leaseRoot, { recursive: true });
+		const release = lockSync(lockDirectory, {
+			realpath: false,
+			lockfilePath: `${lockDirectory}.guard`,
+			stale: 5000,
+		});
+		// Keep the owner fresh while exercising the bounded synchronous retry count.
+		const wait = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
 		try {
-			acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-a"));
-		} catch (error) {
-			thrown = error;
+			let thrown: unknown;
+			try {
+				acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-a"));
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown).toBeInstanceOf(Error);
+			expect(thrown).not.toBeInstanceOf(SessionAlreadyActiveError);
+			expect((thrown as Error).message).toContain("Could not coordinate session lease");
+		} finally {
+			wait.mockRestore();
+			release();
 		}
-		expect(thrown).toBeInstanceOf(Error);
-		expect(thrown).not.toBeInstanceOf(SessionAlreadyActiveError);
-		expect((thrown as Error).message).toContain("Could not coordinate session lease");
 	});
 
 	it("treats symlink aliases as the same persisted session", () => {
@@ -179,6 +199,81 @@ describe("session leases", () => {
 		const lease = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"));
 		expect(lease?.sessionPath).toBe(sessionPath);
 		lease?.release();
+	});
+
+	it("fails closed on corrupt owner.json instead of reclaiming the lease", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "corrupt.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(join(lockDirectory, "owner.json"), "this is not json");
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow("Corrupt");
+	});
+
+	it("fails closed on owner.json with missing required fields", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "partial.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ version: 1, token: "orphan" }));
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow("Corrupt");
+	});
+
+	it("reclaims a lease when owner.json is absent", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "absent-lock.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		const lease = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"));
+		expect(lease?.sessionPath).toBe(sessionPath);
+		lease?.release();
+	});
+
+	it("isRenameTargetContention returns true for EEXIST and ENOTEMPTY", () => {
+		expect(isRenameTargetContention("/tmp", "EEXIST")).toBe(true);
+		expect(isRenameTargetContention("/tmp", "ENOTEMPTY")).toBe(true);
+	});
+
+	it("isRenameTargetContention returns false for EPERM on a nonexistent target", () => {
+		const dir = createTempDir();
+		const missing = join(dir, "nonexistent.lock");
+		// Target does not exist, so EPERM is a real permission error.
+		// No existing target and platform does not matter for that case.
+		expect(isRenameTargetContention(missing, "EPERM")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns true for EPERM on an existing target", () => {
+		const dir = createTempDir();
+		const target = join(dir, "existing.lock");
+		mkdirSync(target, { recursive: true });
+		// Target exists, so EPERM from renameSync means contention on Windows.
+		expect(isRenameTargetContention(target, "EPERM", "win32")).toBe(true);
+		expect(isRenameTargetContention(target, "EPERM", "darwin")).toBe(false);
+		expect(isRenameTargetContention(target, "EPERM", "linux")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns true for EACCES on an existing target", () => {
+		const dir = createTempDir();
+		const target = join(dir, "existing-eacces.lock");
+		mkdirSync(target, { recursive: true });
+		expect(isRenameTargetContention(target, "EACCES", "win32")).toBe(true);
+		expect(isRenameTargetContention(target, "EACCES", "darwin")).toBe(false);
+		expect(isRenameTargetContention(target, "EACCES", "linux")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns false for EACCES on a nonexistent target", () => {
+		const dir = createTempDir();
+		const missing = join(dir, "missing-eacces.lock");
+		expect(isRenameTargetContention(missing, "EACCES")).toBe(false);
+	});
+
+	it("isRenameTargetContention returns false for unrelated error codes", () => {
+		expect(isRenameTargetContention("/tmp", "EIO")).toBe(false);
+		expect(isRenameTargetContention("/tmp", "EBUSY")).toBe(false);
+		expect(isRenameTargetContention("/tmp", undefined)).toBe(false);
 	});
 
 	it("is inert for direct SDK runtimes unless worker isolation enables it", () => {

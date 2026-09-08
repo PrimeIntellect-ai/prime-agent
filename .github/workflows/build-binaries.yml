@@ -353,6 +353,7 @@ jobs:
           test -f "$PRODUCTION_DIR/latest.json"
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
+          (cd "$PRODUCTION_DIR" && sha256sum --check --strict SHA256SUMS)
 
           archive_count=0
           for artifact in "$PRODUCTION_DIR"/*.tar.gz; do
@@ -441,6 +442,7 @@ jobs:
           test -f "$BETA_DIR/beta.json"
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
+          (cd "$BETA_DIR" && sha256sum --check --strict SHA256SUMS)
 
           archive_count=0
           for artifact in "$BETA_DIR"/*.tar.gz; do
