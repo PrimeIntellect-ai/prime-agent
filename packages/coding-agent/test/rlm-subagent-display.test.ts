@@ -1,5 +1,6 @@
 import type fs from "node:fs";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -14,8 +15,9 @@ const { readDisplayFile, renameDisplayFile } = vi.hoisted(() => ({
 	readDisplayFile: vi.fn(),
 	renameDisplayFile: vi.fn(),
 }));
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof fs>();
+const __fs = createRequire(import.meta.url)("node:fs") as typeof fs;
+vi.mock("node:fs", () => {
+	const actual = __fs;
 	return {
 		...actual,
 		readFileSync: readDisplayFile.mockImplementation(actual.readFileSync),

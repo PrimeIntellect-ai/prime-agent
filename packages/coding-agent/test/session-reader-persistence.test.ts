@@ -1,3 +1,4 @@
+import type * as FsModule from "node:fs";
 import {
 	appendFileSync,
 	existsSync,
@@ -8,13 +9,15 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const io = vi.hoisted(() => ({ target: "", streams: 0 }));
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+const __fs = createRequire(import.meta.url)("node:fs") as typeof FsModule;
+vi.mock("node:fs", () => {
+	const actual = __fs;
 	return {
 		...actual,
 		createReadStream: ((...args: Parameters<typeof actual.createReadStream>) => {

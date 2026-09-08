@@ -92,7 +92,8 @@ describe("assistant Markdown file links", () => {
 				openHyperlink(url: string): void;
 			};
 			ui.openHyperlink(targets[0]);
-			expect(onOpenUrl).toHaveBeenCalledExactlyOnceWith(reportUrl);
+			expect(onOpenUrl).toHaveBeenCalledTimes(1);
+			expect(onOpenUrl).toHaveBeenCalledWith(reportUrl);
 		},
 	);
 

@@ -9,6 +9,7 @@ import {
 	writeFileSync,
 	type writeSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,8 +21,9 @@ const linkSweep = vi.hoisted(() => ({ remaining: 0 }));
 const asideStatFault = vi.hoisted(() => ({ remaining: 0, plantRivalAt: undefined as string | undefined }));
 const renameFault = vi.hoisted(() => ({ code: "", remaining: 0, calls: 0 }));
 const renamePerformThenThrow = vi.hoisted(() => ({ remaining: 0 }));
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof FsModule>();
+const __fs = createRequire(import.meta.url)("node:fs") as typeof FsModule;
+vi.mock("node:fs", () => {
+	const actual = __fs;
 	return {
 		...actual,
 		renameSync: ((from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {

@@ -13,7 +13,7 @@
   RLM-native terminal coding and research harness.
 </p>
 
-Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mono), but it is now developed and distributed independently. This workspace retains inherited `@earendil-works/pi-*` source package identifiers, the `pi` package manifest key, and a source-package `pi` bin entry for internal compatibility. Public releases are currently versioned tarball artifacts installed by the scripts below; release packaging rewrites the application package and command to `prime-agent`. Do not use the inherited npm package as the Prime Agent install path.
+Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mono), but it is now developed and distributed independently. This workspace retains inherited `@earendil-works/pi-*` source package identifiers, the `pi` package manifest key, and a source-package `pi` bin entry for internal compatibility. Public releases are compiled Bun binary archives installed by the scripts below; release packaging ships the application and command as `prime-agent`. Do not use the inherited npm package as the Prime Agent install path.
 
 ## Table of Contents
 

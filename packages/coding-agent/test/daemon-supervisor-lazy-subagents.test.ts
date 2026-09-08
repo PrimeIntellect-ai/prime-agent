@@ -19,6 +19,9 @@ interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
 	start(): Promise<void>;
 	cleanupSupervisorResources(): Promise<void>;
+	clearIdleEvictionTimer(): void;
+	clearRosterWatchdogTimer(): void;
+	catalog: { stop?: () => Promise<void> };
 	refreshWorkerSummaries(worker: WorkerFixture): Promise<void>;
 	findSummaryInWorker(worker: WorkerFixture, selector: string): SessionSummary | undefined;
 	createOrReuseWorker(
@@ -55,10 +58,32 @@ interface WorkerFixture {
 }
 
 const tempDirs: string[] = [];
+const supervisors: SupervisorInternals[] = [];
 
-afterEach(() => {
+afterEach(async () => {
+	for (const supervisor of supervisors.splice(0)) {
+		supervisor.clearIdleEvictionTimer();
+		supervisor.clearRosterWatchdogTimer();
+		await supervisor.catalog.stop?.();
+	}
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
+
+function createSupervisor(directory: string): SupervisorInternals {
+	const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+		defaultSessionConfig: { agentDir: directory, cwd: directory },
+		descriptorDir: join(directory, "workers"),
+	}) as unknown as SupervisorInternals;
+	supervisors.push(supervisor);
+	return supervisor;
+}
+
+function capturePromise<T>(promise: Promise<T>): Promise<{ value?: T; error?: unknown }> {
+	return promise.then(
+		(value) => ({ value }),
+		(error: unknown) => ({ error }),
+	);
+}
 
 function summary(overrides: Partial<SessionSummary> & Pick<SessionSummary, "id" | "sessionId">): SessionSummary {
 	return {
@@ -98,10 +123,7 @@ describe("daemon supervisor passive subagent topology", () => {
 	it("finds a child summary by its displayed session ID suffix", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-child-suffix-"));
 		tempDirs.push(directory);
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const child = summary({
 			id: "bbbb6666777788889999cccc",
 			activeSessionId: "bbbb6666777788889999cccc",
@@ -116,10 +138,7 @@ describe("daemon supervisor passive subagent topology", () => {
 	it("rejects an explicit root name that collides with a saved root", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-root-name-"));
 		tempDirs.push(directory);
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const launchWorker = vi.fn();
 		Object.assign(supervisor, {
 			catalog: {
@@ -160,10 +179,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		if (!forkedPath) throw new Error("Missing forked session path");
 		const forkedInfo = await readSessionInfo(forkedPath);
 		if (!forkedInfo) throw new Error("Missing forked session info");
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		Object.assign(supervisor, {
 			catalog: {
 				siblings: vi.fn(async () => [forkedInfo]),
@@ -193,10 +209,7 @@ describe("daemon supervisor passive subagent topology", () => {
 	it("normalizes explicit root names before supervisor validation and launch", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-normalized-root-name-"));
 		tempDirs.push(directory);
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const launchWorker = vi.fn();
 		Object.assign(supervisor, {
 			catalog: {
@@ -243,10 +256,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			allMessagesText: "",
 		};
 		const duplicate = { ...target, id: "duplicate", path: duplicatePath, name: "taken" };
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		Object.assign(supervisor, {
 			rlmLedgerSiblings: vi.fn(async () => [target]),
 			catalog: {
@@ -263,10 +273,7 @@ describe("daemon supervisor passive subagent topology", () => {
 	it("retains a legacy child's parent edge when its depth is unknown", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-legacy-family-"));
 		tempDirs.push(directory);
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const parentPath = join(directory, "parent.jsonl");
 		const child = supervisor.familyCatalogEntry(
 			summary({
@@ -312,10 +319,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		};
 		const target = { ...base, id: "target", path: join(directory, "target.jsonl"), parentSessionPath, rlmDepth: 1 };
 		const legacy = { ...base, id: "legacy", path: join(directory, "legacy.jsonl"), parentSessionPath, name: "taken" };
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 
 		expect(() => supervisor.assertSavedSiblingNameAvailable([target, legacy], target, "taken")).toThrow(
 			"an agent of that name already exists at depth 1 under this parent",
@@ -330,10 +334,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		const siblingGate = new Promise<void>((resolve) => {
 			releaseSiblings = resolve;
 		});
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const resident = worker("opened");
 		const launchWorker = vi.fn(async () => resident);
 		Object.assign(supervisor, {
@@ -367,10 +368,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		const launchGate = new Promise<void>((resolve) => {
 			releaseLaunch = resolve;
 		});
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const resident = worker("opened");
 		resident.descriptor.ownerClientId = "owner";
 		const launchWorker = vi.fn(async () => {
@@ -383,13 +381,13 @@ describe("daemon supervisor passive subagent topology", () => {
 		const first = supervisor.createOrReuseWorker("owner", create);
 		const sameOwner = supervisor.createOrReuseWorker("owner", create);
 		const otherClient = supervisor.createOrReuseWorker("intruder", create);
-		const expectations = Promise.all([
-			expect(first).resolves.toBe(resident),
-			expect(sameOwner).resolves.toBe(resident),
-			expect(otherClient).rejects.toMatchObject({ code: "session_already_active" }),
-		]);
+		const firstResult = capturePromise(first);
+		const sameOwnerResult = capturePromise(sameOwner);
+		const otherClientResult = capturePromise(otherClient);
 		releaseLaunch();
-		await expectations;
+		expect(await firstResult).toEqual({ value: resident });
+		expect(await sameOwnerResult).toEqual({ value: resident });
+		expect((await otherClientResult).error).toHaveProperty("code", "session_already_active");
 		expect(launchWorker).toHaveBeenCalledOnce();
 	});
 
@@ -401,10 +399,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		const reclaimGate = new Promise<void>((resolve) => {
 			releaseReclaim = resolve;
 		});
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const stale = worker("stale");
 		stale.descriptor.createCommand = { config: { cwd: directory }, sessionPath };
 		supervisor.workers.set(stale.descriptor.workerId, stale);
@@ -422,13 +417,13 @@ describe("daemon supervisor passive subagent topology", () => {
 		const first = supervisor.createOrReuseWorker("owner", create);
 		const second = supervisor.createOrReuseWorker("owner", create);
 		const intruder = supervisor.createOrReuseWorker("intruder", create);
-		const expectations = Promise.all([
-			expect(first).resolves.toBe(resident),
-			expect(second).resolves.toBe(resident),
-			expect(intruder).rejects.toMatchObject({ code: "session_already_active" }),
-		]);
+		const firstResult = capturePromise(first);
+		const secondResult = capturePromise(second);
+		const intruderResult = capturePromise(intruder);
 		releaseReclaim();
-		await expectations;
+		expect(await firstResult).toEqual({ value: resident });
+		expect(await secondResult).toEqual({ value: resident });
+		expect((await intruderResult).error).toHaveProperty("code", "session_already_active");
 		expect(launchWorker).toHaveBeenCalledOnce();
 	});
 
@@ -440,10 +435,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		const launchGate = new Promise<void>((resolve) => {
 			releaseLaunch = resolve;
 		});
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		const launchWorker = vi.fn(async () => {
 			await launchGate;
 			throw new Error("launch exploded");
@@ -453,12 +445,13 @@ describe("daemon supervisor passive subagent topology", () => {
 		const create = { type: "create" as const, sessionPath, lifecycle: "client_owned" as const };
 		const first = supervisor.createOrReuseWorker("owner", create);
 		const joiner = supervisor.createOrReuseWorker("intruder", create);
-		const expectations = Promise.all([
-			expect(first).rejects.toThrow("launch exploded"),
-			expect(joiner).rejects.toThrow("launch exploded"),
-		]);
+		const firstResult = capturePromise(first);
+		const joinerResult = capturePromise(joiner);
 		releaseLaunch();
-		await expectations;
+		expect((await firstResult).error).toBeInstanceOf(Error);
+		expect((await firstResult).error).toHaveProperty("message", "launch exploded");
+		expect((await joinerResult).error).toBeInstanceOf(Error);
+		expect((await joinerResult).error).toHaveProperty("message", "launch exploded");
 	});
 
 	it("uses injective structural session name reservation keys", () => {
@@ -497,10 +490,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		});
 		const secondWorker = worker("second", [secondSummary]);
 		secondWorker.client.request.mockResolvedValue(success(undefined, "rename", secondSummary));
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
 		seedSupervisorRoster(supervisor, firstWorker, secondWorker);
@@ -542,10 +532,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		const ownedWorker = worker("owned", [ownedSummary]);
 		ownedWorker.descriptor.ownerClientId = "interactive-client";
 		ownedWorker.client.request.mockResolvedValue(success(undefined, "set_session_name"));
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		supervisor.workers.set("owned", ownedWorker);
 		seedSupervisorRoster(supervisor, ownedWorker);
 		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
@@ -614,10 +601,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		});
 		const secondWorker = worker("second", [secondSummary]);
 		secondWorker.client.request.mockResolvedValue(success(undefined, "rename_saved_session", secondSummary));
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
 		seedSupervisorRoster(supervisor, firstWorker, secondWorker);
@@ -677,10 +661,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			releaseRename = resolve;
 		});
 		const rename = vi.fn(async () => renameGate);
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		Object.assign(supervisor, {
 			rlmLedgerSiblings: vi.fn(async () => saved),
 			rlmSpawnLedger: vi.fn(() => ({ appendRenameByChildPath: vi.fn(async () => {}) })),
@@ -734,10 +715,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			await launchGate;
 			return launched;
 		});
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorInternals;
+		const supervisor = createSupervisor(directory);
 		Object.assign(supervisor, {
 			rlmLedgerSiblings: vi.fn(async (path: string) => [path === firstChild.path ? firstChild : secondChild]),
 			catalog: {

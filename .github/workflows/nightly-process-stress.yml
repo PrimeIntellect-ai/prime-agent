@@ -23,11 +23,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
         with:
-          node-version: 22
-          cache: npm
+          bun-version: 1.4.0
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
 
       - name: Install system dependencies
         run: |
@@ -35,19 +37,19 @@ jobs:
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
 
       - name: Build
-        run: npm run build
+        run: bun run build
 
-      - name: Install uv
-        run: |
-          python3 -m pip install --user uv
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
 
       - name: Run process stress tests
         working-directory: packages/coding-agent
         env:
           PRIME_AGENT_STRESS_WORKERS: "10"
-        run: npm run test:process-stress
+        run: bun run test:process-stress

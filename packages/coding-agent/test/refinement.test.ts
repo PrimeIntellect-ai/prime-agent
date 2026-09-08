@@ -2,7 +2,6 @@ import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type * as PiAi from "@earendil-works/pi-ai";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -34,8 +33,8 @@ const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
 }));
 
-vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
-	const actual = await importOriginal<typeof PiAi>();
+vi.mock("@earendil-works/pi-ai", () => {
+	const actual = require("@earendil-works/pi-ai");
 	return {
 		...actual,
 		completeSimple: completeSimpleMock,
@@ -1015,20 +1014,13 @@ describe("harness refinement", () => {
 		);
 
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining("The default editable continual harness store is local"),
-		});
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining("A caller may explicitly request global refinement"),
-		});
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining("Always use the bare id (no prefix) in edits"),
-		});
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining(
-				"During a local refinement, global entries are read-only context: never propose update or delete edits for them",
-			),
-		});
+		const refinementSystemPrompt = completeSimpleMock.mock.calls[0][1]?.systemPrompt;
+		expect(refinementSystemPrompt).toContain("The default editable continual harness store is local");
+		expect(refinementSystemPrompt).toContain("A caller may explicitly request global refinement");
+		expect(refinementSystemPrompt).toContain("Always use the bare id (no prefix) in edits");
+		expect(refinementSystemPrompt).toContain(
+			"During a local refinement, global entries are read-only context: never propose update or delete edits for them",
+		);
 		// Budget is derived from the model (8192) rather than a fixed literal.
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
 			maxTokens: 8192,

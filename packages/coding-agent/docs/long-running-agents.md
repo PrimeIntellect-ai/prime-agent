@@ -213,7 +213,7 @@ Or configure a run from the CLI:
 ```bash
 prime-agent \
   --autonomous \
-  --autonomous-gate "npm run check" \
+  --autonomous-gate "bun run check" \
   --autonomous-max-turns 20 \
   "Implement and verify the requested change"
 ```

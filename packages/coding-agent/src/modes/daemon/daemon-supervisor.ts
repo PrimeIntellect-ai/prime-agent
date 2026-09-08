@@ -120,6 +120,7 @@ import {
 	type DaemonSocketPathLease,
 	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
+	endDaemonSocketAfterFlush,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
@@ -516,8 +517,16 @@ function commitWorkerStartupGate(gate: Writable): Promise<void> {
 			}
 		};
 		const onError = (error: Error) => finish(error);
+		const onClose = () => {
+			gate.off("error", onError);
+			finish(new Error("Daemon session worker startup gate closed before commit"));
+		};
 		gate.on("error", onError);
-		gate.once("close", () => gate.off("error", onError));
+		gate.once("close", onClose);
+		if (gate.destroyed || gate.closed || !gate.writable) {
+			finish(new Error("Daemon session worker startup gate closed before commit"));
+			return;
+		}
 		gate.end(DAEMON_WORKER_STARTUP_GATE_COMMIT, (error?: Error | null) => finish(error));
 	});
 }
@@ -3138,7 +3147,10 @@ export class DaemonSupervisor {
 				})
 			: () => {};
 		child.once("close", detachWorkerStderr);
-		const childClosed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
+		const childClosed =
+			child.exitCode !== null || child.signalCode !== null
+				? Promise.resolve()
+				: new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
 		let spawnFailure: Error | undefined;
 		const spawnSettled = new Promise<void>((resolveSpawn) => {
 			child.once("spawn", () => resolveSpawn());
@@ -3146,6 +3158,9 @@ export class DaemonSupervisor {
 				spawnFailure = error instanceof Error ? error : new Error(String(error));
 				resolveSpawn();
 			});
+			// Bun can emit "spawn" while a test or instrumentation wrapper is still
+			// returning the ChildProcess. A pid already proves successful admission.
+			if (child.pid) resolveSpawn();
 		});
 		child.on("error", (error) => {
 			this.log(
@@ -3240,7 +3255,12 @@ export class DaemonSupervisor {
 
 		try {
 			try {
-				await commitWorkerStartupGate(startupGate);
+				await Promise.race([
+					commitWorkerStartupGate(startupGate),
+					childClosed.then(() => {
+						throw new Error("Daemon session worker exited before startup gate commit");
+					}),
+				]);
 			} catch (error) {
 				startupGate.destroy();
 				await childClosed;
@@ -6969,7 +6989,7 @@ export class DaemonSupervisor {
 		await this.catalog.stop();
 		for (const client of this.clients) {
 			client.detachInput();
-			client.socket.end();
+			endDaemonSocketAfterFlush(client.socket);
 		}
 		await new Promise<void>((resolveClose) => this.server?.close(() => resolveClose()) ?? resolveClose());
 		await this.runCleanupStep("daemon socket", () => this.cleanupSocket());

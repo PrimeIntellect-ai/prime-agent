@@ -34,8 +34,8 @@ const fsMocks = vi.hoisted(() => ({
 	writeFileSync: vi.fn<WriteFileSync>(),
 	writeSync: vi.fn<WriteSync>(),
 }));
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+vi.mock("node:fs", () => {
+	const actual = require("node:fs");
 	fsMocks.actualWriteFileSync = actual.writeFileSync;
 	fsMocks.actualWriteSync = actual.writeSync;
 	fsMocks.chmodSync.mockImplementation(actual.chmodSync);

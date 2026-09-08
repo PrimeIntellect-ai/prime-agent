@@ -2,7 +2,7 @@
  * Photon image processing wrapper.
  *
  * This module provides a unified interface to @silvia-odwyer/photon-node that works in:
- * 1. Node.js (development, npm run build)
+ * 1. Bun (development and build)
  * 2. Bun compiled binaries (standalone distribution)
  *
  * The challenge: photon-node's CJS entry uses fs.readFileSync(__dirname + '/photon_rs_bg.wasm')

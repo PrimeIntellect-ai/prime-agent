@@ -5,21 +5,20 @@ import { streamSimple } from "../src/stream.js";
 import type { Tool } from "../src/types.js";
 import { getZaiTestModel } from "./zai-test-model.js";
 
-const mockState = vi.hoisted(() => ({
-	lastParams: undefined as unknown,
-	chunks: undefined as
-		| Array<null | {
-				id?: string;
-				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
-				usage?: {
-					prompt_tokens: number;
-					completion_tokens: number;
-					prompt_tokens_details: { cached_tokens: number; cache_write_tokens?: number };
-					completion_tokens_details: { reasoning_tokens: number };
-				};
-		  }>
-		| undefined,
-}));
+interface ChunkItem {
+	id?: string;
+	choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
+	usage?: {
+		prompt_tokens: number;
+		completion_tokens: number;
+		prompt_tokens_details: { cached_tokens: number; cache_write_tokens?: number };
+		completion_tokens_details: { reasoning_tokens: number };
+	};
+}
+const mockState: { lastParams: unknown; chunks: Array<null | ChunkItem> | undefined } = {
+	lastParams: undefined,
+	chunks: undefined,
+};
 
 vi.mock("openai", () => {
 	class FakeOpenAI {

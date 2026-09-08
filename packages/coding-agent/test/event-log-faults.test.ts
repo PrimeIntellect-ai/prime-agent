@@ -1,4 +1,6 @@
+import type * as FsModule from "node:fs";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,8 +9,9 @@ import { EventLog } from "../src/core/event-log.js";
 /** Armable fs faults; everything passes through to the real fs by default. */
 const faults: { shortWriteOnce?: boolean; truncateError?: Error } = {};
 
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+const __fs = createRequire(import.meta.url)("node:fs") as typeof FsModule;
+vi.mock("node:fs", () => {
+	const actual = __fs;
 	return {
 		...actual,
 		writeSync: ((fd: number, data: Uint8Array) => {

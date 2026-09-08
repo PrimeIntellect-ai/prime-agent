@@ -29,8 +29,6 @@ interface SupervisorOwnerRecord {
 const cliPath = resolve(__dirname, "../../../src/cli.ts");
 const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-extension.ts");
 const launcherFixturePath = resolve(__dirname, "../../fixtures/eng-4606-update-launcher.ts");
-const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
-const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const supervisors = new Set<SupervisorHandle>();
 const harnesses: Harness[] = [];
@@ -49,7 +47,7 @@ function spawnSupervisor(paths: {
 }): SupervisorHandle {
 	const child = spawn(
 		process.execPath,
-		[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", paths.socketPath, "--offline"],
+		[cliPath, "--mode", "daemon", "--daemon-socket", paths.socketPath, "--offline"],
 		{
 			cwd: paths.agentDir,
 			env: {
@@ -61,9 +59,7 @@ function spawnSupervisor(paths: {
 				ENG_4606_COMPLETION_PATH: paths.completionPath,
 				ENG_4606_PID_PATH: paths.pidPath,
 				ENG_4606_SOCKET_PATH: paths.socketPath,
-				ENG_4606_TSX_PATH: tsxPath,
 				PI_OFFLINE: "1",
-				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		},
@@ -190,21 +186,11 @@ async function withSourceCliEntrypoint<T>(action: () => Promise<T>): Promise<T> 
 	if (!previousEntrypoint) {
 		throw new Error("Test process has no CLI entrypoint");
 	}
-	const previousExecArgv = [...process.execArgv];
-	const previousTsconfigPath = process.env.TSX_TSCONFIG_PATH;
 	process.argv[1] = cliPath;
-	process.execArgv.splice(0, process.execArgv.length, tsxPath);
-	process.env.TSX_TSCONFIG_PATH = tsconfigPath;
 	try {
 		return await action();
 	} finally {
 		process.argv[1] = previousEntrypoint;
-		process.execArgv.splice(0, process.execArgv.length, ...previousExecArgv);
-		if (previousTsconfigPath === undefined) {
-			delete process.env.TSX_TSCONFIG_PATH;
-		} else {
-			process.env.TSX_TSCONFIG_PATH = previousTsconfigPath;
-		}
 	}
 }
 
@@ -276,9 +262,10 @@ describe("ENG-4606 update restart coordinator", () => {
 
 		vi.useFakeTimers();
 		try {
-			vi.setSystemTime(new Date("2026-07-14T00:00:00.000Z"));
-			const writer = new DaemonUpdateRestartStatusWriter(statusPath, "test-request", "/tmp/daemon.sock");
+			let now = new Date("2026-07-14T00:00:00.000Z");
+			const writer = new DaemonUpdateRestartStatusWriter(statusPath, "test-request", "/tmp/daemon.sock", () => now);
 			const stopHeartbeat = writer.startHeartbeat();
+			now = new Date("2026-07-14T00:00:05.000Z");
 			vi.advanceTimersByTime(5000);
 			stopHeartbeat();
 
@@ -385,7 +372,7 @@ describe("ENG-4606 update restart coordinator", () => {
 			),
 		);
 		const originalActiveSessionId = created.activeSessionId ?? created.id;
-		const updateCommand = [process.execPath, tsxPath, launcherFixturePath].map(shellQuote).join(" ");
+		const updateCommand = [process.execPath, launcherFixturePath].map(shellQuote).join(" ");
 		const executeResponse = await client.request(
 			{ type: "execute_bash", activeSessionId: originalActiveSessionId, command: updateCommand },
 			5000,

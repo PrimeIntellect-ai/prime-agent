@@ -1,5 +1,6 @@
 import type * as childProcess from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -7,8 +8,9 @@ import { ensureKernelPython } from "../src/core/kernel/bootstrap.js";
 import { ReplKernelManager } from "../src/core/kernel/repl-manager.js";
 
 const { spawn } = vi.hoisted(() => ({ spawn: vi.fn<typeof childProcess.spawn>() }));
-vi.mock("node:child_process", async (importOriginal) => ({
-	...(await importOriginal<typeof childProcess>()),
+const __childProcess = createRequire(import.meta.url)("node:child_process") as typeof childProcess;
+vi.mock("node:child_process", () => ({
+	...__childProcess,
 	spawn,
 }));
 

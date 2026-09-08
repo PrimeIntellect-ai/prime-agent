@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
 	ensureInteractiveDaemonRunning,
 	probeDaemonVersion,
@@ -292,7 +292,6 @@ describe("ensureInteractiveDaemonRunning", () => {
 	});
 
 	it("reuses a daemon that becomes current inside the startup window", async () => {
-		vi.useFakeTimers();
 		let resolveFirstConnection = () => {};
 		let resolveSecondConnection = () => {};
 		const firstConnection = new Promise<void>((resolve) => {
@@ -311,19 +310,16 @@ describe("ensureInteractiveDaemonRunning", () => {
 		});
 		cleanups.push(daemon.close);
 
-		try {
-			const ensuring = ensureInteractiveDaemonRunning(daemon.socketPath);
-			await firstConnection;
-			await vi.advanceTimersByTimeAsync(2000);
-			await secondConnection;
-			await expect(ensuring).resolves.toBeUndefined();
-		} finally {
-			vi.useRealTimers();
-		}
+		const ensuring = ensureInteractiveDaemonRunning(daemon.socketPath, undefined, {
+			initialHelloTimeoutMs: 10,
+			startupTimeoutMs: 100,
+		});
+		await firstConnection;
+		await secondConnection;
+		await expect(ensuring).resolves.toBeUndefined();
 	});
 
 	it("leaves a connected unresponsive daemon running after the startup window", async () => {
-		vi.useFakeTimers();
 		const connections: Array<() => void> = [];
 		const connected = [0, 1].map(
 			(index) =>
@@ -339,19 +335,16 @@ describe("ensureInteractiveDaemonRunning", () => {
 		});
 		cleanups.push(daemon.close);
 
-		try {
-			const ensuring = ensureInteractiveDaemonRunning(daemon.socketPath);
-			const rejected = expect(ensuring).rejects.toThrow(/accepted connections but did not finish startup/);
-			await connected[0];
-			await vi.advanceTimersByTimeAsync(2000);
-			await connected[1];
-			await vi.advanceTimersByTimeAsync(30_000);
-			await rejected;
-			expect(commands).not.toContain("list");
-			expect(commands).not.toContain("shutdown");
-		} finally {
-			vi.useRealTimers();
-		}
+		const ensuring = ensureInteractiveDaemonRunning(daemon.socketPath, undefined, {
+			initialHelloTimeoutMs: 10,
+			startupTimeoutMs: 100,
+		});
+		const rejected = expect(ensuring).rejects.toThrow(/accepted connections but did not finish startup/);
+		await connected[0];
+		await connected[1];
+		await rejected;
+		expect(commands).not.toContain("list");
+		expect(commands).not.toContain("shutdown");
 	});
 
 	it("cancels replacement when a stale-looking daemon becomes current", async () => {

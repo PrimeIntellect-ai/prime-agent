@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type * as DaemonUpdateRestartModule from "../src/cli/daemon-update-restart.js";
 import {
 	acquireDaemonUpdateRestartCoordinator,
 	type DaemonUpdateRestartStatus,
@@ -20,7 +19,6 @@ import {
 } from "../src/config.js";
 import type { AgentSessionRuntimeMetadata } from "../src/core/agent-session-runtime.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
-import type * as DaemonSocketModule from "../src/modes/daemon/daemon-socket.js";
 import {
 	handlePackageCommand,
 	prepareDaemonUpdateRestart,
@@ -198,8 +196,8 @@ vi.mock("child_process", () => ({
 	})),
 }));
 
-vi.mock("../src/cli/daemon-update-restart.js", async (importOriginal) => {
-	const original = await importOriginal<typeof DaemonUpdateRestartModule>();
+vi.mock("../src/cli/daemon-update-restart.js", () => {
+	const original = require("../src/cli/daemon-update-restart.js");
 	return {
 		...original,
 		launchDaemonUpdateRestartCoordinator: vi.fn(async (options: { socketPath: string }) => {
@@ -218,10 +216,10 @@ vi.mock("../src/cli/daemon-update-restart.js", async (importOriginal) => {
 	};
 });
 
-vi.mock("../src/modes/daemon/daemon-socket.js", async (importOriginal) => ({
-	...(await importOriginal<typeof DaemonSocketModule>()),
-	defaultDaemonSocketPath: () => mockState.socketPath,
-}));
+vi.mock("../src/modes/daemon/daemon-socket.js", () => {
+	const actual = require("../src/modes/daemon/daemon-socket.js");
+	return { ...actual, defaultDaemonSocketPath: () => mockState.socketPath };
+});
 
 vi.mock("../src/modes/daemon/daemon-supervisor-ownership.js", () => ({
 	acquireDaemonShutdownAdmission: vi.fn(async () => {
@@ -511,7 +509,7 @@ describe("self-update daemon restart", () => {
 		originalCwd = process.cwd();
 		originalExecPath = process.execPath;
 		originalExitCode = process.exitCode;
-		process.exitCode = undefined;
+		process.exitCode = 0;
 		process.env[ENV_AGENT_DIR] = agentDir;
 		process.env.PI_PACKAGE_DIR = packageDir;
 		process.chdir(projectDir);
@@ -529,7 +527,7 @@ describe("self-update daemon restart", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		process.chdir(originalCwd);
-		process.exitCode = originalExitCode;
+		process.exitCode = originalExitCode ?? 0;
 		if (originalAgentDir === undefined) {
 			delete process.env[ENV_AGENT_DIR];
 		} else {
@@ -884,7 +882,7 @@ describe("self-update daemon restart", () => {
 		try {
 			await expect(performUpdateAndRunCoordinator()).resolves.toBeUndefined();
 
-			expect(process.exitCode).toBeUndefined();
+			expect(process.exitCode ?? 0).toBe(0);
 			const spawnIndex = mockState.calls.findIndex((call) => call.startsWith("spawn:npm "));
 			const launchIndex = mockState.calls.indexOf(`launch-coordinator:${mockState.socketPath}`);
 			const fenceIndex = mockState.calls.indexOf("persist-daemon-startup-fence");

@@ -12,9 +12,9 @@ const mocks = vi.hoisted(() => {
 	};
 });
 
-vi.mock("child_process", () => {
+vi.mock("../src/utils/child-process.js", () => {
 	return {
-		spawnSync: mocks.spawnSync,
+		spawnSyncHidden: mocks.spawnSync,
 	};
 });
 
@@ -49,7 +49,6 @@ function spawnError(error: Error): SpawnSyncReturns<Buffer> {
 
 describe("readClipboardImage", () => {
 	beforeEach(() => {
-		vi.resetModules();
 		mocks.spawnSync.mockReset();
 		mocks.clipboard.hasImage.mockReset();
 		mocks.clipboard.getImageBinary.mockReset();

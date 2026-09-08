@@ -94,9 +94,13 @@ describe("daemon worker probe retries", () => {
 			throw new Error("pipe not ready");
 		});
 		const probe = createProbe();
-		const failure = expect(probe.connect(100)).rejects.toBeInstanceOf(DaemonWorkerProbeTimeoutError);
-		await vi.advanceTimersByTimeAsync(100);
-		await failure;
+		const failure = probe.connect(100);
+		void failure.catch(() => {});
+		// Settle each retry at its exact boundary rather than crossing it in a larger timer step.
+		for (let elapsed = 0; elapsed < 100; elapsed += 25) {
+			await vi.advanceTimersByTimeAsync(25);
+		}
+		await expect(failure).rejects.toBeInstanceOf(DaemonWorkerProbeTimeoutError);
 		expect(attempts).toEqual(process.platform === "win32" ? [0, 25, 75] : [0, 25, 50, 75]);
 		expect(Date.now() - started).toBe(100);
 		expect(vi.getTimerCount()).toBe(0);

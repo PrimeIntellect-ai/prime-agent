@@ -1,19 +1,20 @@
+import { createRequire } from "node:module";
 import type { Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sessionLease from "../src/core/session-lease.js";
 import { DaemonClient, type DaemonCommandBody } from "../src/modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_INFO } from "../src/modes/daemon/daemon-protocol.js";
-import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import type * as DaemonSupervisorModule from "../src/modes/daemon/daemon-supervisor.js";
 import { DaemonWorkerClient, DaemonWorkerProbeTimeoutError } from "../src/modes/daemon/daemon-worker-client.js";
 import { DAEMON_WORKER_ROSTER_CAPABILITY } from "../src/modes/daemon/daemon-worker-protocol.js";
 import * as childProcess from "../src/utils/child-process.js";
 
 // Load the Windows timing constants without running Windows processes on the test host.
-const hostPlatform = vi.hoisted(() => {
-	const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-	Object.defineProperty(process, "platform", { value: "win32" });
-	return descriptor;
-});
+const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+Object.defineProperty(process, "platform", { value: "win32" });
+const { DaemonSupervisor } = createRequire(import.meta.url)(
+	"../src/modes/daemon/daemon-supervisor.js",
+) as typeof DaemonSupervisorModule;
 Object.defineProperty(process, "platform", hostPlatform);
 
 const hello = {
@@ -79,10 +80,14 @@ describe("Windows worker connection timing", () => {
 			attempts.push(Date.now() - started);
 			throw new Error("pipe not ready");
 		});
-		const failed = expect(createProbe().connect(7200)).rejects.toBeInstanceOf(DaemonWorkerProbeTimeoutError);
-		await vi.advanceTimersByTimeAsync(7200);
-		await failed;
+		const failed = createProbe().connect(7200);
+		void failed.catch(() => {});
+		for (let elapsed = 0; elapsed < 7200; elapsed += 25) {
+			await vi.advanceTimersByTimeAsync(25);
+		}
+		await expect(failed).rejects.toBeInstanceOf(DaemonWorkerProbeTimeoutError);
 		expect(attempts).toEqual([0, 25, 75, 175, 375, 775, 1575, 3175, 5175, 7175]);
+		expect(Date.now() - started).toBe(7200);
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
@@ -154,7 +159,6 @@ describe("daemon request timeouts", () => {
 			Object.assign(client, { socket, helloMessage: hello });
 			let settled = false;
 			const request = client.request({ type: command } as DaemonCommandBody, override);
-			const failed = expect(request).rejects.toThrow(`Timed out after ${expected}ms`);
 			void request.catch(() => {
 				settled = true;
 			});
@@ -162,7 +166,7 @@ describe("daemon request timeouts", () => {
 			expect(settled).toBe(false);
 			expect(socket.write).toHaveBeenCalledOnce();
 			await vi.advanceTimersByTimeAsync(1);
-			await failed;
+			await expect(request).rejects.toThrow(`Timed out after ${expected}ms`);
 			expect(settled).toBe(true);
 			client.close();
 		},

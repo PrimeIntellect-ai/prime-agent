@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { getModel } from "../src/models.js";
 import { streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses.js";
 import type { Context } from "../src/types.js";
@@ -11,11 +11,11 @@ interface CapturedAzureClientOptions {
 	baseURL: string;
 }
 
-const azureMock = vi.hoisted(() => ({
-	constructorCalls: [] as CapturedAzureClientOptions[],
-}));
+const azureMock: { constructorCalls: CapturedAzureClientOptions[] } = {
+	constructorCalls: [],
+};
 
-vi.mock("openai", () => {
+mock.module("openai", () => {
 	class AzureOpenAI {
 		responses = {
 			create: () => {

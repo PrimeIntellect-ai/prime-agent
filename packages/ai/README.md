@@ -91,7 +91,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 ## Installation
 
 ```bash
-npm install prime-agent-ai
+bun add prime-agent-ai
 ```
 
 TypeBox exports are re-exported from `prime-agent-ai`: `Type`, `Static`, and `TSchema`.
@@ -1150,9 +1150,9 @@ Official docs: [Application Default Credentials](https://cloud.google.com/docs/a
 The quickest way to authenticate:
 
 ```bash
-npx prime-agent-ai login              # interactive provider selection
-npx prime-agent-ai login anthropic    # login to specific provider
-npx prime-agent-ai list               # list available providers
+bunx prime-agent-ai login              # interactive provider selection
+bunx prime-agent-ai login anthropic    # login to specific provider
+bunx prime-agent-ai list               # list available providers
 ```
 
 Credentials are saved to `auth.json` in the current directory.
@@ -1271,6 +1271,8 @@ Create a new provider file (for example `amazon-bedrock.ts`) that exports:
 - Ensure `streamSimple` handles auth lookup via `getEnvApiKey()` or provider-specific auth
 
 #### 4. Model Generation (`scripts/generate-models.ts`)
+
+Normal builds compile the committed `src/models.generated.ts` snapshot and do not contact live provider APIs. Refresh the snapshot intentionally from the repository root with `bun run models:refresh`, then review and commit the generated diff. Live catalog changes must not make unrelated pull-request builds nondeterministic.
 
 - Add logic to fetch and parse models from the provider's source (e.g., models.dev API)
 - Map provider model data to the standardized `Model` interface

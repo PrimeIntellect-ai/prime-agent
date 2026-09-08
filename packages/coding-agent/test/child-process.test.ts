@@ -1,5 +1,7 @@
+import type * as ChildProcessModule from "node:child_process";
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
 import {
 	execFileHidden,
@@ -20,8 +22,9 @@ import { spawnZombieProcess } from "./fixtures/zombie-process.js";
 
 const recordedWindowsHide = vi.hoisted(() => [] as Array<boolean | undefined>);
 
-vi.mock("node:child_process", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:child_process")>();
+const __childProcess = createRequire(import.meta.url)("node:child_process") as typeof ChildProcessModule;
+vi.mock("node:child_process", () => {
+	const actual = __childProcess;
 	const wrap =
 		<A extends unknown[], R>(fn: (...args: A) => R, optionsIndex: number) =>
 		(...args: A): R => {

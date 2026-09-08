@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env bun
 
 import { createCanvas } from "canvas";
 import { writeFileSync } from "fs";

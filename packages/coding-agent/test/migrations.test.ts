@@ -10,6 +10,7 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,15 +20,18 @@ import {
 	migrateLegacySessionDirsToSessionRoot,
 	migrateSessionsFromAgentRoot,
 } from "../src/migrations.js";
+import type * as AtomicFileModule from "../src/utils/atomic-file.js";
 
 const atomicWriteMock = vi.hoisted(() => ({ error: undefined as Error | undefined }));
-vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../src/utils/atomic-file.js")>();
+const __atomicFile = createRequire(import.meta.url)("../src/utils/atomic-file.js") as typeof AtomicFileModule;
+const writeFileAtomicSync = __atomicFile.writeFileAtomicSync;
+vi.mock("../src/utils/atomic-file.js", () => {
+	const actual = __atomicFile;
 	return {
 		...actual,
 		writeFileAtomicSync: (path: string, data: string, options?: object) => {
 			if (atomicWriteMock.error && path.endsWith("auth.json")) throw atomicWriteMock.error;
-			return actual.writeFileAtomicSync(path, data, options);
+			return writeFileAtomicSync(path, data, options);
 		},
 	};
 });

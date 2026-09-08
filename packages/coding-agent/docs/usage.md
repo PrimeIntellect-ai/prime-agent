@@ -279,7 +279,7 @@ For example, this noninteractive run uses a locally available model configuratio
 ```bash
 prime-agent -p \
   --autonomous \
-  --autonomous-gate "npm run check" \
+  --autonomous-gate "bun run check" \
   --autonomous-gate-retries 2 \
   --autonomous-gate-timeout-ms 300000 \
   --autonomous-max-continuations 3 \

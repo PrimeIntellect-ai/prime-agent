@@ -20,16 +20,43 @@ function send(message: Record<string, unknown>): void {
 	process.send?.(message);
 }
 
+function exitFixture(code: number): never {
+	process.exitCode = code;
+	if (process.connected) process.disconnect();
+	const reallyExit = (process as NodeJS.Process & { reallyExit?: (exitCode?: number) => never }).reallyExit;
+	if (reallyExit) return reallyExit.call(process, code);
+	process.exit(code);
+}
+
+function sendAndExit(message: Record<string, unknown>, code: number): void {
+	send(message);
+	setTimeout(() => exitFixture(code), 10);
+}
+
+const pendingControls = new Map<ControlMessage["type"], Array<() => void>>();
+const controlBacklog: ControlMessage["type"][] = [];
+
+process.on("message", (message: unknown) => {
+	if (!message || typeof message !== "object" || typeof (message as Partial<ControlMessage>).type !== "string") {
+		return;
+	}
+	const type = (message as ControlMessage).type;
+	const waiters = pendingControls.get(type);
+	const waiter = waiters?.shift();
+	if (waiter) waiter();
+	else controlBacklog.push(type);
+});
+
 function waitForControl(type: ControlMessage["type"]): Promise<void> {
+	const queuedIndex = controlBacklog.indexOf(type);
+	if (queuedIndex !== -1) {
+		controlBacklog.splice(queuedIndex, 1);
+		return Promise.resolve();
+	}
 	return new Promise((resolve) => {
-		const onMessage = (message: unknown) => {
-			if (!message || typeof message !== "object" || (message as Partial<ControlMessage>).type !== type) {
-				return;
-			}
-			process.off("message", onMessage);
-			resolve();
-		};
-		process.on("message", onMessage);
+		const waiters = pendingControls.get(type) ?? [];
+		waiters.push(resolve);
+		pendingControls.set(type, waiters);
 	});
 }
 
@@ -47,7 +74,7 @@ async function runOwnershipHolder(): Promise<never> {
 	await ownership.release();
 	send({ type: "owner_released" });
 	await waitForControl("shutdown");
-	process.exit(0);
+	exitFixture(0);
 }
 
 async function runSupervisor(): Promise<never> {
@@ -82,8 +109,8 @@ async function runSupervisor(): Promise<never> {
 		});
 		return await new Promise<never>(() => {});
 	} catch (error) {
-		send({ type: "failed", error: error instanceof Error ? error.message : String(error) });
-		process.exit(0);
+		sendAndExit({ type: "failed", error: error instanceof Error ? error.message : String(error) }, 0);
+		return await new Promise<never>(() => {});
 	}
 }
 
@@ -129,8 +156,8 @@ async function runLegacyCleanup(): Promise<never> {
 			}
 		}
 	}
-	send({ type: "cleanup_complete", skipped });
-	process.exit(0);
+	sendAndExit({ type: "cleanup_complete", skipped }, 0);
+	return await new Promise<never>(() => {});
 }
 
 async function main(): Promise<never> {
@@ -158,6 +185,5 @@ async function main(): Promise<never> {
 }
 
 void main().catch((error) => {
-	send({ type: "failed", error: error instanceof Error ? error.message : String(error) });
-	process.exit(1);
+	sendAndExit({ type: "failed", error: error instanceof Error ? error.message : String(error) }, 1);
 });

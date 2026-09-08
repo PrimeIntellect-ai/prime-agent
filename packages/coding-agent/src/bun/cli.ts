@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { APP_NAME } from "../config.js";
 
 process.title = APP_NAME;
@@ -9,4 +9,5 @@ import { restoreSandboxEnv } from "./restore-sandbox-env.js";
 restoreSandboxEnv();
 
 await import("./register-bedrock.js");
-await import("../cli.js");
+const { runCli } = await import("../cli-main.js");
+await runCli();

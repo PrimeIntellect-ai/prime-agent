@@ -8,6 +8,7 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
@@ -93,8 +94,6 @@ interface TestPaths {
 const fixturePath = resolve(__dirname, "../../fixtures/eng-4600-supervisor-fixture.ts");
 const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-extension.ts");
 const cliPath = resolve(__dirname, "../../../src/cli.ts");
-const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
-const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const handles = new Set<ProcessHandle>();
 const harnesses: Harness[] = [];
@@ -126,7 +125,14 @@ async function createPaths(): Promise<TestPaths> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
-	linkSync(process.execPath, executablePath);
+	try {
+		linkSync(process.execPath, executablePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EPERM" && (error as NodeJS.ErrnoException).code !== "EXDEV") {
+			throw error;
+		}
+		symlinkSync(process.execPath, executablePath);
+	}
 	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
 	socketTempDirs.add(socketTmpDir);
@@ -141,13 +147,13 @@ async function createPaths(): Promise<TestPaths> {
 		socketPath:
 			process.platform === "win32"
 				? `\\\\.\\pipe\\prime-agent-eng-4603-${process.pid}-${Date.now()}`
-				: join(harness.tempDir, "daemon.sock"),
+				: join(socketTmpDir, "daemon.sock"),
 	};
 }
 
 function spawnSupervisor(paths: TestPaths): ProcessHandle {
 	return trackProcess(
-		spawn(paths.executablePath, [tsxPath, fixturePath], {
+		spawn(paths.executablePath, [fixturePath], {
 			cwd: paths.agentDir,
 			env: {
 				...process.env,
@@ -160,7 +166,6 @@ function spawnSupervisor(paths: TestPaths): ProcessHandle {
 				ENG_4600_SOCKET_PATH: paths.socketPath,
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
-				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		}),
@@ -175,26 +180,21 @@ function spawnStandaloneWorker(
 	extraEnv: NodeJS.ProcessEnv = {},
 ): ProcessHandle {
 	return trackProcess(
-		spawn(
-			paths.executablePath,
-			[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", workerSocketPath, "--offline"],
-			{
-				cwd: paths.agentDir,
-				env: {
-					...process.env,
-					...extraEnv,
-					[supervisorRegistryDirEnv]: paths.registryDir,
-					[ENV_AGENT_DIR]: paths.agentDir,
-					[DAEMON_WORKER_ROLE_ENV]: "1",
-					[DAEMON_WORKER_TOKEN_ENV]: token,
-					[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: "eng-4603-worker",
-					[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: paths.socketPath,
-					PI_OFFLINE: "1",
-					TSX_TSCONFIG_PATH: tsconfigPath,
-				},
-				stdio: ["ignore", "pipe", "pipe"],
+		spawn(paths.executablePath, [cliPath, "--mode", "daemon", "--daemon-socket", workerSocketPath, "--offline"], {
+			cwd: paths.agentDir,
+			env: {
+				...process.env,
+				...extraEnv,
+				[supervisorRegistryDirEnv]: paths.registryDir,
+				[ENV_AGENT_DIR]: paths.agentDir,
+				[DAEMON_WORKER_ROLE_ENV]: "1",
+				[DAEMON_WORKER_TOKEN_ENV]: token,
+				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: "eng-4603-worker",
+				[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: paths.socketPath,
+				PI_OFFLINE: "1",
 			},
-		),
+			stdio: ["ignore", "pipe", "pipe"],
+		}),
 		"worker",
 	);
 }
@@ -342,6 +342,9 @@ function isFixtureDescendant(pid: number, rootPid: number, processes: Map<number
 }
 
 function signalFixtureProcess(identity: FixtureProcessIdentity, signal: NodeJS.Signals): boolean {
+	if (identity.pid === process.pid) {
+		throw new Error(`Refusing to signal the fixture test process ${process.pid}`);
+	}
 	const state = fixtureProcessState(identity);
 	if (state === "exited") return false;
 	if (state === "unverified") {
@@ -677,7 +680,7 @@ async function runCli(
 	extraEnv: NodeJS.ProcessEnv = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
 	const handle = trackProcess(
-		spawn(process.execPath, [tsxPath, cliPath, ...args], {
+		spawn(process.execPath, [cliPath, ...args], {
 			cwd: paths.agentDir,
 			env: {
 				...process.env,
@@ -686,7 +689,6 @@ async function runCli(
 				[ENV_AGENT_DIR]: paths.agentDir,
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
-				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		}),
@@ -856,7 +858,7 @@ describe("ENG-4603 worker recovery convergence", () => {
 	it("rejects stale commands at worker receipt and before public journal insertion", async () => {
 		if (process.platform === "win32") return;
 		const workerPaths = await createPaths();
-		const workerSocketPath = join(workerPaths.agentDir, "worker-command.sock");
+		const workerSocketPath = join(workerPaths.socketTmpDir, "worker-command.sock");
 		const token = "eng-4603-token";
 		const psCountPath = join(workerPaths.agentDir, "ps-count");
 		const workerEnvironment: NodeJS.ProcessEnv = {};
@@ -877,78 +879,84 @@ describe("ENG-4603 worker recovery convergence", () => {
 			registryDir: workerPaths.registryDir,
 			socketPath: workerPaths.socketPath,
 		});
-		const worker = spawnStandaloneWorker(workerPaths, workerSocketPath, token, workerEnvironment);
-		await waitForPath(workerSocketPath);
-		const socket = createConnection(workerSocketPath);
-		const frames = createFrameReader(socket);
-		await new Promise<void>((resolveConnect, rejectConnect) => {
-			socket.once("connect", resolveConnect);
-			socket.once("error", rejectConnect);
-		});
-		await frames.waitFor((frame) => frame.header.kind === "outbound" && frame.header.outboundType === "daemon_hello");
-		const authId = "auth-old";
-		socket.write(
-			encodePrivateFrame<DaemonWorkerFrameHeader>(
-				{ kind: "command", requestId: authId, commandType: "worker_auth" },
-				Buffer.from(
-					serializeJsonLine({
-						id: authId,
-						type: "worker_auth",
-						token,
-						supervisorGeneration: oldOwner.record.generation,
-						supervisorPid: oldOwner.record.pid,
-						supervisorProcessStartId: oldOwner.record.processStartId,
-						supervisorSocketPath: oldOwner.record.socketPath,
-					}),
+		try {
+			const worker = spawnStandaloneWorker(workerPaths, workerSocketPath, token, workerEnvironment);
+			await waitForPath(workerSocketPath);
+			const socket = createConnection(workerSocketPath);
+			const frames = createFrameReader(socket);
+			await new Promise<void>((resolveConnect, rejectConnect) => {
+				socket.once("connect", resolveConnect);
+				socket.once("error", rejectConnect);
+			});
+			await frames.waitFor(
+				(frame) => frame.header.kind === "outbound" && frame.header.outboundType === "daemon_hello",
+			);
+			const authId = "auth-old";
+			socket.write(
+				encodePrivateFrame<DaemonWorkerFrameHeader>(
+					{ kind: "command", requestId: authId, commandType: "worker_auth" },
+					Buffer.from(
+						serializeJsonLine({
+							id: authId,
+							type: "worker_auth",
+							token,
+							supervisorGeneration: oldOwner.record.generation,
+							supervisorPid: oldOwner.record.pid,
+							supervisorProcessStartId: oldOwner.record.processStartId,
+							supervisorSocketPath: oldOwner.record.socketPath,
+						}),
+					),
 				),
-			),
-		);
-		expect(
-			decodeResponse(
-				await frames.waitFor((frame) => frame.header.kind === "outbound" && frame.header.requestId === authId),
-			).success,
-		).toBe(true);
-		if (process.platform === "darwin") {
-			const countAfterAuthentication = readFileSync(psCountPath, "utf8").length;
-			await delay(750);
-			expect(readFileSync(psCountPath, "utf8").length).toBe(countAfterAuthentication);
-			const ownerPath = join(workerPaths.registryDir, `${oldOwner.record.generation}.owner`, "owner.json");
-			const ownerRecord = JSON.parse(readFileSync(ownerPath, "utf8")) as { updatedAt: string };
-			ownerRecord.updatedAt = new Date(Date.now() + 1000).toISOString();
-			const updatedOwnerPath = `${ownerPath}.updated`;
-			writeFileSync(updatedOwnerPath, `${JSON.stringify(ownerRecord, null, 2)}\n`);
-			renameSync(updatedOwnerPath, ownerPath);
-			await delay(500);
-			const countAfterOwnerChange = readFileSync(psCountPath, "utf8").length;
-			expect(countAfterOwnerChange).toBeGreaterThan(countAfterAuthentication);
-			await delay(750);
-			expect(readFileSync(psCountPath, "utf8").length).toBe(countAfterOwnerChange);
+			);
+			expect(
+				decodeResponse(
+					await frames.waitFor((frame) => frame.header.kind === "outbound" && frame.header.requestId === authId),
+				).success,
+			).toBe(true);
+			if (process.platform === "darwin") {
+				const countAfterAuthentication = readFileSync(psCountPath, "utf8").length;
+				await delay(750);
+				expect(readFileSync(psCountPath, "utf8").length).toBe(countAfterAuthentication);
+				const ownerPath = join(workerPaths.registryDir, `${oldOwner.record.generation}.owner`, "owner.json");
+				const ownerRecord = JSON.parse(readFileSync(ownerPath, "utf8")) as { updatedAt: string };
+				ownerRecord.updatedAt = new Date(Date.now() + 1000).toISOString();
+				const updatedOwnerPath = `${ownerPath}.updated`;
+				writeFileSync(updatedOwnerPath, `${JSON.stringify(ownerRecord, null, 2)}\n`);
+				renameSync(updatedOwnerPath, ownerPath);
+				await delay(500);
+				const countAfterOwnerChange = readFileSync(psCountPath, "utf8").length;
+				expect(countAfterOwnerChange).toBeGreaterThan(countAfterAuthentication);
+				await delay(750);
+				expect(readFileSync(psCountPath, "utf8").length).toBe(countAfterOwnerChange);
+			}
+			const commandId = "stale-list";
+			const commandFrame = encodePrivateFrame<DaemonWorkerFrameHeader>(
+				{ kind: "command", requestId: commandId, commandType: "list" },
+				Buffer.from(serializeJsonLine({ id: commandId, type: "list" })),
+			);
+			socket.write(commandFrame.subarray(0, commandFrame.length - 1));
+			const ownerDirectory = join(workerPaths.registryDir, `${oldOwner.record.generation}.owner`);
+			const ownerPath = join(ownerDirectory, "owner.json");
+			const transitionedOwner = JSON.parse(readFileSync(ownerPath, "utf8")) as OwnerRecord & { updatedAt: string };
+			transitionedOwner.token = "successor-token";
+			transitionedOwner.pid = worker.child.pid!;
+			transitionedOwner.processStartId = getProcessStartId(worker.child.pid!);
+			transitionedOwner.updatedAt = new Date().toISOString();
+			const transitionedOwnerPath = `${ownerPath}.transitioned`;
+			writeFileSync(transitionedOwnerPath, `${JSON.stringify(transitionedOwner, null, 2)}\n`);
+			renameSync(transitionedOwnerPath, ownerPath);
+			socket.write(commandFrame.subarray(commandFrame.length - 1));
+			const staleResponse = decodeResponse(
+				await frames.waitFor((frame) => frame.header.kind === "outbound" && frame.header.requestId === commandId),
+			);
+			expect(staleResponse).toMatchObject({ success: false, error: "supervisor_generation_stale" });
+			socket.destroy();
+			await oldOwner.release();
+			rmSync(ownerDirectory, { recursive: true, force: true });
+			await terminateTrackedFixtureProcess(worker);
+		} finally {
+			await oldOwner.release();
 		}
-		const commandId = "stale-list";
-		const commandFrame = encodePrivateFrame<DaemonWorkerFrameHeader>(
-			{ kind: "command", requestId: commandId, commandType: "list" },
-			Buffer.from(serializeJsonLine({ id: commandId, type: "list" })),
-		);
-		socket.write(commandFrame.subarray(0, commandFrame.length - 1));
-		const ownerDirectory = join(workerPaths.registryDir, `${oldOwner.record.generation}.owner`);
-		const ownerPath = join(ownerDirectory, "owner.json");
-		const transitionedOwner = JSON.parse(readFileSync(ownerPath, "utf8")) as OwnerRecord & { updatedAt: string };
-		transitionedOwner.token = "successor-token";
-		transitionedOwner.pid = worker.child.pid!;
-		transitionedOwner.processStartId = getProcessStartId(worker.child.pid!);
-		transitionedOwner.updatedAt = new Date().toISOString();
-		const transitionedOwnerPath = `${ownerPath}.transitioned`;
-		writeFileSync(transitionedOwnerPath, `${JSON.stringify(transitionedOwner, null, 2)}\n`);
-		renameSync(transitionedOwnerPath, ownerPath);
-		socket.write(commandFrame.subarray(commandFrame.length - 1));
-		const staleResponse = decodeResponse(
-			await frames.waitFor((frame) => frame.header.kind === "outbound" && frame.header.requestId === commandId),
-		);
-		expect(staleResponse).toMatchObject({ success: false, error: "supervisor_generation_stale" });
-		socket.destroy();
-		await oldOwner.release();
-		rmSync(ownerDirectory, { recursive: true, force: true });
-		await terminateTrackedFixtureProcess(worker);
 
 		const publicPaths = await createPaths();
 		const staleSupervisor = spawnSupervisor(publicPaths);
@@ -970,13 +978,17 @@ describe("ENG-4603 worker recovery convergence", () => {
 			registryDir: publicPaths.registryDir,
 			socketPath: publicPaths.socketPath,
 		});
-		const rejected = await publicClient.request({ type: "create" });
-		expect(rejected).toMatchObject({ success: false, error: expect.stringContaining("no longer owns") });
-		expect(existsSync(journalPath) ? readFileSync(journalPath, "utf8") : "").toBe(journalBefore);
-		publicClient.close();
-		await replacementOwner.release();
-		rmSync(displacedOwnerDir, { recursive: true, force: true });
-		await terminateTrackedFixtureProcess(staleSupervisor);
+		try {
+			const rejected = await publicClient.request({ type: "create" });
+			expect(rejected).toMatchObject({ success: false, error: expect.stringContaining("no longer owns") });
+			expect(existsSync(journalPath) ? readFileSync(journalPath, "utf8") : "").toBe(journalBefore);
+			publicClient.close();
+			await replacementOwner.release();
+			rmSync(displacedOwnerDir, { recursive: true, force: true });
+			await terminateTrackedFixtureProcess(staleSupervisor);
+		} finally {
+			await replacementOwner.release();
+		}
 	}, 90_000);
 
 	it("serializes shutdown admission and reclaims an unrenewed live lease", async () => {
@@ -1066,7 +1078,9 @@ describe("ENG-4603 worker recovery convergence", () => {
 		expect(listenersBeforeShutdown).toContain(`p${successor.child.pid}`);
 
 		const shutdown = await runCli(paths, ["shutdown", "--force", "--json"], 60_000, lsofEnvironment);
-		expect(shutdown.code).toBe(0);
+		if (shutdown.code !== 0) {
+			throw new Error(`Shutdown failed with code ${shutdown.code}: ${shutdown.stderr}\n${shutdown.stdout}`);
+		}
 		const shutdownResult = JSON.parse(shutdown.stdout) as { stopped: unknown[]; failed: unknown[] };
 		const survivingIdentities = [
 			{ pid: predecessor.child.pid!, processStartId: predecessorStartId },

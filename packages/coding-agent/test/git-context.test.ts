@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { captureGitContext, gitContextsEqual } from "../src/utils/git.js";
 
 function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+	return execFileSync("git", args, { cwd, encoding: "utf8", env: process.env }).trim();
 }
 
 function initRepo(dir: string): void {

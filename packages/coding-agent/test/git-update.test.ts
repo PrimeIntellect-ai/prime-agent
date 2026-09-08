@@ -11,6 +11,7 @@ function git(args: string[], cwd: string): string {
 	const result = spawnSync("git", args, {
 		cwd,
 		encoding: "utf-8",
+		env: process.env,
 	});
 	if (result.status !== 0) {
 		throw new Error(`Command failed: git ${args.join(" ")}\n${result.stderr}`);

@@ -40,7 +40,7 @@ await session.prompt("What files are in the current directory?");
 ## Installation
 
 ```bash
-npm install @earendil-works/pi-coding-agent
+bun add @earendil-works/pi-coding-agent
 ```
 
 The SDK is included in the main package. No separate installation needed.

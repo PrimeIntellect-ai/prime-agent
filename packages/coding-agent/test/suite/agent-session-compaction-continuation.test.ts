@@ -16,6 +16,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.js";
 import { createHarness, type Harness } from "./harness.js";
+import { expectPromiseRejection } from "./scheduling.js";
 
 type SessionInternals = {
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
@@ -250,7 +251,7 @@ describe("compaction continuation", () => {
 
 		sessionInternals._schedulePostCompactionContinue();
 		const idle = harness.session.waitForHeadlessIdle();
-		const rejectedIdle = expect(idle).rejects.toThrow("continuation failed");
+		const rejectedIdle = expectPromiseRejection(idle, "continuation failed");
 		await vi.advanceTimersByTimeAsync(100);
 
 		await rejectedIdle;

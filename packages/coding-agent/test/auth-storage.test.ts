@@ -1,4 +1,6 @@
+import type * as FsModule from "node:fs";
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
@@ -9,8 +11,9 @@ import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.js
 const initialWriteFault = vi.hoisted(() => ({ count: -1 }));
 const renameFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 const absenceIllusion = vi.hoisted(() => ({ paths: new Set<string>() }));
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+const __fs = createRequire(import.meta.url)("node:fs") as typeof FsModule;
+vi.mock("node:fs", () => {
+	const actual = __fs;
 	return {
 		...actual,
 		writeSync: ((fd: number, data: NodeJS.ArrayBufferView | string, offset?: number, length?: number) => {

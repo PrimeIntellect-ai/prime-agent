@@ -16,7 +16,7 @@ try {
 	imageBuffer = readFileSync(testImagePath);
 } catch (_e) {
 	console.error(`Failed to load image: ${testImagePath}`);
-	console.error("Usage: npx tsx test/image-test.ts [path-to-image.png]");
+	console.error("Usage: bun test/image-test.ts [path-to-image.png]");
 	process.exit(1);
 }
 

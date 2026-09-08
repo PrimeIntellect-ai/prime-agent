@@ -60,4 +60,4 @@ unset BEDROCK_EXTENSIVE_MODEL_TEST
 unset FIREWORKS_API_KEY
 
 echo "Running tests without API keys..."
-npm test
+bun scripts/run-with-clean-env.ts bun test --isolate --timeout 30000

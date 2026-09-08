@@ -2816,28 +2816,28 @@ describe("AgentSession rlm recursion", () => {
 	});
 
 	it("flushes a stale pending usage batch before extending it, bounding crash loss", async () => {
-		vi.useFakeTimers({ toFake: ["Date"] });
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
 		try {
 			// The batch from the first two completions is older than the staleness
 			// bound when the third lands.
 			const root = createToolLoopSession(3, [usage(1, 1), usage(2, 2), usage(4, 4)], (toolResultCount) => {
-				if (toolResultCount === 2) vi.setSystemTime(Date.now() + 61_000);
+				if (toolResultCount === 2) now += 61_000;
 			});
 
 			await root.runRlmChild("use a tool");
-			await vi.waitFor(() => {
-				const attributions = root.sessionManager
-					.getEntries()
-					.filter((entry) => entry.type === "child_usage_attributed");
-				expect(attributions.map((entry) => [entry.childUsage.input, entry.childUsage.output])).toEqual([
-					[3, 3],
-					[4, 4],
-				]);
-				expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
-				// Each aggregate covers exactly the completions durable with or
-				// before it, so any prefix replays to the exact own spend.
-				expect(attributions.map((entry) => entry.aggregateUsage.input)).toEqual([3, 7]);
-			});
+			await root.waitForRlmQuiescence();
+			const attributions = root.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "child_usage_attributed");
+			expect(attributions.map((entry) => [entry.childUsage.input, entry.childUsage.output])).toEqual([
+				[3, 3],
+				[4, 4],
+			]);
+			expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
+			// Each aggregate covers exactly the completions durable with or
+			// before it, so any prefix replays to the exact own spend.
+			expect(attributions.map((entry) => entry.aggregateUsage.input)).toEqual([3, 7]);
 
 			const sessionFile = root.sessionManager.getSessionFile();
 			if (!sessionFile) throw new Error("parent session file was not created");
@@ -2848,7 +2848,7 @@ describe("AgentSession rlm recursion", () => {
 			// Parent own spend is zero here, so the reloaded aggregate must equal the summed child usage.
 			expect(reloadedAttributions.at(-1)?.aggregateUsage.input).toBe(childTotal);
 		} finally {
-			vi.useRealTimers();
+			clock.mockRestore();
 		}
 	});
 

@@ -1,18 +1,139 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+	acquireDaemonSocketPathLease,
 	cleanupDaemonSocketPath,
 	DaemonSocketPathLease,
+	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
+	endDaemonSocketAfterFlush,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
 } from "../src/modes/daemon/daemon-socket.js";
+
+describe("endDaemonSocketAfterFlush", () => {
+	it("delivers queued bytes before closing the socket", async () => {
+		const server = createServer((socket) => {
+			socket.write("daemon_closing\n");
+			endDaemonSocketAfterFlush(socket);
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Expected TCP server address");
+		const received = await new Promise<string>((resolve, reject) => {
+			let data = "";
+			const socket = createConnection({ host: "127.0.0.1", port: address.port });
+			socket.setEncoding("utf8");
+			socket.on("data", (chunk) => {
+				data += chunk;
+			});
+			socket.on("end", () => resolve(data));
+			socket.on("error", reject);
+		});
+		await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+		expect(received).toBe("daemon_closing\n");
+	});
+});
+
+describe.each([
+	{ platform: "darwin", limit: 103 },
+	{ platform: "linux", limit: 107 },
+])("Unix socket bind path length on $platform", ({ platform, limit }) => {
+	function socketPathWithBytes(directory: string, byteLength: number, encoding: string): string {
+		const stemBytes = byteLength - Buffer.byteLength(join(directory, ".sock"));
+		const stem =
+			encoding === "multibyte"
+				? "é".repeat(Math.floor(stemBytes / 2)) + "x".repeat(stemBytes % 2)
+				: "x".repeat(stemBytes);
+		return join(directory, `${stem}.sock`);
+	}
+
+	it.each(["ascii", "multibyte"])("accepts the exact byte boundary for %s paths", async (encoding) => {
+		const root = mkdtempSync(join(tmpdir(), "pa-len-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		let lease: DaemonSocketPathLease | undefined;
+		try {
+			Object.defineProperty(process, "platform", { value: platform });
+			vi.stubEnv("TMPDIR", root);
+			const socketPath = socketPathWithBytes(defaultDaemonSocketDir(), limit, encoding);
+			expect(Buffer.byteLength(socketPath)).toBe(limit);
+			lease = await acquireDaemonSocketPathLease(socketPath);
+			expect(lease?.socketPath).toBe(socketPath);
+			expect(existsSync(`${socketPath}.lock`)).toBe(true);
+			await expect(prepareDaemonSocketPath(socketPath, lease)).resolves.toBeUndefined();
+			expect(existsSync(socketPath)).toBe(false);
+			await lease?.release();
+			expect(existsSync(`${socketPath}.lock`)).toBe(false);
+		} finally {
+			await lease?.release();
+			vi.unstubAllEnvs();
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{ operation: "acquire", encoding: "ascii" },
+		{ operation: "prepare", encoding: "ascii" },
+		{ operation: "acquire", encoding: "multibyte" },
+		{ operation: "prepare", encoding: "multibyte" },
+	])("rejects an overlong $encoding path before $operation side effects", async ({ operation, encoding }) => {
+		const root = mkdtempSync(join(tmpdir(), "pa-len-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		let lease: DaemonSocketPathLease | undefined;
+		try {
+			Object.defineProperty(process, "platform", { value: platform });
+			vi.stubEnv("TMPDIR", root);
+			const socketDir = defaultDaemonSocketDir();
+			const socketPath = socketPathWithBytes(socketDir, limit + 1, encoding);
+			expect(Buffer.byteLength(socketPath)).toBe(limit + 1);
+			if (encoding === "multibyte") expect(socketPath.length).toBeLessThan(limit);
+			let error: unknown;
+			try {
+				if (operation === "acquire") lease = await acquireDaemonSocketPathLease(socketPath);
+				else await prepareDaemonSocketPath(socketPath);
+			} catch (caught) {
+				error = caught;
+			}
+			expect(existsSync(socketDir)).toBe(false);
+			expect(existsSync(`${socketPath}.lock`)).toBe(false);
+			expect(existsSync(socketPath)).toBe(false);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toMatch(/socket path.*too long/i);
+			expect((error as Error).message).toContain(`${limit + 1} bytes`);
+			expect((error as Error).message).toContain(`maximum ${limit} on ${platform}`);
+		} finally {
+			await lease?.release();
+			vi.unstubAllEnvs();
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("still cleans up an existing overlong path without applying bind validation", () => {
+		const root = mkdtempSync(join(tmpdir(), "pa-len-"));
+		const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		try {
+			Object.defineProperty(process, "platform", { value: platform });
+			const socketPath = socketPathWithBytes(root, limit + 1, "ascii");
+			writeFileSync(socketPath, "stale socket record");
+			const identity = getDaemonSocketIdentity(socketPath);
+			expect(readFileSync(socketPath, "utf8")).toBe("stale socket record");
+			cleanupDaemonSocketPath(socketPath, identity);
+			expect(existsSync(socketPath)).toBe(false);
+			expect(existsSync(`${socketPath}.lock`)).toBe(false);
+		} finally {
+			Object.defineProperty(process, "platform", hostPlatform);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("normalizeSocketPath", () => {
 	it("normalizes equivalent Unix spellings", () => {

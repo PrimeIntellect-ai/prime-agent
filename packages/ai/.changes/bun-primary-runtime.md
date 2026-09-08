@@ -1,0 +1,1 @@
+- Made Bun 1.4.0 the primary development and test runtime while preserving Node-compatible package output.

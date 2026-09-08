@@ -1,3 +1,5 @@
+import type * as FsModule from "node:fs";
+import { createRequire } from "node:module";
 import {
 	appendFileSync,
 	chmodSync,
@@ -19,8 +21,9 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fullReadCounter = vi.hoisted(() => ({ suffix: undefined as string | undefined, count: 0 }));
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+const __fs = createRequire(import.meta.url)("node:fs") as typeof FsModule;
+vi.mock("node:fs", () => {
+	const actual = __fs;
 	return {
 		...actual,
 		readFileSync: ((path: Parameters<typeof actual.readFileSync>[0], options?: never) => {

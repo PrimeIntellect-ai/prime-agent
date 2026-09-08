@@ -204,13 +204,12 @@ describe("ReplKernelManager abort handling", () => {
 		await expect(executePromise).resolves.toMatchObject({ status: "aborted" });
 
 		const secondExecutePromise = manager.execute("x = 1");
-		const secondExecuteExpectation = expect(secondExecutePromise).rejects.toThrow(
-			"The Python kernel is still running the previously interrupted cell",
-		);
 		await Promise.resolve();
 		await vi.advanceTimersByTimeAsync(5000);
 
-		await secondExecuteExpectation;
+		await expect(secondExecutePromise).rejects.toThrow(
+			"The Python kernel is still running the previously interrupted cell",
+		);
 		expect(writeLine.mock.calls.filter((call) => (call[0] as { type?: string }).type === "execute")).toHaveLength(1);
 		expect(writeLine.mock.calls.some((call) => (call[0] as { type?: string }).type === "interrupt")).toBe(true);
 		manager.disposeSync();
