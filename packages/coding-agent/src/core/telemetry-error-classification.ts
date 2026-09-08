@@ -1,3 +1,5 @@
+import { telemetryOriginalErrorDetails } from "./telemetry-error-details.js";
+
 export const TELEMETRY_ERROR_CLASSIFIER_REVISION = 1;
 
 export const TELEMETRY_ERROR_MESSAGES = {
@@ -353,7 +355,18 @@ export function classifyTelemetryError(error: unknown): TelemetryErrorClassifica
 }
 
 export function telemetryErrorProperties(error: unknown): Record<string, string | number | boolean | null> {
-	return { ...classifyTelemetryError(error), ...telemetryOriginalErrorDetails(error) };
+	const classification = classifyTelemetryError(error);
+	const details = telemetryOriginalErrorDetails(error);
+	return {
+		...classification,
+		...details,
+		error_code_group:
+			details.error_code_group !== "unknown"
+				? details.error_code_group
+				: classification.error_code !== "unknown"
+					? classification.error_code
+					: classification.http_status !== null
+						? `http_${classification.http_status}`
+						: "unknown",
+	};
 }
-
-import { telemetryOriginalErrorDetails } from "./telemetry-error-details.js";

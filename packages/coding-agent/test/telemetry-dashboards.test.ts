@@ -180,11 +180,16 @@ describe("reviewed telemetry dashboard definitions", () => {
 		expect(sql("run-outcomes")).toContain("GROUP BY distinct_id, run_id");
 	});
 
-	it("deduplicates recovery updates and favors terminal recovery on equal timestamps", () => {
-		for (const key of ["error-causes", "error-recovery"]) {
+	it("deduplicates recovery updates and falls back from unknown codes to HTTP status", () => {
+		for (const key of ["error-causes", "error-recovery", "error-concentration"]) {
 			expect(sql(key)).toContain("GROUP BY distinct_id, error_id");
 			expect(sql(key)).toContain(
 				"tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled')",
+			);
+			expect(sql(key)).toContain("nullIf(properties.error_code_group, 'unknown')");
+			expect(sql(key)).toContain("nullIf(properties.error_code, 'unknown')");
+			expect(sql(key)).toContain(
+				"if(properties.http_status IS NOT NULL, concat('http_', toString(properties.http_status)), 'unknown')",
 			);
 		}
 		expect(sql("error-causes")).toContain("reviewed_message");

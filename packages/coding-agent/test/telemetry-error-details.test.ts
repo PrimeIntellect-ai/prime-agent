@@ -89,6 +89,42 @@ describe("original error message diagnostics", () => {
 		expect(JSON.stringify(details)).not.toContain("canary");
 	});
 
+	it.each([
+		[{ status: 401 }, "http_401", 401, "authentication_rejected"],
+		[{ response: { status: 503 } }, "http_503", 503, "provider_unavailable"],
+		[{ $metadata: { httpStatusCode: 429 } }, "http_429", 429, "rate_limited"],
+		[{ cause: { response: { statusCode: 504 } } }, "http_504", 504, "timeout"],
+		[{ type: "invalid_api_key", status: 401 }, "invalid_api_key", 401, "credential_invalid"],
+		[{ error: { type: "rate_limit_error" } }, "rate_limit_error", null, "rate_limited"],
+	])(
+		"groups status-only and reviewed structured errors without changing their classification",
+		(error, code, status, subtype) => {
+			expect(telemetryErrorProperties(error)).toMatchObject({
+				error_code_group: code,
+				error_subtype: subtype,
+				http_status: status,
+			});
+		},
+	);
+
+	it.each([
+		[{ code: "DAEMON_HANDSHAKE_FAILED", status: 503, type: "server_error" }, "DAEMON_HANDSHAKE_FAILED"],
+		[{ cause: { code: "ECONNRESET" }, response: { status: 502 } }, "ECONNRESET"],
+		[{ code: -32600, status: 400, type: "api_error" }, "code_-32600"],
+	])("prefers the actual application or system code over classifier and HTTP fallbacks", (error, code) => {
+		expect(telemetryErrorProperties(error).error_code_group).toBe(code);
+	});
+
+	it.each([
+		{ message: "HTTP 401 returned by a worker" },
+		{ status: "401" },
+		{ status: 200 },
+		{ status: Number.NaN },
+		{ type: "unreviewed_provider_type" },
+	])("keeps unknown groups when structured evidence is missing or invalid", (error) => {
+		expect(telemetryErrorProperties(error)).toMatchObject({ error_code_group: "unknown", http_status: null });
+	});
+
 	it("bounds malformed, cyclical causes and contains throwing getters", () => {
 		const error = { message: "Worker failed", cause: {} };
 		error.cause = error;
