@@ -714,7 +714,7 @@ function buildCore(side: EndpointSide, physicalRaw: unknown, dispatchRaw: unknow
 
 	const groupIssuers = new CapturedArray<PrivateIssuer | null>(null, null, null, null, null);
 	const firstStream = side === "Runtime" ? 0 : 1;
-	for (let streamIndex = firstStream; streamIndex <= 4; streamIndex += 1) {
+	for (let streamIndex = firstStream; streamIndex <= 3; streamIndex += 1) {
 		const issuer = makePrivateIssuer();
 		if (issuer === null) return null;
 		groupIssuers[streamIndex] = issuer;
@@ -1445,6 +1445,10 @@ function buildCore(side: EndpointSide, physicalRaw: unknown, dispatchRaw: unknow
 			return;
 		}
 		if (side === "Runtime" && frame.stream === 0) {
+			globalPoison();
+			return;
+		}
+		if (frame.stream === 4) {
 			globalPoison();
 			return;
 		}

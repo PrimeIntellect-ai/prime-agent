@@ -460,7 +460,7 @@ describe("capability ownership", () => {
 });
 
 describe("nine request flows", () => {
-	it("runs Runtime streams zero through four", async () => {
+	it("runs Runtime streams zero through three", async () => {
 		const harness = makeHarness();
 		if (harness === null) return;
 		const groups: Array<OriginSubmit> = [
@@ -468,9 +468,8 @@ describe("nine request flows", () => {
 			harness.runtime.lifecycleToHome,
 			harness.runtime.messagesToHome,
 			harness.runtime.observeRequestsToHome,
-			harness.runtime.observeRepliesToHome,
 		];
-		for (let stream = 0; stream <= 4; stream += 1) {
+		for (let stream = 0; stream <= 3; stream += 1) {
 			const result = await roundTrip(harness, groups[stream], true, 10 + stream, 20 + stream);
 			expect(result).not.toBeNull();
 			if (result !== null && result.request.ok) {
@@ -483,16 +482,22 @@ describe("nine request flows", () => {
 		}
 	});
 
-	it("runs Home streams one through four", async () => {
+	it("stream 4 observeRepliesToHome submit returns ENDPOINT_EXHAUSTED", () => {
+		const harness = makeHarness();
+		if (harness === null) return;
+		const result = harness.runtime.observeRepliesToHome.submit(bytes([14]));
+		expect(result).toEqual({ code: "ENDPOINT_EXHAUSTED" });
+	});
+
+	it("runs Home streams one through three", async () => {
 		const harness = makeHarness();
 		if (harness === null) return;
 		const groups: Array<OriginSubmit> = [
 			harness.home.lifecycleToRuntime,
 			harness.home.messagesToRuntime,
 			harness.home.observeRequestsToRuntime,
-			harness.home.observeRepliesToRuntime,
 		];
-		for (let offset = 0; offset < 4; offset += 1) {
+		for (let offset = 0; offset < 3; offset += 1) {
 			const result = await roundTrip(harness, groups[offset], false, 30 + offset, 40 + offset);
 			expect(result).not.toBeNull();
 			if (result !== null && result.request.ok) {
@@ -501,6 +506,13 @@ describe("nine request flows", () => {
 				expect(result.bundle.origin).toBe("Home");
 			}
 		}
+	});
+
+	it("stream 4 observeRepliesToRuntime submit returns ENDPOINT_EXHAUSTED", () => {
+		const harness = makeHarness();
+		if (harness === null) return;
+		const result = harness.home.observeRepliesToRuntime.submit(bytes([14]));
+		expect(result).toEqual({ code: "ENDPOINT_EXHAUSTED" });
 	});
 });
 
@@ -1715,5 +1727,51 @@ run();
 		const request = encodeAppFrame(KIND_REQUEST, 0, 1n, bytes([1]));
 		if (request.ok) harness.runtimeInbound(0, request.frame);
 		expect(harness.runtime.modelToHome.submit(bytes([2]))).toEqual({ code: "POISONED" });
+	});
+
+	it("inbound stream 4 KIND_REQUEST from Home poisons Runtime multiplexer", () => {
+		const harness = makeHarness();
+		if (harness === null) return;
+		const request = encodeAppFrame(KIND_REQUEST, 4, 1n, bytes([1]));
+		if (request.ok) harness.runtimeInbound(4, request.frame);
+		expect(harness.runtime.modelToHome.submit(bytes([2]))).toEqual({ code: "POISONED" });
+	});
+
+	it("inbound stream 4 KIND_REQUEST from Runtime poisons Home multiplexer", () => {
+		const harness = makeHarness();
+		if (harness === null) return;
+		const request = encodeAppFrame(KIND_REQUEST, 4, 1n, bytes([1]));
+		if (request.ok) harness.homeInbound(4, request.frame);
+		expect(harness.home.lifecycleToRuntime.submit(bytes([2]))).toEqual({ code: "POISONED" });
+	});
+
+	it("Runtime stream 4 reserved submit does not consume local or total live capacity", () => {
+		const harness = makeHarness();
+		if (harness === null) return;
+		for (let index = 0; index < 31; index += 1) {
+			expect(ticketFrom(harness.runtime.modelToHome, bytes([index]))).not.toBeNull();
+		}
+		const exResult = harness.runtime.observeRepliesToHome.submit(bytes([31]));
+		expect(exResult).toEqual({ code: "ENDPOINT_EXHAUSTED" });
+		const submit32 = harness.runtime.modelToHome.submit(bytes([32]));
+		expect(submit32.code).toBe("SUBMITTED");
+		if (submit32.code === "SUBMITTED") expect(submit32.ticket).not.toBeUndefined();
+		const submit33 = harness.runtime.modelToHome.submit(bytes([33]));
+		expect(submit33).toEqual({ code: "ENDPOINT_EXHAUSTED" });
+	});
+
+	it("Home stream 4 reserved submit does not consume local or total live capacity", () => {
+		const harness = makeHarness();
+		if (harness === null) return;
+		for (let index = 0; index < 31; index += 1) {
+			expect(ticketFrom(harness.home.lifecycleToRuntime, bytes([index]))).not.toBeNull();
+		}
+		const exResult = harness.home.observeRepliesToRuntime.submit(bytes([31]));
+		expect(exResult).toEqual({ code: "ENDPOINT_EXHAUSTED" });
+		const submit32 = harness.home.lifecycleToRuntime.submit(bytes([32]));
+		expect(submit32.code).toBe("SUBMITTED");
+		if (submit32.code === "SUBMITTED") expect(submit32.ticket).not.toBeUndefined();
+		const submit33 = harness.home.lifecycleToRuntime.submit(bytes([33]));
+		expect(submit33).toEqual({ code: "ENDPOINT_EXHAUSTED" });
 	});
 });
