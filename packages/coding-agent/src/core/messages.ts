@@ -49,6 +49,15 @@ export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice"
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
 export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Shell message received";
 
+/**
+ * Names and other metadata interpolated into a `[<kind> ...]` header line must not
+ * carry the characters that delimit the header itself (brackets, newlines, commas,
+ * or the relationship separator ":").
+ */
+export function sanitizeMessageHeaderValue(value: string): string {
+	return value.replace(/[\s,:[\]]+/g, " ").trim();
+}
+
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
 	commandEntryId?: string;
@@ -197,7 +206,7 @@ export function createRlmChildFailureMessage(
 	return {
 		role: "custom",
 		customType: RLM_CHILD_FAILURE_CUSTOM_TYPE,
-		content: `[child-failed child:${details.sessionName}]
+		content: `[child-failed child:${sanitizeMessageHeaderValue(details.sessionName)}]
 
 ${details.error}`,
 		display: true,
@@ -210,10 +219,11 @@ export function createRlmChildTerminalNoticeMessage(
 	details: RlmChildTerminalNoticeDetails,
 	timestamp = Date.now(),
 ): CustomMessage<RlmChildTerminalNoticeDetails> {
+	const childName = sanitizeMessageHeaderValue(details.sessionName);
 	const content =
 		details.kind === "cancelled"
-			? `[child-exited: cancelled child:${details.sessionName}]${details.reason ? `\n\n${details.reason}` : ""}`
-			: `[child-exited: no-reply child:${details.sessionName}]${details.lastAssistantTextPreview ? `\n\nLast assistant text: ${details.lastAssistantTextPreview}` : ""}`;
+			? `[child-exited: cancelled child:${childName}]${details.reason ? `\n\n${details.reason}` : ""}`
+			: `[child-exited: no-reply child:${childName}]${details.lastAssistantTextPreview ? `\n\nLast assistant text: ${details.lastAssistantTextPreview}` : ""}`;
 	return {
 		role: "custom",
 		customType: RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,

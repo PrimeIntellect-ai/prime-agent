@@ -6508,8 +6508,7 @@ export class AgentSession {
 
 	clearQueuedAgentMessages(): { steering: string[]; followUp: string[] } {
 		this._agentMessageClearEpoch++;
-		// customType identifies current-format agent messages; the text parser only
-		// still matches legacy-format prompts that carry no custom message.
+		// customType identifies agent messages; the text parser covers persisted pre-grammar prompts.
 		return this._clearQueuedTurnActionsMatching(
 			(action) =>
 				isAgentSessionMessage(primaryDeliveryRecord(action).message) ||

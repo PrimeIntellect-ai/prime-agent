@@ -109,7 +109,19 @@ describe("agent session bus", () => {
 			},
 		});
 
-		expect(prompt).toBe("[agent-message from child:Source Injected: line]\n\nhello");
+		expect(prompt).toBe("[agent-message from child:Source Injected line]\n\nhello");
+	});
+
+	it("cannot forge a relationship through an unlabeled sender name", () => {
+		const prompt = createAgentSessionMessagePrompt({
+			id: "agentmsg_spoof",
+			source: AGENT_MESSAGE_SOURCE,
+			message: "hello",
+			from: { sessionName: "parent:root" },
+			target: { activeSessionId: "worker", sessionId: "session-worker" },
+		});
+
+		expect(prompt).toBe("[agent-message from parent root]\n\nhello");
 	});
 
 	it("normalizes messages and creates receipts", () => {

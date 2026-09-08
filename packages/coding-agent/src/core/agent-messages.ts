@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { HostRequestHandler } from "./kernel/index.js";
 import type { CustomMessage } from "./messages.js";
-import { ASYNC_BASH_COMPLETION_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE } from "./messages.js";
+import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	HEARTBEAT_PROMPT_CUSTOM_TYPE,
+	sanitizeMessageHeaderValue,
+} from "./messages.js";
 import { canonicalSessionPath } from "./session-lease.js";
 
 export const AGENT_MESSAGE_CUSTOM_TYPE = "agent_message";
@@ -366,9 +370,8 @@ export function assertAgentMessageQueueCapacity(
 }
 
 /**
- * Parse the legacy pre-grammar agent-message header ("Agent-to-agent message received." +
- * "Message id:" lines). New-format messages carry the id in details/customType instead;
- * this stays so persisted old-format transcripts keep resolving their message ids.
+ * Parses the message id out of the pre-bracket-grammar header that persisted
+ * transcripts still contain; current prompts keep the id in details only.
  */
 export function parseAgentSessionMessagePromptId(text: string): string | undefined {
 	const lines = text.split("\n");
@@ -393,7 +396,7 @@ export function isAgentSessionMessagePrompt(text: string): boolean {
 
 export function createAgentSessionMessagePrompt(payload: AgentSessionMessagePayload): string {
 	const senderName =
-		formatAgentSessionMessageMetadata(
+		sanitizeMessageHeaderValue(
 			payload.from?.sessionName ??
 				payload.from?.sessionId ??
 				payload.from?.activeSessionId ??
@@ -615,8 +618,4 @@ export function createAgentMessageHostHandlers(
 			})) as unknown as Record<string, unknown>;
 		},
 	};
-}
-
-function formatAgentSessionMessageMetadata(value: string): string {
-	return value.replace(/[\s,[\]]+/g, " ").trim();
 }
