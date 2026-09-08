@@ -613,10 +613,11 @@ export class Markdown implements Component {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLink = this.theme.link(this.theme.underline(linkText));
 					if (getCapabilities().hyperlinks) {
-						const href =
-							this.options.baseUrl && URL.canParse(token.href, this.options.baseUrl)
-								? new URL(token.href, this.options.baseUrl).href
-								: token.href;
+						// A Windows drive letter is a file path, not a URL scheme.
+						const target = token.href.replace(/^([a-z]:[\\/])/i, "file:///$1");
+						const href = URL.canParse(target, this.options.baseUrl)
+							? new URL(target, this.options.baseUrl).href
+							: target;
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
 						// so we always show only the link text regardless of whether it matches href.
 						result += hyperlink(styledLink, href) + stylePrefix;

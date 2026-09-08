@@ -1,1 +1,2 @@
 - Added a base URL option for resolving relative Markdown links.
+- Fixed Windows drive paths in Markdown links to open as file URLs.
