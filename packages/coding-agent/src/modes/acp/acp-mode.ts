@@ -17,6 +17,7 @@ import type {
 	AgentConnectionSessionInputPause,
 } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
+import { AcpSessionConfig } from "./acp-config.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
 import { resolveAcpMcpServers } from "./acp-mcp.js";
 import { PRIME_AGENT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
@@ -131,6 +132,7 @@ interface AcpSessionEntry {
 	resolvePromptTask: (() => void) | undefined;
 	unsubscribe: (() => void) | undefined;
 	producer: AcpUpdateProducer;
+	config: AcpSessionConfig;
 }
 
 /**
@@ -768,6 +770,9 @@ export async function runAcpModeWithConnection(
 					resolvePromptTask: undefined,
 					unsubscribe: undefined,
 					producer,
+					config: new AcpSessionConfig(connection, (configOptions) =>
+						producer.publish({ sessionUpdate: "config_option_update", configOptions }, 0, "event"),
+					),
 				};
 				// Subscribe for the session lifetime, not per prompt turn: prime-agent
 				// subagents are fire-and-forget and keep reporting after the spawning turn
@@ -776,7 +781,23 @@ export async function runAcpModeWithConnection(
 				// the run that produced it.
 				const mappingState: AcpEventMappingState = {};
 				const observedChildren = new Map<string, unknown>();
+				const refreshConfig = () => {
+					void entry.config.refresh().catch((error: unknown) => {
+						console.error(`Failed to refresh ACP configuration: ${String(error)}`);
+					});
+				};
 				const unsubscribe = connection.subscribe((event) => {
+					if (
+						session === entry &&
+						(event.type === "session_replaced" ||
+							event.type === "session_resynced" ||
+							(event.type === "session_event" &&
+								(event.event.type === "thinking_level_changed" ||
+									event.event.type === "agent_start" ||
+									event.event.type === "agent_end")))
+					) {
+						refreshConfig();
+					}
 					// Heartbeats are connection-scoped, including if one races a prompt.
 					// They therefore intentionally use origin turn 0.
 					if (event.type === "heartbeats_changed") {
@@ -796,10 +817,15 @@ export async function runAcpModeWithConnection(
 						void producer.publish(update, turnId, "event");
 					}
 				});
+				let configOptions: acp.SessionConfigOption[] = [];
 				try {
 					// Reconcile after subscribing so updates cannot be lost while the snapshot
 					// request is in flight. Do not turn a failed read into an empty roster.
 					const initialSnapshot = await connection.getInitialSnapshot();
+					configOptions = await entry.config.initialize().catch((error: unknown) => {
+						console.error(`Failed to load ACP configuration: ${String(error)}`);
+						return [];
+					});
 					for (const child of initialSnapshot.children ?? []) {
 						if (observedChildren.has(child.id)) continue;
 						observedChildren.set(child.id, child);
@@ -812,6 +838,7 @@ export async function runAcpModeWithConnection(
 				} catch (error) {
 					producer.failSessionNewAdmission();
 					unsubscribe();
+					await entry.config.close();
 					await clearAcpMcpServers().catch(() => undefined);
 					throw error;
 				}
@@ -821,6 +848,7 @@ export async function runAcpModeWithConnection(
 				session = entry;
 				const response = {
 					sessionId,
+					configOptions,
 					...(cwdMismatch ? { _meta: primeAgentMeta({ cwd: cwdMismatch }) } : {}),
 				};
 				// The stream wrapper commits this gate after this exact response has
@@ -835,6 +863,14 @@ export async function runAcpModeWithConnection(
 			} finally {
 				sessionNewInFlight = false;
 			}
+		})
+		.onRequest("session/set_config_option", async (ctx) => {
+			const params = ctx.params as acp.SetSessionConfigOptionRequest;
+			const entry = session?.id === params.sessionId ? session : undefined;
+			if (!entry || sessionCloseInFlight || entry.cancelling || entry.stopFailure) {
+				throw acp.RequestError.invalidParams({ reason: `ACP session is unavailable: ${params.sessionId}` });
+			}
+			return { configOptions: await entry.config.set(params.configId, params.value) };
 		})
 		.onRequest("session/prompt", async (ctx: any) => {
 			const params = ctx.params as { sessionId: string; prompt: readonly unknown[] };
@@ -1014,6 +1050,7 @@ export async function runAcpModeWithConnection(
 					if (!inputPauseKey) throw new Error("Missing ACP close input-pause key");
 					await stopSessionWork(pending, promptTask);
 					closing.unsubscribe?.();
+					await closing.config.close();
 					// Keep the backing session fenced until a replacement ACP session is admitted.
 					await closing.producer.close();
 					// Host credentials are already gone before kernel release runs. Do not
@@ -1095,6 +1132,7 @@ export async function runAcpModeWithConnection(
 	await handle.closed.catch(() => undefined);
 	session?.abort?.abort();
 	session?.unsubscribe?.();
+	await session?.config.close();
 	await session?.inputPause?.release().catch(() => undefined);
 	session = undefined;
 	await closedInputPause?.release().catch(() => undefined);

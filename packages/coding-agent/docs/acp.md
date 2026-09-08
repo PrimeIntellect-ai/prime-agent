@@ -20,6 +20,7 @@ Use ACP mode when something external needs to *drive* a session interactively: p
 |---|---|
 | `initialize` | Returns protocol version, capabilities, and agent info. |
 | `session/new` | Creates the session. One session per connection. |
+| `session/set_config_option` | Selects the model or reasoning level and returns the complete configuration. |
 | `session/prompt` | Runs one turn and resolves with a stop reason. |
 | `session/cancel` | Notification; aborts the addressed session's turn. |
 | `session/close` | Releases the session and frees the connection for a new one. |
@@ -27,6 +28,37 @@ Use ACP mode when something external needs to *drive* a session interactively: p
 One session per connection is a deliberate limit: Prime Agent's underlying session is fixed at process startup, so a second concurrent session would silently share its conversation, working directory, and model. A second `session/new` is refused rather than pretending to isolate. Start another process for a second session.
 
 Likewise `session/prompt` refuses a concurrent turn while one is running, and the working directory cannot be changed after startup — a client-supplied `cwd` that differs from the agent's real one is reported back in `_meta` rather than silently ignored.
+
+## Session configuration
+
+`session/new` returns standard ACP `configOptions` for the current model and, when
+multiple levels are supported, its reasoning level. Model values use `provider/model-id`;
+reasoning values are the levels supported by the selected model.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "<session-id>",
+    "configId": "thought_level",
+    "value": "high"
+  }
+}
+```
+
+Use `configId: "model"` to select a model. Both selectors accept only advertised
+values. Changes can be made during a prompt and use the same session settings as
+the terminal UI. Switching models updates the available reasoning levels and may
+adjust the current level. Every successful response contains all config options.
+
+Changes are also published as `config_option_update` notifications. The adapter
+refreshes configuration on reasoning changes, session replacement or resynchronization,
+and turn boundaries. A model-only change from another client may become visible at
+the next refresh because the connection has no dedicated model-change event.
+If the model catalog cannot be read during setup, the session remains usable with
+an empty configuration list. No permission modes are introduced by these selectors.
 
 ## MCP servers
 

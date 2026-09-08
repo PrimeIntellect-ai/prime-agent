@@ -1,0 +1,1 @@
+- Added ACP model and reasoning selectors through session config options, with dependent option updates when switching models.
