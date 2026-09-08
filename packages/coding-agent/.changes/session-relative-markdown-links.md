@@ -1,0 +1,1 @@
+- Fixed assistant Markdown file links to open relative to the session's working directory.

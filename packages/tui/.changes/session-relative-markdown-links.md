@@ -1,0 +1,1 @@
+- Added a base URL option for resolving relative Markdown links.
