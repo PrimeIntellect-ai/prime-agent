@@ -1,0 +1,1 @@
+- Fixed saved-session renames reverting in the session list when a live worker starts another turn.

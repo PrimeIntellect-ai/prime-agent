@@ -2457,6 +2457,11 @@ export class DaemonSupervisor {
 				return await this.withSessionNameReservation(target, async () => {
 					await this.assertSupervisorSavedSessionNameAvailable(command.sessionPath, target.name);
 					if (!command.activeSessionId) {
+						const owner = this.findWorkerBySessionFile(command.sessionPath);
+						if (owner) {
+							this.assertWorkerAccessibleToClient(client, owner, command.sessionPath);
+							return await this.forwardToWorker(owner, command);
+						}
 						await this.catalog.rename(command.sessionPath, command.name);
 						// Third rename write point: an offline saved-session rename
 						// changes the name the ledger carries for that child.
