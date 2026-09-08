@@ -250,7 +250,7 @@ function Uninstall-PrimeAgent {
 
 if ($Uninstall) {
     Uninstall-PrimeAgent
-    exit 0
+    return
 }
 if ($DownloadBaseUrl -eq ("__PRIME_AGENT_DOWNLOAD_BASE" + "_URL__")) {
     throw "Installer download URL is not configured. Use the published installer or set PRIME_AGENT_DOWNLOAD_BASE_URL."

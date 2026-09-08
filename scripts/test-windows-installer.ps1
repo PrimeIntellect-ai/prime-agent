@@ -103,7 +103,19 @@ try {
     Remove-Item -LiteralPath (Join-Path $serverRoot "stable")
     Set-Content -LiteralPath (Join-Path $serverRoot "beta") -Value $version -Encoding Ascii
     & (Join-Path $testRoot "install-beta.ps1") -Update
-    & (Join-Path $testRoot "install-beta.ps1") -Uninstall
+    $uninstallWrapper = Join-Path $testRoot "uninstall-scriptblock.ps1"
+    @'
+param([string]$InstallerPath)
+$ErrorActionPreference = "Stop"
+& ([scriptblock]::Create((Get-Content -LiteralPath $InstallerPath -Raw))) -Uninstall
+Write-Output "prime-agent-uninstall-host-continued"
+'@ | Set-Content -LiteralPath $uninstallWrapper -Encoding UTF8
+    $currentHost = (Get-Process -Id $PID).Path
+    $uninstallOutput = & $currentHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $uninstallWrapper (Join-Path $testRoot "install-beta.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "Uninstall scriptblock host failed with $LASTEXITCODE" }
+    if ($uninstallOutput -cnotcontains "prime-agent-uninstall-host-continued") {
+        throw "Uninstall exited its hosting PowerShell session"
+    }
     if (Test-Path -LiteralPath (Join-Path $localAppData "PrimeAgent")) {
         throw "Uninstall left the PrimeAgent install directory behind"
     }

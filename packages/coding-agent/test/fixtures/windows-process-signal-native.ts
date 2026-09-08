@@ -4,7 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execCommand } from "../../src/core/exec.js";
-import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../src/utils/child-process.js";
+import {
+	isProcessAlive,
+	spawnHidden,
+	spawnWindowsProcessTreeSignal,
+	waitForChildProcess,
+} from "../../src/utils/child-process.js";
 import {
 	captureWindowsProcessCreationTime,
 	createWindowsProcessTreeSignal,
@@ -52,7 +57,7 @@ if (process.argv[2] === "--exit-caller") {
 	phase("caller-capture-complete");
 	traceCommand(command, process.argv[6]!);
 	encode(command, `${gate(process.argv[4]!)}\n${decode(command)}`);
-	const helper = spawnHidden(command.command, command.args, { detached: true, stdio: "ignore" });
+	const helper = spawnWindowsProcessTreeSignal(command);
 	writeFileSync(process.argv[5]!, String(helper.pid));
 	phase("caller-helper-spawned", { helperPid: helper.pid });
 	process.exit(0);
@@ -114,7 +119,7 @@ async function liveTree(name: string): Promise<{ root: ChildProcess; pids: [numb
 async function runHelper(command: { command: string; args: string[] }): Promise<number | null> {
 	const log = tracePath(`helper-${traces.length}`);
 	traceCommand(command, log);
-	const helper = spawnHidden(command.command, command.args, { stdio: "ignore", detached: true });
+	const helper = spawnWindowsProcessTreeSignal(command);
 	owners.push(helper);
 	phase("helper-spawned", { helperPid: helper.pid, log });
 	helper.once("error", (error) => phase("helper-error", String(error)));
@@ -193,7 +198,7 @@ try {
 		.replace("exit $code", "if (!$pin.IsClosed) { exit 97 }\nexit $code");
 	encode(heldCommand, heldScript);
 	traceCommand(heldCommand, tracePath("held-helper"));
-	const heldHelper = spawnHidden(heldCommand.command, heldCommand.args, { stdio: "ignore", detached: true });
+	const heldHelper = spawnWindowsProcessTreeSignal(heldCommand);
 	owners.push(heldHelper);
 	const heldResult = waitForChildProcess(heldHelper);
 	heldResult.catch((error) => cleanupErrors.push(error));

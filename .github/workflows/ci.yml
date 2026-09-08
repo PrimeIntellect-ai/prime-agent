@@ -420,6 +420,19 @@ jobs:
         if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
         run: bun run build:binary
 
+      - name: Test identity-pinned tree signals under the compiled Windows runtime
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: packages/coding-agent
+        env:
+          BUN_BE_BUN: "1"
+        run: |
+          $binary = (Resolve-Path "./dist/pi.exe").Path
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Identity fixture runtime: $binary SHA256=$hash"
+          & $binary ./test/fixtures/windows-process-signal-native.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Probe the compiled Windows runtime broker
         if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
         timeout-minutes: 3
