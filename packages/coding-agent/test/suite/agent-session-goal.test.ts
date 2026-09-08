@@ -178,7 +178,7 @@ describe("AgentSession goals", () => {
 			"Goal complete.",
 		]);
 		expect(goalContextMessages(harness)).toHaveLength(3);
-		expect(getMessageText(goalContextMessages(harness)[0])).toContain("<goal_context>");
+		expect(getMessageText(goalContextMessages(harness)[0])).toMatch(/^\[goal: continuation\]\n\n/);
 		expect(harness.session.goalState).toMatchObject({
 			active: false,
 			status: "complete",
@@ -473,7 +473,7 @@ describe("AgentSession goals", () => {
 
 		await harness.session.prompt("/goal inspect the image", { images: [image] });
 
-		expect(preparedText).toContain("<goal_context>");
+		expect(preparedText).toMatch(/^\[goal: continuation\]\n\n/);
 		expect(preparedText).not.toContain("[object Object]");
 		expect(preparedImages).toEqual([image]);
 	});

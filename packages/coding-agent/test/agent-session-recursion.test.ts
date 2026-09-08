@@ -885,9 +885,7 @@ describe("AgentSession rlm recursion", () => {
 		await expect(completed({ pid: 42, command: "npm test", exitCode: 1 })).resolves.toEqual({});
 		await root.waitForIdle();
 
-		expect(prompts).toEqual([
-			expect.stringContaining("Inspect the saved BashHandle with .poll(), .output(), or .tail()"),
-		]);
+		expect(prompts).toEqual(['[bash-done pid:42 exit:1]\n\nCommand: "npm test"']);
 		expect(root.messages).toContainEqual(
 			expect.objectContaining({
 				role: "custom",
@@ -1270,7 +1268,9 @@ describe("AgentSession rlm recursion", () => {
 			origin: "agent",
 		});
 		const reply = findLastMessage(parent.messages, isAgentSessionMessage);
-		expect(reply && isAgentSessionMessage(reply) ? reply.content : undefined).toContain("[from child:worker]");
+		expect(reply && isAgentSessionMessage(reply) ? reply.content : undefined).toContain(
+			"[agent-message from child:worker]",
+		);
 
 		await internals.sendAgentSessionMessage({
 			targetSelector: childState.activeSessionId,
@@ -1279,7 +1279,9 @@ describe("AgentSession rlm recursion", () => {
 			origin: "agent",
 		});
 		const steer = findLastMessage(child.messages, isAgentSessionMessage);
-		expect(steer && isAgentSessionMessage(steer) ? steer.content : undefined).toContain("[from parent]");
+		expect(steer && isAgentSessionMessage(steer) ? steer.content : undefined).toContain(
+			"[agent-message from parent:",
+		);
 		expect(child.repliedToParentSinceTask).toBe(false);
 	});
 
@@ -1392,9 +1394,7 @@ describe("AgentSession rlm recursion", () => {
 			);
 			expect(notices).toHaveLength(1);
 			expect(notices[0]).toMatchObject({
-				content: expect.stringContaining(
-					`RLM child cancel-worker (${spawned.rlm_child_id}) was cancelled: Cancelled by user`,
-				),
+				content: "[child-exited: cancelled child:cancel-worker]\n\nCancelled by user",
 				details: { kind: "cancelled", reason: "Cancelled by user" },
 			});
 		});
@@ -1403,16 +1403,14 @@ describe("AgentSession rlm recursion", () => {
 	it("injects exactly one notice with a preview when a child completes without replying", async () => {
 		const root = createSession();
 
-		const spawned = await root.runRlmChild("silent child", { name: "silent-worker" });
+		await root.runRlmChild("silent child", { name: "silent-worker" });
 		await vi.waitFor(() => {
 			const notices = root.messages.filter(
 				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
 			);
 			expect(notices).toHaveLength(1);
 			expect(notices[0]).toMatchObject({
-				content: expect.stringContaining(
-					`RLM child silent-worker (${spawned.rlm_child_id}) completed without sending a reply`,
-				),
+				content: "[child-exited: no-reply child:silent-worker]\n\nLast assistant text: child answer: silent child",
 				details: {
 					kind: "completed_without_reply",
 					lastAssistantTextPreview: "child answer: silent child",
@@ -4004,7 +4002,8 @@ describe("AgentSession rlm recursion", () => {
 			),
 		).toEqual([
 			expect.objectContaining({
-				content: expect.stringContaining("was cancelled: Deleted by parent orchestrator"),
+				content: expect.stringContaining("[child-exited: cancelled"),
+				details: expect.objectContaining({ reason: "Deleted by parent orchestrator" }),
 			}),
 		]);
 	});

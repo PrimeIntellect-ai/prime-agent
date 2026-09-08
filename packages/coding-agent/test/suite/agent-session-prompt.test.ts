@@ -2170,9 +2170,7 @@ describe("Harness digest at cold boundaries", () => {
 		);
 		await harness.session.waitForIdle();
 
-		expect(
-			texts.filter((text) => text.startsWith("The persistent memories produced across this session so far:")),
-		).toHaveLength(1);
+		expect(texts.filter((text) => text.startsWith("[harness-digest]"))).toHaveLength(1);
 	});
 
 	it("strips the digest with a cleared first turn and re-delivers it on the next turn", async () => {

@@ -256,10 +256,8 @@ describe("AgentSession compaction characterization", () => {
 		expect((head as { summary: string }).summary).not.toContain("# Continual Harness State");
 		// Memories-first rendering in LLM context: digest preamble before the summary wrapper.
 		const text = getMessageText(convertToLlm([head!])[0]);
-		expect(text.indexOf("The persistent memories produced across this session so far:")).toBe(0);
-		expect(text.indexOf("# Continual Harness State")).toBeLessThan(
-			text.indexOf("was compacted into the following summary"),
-		);
+		expect(text.indexOf("[harness-digest]")).toBe(0);
+		expect(text.indexOf("# Continual Harness State")).toBeLessThan(text.indexOf("[compaction-summary]"));
 
 		// Update-merge path: the second compaction head carries the digest too.
 		harness.setResponses([
