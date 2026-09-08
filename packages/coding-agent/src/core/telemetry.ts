@@ -816,7 +816,9 @@ export async function captureOnboardingCompleted(options: CaptureOnboardingCompl
 			void telemetryClient(options)
 				.flush()
 				.catch(() => {});
-	} catch {}
+	} catch {
+		// Optional telemetry delivery must not interrupt onboarding.
+	}
 }
 
 export async function captureAgentCommandUsed(options: CaptureAgentCommandUsedOptions): Promise<void> {
@@ -834,7 +836,9 @@ export async function captureAgentCommandUsed(options: CaptureAgentCommandUsedOp
 			void telemetryClient(options)
 				.flush()
 				.catch(() => {});
-	} catch {}
+	} catch {
+		// Optional telemetry delivery must not interrupt the command.
+	}
 }
 
 function errorCategory(message: AssistantMessage | undefined): string | null {

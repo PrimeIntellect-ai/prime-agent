@@ -11246,8 +11246,15 @@ export class AgentSession {
 
 	private _isConcreteProviderAuthFailure(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
-		const { error_subtype: subtype } = classifyTelemetryError(message);
-		return subtype === "credential_invalid" || subtype === "credential_expired" || subtype === "credential_missing";
+		const { error_subtype: subtype, http_status: status } = classifyTelemetryError(message);
+		if (subtype === "credential_invalid" || subtype === "credential_expired" || subtype === "credential_missing") {
+			return true;
+		}
+		// A structured auth verdict still drives recovery when telemetry cannot identify the rejection reason.
+		return (
+			this._getProviderStreamFailureKind(message) === "auth" &&
+			(subtype === "authentication_rejected" || (subtype === "unknown" && status === null))
+		);
 	}
 
 	private _captureRetryAuthFailureSource(message: AssistantMessage): AuthSourceToken | undefined {
