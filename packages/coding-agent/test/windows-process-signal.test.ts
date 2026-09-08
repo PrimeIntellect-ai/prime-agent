@@ -1,6 +1,7 @@
 import type * as ChildProcessModule from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
+import { win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execCommand } from "../src/core/exec.js";
@@ -102,6 +103,39 @@ describe("Windows process identity capture", () => {
 });
 
 describe("Windows shared signal failures", () => {
+	it("re-enters the current Bun with isolated startup without changing the parent environment", () => {
+		const originalEnv = process.env;
+		const inherited = {
+			...originalEnv,
+			bUn_PrElOaD: "untrusted",
+			NoDe_OpTiOnS: "untrusted",
+			prime_agent_windows_signal: "untrusted",
+		};
+		process.env = inherited;
+		try {
+			signalProcessGroupOrProcess(42, "SIGKILL");
+			const [executable, args, options] = calls.spawn.mock.calls[0]!;
+			expect(executable).toBe(process.execPath);
+			expect(args).toEqual([
+				"--no-env-file",
+				"--no-install",
+				String.raw`--config=\\.\NUL`,
+				"--eval",
+				expect.any(String),
+			]);
+			const command = JSON.parse(options.env.PRIME_AGENT_WINDOWS_SIGNAL);
+			expect(options.cwd).toBe(win32.dirname(command.command));
+			expect(options.env.BUN_BE_BUN).toBe("1");
+			for (const key of ["bUn_PrElOaD", "NoDe_OpTiOnS", "prime_agent_windows_signal"]) {
+				expect(options.env[key]).toBeUndefined();
+				expect(process.env[key]).toBe("untrusted");
+			}
+			expect(process.env).toBe(inherited);
+		} finally {
+			process.env = originalEnv;
+		}
+	});
+
 	it("fails closed without throwing or spawning when the native adapter is unavailable", () => {
 		vi.mocked(ffi.dlopen).mockImplementation(() => {
 			throw new Error("adapter unavailable");
@@ -135,7 +169,13 @@ describe("Windows shared signal failures", () => {
 		expect(failure).toHaveBeenCalledTimes(1);
 		expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
 		expect(calls.spawn).toHaveBeenCalledTimes(1);
-		expect(calls.spawn.mock.calls[0]![2]).toEqual({ stdio: "ignore", detached: true, windowsHide: true });
+		expect(calls.spawn.mock.calls[0]![2]).toEqual({
+			cwd: expect.stringMatching(/\\System32\\WindowsPowerShell\\v1\.0$/i),
+			env: expect.objectContaining({ BUN_BE_BUN: "1", PRIME_AGENT_WINDOWS_SIGNAL: expect.any(String) }),
+			stdio: "ignore",
+			detached: true,
+			windowsHide: true,
+		});
 		expect(helper.unref).toHaveBeenCalledTimes(1);
 	});
 });
@@ -228,7 +268,8 @@ describe("owned exec failure reporting", () => {
 		controller.abort();
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(calls.spawn).toHaveBeenCalledTimes(3);
-		const script = Buffer.from(calls.spawn.mock.calls[2]![1].at(-1), "base64").toString("utf16le");
+		const command = JSON.parse(calls.spawn.mock.calls[2]![2].env.PRIME_AGENT_WINDOWS_SIGNAL);
+		const script = Buffer.from(command.args.at(-1), "base64").toString("utf16le");
 		expect(script).toContain("/T /F");
 		expect(result).toBeUndefined();
 		helper.emit("exit", 0);

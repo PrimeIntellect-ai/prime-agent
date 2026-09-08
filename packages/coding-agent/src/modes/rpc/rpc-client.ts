@@ -43,7 +43,7 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
 export interface RpcClientOptions {
-	/** Path to the CLI entry point (default: searches for dist/cli.js) */
+	/** Path to the CLI script (default: dist/cli.js). Bun must be available on PATH. */
 	cliPath?: string;
 	/** Working directory for the agent */
 	cwd?: string;
@@ -104,7 +104,7 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawnHidden("node", [cliPath, ...args], {
+		this.process = spawnHidden("bun", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],

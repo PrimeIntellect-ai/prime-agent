@@ -18,7 +18,7 @@ import {
 } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { constants } from "node:os";
-import { basename } from "node:path";
+import { basename, win32 } from "node:path";
 import { createWindowsProcessTreeSignal } from "./windows-process-signal.js";
 
 const EXIT_STDIO_GRACE_MS = 100;
@@ -168,6 +168,30 @@ export function signalProcessGroupIfHeld(pgid: number, signal: NodeJS.Signals): 
 	return true;
 }
 
+export function spawnWindowsProcessTreeSignal(command: { command: string; args: string[] }): ChildProcess {
+	const env: NodeJS.ProcessEnv = Object.fromEntries(
+		Object.entries(process.env).filter(
+			([key]) => !/^(BUN|NODE)_/i.test(key) && key.toUpperCase() !== "PRIME_AGENT_WINDOWS_SIGNAL",
+		),
+	);
+	env.BUN_BE_BUN = "1";
+	env.PRIME_AGENT_WINDOWS_SIGNAL = JSON.stringify(command);
+	const script = String.raw`
+const { spawn } = require("node:child_process");
+const spec = JSON.parse(process.env.PRIME_AGENT_WINDOWS_SIGNAL);
+delete process.env.PRIME_AGENT_WINDOWS_SIGNAL;
+delete process.env.BUN_BE_BUN;
+const child = spawn(spec.command, spec.args, { detached: false, windowsHide: true, stdio: "ignore" });
+child.once("error", () => { process.exitCode = 1; });
+child.once("exit", (code, signal) => { process.exitCode = signal || code === null ? 1 : code; });
+`;
+	return spawnHidden(
+		process.execPath,
+		["--no-env-file", "--no-install", String.raw`--config=\\.\NUL`, "--eval", script],
+		{ cwd: win32.dirname(command.command), env, detached: true, stdio: "ignore" },
+	);
+}
+
 export function signalProcessGroupOrProcess(
 	pid: number,
 	signal: NodeJS.Signals,
@@ -183,8 +207,7 @@ export function signalProcessGroupOrProcess(
 			else console.error(`Could not signal Windows process tree ${pid} (${signal}): ${error.message}`);
 		};
 		try {
-			const { command, args } = createWindowsProcessTreeSignal(pid, signal);
-			const helper = spawnHidden(command, args, { stdio: "ignore", detached: true });
+			const helper = spawnWindowsProcessTreeSignal(createWindowsProcessTreeSignal(pid, signal));
 			helper.once("error", reportFailure);
 			helper.once("exit", (code) => {
 				if (code !== 0 && isProcessAlive(pid)) reportFailure(`identity helper exited with code ${code}`);

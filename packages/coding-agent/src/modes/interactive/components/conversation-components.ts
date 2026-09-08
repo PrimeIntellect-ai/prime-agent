@@ -89,6 +89,7 @@ export function buildConversationComponents(
 					options.markdownTheme,
 					options.hiddenThinkingLabel ?? "Thinking...",
 					{
+						cwd: options.cwd,
 						expanded,
 						precededByToolActivity:
 							components.at(-1) instanceof ToolExecutionComponent ||

@@ -50,13 +50,15 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while ($true) {
         try {
-            Invoke-WebRequest -Uri "$baseUrl/stable" -UseBasicParsing -TimeoutSec 1 | Out-Null
+            $channelResponse = Invoke-WebRequest -Uri "$baseUrl/stable" -UseBasicParsing -TimeoutSec 1
             break
         } catch {
             if ([DateTime]::UtcNow -ge $deadline) { throw "Local release server did not become ready." }
             Start-Sleep -Milliseconds 100
         }
     }
+
+    Write-Host ("Installer channel response: Content-Type={0}; Content type={1}" -f $channelResponse.Headers["Content-Type"], $channelResponse.Content.GetType().FullName)
 
     $env:LOCALAPPDATA = $localAppData
     $installerSource = Get-Content -LiteralPath (Join-Path $repoRoot "install.ps1") -Raw
@@ -66,6 +68,20 @@ try {
     }
     $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $null
     $env:PRIME_AGENT_VERSION = $null
+    $invalidVersionRejected = $false
+    try {
+        Set-Content -LiteralPath (Join-Path $serverRoot "stable") -Value "invalid-release" -Encoding Ascii -NoNewline
+        try {
+            & (Join-Path $testRoot "install-stable.ps1")
+        } catch {
+            if ($_.Exception.Message -cne "Invalid Prime Agent release version: invalid-release") { throw }
+            $invalidVersionRejected = $true
+        }
+    } finally {
+        Set-Content -LiteralPath (Join-Path $serverRoot "stable") -Value $version -Encoding Ascii
+    }
+    if (-not $invalidVersionRejected) { throw "Installer accepted an invalid channel version." }
+
     # Environment variables describe an emulated process, not the native OS.
     # Poison both values so this x64 runner proves the installer uses the Win32 native-machine API.
     $env:PROCESSOR_ARCHITECTURE = "ARM64"
@@ -87,7 +103,19 @@ try {
     Remove-Item -LiteralPath (Join-Path $serverRoot "stable")
     Set-Content -LiteralPath (Join-Path $serverRoot "beta") -Value $version -Encoding Ascii
     & (Join-Path $testRoot "install-beta.ps1") -Update
-    & (Join-Path $testRoot "install-beta.ps1") -Uninstall
+    $uninstallWrapper = Join-Path $testRoot "uninstall-scriptblock.ps1"
+    @'
+param([string]$InstallerPath)
+$ErrorActionPreference = "Stop"
+& ([scriptblock]::Create((Get-Content -LiteralPath $InstallerPath -Raw))) -Uninstall
+Write-Output "prime-agent-uninstall-host-continued"
+'@ | Set-Content -LiteralPath $uninstallWrapper -Encoding UTF8
+    $currentHost = (Get-Process -Id $PID).Path
+    $uninstallOutput = & $currentHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $uninstallWrapper (Join-Path $testRoot "install-beta.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "Uninstall scriptblock host failed with $LASTEXITCODE" }
+    if ($uninstallOutput -cnotcontains "prime-agent-uninstall-host-continued") {
+        throw "Uninstall exited its hosting PowerShell session"
+    }
     if (Test-Path -LiteralPath (Join-Path $localAppData "PrimeAgent")) {
         throw "Uninstall left the PrimeAgent install directory behind"
     }

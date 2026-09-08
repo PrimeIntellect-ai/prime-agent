@@ -325,6 +325,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Bun 1.4.0
+        id: windows_bun
         uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
         with:
           bun-version: 1.4.0
@@ -335,9 +336,11 @@ jobs:
           version: "0.12.4"
 
       - name: Verify Bun 1.4.0
+        id: windows_bun_verified
         run: bun run check:bun-version
 
       - name: Install dependencies
+        id: windows_dependencies
         run: bun install --frozen-lockfile
 
       - name: Type check
@@ -374,15 +377,17 @@ jobs:
           test/system-prompt.test.ts
           test/windows-process-signal.test.ts
 
-      - name: Test identity-pinned tree signals under Bun and Node
+      - name: Test identity-pinned tree signals under Bun
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
+        timeout-minutes: 3
         working-directory: packages/coding-agent
-        run: |
-          bun ./test/fixtures/windows-process-signal-native.ts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          bun build ./test/fixtures/windows-process-signal-native.ts --target=node --external koffi --outfile=./node_modules/.cache/windows-process-signal-native.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node node_modules/.cache/windows-process-signal-native.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: bun ./test/fixtures/windows-process-signal-native.ts
+
+      - name: Probe PowerShell launch under Bun
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: packages/coding-agent
+        run: bun ./test/fixtures/windows-powershell-launch-native.ts
 
       - name: Test Windows RLM deletion races
         working-directory: packages/coding-agent
@@ -452,9 +457,62 @@ jobs:
           test.test_repl.ReplTest.test_interrupt_await_suspended
 
       - name: Build the native Windows executable
+        id: windows_native_binary
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
         run: bun run build:binary
 
+      - name: Test identity-pinned tree signals under the compiled Windows runtime
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: packages/coding-agent
+        env:
+          BUN_BE_BUN: "1"
+        run: |
+          $binary = (Resolve-Path "./dist/pi.exe").Path
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Identity fixture runtime: $binary SHA256=$hash"
+          & $binary ./test/fixtures/windows-process-signal-native.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Probe the compiled Windows runtime broker
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: packages/coding-agent
+        env:
+          BUN_BE_BUN: "1"
+        run: |
+          $binary = (Resolve-Path "./dist/pi.exe").Path
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          & $binary ./test/fixtures/windows-powershell-launch-native.ts --expect-runtime $binary --expect-sha256 $hash --expect-kind bun
+
+      - name: Check Bun null-device config startup
+        id: windows_bun_null_config
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
+        timeout-minutes: 1
+        working-directory: packages/coding-agent
+        shell: pwsh
+        run: |
+          $binary = (Get-Command bun -CommandType Application).Source
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          & $binary ./test/fixtures/windows-powershell-launch-native.ts --null-config-startup $binary $hash
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check compiled app null-device config startup
+        id: windows_compiled_null_config
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
+        timeout-minutes: 1
+        working-directory: packages/coding-agent
+        shell: pwsh
+        env:
+          BUN_BE_BUN: "1"
+        run: |
+          $binary = (Resolve-Path "./dist/pi.exe").Path
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          & $binary ./test/fixtures/windows-powershell-launch-native.ts --null-config-startup $binary $hash
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Cross-compile and inspect the Windows Arm64 executable
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
         working-directory: packages/coding-agent
         shell: pwsh
         run: |
@@ -476,10 +534,12 @@ jobs:
           }
 
       - name: Test the PowerShell 5.1 installer end to end
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
         shell: powershell
         run: ./scripts/test-windows-installer.ps1
 
       - name: Smoke test the native Windows executable
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
         shell: pwsh
         run: |
           & ./packages/coding-agent/dist/pi.exe --version

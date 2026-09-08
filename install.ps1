@@ -116,7 +116,11 @@ function Resolve-ReleaseVersion {
     $channelUrl = "$DownloadBaseUrl/$Channel"
     Write-Step "resolving the $Channel release"
     $response = Invoke-WebRequest -Uri $channelUrl -UseBasicParsing -TimeoutSec 30
-    return Assert-ReleaseVersion $response.Content
+    $content = $response.Content
+    if ($content -is [byte[]]) {
+        $content = [System.Text.Encoding]::UTF8.GetString($content)
+    }
+    return Assert-ReleaseVersion $content
 }
 
 function Add-UserPathEntry([string]$Entry) {
@@ -246,7 +250,7 @@ function Uninstall-PrimeAgent {
 
 if ($Uninstall) {
     Uninstall-PrimeAgent
-    exit 0
+    return
 }
 if ($DownloadBaseUrl -eq ("__PRIME_AGENT_DOWNLOAD_BASE" + "_URL__")) {
     throw "Installer download URL is not configured. Use the published installer or set PRIME_AGENT_DOWNLOAD_BASE_URL."
