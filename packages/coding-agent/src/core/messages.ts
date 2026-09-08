@@ -584,7 +584,7 @@ export function createHeartbeatPromptMessage(job: AgentCronJob, timestamp = Date
 	return {
 		role: "custom",
 		customType: HEARTBEAT_PROMPT_CUSTOM_TYPE,
-		content: `[heartbeat: ${job.schedule.expression} run#${job.runCount}]\n\n${job.prompt}`,
+		content: `[heartbeat: ${sanitizeMessageHeaderValue(job.schedule.expression)} run#${job.runCount}]\n\n${job.prompt}`,
 		display: true,
 		details: {
 			jobId: job.id,
