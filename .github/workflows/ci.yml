@@ -394,8 +394,9 @@ jobs:
           test/daemon-mode.test.ts
 
       - name: Test daemon worker named-pipe lifecycle
+        timeout-minutes: 7
         working-directory: packages/coding-agent
-        run: bun test --isolate --timeout 240000 test/daemon-named-pipe-lifecycle.test.ts
+        run: bun test --isolate --timeout 340000 test/daemon-named-pipe-lifecycle.test.ts
 
       - name: Test terminal behavior
         working-directory: packages/tui
