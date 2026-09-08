@@ -353,5 +353,7 @@ export function classifyTelemetryError(error: unknown): TelemetryErrorClassifica
 }
 
 export function telemetryErrorProperties(error: unknown): Record<string, string | number | boolean | null> {
-	return { ...classifyTelemetryError(error) };
+	return { ...classifyTelemetryError(error), ...telemetryOriginalErrorDetails(error) };
 }
+
+import { telemetryOriginalErrorDetails } from "./telemetry-error-details.js";

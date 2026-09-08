@@ -80,8 +80,10 @@ describe("auth validation telemetry", () => {
 			operation: "validate",
 			http_status: 403,
 			error_subtype: "permission_denied",
+			error_message: SECRET,
 		});
-		expect(JSON.stringify(reports)).not.toContain(SECRET);
+		const { error_message: _message, ...remaining } = reports[0];
+		expect(JSON.stringify(remaining)).not.toContain(SECRET);
 	});
 
 	it("does not count a deliberate login cancellation as a failed validation", async () => {

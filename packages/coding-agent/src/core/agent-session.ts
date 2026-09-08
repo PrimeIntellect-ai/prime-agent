@@ -298,6 +298,7 @@ import {
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { classifyTelemetryError } from "./telemetry-error-classification.js";
+import { observeTelemetryAction, observeTelemetryInput, type TelemetryInputMetadata } from "./telemetry-input.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
@@ -539,6 +540,7 @@ export type SerializedBackgroundPlanResult =
 export type AutoRefineReviewer = (request: AutoRefineReviewRequest, signal?: AbortSignal) => Promise<AutoRefineReview>;
 
 export interface PromptOptions {
+	telemetryInput?: TelemetryInputMetadata;
 	expandPromptTemplates?: boolean;
 	images?: ImageContent[];
 	streamingBehavior?: "steer" | "followUp";
@@ -1131,7 +1133,9 @@ export class AgentSession {
 	private _agentEventQueue: Promise<void> = Promise.resolve();
 
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
-	private readonly _actionStore = new ActionStore<QueuedSessionAction>();
+	private readonly _actionStore = new ActionStore<QueuedSessionAction>((action, previousState) =>
+		observeTelemetryAction(this, action, previousState),
+	);
 	private _sessionInputPump: Promise<void> = Promise.resolve();
 	private _sessionInputPumpRequested = false;
 	// Invalidates preparation when a branch pause starts and finishes before its next await resumes.
@@ -4963,7 +4967,11 @@ export class AgentSession {
 		}
 	}
 
-	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+	private _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		return observeTelemetryInput(this, options?.telemetryInput, () => this._promptImpl(text, options));
+	}
+
+	private async _promptImpl(text: string, options?: InternalPromptOptions): Promise<void> {
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();

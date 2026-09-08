@@ -20,6 +20,7 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { sanitizeTelemetryInputMetadata } from "../../core/telemetry-input.js";
 import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "../agents-view/roster-store.js";
 import {
 	DaemonCapabilityUnavailableError,
@@ -966,6 +967,10 @@ export class DaemonAgentConnection implements AgentConnection {
 		message: string,
 		options?: AgentConnectionPromptOptions,
 	): Promise<void> {
+		const telemetryInput =
+			!this.options.telemetryDisabled && this.client.supportsServerCapability("telemetry_input")
+				? sanitizeTelemetryInputMetadata(options?.telemetryInput)
+				: undefined;
 		const signal = options?.signal;
 		if (signal?.aborted) {
 			throw new AgentConnectionPromptAdmissionError("Prompt admission was cancelled.", "cancelled");
@@ -980,6 +985,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					streamingBehavior: options?.streamingBehavior,
 					queueIfBusy: options?.queueIfBusy,
 					source: options?.source,
+					...(telemetryInput ? { telemetryInput } : {}),
 				},
 				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
 			);
@@ -1005,6 +1011,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			streamingBehavior: options.streamingBehavior,
 			queueIfBusy: options.queueIfBusy,
 			source: options.source,
+			...(telemetryInput ? { telemetryInput } : {}),
 			admissionId,
 		} as Extract<DaemonCommandBody, { type: typeof type }>;
 		let promptError: unknown;

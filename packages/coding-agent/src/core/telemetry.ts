@@ -11,6 +11,14 @@ import type { AgentExecutionMode } from "./agent-session-config.js";
 import type { AuthCredential, AuthStatus } from "./auth-storage.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { isBuiltinSlashCommandName, resolveBuiltinSlashCommandName } from "./slash-commands.js";
+import {
+	telemetryModelCategory as modelCategory,
+	telemetryAuthCategory,
+	telemetryProviderCategory,
+} from "./telemetry-categories.js";
+
+export type { TelemetryAuthCategory } from "./telemetry-categories.js";
+export { telemetryAuthCategory, telemetryProviderCategory } from "./telemetry-categories.js";
 
 const DEFAULT_TELEMETRY_ENDPOINT = "https://api.primeintellect.ai/api/v1/agent-analytics/events";
 const TELEMETRY_STATE_FILE = "telemetry.json";
@@ -23,7 +31,21 @@ export type { TelemetryProperties } from "./telemetry-schema.js";
 
 import { isSessionSlashCommandMessage, isSessionSlashCommandResultMessage } from "./messages.js";
 import { TELEMETRY_CONTRACT } from "./telemetry-contract.js";
-import { telemetryErrorProperties } from "./telemetry-error-classification.js";
+import {
+	classifyTelemetryError,
+	type TelemetryErrorComponent,
+	type TelemetryErrorOperation,
+	type TelemetryErrorStage,
+} from "./telemetry-error-classification.js";
+import { getTelemetryErrorRecoveryTracker } from "./telemetry-error-recovery.js";
+import { captureTelemetryError } from "./telemetry-errors.js";
+import {
+	getTelemetryExecutionContext,
+	subscribeTelemetryExecutionContexts,
+	type TelemetryExecutionContextCategories,
+} from "./telemetry-execution-context.js";
+import { clearTelemetryInputs, subscribeTelemetryInputs } from "./telemetry-input.js";
+import { type ObservedTelemetryInput, TelemetryInputTracker } from "./telemetry-input-tracker.js";
 import {
 	clearOnboardingTelemetryContext,
 	getCurrentOnboardingTelemetryContext,
@@ -48,21 +70,11 @@ export type TelemetryEventName =
 	| "agent tool summary"
 	| "onboarding stage"
 	| "agent feature outcome"
-	| "agent startup stage";
+	| "agent startup stage"
+	| "agent input stage";
 
 export type TelemetryExecutionMode = AgentExecutionMode | "unknown";
 export type TelemetryOnboardingOutcome = "success" | "error" | "aborted";
-export type TelemetryAuthCategory =
-	| "oauth"
-	| "api_key"
-	| "runtime_api_key"
-	| "environment"
-	| "prime_cli"
-	| "models_json"
-	| "fallback"
-	| "stale"
-	| "stored"
-	| "none";
 
 export interface TelemetryEvent {
 	id: string;
@@ -136,10 +148,15 @@ interface UsageTotals extends Usage {
 
 interface ActiveRun {
 	onboarding?: OnboardingTelemetryContext;
+	input?: ObservedTelemetryInput;
+	executionContext?: TelemetryExecutionContextCategories;
+	contextSource?: "configured" | "request";
+	firstProviderDispatchAt?: number;
 	id: string;
 	index: number;
 	startedAt: number;
 	agentEnded: boolean;
+	actionOutcome?: "failed" | "cancelled";
 	firstTurnStartedAt?: number;
 	firstModelEventMs?: number;
 	visibleTtftMs?: number;
@@ -164,9 +181,9 @@ interface ActiveRun {
 	usageComplete: boolean;
 	pricingComplete: boolean;
 	cancelled: boolean;
-	tools: Map<string, { calls: number; failures: number; duration: number; measured: number }>;
+	tools: Map<string, { calls: number; failures: number; duration: number; measured: number; recovered: number }>;
+	unrecoveredTools: Map<string, { count: number; errorIds: string[] }>;
 	pendingTools: Map<string, { category: string; startedAt: number }>;
-	failures: Array<{ properties: TelemetryProperties; id: string }>;
 }
 
 interface SessionTotals {
@@ -643,70 +660,6 @@ export class TelemetryClient implements TelemetrySink {
 	}
 }
 
-function modelCategory(model: string): string {
-	const normalized = model.toLowerCase();
-	const categories = [
-		"claude",
-		"gpt",
-		"o1",
-		"o3",
-		"o4",
-		"gemini",
-		"glm",
-		"kimi",
-		"qwen",
-		"deepseek",
-		"llama",
-		"mistral",
-	];
-	return categories.find((category) => normalized.includes(category)) ?? "custom";
-}
-
-export function telemetryProviderCategory(provider: string | undefined): string {
-	if (!provider) {
-		return "unknown";
-	}
-	const normalized = provider.toLowerCase();
-	const categories = [
-		"anthropic",
-		"openai",
-		"google",
-		"prime",
-		"openrouter",
-		"bedrock",
-		"vertex",
-		"mistral",
-		"groq",
-		"xai",
-	];
-	return categories.find((category) => normalized.includes(category)) ?? "custom";
-}
-
-export function telemetryAuthCategory(
-	source: AuthStatus["source"],
-	storedCredentialType?: AuthCredential["type"],
-): TelemetryAuthCategory {
-	switch (source) {
-		case "stored":
-			return storedCredentialType ?? "stored";
-		case "runtime":
-			return "runtime_api_key";
-		case "environment":
-			return "environment";
-		case "prime_cli":
-			return "prime_cli";
-		case "models_json_key":
-		case "models_json_command":
-			return "models_json";
-		case "fallback":
-			return "fallback";
-		case "stale":
-			return "stale";
-		default:
-			return "none";
-	}
-}
-
 function baseProperties(executionMode: TelemetryExecutionMode): TelemetryProperties {
 	return {
 		version: VERSION,
@@ -904,8 +857,8 @@ function createActiveRun(now: () => number, id: string, index: number): ActiveRu
 		pricingComplete: true,
 		cancelled: false,
 		tools: new Map(),
+		unrecoveredTools: new Map(),
 		pendingTools: new Map(),
-		failures: [],
 	};
 }
 
@@ -917,13 +870,17 @@ function toolCategory(name: string): string {
 }
 
 export function installAgentTelemetry(session: AgentSession, options: InstallAgentTelemetryOptions): void {
-	if (!isTelemetryEnabled(options.settingsManager) || instrumentedSessions.has(session)) return;
+	if (instrumentedSessions.has(session)) return;
 	instrumentedSessions.add(session);
 	const now = options.now ?? (() => performance.now());
 	const randomId = options.randomId ?? randomUUID;
 	const sink = telemetryClient(options);
-	let sessionId = randomId();
-	sessionContexts.set(session, { sessionId });
+	let trackingEnabled = isTelemetryEnabled(options.settingsManager);
+	let sessionId = trackingEnabled ? randomId() : undefined;
+	if (sessionId) sessionContexts.set(session, { sessionId });
+	const recovery = getTelemetryErrorRecoveryTracker(options.settingsManager, options.agentDir, {
+		isEnabled: () => isTelemetryEnabled(options.settingsManager),
+	});
 	const sessionTotals: SessionTotals = {
 		startedAt: now(),
 		runCount: 0,
@@ -939,12 +896,12 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 	let nextRunIndex = 0;
 	let turnActionActive = false;
 	let disposed = false;
-	let trackingEnabled = true;
+	let lastProviderCategory: string | undefined;
 	const goals = new Map<string, { id: string; startedAt: number; choice: string }>();
 	const childFailures = new Map<string, string>();
 	const commonProperties = (): TelemetryProperties => ({
 		...baseProperties(options.executionMode ?? "unknown"),
-		session_id: sessionId,
+		...(sessionId ? { session_id: sessionId } : {}),
 	});
 	const capture = (name: TelemetryEventName, properties: TelemetryProperties): void => {
 		try {
@@ -957,6 +914,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 	};
 	const runProperties = (run = activeRun): TelemetryProperties => {
 		const onboarding = run?.onboarding;
+		const input = run?.input?.metadata;
 		return {
 			...(run ? { run_id: run.id, run_index: run.index } : {}),
 			...(onboarding
@@ -966,31 +924,103 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 						elapsed_since_onboarding_ms: Math.max(0, Date.now() - onboarding.startedAt),
 					}
 				: {}),
+			...(input
+				? {
+						input_id: input.inputId,
+						...(input.clientSessionId ? { client_session_id: input.clientSessionId } : {}),
+						...(input.onboardingId ? { onboarding_id: input.onboardingId } : {}),
+					}
+				: {}),
 		};
 	};
-	const timing = (stage: string, duration: number, outcome = "success", extra: TelemetryProperties = {}): void => {
-		capture("agent timing", { ...runProperties(), stage, duration_ms: Math.max(0, duration), outcome, ...extra });
+	const executionProperties = (run: ActiveRun): TelemetryProperties => {
+		const context = run.executionContext;
+		if (!context) return { context_source: "unknown" };
+		const properties: TelemetryProperties = {
+			provider_category: context.providerCategory,
+			model_category: context.modelCategory,
+			auth_source: context.authSource,
+			team_scope: context.teamScope,
+			endpoint_category: context.endpointCategory,
+			context_source: run.contextSource ?? "unknown",
+		};
+		const comparisons = {
+			setup: run.input?.metadata.setupContext ?? run.onboarding?.setupContext,
+			ui: run.input?.metadata.uiContext,
+		};
+		const fields = {
+			auth_source: "authSource",
+			provider: "providerCategory",
+			model: "modelCategory",
+			team_scope: "teamScope",
+			endpoint: "endpointCategory",
+		} as const;
+		for (const [prefix, previous] of Object.entries(comparisons)) {
+			for (const [name, field] of Object.entries(fields)) {
+				const before = previous?.[field];
+				properties[`${prefix}_${name}_changed`] =
+					before && before !== "unknown" && context[field] !== "unknown" ? before !== context[field] : null;
+			}
+		}
+		return properties;
 	};
-	const reportError = (error: unknown, component: string, operation: string, stage: string): void => {
-		const properties = {
+	const timing = (stage: string, duration: number, outcome = "success", extra: TelemetryProperties = {}): void => {
+		const provider = activeRun?.executionContext?.providerCategory;
+		capture("agent timing", {
 			...runProperties(),
-			...telemetryErrorProperties(error),
+			provider_category:
+				provider && provider !== "unknown"
+					? provider
+					: telemetryProviderCategory(activeRun?.lastAssistant?.provider ?? session.model?.provider),
+			stage,
+			duration_ms: Math.max(0, duration),
+			outcome,
+			timing_origin: "worker_run",
+			...extra,
+		});
+	};
+	const reportError = (
+		error: unknown,
+		component: TelemetryErrorComponent,
+		operation: TelemetryErrorOperation,
+		stage: TelemetryErrorStage,
+		occurrence?: object,
+	): string | undefined => {
+		const id = captureTelemetryError({
+			...options,
+			sink,
+			error,
 			component,
 			operation,
 			stage,
-			retry_attempt: activeRun?.retryCount ?? 0,
-			provider_category: telemetryProviderCategory(activeRun?.lastAssistant?.provider),
-		};
-		const id = randomId();
-		capture("agent error", {
-			...properties,
-			error_id: id,
-			recovery_action: "none",
-			recovery_outcome: "not_observed",
+			sessionId,
+			occurrence,
+			runId: activeRun?.id,
+			inputId: activeRun?.input?.metadata.inputId,
+			clientSessionId: activeRun?.input?.metadata.clientSessionId,
+			retryAttempt: activeRun?.retryCount ?? 0,
+			provider: activeRun?.lastAssistant?.provider ?? session.model?.provider,
 		});
-		if (activeRun && component === "provider" && activeRun.failures.length < 64)
-			activeRun.failures.push({ properties, id });
+		if (id && activeRun) timing("time_to_error", now() - activeRun.startedAt, "error");
+		return id;
 	};
+	const inputs = new TelemetryInputTracker({
+		capture,
+		onError: (error, input, runId) =>
+			captureTelemetryError({
+				...options,
+				sink,
+				error,
+				component: "session",
+				operation: "execute",
+				stage: "unknown",
+				sessionId,
+				runId,
+				inputId: input.inputId,
+				clientSessionId: input.clientSessionId,
+				provider: session.model?.provider,
+			}),
+	});
 	const finishRetryWait = (outcome = "success"): void => {
 		if (activeRun?.retryStartedAt === undefined) return;
 		const duration = Math.max(0, now() - activeRun.retryStartedAt);
@@ -1004,13 +1034,19 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		if (run.currentTurnStartedAt !== undefined) run.usageComplete = false;
 		finishRetryWait(shutdown ? "shutdown_interrupted" : run.cancelled ? "cancelled" : "success");
 		const terminal =
-			shutdown && (!run.agentEnded || turnActionActive)
-				? "shutdown_interrupted"
-				: run.cancelled || run.lastAssistant?.stopReason === "aborted"
+			run.actionOutcome === "failed"
+				? "error"
+				: run.actionOutcome === "cancelled"
 					? "cancelled"
-					: !run.lastAssistant
-						? "unknown"
-						: runOutcome(run.lastAssistant);
+					: shutdown && (!run.agentEnded || turnActionActive)
+						? "shutdown_interrupted"
+						: run.cancelled || run.lastAssistant?.stopReason === "aborted"
+							? "cancelled"
+							: !run.lastAssistant
+								? "unknown"
+								: run.lastAssistant.stopReason === "error"
+									? "error"
+									: "success";
 		const outcome = runOutcome(run.lastAssistant);
 		const context = runProperties(run);
 		const duration = Math.max(0, now() - run.startedAt);
@@ -1029,12 +1065,16 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		const costKnown = run.pricingComplete && run.usageComplete && run.usage.modelCallCount > 0;
 		capture("agent run completed", {
 			...context,
+			...executionProperties(run),
 			outcome,
 			terminal_outcome: terminal,
 			duration_ms: duration,
 			visible_ttft_ms: run.visibleTtftMs ?? null,
 			first_model_event_ms: run.firstModelEventMs ?? null,
 			first_status_ms: null,
+			queue_wait_ms: run.input?.queueWaitMs ?? null,
+			local_preparation_ms: run.input?.preparationMs ?? null,
+			input_to_run_ms: run.input?.inputToRunMs ?? null,
 			first_reasoning_ms: run.firstReasoningMs ?? null,
 			run_to_first_text_ms: run.runToFirstTextMs ?? null,
 			max_stream_gap_ms: run.maxStreamGapMs ?? null,
@@ -1064,7 +1104,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 			model_category: lastAssistant ? modelCategory(lastAssistant.model) : "unknown",
 			error_category: errorCategory(lastAssistant),
 			error_subtype:
-				lastAssistant?.stopReason === "error" ? telemetryErrorProperties(lastAssistant).error_subtype : "unknown",
+				lastAssistant?.stopReason === "error" ? classifyTelemetryError(lastAssistant).error_subtype : "unknown",
 			stop_reason: lastAssistant?.stopReason ?? "unknown",
 		});
 		for (const [category, tool] of run.tools)
@@ -1073,33 +1113,33 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 				tool_category: category,
 				call_count: tool.calls,
 				failure_count: tool.failures,
+				recovered_count: tool.recovered,
 				duration_ms: tool.measured === tool.calls ? tool.duration : null,
 			});
-		for (const failure of run.failures)
-			capture("agent error", {
-				...failure.properties,
-				error_id: failure.id,
-				recovery_action: run.retryCount > 0 ? "automatic_retry" : terminal === "cancelled" ? "cancelled" : "none",
-				recovery_outcome:
-					terminal === "success"
-						? "success"
-						: terminal === "cancelled"
-							? "cancelled"
-							: terminal === "error"
-								? "failed"
-								: "not_observed",
-			});
+		lastProviderCategory = telemetryProviderCategory(lastAssistant?.provider ?? session.model?.provider);
+		for (const properties of recovery.finishRun({
+			sessionId,
+			runId: run.id,
+			providerCategory: lastProviderCategory,
+			outcome: terminal,
+		}))
+			capture("agent error", properties);
 		timing("terminal", duration, terminal);
 		activeRun = undefined;
-		sessionContexts.set(session, { sessionId });
+		if (sessionId) sessionContexts.set(session, { sessionId });
 	};
-	capture("agent started", {});
+	if (trackingEnabled) capture("agent started", {});
 	const refreshConsent = (): boolean => {
 		if (!isTelemetryEnabled(options.settingsManager)) {
 			activeRun = undefined;
 			turnActionActive = false;
 			goals.clear();
 			childFailures.clear();
+			inputs.clear();
+			clearTelemetryInputs(session);
+			recovery.clear();
+			lastProviderCategory = undefined;
+			sessionId = undefined;
 			clearOnboardingTelemetryContext(options.agentDir);
 			sessionContexts.delete(session);
 			Object.assign(sessionTotals, {
@@ -1128,21 +1168,64 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		return true;
 	};
 	const unsubscribeConsent = options.settingsManager.subscribeTelemetryEnabled(refreshConsent);
+	const unsubscribeInputs = subscribeTelemetryInputs(
+		session,
+		(observation) => {
+			if (!refreshConsent()) return;
+			if (
+				activeRun?.input?.metadata.inputId === observation.input.inputId &&
+				observation.action?.kind === "turn" &&
+				(observation.action.state === "failed" || observation.action.state === "cancelled")
+			)
+				activeRun.actionOutcome = observation.action.state;
+			inputs.observe(observation);
+		},
+		{ isEnabled: () => isTelemetryEnabled(options.settingsManager), now, randomId },
+	);
+	const unsubscribeContext = subscribeTelemetryExecutionContexts(
+		session,
+		(context) => {
+			if (!refreshConsent() || !activeRun) return;
+			activeRun.executionContext = context;
+			activeRun.contextSource = "request";
+			if (activeRun.firstProviderDispatchAt === undefined) {
+				activeRun.firstProviderDispatchAt = now();
+				timing("provider_dispatch", now() - activeRun.startedAt, "success");
+			}
+		},
+		() => isTelemetryEnabled(options.settingsManager),
+	);
 	const unsubscribe = session.subscribe((event) => {
 		try {
 			if (!refreshConsent()) return;
 			switch (event.type) {
 				case "session_action_update":
 					turnActionActive = event.actions.active?.kind === "turn";
-					if (!turnActionActive && activeRun?.agentEnded) finalizeRun();
+					if (!turnActionActive && activeRun && (activeRun.agentEnded || activeRun.actionOutcome)) finalizeRun();
 					break;
 				case "agent_start":
 					if (activeRun?.agentEnded && !turnActionActive) finalizeRun();
 					if (!activeRun) {
 						activeRun = createActiveRun(now, randomId(), ++nextRunIndex);
 						activeRun.onboarding = getCurrentOnboardingTelemetryContext(options.agentDir);
-						sessionContexts.set(session, { sessionId, runId: activeRun.id });
-						capture("agent run started", { ...runProperties(), trigger: "unknown" });
+						activeRun.input = inputs.attachRun(activeRun.id, activeRun.startedAt);
+						activeRun.executionContext = getTelemetryExecutionContext(session.modelRegistry, session.model);
+						activeRun.contextSource = "configured";
+						const recoveryAction = activeRun.input?.metadata.recoveryAction;
+						if (recoveryAction)
+							for (const properties of recovery.noteRecoveryAction(recoveryAction, {
+								sessionId,
+								providerCategory: lastProviderCategory,
+								components: ["provider", "authentication", "session"],
+								targetProviderCategory: activeRun.executionContext.providerCategory,
+							}))
+								capture("agent error", properties);
+						if (sessionId) sessionContexts.set(session, { sessionId, runId: activeRun.id });
+						capture("agent run started", {
+							...runProperties(),
+							...executionProperties(activeRun),
+							trigger: "unknown",
+						});
 					}
 					finishRetryWait();
 					activeRun.agentEnded = false;
@@ -1274,7 +1357,13 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 						const pending = activeRun.pendingTools.get(event.toolCallId);
 						activeRun.pendingTools.delete(event.toolCallId);
 						const category = pending?.category ?? toolCategory(event.toolName);
-						const tool = activeRun.tools.get(category) ?? { calls: 0, failures: 0, duration: 0, measured: 0 };
+						const tool = activeRun.tools.get(category) ?? {
+							calls: 0,
+							failures: 0,
+							duration: 0,
+							measured: 0,
+							recovered: 0,
+						};
 						tool.calls++;
 						activeRun.toolCallCount++;
 						if (pending) {
@@ -1286,7 +1375,30 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 						if (event.isError) {
 							tool.failures++;
 							activeRun.toolErrorCount++;
-							reportError(event.result, category === "mcp" ? "mcp" : "tools", "execute", "tool_execution");
+							const id = reportError(
+								event.result,
+								category === "mcp" ? "mcp" : "tools",
+								"execute",
+								"tool_execution",
+								{},
+							);
+							if (activeRun.unrecoveredTools.size < 256 || activeRun.unrecoveredTools.has(event.toolName)) {
+								const failures = activeRun.unrecoveredTools.get(event.toolName) ?? { count: 0, errorIds: [] };
+								failures.count++;
+								if (id && failures.errorIds.length < 128) failures.errorIds.push(id);
+								activeRun.unrecoveredTools.set(event.toolName, failures);
+							}
+						} else {
+							const failures = activeRun.unrecoveredTools.get(event.toolName);
+							tool.recovered += failures?.count ?? 0;
+							if (failures)
+								for (const properties of recovery.finishErrors(failures.errorIds, {
+									sessionId,
+									runId: activeRun.id,
+									components: ["tools", "mcp"],
+								}))
+									capture("agent error", properties);
+							activeRun.unrecoveredTools.delete(event.toolName);
 						}
 						activeRun.tools.set(category, tool);
 					}
@@ -1314,8 +1426,14 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 					if (activeRun) {
 						activeRun.retryCount++;
 						activeRun.retryStartedAt = now();
-						const previous = activeRun.failures.at(-1);
-						if (previous) previous.properties.retry_backoff_ms = event.delayMs;
+						for (const properties of recovery.noteRecoveryAction("automatic_retry", {
+							sessionId,
+							runId: activeRun.id,
+							providerCategory: telemetryProviderCategory(activeRun.lastAssistant?.provider),
+							components: ["provider", "authentication"],
+							retryBackoffMs: event.delayMs,
+						}))
+							capture("agent error", properties);
 					}
 					break;
 				case "auto_retry_end":
@@ -1359,6 +1477,10 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		disposed = true;
 		unsubscribe();
 		unsubscribeConsent();
+		unsubscribeInputs();
+		unsubscribeContext();
+		inputs.clear();
+		if (!refreshConsent()) return;
 		const interrupted = activeRun !== undefined && (!activeRun.agentEnded || turnActionActive);
 		finalizeRun(true);
 		sessionContexts.delete(session);

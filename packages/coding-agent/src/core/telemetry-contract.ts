@@ -3,6 +3,7 @@ export interface TelemetryPropertyRule {
 	values?: readonly string[];
 	fallback?: string;
 	max?: number;
+	maxLength?: number;
 	integer?: boolean;
 	nullable?: boolean;
 }
@@ -20,7 +21,7 @@ export const TELEMETRY_CONTRACT: {
 	events: Readonly<Record<string, TelemetryEventRule>>;
 } = {
 	schema_version: 2,
-	schema_revision: 1,
+	schema_revision: 2,
 	events: {
 		"agent started": {
 			legacy: true,
@@ -866,6 +867,99 @@ export const TELEMETRY_CONTRACT: {
 					values: ["stop", "length", "toolUse", "error", "aborted", "unknown"],
 					fallback: "unknown",
 				},
+				input_id: {
+					kind: "uuid",
+				},
+				auth_source: {
+					kind: "enum",
+					values: [
+						"oauth",
+						"api_key",
+						"runtime_api_key",
+						"environment",
+						"prime_cli",
+						"models_json",
+						"fallback",
+						"stale",
+						"stored",
+						"none",
+						"unknown",
+					],
+					fallback: "unknown",
+				},
+				team_scope: {
+					kind: "enum",
+					values: ["personal", "team", "unknown"],
+					fallback: "unknown",
+				},
+				endpoint_category: {
+					kind: "enum",
+					values: ["default", "custom", "unknown"],
+					fallback: "unknown",
+				},
+				context_source: {
+					kind: "enum",
+					values: ["configured", "request", "unknown"],
+					fallback: "unknown",
+				},
+				setup_auth_source_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_provider_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_model_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_team_scope_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_endpoint_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_auth_source_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_provider_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_model_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_team_scope_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_endpoint_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				queue_wait_ms: {
+					kind: "number",
+					max: 31536000000,
+					integer: true,
+					nullable: true,
+				},
+				local_preparation_ms: {
+					kind: "number",
+					max: 31536000000,
+					integer: true,
+					nullable: true,
+				},
+				input_to_run_ms: {
+					kind: "number",
+					max: 31536000000,
+					integer: true,
+					nullable: true,
+				},
 			},
 			legacy_properties: [
 				"version",
@@ -1282,6 +1376,81 @@ export const TELEMETRY_CONTRACT: {
 					values: ["prompt", "continuation", "unknown"],
 					fallback: "unknown",
 				},
+				input_id: {
+					kind: "uuid",
+				},
+				auth_source: {
+					kind: "enum",
+					values: [
+						"oauth",
+						"api_key",
+						"runtime_api_key",
+						"environment",
+						"prime_cli",
+						"models_json",
+						"fallback",
+						"stale",
+						"stored",
+						"none",
+						"unknown",
+					],
+					fallback: "unknown",
+				},
+				team_scope: {
+					kind: "enum",
+					values: ["personal", "team", "unknown"],
+					fallback: "unknown",
+				},
+				endpoint_category: {
+					kind: "enum",
+					values: ["default", "custom", "unknown"],
+					fallback: "unknown",
+				},
+				context_source: {
+					kind: "enum",
+					values: ["configured", "request", "unknown"],
+					fallback: "unknown",
+				},
+				setup_auth_source_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_provider_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_model_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_team_scope_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_endpoint_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_auth_source_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_provider_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_model_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_team_scope_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_endpoint_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
 			},
 		},
 		"agent error": {
@@ -1672,6 +1841,63 @@ export const TELEMETRY_CONTRACT: {
 					values: ["pending", "success", "failed", "cancelled", "not_observed", "unknown"],
 					fallback: "unknown",
 				},
+				error_message: {
+					kind: "error_message",
+					maxLength: 4096,
+				},
+				error_message_length: {
+					kind: "number",
+					max: 1000000,
+					integer: true,
+				},
+				error_message_length_lower_bound: {
+					kind: "boolean",
+				},
+				error_message_truncated: {
+					kind: "boolean",
+				},
+				error_message_redacted: {
+					kind: "boolean",
+				},
+				error_code_group: {
+					kind: "error_code",
+					maxLength: 80,
+				},
+				error_type: {
+					kind: "enum",
+					values: [
+						"Error",
+						"TypeError",
+						"RangeError",
+						"ReferenceError",
+						"SyntaxError",
+						"URIError",
+						"EvalError",
+						"AggregateError",
+						"AbortError",
+						"TimeoutError",
+						"SystemError",
+						"StreamFailureError",
+						"APIError",
+						"AuthenticationError",
+						"PermissionDeniedError",
+						"RateLimitError",
+						"NotFoundError",
+						"InternalServerError",
+						"ConnectionError",
+						"custom",
+						"unknown",
+					],
+					fallback: "unknown",
+				},
+				error_event_kind: {
+					kind: "enum",
+					values: ["occurrence", "recovery_update"],
+					fallback: "unknown",
+				},
+				input_id: {
+					kind: "uuid",
+				},
 			},
 		},
 		"agent timing": {
@@ -1817,6 +2043,12 @@ export const TELEMETRY_CONTRACT: {
 						"stream_gap",
 						"terminal",
 						"unknown",
+						"queue_wait",
+						"local_preparation",
+						"input_to_run",
+						"provider_dispatch",
+						"time_to_error",
+						"cancellation_to_idle",
 					],
 					fallback: "unknown",
 				},
@@ -1828,7 +2060,7 @@ export const TELEMETRY_CONTRACT: {
 				},
 				outcome: {
 					kind: "enum",
-					values: ["success", "error", "cancelled", "shutdown_interrupted", "unknown"],
+					values: ["success", "error", "cancelled", "shutdown_interrupted", "unknown", "unavailable"],
 					fallback: "unknown",
 				},
 				tool_category: {
@@ -1848,6 +2080,14 @@ export const TELEMETRY_CONTRACT: {
 						"unknown",
 					],
 					fallback: "custom",
+				},
+				input_id: {
+					kind: "uuid",
+				},
+				timing_origin: {
+					kind: "enum",
+					values: ["worker_input", "worker_action", "worker_run", "ui_input", "ui_cancellation", "ui"],
+					fallback: "unknown",
 				},
 			},
 		},
@@ -2610,6 +2850,266 @@ export const TELEMETRY_CONTRACT: {
 				timing_scope: {
 					kind: "enum",
 					values: ["system_work", "elapsed_including_user_wait"],
+				},
+			},
+		},
+		"agent input stage": {
+			legacy: false,
+			required: [
+				"version",
+				"os_family",
+				"architecture",
+				"install_method",
+				"execution_mode",
+				"input_id",
+				"stage",
+				"outcome",
+			],
+			properties: {
+				version: {
+					kind: "version",
+				},
+				os_family: {
+					kind: "enum",
+					values: [
+						"aix",
+						"android",
+						"darwin",
+						"freebsd",
+						"haiku",
+						"linux",
+						"netbsd",
+						"openbsd",
+						"sunos",
+						"win32",
+						"cygwin",
+						"unknown",
+					],
+					fallback: "unknown",
+				},
+				architecture: {
+					kind: "enum",
+					values: [
+						"arm",
+						"arm64",
+						"ia32",
+						"loong64",
+						"mips",
+						"mipsel",
+						"ppc",
+						"ppc64",
+						"riscv64",
+						"s390",
+						"s390x",
+						"x64",
+						"unknown",
+					],
+					fallback: "unknown",
+				},
+				install_method: {
+					kind: "enum",
+					values: ["bun-binary", "homebrew", "npm", "pnpm", "yarn", "bun", "unknown"],
+					fallback: "unknown",
+				},
+				execution_mode: {
+					kind: "enum",
+					values: ["interactive", "print", "json", "rpc", "acp", "unknown"],
+					fallback: "unknown",
+				},
+				schema_revision: {
+					kind: "number",
+					max: 10000,
+					integer: true,
+				},
+				build_channel: {
+					kind: "enum",
+					values: ["release", "prerelease", "development", "unknown"],
+					fallback: "unknown",
+				},
+				workload_origin: {
+					kind: "enum",
+					values: ["interactive", "automated", "internal", "test", "unknown"],
+					fallback: "unknown",
+				},
+				session_id: {
+					kind: "uuid",
+				},
+				run_id: {
+					kind: "uuid",
+				},
+				client_session_id: {
+					kind: "uuid",
+				},
+				onboarding_id: {
+					kind: "uuid",
+				},
+				run_index: {
+					kind: "number",
+					max: 1000000,
+					integer: true,
+				},
+				elapsed_since_onboarding_ms: {
+					kind: "number",
+					max: 31536000000,
+					integer: true,
+					nullable: true,
+				},
+				provider_category: {
+					kind: "enum",
+					values: [
+						"anthropic",
+						"openai",
+						"google",
+						"prime",
+						"openrouter",
+						"bedrock",
+						"vertex",
+						"mistral",
+						"groq",
+						"xai",
+						"custom",
+						"unknown",
+					],
+					fallback: "custom",
+				},
+				model_category: {
+					kind: "enum",
+					values: [
+						"claude",
+						"gpt",
+						"o1",
+						"o3",
+						"o4",
+						"gemini",
+						"glm",
+						"kimi",
+						"qwen",
+						"deepseek",
+						"llama",
+						"mistral",
+						"custom",
+						"unknown",
+					],
+					fallback: "custom",
+				},
+				input_id: {
+					kind: "uuid",
+				},
+				stage: {
+					kind: "enum",
+					values: [
+						"received",
+						"queued",
+						"preparation",
+						"dispatch",
+						"admitted",
+						"terminal",
+						"submitted",
+						"rejected",
+						"first_visible_status",
+						"cancellation_to_idle",
+					],
+					fallback: "unknown",
+				},
+				outcome: {
+					kind: "enum",
+					values: [
+						"started",
+						"success",
+						"error",
+						"cancelled",
+						"no_run",
+						"unknown",
+						"initiated",
+						"completed",
+						"failed",
+						"canceled",
+						"unavailable",
+					],
+					fallback: "unknown",
+				},
+				duration_ms: {
+					kind: "number",
+					max: 31536000000,
+					integer: true,
+					nullable: true,
+				},
+				timing_origin: {
+					kind: "enum",
+					values: ["worker_input", "worker_action", "worker_run", "ui_input", "ui_cancellation", "ui"],
+					fallback: "unknown",
+				},
+				auth_source: {
+					kind: "enum",
+					values: [
+						"oauth",
+						"api_key",
+						"runtime_api_key",
+						"environment",
+						"prime_cli",
+						"models_json",
+						"fallback",
+						"stale",
+						"stored",
+						"none",
+						"unknown",
+					],
+					fallback: "unknown",
+				},
+				team_scope: {
+					kind: "enum",
+					values: ["personal", "team", "unknown"],
+					fallback: "unknown",
+				},
+				endpoint_category: {
+					kind: "enum",
+					values: ["default", "custom", "unknown"],
+					fallback: "unknown",
+				},
+				context_source: {
+					kind: "enum",
+					values: ["configured", "request", "unknown"],
+					fallback: "unknown",
+				},
+				setup_auth_source_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_provider_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_model_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_team_scope_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				setup_endpoint_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_auth_source_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_provider_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_model_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_team_scope_changed: {
+					kind: "boolean",
+					nullable: true,
+				},
+				ui_endpoint_changed: {
+					kind: "boolean",
+					nullable: true,
 				},
 			},
 		},

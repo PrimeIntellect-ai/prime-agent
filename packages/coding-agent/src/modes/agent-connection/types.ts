@@ -27,6 +27,7 @@ import type {
 } from "../../core/session-action-store.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import type { TelemetryInputMetadata } from "../../core/telemetry-input.js";
 import type { SessionUsageSummary } from "../../core/usage.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
@@ -454,6 +455,7 @@ export class AgentConnectionPromptAdmissionError extends Error {
 }
 
 export interface AgentConnectionPromptOptions {
+	telemetryInput?: TelemetryInputMetadata;
 	images?: ImageContent[];
 	streamingBehavior?: "steer" | "followUp";
 	queueIfBusy?: boolean;

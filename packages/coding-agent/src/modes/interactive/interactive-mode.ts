@@ -33,7 +33,6 @@ import {
 	type LoaderIndicatorOptions,
 	Markdown,
 	matchesKey,
-	ProcessTerminal,
 	Spacer,
 	setKeybindings,
 	Text,
@@ -136,11 +135,13 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { captureTelemetryError } from "../../core/telemetry-errors.js";
+import { getTelemetryExecutionContext } from "../../core/telemetry-execution-context.js";
 import {
 	type TelemetryFeatureAttempt,
 	TelemetryJourneys,
 	type TelemetryOnboardingAttempt,
 	type TelemetryTaskFeedback,
+	type TelemetryUiInputAttempt,
 } from "../../core/telemetry-journeys.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
@@ -161,6 +162,7 @@ import type {
 	AgentConnectionHeartbeat,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
+	AgentConnectionPromptOptions,
 	AgentConnectionQueuedMessageMutationStatus,
 	AgentConnectionQueueState,
 	AgentConnectionResourceDiagnostic,
@@ -272,6 +274,7 @@ import {
 import type { ClientPromptStashStore, PromptStash, PromptStashState } from "./prompt-stash-state.js";
 import { QueueSelection, type QueueSelectionItem } from "./queue-selection.js";
 import { formatResumeHint } from "./resume-hint.js";
+import { TelemetryStatusContainer, TelemetryTerminal } from "./telemetry-render-observer.js";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -956,6 +959,15 @@ export class InteractiveMode {
 	private readonly startHint = getRandomStartHint();
 	private isInitialized = false;
 	private journeyTelemetry?: TelemetryJourneys;
+	private pendingInputStatus?: TelemetryUiInputAttempt;
+	private inputStatusRendered = false;
+	private inputStatusFrameAt?: number;
+	private inputStatusAdmitted = false;
+	private pendingCancellation?: {
+		finish: ReturnType<TelemetryJourneys["beginCancellation"]>;
+		acknowledged: boolean;
+		idleAt?: number;
+	};
 	private onboardingTelemetry?: TelemetryOnboardingAttempt;
 	private onboardingExitOutcome: "failed" | "canceled" = "canceled";
 	private onboardingValidationObserved = false;
@@ -1149,6 +1161,12 @@ export class InteractiveMode {
 		this.journeyTelemetry = new TelemetryJourneys({
 			agentDir: getAgentDir(),
 			settingsManager: uiServices.settingsManager,
+			onDisabled: () => {
+				this.pendingInputStatus = undefined;
+				this.inputStatusFrameAt = undefined;
+				this.inputStatusRendered = false;
+				this.pendingCancellation = undefined;
+			},
 		});
 		this.agentConnection = options.agentConnection;
 		this.promptStashStore = options.promptStashStore;
@@ -1164,11 +1182,18 @@ export class InteractiveMode {
 			throw new Error("Local extension binding requires localSessionHost");
 		}
 		this.agentConnection.onBeforeSessionInvalidate(() => {
+			this.pendingInputStatus?.firstStatus(false);
+			this.pendingInputStatus = undefined;
+			this.pendingCancellation?.finish("unavailable");
+			this.pendingCancellation = undefined;
 			this.resetExtensionUI();
 			this.resetSideQuestion();
 		});
 		this.version = VERSION;
-		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.ui = new TUI(
+			new TelemetryTerminal(() => this.observeInputStatusFrame()),
+			this.settingsManager.getShowHardwareCursor(),
+		);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.ui.onCopy = (text) => {
 			void this.copyFullscreenSelection(text);
@@ -1177,7 +1202,9 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();
 		this.pendingMessagesContainer = new Container();
-		this.statusContainer = new Container();
+		this.statusContainer = new TelemetryStatusContainer(() => {
+			this.inputStatusRendered = true;
+		});
 		this.queuedMessagesContainer = new Container();
 		this.sideQuestionContainer = new Container();
 		this.featureHintContainer = new Container();
@@ -1228,6 +1255,100 @@ export class InteractiveMode {
 
 	private get promptStash(): PromptStash | undefined {
 		return this.promptStashState.stash;
+	}
+
+	private beginInputTelemetry(): TelemetryUiInputAttempt | undefined {
+		this.pendingCancellation?.finish("unavailable");
+		this.pendingCancellation = undefined;
+		const attempt = this.journeyTelemetry?.beginInput(
+			isTelemetryEnabled(this.settingsManager)
+				? getTelemetryExecutionContext(this.modelRegistry, this.getCurrentModel())
+				: undefined,
+		);
+		const overlapping = this.pendingInputStatus !== undefined;
+		this.pendingInputStatus?.firstStatus(false);
+		this.pendingInputStatus = undefined;
+		this.inputStatusFrameAt = undefined;
+		this.inputStatusAdmitted = false;
+		this.inputStatusRendered = false;
+		if (!attempt?.metadata) return attempt;
+		if (!overlapping && !this.hasInterruptibleWork() && this.getQueuedActionCount() === 0 && !this.ui.hasOverlay()) {
+			this.pendingInputStatus = attempt;
+		} else attempt?.firstStatus(false);
+		return attempt;
+	}
+
+	private observeInputStatusFrame(): void {
+		const rendered = this.inputStatusRendered;
+		this.inputStatusRendered = false;
+		if (
+			!this.pendingInputStatus ||
+			!rendered ||
+			this.ui.hasOverlay() ||
+			!this.loadingAnimation ||
+			!this.statusContainer.children.includes(this.loadingAnimation)
+		)
+			return;
+		if (this.getQueuedActionCount() > 0) {
+			this.pendingInputStatus.firstStatus(false);
+			this.pendingInputStatus = undefined;
+			return;
+		}
+		this.inputStatusFrameAt ??= performance.now();
+		if (this.inputStatusAdmitted) {
+			this.pendingInputStatus.firstStatus(true, this.inputStatusFrameAt);
+			this.pendingInputStatus = undefined;
+		}
+	}
+
+	private async promptWithTelemetry(
+		text: string,
+		options: AgentConnectionPromptOptions,
+		attempt = this.beginInputTelemetry(),
+	): Promise<void> {
+		try {
+			await this.agentConnection.prompt(text, {
+				...options,
+				...(attempt?.metadata && isTelemetryEnabled(this.settingsManager)
+					? { telemetryInput: attempt.metadata }
+					: {}),
+			});
+			attempt?.admission("completed");
+			if (attempt && this.pendingInputStatus === attempt) {
+				if (this.getQueuedActionCount() > 0) {
+					attempt?.firstStatus(false);
+					this.pendingInputStatus = undefined;
+					return;
+				}
+				this.inputStatusAdmitted = true;
+				if (this.inputStatusFrameAt !== undefined) {
+					attempt?.firstStatus(true, this.inputStatusFrameAt);
+					this.pendingInputStatus = undefined;
+				}
+			}
+		} catch (error) {
+			const uncertain =
+				error instanceof AgentConnectionPromptAdmissionError &&
+				(error.status === "owned" || error.status === "unknown");
+			const canceled =
+				!uncertain &&
+				(options.signal?.aborted || (error instanceof AgentConnectionPromptAdmissionError && error.cancelled));
+			attempt?.admission(uncertain ? "unavailable" : canceled ? "canceled" : "failed");
+			if (this.pendingInputStatus === attempt) this.pendingInputStatus = undefined;
+			if (!canceled && attempt?.metadata)
+				captureTelemetryError({
+					agentDir: getAgentDir(),
+					settingsManager: this.settingsManager,
+					executionMode: "interactive",
+					error,
+					component: this.localSessionHost ? "session" : "daemon",
+					operation: "request",
+					stage: "unknown",
+					inputId: attempt?.metadata?.inputId,
+					clientSessionId: attempt?.metadata?.clientSessionId,
+				});
+			throw error;
+		}
 	}
 
 	private set promptStash(stash: PromptStash | undefined) {
@@ -1651,7 +1772,7 @@ export class InteractiveMode {
 				}
 				const prompt = startupPrompts[next]!;
 				try {
-					await this.agentConnection.prompt(prompt.text, {
+					await this.promptWithTelemetry(prompt.text, {
 						images: prompt.images,
 						streamingBehavior: next === 0 ? "steer" : "followUp",
 						queueIfBusy: true,
@@ -1851,6 +1972,7 @@ export class InteractiveMode {
 			const authStatus = model ? this.modelRegistry.getProviderAuthStatus(model.provider) : undefined;
 			const storedCredential = model ? this.modelRegistry.authStorage.get(model.provider) : undefined;
 			const observation = {
+				setupContext: getTelemetryExecutionContext(this.modelRegistry, model),
 				provider: model?.provider,
 				authSource: authStatus?.source,
 				storedCredentialType: storedCredential?.type,
@@ -5161,11 +5283,18 @@ export class InteractiveMode {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				const promptStashAfterClear = this.promptStash;
-				submissionOutcome = (await this.admitPendingStartupPrompts?.()) ?? "admitted";
+				const inputTelemetry = this.beginInputTelemetry();
+				try {
+					submissionOutcome = (await this.admitPendingStartupPrompts?.()) ?? "admitted";
+				} catch (error) {
+					inputTelemetry?.admission("failed");
+					throw error;
+				}
 				// Retention is not admission. Startup drafts were inserted synchronously
 				// before the barrier settled, so append this blocked submission behind them
 				// and never let it prompt or overtake them.
 				if (submissionOutcome === "retained") {
+					inputTelemetry?.admission("unavailable");
 					this.retainSubmittedDraft(submittedDraft ?? { text }, submissionGeneration);
 					return;
 				}
@@ -5182,14 +5311,19 @@ export class InteractiveMode {
 					// was typed for, without overwriting an explicit older stash.
 					this.retainSubmittedDraft(submittedDraft ?? { text }, submissionGeneration, submissionStashState);
 					submissionOutcome = "lifecycle-cancelled";
+					inputTelemetry?.admission("canceled");
 					return;
 				}
 				try {
-					await this.agentConnection.prompt(text, {
-						streamingBehavior,
-						queueIfBusy: true,
-						images,
-					});
+					await this.promptWithTelemetry(
+						text,
+						{
+							streamingBehavior,
+							queueIfBusy: true,
+							images,
+						},
+						inputTelemetry,
+					);
 				} catch (error) {
 					// Generation guards editor ownership, not draft durability: a stale
 					// rejection must be retained rather than overwrite newer input or vanish.
@@ -5498,6 +5632,7 @@ export class InteractiveMode {
 
 		this.footer.invalidate();
 		this.updateConnectionStateFromEvent(event);
+		this.observeCancellationIdle();
 		// A new user message resets the activity tracker to 0, so the in-flight baseline must
 		// reset with it. (agent_start on auto-retry does not reset the tracker.)
 		if (event.type === "message_start") {
@@ -5782,6 +5917,10 @@ export class InteractiveMode {
 				break;
 
 			case "agent_end":
+				if (this.pendingInputStatus && this.inputStatusFrameAt === undefined) {
+					this.pendingInputStatus.firstStatus(false);
+					this.pendingInputStatus = undefined;
+				}
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -6878,27 +7017,83 @@ export class InteractiveMode {
 	}
 
 	private interruptOrClearInput(): void {
+		this.pendingCancellation?.finish("unavailable");
+		this.pendingCancellation = undefined;
+		const requests: Promise<void>[] = [];
+		const cancellation =
+			this.journeyTelemetry &&
+			isTelemetryEnabled(this.settingsManager) &&
+			(this.isAgentStreaming() || this.isAgentCompacting() || this.isBashRunning() || this.getRetryAttempt() > 0)
+				? {
+						finish: this.journeyTelemetry.beginCancellation(),
+						acknowledged: false,
+						idleAt: undefined as number | undefined,
+					}
+				: undefined;
+		this.pendingCancellation = cancellation;
 		this.traceUploadAllAbortController?.abort(new Error("Trace upload cancelled"));
 		if (this.sideQuestionEvent?.status === "running") {
 			this.abortSideQuestion(this.sideQuestionEvent.id, true);
 		}
 		if (this.getRetryAttempt() > 0) {
-			void this.agentConnection.abortRetry();
+			requests.push(this.agentConnection.abortRetry());
 		}
 		if (this.isAgentCompacting()) {
-			void this.agentConnection.abortCompaction();
-			void this.agentConnection.abortBranchSummary();
+			requests.push(this.agentConnection.abortCompaction());
+			requests.push(this.agentConnection.abortBranchSummary());
 		}
 		if (this.isBashRunning()) {
-			void this.agentConnection.abortBash();
+			requests.push(this.agentConnection.abortBash());
 		}
 		if (this.isAgentStreaming()) {
 			// The queue is preserved server-side; draining resumes on the next
 			// submit or queued-message edit.
-			void this.agentConnection.abort().catch((error) => {
-				this.showError(error instanceof Error ? error.message : String(error));
-			});
+			requests.push(
+				this.agentConnection.abort().catch((error) => {
+					this.showError(error instanceof Error ? error.message : String(error));
+					throw error;
+				}),
+			);
 		}
+		void Promise.allSettled(requests).then((results) => {
+			if (!cancellation || this.pendingCancellation !== cancellation) return;
+			const failed = results.find((result) => result.status === "rejected");
+			if (failed?.status === "rejected") {
+				cancellation.finish("failed");
+				this.pendingCancellation = undefined;
+				captureTelemetryError({
+					agentDir: getAgentDir(),
+					settingsManager: this.settingsManager,
+					executionMode: "interactive",
+					error: failed.reason,
+					component: this.localSessionHost ? "session" : "daemon",
+					operation: "request",
+					stage: "unknown",
+					clientSessionId: this.journeyTelemetry?.clientSessionId,
+				});
+				return;
+			}
+			cancellation.acknowledged = true;
+			this.observeCancellationIdle();
+		});
+	}
+
+	private observeCancellationIdle(): void {
+		const cancellation = this.pendingCancellation;
+		if (
+			!cancellation ||
+			!this.connectionState ||
+			this.isAgentStreaming() ||
+			this.isAgentCompacting() ||
+			this.isBashRunning() ||
+			this.getRetryAttempt() > 0 ||
+			this.connectionState.sessionActions.active
+		)
+			return;
+		cancellation.idleAt ??= performance.now();
+		if (!cancellation.acknowledged) return;
+		cancellation.finish("completed", cancellation.idleAt);
+		this.pendingCancellation = undefined;
 	}
 
 	private showCtrlCExitHint(): void {
@@ -7911,9 +8106,14 @@ export class InteractiveMode {
 	}
 
 	private async completeModelSelection(model: AgentConnectionModel): Promise<void> {
+		const previousModel = this.getCurrentModel()?.id;
 		const previousProvider = this.getCurrentModel()?.provider;
 		this.showStatus(`Switching model: ${model.id}`);
 		await this.applySelectedModel(model);
+		if (previousProvider !== model.provider || previousModel !== model.id)
+			this.journeyTelemetry?.noteRecoveryAction(
+				previousProvider !== model.provider ? "provider_changed" : "model_changed",
+			);
 		this.onboardingTelemetry?.stage(
 			"provider_selection",
 			previousProvider && previousProvider !== model.provider ? "provider_switched" : "completed",
@@ -8345,7 +8545,9 @@ export class InteractiveMode {
 						this.onboardingTelemetry?.stage("credential_validation", "unavailable", {
 							validationScope: "unchecked",
 						});
-					this.onboardingTelemetry?.finish(ready ? "completed" : "canceled");
+					this.onboardingTelemetry?.finish(ready ? "completed" : "canceled", {
+						setupContext: getTelemetryExecutionContext(this.modelRegistry, this.getCurrentModel()),
+					});
 					this.onboardingTelemetry = undefined;
 				}
 				resolve();
@@ -8896,6 +9098,7 @@ export class InteractiveMode {
 					{ provider: providerId, acquisitionMethod: method },
 				);
 				return (result) => {
+					if (result.status === "success") this.journeyTelemetry?.noteRecoveryAction("credentials_updated");
 					feature?.finish(
 						result.status === "success" ? "completed" : result.status === "cancelled" ? "canceled" : "failed",
 					);
@@ -10407,6 +10610,8 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		this.pendingCancellation?.finish("unavailable");
+		this.pendingCancellation = undefined;
 		this.journeyTelemetry?.dispose();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });

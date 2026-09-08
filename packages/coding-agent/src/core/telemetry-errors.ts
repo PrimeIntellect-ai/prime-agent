@@ -3,15 +3,9 @@ import { randomUUID } from "node:crypto";
 import type { LogEntry } from "@earendil-works/pi-ai";
 import type { AgentExecutionMode } from "./agent-session-config.js";
 import type { SettingsManager } from "./settings-manager.js";
+import { captureTelemetryEvent, flushTelemetry, isTelemetryEnabled, type TelemetrySink } from "./telemetry.js";
+import { telemetryProviderCategory } from "./telemetry-categories.js";
 import {
-	captureTelemetryEvent,
-	flushTelemetry,
-	isTelemetryEnabled,
-	type TelemetrySink,
-	telemetryProviderCategory,
-} from "./telemetry.js";
-import {
-	classifyTelemetryError,
 	TELEMETRY_ERROR_COMPONENTS,
 	TELEMETRY_ERROR_OPERATIONS,
 	TELEMETRY_ERROR_RECOVERY_ACTIONS,
@@ -22,7 +16,9 @@ import {
 	type TelemetryErrorRecoveryAction,
 	type TelemetryErrorRecoveryOutcome,
 	type TelemetryErrorStage,
+	telemetryErrorProperties,
 } from "./telemetry-error-classification.js";
+import { getTelemetryErrorRecoveryTracker, type TelemetryErrorRecoveryTracker } from "./telemetry-error-recovery.js";
 
 export interface TelemetryErrorContext {
 	agentDir: string;
@@ -40,6 +36,8 @@ export interface TelemetryErrorDetails {
 	provider?: string;
 	sessionId?: string;
 	runId?: string;
+	inputId?: string;
+	clientSessionId?: string;
 	retryAttempt?: number;
 	retryBackoffMs?: number;
 	consecutiveFailureCount?: number;
@@ -57,6 +55,7 @@ const DEDUPLICATION_WINDOW_MS = 1_000;
 const MAX_COUNTER = 1_000_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const seenErrors = new WeakMap<object, { id: string; scope: string; capturedAt: number }>();
+const watchedSettings = new WeakMap<SettingsManager, Set<TelemetryErrorRecoveryTracker>>();
 const scopedContext = new AsyncLocalStorage<TelemetryErrorContext>();
 let activeContext: TelemetryErrorContext | undefined;
 let customReporter: ErrorReporter | undefined;
@@ -104,7 +103,7 @@ function makeReport(details: TelemetryErrorDetails): ErrorReport | undefined {
 	const id = randomUUID();
 	for (const key of keys) seenErrors.set(key, { id, scope, capturedAt: now });
 	return {
-		...classifyTelemetryError(details.error),
+		...telemetryErrorProperties(details.error),
 		error_id: id,
 		component: enumValue(details.component, TELEMETRY_ERROR_COMPONENTS, "unknown"),
 		operation: enumValue(details.operation, TELEMETRY_ERROR_OPERATIONS, "unknown"),
@@ -112,12 +111,30 @@ function makeReport(details: TelemetryErrorDetails): ErrorReport | undefined {
 		provider_category: telemetryProviderCategory(details.provider),
 		session_id: sessionId,
 		run_id: runId,
+		input_id: analyticsId(details.inputId),
+		client_session_id: analyticsId(details.clientSessionId),
 		retry_attempt: counter(details.retryAttempt),
 		retry_backoff_ms: counter(details.retryBackoffMs, 86_400_000),
 		consecutive_failure_count: counter(details.consecutiveFailureCount),
 		recovery_action: enumValue(details.recoveryAction, TELEMETRY_ERROR_RECOVERY_ACTIONS, "none"),
 		recovery_outcome: enumValue(details.recoveryOutcome, TELEMETRY_ERROR_RECOVERY_OUTCOMES, "not_observed"),
 	};
+}
+
+function trackReport(context: TelemetryErrorContext, report: ErrorReport): ErrorReport | undefined {
+	const tracker = getTelemetryErrorRecoveryTracker(context.settingsManager, context.agentDir, {
+		isEnabled: () => isTelemetryEnabled(context.settingsManager),
+	});
+	let trackers = watchedSettings.get(context.settingsManager);
+	if (!trackers) {
+		trackers = new Set();
+		watchedSettings.set(context.settingsManager, trackers);
+		context.settingsManager.subscribeTelemetryEnabled(() => {
+			for (const item of watchedSettings.get(context.settingsManager) ?? []) item.clear();
+		});
+	}
+	trackers.add(tracker);
+	return tracker.recordFailure(report);
 }
 
 /** Register only after effective settings (including opt-outs) have been loaded. */
@@ -157,7 +174,8 @@ export function captureTelemetryError(options: CaptureTelemetryErrorOptions): st
 	try {
 		if (options.telemetryDisabled || !isTelemetryEnabled(options.settingsManager)) return undefined;
 		reporting = true;
-		const report = makeReport(options);
+		const prepared = makeReport(options);
+		const report = prepared ? trackReport(options, prepared) : undefined;
 		if (!report) return undefined;
 		captureTelemetryEvent({
 			agentDir: options.agentDir,
@@ -181,10 +199,11 @@ export function reportTelemetryError(details: TelemetryErrorDetails): string | u
 	try {
 		const context = scopedContext.getStore() ?? activeContext;
 		if (!context) return undefined;
-		if (!customReporter) return captureTelemetryError({ ...context, ...details });
 		if (context.telemetryDisabled || !isTelemetryEnabled(context.settingsManager)) return undefined;
+		if (!customReporter) return captureTelemetryError({ ...context, ...details });
 		reporting = true;
-		const report = makeReport(details);
+		const prepared = makeReport(details);
+		const report = prepared ? trackReport(context, prepared) : undefined;
 		if (!report) return undefined;
 		customReporter(report);
 		return report.error_id as string;
@@ -195,7 +214,7 @@ export function reportTelemetryError(details: TelemetryErrorDetails): string | u
 	}
 }
 
-/** Observe selected local error boundaries, without forwarding log fields or raw log messages. */
+/** Observe selected scoped failure messages without forwarding arbitrary log fields. */
 export function reportTelemetryLogEntry(entry: LogEntry): void {
 	if (reporting) return;
 	try {

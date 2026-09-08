@@ -22,6 +22,7 @@ import type { CustomMessage } from "../../core/messages.js";
 import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import type { TelemetryInputMetadata } from "../../core/telemetry-input.js";
 import type { SessionUsageSummary } from "../../core/usage.js";
 import type {
 	AgentConnectionAgentStatus,
@@ -73,8 +74,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
-export const DAEMON_SCHEMA_REVISION = 27;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-962b8b4c5e35";
+// Revision 28 adds optional, capability-gated prompt telemetry correlation metadata.
+export const DAEMON_SCHEMA_REVISION = 28;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-845bf2d78cc1";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -121,6 +123,7 @@ export type DaemonServerCapability =
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
+	| "telemetry_input"
 	| "direct_peer_transport";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
@@ -166,6 +169,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"rlm_quiescence_barrier",
 	"session_input_pause",
 	"acp_mcp_servers",
+	"telemetry_input",
 ];
 
 /** Single-use short-lived credential for one direct TUI connection to one worker process incarnation. */
@@ -442,6 +446,7 @@ export type DaemonCommand =
 	| {
 			id?: string;
 			type: "prompt";
+			telemetryInput?: TelemetryInputMetadata;
 			activeSessionId: string;
 			message: string;
 			content?: (TextContent | ImageContent)[];
@@ -466,6 +471,7 @@ export type DaemonCommand =
 	| {
 			id?: string;
 			type: "prompt_and_wait";
+			telemetryInput?: TelemetryInputMetadata;
 			activeSessionId: string;
 			message: string;
 			content?: (TextContent | ImageContent)[];
@@ -717,6 +723,7 @@ const DELETE_RLM_SUBAGENT_COMMAND = {
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
 const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const TELEMETRY_INPUT_COMMAND = { minProtocol: 7, minSchemaRevision: 28, capability: "telemetry_input" } as const;
 const AUTHORITATIVE_CHILD_ROSTER_COMMAND = {
 	minProtocol: 7,
 	minSchemaRevision: 17,
@@ -984,6 +991,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 		((command.type === "attach" || command.type === "reattach") && command.telemetryDisabled !== undefined) ||
 		(command.type === "create" && command.config?.telemetryDisabled !== undefined);
 	if (carriesTelemetryPolicy) requirements.push(TELEMETRY_POLICY_COMMAND);
+	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.telemetryInput !== undefined) {
+		requirements.push(TELEMETRY_INPUT_COMMAND);
+	}
 	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 		requirements.push(PROMPT_ADMISSION_CANCELLATION_COMMAND);
 	}
@@ -994,6 +1004,20 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
+}
+
+export function omitUnsupportedTelemetryInput<T extends DaemonCommand>(
+	command: T,
+	hello: Parameters<typeof meetsDaemonCommandCompatibility>[0] | undefined,
+): T {
+	if (
+		(command.type !== "prompt" && command.type !== "prompt_and_wait") ||
+		command.telemetryInput === undefined ||
+		(hello && meetsDaemonCommandCompatibility(hello, TELEMETRY_INPUT_COMMAND))
+	)
+		return command;
+	const { telemetryInput: _telemetryInput, ...compatible } = command;
+	return compatible as T;
 }
 
 export function meetsDaemonCommandCompatibility(

@@ -350,6 +350,7 @@ export class InProcessAgentConnection implements AgentConnection {
 				}
 			};
 			const prompt = this.session.prompt(message, {
+				...(options?.telemetryInput ? { telemetryInput: options.telemetryInput } : {}),
 				...(options?.images ? { images: options.images } : {}),
 				...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior, resumeIfIdle: true } : {}),
 				...(options?.queueIfBusy !== undefined ? { queueIfBusy: options.queueIfBusy } : {}),
@@ -371,6 +372,7 @@ export class InProcessAgentConnection implements AgentConnection {
 
 	async promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void> {
 		await this.session.promptAndWait(message, {
+			...(options?.telemetryInput ? { telemetryInput: options.telemetryInput } : {}),
 			...(options?.images ? { images: options.images } : {}),
 			...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior, resumeIfIdle: true } : {}),
 			...(options?.queueIfBusy !== undefined ? { queueIfBusy: options.queueIfBusy } : {}),

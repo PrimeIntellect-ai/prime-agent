@@ -46,12 +46,39 @@ The UI measures model and authentication changes, effort changes, new sessions, 
 | `session_ui_rebind` startup stage | UI subscription and state rebinding after selecting a connection. |
 | `ui_ready` startup stage | CLI process start to completion of UI initialization, including any earlier user wait; before onboarding. An embedded UI measures from its initialization call unless an origin is supplied. |
 
-System durations use a monotonic clock. `timing_scope` distinguishes system work from elapsed time that can include user wait. Worker run-to-first-text timing starts at `agent_start`; it must not be presented as time from user submission. UI submission-to-dispatch, queue wait, and first-visible-status timing are not inferred from these events.
+System durations use a monotonic clock. `timing_scope` distinguishes system work from elapsed time that can include user wait. Worker run-to-first-text timing starts at `agent_start`; it must not be presented as time from user submission.
+
+## Input, queue, and cancellation observations
+
+`agent input stage` separates UI submission from receipt in the worker, queue selection, preparation, dispatch, and completion of the prompt call. A random `input_id` joins observations of the same input. The worker observes actual session-action state changes, including rollback to the queue and cancellation before execution. Finishing the prompt call is not proof that a run completed: queued prompts can return while their work is still waiting. A request rejected before dispatch is also distinct from a provider failure.
+
+UI submission starts when a normal editor submission reaches the prompt path, before the startup-prompt admission barrier. For startup-supplied prompts it starts immediately before the connection call. UI admission ends when that call returns or rejects. A transport result that cannot confirm ownership has outcome `unavailable`; it does not claim cancellation or rejection. These UI durations include local preparation and any connection or admission wait after their start. Worker queue and preparation durations start and end within the worker. The UI and worker never subtract timestamps from different processes.
+
+`agent timing` adds two observations from the interactive UI:
+
+| Stage | Boundary and coverage |
+| --- | --- |
+| `first_status` | UI input start to the first successfully written terminal frame that rendered a nonempty working-status area, once admission of that input is confirmed. Coverage is limited to a single input submitted while idle, with no queued action or overlay. Overlapping inputs, observed queueing, a missing rendered frame, and view replacement produce `unavailable` with a null duration. This observes a terminal write, not a display-device acknowledgement. |
+| `cancellation_to_idle` | Interrupt request to the first observed state with no running, compacting, retrying, shell, or active session action, provided the cancellation requests succeed. Preserved queued messages do not prevent idle. Failed cancellation or lost observation produces a null duration. A new input or view replacement closes an unfinished measurement as unavailable. |
+
+The first-status observation has no per-input status identifier from the daemon. Its narrow idle-input coverage reduces ambiguity, but does not prove that another attached client could not have started work concurrently. Do not use it as complete prompt latency coverage. Cancellation is associated with the UI lifetime, rather than an invented input or worker run ID. Neither measurement adds a blocking wait or a new keybinding.
+
+## Setup, UI, and executing-worker context
+
+At the end of an actual onboarding attempt, local correlation state can retain a bounded setup snapshot: provider and model category, credential-source category, personal/team category, and default/custom endpoint category. Before submitting a prompt, the UI can include its current snapshot. The worker separately observes the context used when request authentication is actually resolved. Configuration at setup and configuration in the UI are not substitutes for the executing worker's request context.
+
+Differences compare categories only. Two credentials, team identifiers, or endpoint URLs can differ while their categories are equal. Unknown values remain unknown. Keys, account or team identifiers, URLs, prompt text, and paths are never included in these snapshots. No provider request is made just to populate telemetry.
+
+Successful login, provider changes, and model changes can mark the next input with a fixed recovery-action category. An input that fails admission restores that pending action for a later attempt. This records the action taken, not a claim that it solved the error. Worker recovery observations determine whether a later request actually succeeds.
+
+The optional `telemetryInput` prompt metadata is capability-gated by `telemetry_input` and daemon schema revision 28. The protocol version is unchanged. It applies to `prompt` and `prompt_and_wait`; no command or event is required during startup. Clients strip the metadata when the connected server lacks the capability or schema, including reconnect replay and direct-worker fallback. Older clients continue to send their existing prompt shape. Worker-only observations still work when UI metadata is unavailable.
+
+Non-HTTP failures in commands for an already resident session use that session's settings, runtime opt-out, and agent directory. Unbound catalog requests and cross-project session replacement do not acquire a global error-reporting context; caller-side reporting covers visible failures where consent is known.
 
 ## Activation pairing and opt-out
 
-The most recent actual onboarding attempt stores only random attempt/client IDs and its start time in private local state, retained for at most seven days. Worker run events can use this context to relate later successful runs to onboarding. A 24-hour activation metric requires an observed successful run with the same `onboarding_id` and `elapsed_since_onboarding_ms` between zero and 86,400,000. Missing pairs are unknown coverage, not demonstrated failure.
+The most recent actual onboarding attempt stores random attempt/client IDs, its start time, and the bounded setup categories in private local state, retained for at most seven days. Worker run events can use this context to relate later successful runs to onboarding. A 24-hour activation metric requires an observed successful run with the same `onboarding_id` and `elapsed_since_onboarding_ms` between zero and 86,400,000. Missing pairs are unknown coverage, not demonstrated failure.
 
-For first-session activation, select the first observed worker session associated with the attempt and inspect successful runs in that session. `run_index` counts runs inside a worker session; it does not identify the first session by itself. This is a recent local-installation association, not proof that a particular UI submitted the run: concurrent UIs can update the shared context. Keep unmatched or ambiguous cases separate. No daemon commands, capabilities, or wire fields are added for this correlation.
+For first-session activation, select the first observed worker session associated with the attempt and inspect successful runs in that session. `run_index` counts runs inside a worker session; it does not identify the first session by itself. Input metadata can associate a submitting UI with a worker run. The fallback shared local onboarding context remains an installation association: concurrent UIs can update it. Keep missing metadata and ambiguous cases separate.
 
-Telemetry remains enabled by default and follows the existing setting and environment precedence. Disabling effective telemetry immediately removes local onboarding correlation and clears in-memory journey state. Disabled operations allocate no analytics IDs and are not replayed after telemetry is re-enabled. Fresh activity after re-enabling starts new correlation IDs.
+Telemetry remains enabled by default and follows the existing setting and environment precedence. Disabling effective telemetry immediately removes local onboarding correlation and clears in-memory journey state, pending UI observations, and recovery-action markers. Disabled operations allocate no analytics IDs and are not replayed after telemetry is re-enabled. Worker consent is checked independently before input observation. Fresh activity after re-enabling starts new correlation IDs.

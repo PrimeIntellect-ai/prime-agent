@@ -6,6 +6,7 @@ import { AuthStorage, type AuthStorageBackend } from "../src/core/auth-storage.j
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { TelemetryEventName, TelemetrySink } from "../src/core/telemetry.js";
+import { getTelemetryErrorRecoveryTracker } from "../src/core/telemetry-error-recovery.js";
 import {
 	captureTelemetryError,
 	flushTelemetryErrorReporting,
@@ -74,9 +75,19 @@ describe("application error reporting", () => {
 				error_subtype: "insufficient_balance",
 				http_status: 402,
 				diagnostic_message: "The provider reported insufficient balance.",
+				error_message: SECRET,
+				error_code_group: "insufficient_funds",
+				error_event_kind: "occurrence",
 			},
 		});
-		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+		expect(
+			JSON.stringify(
+				sink.events.map(({ properties }) => {
+					const { error_message: _message, error_code_group: _code, ...safe } = properties;
+					return safe;
+				}),
+			),
+		).not.toContain(SECRET);
 	});
 
 	it.each(["PI_OFFLINE", "DO_NOT_TRACK", "PRIME_AGENT_TELEMETRY"])(
@@ -97,6 +108,33 @@ describe("application error reporting", () => {
 		settings.setTelemetryEnabled(false);
 		reportTelemetryError({ error: new Error(SECRET), component: "background", operation: "execute" });
 		expect(sink.events).toHaveLength(1);
+	});
+	it("checks fallback consent before copying lazy error details", () => {
+		cleanups.push(initializeTelemetryErrorReporting({ ...context, telemetryDisabled: true }));
+		const getter = vi.fn(() => new Error("private lazy message"));
+		const details = Object.defineProperty(
+			{ component: "startup" as const, operation: "startup" as const, error: undefined },
+			"error",
+			{ enumerable: true, get: getter },
+		);
+		expect(reportTelemetryError(details)).toBeUndefined();
+		expect(getter).not.toHaveBeenCalled();
+	});
+	it("clears pending original messages immediately on settings opt-out", () => {
+		captureTelemetryError({
+			...context,
+			error: new Error("Original synthetic failure"),
+			component: "provider",
+			operation: "request",
+			sessionId: SESSION_ID,
+			runId: RUN_ID,
+		});
+		const tracker = getTelemetryErrorRecoveryTracker(settings, agentDir, {
+			isEnabled: () => settings.getTelemetryEnabled(),
+		});
+		settings.setTelemetryEnabled(false);
+		settings.setTelemetryEnabled(true);
+		expect(tracker.finishRun({ sessionId: SESSION_ID, runId: RUN_ID, outcome: "success" })).toEqual([]);
 	});
 
 	it("flushes controlled startup errors with a bounded budget and preserves opt-out", async () => {
@@ -144,7 +182,14 @@ describe("application error reporting", () => {
 			error_code: "unknown",
 			consecutive_failure_count: 1_000_000,
 		});
-		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+		expect(
+			JSON.stringify(
+				sink.events.map(({ properties }) => {
+					const { error_message: _message, error_code_group: _code, ...safe } = properties;
+					return safe;
+				}),
+			),
+		).not.toContain(SECRET);
 	});
 
 	it("does not throw or recursively report a sink failure", () => {
@@ -241,12 +286,20 @@ describe("application error reporting", () => {
 			operation: "load",
 			error_code: "EACCES",
 		});
-		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+		expect(
+			JSON.stringify(
+				sink.events.map(({ properties }) => {
+					const { error_message: _message, error_code_group: _code, ...safe } = properties;
+					return safe;
+				}),
+			),
+		).not.toContain(SECRET);
 	});
 
 	it("installs a monitor without taking over uncaught exception behavior", () => {
 		cleanups.push(initializeTelemetryErrorReporting(context));
 		const existing = process.listenerCount("uncaughtException");
+		const rejectionListeners = process.listenerCount("unhandledRejection");
 		const previousMonitors = process.listeners("uncaughtExceptionMonitor");
 		const cleanup = installTelemetryExceptionMonitor();
 		cleanups.push(cleanup);
@@ -255,6 +308,7 @@ describe("application error reporting", () => {
 			.find((candidate) => !previousMonitors.includes(candidate));
 		withTelemetryErrorContext(context, () => listener?.(new Error(SECRET), "unhandledRejection"));
 		expect(process.listenerCount("uncaughtException")).toBe(existing);
+		expect(process.listenerCount("unhandledRejection")).toBe(rejectionListeners);
 		expect(sink.events[0].properties).toMatchObject({ operation: "unhandled_rejection" });
 	});
 
@@ -328,7 +382,14 @@ describe("application error reporting", () => {
 			operation: "login",
 			error_code: "ECONNRESET",
 		});
-		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+		expect(
+			JSON.stringify(
+				sink.events.map(({ properties }) => {
+					const { error_message: _message, error_code_group: _code, ...safe } = properties;
+					return safe;
+				}),
+			),
+		).not.toContain(SECRET);
 	});
 
 	it("observes daemon failures while excluding provider logs and ordinary notices", () => {
@@ -347,7 +408,14 @@ describe("application error reporting", () => {
 		});
 		expect(sink.events).toHaveLength(1);
 		expect(sink.events[0].properties).toMatchObject({ component: "daemon", error_subtype: "unknown" });
-		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+		expect(
+			JSON.stringify(
+				sink.events.map(({ properties }) => {
+					const { error_message: _message, error_code_group: _code, ...safe } = properties;
+					return safe;
+				}),
+			),
+		).not.toContain(SECRET);
 	});
 
 	it("requires scoped consent for daemon logs even when global reporting is enabled", () => {
@@ -370,6 +438,13 @@ describe("application error reporting", () => {
 		withTelemetryErrorContext(context, report);
 		expect(sink.events).toHaveLength(1);
 		expect(sink.events[0].properties).toMatchObject({ component: "daemon" });
-		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+		expect(
+			JSON.stringify(
+				sink.events.map(({ properties }) => {
+					const { error_message: _message, error_code_group: _code, ...safe } = properties;
+					return safe;
+				}),
+			),
+		).not.toContain(SECRET);
 	});
 });

@@ -7,6 +7,10 @@ import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/o
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
+import {
+	observeTelemetryRequestContext,
+	subscribeTelemetryExecutionContexts,
+} from "../src/core/telemetry-execution-context.js";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -169,6 +173,7 @@ describe("ModelRegistry", () => {
 			expect(auth).toEqual({
 				ok: true,
 				apiKey: "agent-key",
+				authSource: "stored",
 				headers: { "X-Prime-Team-ID": "team-1" },
 			});
 		});
@@ -1370,6 +1375,28 @@ describe("ModelRegistry", () => {
 		});
 
 		describe("request-time resolution", () => {
+			test("reports the resolved auth source without resolving credentials again", async () => {
+				writeRawModelsJson({ "custom-provider": providerWithApiKey("synthetic-config-key") });
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const model = registry.find("custom-provider", "test-model")!;
+				const authResolution = vi.spyOn(authStorage, "getApiKeyWithSourceToken");
+				const sourceResolution = vi.spyOn(registry, "getCurrentProviderAuthSourceToken");
+				const listener = vi.fn();
+				const session = {};
+				const cleanup = subscribeTelemetryExecutionContexts(session, listener, () => true);
+				try {
+					const auth = await registry.getApiKeyAndHeaders(model);
+					expect(auth).toMatchObject({ ok: true, apiKey: "synthetic-config-key", authSource: "models_json_key" });
+					observeTelemetryRequestContext(session, registry, model, auth);
+					expect(listener).toHaveBeenCalledWith(expect.objectContaining({ authSource: "models_json" }));
+					expect(authResolution).toHaveBeenCalledTimes(1);
+					expect(sourceResolution).not.toHaveBeenCalled();
+				} finally {
+					cleanup();
+					authResolution.mockRestore();
+					sourceResolution.mockRestore();
+				}
+			});
 			test("command is executed on every provider lookup", async () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
@@ -1860,6 +1887,7 @@ describe("ModelRegistry", () => {
 				expect(auth1).toEqual({
 					ok: true,
 					apiKey: "token-1",
+					authSource: "models_json_command",
 					headers: { Authorization: "Bearer token-1" },
 				});
 
@@ -1869,6 +1897,7 @@ describe("ModelRegistry", () => {
 				expect(auth2).toEqual({
 					ok: true,
 					apiKey: "token-2",
+					authSource: "models_json_command",
 					headers: { Authorization: "Bearer token-2" },
 				});
 			});

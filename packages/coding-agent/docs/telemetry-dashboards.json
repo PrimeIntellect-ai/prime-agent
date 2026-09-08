@@ -16,15 +16,23 @@
     "Null timings and incomplete token/cost measurements stay missing. Percentiles include coverage and measured sample counts.",
     "run_to_first_text_ms starts at agent_start. It does not measure time since the user submitted a prompt.",
     "model_latency_ms includes provider waiting and time to first token. Effective output tokens per model-call second is not pure generation speed.",
-    "D1 measures repeated successful model work 24\u201348 hours after first observed success; D7 uses days 7\u20138. Only fully elapsed windows enter denominators.",
+    "D1 measures repeated successful model work 24–48 hours after first observed success; D7 uses days 7–8. Only fully elapsed windows enter denominators.",
     "Error occurrence counts deduplicate by installation and error_id; latest recovery status updates the original error rather than adding a failure.",
     "Costs are estimates for complete usage only. Unknown costs are never zero.",
-    "Same-attempt and first worker-session activation require the original first-setup onboarding_id and exclude later re-entry attempts. First-session activation uses the earliest observed worker session from run-start events; missing associations stay explicit."
+    "Same-attempt and first worker-session activation require the original first-setup onboarding_id and exclude later re-entry attempts. First-session activation uses the earliest observed worker session from run-start events; missing associations stay explicit.",
+    "Revision-2 input, error-code, recovery, and context views require revision-2 events. Older reports are not treated as measured coverage.",
+    "Input admission success means that the worker accepted the action, not that the model completed successfully. Runs and inputs are joined by their explicit IDs.",
+    "UI and worker timing origins remain separate. No duration is formed by subtracting timestamps from different processes.",
+    "Context differences compare coarse categories only; they cannot identify a different key, team, or custom endpoint within the same category.",
+    "A recovered tool count means a later success by that same tool in the same run; it does not prove that the original task was fixed.",
+    "Alert defaults are proposed starting thresholds with minimum samples, not learned production baselines. Publication creates disabled alerts for review."
   ],
   "sources": [
     "https://posthog.com/docs/sql/aggregations",
     "https://posthog.com/docs/sql",
-    "https://posthog.com/docs/api/insights"
+    "https://posthog.com/docs/api/insights",
+    "https://posthog.com/docs/api/alerts",
+    "https://github.com/PostHog/posthog/blob/master/services/mcp/tests/unit/__snapshots__/tool-schemas/alert-create.json"
   ],
   "corrections": [
     {
@@ -145,7 +153,7 @@
     {
       "key": "error-causes",
       "name": "Prime Agent telemetry: error causes and latest recovery",
-      "description": "One occurrence per installation/error_id, including errors followed by a successful retry. Readable messages are reviewed collector templates; raw error text is excluded. Equal-timestamp updates prefer an observed terminal recovery state.",
+      "description": "One occurrence per installation/error_id, grouped by component, stable code, provider and version. Daemon, filesystem, process and other non-HTTP codes are included. Recovery updates do not add occurrences. Reviewed message templates remain available.",
       "requires": [
         "agent error"
       ],
@@ -153,15 +161,16 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH failures AS (SELECT distinct_id, properties.error_id AS error_id, min(timestamp) AS observed_at,\n argMin(coalesce(properties.error_subtype, 'unknown'), timestamp) AS error_subtype,\n argMin(coalesce(properties.component, 'unknown'), timestamp) AS component,\n argMin(coalesce(properties.error_code, 'unknown'), timestamp) AS error_code,\n argMin(properties.diagnostic_message, timestamp) AS reviewed_message,\n argMin(properties.http_status, timestamp) AS http_status,\n argMax(coalesce(properties.recovery_outcome, 'not_observed'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'), coalesce(properties.recovery_outcome, 'not_observed'))) AS recovery_outcome,\n max(toFloat(properties.retry_attempt)) AS retry_attempts\nFROM events WHERE event = 'agent error' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.error_id IS NOT NULL\nGROUP BY distinct_id, error_id)\nSELECT component, error_subtype, error_code, reviewed_message, http_status, recovery_outcome,\n count() AS distinct_errors, count(DISTINCT distinct_id) AS affected_installations,\n max(retry_attempts) AS maximum_observed_retry_attempts\nFROM failures GROUP BY component, error_subtype, error_code, reviewed_message, http_status, recovery_outcome\nORDER BY distinct_errors DESC LIMIT 200"
+          "query": "WITH failures AS (SELECT distinct_id, properties.error_id AS error_id, min(timestamp) AS observed_at,\n argMin(coalesce(properties.error_subtype, 'unknown'), timestamp) AS error_subtype,\n argMin(coalesce(properties.component, 'unknown'), timestamp) AS component,\n argMin(coalesce(properties.provider_category, 'unknown'), timestamp) AS provider_category,\n argMin(coalesce(properties.version, 'unknown'), timestamp) AS version,\n argMin(coalesce(properties.error_code_group, properties.error_code, 'unknown'), timestamp) AS error_code,\n argMin(properties.diagnostic_message, timestamp) AS reviewed_message,\n argMin(properties.http_status, timestamp) AS http_status,\n argMax(coalesce(properties.recovery_action, 'none'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'))) AS recovery_action,\n argMax(coalesce(properties.recovery_outcome, 'not_observed'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'), coalesce(properties.recovery_outcome, 'not_observed'))) AS recovery_outcome,\n max(toFloat(properties.consecutive_failure_count)) AS consecutive_failures,\n max(toFloat(properties.retry_attempt)) AS retry_attempts\nFROM events WHERE event = 'agent error' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.error_id IS NOT NULL\nGROUP BY distinct_id, error_id)\nSELECT component, error_code, error_subtype, provider_category, version,\n argMax(reviewed_message, observed_at) AS reviewed_message,\n count() AS distinct_errors, count(DISTINCT distinct_id) AS affected_installations,\n max(consecutive_failures) AS maximum_consecutive_failures, max(retry_attempts) AS maximum_observed_retry_attempts,\n min(observed_at) AS first_observed_at, max(observed_at) AS last_observed_at\nFROM failures GROUP BY component, error_code, error_subtype, provider_category, version\nORDER BY distinct_errors DESC LIMIT 200"
         },
         "display": "ActionsTable"
-      }
+      },
+      "min_schema_revision": 2
     },
     {
       "key": "error-recovery",
       "name": "Prime Agent telemetry: error recovery outcomes",
-      "description": "Latest recovery report per distinct error_id. Pending and not-observed recovery remain unknown; repeated recovery updates do not add failures. Equal-timestamp updates prefer an observed terminal recovery state.",
+      "description": "Latest scoped recovery action and result per distinct error_id. Manual retries, credentials, model and provider changes remain distinct. An unrelated successful session never proves recovery.",
       "requires": [
         "agent error"
       ],
@@ -169,10 +178,11 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH failures AS (SELECT distinct_id, properties.error_id AS error_id, min(timestamp) AS observed_at,\n argMin(coalesce(properties.error_subtype, 'unknown'), timestamp) AS error_subtype,\n argMin(coalesce(properties.component, 'unknown'), timestamp) AS component,\n argMin(coalesce(properties.error_code, 'unknown'), timestamp) AS error_code,\n argMin(properties.diagnostic_message, timestamp) AS reviewed_message,\n argMin(properties.http_status, timestamp) AS http_status,\n argMax(coalesce(properties.recovery_outcome, 'not_observed'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'), coalesce(properties.recovery_outcome, 'not_observed'))) AS recovery_outcome,\n max(toFloat(properties.retry_attempt)) AS retry_attempts\nFROM events WHERE event = 'agent error' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.error_id IS NOT NULL\nGROUP BY distinct_id, error_id)\nSELECT toDate(observed_at) AS day, count() AS distinct_errors,\n countIf(recovery_outcome = 'success') AS recovered_errors,\n countIf(recovery_outcome = 'failed') AS recovery_failed,\n countIf(recovery_outcome = 'cancelled') AS recovery_cancelled,\n countIf(recovery_outcome IN ('pending', 'not_observed', 'unknown')) AS recovery_not_observed_or_pending\nFROM failures GROUP BY day ORDER BY day ASC LIMIT 100"
+          "query": "WITH failures AS (SELECT distinct_id, properties.error_id AS error_id, min(timestamp) AS observed_at,\n argMin(coalesce(properties.error_subtype, 'unknown'), timestamp) AS error_subtype,\n argMin(coalesce(properties.component, 'unknown'), timestamp) AS component,\n argMin(coalesce(properties.provider_category, 'unknown'), timestamp) AS provider_category,\n argMin(coalesce(properties.version, 'unknown'), timestamp) AS version,\n argMin(coalesce(properties.error_code_group, properties.error_code, 'unknown'), timestamp) AS error_code,\n argMin(properties.diagnostic_message, timestamp) AS reviewed_message,\n argMin(properties.http_status, timestamp) AS http_status,\n argMax(coalesce(properties.recovery_action, 'none'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'))) AS recovery_action,\n argMax(coalesce(properties.recovery_outcome, 'not_observed'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'), coalesce(properties.recovery_outcome, 'not_observed'))) AS recovery_outcome,\n max(toFloat(properties.consecutive_failure_count)) AS consecutive_failures,\n max(toFloat(properties.retry_attempt)) AS retry_attempts\nFROM events WHERE event = 'agent error' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.error_id IS NOT NULL\nGROUP BY distinct_id, error_id)\nSELECT component, error_code, recovery_action, recovery_outcome, count() AS distinct_errors,\n count(DISTINCT distinct_id) AS affected_installations,\n max(consecutive_failures) AS maximum_consecutive_failures\nFROM failures GROUP BY component, error_code, recovery_action, recovery_outcome ORDER BY distinct_errors DESC LIMIT 200"
         },
         "display": "ActionsTable"
-      }
+      },
+      "min_schema_revision": 2
     },
     {
       "key": "latency-run-to-first-text-ms",
@@ -185,7 +195,7 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.run_to_first_text_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY terminal_outcome ORDER BY terminal_outcome LIMIT 20"
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(properties.version, timestamp) AS version, argMax(properties.execution_mode, timestamp) AS execution_mode, argMax(properties.provider_category, timestamp) AS provider_category,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.run_to_first_text_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT version, execution_mode, provider_category, terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY version, execution_mode, provider_category, terminal_outcome ORDER BY reported_runs DESC LIMIT 500"
         },
         "display": "ActionsTable"
       }
@@ -201,7 +211,7 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.first_model_event_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY terminal_outcome ORDER BY terminal_outcome LIMIT 20"
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(properties.version, timestamp) AS version, argMax(properties.execution_mode, timestamp) AS execution_mode, argMax(properties.provider_category, timestamp) AS provider_category,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.first_model_event_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT version, execution_mode, provider_category, terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY version, execution_mode, provider_category, terminal_outcome ORDER BY reported_runs DESC LIMIT 500"
         },
         "display": "ActionsTable"
       }
@@ -217,7 +227,7 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.model_latency_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY terminal_outcome ORDER BY terminal_outcome LIMIT 20"
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(properties.version, timestamp) AS version, argMax(properties.execution_mode, timestamp) AS execution_mode, argMax(properties.provider_category, timestamp) AS provider_category,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.model_latency_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT version, execution_mode, provider_category, terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY version, execution_mode, provider_category, terminal_outcome ORDER BY reported_runs DESC LIMIT 500"
         },
         "display": "ActionsTable"
       }
@@ -233,7 +243,7 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.tool_duration_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY terminal_outcome ORDER BY terminal_outcome LIMIT 20"
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(properties.version, timestamp) AS version, argMax(properties.execution_mode, timestamp) AS execution_mode, argMax(properties.provider_category, timestamp) AS provider_category,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.tool_duration_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT version, execution_mode, provider_category, terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY version, execution_mode, provider_category, terminal_outcome ORDER BY reported_runs DESC LIMIT 500"
         },
         "display": "ActionsTable"
       }
@@ -249,7 +259,7 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.retry_wait_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY terminal_outcome ORDER BY terminal_outcome LIMIT 20"
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(properties.version, timestamp) AS version, argMax(properties.execution_mode, timestamp) AS execution_mode, argMax(properties.provider_category, timestamp) AS provider_category,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.retry_wait_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT version, execution_mode, provider_category, terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY version, execution_mode, provider_category, terminal_outcome ORDER BY reported_runs DESC LIMIT 500"
         },
         "display": "ActionsTable"
       }
@@ -265,7 +275,7 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.compaction_duration_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY terminal_outcome ORDER BY terminal_outcome LIMIT 20"
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(properties.version, timestamp) AS version, argMax(properties.execution_mode, timestamp) AS execution_mode, argMax(properties.provider_category, timestamp) AS provider_category,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.compaction_duration_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT version, execution_mode, provider_category, terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY version, execution_mode, provider_category, terminal_outcome ORDER BY reported_runs DESC LIMIT 500"
         },
         "display": "ActionsTable"
       }
@@ -281,7 +291,7 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.max_stream_gap_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY terminal_outcome ORDER BY terminal_outcome LIMIT 20"
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, max(timestamp) AS completed_at,\n argMax(properties.version, timestamp) AS version, argMax(properties.execution_mode, timestamp) AS execution_mode, argMax(properties.provider_category, timestamp) AS provider_category,\n argMax(coalesce(properties.terminal_outcome, 'unknown'), timestamp) AS terminal_outcome, argMax(toFloat(properties.max_stream_gap_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL\n GROUP BY distinct_id, run_id)\nSELECT version, execution_mode, provider_category, terminal_outcome, count() AS reported_runs,\n countIf(value_ms IS NOT NULL) AS measured_runs,\n countIf(value_ms IS NULL) AS missing_measurement_runs,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM runs GROUP BY version, execution_mode, provider_category, terminal_outcome ORDER BY reported_runs DESC LIMIT 500"
         },
         "display": "ActionsTable"
       }
@@ -297,10 +307,11 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "SELECT properties.stage AS stage, coalesce(properties.tool_category, 'unknown') AS tool_category,\n coalesce(properties.outcome, 'unknown') AS outcome,\n count() AS timing_samples, countIf(properties.duration_ms IS NOT NULL) AS measured_samples,\n countIf(properties.duration_ms IS NULL) AS missing_samples,\n 100.0 * countIf(properties.duration_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(properties.duration_ms IS NOT NULL) = 0, NULL, quantile(0.50)(toFloat(properties.duration_ms))) AS p50_ms,\n if(countIf(properties.duration_ms IS NOT NULL) = 0, NULL, quantile(0.95)(toFloat(properties.duration_ms))) AS p95_ms,\n if(countIf(properties.duration_ms IS NOT NULL) = 0, NULL, quantile(0.99)(toFloat(properties.duration_ms))) AS p99_ms\nFROM events WHERE event = 'agent timing' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\nGROUP BY stage, tool_category, outcome ORDER BY timing_samples DESC LIMIT 150"
+          "query": "WITH samples AS (SELECT distinct_id, uuid, argMax(coalesce(properties.stage, 'unknown'), timestamp) AS stage, argMax(coalesce(properties.provider_category, 'unknown'), timestamp) AS provider_category, argMax(coalesce(properties.timing_origin, 'unknown'), timestamp) AS timing_origin, argMax(coalesce(properties.tool_category, 'unknown'), timestamp) AS tool_category, argMax(coalesce(properties.outcome, 'unknown'), timestamp) AS outcome, argMax(coalesce(properties.version, 'unknown'), timestamp) AS version, argMax(coalesce(properties.execution_mode, 'unknown'), timestamp) AS execution_mode,\n argMax(toFloat(properties.duration_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent timing' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n GROUP BY distinct_id, uuid)\nSELECT stage, provider_category, timing_origin, tool_category, outcome, version, execution_mode, count() AS timing_samples, countIf(value_ms IS NOT NULL) AS measured_samples,\n countIf(value_ms IS NULL) AS missing_samples,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM samples GROUP BY stage, provider_category, timing_origin, tool_category, outcome, version, execution_mode ORDER BY timing_samples DESC LIMIT 500"
         },
         "display": "ActionsTable"
-      }
+      },
+      "min_schema_revision": 2
     },
     {
       "key": "startup-timing",
@@ -313,15 +324,16 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "SELECT properties.stage AS stage, properties.startup_kind AS startup_kind, properties.timing_scope AS timing_scope,\n properties.outcome AS outcome, count() AS samples,\n countIf(properties.duration_ms IS NOT NULL) AS measured_samples,\n countIf(properties.duration_ms IS NULL) AS missing_samples,\n 100.0 * countIf(properties.duration_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(properties.duration_ms IS NOT NULL) = 0, NULL, quantile(0.50)(toFloat(properties.duration_ms))) AS p50_ms,\n if(countIf(properties.duration_ms IS NOT NULL) = 0, NULL, quantile(0.95)(toFloat(properties.duration_ms))) AS p95_ms,\n if(countIf(properties.duration_ms IS NOT NULL) = 0, NULL, quantile(0.99)(toFloat(properties.duration_ms))) AS p99_ms\nFROM events WHERE event = 'agent startup stage' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\nGROUP BY stage, startup_kind, timing_scope, outcome ORDER BY samples DESC LIMIT 150"
+          "query": "WITH samples AS (SELECT distinct_id, uuid, argMax(coalesce(properties.stage, 'unknown'), timestamp) AS stage, argMax(coalesce(properties.startup_kind, 'unknown'), timestamp) AS startup_kind, argMax(coalesce(properties.timing_scope, 'unknown'), timestamp) AS timing_scope, argMax(coalesce(properties.outcome, 'unknown'), timestamp) AS outcome, argMax(coalesce(properties.version, 'unknown'), timestamp) AS version, argMax(coalesce(properties.execution_mode, 'unknown'), timestamp) AS execution_mode,\n argMax(toFloat(properties.duration_ms), timestamp) AS value_ms\n FROM events WHERE event = 'agent startup stage' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n GROUP BY distinct_id, uuid)\nSELECT stage, startup_kind, timing_scope, outcome, version, execution_mode, count() AS timing_samples, countIf(value_ms IS NOT NULL) AS measured_samples,\n countIf(value_ms IS NULL) AS missing_samples,\n 100.0 * countIf(value_ms IS NOT NULL) / nullIf(count(), 0) AS measurement_coverage_pct,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.50)(value_ms)) AS p50_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.95)(value_ms)) AS p95_ms,\n if(countIf(value_ms IS NOT NULL) = 0, NULL, quantile(0.99)(value_ms)) AS p99_ms\nFROM samples GROUP BY stage, startup_kind, timing_scope, outcome, version, execution_mode ORDER BY timing_samples DESC LIMIT 500"
         },
         "display": "ActionsTable"
-      }
+      },
+      "min_schema_revision": 2
     },
     {
       "key": "tool-reliability",
       "name": "Prime Agent telemetry: tool reliability and time",
-      "description": "Summaries deduplicate by installation/run_id/tool_category. Tool names, arguments and outputs are not collected.",
+      "description": "One summary per installation/run/tool category. A recovery is a later success by the same tool in that run; it does not prove the original task was fixed. Tool names and outputs remain local.",
       "requires": [
         "agent tool summary"
       ],
@@ -329,10 +341,11 @@
         "kind": "DataVisualizationNode",
         "source": {
           "kind": "HogQLQuery",
-          "query": "WITH summaries AS (\n SELECT distinct_id, properties.run_id AS run_id, properties.tool_category AS tool_category,\n argMax(toFloat(properties.call_count), timestamp) AS calls,\n argMax(toFloat(properties.failure_count), timestamp) AS failures,\n argMax(toFloat(properties.duration_ms), timestamp) AS duration_ms\n FROM events WHERE event = 'agent tool summary' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND timestamp >= now() - INTERVAL 90 DAY\n GROUP BY distinct_id, run_id, tool_category\n)\nSELECT tool_category, sum(calls) AS tool_calls, sum(failures) AS tool_failures,\n 100.0 * sum(failures) / nullIf(sum(calls), 0) AS failure_rate_pct,\n countIf(duration_ms IS NOT NULL) AS measured_run_summaries,\n countIf(duration_ms IS NULL) AS missing_duration_summaries,\n if(countIf(duration_ms IS NOT NULL) = 0, NULL, sum(duration_ms)) AS measured_tool_duration_ms\nFROM summaries GROUP BY tool_category ORDER BY tool_calls DESC LIMIT 20"
+          "query": "WITH summaries AS (\n SELECT distinct_id, properties.run_id AS run_id, properties.tool_category AS tool_category,\n argMax(toFloat(properties.call_count), timestamp) AS calls,\n argMax(toFloat(properties.failure_count), timestamp) AS failures,\n argMax(toFloat(properties.recovered_count), timestamp) AS recovered_count,\n argMax(toFloat(properties.duration_ms), timestamp) AS duration_ms\n FROM events WHERE event = 'agent tool summary' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n GROUP BY distinct_id, run_id, tool_category\n)\nSELECT tool_category, sum(calls) AS tool_calls, sum(failures) AS tool_failures, sum(recovered_count) AS failures_followed_by_same_tool_success,\n countIf(recovered_count IS NULL) AS summaries_missing_recovery_measurement,\n 100.0 * sum(failures) / nullIf(sum(calls), 0) AS failure_rate_pct,\n countIf(duration_ms IS NOT NULL) AS measured_run_summaries,\n countIf(duration_ms IS NULL) AS missing_duration_summaries,\n if(countIf(duration_ms IS NOT NULL) = 0, NULL, sum(duration_ms)) AS measured_tool_duration_ms\nFROM summaries GROUP BY tool_category ORDER BY tool_calls DESC LIMIT 20"
         },
         "display": "ActionsTable"
-      }
+      },
+      "min_schema_revision": 2
     },
     {
       "key": "onboarding-activation",
@@ -372,7 +385,7 @@
     {
       "key": "successful-retention",
       "name": "Prime Agent telemetry: eligible D1 and D7 repeated success",
-      "description": "First observed successful model run defines the cohort. D1 uses hours 24\u201348 and D7 days 7\u20138; only fully elapsed windows count. UUIDs are installations, not people.",
+      "description": "First observed successful model run defines the cohort. D1 uses hours 24–48 and D7 days 7–8; only fully elapsed windows count. UUIDs are installations, not people.",
       "requires": [
         "agent run completed"
       ],
@@ -448,6 +461,148 @@
         },
         "display": "ActionsTable"
       }
+    },
+    {
+      "key": "input-admission",
+      "name": "Prime Agent telemetry: input admission and run association",
+      "description": "Worker inputs deduplicate by installation/input_id. A completed input action is not a successful model run. Rejected/no-run/cancelled inputs and missing run association stay explicit. Coalesced inputs link to their shared run through input-to-run measurements.",
+      "requires": [
+        "agent input stage",
+        "agent run started",
+        "agent timing"
+      ],
+      "min_schema_revision": 2,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH inputs AS (\n SELECT distinct_id, properties.input_id AS input_id,\n argMin(properties.version, timestamp) AS version,\n countIf(event = 'agent input stage' AND properties.stage = 'received') AS receipts,\n countIf(event = 'agent input stage' AND properties.stage = 'terminal') AS terminals,\n argMaxIf(properties.outcome, timestamp, event = 'agent input stage' AND properties.stage = 'terminal') AS input_outcome,\n countIf(event = 'agent run started' OR (event = 'agent timing' AND properties.stage = 'input_to_run')) AS run_starts\n FROM events WHERE event IN ('agent input stage', 'agent run started', 'agent timing') AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.input_id IS NOT NULL AND (event = 'agent run started' OR (event = 'agent input stage' AND properties.timing_origin = 'worker_input') OR (event = 'agent timing' AND properties.stage = 'input_to_run'))\n GROUP BY distinct_id, input_id)\nSELECT version, countIf(receipts > 0) AS observed_inputs,\n countIf(receipts > 0 AND run_starts > 0) AS inputs_with_observed_run,\n countIf(receipts > 0 AND terminals = 0) AS pending_or_missing_input_terminal,\n countIf(receipts > 0 AND input_outcome = 'error' AND run_starts = 0) AS failed_before_observed_run,\n countIf(receipts > 0 AND input_outcome = 'no_run') AS no_run_inputs,\n countIf(receipts > 0 AND input_outcome = 'cancelled') AS cancelled_inputs\nFROM inputs GROUP BY version ORDER BY observed_inputs DESC LIMIT 100"
+        },
+        "display": "ActionsTable"
+      }
+    },
+    {
+      "key": "execution-context",
+      "name": "Prime Agent telemetry: worker request context and setup differences",
+      "description": "Actual request context is authoritative when observed; configured-only context is separate. Comparisons concern categories, never account/key/team identities. Missing UI/setup association remains unknown.",
+      "requires": [
+        "agent run completed"
+      ],
+      "min_schema_revision": 2,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id,\n argMax(properties.version, timestamp) AS version, argMax(properties.context_source, timestamp) AS context_source,\n argMax(properties.auth_source, timestamp) AS auth_source, argMax(properties.team_scope, timestamp) AS team_scope,\n argMax(properties.endpoint_category, timestamp) AS endpoint_category,\n argMax(properties.setup_auth_source_changed, timestamp) AS setup_auth_source_changed,\n argMax(properties.setup_provider_changed, timestamp) AS setup_provider_changed,\n argMax(properties.setup_model_changed, timestamp) AS setup_model_changed,\n argMax(properties.setup_team_scope_changed, timestamp) AS setup_team_scope_changed,\n argMax(properties.setup_endpoint_changed, timestamp) AS setup_endpoint_changed,\n argMax(properties.ui_auth_source_changed, timestamp) AS ui_auth_source_changed,\n argMax(properties.ui_provider_changed, timestamp) AS ui_provider_changed,\n argMax(properties.ui_model_changed, timestamp) AS ui_model_changed,\n argMax(properties.ui_team_scope_changed, timestamp) AS ui_team_scope_changed,\n argMax(properties.ui_endpoint_changed, timestamp) AS ui_endpoint_changed\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.run_id IS NOT NULL GROUP BY distinct_id, run_id)\nSELECT version, context_source, auth_source, team_scope, endpoint_category, count() AS reported_runs,\n countIf(setup_auth_source_changed = true) AS setup_auth_source_changed_runs, countIf(setup_auth_source_changed IS NULL) AS setup_auth_source_changed_unknown_runs,\n countIf(setup_provider_changed = true) AS setup_provider_changed_runs, countIf(setup_provider_changed IS NULL) AS setup_provider_changed_unknown_runs,\n countIf(setup_model_changed = true) AS setup_model_changed_runs, countIf(setup_model_changed IS NULL) AS setup_model_changed_unknown_runs,\n countIf(setup_team_scope_changed = true) AS setup_team_scope_changed_runs, countIf(setup_team_scope_changed IS NULL) AS setup_team_scope_changed_unknown_runs,\n countIf(setup_endpoint_changed = true) AS setup_endpoint_changed_runs, countIf(setup_endpoint_changed IS NULL) AS setup_endpoint_changed_unknown_runs,\n countIf(ui_auth_source_changed = true) AS ui_auth_source_changed_runs, countIf(ui_auth_source_changed IS NULL) AS ui_auth_source_changed_unknown_runs,\n countIf(ui_provider_changed = true) AS ui_provider_changed_runs, countIf(ui_provider_changed IS NULL) AS ui_provider_changed_unknown_runs,\n countIf(ui_model_changed = true) AS ui_model_changed_runs, countIf(ui_model_changed IS NULL) AS ui_model_changed_unknown_runs,\n countIf(ui_team_scope_changed = true) AS ui_team_scope_changed_runs, countIf(ui_team_scope_changed IS NULL) AS ui_team_scope_changed_unknown_runs,\n countIf(ui_endpoint_changed = true) AS ui_endpoint_changed_runs, countIf(ui_endpoint_changed IS NULL) AS ui_endpoint_changed_unknown_runs\nFROM runs GROUP BY version, context_source, auth_source, team_scope, endpoint_category ORDER BY reported_runs DESC LIMIT 500"
+        },
+        "display": "ActionsTable"
+      }
+    },
+    {
+      "key": "error-concentration",
+      "name": "Prime Agent telemetry: repeated-error concentration",
+      "description": "Distinct errors per installation after recovery-update deduplication. The busiest installation share separates broad regressions from one repeatedly failing installation. IDs are installations, not people.",
+      "requires": [
+        "agent error"
+      ],
+      "min_schema_revision": 2,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH failures AS (SELECT distinct_id, properties.error_id AS error_id, min(timestamp) AS observed_at,\n argMin(coalesce(properties.error_subtype, 'unknown'), timestamp) AS error_subtype,\n argMin(coalesce(properties.component, 'unknown'), timestamp) AS component,\n argMin(coalesce(properties.provider_category, 'unknown'), timestamp) AS provider_category,\n argMin(coalesce(properties.version, 'unknown'), timestamp) AS version,\n argMin(coalesce(properties.error_code_group, properties.error_code, 'unknown'), timestamp) AS error_code,\n argMin(properties.diagnostic_message, timestamp) AS reviewed_message,\n argMin(properties.http_status, timestamp) AS http_status,\n argMax(coalesce(properties.recovery_action, 'none'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'))) AS recovery_action,\n argMax(coalesce(properties.recovery_outcome, 'not_observed'), tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled'), coalesce(properties.recovery_outcome, 'not_observed'))) AS recovery_outcome,\n max(toFloat(properties.consecutive_failure_count)) AS consecutive_failures,\n max(toFloat(properties.retry_attempt)) AS retry_attempts\nFROM events WHERE event = 'agent error' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2 AND timestamp >= now() - INTERVAL 90 DAY\n AND properties.error_id IS NOT NULL\nGROUP BY distinct_id, error_id), installation_counts AS (\n SELECT component, error_code, distinct_id, count() AS failures FROM failures GROUP BY component, error_code, distinct_id)\nSELECT component, error_code, count() AS affected_installations, sum(failures) AS distinct_errors,\n max(failures) AS largest_installation_error_count,\n 100.0 * max(failures) / nullIf(sum(failures), 0) AS largest_installation_error_share_pct,\n countIf(failures > 1) AS repeatedly_affected_installations\nFROM installation_counts GROUP BY component, error_code ORDER BY distinct_errors DESC LIMIT 200"
+        },
+        "display": "ActionsTable"
+      }
+    },
+    {
+      "key": "configured-activation",
+      "name": "Prime Agent telemetry: first observed input activation with and without setup history",
+      "description": "Mature first-input cohorts include already-configured workflows. Setup-associated and no-observed-setup groups are labels about retained telemetry, not proof of new or existing users.",
+      "requires": [
+        "agent input stage",
+        "agent run completed"
+      ],
+      "min_schema_revision": 2,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH inputs AS (\n SELECT distinct_id, min(timestamp) AS first_input_at,\n argMin(coalesce(properties.onboarding_id, ''), timestamp) AS onboarding_id\n FROM events WHERE event = 'agent input stage' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2\n AND properties.stage = 'received' AND properties.timing_origin = 'worker_input' GROUP BY distinct_id\n), runs AS (\n SELECT distinct_id, properties.run_id AS run_id, min(timestamp) AS completed_at,\n argMax(properties.terminal_outcome, timestamp) AS terminal_outcome,\n argMax(toFloat(properties.model_call_count), timestamp) AS model_call_count\n FROM events WHERE event = 'agent run completed' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2\n AND properties.run_id IS NOT NULL GROUP BY distinct_id, run_id\n), cohorts AS (\n SELECT i.distinct_id AS installation_id, i.first_input_at AS first_input_at, i.onboarding_id AS onboarding_id,\n max(if(r.terminal_outcome = 'success' AND r.model_call_count > 0 AND r.completed_at >= i.first_input_at AND r.completed_at < i.first_input_at + INTERVAL 24 HOUR, 1, 0)) AS success_24h\n FROM inputs i LEFT JOIN runs r ON i.distinct_id = r.distinct_id\n WHERE i.first_input_at <= now() - INTERVAL 24 HOUR AND i.first_input_at >= now() - INTERVAL 90 DAY\n GROUP BY installation_id, first_input_at, onboarding_id)\nSELECT if(onboarding_id = '', 'no_observed_setup_association', 'setup_associated') AS setup_cohort,\n count() AS mature_installations, countIf(success_24h = 1) AS observed_success_24h,\n 100.0 * countIf(success_24h = 1) / nullIf(count(), 0) AS observed_activation_pct\nFROM cohorts GROUP BY setup_cohort ORDER BY mature_installations DESC LIMIT 10"
+        },
+        "display": "ActionsTable"
+      }
+    },
+    {
+      "key": "alert-error-rate",
+      "name": "Prime Agent telemetry: alert sample: failed run fraction",
+      "description": "Proposed hourly check: failed fraction above 10%, requiring at least 100 terminal runs and 10 installations in 24 hours. Cancellation is excluded from failures. No-row results mean insufficient samples.",
+      "requires": [
+        "agent run started",
+        "agent run completed"
+      ],
+      "min_schema_revision": 2,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, min(timestamp) AS started_at,\n countIf(event = 'agent run started') AS starts, countIf(event = 'agent run completed') AS terminals,\n argMaxIf(properties.terminal_outcome, timestamp, event = 'agent run completed') AS outcome\n FROM events WHERE event IN ('agent run started', 'agent run completed') AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2\n AND timestamp >= now() - INTERVAL 25 HOUR AND properties.run_id IS NOT NULL GROUP BY distinct_id, run_id)\nSELECT count() AS sample_count, count(DISTINCT distinct_id) AS installation_count,\n 100.0 * countIf(outcome = 'error') / nullIf(count(), 0) AS alert_value\nFROM runs WHERE terminals > 0 AND started_at >= now() - INTERVAL 24 HOUR\nHAVING sample_count >= 100 AND installation_count >= 10 LIMIT 1"
+        },
+        "display": "ActionsTable"
+      },
+      "alert": {
+        "name": "Prime Agent telemetry: alert: failed run fraction",
+        "upper": 10,
+        "column": "alert_value",
+        "calculation_interval": "hourly"
+      }
+    },
+    {
+      "key": "alert-terminal-loss",
+      "name": "Prime Agent telemetry: alert sample: aged missing run terminals",
+      "description": "Proposed hourly check: over 5% missing terminals among starts aged 1–25 hours, requiring 100 starts and 10 installations. This detects reporting gaps or long runs, not proven crashes.",
+      "requires": [
+        "agent run started",
+        "agent run completed"
+      ],
+      "min_schema_revision": 2,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH runs AS (SELECT distinct_id, properties.run_id AS run_id, min(timestamp) AS started_at,\n countIf(event = 'agent run started') AS starts, countIf(event = 'agent run completed') AS terminals,\n argMaxIf(properties.terminal_outcome, timestamp, event = 'agent run completed') AS outcome\n FROM events WHERE event IN ('agent run started', 'agent run completed') AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2\n AND timestamp >= now() - INTERVAL 25 HOUR AND properties.run_id IS NOT NULL GROUP BY distinct_id, run_id)\nSELECT count() AS sample_count, count(DISTINCT distinct_id) AS installation_count,\n 100.0 * countIf(terminals = 0) / nullIf(count(), 0) AS alert_value\nFROM runs WHERE starts > 0 AND started_at <= now() - INTERVAL 1 HOUR\nHAVING sample_count >= 100 AND installation_count >= 10 LIMIT 1"
+        },
+        "display": "ActionsTable"
+      },
+      "alert": {
+        "name": "Prime Agent telemetry: alert: aged missing run terminals",
+        "upper": 5,
+        "column": "alert_value",
+        "calculation_interval": "hourly"
+      }
+    },
+    {
+      "key": "alert-ingestion-drop",
+      "name": "Prime Agent telemetry: alert sample: reporting volume drop",
+      "description": "Compares the last completed hour against the same hour yesterday. Requires at least 100 baseline events and 10 baseline installations. A 75% fall can reflect adoption or delivery changes; confirm collector counters before diagnosing an outage.",
+      "requires": [
+        "agent started"
+      ],
+      "min_schema_revision": 2,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH periods AS (SELECT distinct_id, uuid, min(timestamp) AS observed_at\n FROM events WHERE event = 'agent started' AND properties.telemetry_schema_version = 2 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test') AND properties.schema_revision >= 2\n AND timestamp >= toStartOfHour(now()) - INTERVAL 25 HOUR AND timestamp < toStartOfHour(now())\n GROUP BY distinct_id, uuid)\nSELECT countIf(observed_at >= toStartOfHour(now()) - INTERVAL 1 HOUR) AS current_count,\n countIf(observed_at < toStartOfHour(now()) - INTERVAL 24 HOUR) AS baseline_count,\n count(DISTINCT if(observed_at < toStartOfHour(now()) - INTERVAL 24 HOUR, distinct_id, NULL)) AS baseline_installations,\n 100.0 * (1.0 - current_count / nullIf(baseline_count, 0)) AS alert_value\nFROM periods HAVING baseline_count >= 100 AND baseline_installations >= 10 LIMIT 1"
+        },
+        "display": "ActionsTable"
+      },
+      "alert": {
+        "name": "Prime Agent telemetry: alert: reporting volume drop",
+        "upper": 75,
+        "column": "alert_value",
+        "calculation_interval": "hourly"
+      }
     }
   ],
   "required_events": [
@@ -455,10 +610,12 @@
     "agent run completed",
     "agent error",
     "agent timing",
+    "agent startup stage",
     "agent tool summary",
     "onboarding stage",
     "agent feature outcome",
-    "agent startup stage",
-    "agent started"
-  ]
+    "agent started",
+    "agent input stage"
+  ],
+  "contract_schema_revision": 2
 }

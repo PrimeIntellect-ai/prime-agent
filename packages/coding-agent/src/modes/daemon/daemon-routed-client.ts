@@ -18,6 +18,7 @@ import {
 	getDaemonCommandCompatibilities,
 	isSessionPlaneDaemonCommand,
 	meetsDaemonCommandCompatibility,
+	omitUnsupportedTelemetryInput,
 } from "./daemon-protocol.js";
 import { getDaemonSocketIdentity } from "./daemon-socket.js";
 import { DaemonWorkerClient } from "./daemon-worker-client.js";
@@ -139,7 +140,7 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 		}
 		const direct = this.direct;
 		if (direct?.isConnected && this.servesDirect(direct, command)) {
-			return direct.request(command, timeoutMs, options);
+			return direct.request(omitUnsupportedTelemetryInput(command, direct.hello), timeoutMs, options);
 		}
 		return this.requestControlPlane(command, timeoutMs, options);
 	}
@@ -148,8 +149,8 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 		if (!isSessionPlaneDaemonCommand(command.type)) return false;
 		const hello = direct.hello;
 		if (!hello) return false;
-		return getDaemonCommandCompatibilities(command as DaemonCommand).every((compatibility) =>
-			meetsDaemonCommandCompatibility(hello, compatibility),
+		return getDaemonCommandCompatibilities(omitUnsupportedTelemetryInput(command as DaemonCommand, hello)).every(
+			(compatibility) => meetsDaemonCommandCompatibility(hello, compatibility),
 		);
 	}
 
@@ -158,10 +159,12 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 		timeoutMs: number,
 		options: DaemonClientRequestOptions,
 	): Promise<DaemonResponse> {
-		return this.supervisor.request(command, timeoutMs, options).catch((error: unknown) => {
-			if (error instanceof DaemonCapabilityUnavailableError) throw error;
-			throw new DaemonControlPlaneTransportError(error instanceof Error ? error : new Error(String(error)));
-		});
+		return this.supervisor
+			.request(omitUnsupportedTelemetryInput(command, this.supervisor.hello), timeoutMs, options)
+			.catch((error: unknown) => {
+				if (error instanceof DaemonCapabilityUnavailableError) throw error;
+				throw new DaemonControlPlaneTransportError(error instanceof Error ? error : new Error(String(error)));
+			});
 	}
 
 	fallbackToSupervisor(): void {

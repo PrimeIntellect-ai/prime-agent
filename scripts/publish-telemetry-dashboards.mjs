@@ -16,7 +16,7 @@ export async function readTelemetryContract() {
 }
 
 export function validateDashboardBundle(bundle, contract) {
-	if (bundle.bundle_version !== 1 || bundle.contract_schema_version !== contract.schema_version) {
+	if (bundle.bundle_version !== 1 || bundle.contract_schema_version !== contract.schema_version || !Number.isSafeInteger(bundle.contract_schema_revision) || bundle.contract_schema_revision < 1 || bundle.contract_schema_revision > contract.schema_revision) {
 		throw new Error("Dashboard and telemetry contract versions do not match");
 	}
 	if (bundle.project_id !== 22174 || bundle.dashboard_id !== 882785 || bundle.host !== "https://eu.posthog.com") {
@@ -57,7 +57,11 @@ export function validateDashboardBundle(bundle, contract) {
 				throw new Error(`Missing v2 publication gate: ${definition.key}`);
 			}
 			for (const event of definition.requires) if (!contract.events[event]) throw new Error(`Unknown contract event: ${event}`);
+			if (definition.min_schema_revision !== undefined && (definition.min_schema_revision !== bundle.contract_schema_revision || !sql.includes(`properties.schema_revision >= ${definition.min_schema_revision}`))) {
+				throw new Error(`Missing schema revision publication gate: ${definition.key}`);
+			}
 		}
+		if (definition.alert && (!Number.isFinite(definition.alert.upper) || definition.alert.column !== "alert_value" || definition.alert.calculation_interval !== "hourly" || !sql.includes("HAVING"))) throw new Error(`Invalid alert definition: ${definition.key}`);
 	}
 	return { corrections: bundle.corrections.length, insights: bundle.insights.length };
 }
@@ -91,10 +95,21 @@ function sqlQuery(query) {
 
 export function readinessQuery(bundle) {
 	const events = [...new Set(bundle.insights.flatMap((insight) => insight.requires))];
-	return `SELECT event, count() AS observed_events FROM events\nWHERE properties.telemetry_schema_version = 2\nAND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test')\nAND timestamp >= now() - INTERVAL 7 DAY\nAND event IN (${events.map((event) => `'${event.replaceAll("'", "''")}'`).join(", ")})\nGROUP BY event LIMIT 100`;
+	return `SELECT event, count() AS observed_events, countIf(properties.schema_revision >= ${bundle.contract_schema_revision}) AS current_revision_events FROM events\nWHERE properties.telemetry_schema_version = 2\nAND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test')\nAND timestamp >= now() - INTERVAL 7 DAY\nAND event IN (${events.map((event) => `'${event.replaceAll("'", "''")}'`).join(", ")})\nGROUP BY event LIMIT 100`;
 }
 
-export async function publishTelemetryDashboards({ bundle, contract, mode = "check", token, fetcher = fetch, legacyOnly = false }) {
+export function telemetryAlertPayload(definition, insightId) {
+	if (!definition.alert || !Number.isSafeInteger(insightId) || insightId <= 0) throw new Error("Alert requires a saved insight");
+	return {
+		name: definition.alert.name, insight: insightId, subscribed_users: [], enabled: false,
+		threshold: { configuration: { type: "absolute", bounds: { upper: definition.alert.upper } } },
+		condition: { type: "absolute_value" },
+		config: { type: "HogQLAlertConfig", column: definition.alert.column, evaluation: "first_row" },
+		calculation_interval: definition.alert.calculation_interval,
+	};
+}
+
+export async function publishTelemetryDashboards({ bundle, contract, mode = "check", token, fetcher = fetch, legacyOnly = false, includeAlerts = false }) {
 	const counts = validateDashboardBundle(bundle, contract);
 	if (!["check", "preflight", "apply"].includes(mode)) throw new Error("Unknown publication mode");
 	if (mode === "check") return { status: "local_check_only", ...counts, writes: [], pending: bundle.insights.map((insight) => insight.key) };
@@ -131,11 +146,13 @@ export async function publishTelemetryDashboards({ bundle, contract, mode = "che
 	}
 	const pending = [];
 	const creates = [];
+	const alerts = [];
+	const insightIds = new Map();
 	let observedV2Events = 0;
 	if (!legacyOnly) {
 		const rows = await execute({ kind: "HogQLQuery", query: readinessQuery(bundle) });
-		const observed = new Map(rows.map((row) => [row[0], Number(row[1])]));
-		observedV2Events = [...observed.values()].reduce((total, count) => total + (Number.isFinite(count) ? count : 0), 0);
+		const observed = new Map(rows.map((row) => [row[0], { total: Number(row[1]), current: Number(row[2] ?? 0) }]));
+		observedV2Events = [...observed.values()].reduce((total, count) => total + (Number.isFinite(count.total) ? count.total : 0), 0);
 		const existingInsights = [];
 		let next = `${prefix}insights/?search=${encodeURIComponent("Prime Agent telemetry:")}&limit=100`;
 		let pages = 0;
@@ -147,7 +164,7 @@ export async function publishTelemetryDashboards({ bundle, contract, mode = "che
 			next = page.next;
 		}
 		for (const definition of bundle.insights) {
-			if (definition.requires.some((event) => !(observed.get(event) > 0))) {
+			if (definition.requires.some((event) => !((definition.min_schema_revision ? observed.get(event)?.current : observed.get(event)?.total) > 0))) {
 				pending.push({ key: definition.key, reason: "required_v2_events_not_observed" });
 				continue;
 			}
@@ -167,11 +184,35 @@ export async function publishTelemetryDashboards({ bundle, contract, mode = "che
 				tags: [...new Set([...(existing?.tags ?? []), MANAGED_TAG, keyTag])],
 				dashboards: [...new Set([...(existing?.dashboards ?? []), bundle.dashboard_id])],
 			};
-			if (existing) updates.push({ key: definition.key, id: existing.id, patch });
+			if (existing) {
+				updates.push({ key: definition.key, id: existing.id, patch });
+				insightIds.set(definition.key, existing.id);
+			}
 			else creates.push({ key: definition.key, patch });
+			if (includeAlerts && definition.alert) alerts.push({ key: definition.key, definition });
 		}
 	}
-	const plan = { status: pending.length ? "pending_data" : "validated", updates, creates, pending, observedV2Events, writes: [] };
+	const existingAlerts = [];
+	if (alerts.length) {
+		let next = `${prefix}alerts/?limit=100`;
+		let pages = 0;
+		while (next) {
+			if (++pages > 20) throw new Error("Alert search exceeded the bounded pagination limit");
+			const page = await request(next);
+			if (!Array.isArray(page.results)) throw new Error("Invalid alert search response");
+			existingAlerts.push(...page.results);
+			next = page.next;
+		}
+		for (const alert of alerts) {
+			const matches = existingAlerts.filter((item) => item.name === alert.definition.alert.name);
+			const existing = matches[0];
+			const existingInsightId = typeof existing?.insight === "object" ? existing.insight?.id : existing?.insight;
+			if (matches.length > 1 || (existing && existingInsightId !== insightIds.get(alert.key))) throw new Error(`Ambiguous existing alert ${alert.key}`);
+			if (existing && (existing.threshold?.configuration?.bounds?.upper !== alert.definition.alert.upper || existing.config?.type !== "HogQLAlertConfig" || existing.config?.column !== alert.definition.alert.column || existing.config?.evaluation !== "first_row" || existing.calculation_interval !== "hourly")) throw new Error(`Existing alert ${alert.key} differs from the reviewed definition`);
+			alert.existing = existing?.id;
+		}
+	}
+	const plan = { status: pending.length ? "pending_data" : "validated", updates, creates, pending, observedV2Events, alerts: alerts.map(({ key, existing }) => ({ key, existing, action: existing ? "preserve_existing" : "create_disabled" })), writes: [] };
 	if (mode === "preflight") return plan;
 	if (!legacyOnly && observedV2Events === 0) throw new Error("No deployed public v2 events observed; nothing was published. Use --legacy-only to apply only reviewed historical corrections");
 	for (const update of updates) {
@@ -180,17 +221,23 @@ export async function publishTelemetryDashboards({ bundle, contract, mode = "che
 	}
 	for (const create of creates) {
 		const result = await request(`${prefix}insights/`, "POST", create.patch);
+		insightIds.set(create.key, result.id);
 		plan.writes.push({ operation: "created", key: create.key, id: result.id });
+	}
+	for (const alert of alerts) {
+		if (alert.existing) continue;
+		const result = await request(`${prefix}alerts/`, "POST", telemetryAlertPayload(alert.definition, insightIds.get(alert.key)));
+		plan.writes.push({ operation: "created_disabled_alert", key: alert.key, id: result.id });
 	}
 	plan.status = pending.length ? "partially_published_pending_data" : "published";
 	return plan;
 }
 
 export async function main(args = process.argv.slice(2)) {
-	const supported = new Set(["--check", "--preflight", "--apply", "--legacy-only", "--help"]);
+	const supported = new Set(["--check", "--preflight", "--apply", "--legacy-only", "--include-alerts", "--help"]);
 	if (args.some((arg) => !supported.has(arg))) throw new Error("Unknown option; use --help");
 	if (args.includes("--help")) {
-		console.log("Usage: node scripts/publish-telemetry-dashboards.mjs [--check | --preflight | --apply] [--legacy-only]\nDefault --check validates local definitions without network access. --preflight performs read-only API validation. --apply explicitly writes reviewed insights after all preflight checks. POSTHOG_PERSONAL_API_KEY is required for API access. New charts require observed deployed v2 events and eligible query rows.");
+		console.log("Usage: node scripts/publish-telemetry-dashboards.mjs [--check | --preflight | --apply] [--legacy-only] [--include-alerts]\nDefault --check validates local definitions without network access. --preflight performs read-only API validation. --apply explicitly writes reviewed insights after all preflight checks. POSTHOG_PERSONAL_API_KEY is required for API access. New charts require observed deployed schema revisions and eligible query rows. --include-alerts also creates disabled native alerts without subscribers; review thresholds and choose recipients in PostHog before enabling.");
 		return;
 	}
 	const modes = ["--check", "--preflight", "--apply"].filter((flag) => args.includes(flag));
@@ -199,6 +246,7 @@ export async function main(args = process.argv.slice(2)) {
 		bundle: await readDashboardBundle(), contract: await readTelemetryContract(),
 		mode: (modes[0] ?? "--check").slice(2), token: process.env.POSTHOG_PERSONAL_API_KEY,
 		legacyOnly: args.includes("--legacy-only"),
+		includeAlerts: args.includes("--include-alerts"),
 	});
 	console.log(JSON.stringify(result, null, 2));
 }

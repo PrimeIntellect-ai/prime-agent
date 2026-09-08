@@ -265,4 +265,89 @@ describe("telemetry journeys", () => {
 		expect(() => journeys.beginFeature("model").finish("completed")).not.toThrow();
 		expect(() => journeys.beginOnboarding("first_setup").finish("completed")).not.toThrow();
 	});
+
+	it("carries sanitized setup and current UI categories on independently identified inputs", () => {
+		const setup = {
+			providerCategory: "prime",
+			modelCategory: "custom",
+			authSource: "api_key",
+			teamScope: "personal" as const,
+			endpointCategory: "default" as const,
+		};
+		journeys.beginOnboarding("first_setup").finish("completed", { setupContext: setup });
+		journeys.noteRecoveryAction("credentials_updated");
+		const first = journeys.beginInput({ ...setup, authSource: "environment", teamScope: "team" });
+		expect(first.metadata).toMatchObject({
+			setupContext: setup,
+			uiContext: { teamScope: "team" },
+			recoveryAction: "credentials_updated",
+		});
+		time = 140;
+		first.admission("failed");
+		const second = journeys.beginInput(setup);
+		expect(second.metadata?.inputId).not.toBe(first.metadata?.inputId);
+		expect(second.metadata?.recoveryAction).toBe("credentials_updated");
+		second.admission("completed");
+		expect(journeys.beginInput(setup).metadata?.recoveryAction).toBeUndefined();
+	});
+
+	it("measures admission and an actual earlier status frame from the same UI clock", () => {
+		const input = journeys.beginInput();
+		time = 180;
+		input.admission("completed");
+		input.firstStatus(true, 150);
+		expect(sink.events.map((event) => [event.properties.stage, event.properties.duration_ms])).toEqual([
+			["submitted", 0],
+			["admitted", 80],
+			["first_status", 50],
+		]);
+		expect(sink.events.every((event) => event.properties.input_id === input.metadata?.inputId)).toBe(true);
+		expect(sink.events.every((event) => event.properties.timing_origin === "ui_input")).toBe(true);
+	});
+
+	it("reports unobserved status as null while still closing an unfinished admission", () => {
+		const input = journeys.beginInput();
+		input.firstStatus(false);
+		journeys.dispose();
+		expect(sink.events.find((event) => event.properties.stage === "first_status")?.properties).toMatchObject({
+			duration_ms: null,
+			outcome: "unavailable",
+		});
+		expect(sink.events.at(-1)?.properties).toMatchObject({ stage: "rejected", outcome: "canceled" });
+	});
+
+	it("measures cancellation only through observed idle and suppresses stale consent scopes", () => {
+		const done = journeys.beginCancellation();
+		time = 300;
+		done("completed", 225);
+		done("failed");
+		expect(sink.events.at(-1)?.properties).toMatchObject({
+			stage: "cancellation_to_idle",
+			duration_ms: 125,
+			timing_origin: "ui_cancellation",
+		});
+		const pending = journeys.beginInput();
+		const cancel = journeys.beginCancellation();
+		const count = sink.events.length;
+		settingsManager.setTelemetryEnabled(false);
+		expect(pending.metadata).toBeUndefined();
+		settingsManager.setTelemetryEnabled(true);
+		pending.admission("completed");
+		pending.firstStatus();
+		cancel("completed");
+		expect(sink.events).toHaveLength(count);
+	});
+
+	it("allocates no input or cancellation IDs while opted out", () => {
+		settingsManager.setTelemetryEnabled(false);
+		journeys.noteRecoveryAction("manual_retry");
+		const input = journeys.beginInput();
+		const cancel = journeys.beginCancellation();
+		expect(allocatedIds).toBe(0);
+		settingsManager.setTelemetryEnabled(true);
+		input.admission("completed");
+		cancel("completed");
+		expect(sink.events).toEqual([]);
+		expect(journeys.beginInput().metadata?.recoveryAction).toBeUndefined();
+	});
 });

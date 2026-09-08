@@ -4,11 +4,13 @@ import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.js";
+import type { SessionAction } from "../src/core/session-action-store.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import {
 	captureAgentCommandUsed,
 	captureOnboardingCompleted,
 	getOrCreateTelemetryInstallationId,
+	getTelemetrySessionContext,
 	installAgentTelemetry,
 	isTelemetryEnabled,
 	TelemetryClient,
@@ -17,6 +19,7 @@ import {
 	type TelemetrySink,
 	telemetryAuthCategory,
 } from "../src/core/telemetry.js";
+import { observeTelemetryAction, observeTelemetryInput } from "../src/core/telemetry-input.js";
 import { saveOnboardingTelemetryContext } from "../src/core/telemetry-journey-state.js";
 
 const base = {
@@ -543,14 +546,14 @@ describe("agent telemetry aggregation", () => {
 
 describe("run lifecycle observations", () => {
 	beforeEach(() => vi.stubEnv("DO_NOT_TRACK", "0"));
-	function setup() {
+	function setup(settingsManager = SettingsManager.inMemory()) {
 		let time = 0;
 		const sink = new FakeTelemetrySink();
 		const session = new FakeAgentSession();
 		const agentDir = mkdtempSync(join(tmpdir(), "telemetry-runs-"));
 		const options = {
 			agentDir,
-			settingsManager: SettingsManager.inMemory(),
+			settingsManager,
 			sink,
 			now: () => time,
 			randomId: uuidGenerator(),
@@ -565,6 +568,65 @@ describe("run lifecycle observations", () => {
 			},
 		};
 	}
+	it("begins fresh observations when a session starts opted out and is later enabled", async () => {
+		const { session, options, sink } = setup(SettingsManager.inMemory({ telemetry: { enabled: false } }));
+		expect(getTelemetrySessionContext(session as unknown as AgentSession)).toBeUndefined();
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		expect(sink.events).toEqual([]);
+		options.settingsManager.setTelemetryEnabled(true);
+		session.emit({ type: "agent_end", messages: [] });
+		expect(sink.events.filter((event) => event.name === "agent run completed")).toHaveLength(0);
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		await session.disposeAsync();
+		expect(sink.events.filter((event) => event.name === "agent started")).toHaveLength(1);
+		expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+			run_index: 1,
+			model_call_count: 1,
+		});
+	});
+	it.each(["failed", "cancelled"] as const)(
+		"keeps an outer action %s after a successful assistant turn",
+		async (state) => {
+			const { session, sink } = setup();
+			const inputId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+			const action: SessionAction = {
+				id: "local-action",
+				source: "interactive",
+				delivery: "when_run_idle",
+				wake: "immediate",
+				payload: { kind: "turn", records: [], text: "private prompt" },
+				lifecycle: { state: "queued" },
+			};
+			await observeTelemetryInput(session, { inputId }, async () => {
+				observeTelemetryAction(session, action);
+				action.lifecycle = { state: "committing" };
+				observeTelemetryAction(session, action, "preparing");
+				session.emit({
+					type: "session_action_update",
+					actions: { queuedCount: 0, steering: [], followUps: [], active: { kind: "turn", phase: "running" } },
+				});
+				session.emit({ type: "agent_start" });
+				session.emit({ type: "message_end", message: assistantMessage() });
+				session.emit({ type: "agent_end", messages: [] });
+				action.lifecycle =
+					state === "failed" ? { state, error: new Error("Session persistence failed") } : { state };
+				observeTelemetryAction(session, action, "running");
+				session.emit({ type: "session_action_update", actions: { queuedCount: 0, steering: [], followUps: [] } });
+			});
+			expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+				input_id: inputId,
+				terminal_outcome: state === "failed" ? "error" : "cancelled",
+			});
+			expect(
+				sink.events
+					.filter((event) => event.name === "agent error")
+					.some((event) => event.properties.recovery_outcome === "success"),
+			).toBe(false);
+		},
+	);
 	it("installs one observer and pairs one run terminal with its start", async () => {
 		const { sink, session, options } = setup();
 		installAgentTelemetry(session as unknown as AgentSession, options);
@@ -640,7 +702,14 @@ describe("run lifecycle observations", () => {
 		});
 		expect(JSON.stringify(sink.events)).not.toContain("private tool output");
 		expect(JSON.stringify(sink.events)).not.toContain("private.custom");
-		expect(JSON.stringify(sink.events)).not.toContain("private provider output");
+		expect(errors[0].properties.error_message).toBe("private provider output");
+		expect(
+			sink.events.find((event) => event.name === "agent timing" && event.properties.stage === "time_to_error")
+				?.properties.provider_category,
+		).toBe("openai");
+		expect(JSON.stringify(sink.events.filter((event) => event.name !== "agent error"))).not.toContain(
+			"private provider output",
+		);
 	});
 	it("keeps cancellation during retry backoff separate from the preceding error", () => {
 		const { sink, session, advance } = setup();
@@ -681,6 +750,19 @@ describe("run lifecycle observations", () => {
 			total_tokens: 0,
 		});
 	});
+	it("honors an environment opt-out at disposal before inspecting retained error details", async () => {
+		const { sink, session } = setup();
+		const message = vi.fn(() => "Original provider failure");
+		const failed = Object.defineProperty(assistantMessage({ stopReason: "error" }), "errorMessage", { get: message });
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: failed });
+		const inspections = message.mock.calls.length;
+		vi.stubEnv("DO_NOT_TRACK", "1");
+		await session.disposeAsync();
+		expect(message).toHaveBeenCalledTimes(inspections);
+		expect(sink.events.filter((event) => event.name === "agent run completed")).toHaveLength(0);
+		expect(getTelemetrySessionContext(session as unknown as AgentSession)).toBeUndefined();
+	});
 
 	it("reports missing tool timing and unknown pricing as null, not zero", () => {
 		const { sink, session } = setup();
@@ -709,6 +791,100 @@ describe("run lifecycle observations", () => {
 		expect(JSON.stringify(sink.events)).not.toContain("private tool output");
 		expect(JSON.stringify(sink.events)).not.toContain("private.custom");
 		expect(JSON.stringify(sink.events)).not.toContain("private provider output");
+	});
+	it("links same-tool later success to its errors without resolving another tool or coupling provider retries", () => {
+		const { sink, session } = setup();
+		session.emit({
+			type: "session_action_update",
+			actions: { queuedCount: 0, steering: [], followUps: [], active: { kind: "turn", phase: "running" } },
+		});
+		session.emit({ type: "agent_start" });
+		const repeatedError = { message: "Tool unavailable", code: "ECONNRESET" };
+		for (const toolCallId of ["private-call-one", "private-call-two"])
+			session.emit({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "mcp__private_a",
+				result: repeatedError,
+				isError: true,
+			});
+		session.emit({
+			type: "tool_execution_end",
+			toolCallId: "private-call-three",
+			toolName: "mcp__private_b",
+			result: { message: "Tool unavailable", code: "ECONNRESET" },
+			isError: true,
+		});
+		const toolErrors = sink.events.filter((event) => event.name === "agent error");
+		expect(toolErrors).toHaveLength(3);
+		expect(new Set(toolErrors.map((event) => event.properties.error_id)).size).toBe(3);
+		session.emit({
+			type: "message_end",
+			message: assistantMessage({ stopReason: "error", errorMessage: "Provider unavailable" }),
+		});
+		session.emit({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 2,
+			delayMs: 10,
+			errorMessage: "Provider unavailable",
+		});
+		expect(
+			sink.events.filter((event) => event.name === "agent error" && event.properties.component === "mcp"),
+		).toHaveLength(3);
+		session.emit({
+			type: "tool_execution_end",
+			toolCallId: "private-call-four",
+			toolName: "mcp__private_a",
+			result: {},
+			isError: false,
+		});
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		session.emit({ type: "session_action_update", actions: { queuedCount: 0, steering: [], followUps: [] } });
+		const recovered = sink.events.filter(
+			(event) =>
+				event.name === "agent error" &&
+				event.properties.component === "mcp" &&
+				event.properties.recovery_outcome === "success",
+		);
+		expect(recovered.map((event) => event.properties.error_id)).toEqual(
+			toolErrors.slice(0, 2).map((event) => event.properties.error_id),
+		);
+		expect(recovered.every((event) => event.properties.error_event_kind === "recovery_update")).toBe(true);
+		expect(sink.events.find((event) => event.name === "agent tool summary")?.properties).toMatchObject({
+			call_count: 4,
+			failure_count: 3,
+			recovered_count: 2,
+		});
+		expect(JSON.stringify(sink.events)).not.toContain("mcp__private_");
+	});
+	it("retains failed-run error IDs for a later successful run only in their originating session", () => {
+		const { sink, session, options } = setup();
+		const other = new FakeAgentSession();
+		installAgentTelemetry(other as unknown as AgentSession, { ...options, randomId: undefined });
+		session.emit({ type: "agent_start" });
+		session.emit({
+			type: "message_end",
+			message: assistantMessage({ stopReason: "error", errorMessage: "Provider unavailable" }),
+		});
+		session.emit({ type: "agent_end", messages: [] });
+		const original = sink.events.find((event) => event.name === "agent error")!.properties;
+		other.emit({ type: "agent_start" });
+		other.emit({ type: "message_end", message: assistantMessage() });
+		other.emit({ type: "agent_end", messages: [] });
+		expect(sink.events.filter((event) => event.name === "agent error")).toHaveLength(1);
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		const recovered = sink.events.filter((event) => event.name === "agent error").at(-1)!.properties;
+		expect(recovered).toMatchObject({
+			error_id: original.error_id,
+			run_id: original.run_id,
+			session_id: original.session_id,
+			error_event_kind: "recovery_update",
+			recovery_outcome: "success",
+		});
 	});
 	it("requires pricing for every model call and terminal usage for active requests", async () => {
 		const { sink, session } = setup();

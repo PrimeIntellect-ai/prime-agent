@@ -1,6 +1,10 @@
 import { lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomicSync } from "../utils/atomic-file.js";
+import {
+	sanitizeTelemetryExecutionContext,
+	type TelemetryExecutionContextCategories,
+} from "./telemetry-execution-context.js";
 
 const STATE_FILE = "telemetry-onboarding.json";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -10,6 +14,7 @@ export interface OnboardingTelemetryContext {
 	onboardingId: string;
 	clientSessionId: string;
 	startedAt: number;
+	setupContext?: TelemetryExecutionContextCategories;
 }
 
 export function clearOnboardingTelemetryContext(agentDir: string): void {
@@ -57,6 +62,7 @@ export function getCurrentOnboardingTelemetryContext(
 			onboardingId: state.onboardingId,
 			clientSessionId: state.clientSessionId,
 			startedAt: state.startedAt,
+			...(state.setupContext ? { setupContext: sanitizeTelemetryExecutionContext(state.setupContext) } : {}),
 		};
 	} catch {
 		return undefined;

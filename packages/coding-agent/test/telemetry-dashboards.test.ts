@@ -8,6 +8,7 @@ import {
 	readDashboardBundle,
 	readTelemetryContract,
 	type TelemetryContract,
+	telemetryAlertPayload,
 	validateDashboardBundle,
 } from "../../../scripts/publish-telemetry-dashboards.mjs";
 
@@ -62,6 +63,8 @@ interface ApiOptions {
 	queryError?: boolean;
 	next?: string;
 	existing?: Array<{ id: number; name: string; tags: string[]; dashboards: number[] }>;
+	revision?: number;
+	alerts?: Record<string, unknown>[];
 }
 
 function fakeApi(target: DashboardBundle, options: ApiOptions = {}) {
@@ -81,7 +84,9 @@ function fakeApi(target: DashboardBundle, options: ApiOptions = {}) {
 			const query = body?.query as { query?: string } | undefined;
 			if (query?.query?.includes("AS observed_events")) {
 				const required = [...new Set(target.insights.flatMap((definition) => definition.requires ?? []))];
-				return respond({ results: options.observed ? required.map((event) => [event, 3]) : [] });
+				return respond({
+					results: options.observed ? required.map((event) => [event, 3, options.revision === 1 ? 0 : 3]) : [],
+				});
 			}
 			if (options.queryError && newSql.has(query?.query)) return respond({ error: "Synthetic invalid query" });
 			return respond({ results: options.emptyQueries && newSql.has(query?.query) ? [] : [[1]] });
@@ -89,6 +94,9 @@ function fakeApi(target: DashboardBundle, options: ApiOptions = {}) {
 		if (method === "GET" && url.pathname.endsWith("/insights/")) {
 			return respond({ results: options.existing ?? [], next: options.next });
 		}
+		if (method === "GET" && url.pathname.endsWith("/alerts/"))
+			return respond({ results: options.alerts ?? [], next: null });
+		if (method === "POST" && url.pathname.endsWith("/alerts/")) return respond({ id: "synthetic-alert-id" });
 		if (method === "GET") {
 			const definition = target.corrections.find((item) => url.pathname.endsWith(`/insights/${item.id}/`));
 			if (definition) return respond(existingCorrection(definition));
@@ -107,7 +115,7 @@ function fakeApi(target: DashboardBundle, options: ApiOptions = {}) {
 
 describe("reviewed telemetry dashboard definitions", () => {
 	it("uses the deployed contract and exactly the reviewed historical correction IDs", () => {
-		expect(validateDashboardBundle(bundle, contract)).toEqual({ corrections: 7, insights: 20 });
+		expect(validateDashboardBundle(bundle, contract)).toEqual({ corrections: 7, insights: 27 });
 		expect(bundle.corrections.map((definition) => definition.id)).toEqual([
 			5381784, 5381785, 5381786, 5381787, 5381788, 5381818, 5381833,
 		]);
@@ -217,12 +225,101 @@ describe("reviewed telemetry dashboard definitions", () => {
 		expect(sql("effective-throughput-cost")).toContain("effective_output_tokens_per_model_call_second");
 		expect(sql("effective-throughput-cost")).toContain("HAVING reported_runs > 0");
 		expect(sql("fixed-feedback")).not.toContain("previous_success");
-		expect(sql("tool-reliability")).not.toContain("recovered_count");
+		expect(sql("tool-reliability")).toContain("recovered_count");
 		expect(sql("feature-outcomes")).toContain("countIf(starts > 0 AND terminal_outcome = 'completed')");
 	});
 });
 
 describe("dashboard publication safety", () => {
+	it("preserves an existing alert and its subscribers but rejects changed alert definitions before writing", async () => {
+		const definition = insight("alert-error-rate");
+		const target = { ...bundle, insights: [definition] };
+		const existing = [
+			{
+				id: 100,
+				name: definition.name,
+				tags: [`prime-agent-telemetry-eng-5933:${definition.key}`],
+				dashboards: [bundle.dashboard_id],
+			},
+		];
+		const alert = {
+			...telemetryAlertPayload(definition, 100),
+			id: "existing-alert",
+			insight: { id: 100 },
+			enabled: true,
+			subscribed_users: [7],
+		};
+		const api = fakeApi(target, { observed: true, existing, alerts: [alert] });
+		const result = await publishTelemetryDashboards({
+			bundle: target,
+			contract,
+			mode: "apply",
+			token: "synthetic-token",
+			fetcher: api.fetcher,
+			includeAlerts: true,
+		});
+		expect(result.alerts).toEqual([{ key: definition.key, existing: "existing-alert", action: "preserve_existing" }]);
+		expect(api.calls.some((call) => call.path.endsWith("/alerts/") && call.method !== "GET")).toBe(false);
+		const changed = fakeApi(target, {
+			observed: true,
+			existing,
+			alerts: [{ ...alert, threshold: { configuration: { bounds: { upper: 99 } } } }],
+		});
+		await expect(
+			publishTelemetryDashboards({
+				bundle: target,
+				contract,
+				mode: "apply",
+				token: "synthetic-token",
+				fetcher: changed.fetcher,
+				includeAlerts: true,
+			}),
+		).rejects.toThrow("differs from the reviewed definition");
+		expect(changed.writes()).toEqual([]);
+	});
+	it("requires revision 2 data for measurements not present in revision 1", async () => {
+		const api = fakeApi(bundle, { observed: true, revision: 1 });
+		const result = await publishTelemetryDashboards({
+			bundle,
+			contract,
+			mode: "preflight",
+			token: "synthetic-token",
+			fetcher: api.fetcher,
+		});
+		const pending = result.pending.map((entry) => (typeof entry === "string" ? entry : entry.key));
+		for (const definition of bundle.insights.filter((item) => item.min_schema_revision === 2))
+			expect(pending).toContain(definition.key);
+		expect(result.creates?.some((entry) => entry.key === "run-outcomes")).toBe(true);
+		expect(api.writes()).toEqual([]);
+	});
+	it("prepares disabled native alerts without subscribers and validates their sample queries before writes", async () => {
+		const api = fakeApi(bundle, { observed: true });
+		const result = await publishTelemetryDashboards({
+			bundle,
+			contract,
+			mode: "apply",
+			token: "synthetic-token",
+			fetcher: api.fetcher,
+			includeAlerts: true,
+		});
+		const alerts = api.calls.filter((call) => call.path.endsWith("/alerts/") && call.method === "POST");
+		expect(alerts).toHaveLength(3);
+		for (const alert of alerts)
+			expect(alert.body).toMatchObject({
+				enabled: false,
+				subscribed_users: [],
+				config: { type: "HogQLAlertConfig", column: "alert_value", evaluation: "first_row" },
+			});
+		expect(result.writes.filter((entry) => entry.operation === "created_disabled_alert")).toHaveLength(3);
+		const firstWrite = api.calls.findIndex((call) => call.path.includes("/insights/") && call.method !== "GET");
+		expect(api.calls.slice(firstWrite).some((call) => call.path.endsWith("/query/"))).toBe(false);
+		expect(telemetryAlertPayload(insight("alert-error-rate"), 100)).toMatchObject({
+			threshold: { configuration: { bounds: { upper: 10 } } },
+		});
+		expect(sql("alert-error-rate")).toContain("sample_count >= 100 AND installation_count >= 10");
+		expect(sql("alert-terminal-loss")).toContain("started_at <= now() - INTERVAL 1 HOUR");
+		expect(sql("alert-ingestion-drop")).toContain("baseline_count >= 100 AND baseline_installations >= 10");
+	});
 	it("defaults to a local check without network access, including when a token exists", async () => {
 		const fetcher = vi.fn<typeof fetch>();
 		const result = await publishTelemetryDashboards({ bundle, contract, fetcher, token: "synthetic-token" });

@@ -1,4 +1,5 @@
 import { TELEMETRY_CONTRACT, type TelemetryPropertyRule } from "./telemetry-contract.js";
+import { sanitizeTelemetryErrorCode, sanitizeTelemetryErrorMessage } from "./telemetry-error-details.js";
 
 export type TelemetryPrimitive = string | number | boolean | null;
 export type TelemetryProperties = Record<string, TelemetryPrimitive>;
@@ -13,6 +14,10 @@ export function isTelemetryUuid(value: unknown): value is string {
 function sanitizeValue(value: unknown, rule: TelemetryPropertyRule): TelemetryPrimitive | undefined {
 	if (value === null && rule.nullable) return null;
 	switch (rule.kind) {
+		case "error_message":
+			return typeof value === "string" ? sanitizeTelemetryErrorMessage(value).error_message : undefined;
+		case "error_code":
+			return sanitizeTelemetryErrorCode(value);
 		case "enum":
 			return typeof value === "string" && rule.values?.includes(value) ? value : rule.fallback;
 		case "uuid":
@@ -56,6 +61,17 @@ export function sanitizeTelemetryProperties(
 	if (event.required.some((key) => !(key in result))) return undefined;
 	if (name === "agent error" && typeof result.error_subtype === "string") {
 		result.diagnostic_message = TELEMETRY_CONTRACT.diagnostic_messages[result.error_subtype];
+		const descriptor = Object.getOwnPropertyDescriptor(properties, "error_message");
+		if (descriptor && "value" in descriptor && typeof descriptor.value === "string") {
+			const details = sanitizeTelemetryErrorMessage(descriptor.value);
+			result.error_message_length = Math.max(Number(result.error_message_length) || 0, details.error_message_length);
+			for (const flag of [
+				"error_message_redacted",
+				"error_message_truncated",
+				"error_message_length_lower_bound",
+			] as const)
+				result[flag] = result[flag] === true || details[flag];
+		}
 	}
 	if (legacy && result.install_method === "homebrew") result.install_method = "unknown";
 	return result;

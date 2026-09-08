@@ -99,6 +99,49 @@ describe("shared telemetry contract and privacy", () => {
 			"http_status",
 		);
 	});
+	it("redacts original messages independently and preserves flags through repeated sanitization", () => {
+		const safe = sanitizeTelemetryProperties("agent error", {
+			...error,
+			error_message: 'Worker failed: token="synthetic-secret"',
+			error_code_group: "DAEMON_START_FAILED",
+			error_message_length: 8_000,
+			error_message_truncated: true,
+			error_event_kind: "occurrence",
+		});
+		expect(safe).toMatchObject({
+			error_message: 'Worker failed: token="[REDACTED]"',
+			error_code_group: "DAEMON_START_FAILED",
+			error_message_length: 8_000,
+			error_message_truncated: true,
+			error_message_redacted: true,
+		});
+		expect(sanitizeTelemetryProperties("agent error", safe ?? {})).toEqual(safe);
+	});
+	it("accepts scoped input timings but rejects unrelated prompt and connection data", () => {
+		const input = sanitizeTelemetryProperties("agent input stage", {
+			...base,
+			input_id: errorId,
+			stage: "received",
+			outcome: "started",
+			timing_origin: "worker_input",
+			duration_ms: null,
+			setup_team_scope_changed: null,
+			ui_auth_source_changed: true,
+			endpoint_category: "custom",
+			context_source: "request",
+			prompt: "private prompt",
+			headers: { token: "private secret" },
+		});
+		expect(input).toMatchObject({
+			input_id: errorId,
+			duration_ms: null,
+			setup_team_scope_changed: null,
+			ui_auth_source_changed: true,
+			timing_origin: "worker_input",
+			endpoint_category: "custom",
+		});
+		expect(JSON.stringify(input)).not.toContain("private");
+	});
 });
 
 describe("version negotiation, retry and consent", () => {
