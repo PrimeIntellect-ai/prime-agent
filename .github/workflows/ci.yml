@@ -360,43 +360,17 @@ jobs:
           test/kernel-bash-shell.test.ts
           test/windows-process-signal.test.ts
 
-      - name: Build the Node identity signal fixture
-        id: windows_node_fixture
-        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
-        timeout-minutes: 3
-        working-directory: packages/coding-agent
-        run: bun build ./test/fixtures/windows-process-signal-native.ts --target=node --external koffi --outfile=./node_modules/.cache/windows-process-signal-native.mjs
-
       - name: Test identity-pinned tree signals under Bun
         if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
         timeout-minutes: 3
         working-directory: packages/coding-agent
         run: bun ./test/fixtures/windows-process-signal-native.ts
 
-      - name: Test identity-pinned tree signals under Node
-        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' && steps.windows_node_fixture.outcome == 'success' }}
-        timeout-minutes: 3
-        working-directory: packages/coding-agent
-        run: node ./node_modules/.cache/windows-process-signal-native.mjs
-
-      - name: Build the PowerShell launch probe
-        id: windows_launch_probe
-        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
-        timeout-minutes: 3
-        working-directory: packages/coding-agent
-        run: bun build ./test/fixtures/windows-powershell-launch-native.ts --target=node --external koffi --outfile=./node_modules/.cache/windows-powershell-launch-native.mjs
-
       - name: Probe PowerShell launch under Bun
         if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
         timeout-minutes: 3
         working-directory: packages/coding-agent
         run: bun ./test/fixtures/windows-powershell-launch-native.ts
-
-      - name: Probe PowerShell launch under Node
-        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' && steps.windows_launch_probe.outcome == 'success' }}
-        timeout-minutes: 3
-        working-directory: packages/coding-agent
-        run: node ./node_modules/.cache/windows-powershell-launch-native.mjs
 
       - name: Test terminal behavior
         working-directory: packages/tui
@@ -456,6 +430,32 @@ jobs:
           $binary = (Resolve-Path "./dist/pi.exe").Path
           $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
           & $binary ./test/fixtures/windows-powershell-launch-native.ts --expect-runtime $binary --expect-sha256 $hash --expect-kind bun
+
+      - name: Check Bun null-device config startup
+        id: windows_bun_null_config
+        if: ${{ !cancelled() && steps.windows_bun.outcome == 'success' && steps.windows_bun_verified.outcome == 'success' && steps.windows_dependencies.outcome == 'success' }}
+        timeout-minutes: 1
+        working-directory: packages/coding-agent
+        shell: pwsh
+        run: |
+          $binary = (Get-Command bun -CommandType Application).Source
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          & $binary ./test/fixtures/windows-powershell-launch-native.ts --null-config-startup $binary $hash
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check compiled app null-device config startup
+        id: windows_compiled_null_config
+        if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}
+        timeout-minutes: 1
+        working-directory: packages/coding-agent
+        shell: pwsh
+        env:
+          BUN_BE_BUN: "1"
+        run: |
+          $binary = (Resolve-Path "./dist/pi.exe").Path
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          & $binary ./test/fixtures/windows-powershell-launch-native.ts --null-config-startup $binary $hash
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Cross-compile and inspect the Windows Arm64 executable
         if: ${{ !cancelled() && steps.windows_native_binary.outcome == 'success' }}

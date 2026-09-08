@@ -1,7 +1,4 @@
-import { createRequire } from "node:module";
 import { win32 } from "node:path";
-
-const cjsRequire = createRequire(import.meta.url);
 
 interface ProcessSymbols {
 	OpenProcess(access: number, inherit: boolean, pid: number): unknown;
@@ -29,22 +26,7 @@ function openProcessLibrary(): ProcessLibrary & { ptr(buffer: Uint32Array): unkn
 		});
 		return { symbols: library.symbols, close: () => library.close(), ptr: (buffer) => ffi.ptr(buffer) };
 	}
-	// koffi belongs to pi-tui and is optional; do not rely on workspace hoisting.
-	const tuiRequire = createRequire(cjsRequire.resolve("@earendil-works/pi-tui/package.json"));
-	const koffi = tuiRequire("koffi");
-	const library = koffi.load("kernel32.dll");
-	const openProcess = library.func("void* __stdcall OpenProcess(uint32_t, int, uint32_t)");
-	return {
-		symbols: {
-			OpenProcess: (access, inherit, pid) => openProcess(access, Number(inherit), pid),
-			GetProcessTimes: library.func(
-				"int __stdcall GetProcessTimes(void*, _Out_ uint32_t*, _Out_ uint32_t*, _Out_ uint32_t*, _Out_ uint32_t*)",
-			),
-			CloseHandle: library.func("int __stdcall CloseHandle(void*)"),
-		},
-		close: () => library.unload(),
-		ptr: (buffer) => buffer,
-	};
+	throw new Error("Bun FFI is unavailable");
 }
 
 /** Capture from one native HANDLE before scheduling any PID-based helper. */
@@ -80,7 +62,7 @@ export function createWindowsProcessTreeSignal(
 ): { command: string; args: string[] } {
 	const creationTime = captureWindowsProcessCreationTime(pid);
 	// Handle must be cached BEFORE StartTime: .NET then queries the same process object.
-	// .Handle requires ALL_ACCESS; denied access, missing koffi, or blocked PowerShell fail closed.
+	// .Handle requires ALL_ACCESS; denied access or blocked PowerShell fail closed.
 	const script = `
 $ErrorActionPreference = 'Stop'
 $targetId = ${pid}

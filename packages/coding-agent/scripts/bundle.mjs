@@ -35,7 +35,7 @@ const result = await Bun.build({
 	outdir,
 	splitting: true,
 	format: "esm",
-	target: "node",
+	target: "bun",
 	sourcemap: "linked",
 	// Native or interop-sensitive packages stay external; they resolve from
 	// node_modules at runtime (and are loaded via createRequire/lazily anyway).

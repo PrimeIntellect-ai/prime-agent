@@ -2,12 +2,9 @@ import assert from "node:assert/strict";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-	appendFileSync,
-	closeSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
-	openSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
@@ -33,7 +30,7 @@ const { spawn } = require("node:child_process");
 const { appendFileSync } = require("node:fs");
 const spec = JSON.parse(process.env.PRIME_AGENT_LAUNCH_PROBE_SPEC);
 const report = (event, data) => appendFileSync(spec.trace, JSON.stringify({ event, pid: process.pid, data }) + "\n");
-report("start", { runtime: process.execPath, kind: process.versions.bun ? "bun" : "node", revision: globalThis.Bun?.revision, cwd: process.cwd() });
+report("start", { runtime: process.execPath, kind: process.versions.bun ? "bun" : "unsupported", revision: globalThis.Bun?.revision, cwd: process.cwd() });
 const child = spawn(spec.command, spec.args, { detached: false, windowsHide: true, stdio: "ignore" });
 report("spawned", { pid: child.pid });
 child.once("error", (error) => { report("error", String(error)); process.exitCode = 1; });
@@ -43,15 +40,13 @@ child.once("exit", (code, signal) => {
 });
 // Do not unref the inner child or exit before its actual exit event.
 `;
-function runtimeEnvironment(source: NodeJS.ProcessEnv, bun: boolean): NodeJS.ProcessEnv {
+function runtimeEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const env = Object.fromEntries(Object.entries(source).filter(([key]) => !/^(BUN|NODE)_/i.test(key)));
-	if (bun) env.BUN_BE_BUN = "1";
+	env.BUN_BE_BUN = "1";
 	return env;
 }
-function runtimeArguments(bun: boolean, script: string): string[] {
-	return bun
-		? ["--no-env-file", "--no-install", "--config=broker-empty.toml", "--eval", script]
-		: ["--input-type=commonjs", "--eval", script];
+function runtimeArguments(script: string): string[] {
+	return ["--no-env-file", "--no-install", "--config=broker-empty.toml", "--eval", script];
 }
 
 const sentinelReadyPattern = /^\d+\|-?\d+\|(True|False)\|\d+\|\d+\|\d+\|\d+\|\d+$/;
@@ -130,11 +125,9 @@ if (process.argv[2] === "--construction-check") {
 		bun_inspect: "bad",
 		HOME: "owned-home",
 	};
-	assert.deepEqual(runtimeEnvironment(inherited, false), { HOME: "owned-home" });
-	assert.deepEqual(runtimeEnvironment(inherited, true), { HOME: "owned-home", BUN_BE_BUN: "1" });
+	assert.deepEqual(runtimeEnvironment(inherited), { HOME: "owned-home", BUN_BE_BUN: "1" });
 	assert.equal(inherited.NODE_OPTIONS, "bad");
-	assert.deepEqual(runtimeArguments(false, brokerProgram), ["--input-type=commonjs", "--eval", brokerProgram]);
-	assert.deepEqual(runtimeArguments(true, brokerProgram).slice(0, 3), [
+	assert.deepEqual(runtimeArguments(brokerProgram).slice(0, 3), [
 		"--no-env-file",
 		"--no-install",
 		"--config=broker-empty.toml",
@@ -169,8 +162,6 @@ if (process.argv[2] === "--construction-check") {
 }
 
 assert.equal(process.platform, "win32", "Native launch probe requires Windows");
-const version = process.versions.node.split(".").map(Number);
-assert(version[0]! > 22 || (version[0] === 22 && version[1]! >= 8));
 const began = Date.now();
 const workDeadline = began + 135000; // Reserve owned cleanup and reporting inside the 3-minute step.
 const budget = (milliseconds: number) => Math.max(0, Math.min(milliseconds, workDeadline - Date.now()));
@@ -181,8 +172,208 @@ const hash = (path: string) => createHash("sha256").update(readFileSync(path)).d
 const template = createWindowsProcessTreeSignal(process.pid, "SIGKILL");
 const powershell = safeImage(template.command);
 const isBun = Boolean(process.versions.bun);
+assert(isBun, "Native launch probe requires Bun");
 const bunRevision = (Reflect.get(globalThis, "Bun") as { revision?: string } | undefined)?.revision;
-if (isBun) assert.equal(bunRevision, "34cbb9a40b4bd1bd767d134a7065e66c2432a676");
+assert.equal(bunRevision, "34cbb9a40b4bd1bd767d134a7065e66c2432a676");
+if (process.argv[2] === "--null-config-startup") {
+	const deadline = Date.now() + 30000;
+	const remaining = () => Math.max(0, deadline - Date.now());
+	const failures: unknown[] = [];
+	const outputLimit = 64 * 1024;
+	const output = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+	const bytes = { stdout: 0, stderr: 0 };
+	let child: ChildProcess | undefined;
+	let completion: Promise<number | null> | undefined;
+	let spawned = false;
+	let exited = false;
+	let closed = false;
+	let hadError = false;
+	let forced = false;
+	let stdoutEnded = false;
+	let stderrEnded = false;
+	let exitCode: number | null = null;
+	let exitSignal: NodeJS.Signals | null = null;
+	let imageHash: string | undefined;
+	let finalImageHash: string | undefined;
+	const cwd = win32.dirname(template.command);
+	const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
+		bytes[stream] += chunk.length;
+		const space = outputLimit - output[stream].length;
+		if (space > 0) output[stream] = Buffer.concat([output[stream], chunk.subarray(0, space)]);
+	};
+	const onStdout = (chunk: Buffer) => capture("stdout", chunk);
+	const onStderr = (chunk: Buffer) => capture("stderr", chunk);
+	const onStdoutEnd = () => {
+		stdoutEnded = true;
+	};
+	const onStderrEnd = () => {
+		stderrEnded = true;
+	};
+	const onSpawn = () => {
+		spawned = true;
+		record("null-config-spawn", { pid: child?.pid });
+	};
+	const onError = (error: Error) => {
+		hadError = true;
+		record("null-config-child-error", String(error));
+	};
+	const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+		exited = true;
+		exitCode = code;
+		exitSignal = signal;
+		record("null-config-exit", { code, signal });
+	};
+	const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+		closed = true;
+		record("null-config-close", { code, signal });
+	};
+	try {
+		assert(isBun, "Null-config control requires Bun or the actual Bun-compiled app");
+		assert.equal(process.versions.bun, "1.4.0");
+		assert.equal(process.argv.length, 5);
+		const expectedImage = process.argv[3]!;
+		const expectedHash = process.argv[4]!;
+		assert(win32.isAbsolute(expectedImage));
+		assert(/^[0-9a-f]{64}$/.test(expectedHash));
+		assert.equal(win32.normalize(process.execPath).toLowerCase(), win32.normalize(expectedImage).toLowerCase());
+		imageHash = hash(process.execPath);
+		assert.equal(imageHash, expectedHash);
+		const program = String.raw`
+const { spawn } = require("node:child_process");
+process.stdout.write(JSON.stringify({ type: "prime-agent-nul-config-startup-v1", pid: process.pid, runtime: process.execPath, bun: process.versions.bun, revision: Bun.revision, cwd: process.cwd(), builtinLoaded: typeof spawn === "function" }) + "\n");
+`;
+		const args = ["--no-env-file", "--no-install", String.raw`--config=\\.\NUL`, "--eval", program];
+		record("null-config-launch", {
+			runtime: process.execPath,
+			expectedImage,
+			imageHash,
+			cwd,
+			args,
+			detached: true,
+			windowsHide: true,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		assert(remaining() > 0, "Null-config setup exceeded the work deadline");
+		child = spawnHidden(process.execPath, args, {
+			cwd,
+			env: runtimeEnvironment(process.env),
+			detached: true,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		child.once("spawn", onSpawn);
+		child.on("error", onError);
+		child.once("exit", onExit);
+		child.once("close", onClose);
+		child.stdout?.on("data", onStdout);
+		child.stderr?.on("data", onStderr);
+		child.stdout?.once("end", onStdoutEnd);
+		child.stderr?.once("end", onStderrEnd);
+		child.stdout?.on("error", onError);
+		child.stderr?.on("error", onError);
+		completion = waitForChildProcess(child);
+		void completion.catch(() => {});
+		assert(child.stdout && child.stderr, "Null-config capture pipes are missing");
+		const code = await observe(completion, remaining(), "null-config startup");
+		await waitUntil(() => closed, remaining(), "null-config output close");
+		assert(spawned && exited && !hadError, "Null-config child did not complete normally");
+		assert.equal(code, 0);
+		assert.equal(exitCode, 0);
+		assert.equal(exitSignal, null);
+		assert(stdoutEnded && stderrEnded, "Null-config output did not drain naturally");
+		assert(
+			bytes.stdout <= outputLimit && bytes.stderr <= outputLimit,
+			"Null-config output exceeded the capture bound",
+		);
+		const lines = output.stdout.toString("utf8").split("\n");
+		assert.equal(lines.length, 2, "Expected exactly one null-config result line");
+		assert.equal(lines[1], "");
+		const data = JSON.parse(lines[0]!) as Record<string, unknown>;
+		assert(data && typeof data === "object" && !Array.isArray(data));
+		const { runtime, cwd: actualCwd, ...result } = data;
+		assert.deepEqual(result, {
+			type: "prime-agent-nul-config-startup-v1",
+			pid: child.pid,
+			bun: "1.4.0",
+			revision: bunRevision,
+			builtinLoaded: true,
+		});
+		assert(typeof runtime === "string" && win32.isAbsolute(runtime));
+		assert.equal(win32.normalize(runtime).toLowerCase(), win32.normalize(expectedImage).toLowerCase());
+		assert(typeof actualCwd === "string" && win32.isAbsolute(actualCwd));
+		assert.equal(realpathSync(actualCwd).toLowerCase(), realpathSync(cwd).toLowerCase());
+		finalImageHash = hash(process.execPath);
+		assert.equal(finalImageHash, expectedHash);
+		assert(remaining() > 0, "Null-config verification exceeded the work deadline");
+	} catch (error) {
+		failures.push(error);
+	} finally {
+		if (child) {
+			record("null-config-before-cleanup", { pid: child.pid, runtime: process.execPath, spawned, exited, closed });
+			const cleanupDeadline = Date.now() + 10000;
+			const cleanupRemaining = () => Math.max(0, cleanupDeadline - Date.now());
+			if (!exited && child.pid) {
+				forced = true;
+				try {
+					const accepted = child.kill("SIGKILL");
+					record("null-config-owned-kill", { pid: child.pid, accepted });
+					if (!accepted) failures.push(new Error("Null-config owned child rejected SIGKILL"));
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			try {
+				await waitUntil(
+					() => closed && (exited || (!spawned && !child?.pid)),
+					cleanupRemaining(),
+					"null-config owned exit",
+				);
+				if (completion) await observe(completion, cleanupRemaining(), "null-config owned completion");
+			} catch (error) {
+				if (!failures.includes(error)) failures.push(error);
+			}
+		}
+		if (forced) failures.push(new Error("Null-config forced termination is not a startup pass"));
+		if (hadError && !failures.length) failures.push(new Error("Null-config child reported an error"));
+		record("null-config-result", {
+			pid: child?.pid,
+			runtime: process.execPath,
+			imageHash,
+			finalImageHash,
+			cwd,
+			spawned,
+			exited,
+			closed,
+			exitCode,
+			exitSignal,
+			forced,
+			hadError,
+			stdoutEnded,
+			stderrEnded,
+			cleanupConfirmed: !child || (closed && (exited || (!spawned && !child.pid))),
+			bytes,
+			outputLimit,
+			outputTruncated: bytes.stdout > outputLimit || bytes.stderr > outputLimit,
+			stdout: output.stdout.toString("utf8"),
+			stderr: output.stderr.toString("utf8"),
+			failures: failures.map(String),
+		});
+		if (child && closed && (exited || (!spawned && !child.pid))) {
+			child.removeListener("spawn", onSpawn);
+			child.removeListener("error", onError);
+			child.removeListener("exit", onExit);
+			child.removeListener("close", onClose);
+			child.stdout?.removeListener("data", onStdout);
+			child.stderr?.removeListener("data", onStderr);
+			child.stdout?.removeListener("end", onStdoutEnd);
+			child.stderr?.removeListener("end", onStderrEnd);
+			child.stdout?.removeListener("error", onError);
+			child.stderr?.removeListener("error", onError);
+		}
+	}
+	if (failures.length) throw new AggregateError(failures, "Null-config startup failed or cleanup is unconfirmed");
+	record("PASS-NUL-CONFIG-STARTUP", { runtime: process.execPath, imageHash, cwd, diagnosticPipes: true });
+	process.exit(0);
+}
 if (process.argv[2] === "--expect-runtime") {
 	assert.equal(process.argv[4], "--expect-sha256");
 	assert.equal(process.argv[6], "--expect-kind");
@@ -190,7 +381,7 @@ if (process.argv[2] === "--expect-runtime") {
 	assert(win32.isAbsolute(process.argv[3]!));
 	assert.equal(win32.normalize(process.execPath).toLowerCase(), win32.normalize(process.argv[3]!).toLowerCase());
 	assert.equal(hash(process.execPath), process.argv[5]!.toLowerCase());
-	assert.equal(isBun ? "bun" : "node", process.argv[7]);
+	assert.equal("bun", process.argv[7]);
 }
 assert.deepEqual(template.args.slice(0, -1), ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"]);
 function launchSpec(directory: string, name: string, broker: boolean, image = powershell) {
@@ -204,7 +395,7 @@ function launchSpec(directory: string, name: string, broker: boolean, image = po
 	if (broker) {
 		options.cwd = join(directory, "runtime-cwd");
 		assert.equal(readFileSync(join(options.cwd, "broker-empty.toml"), "utf8"), "");
-		options.env = runtimeEnvironment(process.env, isBun);
+		options.env = runtimeEnvironment(process.env);
 		options.env.PRIME_AGENT_LAUNCH_PROBE_SPEC = JSON.stringify({
 			command: image,
 			args,
@@ -213,7 +404,7 @@ function launchSpec(directory: string, name: string, broker: boolean, image = po
 	}
 	return {
 		command: broker ? process.execPath : image,
-		args: broker ? runtimeArguments(isBun, brokerProgram) : args,
+		args: broker ? runtimeArguments(brokerProgram) : args,
 		options,
 		payload: { command: image, args },
 		scriptHash: createHash("sha256").update(script).digest("hex"),
@@ -223,16 +414,10 @@ function launchSpec(directory: string, name: string, broker: boolean, image = po
 if (process.argv[2] === "--caller") {
 	const directory = process.argv[3]!;
 	const name = process.argv[4]!;
-	assert(["D", "D-stderr"].includes(name));
-	const stage = (text: string) => {
-		if (name === "D-stderr") appendFileSync(join(directory, `${name}-caller-stages`), `${text}\n`);
-	};
-	stage("after native factory");
+	assert.equal(name, "D");
 	const spec = launchSpec(directory, name, true);
-	stage("before spawn");
 	const child = spawnHidden(spec.command, spec.args, { ...spec.options, detached: true, stdio: "ignore" });
 	writeFileSync(join(directory, `${name}-broker`), String(child.pid));
-	stage("after spawn; before immediate unref + process.exit(0)");
 	child.unref();
 	process.exit(0);
 }
@@ -255,7 +440,6 @@ const observerCode = visibilityObserverScript(directory);
 record("provenance", {
 	directory,
 	runtime: process.execPath,
-	node: process.versions.node,
 	bun: process.versions.bun,
 	bunRevision,
 	powershell,
@@ -277,8 +461,8 @@ function verifyBroker(name: string): void {
 		.map((line) => JSON.parse(line));
 	const started = events.find((event) => event.event === "start");
 	assert.equal(win32.normalize(started?.data.runtime).toLowerCase(), win32.normalize(process.execPath).toLowerCase());
-	assert.equal(started.data.kind, isBun ? "bun" : "node");
-	if (isBun) assert.equal(started.data.revision, bunRevision);
+	assert.equal(started.data.kind, "bun");
+	assert.equal(started.data.revision, bunRevision);
 	assert.equal(realpathSync(started.data.cwd), realpathSync(join(directory, "runtime-cwd")));
 	assert(!events.some((event) => event.event === "error"), `${name}: runtime broker reported an error`);
 	assert.deepEqual(events.filter((event) => event.event === "exit").at(-1)?.data, { code: 37, signal: null });
@@ -471,18 +655,17 @@ try {
 	const space = await run("C-space", true, true, spaceImage);
 	assert(space.code === 37 && space.started && space.done, "C-space quoting failed; stop");
 
-	for (const name of ["D", "D-stderr"]) {
-		let stderrFd: number | undefined;
+	{
+		const name = "D";
 		try {
 			assert(Date.now() < workDeadline, "Launch probe work budget expired");
 			await setPhase(name, "armed");
-			if (name === "D-stderr") stderrFd = openSync(join(directory, `${name}-caller-stderr`), "w");
-			const args = isBun ? runtimeArguments(true, "").slice(0, 3) : [];
+			const args = runtimeArguments("").slice(0, 3);
 			args.push(resolve(process.argv[1]!), "--caller", directory, name);
 			const caller = spawnHidden(process.execPath, args, {
 				cwd: join(directory, "runtime-cwd"),
-				env: runtimeEnvironment(process.env, isBun),
-				stdio: stderrFd === undefined ? "ignore" : ["ignore", "ignore", stderrFd],
+				env: runtimeEnvironment(process.env),
+				stdio: "ignore",
 			});
 			trampolineCases.add(name);
 			const code = await observe(own(caller), budget(5000), `${name} original caller exit`);
@@ -491,7 +674,7 @@ try {
 				name,
 				pid: caller.pid,
 				code,
-				stdio: name === "D" ? "ignore" : "stderr-file",
+				stdio: "ignore",
 			});
 			if (!callerSucceeded) errors.push(new Error(`${name}: explicit original caller exit failed: ${code}`));
 			const broker = Number(readFileSync(join(directory, `${name}-broker`), "utf8"));
@@ -531,7 +714,6 @@ try {
 			errors.push(error);
 		} finally {
 			writeFileSync(join(directory, `${name}-gate`), "release");
-			if (stderrFd !== undefined) closeSync(stderrFd);
 		}
 	}
 } catch (error) {
@@ -542,7 +724,7 @@ try {
 		owners: owners.map((child) => ({ pid: child.pid, exit: child.exitCode, signal: child.signalCode })),
 		errors: [...errors, ...auditErrors].map(String),
 	});
-	for (const name of ["AB", "A", "B", "C", "C-space", "D", "D-stderr"]) {
+	for (const name of ["AB", "A", "B", "C", "C-space", "D"]) {
 		try {
 			writeFileSync(join(directory, `${name}-gate`), "release");
 		} catch (error) {
@@ -578,7 +760,7 @@ try {
 		auditErrors.push(error);
 	}
 	for (const name of trampolineCases) audit(name);
-	for (const name of ["AB", "A", "B", "C", "C-space", "D", "D-stderr"]) {
+	for (const name of ["AB", "A", "B", "C", "C-space", "D"]) {
 		for (const suffix of [
 			"started",
 			"metadata",
@@ -589,8 +771,6 @@ try {
 			"error",
 			"broker",
 			"runtime.jsonl",
-			"caller-stages",
-			"caller-stderr",
 		]) {
 			const path = join(directory, `${name}-${suffix}`);
 			if (existsSync(path))

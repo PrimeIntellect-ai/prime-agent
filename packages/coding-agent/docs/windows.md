@@ -92,7 +92,7 @@ Run the command in a normal interactive PowerShell session. Organization policy 
 
 Run `prime-agent shutdown --force`. Prime Agent uses Windows process-tree termination and CPython Job Objects, but a process moved into a separately managed Windows service or job can require manual termination.
 
-Verified process-tree termination requires permitted Windows PowerShell. Under Node, it also requires the optional `koffi` package. The .NET `Process.Handle` check requires `ALL_ACCESS`; narrower process DACLs can cause refusal even when `taskkill` alone could work. Failed verification or helper launch does not fall back to a PID-only kill. `execCommand` reports final termination failure as `code: 1` and `killed: false`. It continues watching and draining the live child until it exits.
+Verified process-tree termination requires permitted Windows PowerShell. The .NET `Process.Handle` check requires `ALL_ACCESS`; narrower process DACLs can cause refusal even when `taskkill` alone could work. Failed verification or helper launch does not fall back to a PID-only kill. `execCommand` reports final termination failure as `code: 1` and `killed: false`. It continues watching and draining the live child until it exits.
 
 ### Terminal input or colors are incorrect
 

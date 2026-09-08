@@ -12,8 +12,7 @@ import {
 import { cooperativeTreeScript, observe, waitUntil } from "./windows-process-observation.js";
 
 assert.equal(process.platform, "win32", "This fixture requires native Windows");
-const nodeVersion = process.versions.node.split(".").map(Number);
-assert(nodeVersion[0]! > 22 || (nodeVersion[0] === 22 && nodeVersion[1]! >= 8));
+assert(Reflect.get(globalThis, "Bun"), "This fixture requires Bun");
 
 const quote = (text: string) => `'${text.replaceAll("'", "''")}'`;
 const decode = (command: { args: string[] }) => Buffer.from(command.args.at(-1)!, "base64").toString("utf16le");
@@ -258,6 +257,4 @@ if (testError !== undefined || cleanupErrors.length) {
 		"Native fixture failed",
 	);
 }
-console.log(
-	`PASS native identity-pinned signals under ${Reflect.get(globalThis, "Bun") ? "Bun" : "Node"} ${process.version}`,
-);
+console.log(`PASS native identity-pinned signals under Bun ${process.versions.bun}`);

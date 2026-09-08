@@ -50,13 +50,15 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while ($true) {
         try {
-            Invoke-WebRequest -Uri "$baseUrl/stable" -UseBasicParsing -TimeoutSec 1 | Out-Null
+            $channelResponse = Invoke-WebRequest -Uri "$baseUrl/stable" -UseBasicParsing -TimeoutSec 1
             break
         } catch {
             if ([DateTime]::UtcNow -ge $deadline) { throw "Local release server did not become ready." }
             Start-Sleep -Milliseconds 100
         }
     }
+
+    Write-Host ("Installer channel response: Content-Type={0}; Content type={1}" -f $channelResponse.Headers["Content-Type"], $channelResponse.Content.GetType().FullName)
 
     $env:LOCALAPPDATA = $localAppData
     $installerSource = Get-Content -LiteralPath (Join-Path $repoRoot "install.ps1") -Raw
@@ -66,6 +68,20 @@ try {
     }
     $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $null
     $env:PRIME_AGENT_VERSION = $null
+    $invalidVersionRejected = $false
+    try {
+        Set-Content -LiteralPath (Join-Path $serverRoot "stable") -Value "invalid-release" -Encoding Ascii -NoNewline
+        try {
+            & (Join-Path $testRoot "install-stable.ps1")
+        } catch {
+            if ($_.Exception.Message -cne "Invalid Prime Agent release version: invalid-release") { throw }
+            $invalidVersionRejected = $true
+        }
+    } finally {
+        Set-Content -LiteralPath (Join-Path $serverRoot "stable") -Value $version -Encoding Ascii
+    }
+    if (-not $invalidVersionRejected) { throw "Installer accepted an invalid channel version." }
+
     # Environment variables describe an emulated process, not the native OS.
     # Poison both values so this x64 runner proves the installer uses the Win32 native-machine API.
     $env:PROCESSOR_ARCHITECTURE = "ARM64"
