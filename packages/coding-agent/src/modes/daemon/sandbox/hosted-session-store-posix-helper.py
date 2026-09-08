@@ -98,6 +98,18 @@ _MODE_V5_READY = 2
 _MODE_V5_BLOCKED = 3
 
 _V5_OPCODES = frozenset((_V5_HELLO, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17))
+_WORKSPACE_EVIDENCE = b"workspace-evidence"
+_INPUT_MANIFEST_TEMP_PREFIX = b".ws-\x69nput-manifest-tmp."
+_PLAN_DRAFT_PREFIX = b".ws-plan."
+_CONTENT_DRAFT_PREFIX = b".ws-content."
+_INPUT_MANIFEST_MAGIC = b"PIWSIMF5"
+_PLAN_RECORD_MAGIC = b"PIWSPLN1"
+_CONTENT_RECORD_MAGIC = b"PIWSCNT1"
+_INPUT_MANIFEST_SIZE = 272
+_PLAN_HEADER_SIZE = 12
+_CONTENT_HEADER_SIZE = 16
+_MAX_PLAN_PAYLOAD = 1048576
+_MAX_CONTENT_PAYLOAD = 1073741824
 
 
 class Fatal(Exception):
@@ -1379,7 +1391,16 @@ def _rollback_empty_generation(fds, generations_fd, generation_name, generation_
 
 
 def _scan_generation(
-    fds, generations_fd, generation_name, lifecycle, uid, device, repair, allow_suffix=False, allow_missing_head_repair=True
+    fds,
+    generations_fd,
+    generation_name,
+    lifecycle,
+    uid,
+    device,
+    repair,
+    allow_suffix=False,
+    allow_missing_head_repair=True,
+    allow_v5_evidence=False,
 ):
     generation_fd, error = _open_dir(fds, generations_fd, generation_name, uid, device)
     if generation_fd is None:
@@ -1387,7 +1408,7 @@ def _scan_generation(
     entries = _list(generation_fd)
     index = 0
     while index < len(entries):
-        if entries[index] != _WAL:
+        if entries[index] != _WAL and (not allow_v5_evidence or entries[index] != _WORKSPACE_EVIDENCE):
             raise Fatal(_E_STATE)
         index += 1
     if repair and _rollback_empty_generation(fds, generations_fd, generation_name, generation_fd, uid, device):
@@ -1941,7 +1962,17 @@ def _open_lifecycle(fds, root_fd, lifecycle, uid, device):
     return fd, error, name
 
 
-def _scan_lifecycle(fds, lifecycle_fd, lifecycle, uid, device, repair, lifecycle_head_links=1, deferred_temp=None):
+def _scan_lifecycle(
+    fds,
+    lifecycle_fd,
+    lifecycle,
+    uid,
+    device,
+    repair,
+    lifecycle_head_links=1,
+    deferred_temp=None,
+    allow_v5_evidence=False,
+):
     identity = None
     identity_digest = None
     ledger_rows = []
@@ -1999,7 +2030,16 @@ def _scan_lifecycle(fds, lifecycle_fd, lifecycle, uid, device, repair, lifecycle
         index = 0
         while index < len(generation_names):
             generation_name = generation_names[index]
-            scanned = _scan_generation(fds, generations_fd, generation_name, lifecycle, uid, device, repair)
+            scanned = _scan_generation(
+                fds,
+                generations_fd,
+                generation_name,
+                lifecycle,
+                uid,
+                device,
+                repair,
+                allow_v5_evidence=allow_v5_evidence,
+            )
             if scanned is not None:
                 generation_fd, wal_fd, rows, last, stage = scanned
                 generations.append((generation_name, generation_fd, wal_fd, rows, last, stage))
@@ -2142,7 +2182,7 @@ def _session_payload(lifecycle, scan):
             _zero(result)
 
 
-def _peek_generation_state(fds, generations_fd, generation_name, lifecycle, uid, device):
+def _peek_generation_state(fds, generations_fd, generation_name, lifecycle, uid, device, allow_v5_evidence=False):
     generation_fd, error = _open_dir(fds, generations_fd, generation_name, uid, device)
     if generation_fd is None:
         raise Fatal(_E_STATE)
@@ -2151,7 +2191,8 @@ def _peek_generation_state(fds, generations_fd, generation_name, lifecycle, uid,
         if len(entries) == 0:
             return None, "empty-generation", None
         if len(entries) != 1 or entries[0] != _WAL:
-            raise Fatal(_E_STATE)
+            if not allow_v5_evidence or len(entries) != 2 or _WAL not in entries or _WORKSPACE_EVIDENCE not in entries:
+                raise Fatal(_E_STATE)
         wal_fd, wal_error = _open_dir(fds, generation_fd, _WAL, uid, device)
         if wal_fd is None:
             raise Fatal(_E_STATE)
@@ -2213,7 +2254,7 @@ def _peek_generation_state(fds, generations_fd, generation_name, lifecycle, uid,
         fds.close(generation_fd)
 
 
-def _recover_generation_stages(fds, lifecycle_fd, lifecycle, uid, device):
+def _recover_generation_stages(fds, lifecycle_fd, lifecycle, uid, device, allow_v5_evidence=False):
     session_data, session_error = _read_head(fds, lifecycle_fd, _HEAD, _SESSION_MAGIC, 112, uid, device)
     if session_data is None or session_error is not None:
         raise Fatal(_E_HEAD)
@@ -2256,7 +2297,8 @@ def _recover_generation_stages(fds, lifecycle_fd, lifecycle, uid, device):
         if current_name not in names:
             raise Fatal(_E_HEAD)
         scanned_current = _scan_generation(
-            fds, generations_fd, current_name, lifecycle, uid, device, True, False, False
+            fds, generations_fd, current_name, lifecycle, uid, device, True, False, False,
+            allow_v5_evidence,
         )
         if scanned_current is None:
             raise Fatal(_E_STATE)
@@ -2283,7 +2325,7 @@ def _recover_generation_stages(fds, lifecycle_fd, lifecycle, uid, device):
         other_name = names[0] if names[1] == current_name else names[1]
         if other_name == current_name or not _valid_hex_name(other_name, 64):
             raise Fatal(_E_STATE)
-        other_state, stage, linked_head_temp = _peek_generation_state(fds, generations_fd, other_name, lifecycle, uid, device)
+        other_state, stage, linked_head_temp = _peek_generation_state(fds, generations_fd, other_name, lifecycle, uid, device, allow_v5_evidence)
         fds.require_certain()
         if other_state is None:
             if stage not in ("empty-generation", "empty-wal"):
@@ -2491,6 +2533,7 @@ def _recover_purge_suffix(fds, root_fd, lifecycle_name, lifecycle_fd, lifecycle,
     ledger_rows = []
     wal_rows = []
     candidate = False
+    v5_evidence = False
     try:
         current_generation, current_revision, current_digest, head_identity = _parse_session_head(session_data)
         _zero(session_data)
@@ -2570,7 +2613,11 @@ def _recover_purge_suffix(fds, root_fd, lifecycle_name, lifecycle_fd, lifecycle,
                 if len(generation_entries) == 0:
                     generation_stage = "empty-generation"
                     candidate = True
-                elif generation_entries == [_WAL]:
+                elif generation_entries == [_WAL] or _WORKSPACE_EVIDENCE in generation_entries:
+                    if _WORKSPACE_EVIDENCE in generation_entries:
+                        if len(generation_entries) != 2 or _WAL not in generation_entries:
+                            raise Fatal(_E_STATE)
+                        v5_evidence = True
                     wal_fd, wal_error = _open_dir(fds, generation_fd, _WAL, uid, device)
                     if wal_fd is None or wal_error is not None:
                         raise Fatal(_E_STATE)
@@ -2622,6 +2669,8 @@ def _recover_purge_suffix(fds, root_fd, lifecycle_name, lifecycle_fd, lifecycle,
         else:
             generation_stage = "absent"
             candidate = True
+        if v5_evidence:
+            raise Fatal(_E_STATE)
         if not candidate:
             return False
         if len(wal_rows) > 0 and wal_rows[-1][0] != _MAX_WAL_RECORDS:
@@ -2723,7 +2772,270 @@ def _recover_purge_suffix(fds, root_fd, lifecycle_name, lifecycle_fd, lifecycle,
             _zero(head_identity)
 
 
-def _recover_root(fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_inode):
+def _v5_random_suffix(name, prefix):
+    if len(name) != len(prefix) + 64 or name[:len(prefix)] != prefix or not _valid_hex_name(name[len(prefix):], 64):
+        return None
+    suffix = bytearray.fromhex(name[len(prefix):].decode("ascii"))
+    if _all_zero(suffix):
+        _zero(suffix)
+        return None
+    return suffix
+
+
+def _v5_header_prefix(data, magic, width, minimum, maximum):
+    expected_size = len(magic) + width
+    if len(data) > expected_size:
+        return False, False, 0
+    fixed = len(data) if len(data) < len(magic) else len(magic)
+    difference = 0
+    fixed_index = 0
+    while fixed_index < fixed:
+        difference |= data[fixed_index] ^ magic[fixed_index]
+        fixed_index += 1
+    if difference != 0:
+        return False, False, 0
+    if len(data) <= len(magic):
+        return True, False, 0
+    value = 0
+    index = len(magic)
+    while index < len(data):
+        value = (value << 8) | data[index]
+        index += 1
+    remaining = expected_size - len(data)
+    lower = value << (remaining * 8)
+    upper = lower | ((1 << (remaining * 8)) - 1 if remaining > 0 else 0)
+    if lower > maximum or upper < minimum:
+        return False, False, 0
+    if remaining == 0:
+        return True, True, value
+    return True, False, 0
+
+
+def _v5_prefix_field(data, offset, expected):
+    if len(data) <= offset:
+        return True
+    available = len(data) - offset
+    count = len(expected) if len(expected) < available else available
+    difference = 0
+    index = 0
+    while index < count:
+        difference |= data[offset + index] ^ expected[index]
+        index += 1
+    return difference == 0
+
+
+def _v5_input_manifest_prefix(data, lifecycle, generation, plan_nonce, content_nonce, plan_length, content_length):
+    if len(data) > _INPUT_MANIFEST_SIZE:
+        return False
+    plan_size = struct.pack(">I", plan_length)
+    content_size = struct.pack(">Q", content_length)
+    zero_eight = bytes(8)
+    zero_twenty = bytes(20)
+    if not _v5_prefix_field(data, 0, _INPUT_MANIFEST_MAGIC):
+        return False
+    if not _v5_prefix_field(data, 8, zero_eight):
+        return False
+    if not _v5_prefix_field(data, 16, lifecycle):
+        return False
+    if not _v5_prefix_field(data, 48, generation):
+        return False
+    if len(data) >= 144 and _range_zero(data, 112, 144):
+        return False
+    if not _v5_prefix_field(data, 176, plan_size):
+        return False
+    if not _v5_prefix_field(data, 180, content_size):
+        return False
+    if not _v5_prefix_field(data, 188, plan_nonce):
+        return False
+    if not _v5_prefix_field(data, 220, content_nonce):
+        return False
+    return _v5_prefix_field(data, 252, zero_twenty)
+
+
+def _v5_require_absent(parent, name):
+    found, error = _lstat(parent, name)
+    if found is not None or error != errno.ENOENT:
+        raise Fatal(_E_UNCERTAIN)
+
+
+def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, uid, device):
+    mark = fds.mark()
+    evidence_fd = None
+    plan_data = None
+    content_data = None
+    manifest_data = None
+    plan_suffix = None
+    content_suffix = None
+    manifest_suffix = None
+    try:
+        evidence_fd, error = _open_dir(fds, generation_fd, _WORKSPACE_EVIDENCE, uid, device)
+        if evidence_fd is None:
+            if error == errno.ENOENT:
+                return False
+            raise Fatal(_E_UNCERTAIN)
+        entries = _list(evidence_fd)
+        plan_name = None
+        content_name = None
+        manifest_name = None
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            if entry.startswith(_PLAN_DRAFT_PREFIX):
+                suffix = _v5_random_suffix(entry, _PLAN_DRAFT_PREFIX)
+                if suffix is None or plan_name is not None:
+                    if suffix is not None:
+                        _zero(suffix)
+                    raise Fatal(_E_STATE)
+                plan_name = entry
+                plan_suffix = suffix
+            elif entry.startswith(_CONTENT_DRAFT_PREFIX):
+                suffix = _v5_random_suffix(entry, _CONTENT_DRAFT_PREFIX)
+                if suffix is None or content_name is not None:
+                    if suffix is not None:
+                        _zero(suffix)
+                    raise Fatal(_E_STATE)
+                content_name = entry
+                content_suffix = suffix
+            elif entry.startswith(_INPUT_MANIFEST_TEMP_PREFIX):
+                suffix = _v5_random_suffix(entry, _INPUT_MANIFEST_TEMP_PREFIX)
+                if suffix is None or manifest_name is not None:
+                    if suffix is not None:
+                        _zero(suffix)
+                    raise Fatal(_E_STATE)
+                manifest_name = entry
+                manifest_suffix = suffix
+            else:
+                raise Fatal(_E_STATE)
+            index += 1
+        if plan_suffix is not None and content_suffix is not None and _same(plan_suffix, content_suffix):
+            raise Fatal(_E_STATE)
+        if plan_suffix is not None and manifest_suffix is not None and _same(plan_suffix, manifest_suffix):
+            raise Fatal(_E_STATE)
+        if content_suffix is not None and manifest_suffix is not None and _same(content_suffix, manifest_suffix):
+            raise Fatal(_E_STATE)
+        plan_complete = False
+        plan_length = 0
+        if plan_name is None:
+            if content_name is not None or manifest_name is not None:
+                raise Fatal(_E_STATE)
+        else:
+            plan_data, plan_error = _read_file(
+                fds, evidence_fd, plan_name, uid, device, _PLAN_HEADER_SIZE
+            )
+            if plan_data is None or plan_error is not None:
+                raise Fatal(_E_UNCERTAIN)
+            valid, plan_complete, plan_length = _v5_header_prefix(
+                plan_data, _PLAN_RECORD_MAGIC, 4, 1, _MAX_PLAN_PAYLOAD
+            )
+            if not valid:
+                raise Fatal(_E_STATE)
+        content_complete = False
+        content_length = 0
+        if content_name is None:
+            if manifest_name is not None:
+                raise Fatal(_E_STATE)
+        else:
+            if not plan_complete:
+                raise Fatal(_E_STATE)
+            content_data, content_error = _read_file(
+                fds, evidence_fd, content_name, uid, device, _CONTENT_HEADER_SIZE
+            )
+            if content_data is None or content_error is not None:
+                raise Fatal(_E_UNCERTAIN)
+            valid, content_complete, content_length = _v5_header_prefix(
+                content_data, _CONTENT_RECORD_MAGIC, 8, 0, _MAX_CONTENT_PAYLOAD
+            )
+            if not valid:
+                raise Fatal(_E_STATE)
+        if manifest_name is not None:
+            if not plan_complete or not content_complete or plan_suffix is None or content_suffix is None:
+                raise Fatal(_E_STATE)
+            manifest_data, manifest_error = _read_file(
+                fds, evidence_fd, manifest_name, uid, device, _INPUT_MANIFEST_SIZE
+            )
+            if manifest_data is None or manifest_error is not None:
+                raise Fatal(_E_UNCERTAIN)
+            if not _v5_input_manifest_prefix(
+                manifest_data,
+                lifecycle,
+                generation,
+                plan_suffix,
+                content_suffix,
+                plan_length,
+                content_length,
+            ):
+                raise Fatal(_E_STATE)
+            _unlink(evidence_fd, manifest_name)
+            _fsync(evidence_fd)
+            _v5_require_absent(evidence_fd, manifest_name)
+        if content_name is not None:
+            _unlink(evidence_fd, content_name)
+            _fsync(evidence_fd)
+            _v5_require_absent(evidence_fd, content_name)
+        if plan_name is not None:
+            _unlink(evidence_fd, plan_name)
+            _fsync(evidence_fd)
+            _v5_require_absent(evidence_fd, plan_name)
+        if len(_list(evidence_fd)) != 0:
+            raise Fatal(_E_STATE)
+        fds.close_for_recovery(evidence_fd)
+        evidence_fd = None
+        _rmdir(generation_fd, _WORKSPACE_EVIDENCE)
+        _fsync(generation_fd)
+        _v5_require_absent(generation_fd, _WORKSPACE_EVIDENCE)
+        return True
+    finally:
+        if manifest_data is not None:
+            _zero(manifest_data)
+        if content_data is not None:
+            _zero(content_data)
+        if plan_data is not None:
+            _zero(plan_data)
+        if manifest_suffix is not None:
+            _zero(manifest_suffix)
+        if content_suffix is not None:
+            _zero(content_suffix)
+        if plan_suffix is not None:
+            _zero(plan_suffix)
+        if evidence_fd is not None:
+            fds.close_for_recovery(evidence_fd)
+        if fds.mark() != mark:
+            raise Fatal(_E_UNCERTAIN)
+
+
+def _v5_recover_lifecycle_evidence(fds, scan, lifecycle, uid, device, recover):
+    generations = scan[6]
+    current_generation = scan[7]
+    current_name = _hex_name(current_generation)
+    present = False
+    index = 0
+    while index < len(generations):
+        generation = generations[index]
+        entries = _list(generation[1])
+        if _WORKSPACE_EVIDENCE in entries:
+            present = True
+            if recover:
+                if generation[0] != current_name:
+                    raise Fatal(_E_STATE)
+                _v5_recover_input_begin_prefix(
+                    fds, generation[1], lifecycle, current_generation, uid, device
+                )
+        index += 1
+    return present
+
+
+def _recover_root(
+    fds,
+    root_fd,
+    uid,
+    device,
+    root_inode,
+    lock_fd,
+    lock_device,
+    lock_inode,
+    recover_v5_evidence=False,
+):
+    v5_present = False
     fds.begin_recovery()
     _root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)
     fds.require_certain()
@@ -2782,15 +3094,29 @@ def _recover_root(fds, root_fd, uid, device, root_inode, lock_fd, lock_device, l
                     _root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)
                     fds.require_certain()
                     try:
-                        _recover_generation_stages(fds, lifecycle_fd, lifecycle, uid, device)
+                        _recover_generation_stages(fds, lifecycle_fd, lifecycle, uid, device, True)
                     finally:
                         _root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)
                         fds.require_certain()
                     _root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)
                     fds.require_certain()
                     try:
-                        scan = _scan_lifecycle(fds, lifecycle_fd, lifecycle, uid, device, True)
-                        _close_scan(fds, scan)
+                        scan = _scan_lifecycle(
+                            fds,
+                            lifecycle_fd,
+                            lifecycle,
+                            uid,
+                            device,
+                            True,
+                            allow_v5_evidence=True,
+                        )
+                        try:
+                            if _v5_recover_lifecycle_evidence(
+                                fds, scan, lifecycle, uid, device, recover_v5_evidence
+                            ):
+                                v5_present = True
+                        finally:
+                            _close_scan(fds, scan)
                     finally:
                         _root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)
                         fds.require_certain()
@@ -2808,6 +3134,7 @@ def _recover_root(fds, root_fd, uid, device, root_inode, lock_fd, lock_device, l
         _root_check(root_fd, device, root_inode, uid, lock_fd, lock_device, lock_inode)
         fds.require_certain()
     fds.end_recovery([root_fd, lock_fd])
+    return v5_present
 
 
 def _cmd_inventory(fds, root_fd, uid, device, output_fd, root_inode, lock_fd, lock_device, lock_inode):
@@ -3944,7 +4271,17 @@ def _v5_validate_request(opcode, payload):
 def _v5_handle_hello(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, payload):
     if len(payload) != 8 or payload != b"PISTOV05":
         return (_MODE_UNSELECTED, "error", _E_PROTOCOL)
-    _recover_root(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode)
+    _recover_root(
+        fds,
+        root_fd,
+        uid,
+        root_device,
+        root_inode,
+        lock_fd,
+        lock_device,
+        lock_inode,
+        recover_v5_evidence=True,
+    )
     _root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)
     if fds.uncertain or fds.recovering or fds.items != [root_fd, lock_fd]:
         raise Fatal(_E_UNCERTAIN)
@@ -3977,6 +4314,7 @@ def main():
     current_opcode = 0
     exit_code = 2
     v5_mode = _MODE_UNSELECTED
+    v5_tree_present = False
     try:
         while True:
             current_opcode = 0
@@ -4006,7 +4344,7 @@ def main():
                         response = _error_payload(_OPEN, _E_BUSY)
                         _write_frame(1, _ERROR, response)
                         continue
-                    _recover_root(
+                    v5_tree_present = _recover_root(
                         fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode
                     )
                     _root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)
@@ -4047,6 +4385,10 @@ def main():
                             next_mode, kind, value = _v5_handle_hello(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, payload)
                         elif current_opcode in _V5_OPCODES:
                             raise Fatal(_E_PROTOCOL)
+                        elif v5_tree_present:
+                            kind = "error"
+                            value = _E_PROTOCOL
+                            next_mode = _MODE_V5_BLOCKED
                         else:
                             kind, value = _dispatch_v4(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, current_opcode, payload)
                             next_mode = _MODE_V4_COMPAT

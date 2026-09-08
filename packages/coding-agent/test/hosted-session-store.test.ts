@@ -681,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(168590);
+		expect(bytes.byteLength).toBe(180518);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"c102d0c23b6c7774fd18cd21ceb985268494c146ac5c49c46cce3c7da2d0a519",
+			"12b47d64cefb847817b41d57754162d610fa58fa246156d0746e3302f130c373",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -837,7 +837,7 @@ externalTest(
 			harnessPath,
 			`import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, chownSync, closeSync, constants, cpSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, closeSync, constants, cpSync, fdatasyncSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHostedSessionStore, createStartupV5HostedSessionStore } from "./src/modes/daemon/sandbox/hosted-session-store.js";
 import { types as utilTypes } from "node:util";
 
@@ -1134,9 +1134,62 @@ const blockedClose = await v4BeforeBlocked.store.close();
 check(blockedInventory.code === "INVENTORIED", "V5 blocked V4 inventory");
 check(blockedAllocation.code === "ALLOCATED", "V5 blocked real V4 allocation " + blockedAllocation.code);
 check(blockedClose.code === "CLOSED", "V5 blocked first helper closed");
+
+const bLifecycleNames = readdirSync(blockedRoot).filter((name) => /^[0-9a-f]{64}$/.test(name));
+check(bLifecycleNames.length === 1, "B13 lifecycle");
+const bLifecycleName = bLifecycleNames[0];
+if (bLifecycleName === undefined) process.exit(60);
+const bLifecyclePath = blockedRoot + "/" + bLifecycleName;
+const bGenerationNames = readdirSync(bLifecyclePath + "/generations").filter((name) => /^[0-9a-f]{64}$/.test(name));
+check(bGenerationNames.length === 1, "B13 generation");
+const bGenerationName = bGenerationNames[0];
+if (bGenerationName === undefined) process.exit(61);
+const bGenerationPath = bLifecyclePath + "/generations/" + bGenerationName;
+const bEvidencePath = bGenerationPath + "/workspace-evidence";
+mkdirSync(bEvidencePath, { mode: 0o700 });
+const bGenerationFd = openSync(bGenerationPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY | 0x00080000);
+fsyncSync(bGenerationFd);
+closeSync(bGenerationFd);
+const bPlanNonce = Buffer.alloc(32, 7);
+const bContentNonce = Buffer.alloc(32, 8);
+const bManifestNonce = Buffer.alloc(32, 9);
+const bPlan = Buffer.alloc(12);
+bPlan.write("PIWSPLN1", 0, "ascii");
+bPlan.writeUInt32BE(17, 8);
+const bContent = Buffer.alloc(16);
+bContent.write("PIWSCNT1", 0, "ascii");
+bContent.writeBigUInt64BE(23n, 8);
+const bManifest = Buffer.alloc(272);
+bManifest.write("PIWSIMF5", 0, "ascii");
+Buffer.from(bLifecycleName, "hex").copy(bManifest, 16);
+Buffer.from(bGenerationName, "hex").copy(bManifest, 48);
+bManifest.fill(4, 80, 112);
+bManifest[112] = 1;
+bManifest.fill(6, 144, 176);
+bManifest.writeUInt32BE(17, 176);
+bManifest.writeBigUInt64BE(23n, 180);
+bPlanNonce.copy(bManifest, 188);
+bContentNonce.copy(bManifest, 220);
+function bWriteDurable(path: string, bytes: Uint8Array): void {
+	const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | 0x00080000, 0o600);
+	writeFileSync(fd, bytes);
+	fdatasyncSync(fd);
+	closeSync(fd);
+}
+function bSyncEvidence(): void {
+	const fd = openSync(bEvidencePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY | 0x00080000);
+	fsyncSync(fd);
+	closeSync(fd);
+}
+bWriteDurable(bEvidencePath + "/.ws-plan." + bPlanNonce.toString("hex"), bPlan);
+bSyncEvidence();
+bWriteDurable(bEvidencePath + "/.ws-content." + bContentNonce.toString("hex"), bContent);
+bSyncEvidence();
+bWriteDurable(bEvidencePath + "/.ws-input-manifest-tmp." + bManifestNonce.toString("hex"), bManifest);
 const v5NonemptyReady = await createStartupV5HostedSessionStore(registry);
 check(v5NonemptyReady.code === "READY", "V5 nonempty root ready");
 if (v5NonemptyReady.code !== "READY") process.exit(49);
+check(readdirSync(bGenerationPath).sort().join(",") === "wal", "B13 recovered exact absence");
 check(Object.getPrototypeOf(v5NonemptyReady) === Object.prototype && Object.isFrozen(v5NonemptyReady), "V5 nonempty ready exact ordinary");
 check(Object.getOwnPropertyNames(v5NonemptyReady).join(",") === "code,store" && Object.getOwnPropertySymbols(v5NonemptyReady).length === 0, "V5 nonempty ready keys");
 const v5NonemptyStore = v5NonemptyReady.store;
@@ -2381,10 +2434,10 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"4c1ec9efb05576ba0a98a765cbfec782154a6bde6b57c0016ed6f21285d52466",
+			"7c444539bd34ac3381a9aaabfa46e857b819f9440fb9d79f9f3f1bb00fe474e6",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
-			"f02e59eaaee932d274a5173cb55969ceb8817f115a9f402e4f9219db0630da9e",
+			"caf6a65f16a35b3567d4f64c0a461891dff475382d612463b73048adfef1a0be",
 		);
 		expect(createHash("sha256").update(readFileSync(v5ProbePath)).digest("hex")).toBe(
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",

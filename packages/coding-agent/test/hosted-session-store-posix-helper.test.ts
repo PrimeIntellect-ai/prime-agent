@@ -431,7 +431,7 @@ const PURGE_RECOVERY_MUTATIONS: readonly SourceMutation[] = [
 	},
 	{
 		functionName: "_recover_purge_suffix",
-		anchor: "elif generation_entries == [_WAL]:",
+		anchor: "elif generation_entries == [_WAL] or _WORKSPACE_EVIDENCE in generation_entries:",
 		replacement: "elif generation_entries != [_WAL]:",
 	},
 	{
@@ -657,7 +657,7 @@ function purgeRecoveryClassifierIsExact(source: string): boolean {
 		"elif len(generation_names) == 1 and generation_names[0] == current_name:",
 		"if len(generation_entries) == 0:",
 		'generation_stage = "empty-generation"',
-		"elif generation_entries == [_WAL]:",
+		"elif generation_entries == [_WAL] or _WORKSPACE_EVIDENCE in generation_entries:",
 		"wal_head_present = _HEAD in wal_entries",
 		"if wal_head_present:",
 		'generation_stage = "full-head" if wal_rows[0][0] == 1 else "suffix-head"',
@@ -666,6 +666,8 @@ function purgeRecoveryClassifierIsExact(source: string): boolean {
 		"elif len(wal_rows) == 0:",
 		'generation_stage = "empty-wal"',
 		'generation_stage = "absent"',
+		"if v5_evidence:",
+		"raise Fatal(_E_STATE)",
 		"_purge_stage_pair_allowed(generation_stage, ledger_stage, len(wal_rows), len(ledger_rows))",
 	]);
 }
@@ -1865,7 +1867,7 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 			tokensInOrder(hello, [
 				'if len(payload) != 8 or payload != b"PISTOV05":',
 				'return (_MODE_UNSELECTED, "error", _E_PROTOCOL)',
-				"_recover_root(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode)",
+				"recover_v5_evidence=True",
 				"_root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)",
 				"if fds.uncertain or fds.recovering or fds.items != [root_fd, lock_fd]:",
 				"raise Fatal(_E_UNCERTAIN)",
@@ -1945,6 +1947,102 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
                             raise Fatal(_E_PROTOCOL)`);
 		expect(main).toContain(`if current_opcode != _V5_HELLO:
                             raise Fatal(_E_PROTOCOL)`);
+	});
+
+	test("V5 B00-B13 recovery stays source-bound and executes every byte prefix", async () => {
+		const source = await readFile(HELPER, "utf8");
+		const recovery = pythonFunction(source, "_v5_recover_input_begin_prefix").body;
+		for (const exact of [
+			'_WORKSPACE_EVIDENCE = b"workspace-evidence"',
+			"def _v5_recover_input_begin_prefix(",
+			"def _v5_recover_lifecycle_evidence(",
+			"recover_v5_evidence=True",
+			"elif v5_tree_present:",
+			"next_mode = _MODE_V5_BLOCKED",
+		])
+			expect(source).toContain(exact);
+		expect(
+			tokensInOrder(recovery, [
+				"_v5_input_manifest_prefix(",
+				"_unlink(evidence_fd, manifest_name)",
+				"_fsync(evidence_fd)",
+				"_unlink(evidence_fd, content_name)",
+				"_fsync(evidence_fd)",
+				"_unlink(evidence_fd, plan_name)",
+				"_fsync(evidence_fd)",
+				"_rmdir(generation_fd, _WORKSPACE_EVIDENCE)",
+				"_fsync(generation_fd)",
+				"_v5_require_absent(generation_fd, _WORKSPACE_EVIDENCE)",
+			]),
+		).toBe(true);
+		const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+spec=importlib.util.spec_from_file_location("store_v5_b_probe",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lifecycle=bytearray(range(32))
+generation=bytearray(range(32,64))
+binding=bytes(range(64,96))
+tx=bytes((1,))+bytes(31)
+plan_digest=bytes(range(96,128))
+plan_nonce=bytes((7,))*32
+content_nonce=bytes((8,))*32
+manifest_nonce=bytes((9,))*32
+plan=b"PIWSPLN1"+struct.pack(">I",17)
+content=b"PIWSCNT1"+struct.pack(">Q",23)
+manifest=b"PIWSIMF5"+bytes(8)+bytes(lifecycle)+bytes(generation)+binding+tx+plan_digest+struct.pack(">I",17)+struct.pack(">Q",23)+plan_nonce+content_nonce+bytes(20)
+count=0
+
+def write_exact(path,data):
+ fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ try:
+  offset=0
+  while offset<len(data):
+   written=os.write(fd,data[offset:])
+   if written<=0:raise RuntimeError("write")
+   offset+=written
+ finally:os.close(fd)
+
+def one(plan_size=None,content_size=None,manifest_size=None):
+ global count
+ parent="/private/tmp" if sys.platform=="darwin" else "/tmp"
+ root=tempfile.mkdtemp(prefix="store-v5-b-",dir=parent)
+ try:
+  generation_path=os.path.join(root,"generation")
+  evidence_path=os.path.join(generation_path,"workspace-evidence")
+  os.mkdir(generation_path,0o700)
+  os.mkdir(evidence_path,0o700)
+  if plan_size is not None:write_exact(os.path.join(evidence_path,".ws-plan."+plan_nonce.hex()),plan[:plan_size])
+  if content_size is not None:write_exact(os.path.join(evidence_path,".ws-content."+content_nonce.hex()),content[:content_size])
+  if manifest_size is not None:write_exact(os.path.join(evidence_path,".ws-input-manifest-tmp."+manifest_nonce.hex()),manifest[:manifest_size])
+  generation_fd=os.open(generation_path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  fds=module.Fds();fds.add(generation_fd)
+  try:
+   device=os.fstat(generation_fd).st_dev
+   if module._v5_recover_input_begin_prefix(fds,generation_fd,lifecycle,generation,os.getuid(),device) is not True:raise RuntimeError("result")
+   if os.path.exists(evidence_path):raise RuntimeError("presence")
+   if fds.uncertain or fds.items!=[generation_fd]:raise RuntimeError("descriptors")
+  finally:
+   if generation_fd in fds.items:fds.close(generation_fd)
+  count+=1
+ finally:shutil.rmtree(root,ignore_errors=True)
+
+one()
+for size in range(13):one(size)
+for size in range(17):one(12,size)
+for size in range(273):one(12,16,size)
+if count!=304:raise RuntimeError("count")
+print("V5_B00_B13_PREFIX_MATRIX_OK 304")
+`;
+		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+		const child = Bun.spawn([hostPython, "-c", probe, HELPER], { cwd: "/", env: {}, stdout: "pipe", stderr: "pipe" });
+		const stdoutPromise = new Response(child.stdout).text();
+		const stderrPromise = new Response(child.stderr).text();
+		const exitCode = await child.exited;
+		const stdout = await stdoutPromise;
+		const stderr = await stderrPromise;
+		expect(exitCode, stderr).toBe(0);
+		expect(stderr).toBe("");
+		expect(stdout).toBe("V5_B00_B13_PREFIX_MATRIX_OK 304\n");
 	});
 
 	test("static source keeps the hostile-input boundary and forbidden syntax closed", async () => {
