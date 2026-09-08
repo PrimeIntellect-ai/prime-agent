@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.0] - 2026-09-08
+
+- Fixed GitHub Copilot requests to omit unsupported service tiers while preserving explicit tiers for other providers, and corrected Anthropic cache-write pricing when streaming usage changes.
+- Changed authentication failure classification to require structured evidence. Permission denials now stop retries without marking provider credentials stale.
+- Removed SDK-internal provider retries (OpenAI, Azure, Anthropic, Bedrock, Codex): providers make a single attempt and report a structured failure so the agent's own retry loop owns every retry.
+- Added the server-requested Retry-After delay to structured stream-failure diagnostics.
+- Added structured stream-failure diagnostics to the OpenAI-completions and Codex providers, including friendly messages for Codex nested usage-limit error payloads.
+- Removed the `maxRetries` and `maxRetryDelayMs` stream options.
+- Added live Prime Inference model names, pricing, limits, modalities, and reasoning support to the bundled catalog.
+
 ## [0.9.3] - 2026-09-06
 
 - Added GPT-6 Astra to the Codex/ChatGPT OAuth catalog with its mandatory-reasoning effort levels, and bumped the Codex discovery client version to 0.153.4 so account discovery lists it (reported by endcycles and api-moose in discussion #2062).
