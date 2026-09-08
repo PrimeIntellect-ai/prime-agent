@@ -1,0 +1,1 @@
+- Fixed `heartbeats_list` failing with "Cannot list heartbeats while session worker is starting" by awaiting in-flight worker launches before enumerating heartbeats.
