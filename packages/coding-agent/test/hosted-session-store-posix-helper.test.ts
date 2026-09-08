@@ -1865,9 +1865,11 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 			tokensInOrder(hello, [
 				'if len(payload) != 8 or payload != b"PISTOV05":',
 				'return (_MODE_UNSELECTED, "error", _E_PROTOCOL)',
-				"if _is_empty_root(root_fd):",
+				"_recover_root(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode)",
+				"_root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)",
+				"if fds.uncertain or fds.recovering or fds.items != [root_fd, lock_fd]:",
+				"raise Fatal(_E_UNCERTAIN)",
 				'return (_MODE_V5_READY, "v5_ready", None)',
-				'return (_MODE_V5_BLOCKED, "error", _E_STATE)',
 			]),
 		).toBe(true);
 
@@ -1919,7 +1921,7 @@ describe("hosted session Store POSIX helper V7 static structure", () => {
 			tokensInOrder(main, [
 				"command_mark = fds.mark()",
 				"if v5_mode == _MODE_UNSELECTED:",
-				"next_mode, kind, value = _v5_handle_hello(root_fd, payload)",
+				"next_mode, kind, value = _v5_handle_hello(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, payload)",
 				"kind, value = _dispatch_v4(",
 				"elif v5_mode == _MODE_V4_COMPAT:",
 				"elif v5_mode == _MODE_V5_BLOCKED:",

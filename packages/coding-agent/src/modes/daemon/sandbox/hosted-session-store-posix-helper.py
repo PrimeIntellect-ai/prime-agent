@@ -3772,13 +3772,6 @@ def _dispatch_v4(fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lo
     return "ok", result
 
 
-def _is_empty_root(root_fd):
-    entries = _list(root_fd)
-    if len(entries) != 1 or entries[0] != _LOCK:
-        return False
-    return True
-
-
 def _v5_validate_request(opcode, payload):
     if opcode == _WS_INVENTORY:
         if len(payload) != 0:
@@ -3948,12 +3941,14 @@ def _v5_validate_request(opcode, payload):
     raise Fatal(_E_PROTOCOL)
 
 
-def _v5_handle_hello(root_fd, payload):
+def _v5_handle_hello(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, payload):
     if len(payload) != 8 or payload != b"PISTOV05":
         return (_MODE_UNSELECTED, "error", _E_PROTOCOL)
-    if _is_empty_root(root_fd):
-        return (_MODE_V5_READY, "v5_ready", None)
-    return (_MODE_V5_BLOCKED, "error", _E_STATE)
+    _recover_root(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode)
+    _root_check(root_fd, root_device, root_inode, uid, lock_fd, lock_device, lock_inode)
+    if fds.uncertain or fds.recovering or fds.items != [root_fd, lock_fd]:
+        raise Fatal(_E_UNCERTAIN)
+    return (_MODE_V5_READY, "v5_ready", None)
 
 
 def _dispatch_v5(opcode, payload, v5_mode):
@@ -4049,7 +4044,7 @@ def main():
                     value = None
                     if v5_mode == _MODE_UNSELECTED:
                         if current_opcode == _V5_HELLO:
-                            next_mode, kind, value = _v5_handle_hello(root_fd, payload)
+                            next_mode, kind, value = _v5_handle_hello(fds, root_fd, uid, root_device, root_inode, lock_fd, lock_device, lock_inode, payload)
                         elif current_opcode in _V5_OPCODES:
                             raise Fatal(_E_PROTOCOL)
                         else:

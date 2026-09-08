@@ -681,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(168389);
+		expect(bytes.byteLength).toBe(168590);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"bdb6a719843aa3590bdb8301ce2551161cda5084b09a0ffdbe503ec3a31a7b8a",
+			"c102d0c23b6c7774fd18cd21ceb985268494c146ac5c49c46cce3c7da2d0a519",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -1134,9 +1134,268 @@ const blockedClose = await v4BeforeBlocked.store.close();
 check(blockedInventory.code === "INVENTORIED", "V5 blocked V4 inventory");
 check(blockedAllocation.code === "ALLOCATED", "V5 blocked real V4 allocation " + blockedAllocation.code);
 check(blockedClose.code === "CLOSED", "V5 blocked first helper closed");
-exactFailed(await createStartupV5HostedSessionStore(registry), "V5 nonempty root blocked");
+const v5NonemptyReady = await createStartupV5HostedSessionStore(registry);
+check(v5NonemptyReady.code === "READY", "V5 nonempty root ready");
+if (v5NonemptyReady.code !== "READY") process.exit(49);
+check(Object.getPrototypeOf(v5NonemptyReady) === Object.prototype && Object.isFrozen(v5NonemptyReady), "V5 nonempty ready exact ordinary");
+check(Object.getOwnPropertyNames(v5NonemptyReady).join(",") === "code,store" && Object.getOwnPropertySymbols(v5NonemptyReady).length === 0, "V5 nonempty ready keys");
+const v5NonemptyStore = v5NonemptyReady.store;
+check(Object.getPrototypeOf(v5NonemptyStore) === Object.prototype && Object.isFrozen(v5NonemptyStore), "V5 nonempty store exact ordinary");
+check(Object.getOwnPropertyNames(v5NonemptyStore).join(",") === "close" && Object.getOwnPropertySymbols(v5NonemptyStore).length === 0, "V5 nonempty close-only authority");
+const v5NonemptyCloseOne = v5NonemptyStore.close();
+const v5NonemptyCloseTwo = v5NonemptyStore.close();
+check(v5NonemptyCloseOne === v5NonemptyCloseTwo && utilTypes.isPromise(v5NonemptyCloseOne), "V5 nonempty memoized close");
+check((await v5NonemptyCloseOne).code === "CLOSED", "V5 nonempty closed");
 rmSync(blockedRoot, { recursive: true, force: true });
-console.log("V5_NONEMPTY_BLOCKED_OK");
+console.log("V5_NONEMPTY_READY_OK");
+// T3: One running lifecycle (with head)
+const t3v4 = await createHostedSessionStore(registry);
+check(t3v4.code === "READY", "T3 V4 factory");
+if (t3v4.code !== "READY") process.exit(50);
+const t3inv = await t3v4.store.inventory();
+check(t3inv.code === "INVENTORIED", "T3 inventory");
+const t3id = Object.freeze({ sessionId: "t3-s", activeSessionId: "t3-a", childId: "t3-c", name: "t3", modelSelector: "model", durableParentSessionId: "t3-p", rlmParentNodeId: "t3-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "33".repeat(32), depth: 1 });
+const t3dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t3alloc = await t3v4.store.allocate(t3id, t3dg);
+check(t3alloc.code === "ALLOCATED", "T3 allocate");
+check((await t3v4.store.createDispatched(t3alloc.session)).code === "COMMITTED", "T3 create dispatched");
+check((await t3v4.store.close()).code === "CLOSED", "T3 close");
+const t3v5 = await createStartupV5HostedSessionStore(registry);
+check(t3v5.code === "READY", "T3 V5 ready running lifecycle");
+if (t3v5.code !== "READY") process.exit(51);
+check((await t3v5.store.close()).code === "CLOSED", "T3 closed");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_RUNNING_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T4: One terminal lifecycle (deleteDispatched)
+const t4v4 = await createHostedSessionStore(registry);
+check(t4v4.code === "READY", "T4 V4 factory");
+if (t4v4.code !== "READY") process.exit(52);
+const t4inv = await t4v4.store.inventory();
+check(t4inv.code === "INVENTORIED", "T4 inventory");
+const t4id = Object.freeze({ sessionId: "t4-s", activeSessionId: "t4-a", childId: "t4-c", name: "t4", modelSelector: "model", durableParentSessionId: "t4-p", rlmParentNodeId: "t4-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "44".repeat(32), depth: 1 });
+const t4dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t4alloc = await t4v4.store.allocate(t4id, t4dg);
+check(t4alloc.code === "ALLOCATED", "T4 allocate");
+check((await t4v4.store.createDispatched(t4alloc.session)).code === "COMMITTED", "T4 create");
+check((await t4v4.store.present(t4alloc.session)).code === "COMMITTED", "T4 present");
+check((await t4v4.store.runtimeDispatched(t4alloc.session)).code === "COMMITTED", "T4 runtime");
+check((await t4v4.store.running(t4alloc.session)).code === "COMMITTED", "T4 running");
+check((await t4v4.store.deleteDispatched(t4alloc.session, Object.freeze({ terminalStatus: "completed", terminalCode: "SUCCESS" }))).code === "COMMITTED", "T4 delete");
+check((await t4v4.store.close()).code === "CLOSED", "T4 close");
+const t4v5 = await createStartupV5HostedSessionStore(registry);
+check(t4v5.code === "READY", "T4 V5 ready terminal lifecycle");
+if (t4v5.code !== "READY") process.exit(53);
+check((await t4v5.store.close()).code === "CLOSED", "T4 closed");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_TERMINAL_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T5: parameterized N=2 (different states) and N=8
+const t5dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t5Counts = Object.freeze([2, 8]);
+for (let t5ci = 0; t5ci < t5Counts.length; t5ci++) {
+	const t5n = t5Counts[t5ci];
+	rmSync(blockedRoot, { recursive: true, force: true });
+	const t5v4 = await createHostedSessionStore(registry);
+	check(t5v4.code === "READY", "T5 V4 N" + t5n);
+	if (t5v4.code !== "READY") process.exit(54);
+	check((await t5v4.store.inventory()).code === "INVENTORIED", "T5 N" + t5n + " inventory");
+	for (let t5i = 0; t5i < t5n; t5i++) {
+		const t5sid = Object.freeze({ sessionId: "t5-" + t5i, activeSessionId: "t5a-" + t5i, childId: "t5c-" + t5i, name: "t5", modelSelector: "model", durableParentSessionId: "t5p-" + t5i, rlmParentNodeId: "t5n-" + t5i, spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: ("0" + (t5i + 1)).repeat(32).slice(0, 64), depth: 1 });
+		const t5alloc = await t5v4.store.allocate(t5sid, t5dg);
+		check(t5alloc.code === "ALLOCATED", "T5 N" + t5n + " allocate " + t5i);
+		if (t5alloc.code !== "ALLOCATED") process.exit(55);
+		if (t5n === 2 && t5i === 0) {
+			check((await t5v4.store.createDispatched(t5alloc.session)).code === "COMMITTED", "T5 N" + t5n + " create first");
+			check((await t5v4.store.present(t5alloc.session)).code === "COMMITTED", "T5 N" + t5n + " present first");
+			check((await t5v4.store.runtimeDispatched(t5alloc.session)).code === "COMMITTED", "T5 N" + t5n + " runtime first");
+			check((await t5v4.store.running(t5alloc.session)).code === "COMMITTED", "T5 N" + t5n + " running first");
+			check((await t5v4.store.deleteDispatched(t5alloc.session, Object.freeze({ terminalStatus: "completed", terminalCode: "SUCCESS" }))).code === "COMMITTED", "T5 N" + t5n + " delete first");
+		} else {
+			check((await t5v4.store.createDispatched(t5alloc.session)).code === "COMMITTED", "T5 N" + t5n + " create " + t5i);
+		}
+	}
+	check((await t5v4.store.close()).code === "CLOSED", "T5 N" + t5n + " close");
+	const t5v5 = await createStartupV5HostedSessionStore(registry);
+	check(t5v5.code === "READY", "T5 V5 ready N=" + t5n);
+	if (t5v5.code !== "READY") process.exit(56);
+	check((await t5v5.store.close()).code === "CLOSED", "T5 N" + t5n + " closed");
+}
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_N2_N8_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T6: V5 residue at generation dir
+const t6v4 = await createHostedSessionStore(registry);
+check(t6v4.code === "READY", "T6 V4 factory");
+if (t6v4.code !== "READY") process.exit(57);
+const t6inv = await t6v4.store.inventory();
+check(t6inv.code === "INVENTORIED", "T6 inventory");
+const t6id = Object.freeze({ sessionId: "t6-s", activeSessionId: "t6-a", childId: "t6-c", name: "t6", modelSelector: "model", durableParentSessionId: "t6-p", rlmParentNodeId: "t6-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "66".repeat(32), depth: 1 });
+const t6dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t6alloc = await t6v4.store.allocate(t6id, t6dg);
+check(t6alloc.code === "ALLOCATED", "T6 allocate");
+check((await t6v4.store.createDispatched(t6alloc.session)).code === "COMMITTED", "T6 create");
+check((await t6v4.store.close()).code === "CLOSED", "T6 close");
+// Inject workspace-evidence/ in the generation dir (parallel to wal/)
+const t6Root = blockedRoot;
+const t6LifecycleDirs = readdirSync(t6Root).filter(n => n !== ".lock" && n.length === 64);
+check(t6LifecycleDirs.length >= 1, "T6 lifecycle exists");
+const t6GenDir = t6Root + "/" + t6LifecycleDirs[0] + "/generations";
+const t6GenChildren = readdirSync(t6GenDir).filter(n => n.length === 64);
+check(t6GenChildren.length >= 1, "T6 generation exists");
+mkdirSync(t6GenDir + "/" + t6GenChildren[0] + "/workspace-evidence", { recursive: true });
+const t6v5 = await createStartupV5HostedSessionStore(registry);
+exactFailed(t6v5, "T6 V5 residue at generation dir fatal");
+check(Object.getOwnPropertyNames(t6v5).join(",") === "code", "T6 exact");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_RESIDUE_GENERATION_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T7: V5 residue at lifecycle dir
+const t7v4 = await createHostedSessionStore(registry);
+check(t7v4.code === "READY", "T7 V4 factory");
+if (t7v4.code !== "READY") process.exit(58);
+const t7inv = await t7v4.store.inventory();
+check(t7inv.code === "INVENTORIED", "T7 inventory");
+const t7id = Object.freeze({ sessionId: "t7-s", activeSessionId: "t7-a", childId: "t7-c", name: "t7", modelSelector: "model", durableParentSessionId: "t7-p", rlmParentNodeId: "t7-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "77".repeat(32), depth: 1 });
+const t7dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t7alloc = await t7v4.store.allocate(t7id, t7dg);
+check(t7alloc.code === "ALLOCATED", "T7 allocate");
+check((await t7v4.store.createDispatched(t7alloc.session)).code === "COMMITTED", "T7 create");
+check((await t7v4.store.close()).code === "CLOSED", "T7 close");
+// Inject .ws-identity-tmp.xxxx in lifecycle dir
+const t7LifecycleDirs = readdirSync(blockedRoot).filter(n => n !== ".lock" && n.length === 64);
+check(t7LifecycleDirs.length >= 1, "T7 lifecycle exists");
+writeFileSync(blockedRoot + "/" + t7LifecycleDirs[0] + "/.ws-identity-tmp.11112222333344445555666677778888", "", "utf8");
+const t7v5 = await createStartupV5HostedSessionStore(registry);
+exactFailed(t7v5, "T7 V5 residue at lifecycle dir fatal");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_RESIDUE_LIFECYCLE_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T8: V5 residue at WAL dir
+const t8v4 = await createHostedSessionStore(registry);
+check(t8v4.code === "READY", "T8 V4 factory");
+if (t8v4.code !== "READY") process.exit(59);
+const t8inv = await t8v4.store.inventory();
+check(t8inv.code === "INVENTORIED", "T8 inventory");
+const t8id = Object.freeze({ sessionId: "t8-s", activeSessionId: "t8-a", childId: "t8-c", name: "t8", modelSelector: "model", durableParentSessionId: "t8-p", rlmParentNodeId: "t8-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "88".repeat(32), depth: 1 });
+const t8dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t8alloc = await t8v4.store.allocate(t8id, t8dg);
+check(t8alloc.code === "ALLOCATED", "T8 allocate");
+check((await t8v4.store.createDispatched(t8alloc.session)).code === "COMMITTED", "T8 create");
+check((await t8v4.store.close()).code === "CLOSED", "T8 close");
+// Inject .ws-checkpoint-tmp.xxxx in wal dir
+const t8LifecycleDirs = readdirSync(blockedRoot).filter(n => n !== ".lock" && n.length === 64);
+check(t8LifecycleDirs.length >= 1, "T8 lifecycle exists");
+const t8GenDirs = readdirSync(blockedRoot + "/" + t8LifecycleDirs[0] + "/generations").filter(n => n.length === 64);
+check(t8GenDirs.length >= 1, "T8 generation exists");
+writeFileSync(blockedRoot + "/" + t8LifecycleDirs[0] + "/generations/" + t8GenDirs[0] + "/wal/.ws-checkpoint-tmp.11112222333344445555666677778888", "", "utf8");
+const t8v5 = await createStartupV5HostedSessionStore(registry);
+exactFailed(t8v5, "T8 V5 residue at WAL dir fatal");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_RESIDUE_WAL_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T9: Unknown file at root
+const t9v4 = await createHostedSessionStore(registry);
+check(t9v4.code === "READY", "T9 V4 factory");
+if (t9v4.code !== "READY") process.exit(60);
+const t9inv = await t9v4.store.inventory();
+check(t9inv.code === "INVENTORIED", "T9 inventory");
+const t9id = Object.freeze({ sessionId: "t9-s", activeSessionId: "t9-a", childId: "t9-c", name: "t9", modelSelector: "model", durableParentSessionId: "t9-p", rlmParentNodeId: "t9-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "99".repeat(32), depth: 1 });
+const t9dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t9alloc = await t9v4.store.allocate(t9id, t9dg);
+check(t9alloc.code === "ALLOCATED", "T9 allocate");
+check((await t9v4.store.createDispatched(t9alloc.session)).code === "COMMITTED", "T9 create");
+check((await t9v4.store.close()).code === "CLOSED", "T9 close");
+// Inject unknown file at root
+writeFileSync(blockedRoot + "/unknown-file", "", "utf8");
+const t9v5 = await createStartupV5HostedSessionStore(registry);
+exactFailed(t9v5, "T9 V5 unknown file at root fatal");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_RESIDUE_ROOT_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T10: Helper crash/restart durability
+const t10v4 = await createHostedSessionStore(registry);
+check(t10v4.code === "READY", "T10 V4 factory");
+if (t10v4.code !== "READY") process.exit(61);
+const t10inv = await t10v4.store.inventory();
+check(t10inv.code === "INVENTORIED", "T10 inventory");
+const t10id = Object.freeze({ sessionId: "t10-s", activeSessionId: "t10-a", childId: "t10-c", name: "t10", modelSelector: "model", durableParentSessionId: "t10-p", rlmParentNodeId: "t10-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "1010".repeat(16), depth: 1 });
+const t10dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t10alloc = await t10v4.store.allocate(t10id, t10dg);
+check(t10alloc.code === "ALLOCATED", "T10 allocate");
+check((await t10v4.store.createDispatched(t10alloc.session)).code === "COMMITTED", "T10 create");
+check((await t10v4.store.close()).code === "CLOSED", "T10 close");
+// First V5 startup - should be READY
+const t10first = await createStartupV5HostedSessionStore(registry);
+check(t10first.code === "READY", "T10 first V5 READY");
+if (t10first.code !== "READY") process.exit(62);
+// SIGKILL the V5 helper via negative PGID using /proc children pattern
+const t10Children = readFileSync("/proc/" + process.pid + "/task/" + process.pid + "/children", "utf8").trim().split(/\\s+/);
+check(t10Children.length === 1, "T10 helper child");
+const t10HelperPid = Number(t10Children[0]);
+check(Number.isSafeInteger(t10HelperPid) && t10HelperPid > 1, "T10 helper pid");
+if (!Number.isSafeInteger(t10HelperPid) || t10HelperPid <= 1) process.exit(63);
+process.kill(-t10HelperPid, "SIGKILL");
+const t10KilledClose = await t10first.store.close();
+check(t10KilledClose.code === "FAILED", "T10 killed close FAILED");
+let t10GroupAbsent = false;
+try {
+	process.kill(-t10HelperPid, 0);
+} catch (failure) {
+	t10GroupAbsent = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "ESRCH";
+}
+check(t10GroupAbsent, "T10 helper group ESRCH");
+// Second V5 startup on same root - should be READY (durability)
+const t10second = await createStartupV5HostedSessionStore(registry);
+check(t10second.code === "READY", "T10 second V5 READY durable");
+if (t10second.code !== "READY") process.exit(64);
+check((await t10second.store.close()).code === "CLOSED", "T10 second close");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_DURABILITY_OK");
+
+rmSync(blockedRoot, { recursive: true, force: true });
+// T11: V4 -> V5 -> V4 allocate a second session -> V5 cross-version cycle
+const t11v4a = await createHostedSessionStore(registry);
+check(t11v4a.code === "READY", "T11 V4a factory " + t11v4a.code);
+if (t11v4a.code !== "READY") process.exit(64);
+check((await t11v4a.store.inventory()).code === "INVENTORIED", "T11 V4a inventory");
+const t11ida = Object.freeze({ sessionId: "t11a-s", activeSessionId: "t11a-a", childId: "t11a-c", name: "t11a", modelSelector: "model", durableParentSessionId: "t11a-p", rlmParentNodeId: "t11a-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "1111".repeat(16), depth: 1 });
+const t11dg = Object.freeze({ releaseDigest: new Uint8Array(32).fill(1), manifestDigest: new Uint8Array(32).fill(2), bootstrapDigest: new Uint8Array(32).fill(3), trustDigest: new Uint8Array(32).fill(4), runtimeConfigDigest: new Uint8Array(32).fill(5) });
+const t11alloca = await t11v4a.store.allocate(t11ida, t11dg);
+check(t11alloca.code === "ALLOCATED", "T11 V4 allocate");
+check((await t11v4a.store.createDispatched(t11alloca.session)).code === "COMMITTED", "T11 V4 create first");
+check((await t11v4a.store.close()).code === "CLOSED", "T11 V4 close");
+// V5
+const t11v5a = await createStartupV5HostedSessionStore(registry);
+check(t11v5a.code === "READY", "T11 first V5 READY");
+if (t11v5a.code !== "READY") process.exit(65);
+check((await t11v5a.store.close()).code === "CLOSED", "T11 first V5 close");
+// V4 again - allocate a second session
+const t11v4b = await createHostedSessionStore(registry);
+check(t11v4b.code === "READY", "T11 V4b factory");
+if (t11v4b.code !== "READY") process.exit(66);
+check((await t11v4b.store.inventory()).code === "INVENTORIED", "T11 V4b inventory");
+const t11idb = Object.freeze({ sessionId: "t11b-s", activeSessionId: "t11b-a", childId: "t11b-c", name: "t11b", modelSelector: "model", durableParentSessionId: "t11b-p", rlmParentNodeId: "t11b-n", spawnedByRequestId: null, thinkingLevel: "medium", serviceTier: null, spawnContextDigest: "2222".repeat(16), depth: 1 });
+const t11allocb = await t11v4b.store.allocate(t11idb, t11dg);
+check(t11allocb.code === "ALLOCATED", "T11 V4 allocate second");
+check((await t11v4b.store.createDispatched(t11allocb.session)).code === "COMMITTED", "T11 V4 create second");
+check((await t11v4b.store.close()).code === "CLOSED", "T11 V4b close");
+// V5 again
+const t11v5b = await createStartupV5HostedSessionStore(registry);
+check(t11v5b.code === "READY", "T11 second V5 READY cross-version");
+if (t11v5b.code !== "READY") process.exit(67);
+check((await t11v5b.store.close()).code === "CLOSED", "T11 second V5 close");
+rmSync(blockedRoot, { recursive: true, force: true });
+console.log("V5_MATRIX_CROSSVERSION_OK");
+
+
 const integrationStarted = Date.now();
 function milestone(label: string): void { console.log("MILESTONE " + label + " " + (Date.now() - integrationStarted)); }
 const ready = await createHostedSessionStore(registry);
@@ -2122,10 +2381,10 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"3458478c46e66c48e7e4257a05aabdb5cf9679a06a39b42aab7704e26af6a100",
+			"4c1ec9efb05576ba0a98a765cbfec782154a6bde6b57c0016ed6f21285d52466",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
-			"92701b9e1f5bcd32a73dfec2f71688542a845b68e5b9964222e69bb3e52e04cd",
+			"f02e59eaaee932d274a5173cb55969ceb8817f115a9f402e4f9219db0630da9e",
 		);
 		expect(createHash("sha256").update(readFileSync(v5ProbePath)).digest("hex")).toBe(
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
@@ -2208,7 +2467,16 @@ for scenario in ("case3","case4"):
 			console.log(stdout);
 			expect(exitCode, stderr).toBe(0);
 			expect(stdout).toContain("V5_RAW_PROTOCOL_OK");
-			expect(stdout).toContain("V5_NONEMPTY_BLOCKED_OK");
+			expect(stdout).toContain("V5_NONEMPTY_READY_OK");
+			expect(stdout).toContain("V5_MATRIX_RUNNING_OK");
+			expect(stdout).toContain("V5_MATRIX_TERMINAL_OK");
+			expect(stdout).toContain("V5_MATRIX_N2_N8_OK");
+			expect(stdout).toContain("V5_MATRIX_RESIDUE_GENERATION_OK");
+			expect(stdout).toContain("V5_MATRIX_RESIDUE_LIFECYCLE_OK");
+			expect(stdout).toContain("V5_MATRIX_RESIDUE_WAL_OK");
+			expect(stdout).toContain("V5_MATRIX_RESIDUE_ROOT_OK");
+			expect(stdout).toContain("V5_MATRIX_DURABILITY_OK");
+			expect(stdout).toContain("V5_MATRIX_CROSSVERSION_OK");
 			expect(stdout).toContain("V5_STARTUP_FACTORY_OK");
 			expect(stdout).toContain("INTEGRATION_OK");
 
