@@ -1,1 +1,2 @@
 - Fixed saved-session renames reverting in the session list when a live worker starts another turn.
+- Fixed concurrent renames and session creation accepting a name already claimed by another live session.

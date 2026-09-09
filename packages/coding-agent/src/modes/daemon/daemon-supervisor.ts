@@ -5026,9 +5026,30 @@ export class DaemonSupervisor {
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
-		if (command.type === "rename" && response.success && isSessionSummary(response.data)) {
-			this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
-			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
+		if (
+			response.success &&
+			(command.type === "rename" || command.type === "set_session_name" || command.type === "rename_saved_session")
+		) {
+			// Commit the acknowledged name before releasing its reservation, after earlier roster frames.
+			await this.chainWorkerRosterApply(worker, client, () => {
+				if (command.type === "rename" && isSessionSummary(response.data)) {
+					this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
+					return;
+				}
+				const entry =
+					command.type === "rename_saved_session"
+						? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
+						: this.roster().byActiveSessionId(command.activeSessionId);
+				if (entry?.workerId === worker.descriptor.workerId) {
+					this.writeRosterEntry(
+						{ ...entry, summary: { ...entry.summary, sessionName: command.name.trim() } },
+						worker,
+					);
+				}
+			});
+			if (command.type === "rename" && isSessionSummary(response.data)) {
+				return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
+			}
 		}
 		return responseWithId(response, command.id);
 	}

@@ -8,30 +8,50 @@ import { readSessionInfo, SessionManager } from "../../../src/core/session-manag
 import type { ActiveSessionState, DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
 import { type WorkerRosterEntry, workerRosterEntryFromSummary } from "../../../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
-import { type DaemonCommand, type DaemonResponse, success } from "../../../src/modes/daemon/daemon-protocol.js";
-import { type SessionSummary, summaryForActiveSession } from "../../../src/modes/daemon/daemon-session-list.js";
+import {
+	type DaemonCommand,
+	type DaemonOutbound,
+	type DaemonResponse,
+	failure,
+	success,
+} from "../../../src/modes/daemon/daemon-protocol.js";
+import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js";
-import type { DaemonWorkerDescriptor } from "../../../src/modes/daemon/daemon-worker-protocol.js";
+import type {
+	DaemonWorkerDescriptor,
+	DaemonWorkerRosterOutbound,
+} from "../../../src/modes/daemon/daemon-worker-protocol.js";
 import { createHarness, type Harness } from "../harness.js";
 
 interface WorkerFixture {
 	descriptor: Pick<
 		DaemonWorkerDescriptor,
-		"workerId" | "lifecycle" | "rootActiveSessionId" | "sessionFile" | "createCommand" | "ownerClientId"
+		| "workerId"
+		| "lifecycle"
+		| "rootActiveSessionId"
+		| "rootSessionId"
+		| "sessionFile"
+		| "createCommand"
+		| "ownerClientId"
 	>;
 	client?: { request(command: DaemonCommand): Promise<DaemonResponse> };
 	intentionalStop: boolean;
+	rosterApplyChain?: Promise<void>;
 }
 
 interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
 	handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonResponse>;
 	writeRosterEntry(entry: WorkerRosterEntry, worker?: WorkerFixture): void;
+	consumeWorkerRosterDelta(worker: WorkerFixture, payload: Buffer): void;
+	launchWorker(command: DaemonCommand): Promise<WorkerFixture>;
 }
 
 interface WorkerInternals {
 	sessions: Map<string, ActiveSessionState>;
 	handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonResponse | undefined>;
+	observeRosterEvent(state: ActiveSessionState, message: DaemonOutbound): void;
+	flushRoster(): void;
 }
 
 const harnesses: Harness[] = [];
@@ -40,7 +60,7 @@ afterEach(() => {
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 });
 
-async function createFixture() {
+async function createFixture(sharedSupervisor?: SupervisorInternals) {
 	const harness = await createHarness({ persistSession: true });
 	harnesses.push(harness);
 	harness.setResponses([fauxAssistantMessage("Saved answer")]);
@@ -48,7 +68,7 @@ async function createFixture() {
 	harness.session.setSessionName("Original name");
 	harness.sessionManager.flushNow();
 	const sessionPath = harness.session.sessionFile!;
-	const activeSessionId = "fixture-active";
+	const activeSessionId = `fixture-active-${harnesses.length}`;
 	const client: DaemonSocketClient = {
 		id: "fixture-client",
 		socket: new Socket(),
@@ -77,9 +97,11 @@ async function createFixture() {
 		lastEventSequence: 0,
 	};
 	daemon.sessions.set(activeSessionId, state);
-	const supervisor = new DaemonSupervisor(join(harness.tempDir, "supervisor.sock"), {
-		defaultSessionConfig: config,
-	}) as unknown as SupervisorInternals;
+	const supervisor =
+		sharedSupervisor ??
+		(new DaemonSupervisor(join(harness.tempDir, "supervisor.sock"), {
+			defaultSessionConfig: config,
+		}) as unknown as SupervisorInternals);
 	const request = vi.fn(async (command: DaemonCommand) => {
 		const response = await daemon.handleCommand(client, command);
 		if (!response) throw new Error(`No response for ${command.type}`);
@@ -87,9 +109,10 @@ async function createFixture() {
 	});
 	const worker: WorkerFixture = {
 		descriptor: {
-			workerId: "fixture-worker",
+			workerId: `fixture-worker-${harnesses.length}`,
 			lifecycle: "ready",
 			rootActiveSessionId: activeSessionId,
+			rootSessionId: harness.session.sessionId,
 			sessionFile: sessionPath,
 			createCommand: { type: "create", sessionPath },
 		},
@@ -99,24 +122,51 @@ async function createFixture() {
 	const catalogRename = vi.fn(async (path: string, name: string) => {
 		SessionManager.open(path).appendSessionInfo(name.trim());
 	});
-	Object.assign(supervisor, {
-		catalog: {
-			list: async () => [await readSessionInfo(sessionPath)],
-			rename: catalogRename,
+	if (!sharedSupervisor) {
+		Object.assign(supervisor, {
+			catalog: {
+				list: async () => Promise.all(harnesses.map((item) => readSessionInfo(item.session.sessionFile!))),
+				rename: catalogRename,
+			},
+		});
+	}
+	supervisor.workers.set(worker.descriptor.workerId, worker);
+	const pendingRoster: Buffer[] = [];
+	Object.assign(daemon, {
+		hasAuthenticatedSupervisorClient: () => true,
+		broadcastRosterFrame: (message: DaemonWorkerRosterOutbound) => {
+			if (message.type === "roster_delta") pendingRoster.push(Buffer.from(JSON.stringify(message)));
+			return true;
 		},
 	});
-	supervisor.workers.set(worker.descriptor.workerId, worker);
-	const publish = () =>
-		supervisor.writeRosterEntry(workerRosterEntryFromSummary(summaryForActiveSession(state)), worker);
-	publish();
-	harness.session.subscribe(publish);
+	const flushRoster = async () => {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		for (const payload of pendingRoster.splice(0)) supervisor.consumeWorkerRosterDelta(worker, payload);
+		await worker.rosterApplyChain;
+	};
+	daemon.flushRoster();
+	await flushRoster();
+	harness.session.subscribe((event) =>
+		daemon.observeRosterEvent(state, { type: "session_event", activeSessionId, event }),
+	);
 	const row = async () => {
 		const response = await supervisor.handleCommand(client, { type: "list" });
 		if (!response.success) throw new Error(response.error);
 		const { sessions } = response.data as { sessions: SessionSummary[] };
 		return sessions.find((entry) => entry.activeSessionId === activeSessionId);
 	};
-	return { harness, supervisor, worker, client, request, catalogRename, sessionPath, activeSessionId, row };
+	return {
+		harness,
+		supervisor,
+		worker,
+		client,
+		request,
+		catalogRename,
+		sessionPath,
+		activeSessionId,
+		row,
+		flushRoster,
+	};
 }
 
 describe("ENG-6013: saved-session names survive live worker activity", () => {
@@ -136,6 +186,7 @@ describe("ENG-6013: saved-session names survive live worker activity", () => {
 			...(route === "active id" ? { activeSessionId } : {}),
 		};
 		await expect(supervisor.handleCommand(client, command)).resolves.toEqual(success(command.id, command.type));
+		await fixture.flushRoster();
 		expect((await row())?.sessionName).toBe("Renamed session");
 		expect((await readSessionInfo(sessionPath))?.name).toBe("Renamed session");
 
@@ -148,6 +199,7 @@ describe("ENG-6013: saved-session names survive live worker activity", () => {
 		const streamingNames = (await Promise.all(streamingRows)).map((entry) => entry?.sessionName);
 		expect(streamingNames.length).toBeGreaterThan(0);
 		expect(new Set(streamingNames)).toEqual(new Set(["Renamed session"]));
+		await fixture.flushRoster();
 		expect((await row())?.sessionName).toBe("Renamed session");
 		await expect(supervisor.handleCommand(client, { type: "get_state", activeSessionId })).resolves.toMatchObject({
 			data: { sessionName: "Renamed session" },
@@ -191,4 +243,117 @@ describe("ENG-6013: saved-session names survive live worker activity", () => {
 		});
 		expect(harness.session.sessionName).toBe("Owner rename");
 	});
+
+	it.each(["path", "symlink", "active id", "set_session_name", "rename"])(
+		"reserves a name accepted by %s before its delayed roster frame arrives",
+		async (route) => {
+			const first = await createFixture();
+			const second = await createFixture(first.supervisor);
+			const { supervisor, client, activeSessionId } = first;
+			let sessionPath = first.sessionPath;
+			if (route === "symlink") {
+				sessionPath = join(first.harness.tempDir, "session-alias.jsonl");
+				symlinkSync(first.sessionPath, sessionPath);
+			}
+			const command: DaemonCommand =
+				route === "set_session_name" || route === "rename"
+					? { type: route, activeSessionId, name: "  Claimed name  " }
+					: {
+							type: "rename_saved_session",
+							sessionPath,
+							name: "  Claimed name  ",
+							...(route === "active id" ? { activeSessionId } : {}),
+						};
+			await expect(supervisor.handleCommand(client, command)).resolves.toMatchObject({ success: true });
+			expect(first.harness.session.sessionName).toBe("Claimed name");
+			// Worker responses and setImmediate roster publication travel independently over IPC.
+			await expect(
+				supervisor.handleCommand(client, {
+					type: "rename_saved_session",
+					sessionPath: second.sessionPath,
+					name: "Claimed name",
+				}),
+			).rejects.toThrow(/already/);
+			expect(second.request).not.toHaveBeenCalled();
+			expect((await first.row())?.sessionName).toBe("Claimed name");
+			await first.flushRoster();
+			expect((await first.row())?.sessionName).toBe("Claimed name");
+			expect((await second.row())?.sessionName).toBe("Original name");
+		},
+	);
+
+	it("rejects a competing create before the accepted rename's roster frame arrives", async () => {
+		const { supervisor, client, sessionPath, flushRoster } = await createFixture();
+		const launch = vi.spyOn(supervisor, "launchWorker").mockRejectedValue(new Error("Unexpected worker launch"));
+		await expect(
+			supervisor.handleCommand(client, { type: "rename_saved_session", sessionPath, name: "Claimed name" }),
+		).resolves.toMatchObject({ success: true });
+		await expect(supervisor.handleCommand(client, { type: "create", name: "Claimed name" })).rejects.toThrow(
+			/already/,
+		);
+		expect(launch).not.toHaveBeenCalled();
+		await flushRoster();
+	});
+
+	it("leaves a rejected rename available to another session", async () => {
+		const first = await createFixture();
+		const second = await createFixture(first.supervisor);
+		first.request.mockResolvedValueOnce(failure(undefined, "rename_saved_session", "Rename rejected"));
+		await expect(
+			first.supervisor.handleCommand(first.client, {
+				type: "rename_saved_session",
+				sessionPath: first.sessionPath,
+				name: "Available name",
+			}),
+		).resolves.toMatchObject({ success: false, error: "Rename rejected" });
+		expect((await first.row())?.sessionName).toBe("Original name");
+		expect((await readSessionInfo(first.sessionPath))?.name).toBe("Original name");
+		await expect(
+			first.supervisor.handleCommand(first.client, {
+				type: "rename_saved_session",
+				sessionPath: second.sessionPath,
+				name: "Available name",
+			}),
+		).resolves.toMatchObject({ success: true });
+		await second.flushRoster();
+		expect((await second.row())?.sessionName).toBe("Available name");
+	});
+
+	it.each(["rename_saved_session", "set_session_name", "rename"] as const)(
+		"applies an acknowledged %s after earlier queued roster frames",
+		async (type) => {
+			const { supervisor, worker, client, sessionPath, activeSessionId, row, request } = await createFixture();
+			const previous = workerRosterEntryFromSummary((await row())!);
+			let release!: () => void;
+			worker.rosterApplyChain = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			supervisor.consumeWorkerRosterDelta(
+				worker,
+				Buffer.from(JSON.stringify({ type: "roster_delta", entries: [previous] })),
+			);
+			let acknowledged!: () => void;
+			const acknowledgement = new Promise<void>((resolve) => {
+				acknowledged = resolve;
+			});
+			const handleRequest = request.getMockImplementation()!;
+			request.mockImplementationOnce(async (command) => {
+				const response = await handleRequest(command);
+				acknowledged();
+				return response;
+			});
+			const renaming = supervisor.handleCommand(client, {
+				type,
+				activeSessionId,
+				sessionPath,
+				name: "Current name",
+			});
+			await acknowledgement;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			release();
+			await expect(renaming).resolves.toMatchObject({ success: true });
+			await worker.rosterApplyChain;
+			expect((await row())?.sessionName).toBe("Current name");
+		},
+	);
 });
