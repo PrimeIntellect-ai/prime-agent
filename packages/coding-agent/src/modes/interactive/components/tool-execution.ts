@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type Component, Container, Image, Text, type TUI } from "@earendil-works/pi-tui";
+import { type Component, Container, Image, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.js";
 import type { KernelSentAgentMessage } from "../../../core/kernel/index.js";
 import { createBashToolDefinition } from "../../../core/tools/bash.js";
@@ -9,8 +9,14 @@ import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/rend
 import type { AgentConnectionToolDefinition } from "../../agent-connection/index.js";
 import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
+import { createCollapsedOutputPreview } from "./collapsed-output.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
 import { ToolPanel } from "./tool-panel.js";
+
+/** Visual lines of tool output shown by generic fallbacks when collapsed. */
+const RESULT_PREVIEW_LINES = 5;
+/** Max width of the single-line args summary shown by the no-definition fallback when collapsed. */
+const ARGS_SUMMARY_MAX_WIDTH = 120;
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -213,6 +219,12 @@ export class ToolExecutionComponent extends Container {
 		if (!output) {
 			return undefined;
 		}
+		if (!this.expanded) {
+			return createCollapsedOutputPreview(output, {
+				previewLines: RESULT_PREVIEW_LINES,
+				showExpandHint: this.showExpandHint,
+			});
+		}
 		return new Text(theme.fg("toolOutput", output), 0, 0);
 	}
 
@@ -380,10 +392,24 @@ export class ToolExecutionComponent extends Container {
 			this.contentPanel.clear();
 			if (this.hasRendererDefinition()) {
 				this.mountRenderers(this.contentPanel, false);
-			} else {
+			} else if (this.expanded) {
 				const fallbackText = this.formatToolExecution();
 				if (fallbackText) {
 					this.contentPanel.addChild(new Text(fallbackText, 0, 0));
+				}
+			} else {
+				const argsSummary = this.createCollapsedArgsSummary();
+				if (argsSummary) {
+					this.contentPanel.addChild(new Text(argsSummary, 0, 0));
+				}
+				const output = this.getTextOutput();
+				if (output) {
+					this.contentPanel.addChild(
+						createCollapsedOutputPreview(output, {
+							previewLines: RESULT_PREVIEW_LINES,
+							showExpandHint: this.showExpandHint,
+						}),
+					);
 				}
 			}
 			hasContent = true;
@@ -516,6 +542,14 @@ export class ToolExecutionComponent extends Container {
 			parts.push(output);
 		}
 		return parts.join("\n\n");
+	}
+
+	private createCollapsedArgsSummary(): string | undefined {
+		const compactArgs = JSON.stringify(this.args);
+		if (!compactArgs) {
+			return undefined;
+		}
+		return truncateToWidth(compactArgs, ARGS_SUMMARY_MAX_WIDTH, "...");
 	}
 }
 
