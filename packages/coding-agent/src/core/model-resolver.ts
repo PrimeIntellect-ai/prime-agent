@@ -469,6 +469,38 @@ export function resolveCliModel(options: {
 	};
 }
 
+export async function resolveCliModelFromCatalog(options: {
+	cliProvider?: string;
+	cliModel?: string;
+	apiKey?: string;
+	modelRegistry: ModelRegistry;
+}): Promise<ResolveCliModelResult> {
+	let resolved = resolveCliModel(options);
+	if (!options.cliModel) return resolved;
+	const { modelRegistry } = options;
+	if (options.apiKey && resolved.model) {
+		modelRegistry.authStorage.setRuntimeApiKey(resolved.model.provider, options.apiKey);
+		modelRegistry.refresh();
+		resolved = resolveCliModel(options);
+	}
+	if (resolved.model && modelRegistry.find(resolved.model.provider, resolved.model.id)) return resolved;
+	// Only a cache miss waits for discovery before constructing a custom-model fallback.
+	await modelRegistry.refreshAvailableModels();
+	resolved = resolveCliModel(options);
+	if (
+		resolved.model &&
+		isPrivatePrimeInferenceModel(resolved.model) &&
+		!modelRegistry.find(resolved.model.provider, resolved.model.id)
+	) {
+		return {
+			model: undefined,
+			warning: undefined,
+			error: `Model "${resolved.model.provider}/${resolved.model.id}" is not available for the current Prime team.`,
+		};
+	}
+	return resolved;
+}
+
 export interface InitialModelResult {
 	model: Model<Api> | undefined;
 	thinkingLevel: ThinkingLevel;

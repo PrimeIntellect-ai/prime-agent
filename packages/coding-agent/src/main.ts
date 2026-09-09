@@ -58,7 +58,12 @@ import type { ExtensionFactory } from "./core/extensions/types.js";
 import { KeybindingsManager } from "./core/keybindings.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
-import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
+import {
+	findInitialModel,
+	resolveCliModelFromCatalog,
+	resolveModelScope,
+	type ScopedModel,
+} from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
@@ -529,17 +534,17 @@ export async function createSessionManager(
 	return readOnly ? SessionManager.inMemory(cwd, sessionDir) : SessionManager.create(cwd, sessionDir);
 }
 
-function buildSessionOptions(
+async function buildSessionOptions(
 	config: AgentSessionRuntimeConfig,
 	scopedModels: ScopedModel[],
 	hasExistingSession: boolean,
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
-): {
+): Promise<{
 	options: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
-} {
+}> {
 	const options: CreateAgentSessionOptions = {};
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	let cliThinkingFromModel = false;
@@ -548,9 +553,10 @@ function buildSessionOptions(
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
 	if (config.model) {
-		const resolved = resolveCliModel({
+		const resolved = await resolveCliModelFromCatalog({
 			cliProvider: config.provider,
 			cliModel: config.model,
+			apiKey: config.apiKey,
 			modelRegistry,
 		});
 		if (resolved.warning) {
@@ -862,7 +868,7 @@ async function prepareRuntimeServices(options: {
 		options: sessionOptions,
 		cliThinkingFromModel,
 		diagnostics: sessionOptionDiagnostics,
-	} = buildSessionOptions(
+	} = await buildSessionOptions(
 		config,
 		scopedModels,
 		sessionManager.buildSessionContext().messages.length > 0,

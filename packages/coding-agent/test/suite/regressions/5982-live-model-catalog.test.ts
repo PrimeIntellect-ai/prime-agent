@@ -5,8 +5,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { MODEL_CATALOG_REFRESH_INTERVAL_MS } from "../../../src/core/model-catalog-cache.js";
 import { ModelRegistry } from "../../../src/core/model-registry.js";
-import { findInitialModel, restoreModelFromSession } from "../../../src/core/model-resolver.js";
+import {
+	findInitialModel,
+	resolveCliModelFromCatalog,
+	restoreModelFromSession,
+} from "../../../src/core/model-resolver.js";
 import { PROVIDER_MODEL_CATALOG_URL, parseProviderModelCatalog } from "../../../src/core/provider-model-catalog.js";
+import { SessionManager } from "../../../src/core/session-manager.js";
+import { createDefaultRuntimeFactory } from "../../../src/main.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const primeUrl = "https://api.pinference.ai/api/v1/models";
@@ -29,7 +35,9 @@ const publicEntries = [
 	...getModels("prime-inference").map((model) => primeEntry(model.id, model)),
 	primeEntry("test/new-public"),
 ];
-const primePayload = { data: [...publicEntries, primeEntry("internal/new-private")] };
+const primePayload = {
+	data: [...publicEntries, { ...primeEntry("internal/new-private"), display_name: "Catalog Private" }],
+};
 const json = (payload: unknown) => new Response(JSON.stringify(payload));
 
 describe("ENG-5982 live model catalogs", () => {
@@ -133,6 +141,94 @@ describe("ENG-5982 live model catalogs", () => {
 			expect.arrayContaining(["catalog-new", "test/new-public", "internal/new-private"]),
 		);
 		expect(fetchFn).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		["openai", "catalog-new", "Catalog New"],
+		["prime-inference", "internal/new-private", "Catalog Private"],
+	])("resolves cold %s metadata through the production startup factory", async (provider, model, name) => {
+		const factory = createDefaultRuntimeFactory({
+			provider,
+			model,
+			apiKey: "catalog-test-key",
+			noTools: true,
+			noExtensions: true,
+			noSkills: true,
+			noContextFiles: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			telemetryDisabled: true,
+		});
+		const created = await factory({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			sessionManager: SessionManager.inMemory(harness.tempDir),
+			sessionOptions: { rlmDepth: 1 },
+		});
+		try {
+			expect(created.session.model).toMatchObject({ provider, id: model, name });
+			expect(created.diagnostics).not.toEqual(
+				expect.arrayContaining([expect.objectContaining({ type: "warning" })]),
+			);
+			if (provider === "prime-inference") {
+				expect(created.session.model).toMatchObject({ contextWindow: 200_000, maxTokens: 20_000 });
+				const request = fetchFn.mock.calls.find(([url]) => url === primeUrl);
+				expect(new Headers(request?.[1]?.headers).get("authorization")).toBe("Bearer catalog-test-key");
+			}
+		} finally {
+			created.session.dispose();
+		}
+	});
+
+	test("resolves cached CLI models without starting or awaiting a refresh", async () => {
+		await registry.refreshAvailableModels();
+		fetchFn.mockClear();
+		for (const [provider, id] of [
+			["openai", "catalog-new"],
+			["prime-inference", "internal/new-private"],
+		]) {
+			const resolved = await resolveCliModelFromCatalog({
+				cliProvider: provider,
+				cliModel: id,
+				modelRegistry: registry,
+			});
+			expect(resolved.model).toBe(registry.find(provider, id));
+		}
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+
+	test("does not invent metadata for a private model absent from the authenticated catalog", async () => {
+		const resolved = await resolveCliModelFromCatalog({
+			cliProvider: "prime-inference",
+			cliModel: "internal/not-authorized",
+			modelRegistry: registry,
+		});
+		expect(resolved.model).toBeUndefined();
+		expect(resolved.error).toContain("not available for the current Prime team");
+	});
+
+	test("does not reuse private metadata after an explicit CLI API key change", async () => {
+		await registry.refreshAvailableModels();
+		fetchFn.mockImplementation(async (url) => json(url === primeUrl ? { data: publicEntries } : providerPayload));
+		const resolved = await resolveCliModelFromCatalog({
+			cliProvider: "prime-inference",
+			cliModel: "internal/new-private",
+			apiKey: "different-account-key",
+			modelRegistry: registry,
+		});
+		expect(resolved.model).toBeUndefined();
+		expect(resolved.error).toContain("not available for the current Prime team");
+	});
+
+	test("keeps custom public model IDs usable when catalog discovery fails", async () => {
+		fetchFn.mockRejectedValue(new Error("offline"));
+		const resolved = await resolveCliModelFromCatalog({
+			cliProvider: "openai",
+			cliModel: "custom-unlisted-id",
+			modelRegistry: registry,
+		});
+		expect(resolved.model).toMatchObject({ provider: "openai", id: "custom-unlisted-id" });
+		expect(resolved.error).toBeUndefined();
 	});
 
 	test.each(["team", "credentials", "logout"])(
