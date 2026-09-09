@@ -1,5 +1,0 @@
-- Fixed sessions with armed heartbeats showing as Running forever in the agents view; between firings they now list as Idle with the heartbeat badge and a `heartbeat · next <time>` label.
-- Added a dimmed heartbeat badge for sessions whose only heartbeats are paused.
-- Added an armed-heartbeat warning to the agents-view delete confirmation for sessions and subagents.
-- Changed sessions with armed heartbeats to passivate like any idle session; the daemon now wakes them when the next heartbeat is due, including after a daemon restart.
-- Fixed heartbeats of passivated sessions disappearing from the heartbeat list and agents-view badges.

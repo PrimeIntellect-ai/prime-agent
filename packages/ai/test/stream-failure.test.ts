@@ -38,6 +38,8 @@ describe("classifyStreamFailure", () => {
 		["overloaded_error", undefined, "overloaded"],
 		[undefined, 529, "overloaded"],
 		["rate_limit_error", undefined, "rate_limit"],
+		["usage_limit_reached", undefined, "rate_limit"],
+		["usage_not_included", 403, "rate_limit"],
 		[undefined, 429, "rate_limit"],
 		["refusal", undefined, "refusal"],
 		["sensitive", undefined, "safety"],
@@ -46,6 +48,10 @@ describe("classifyStreamFailure", () => {
 		["content_filter", undefined, "safety"],
 		["guardrail_intervened", undefined, "safety"],
 		["authentication_error", undefined, "auth"],
+		[undefined, 401, "auth"],
+		["permission_error", 403, "permission"],
+		["PermissionDeniedError", 403, "permission"],
+		[undefined, 403, "permission"],
 		["invalid_request_error", undefined, "invalid_request"],
 		["api_error", undefined, "server_error"],
 		[undefined, 503, "server_error"],
@@ -102,9 +108,39 @@ describe("extractStreamFailureInfo", () => {
 		expect(extractStreamFailureInfo(awsError)).toMatchObject({ requestId: "aws_req" });
 	});
 
+	test.each([
+		["Headers seconds", new Headers({ "retry-after": "120" }), 120000],
+		["retry-after-ms precedence", { "retry-after-ms": "1500", "retry-after": "2" }, 1500],
+		["record with mixed case", { "Retry-After": "120" }, 120000],
+	] as const)("extracts the server-requested retry delay: %s", (_name, headers, expected) => {
+		const error = Object.assign(new Error("429"), { status: 429, headers });
+		expect(extractStreamFailureInfo(error)).toMatchObject({ kind: "rate_limit", retryAfterMs: expected });
+	});
+
+	test("parses an HTTP-date Retry-After relative to now", () => {
+		const withDate = Object.assign(new Error("429"), {
+			status: 429,
+			headers: new Headers({ "retry-after": new Date(Date.now() + 60000).toUTCString() }),
+		});
+		const dateMs = extractStreamFailureInfo(withDate).retryAfterMs;
+		expect(dateMs).toBeGreaterThan(0);
+		expect(dateMs).toBeLessThanOrEqual(60000);
+	});
+
 	test("falls back to classifying the message text", () => {
 		expect(extractStreamFailureInfo(new Error("provider overloaded, retry later")).kind).toBe("overloaded");
 		expect(extractStreamFailureInfo("not an error").kind).toBe("unknown");
+	});
+
+	test.each([
+		["Unauthorized: authentication failed", undefined, "unknown"],
+		["permission denied by policy", undefined, "unknown"],
+		["upstream authentication failed", 500, "server_error"],
+		["Unauthorized", 401, "auth"],
+		["permission denied", 403, "permission"],
+	] as const)("auth/permission need more than message text: %s / %s -> %s", (message, status, expected) => {
+		// Without a structured error type, only the status may decide auth or permission.
+		expect(extractStreamFailureInfo(Object.assign(new Error(message), { status })).kind).toBe(expected);
 	});
 });
 

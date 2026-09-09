@@ -168,6 +168,7 @@ describe("buildRlmPrompt", () => {
 		});
 
 		expect(prompt).toContain("Use `bash()` to invoke programs, not to write shell programs");
+		expect(prompt).toContain("A `bash()` handle left running beyond its creating cell sends a completion follow-up");
 	});
 
 	test("documents preferring Python for reading and searching files when ipython is active", () => {

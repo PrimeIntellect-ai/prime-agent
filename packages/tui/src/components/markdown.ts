@@ -168,6 +168,8 @@ export interface MarkdownTheme {
 export interface MarkdownOptions {
 	/** Transform source Markdown before parsing, with the exact width available for content. */
 	transform?: (markdown: string, availableWidth: number) => string;
+	/** Base URL for relative link targets. Directory URLs must end with a slash. */
+	baseUrl?: string;
 }
 
 interface InlineStyleContext {
@@ -611,9 +613,17 @@ export class Markdown implements Component {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLink = this.theme.link(this.theme.underline(linkText));
 					if (getCapabilities().hyperlinks) {
+						// A Windows drive letter is a file path, not a URL scheme.
+						const target = token.href.replace(/^([a-z]:[\\/])/i, "file:///$1");
+						const href =
+							!target.startsWith("#") &&
+							(this.options.baseUrl || target !== token.href) &&
+							URL.canParse(target, this.options.baseUrl)
+								? new URL(target, this.options.baseUrl).href
+								: target;
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
 						// so we always show only the link text regardless of whether it matches href.
-						result += hyperlink(styledLink, token.href) + stylePrefix;
+						result += hyperlink(styledLink, href) + stylePrefix;
 					} else {
 						// Compare raw token.text (not styled) against href for the equality check.
 						// For mailto: links strip the prefix (autolinked emails use text="foo@bar.com"

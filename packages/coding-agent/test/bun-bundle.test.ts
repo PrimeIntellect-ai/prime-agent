@@ -5,16 +5,13 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 const bundleDir = join(process.cwd(), "dist", "bundle");
 const bundleEntry = join(bundleDir, "cli.js");
-const distEntry = join(process.cwd(), "dist", "cli.js");
 const bundleScript = join(process.cwd(), "scripts", "bundle.mjs");
 
 beforeAll(() => {
-	if (!existsSync(distEntry)) {
-		for (const packageDir of ["../tui", "../ai", "../agent", "."]) {
-			execFileSync("bun", ["--bun", "tsgo", "-p", "tsconfig.build.json"], {
-				cwd: join(process.cwd(), packageDir),
-			});
-		}
+	for (const packageDir of ["../tui", "../ai", "../agent", "."]) {
+		execFileSync("bun", ["--bun", "tsgo", "-p", "tsconfig.build.json"], {
+			cwd: join(process.cwd(), packageDir),
+		});
 	}
 	if (existsSync(bundleDir)) {
 		rmSync(bundleDir, { recursive: true, force: true });
@@ -50,7 +47,7 @@ describe("bun-bundle build output", () => {
 
 describe("bun-bundle entry content", () => {
 	it("preserves shebang", () => {
-		expect(readEntry().startsWith("#!/usr/bin/env node")).toBe(true);
+		expect(readEntry().startsWith("#!/usr/bin/env bun")).toBe(true);
 	});
 
 	it("injects require polyfill banner (createRequire)", () => {

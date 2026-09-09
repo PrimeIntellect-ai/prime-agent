@@ -213,6 +213,41 @@ describe("openai-responses provider defaults", () => {
 	});
 
 	it.each([
+		["github-copilot" as const, "auto" as const, false],
+		["github-copilot" as const, "default" as const, false],
+		["openai" as const, "default" as const, true],
+	])("scopes service_tier serialization to the provider (%s, %s)", async (provider, serviceTier, expected) => {
+		const base = getModel("openai", "gpt-5.4");
+		const model = { ...base, provider };
+		const sse = `data: ${JSON.stringify({
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, input_tokens_details: { cached_tokens: 0 } },
+			},
+		})}\n\n`;
+		let wireBody: Record<string, unknown> | undefined;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			wireBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+
+		const result = await streamOpenAIResponses(
+			model,
+			{ systemPrompt: "sys", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test-key", serviceTier },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		// Copilot rejects the FIELD for every value; elsewhere absence means "auto"
+		// (the project tier), so an explicit "default" must stay on the wire.
+		expect(wireBody && "service_tier" in wireBody).toBe(expected);
+		if (expected) {
+			expect((wireBody as Record<string, unknown>).service_tier).toBe(serviceTier);
+		}
+	});
+
+	it.each([
 		["gpt-5.4", "priority", 2],
 		["gpt-5.5", "priority", 2.5],
 		["gpt-5.5", "flex", 0.5],

@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { getProcessStartId } from "../src/core/session-lease.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	acquireDaemonShutdownAdmission,
@@ -10,6 +11,9 @@ import {
 	assertDaemonSupervisorOwnerCurrent,
 	persistDaemonStartupFenceFromOwner,
 } from "../src/modes/daemon/daemon-supervisor-ownership.js";
+import * as childProcessModule from "../src/utils/child-process.js";
+import { isZombieProcess } from "../src/utils/child-process.js";
+import { spawnZombieProcess } from "./fixtures/zombie-process.js";
 
 type Ownership = Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 
@@ -173,6 +177,63 @@ describe("daemon supervisor ownership registry", () => {
 		await expect(reaped.assertCurrent()).rejects.toMatchObject({ code: "supervisor_generation_stale" });
 		expect(existsSync(reapedDir)).toBe(false);
 		await reaped.release();
+	});
+
+	it("confirms owner zombie state at most once per interval across fence polls", async () => {
+		const paths = createPaths();
+		const owner = await acquire(paths, "fence-owner");
+		const claim = {
+			generation: owner.record.generation,
+			pid: owner.record.pid,
+			processStartId: owner.record.processStartId,
+			socketPath: owner.record.socketPath,
+		};
+		const fingerprint = await assertDaemonSupervisorOwnerCurrent(claim, undefined, paths.registryDir);
+		const zombieSpy = vi.spyOn(childProcessModule, "isZombieProcess");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive");
+		try {
+			// Steady-state fence polls (validated fingerprint, confirmed owner) must
+			// not run a ps-backed probe per 250ms tick; existence stays kill(0)-cheap.
+			await assertDaemonSupervisorOwnerCurrent(claim, fingerprint, paths.registryDir);
+			await assertDaemonSupervisorOwnerCurrent(claim, fingerprint, paths.registryDir);
+			expect(zombieSpy.mock.calls.length + aliveSpy.mock.calls.length).toBe(0);
+			// Confirmations expire: after the interval the owner is re-probed once
+			// (the same timestamp the cache's bounded prune sweeps on).
+			vi.useFakeTimers();
+			try {
+				vi.setSystemTime(Date.now() + 6000);
+				await assertDaemonSupervisorOwnerCurrent(claim, fingerprint, paths.registryDir);
+				expect(zombieSpy).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		} finally {
+			zombieSpy.mockRestore();
+			aliveSpy.mockRestore();
+			await owner.release();
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("treats a zombie owner process as reclaimable", async () => {
+		const paths = createPaths();
+		const { zombiePid, dispose } = await spawnZombieProcess();
+		try {
+			expect(isZombieProcess(zombiePid)).toBe(true);
+			const stale = await acquire(paths, "zombie-owner");
+			const ownerPath = join(ownerDir(paths, "zombie-owner"), "owner.json");
+			const record = readJson(ownerPath);
+			record.pid = zombiePid;
+			const zombieStartId = getProcessStartId(zombiePid);
+			if (zombieStartId) record.processStartId = zombieStartId;
+			else delete record.processStartId;
+			writeFileSync(ownerPath, `${JSON.stringify(record, null, 2)}\n`);
+
+			const successor = await acquire(paths, "successor-owner");
+			await successor.release();
+			await stale.release();
+		} finally {
+			dispose();
+		}
 	});
 
 	it("does not resurrect the shutdown admission when release overtakes an in-flight renew", async () => {

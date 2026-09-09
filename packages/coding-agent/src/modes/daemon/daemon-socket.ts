@@ -87,7 +87,19 @@ export function defaultDaemonSocketPath(): string {
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
 
+function assertDaemonSocketPathLength(socketPath: string): void {
+	if (process.platform === "win32") return;
+	const bytes = Buffer.byteLength(socketPath, "utf8");
+	const maxBytes = process.platform === "linux" ? 107 : 103;
+	if (bytes > maxBytes) {
+		throw new Error(
+			`Daemon socket path is too long (${bytes} bytes; maximum ${maxBytes} on ${process.platform}). Use a shorter socket path or TMPDIR: ${socketPath}`,
+		);
+	}
+}
+
 export async function acquireDaemonSocketPathLease(socketPath: string): Promise<DaemonSocketPathLease | undefined> {
+	assertDaemonSocketPathLength(socketPath);
 	ensureDefaultDaemonSocketDir(socketPath);
 	if (process.platform === "win32") {
 		return undefined;
@@ -115,6 +127,7 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 }
 
 export async function prepareDaemonSocketPath(socketPath: string, lease?: DaemonSocketPathLease): Promise<void> {
+	assertDaemonSocketPathLength(socketPath);
 	ensureDefaultDaemonSocketDir(socketPath);
 
 	if (process.platform === "win32") {

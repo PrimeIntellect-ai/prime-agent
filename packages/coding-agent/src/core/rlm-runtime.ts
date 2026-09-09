@@ -12,6 +12,19 @@ export interface RlmRunRequest {
 	cellSourceCode?: string;
 }
 
+interface RlmCreateSessionRequest {
+	prompt: string;
+	kwargs: Record<string, unknown>;
+}
+
+export interface RlmCreateSessionResult {
+	active_session_id: string;
+	session_id: string;
+	name: string;
+	session_file: string;
+	model: string;
+}
+
 export interface RlmSpawnHandle {
 	rlm_child_id: string;
 	name: string;
@@ -51,6 +64,15 @@ export interface RlmFindModelsResult {
 }
 
 export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
+type RlmCreateSessionHandler = (request: RlmCreateSessionRequest) => Promise<RlmCreateSessionResult>;
+
+interface AsyncBashCompletionRequest {
+	pid: number;
+	command: string;
+	exitCode: number;
+}
+
+type AsyncBashCompletionHandler = (request: AsyncBashCompletionRequest) => void | Promise<void>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -59,47 +81,50 @@ const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
 
-export function normalizeRequestedRlmSubagentSessionName(value: unknown): string | undefined {
+export function normalizeRequestedRlmSubagentSessionName(value: unknown, operation = "rlm.run"): string | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
 	if (typeof value !== "string") {
-		throw new Error("rlm.run name must be a string");
+		throw new Error(`${operation} name must be a string`);
 	}
 	const name = value.trim();
 	if (!name) {
-		throw new Error("rlm.run name must not be empty");
+		throw new Error(`${operation} name must not be empty`);
 	}
 	if (name.length > RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH) {
-		throw new Error(`rlm.run name must be at most ${RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH} characters`);
+		throw new Error(`${operation} name must be at most ${RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH} characters`);
 	}
 	return name;
 }
 
-export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
+export function normalizeRequestedRlmSubagentThinkingLevel(
+	value: unknown,
+	operation = "rlm.run",
+): ThinkingLevel | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
 	if (typeof value !== "string") {
-		throw new Error("rlm.run thinking must be a string");
+		throw new Error(`${operation} thinking must be a string`);
 	}
 	const level = value.trim().toLowerCase();
 	if (!THINKING_LEVELS.includes(level as ThinkingLevel)) {
-		throw new Error(`rlm.run thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
+		throw new Error(`${operation} thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
 	}
 	return level as ThinkingLevel;
 }
 
-export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {
+export function normalizeRequestedRlmSubagentModel(value: unknown, operation = "rlm.run"): string | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
 	if (typeof value !== "string") {
-		throw new Error("rlm.run model must be a string");
+		throw new Error(`${operation} model must be a string`);
 	}
 	const model = value.trim();
 	if (!model) {
-		throw new Error("rlm.run model must not be empty");
+		throw new Error(`${operation} model must not be empty`);
 	}
 	return model;
 }
@@ -161,6 +186,17 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 		}));
 }
 
+export function createRlmCreateSessionHostHandler(handler: RlmCreateSessionHandler): HostRequestHandler {
+	return async (payload) => {
+		if (typeof payload.prompt !== "string") {
+			throw new Error("rlm.create_session prompt must be a string");
+		}
+		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
+		const result = await handler({ prompt: payload.prompt, kwargs });
+		return result as unknown as Record<string, unknown>;
+	};
+}
+
 /** Adapt an RlmRunHandler into the typed `rlm.run` kernel host handler. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
 	return async (payload) => {
@@ -175,6 +211,24 @@ export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHand
 			cellSourceCode,
 		});
 		return result as unknown as Record<string, unknown>;
+	};
+}
+
+/** Adapt detached kernel bash completions into a validated host notification. */
+export function createAsyncBashCompletionHostHandler(handler: AsyncBashCompletionHandler): HostRequestHandler {
+	return async (payload) => {
+		const { pid, command, exitCode } = payload;
+		if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+			throw new Error("bash.completed pid must be a positive integer");
+		}
+		if (typeof command !== "string" || !command) {
+			throw new Error("bash.completed command must be a non-empty string");
+		}
+		if (typeof exitCode !== "number" || !Number.isInteger(exitCode)) {
+			throw new Error("bash.completed exitCode must be an integer");
+		}
+		await handler({ pid, command, exitCode });
+		return {};
 	};
 }
 
@@ -297,8 +351,17 @@ export interface CreateRlmSubagentRuntimeOptions {
 	onSessionPublished?: (session: AgentSession) => void;
 }
 
+export interface CreateRlmRootSessionOptions {
+	prompt: string;
+	sessionName?: string;
+	cwd: string;
+	model: Model<Api>;
+	thinkingLevel: ThinkingLevel;
+}
+
 export interface SubagentRuntimeHost {
 	createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
+	createRlmRootSession?(options: CreateRlmRootSessionOptions): Promise<RlmCreateSessionResult>;
 	/** Persist host-owned completion before the child becomes passivation-eligible. */
 	completeRlmSubagentRuntime?(childId: string, session: AgentSession): boolean;
 	/** Release a host-owned child after its detached initial task settles. */

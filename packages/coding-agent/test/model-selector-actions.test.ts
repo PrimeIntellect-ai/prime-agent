@@ -1,7 +1,10 @@
-import { setKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { parsePrimeInferenceModelCatalog } from "@earendil-works/pi-ai";
+import { setKeybindings, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { buildPrimeInferenceModels } from "../src/core/prime-inference-model-catalog.js";
 import { ModelSelectorComponent } from "../src/modes/interactive/components/model-selector.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "./suite/harness.js";
@@ -34,6 +37,57 @@ describe("ModelSelectorComponent", () => {
 	afterEach(() => {
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
+		}
+	});
+
+	it("does not write catalog OSC actions to the terminal", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const osc = "\x1b]52;c;VFJJQUdF\x07";
+		const entry = {
+			id: "vendor/模型",
+			display_name: `模型 é${osc}`,
+			pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+			specs: {
+				context_window: 1000,
+				max_output_tokens: 100,
+				supports_reasoning: false,
+				modalities: { input: ["text"], output: ["text"] },
+			},
+		};
+		const models = buildPrimeInferenceModels(
+			[],
+			parsePrimeInferenceModelCatalog({
+				data: [entry, { ...entry, id: `vendor/bad${osc}` }],
+			}),
+		)!;
+		expect(models.map((model) => model.id)).toEqual([entry.id]);
+		const terminal = new VirtualTerminal(120, 40);
+		const write = vi.spyOn(terminal, "write");
+		const tui = new TUI(terminal);
+		const selector = new ModelSelectorComponent(
+			tui,
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: models,
+				configuredProviders: new Set(["prime-inference"]),
+			},
+		);
+		tui.addChild(selector);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			const output = write.mock.calls.map(([data]) => data).join("");
+			expect(output).not.toContain(osc);
+			expect(output).toContain("模型 é");
+			expect(output).toContain(entry.id);
+		} finally {
+			tui.stop();
 		}
 	});
 

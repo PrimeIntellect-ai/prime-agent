@@ -119,12 +119,13 @@ export interface RlmLedgerSeedSource {
 
 export async function readLegacyRlmSubagentRegistry(
 	path: string,
-	options: { throwOnReadError?: boolean; log?: (message: string) => void } = {},
+	options: { throwOnReadError?: boolean; log?: (message: string) => void; onReadError?: () => void } = {},
 ): Promise<LegacyRlmSubagentRegistryEntry[]> {
 	let contents: string;
 	try {
 		contents = await readFile(path, "utf8");
 	} catch (error) {
+		options.onReadError?.();
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 			options.log?.(
 				`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`,

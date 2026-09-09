@@ -1,0 +1,2 @@
+- Prevented session export and daemon-client startup from repairing or rewriting transcripts owned by another process.
+- Enforced the retained session-scan usage cache limit for oversized transcripts.

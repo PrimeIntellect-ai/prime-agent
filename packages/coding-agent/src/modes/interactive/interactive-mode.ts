@@ -42,7 +42,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { spawn, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import {
 	buildDaemonUpdateRestartReport,
 	launchDaemonUpdateRestartCoordinator,
@@ -99,6 +99,7 @@ import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
 import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
+	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
 	bashOutputToText,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CustomMessage,
@@ -136,6 +137,7 @@ import {
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
+import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
 import { readClipboardImage } from "../../utils/clipboard-image.js";
 import { parseGitUrl } from "../../utils/git.js";
@@ -210,6 +212,7 @@ import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybin
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
+import { styleArgumentTokens } from "./components/prompt-highlight.js";
 import {
 	MalformedRefinementOutcomeMessageComponent,
 	RefinementOutcomeMessageComponent,
@@ -310,7 +313,8 @@ function isLabeledQueuedPreview(message: string): boolean {
 	return (
 		message.startsWith(`${HEARTBEAT_PROMPT_PREVIEW_LABEL}: `) ||
 		message.startsWith(`${GOAL_CONTEXT_PREVIEW_LABEL}: `) ||
-		message.startsWith(`${AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL}: `)
+		message.startsWith(`${AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL}: `) ||
+		message.startsWith(`${ASYNC_BASH_COMPLETION_PREVIEW_LABEL}: `)
 	);
 }
 
@@ -324,9 +328,12 @@ export function styleQueuedMessagePreview(
 	isRecognizedSlashCommand: (name: string) => boolean,
 ): string {
 	const preview = formatQueuedMessagePreview(message, label);
-	if (!isLeadingSlashCommand(message, isRecognizedSlashCommand)) return theme.fg("dim", preview);
+	const styleDim = (segment: string) => theme.fg("dim", segment);
+	if (!isLeadingSlashCommand(message, isRecognizedSlashCommand)) return styleArgumentTokens(preview, styleDim);
 	const prefix = preview.slice(0, preview.length - message.length);
-	return `${theme.fg("dim", prefix)}${styleSlashCommandText(message, (rest) => theme.fg("dim", rest))}`;
+	return `${theme.fg("dim", prefix)}${styleSlashCommandText(message, (rest, includeBareSeparator) =>
+		styleArgumentTokens(rest, styleDim, includeBareSeparator),
+	)}`;
 }
 
 function isExpandable(obj: unknown): obj is Expandable {
@@ -5827,6 +5834,7 @@ export class InteractiveMode {
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				mermaidTransform: this.mermaidMarkdownTransform,
+				cwd: this.getCurrentCwd(),
 			},
 		);
 		this.streamingMessage = message;
@@ -6475,6 +6483,7 @@ export class InteractiveMode {
 							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 						mermaidTransform: this.mermaidMarkdownTransform,
+						cwd: this.getCurrentCwd(),
 					},
 				);
 				this.chatContainer.addChild(assistantComponent);
@@ -9079,7 +9088,7 @@ export class InteractiveMode {
 	private async handleShareCommand(): Promise<void> {
 		// Check if gh is available and logged in
 		try {
-			const authResult = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
+			const authResult = spawnSyncHidden("gh", ["auth", "status"], { encoding: "utf-8" });
 			if (authResult.status !== 0) {
 				this.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
 				return;
@@ -9118,7 +9127,7 @@ export class InteractiveMode {
 		};
 
 		// Create a secret gist asynchronously
-		let proc: ReturnType<typeof spawn> | null = null;
+		let proc: ReturnType<typeof spawnHidden> | null = null;
 
 		loader.onAbort = () => {
 			proc?.kill();
@@ -9128,7 +9137,7 @@ export class InteractiveMode {
 
 		try {
 			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
-				proc = spawn("gh", ["gist", "create", "--public=false", tmpFile]);
+				proc = spawnHidden("gh", ["gist", "create", "--public=false", tmpFile]);
 				let stdout = "";
 				let stderr = "";
 				proc.stdout?.on("data", (data) => {
