@@ -1,0 +1,18 @@
+{
+  "image": "node:24-bookworm@sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2",
+  "region": "us",
+  "cpu_cores": 4,
+  "memory_gb": 8,
+  "disk_gb": 20,
+  "trials": 10,
+  "install_trials": 3,
+  "debounce_seconds": 60,
+  "timeout_seconds": 1200,
+  "ttl_minutes": 30,
+  "budget_usd": 1,
+  "max_output_tokens": 1024,
+  "effort": "medium",
+  "cpu_usd_per_hour": 0.05,
+  "memory_usd_per_gb_hour": 0.01,
+  "disk_usd_per_gb_hour": 0.001
+}
