@@ -41,6 +41,7 @@ describe("ENG-4509 side questions", () => {
 					expect(context.systemPrompt).toBe(systemPromptBefore);
 					expect(context.tools).toEqual([]);
 					expect(context.messages.map(getMessageText)).toEqual([
+						expect.stringContaining("The persistent memories produced across this session so far:"),
 						"The project codename is kestrel.",
 						"The codename is kestrel.",
 						expect.stringContaining("What is the project codename?"),
@@ -81,6 +82,7 @@ describe("ENG-4509 side questions", () => {
 				(context) => {
 					const texts = context.messages.map(getMessageText);
 					expect(texts).toEqual([
+						expect.stringContaining("The persistent memories produced across this session so far:"),
 						"Main context message.",
 						"main answer",
 						expect.stringContaining("First side question?"),
@@ -89,8 +91,8 @@ describe("ENG-4509 side questions", () => {
 					]);
 					expect(context.tools).toEqual([]);
 					// The instruction is repeated only on the first side turn.
-					expect(texts[2]).toContain("Answer this side question");
-					expect(texts[4]).not.toContain("Answer this side question");
+					expect(texts[3]).toContain("Answer this side question");
+					expect(texts[5]).not.toContain("Answer this side question");
 					return fauxAssistantMessage("second side answer");
 				},
 			]);
@@ -159,6 +161,7 @@ describe("ENG-4509 side questions", () => {
 				(context) => {
 					expect(context.tools).toEqual([]);
 					expect(context.messages.map(getMessageText)).toEqual([
+						expect.stringContaining("The persistent memories produced across this session so far:"),
 						"Run the main task.",
 						expect.stringContaining("Can I ask this concurrently?"),
 					]);

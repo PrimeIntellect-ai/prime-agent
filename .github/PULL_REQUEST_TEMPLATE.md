@@ -7,7 +7,9 @@ https://github.com/PrimeIntellect-ai/prime-agent/discussions
 ## Context
 
 <!-- Link the accepted Issue or Discussion and explain why this change is needed.
-Prime Agent Linear tickets should normally use the Research team and the Prime Agent: Long-Horizon research project.
+Link a Prime Agent Linear ticket.
+Engineering issues should use the Engineering (ENG) team and the Prime Agent V1 board.
+Capabilities and research issues should use the Research (RES) team and the Prime Agent: Long-Horizon board.
 If this change has no ticket, add `No-Ticket: <short reason>` below. -->
 
 ## Changes

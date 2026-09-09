@@ -1,6 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, getUserTexts, type Harness } from "./harness.js";
+import { conversationMessages, createHarness, getUserTexts, type Harness } from "./harness.js";
 import { withStreaming } from "./scheduling.js";
 
 describe("AgentSession action contracts", () => {
@@ -64,12 +64,16 @@ describe("AgentSession action contracts", () => {
 			{ triggerTurn: true, deliverAs: "nextTurn" },
 		);
 
-		expect(harness.session.messages).toEqual([]);
+		expect(conversationMessages(harness.session)).toEqual([]);
 		expect(harness.session.queuedActionCount).toBe(0);
 		expect(harness.getPendingResponseCount()).toBe(1);
 
 		await harness.session.prompt("consume context");
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "user", "assistant"]);
+		expect(conversationMessages(harness.session).map((message) => message.role)).toEqual([
+			"custom",
+			"user",
+			"assistant",
+		]);
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
@@ -103,7 +107,7 @@ describe("AgentSession action contracts", () => {
 		expect(extensionCommandRuns).toBe(0);
 		expect(harness.session.getSteeringMessages()).toEqual(["/literal keep text"]);
 		expect(harness.session.getFollowUpMessages()).toEqual(["/compact"]);
-		expect(harness.session.messages).toEqual([]);
+		expect(conversationMessages(harness.session)).toEqual([]);
 
 		expect(harness.session.resumeQueuedWork()).toBe(true);
 		await harness.session.waitForIdle();

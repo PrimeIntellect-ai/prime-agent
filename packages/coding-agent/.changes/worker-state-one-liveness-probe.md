@@ -1,1 +1,0 @@
-- Fixed zombie processes being treated as live owners by the daemon supervisor ownership registry, session leases, supervisor launch locks, `daemon ps` process stops, and update-restart liveness checks; all process liveness probes now share the zombie-aware helper.

@@ -12,7 +12,7 @@ import {
 } from "../../../src/modes/interactive/components/injected-prompt-message.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../../../src/modes/interactive/theme/theme.js";
-import { createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
+import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type AddMessageToChatHost = {
 	addMessageToChat(
@@ -124,12 +124,12 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		await harness.session.promptHeartbeat(createHeartbeat());
 
 		expect(getUserTexts(harness)).toEqual([]);
-		expect(harness.session.messages[0]).toMatchObject({
+		expect(conversationMessages(harness.session)[0]).toMatchObject({
 			role: "custom",
 			customType: HEARTBEAT_PROMPT_CUSTOM_TYPE,
 			display: true,
 		});
-		expect(getMessageText(harness.session.messages[0])).toBe(
+		expect(getMessageText(conversationMessages(harness.session)[0])).toBe(
 			"Check whether the long-running task needs another step.",
 		);
 		expect(providerMessages.at(-1)).toMatchObject({ role: "user" });
