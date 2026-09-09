@@ -2,6 +2,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AgentFamilyRelationship } from "./agent-messages.js";
 
 export const AGENT_OBSERVE_SKILL_NAME = "agent-observe";
+/** Shared cap for the message previews carried by roster rows. */
+export const AGENT_OBSERVE_PREVIEW_MAX_CHARS = 240;
 export const AGENT_OBSERVE_IMPORT_NAME = "agent_observe";
 export const ORCHESTRATION_HEARTBEAT_SKILL_NAME = "orchestration-heartbeat";
 

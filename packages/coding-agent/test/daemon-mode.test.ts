@@ -29,7 +29,11 @@ import {
 	DEFAULT_AGENT_MESSAGE_MAX_CHARS,
 	sessionNameReservationKey,
 } from "../src/core/agent-messages.js";
-import type { AgentObserveController, AgentObserveListResult } from "../src/core/agent-observe.js";
+import {
+	AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+	type AgentObserveController,
+	type AgentObserveListResult,
+} from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -2160,7 +2164,14 @@ describe("daemon mode helpers", () => {
 			const handlers = createAgentMessageHostHandlers({ ...controller, family: async () => controller.family!() });
 			await expect(controller.family!()).resolves.toContainEqual({
 				relationship: "sibling",
-				entry: { id: "session-remote", name: "Remote", depth: 0, status: "idle", cwd: "/tmp/remote" },
+				entry: {
+					id: "session-remote",
+					name: "Remote",
+					depth: 0,
+					status: "idle",
+					cwd: "/tmp/remote",
+					activeSessionId: remoteSelector,
+				},
 			});
 			await expect(
 				handlers["agent_message.send"]!({
@@ -3135,6 +3146,16 @@ describe("daemon mode helpers", () => {
 				sessionPath: "/tmp/archivist.jsonl",
 				cwd: "/tmp/archivist",
 				messageCount: 3,
+				firstMessage: "x".repeat(1000),
+			},
+			{
+				id: "session-remote",
+				name: "peer",
+				depth: 0,
+				status: "running",
+				sessionPath: "/tmp/peer.jsonl",
+				cwd: "/tmp/peer",
+				activeSessionId: "remote-active",
 			},
 		]);
 
@@ -3154,6 +3175,22 @@ describe("daemon mode helpers", () => {
 				messageCount: 3,
 				queuedCount: 0,
 				isSessionActive: false,
+				firstMessage: "x".repeat(AGENT_OBSERVE_PREVIEW_MAX_CHARS),
+			},
+			{
+				activeSessionId: "remote-active",
+				relationship: "sibling",
+				sessionId: "session-remote",
+				sessionName: "peer",
+				runtimeKind: "top-level",
+				cwd: "/tmp/peer",
+				status: "running",
+				isCurrent: false,
+				isStreaming: false,
+				isCompacting: false,
+				attachedClients: 0,
+				queuedCount: 0,
+				isSessionActive: true,
 			},
 		]);
 	});
@@ -4398,7 +4435,8 @@ describe("daemon mode helpers", () => {
 					const controller = options.sessionOptions?.agentMessageController;
 					const result = await controller?.listAgents();
 					expect(result?.current?.activeSessionId).toBeTruthy();
-					// Resolves only when the family catalog contains the binding session itself.
+					// The catalog must resolve around the binding session, which is the selection
+					// origin and therefore never one of its own family members.
 					const family = await controller?.family?.();
 					expect(family?.some((member) => member.entry.id === session.sessionId)).toBe(false);
 					listedAgentsDuringBind++;

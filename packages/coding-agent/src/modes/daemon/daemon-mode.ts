@@ -53,6 +53,7 @@ import {
 	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
 import {
+	AGENT_OBSERVE_PREVIEW_MAX_CHARS,
 	type AgentObserveAgentSnapshot,
 	type AgentObserveAgentSummary,
 	type AgentObserveController,
@@ -3379,12 +3380,14 @@ export class AgentDaemon {
 	}
 
 	/**
-	 * Family member without a live session in this daemon: only persisted catalog
-	 * facts are known, so the runtime flags stay false and `activeSessionId` is absent.
+	 * Family member with no live session in this daemon: only catalog facts are known,
+	 * so the runtime flags stay false. A peer working in another worker keeps its
+	 * `activeSessionId` and its live status; everything else is absent or inactive.
 	 */
 	private createPersistedAgentObserveSummary(member: AgentFamilyMember): AgentObserveAgentSummary {
 		const entry = member.entry;
 		return {
+			...(entry.activeSessionId ? { activeSessionId: entry.activeSessionId } : {}),
 			sessionId: entry.id,
 			...(entry.name ? { sessionName: entry.name } : {}),
 			relationship: member.relationship,
@@ -3401,7 +3404,9 @@ export class AgentDaemon {
 			...(entry.repliedSinceTask !== undefined ? { repliedSinceTask: entry.repliedSinceTask } : {}),
 			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
 			...(entry.rlmChildId ? { rlmChildId: entry.rlmChildId } : {}),
-			...(entry.firstMessage ? { firstMessage: entry.firstMessage } : {}),
+			...(entry.firstMessage
+				? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) }
+				: {}),
 		};
 	}
 
@@ -3477,7 +3482,7 @@ export class AgentDaemon {
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 			...(latest
 				? {
-						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, 240),
+						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, AGENT_OBSERVE_PREVIEW_MAX_CHARS),
 					}
 				: {}),
 		};
@@ -5801,11 +5806,12 @@ export class AgentDaemon {
 					sessionPath: canonicalSessionPath(info.path),
 					cwd: info.cwd,
 					messageCount: info.messageCount,
-					firstMessage: info.firstMessage,
 				}),
 			);
 		const byId = new Map<string, AgentFamilyCatalogEntry>(savedRoots.map((entry) => [entry.id, entry]));
-		const addAgent = (agent: AgentSessionMessageAgentSummary) => {
+		// `remote` peers live in another worker: their active id stays routable, while a
+		// local summary's stand-in id for a passive child does not.
+		const addAgent = (agent: AgentSessionMessageAgentSummary, remote = false) => {
 			const depth = agent.rlmDepth ?? 0;
 			byId.set(agent.sessionId, {
 				id: agent.sessionId,
@@ -5825,10 +5831,11 @@ export class AgentDaemon {
 					: {}),
 				...(agent.sessionPath ? { sessionPath: canonicalSessionPath(agent.sessionPath) } : {}),
 				...(agent.rlmChildId ? { rlmChildId: agent.rlmChildId } : {}),
+				...(remote ? { activeSessionId: agent.activeSessionId } : {}),
 				cwd: agent.cwd,
 			});
 		};
-		for (const peer of remotePeers) addAgent(peer);
+		for (const peer of remotePeers) addAgent(peer, true);
 		for (const agent of localAgents) addAgent(agent);
 		for (const state of this.sessions.values()) {
 			const entry = byId.get(state.runtime.session.sessionId);

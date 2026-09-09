@@ -85,6 +85,8 @@ export interface AgentFamilyCatalogEntry {
 	sessionPath?: string;
 	cwd?: string;
 	rlmChildId?: string;
+	/** Set only for peers live in another worker; local rows read residency directly. */
+	activeSessionId?: string;
 	/** Persisted transcript facts; known only for entries read from disk. */
 	messageCount?: number;
 	firstMessage?: string;

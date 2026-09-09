@@ -8,8 +8,8 @@ description: Read-only roster and observation of an agent's parent, siblings, an
 Observe the current agent's nuclear family through the local daemon: parent,
 siblings, direct children, and self. `list_agents` is the one family roster and
 covers every member `agent_message.send` can reach. `get_agent` and
-`recent_messages` hydrate an inactive child before reading it, but they cannot
-read a root sibling held by another worker.
+`recent_messages` hydrate an inactive child before reading it. They cannot read
+a root sibling that has no live session in this worker.
 This skill is read-only: it can list family sessions, inspect one session, and fetch
 bounded recent message previews. It cannot prompt, steer, clear, kill, rename, or
 otherwise mutate another session.
@@ -32,9 +32,11 @@ if child is not None:
   nuclear family: parent, siblings, and direct children, active or not. Each
   agent carries `sessionId`, optional `sessionName`, `relationship`
   (`parent`/`sibling`/`child`), `status`, `isSessionActive`, and the counts and
-  latest message preview known for it. A member with no live session in this
-  worker has no `activeSessionId` and no live detail; use `relationship` and
-  `sessionName` to address it with `agent_message.send`. For direct children,
+  message previews known for it: `latestMessage` for a live session,
+  `firstMessage` for a member read from disk. A member with no live session has
+  no `activeSessionId` and no live detail; address it with `agent_message.send`
+  using its `relationship` plus its `sessionName`, or its `sessionId` when the
+  member has no name. For direct children,
   `await rlm.list_subagents()` also exposes parent-owned lifecycle handles.
 - `await agent_observe.get_agent(target)` returns `agent`, where `agent`
   contains one live agent summary. `target` is resolved like other live-session
