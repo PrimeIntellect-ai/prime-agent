@@ -31,7 +31,9 @@ const signature = stats => ({ size: stats.size, mtimeMs: stats.mtimeMs, ino: sta
 const equal = (a, b) => a.size === b.size && a.mtimeMs === b.mtimeMs && a.ino === b.ino && a.dev === b.dev;
 const header = body => {
   let parsed;
-  try { parsed = JSON.parse(body.subarray(0, body.indexOf(10) < 0 ? body.length : body.indexOf(10)).toString("utf8")); } catch {}
+  try { parsed = JSON.parse(body.subarray(0, body.indexOf(10) < 0 ? body.length : body.indexOf(10)).toString("utf8")); } catch {
+    // Invalid JSON is rejected by the shared header validation below.
+  }
   if (!record(parsed) || parsed.type !== "session" || typeof parsed.id !== "string" || typeof parsed.cwd !== "string" || typeof parsed.timestamp !== "string") throw new Error("invalid_session");
   return parsed;
 };
@@ -166,7 +168,9 @@ try {
  let value;
  if (process.platform === "win32") {
   let shell = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter(Boolean).map(root => root + "\\Git\\bin\\bash.exe").find(existsSync);
-  if (!shell) { try { shell = execFileSync("where", ["bash.exe"], options).trim().split(/\r?\n/).find(existsSync); } catch {} }
+  if (!shell) { try { shell = execFileSync("where", ["bash.exe"], options).trim().split(/\r?\n/).find(existsSync); } catch {
+    // Missing Git Bash falls back to the default shell below.
+  } }
   if (shell) value = execFileSync(shell, ["-c", command], options);
  }
  if (value === undefined) value = execSync(command, options);
