@@ -9,7 +9,7 @@ import {
 } from "../selection-metadata.js";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.js";
 import type { Component } from "../tui.js";
-import { applyBackgroundToLine, stripAnsi, visibleWidth, wrapTextWithAnsi } from "../utils.js";
+import { applyBackgroundToLine, sanitizeTerminalText, stripAnsi, visibleWidth, wrapTextWithAnsi } from "../utils.js";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -127,6 +127,33 @@ function pickMarkdownParser(text: string): Marked {
 	return text.includes("$") || text.includes("\\(") || text.includes("\\[") ? mathMarkdownParser : markdownParser;
 }
 
+const EXPLICIT_FILE_SCHEME_REGEX = /^\s*file:/i;
+const HREF_CONTROL_REGEX = /[\x00-\x1f\x7f-\x9f]/;
+const HREF_NON_ASCII_REGEX = /[^\x21-\x7e]/;
+
+/**
+ * Restrict OSC 8 targets to schemes a terminal can hand to the OS safely.
+ * `file:` is accepted only when this renderer produced it from a local path via
+ * `baseUrl` (never from an href the source spelled as `file:`, never with a host).
+ * Returns undefined when the link must fall back to plain-text rendering.
+ */
+function safeHyperlinkTarget(href: string, sourceHref: string, baseUrl: string | undefined): string | undefined {
+	if (HREF_CONTROL_REGEX.test(href) || !URL.canParse(href)) {
+		return undefined;
+	}
+	const url = new URL(href);
+	// OSC 8 payloads stay printable ASCII; the parser percent-encodes anything else.
+	const target = HREF_NON_ASCII_REGEX.test(href) ? url.href : href;
+	if (url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:") {
+		return target;
+	}
+	if (url.protocol === "file:") {
+		const rendererResolved = baseUrl !== undefined && !EXPLICIT_FILE_SCHEME_REGEX.test(sourceHref);
+		return rendererResolved && url.host === "" ? target : undefined;
+	}
+	return undefined;
+}
+
 /**
  * Default text styling for markdown content.
  * Applied to all text unless overridden by markdown formatting.
@@ -204,7 +231,10 @@ export class Markdown implements Component {
 		defaultTextStyle?: DefaultTextStyle,
 		options?: MarkdownOptions,
 	) {
-		this.text = text;
+		// Markdown sources are untrusted (model output, tool text, files), so control
+		// sequences are neutralized once here, before parsing or any transform adds
+		// renderer-owned styling. Per-frame rendering never re-scans.
+		this.text = sanitizeTerminalText(text);
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 		this.theme = theme;
@@ -213,7 +243,7 @@ export class Markdown implements Component {
 	}
 
 	setText(text: string): void {
-		this.text = text;
+		this.text = sanitizeTerminalText(text);
 		// Only the whole-result cache is dropped; the per-block cache stays so a
 		// streaming append re-renders just the blocks that actually changed.
 		this.cachedText = undefined;
@@ -612,15 +642,8 @@ export class Markdown implements Component {
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLink = this.theme.link(this.theme.underline(linkText));
-					if (getCapabilities().hyperlinks) {
-						// A Windows drive letter is a file path, not a URL scheme.
-						const target = token.href.replace(/^([a-z]:[\\/])/i, "file:///$1");
-						const href =
-							!target.startsWith("#") &&
-							(this.options.baseUrl || target !== token.href) &&
-							URL.canParse(target, this.options.baseUrl)
-								? new URL(target, this.options.baseUrl).href
-								: target;
+					const href = getCapabilities().hyperlinks ? this.resolveHyperlinkTarget(token.href) : undefined;
+					if (href !== undefined) {
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
 						// so we always show only the link text regardless of whether it matches href.
 						result += hyperlink(styledLink, href) + stylePrefix;
@@ -666,6 +689,19 @@ export class Markdown implements Component {
 		}
 
 		return result;
+	}
+
+	/** Resolve a link href to an allowlisted OSC 8 target, or undefined to render the URL as text. */
+	private resolveHyperlinkTarget(sourceHref: string): string | undefined {
+		// A Windows drive letter is a file path, not a URL scheme.
+		const target = sourceHref.replace(/^([a-z]:[\\/])/i, "file:///$1");
+		const href =
+			!target.startsWith("#") &&
+			(this.options.baseUrl || target !== sourceHref) &&
+			URL.canParse(target, this.options.baseUrl)
+				? new URL(target, this.options.baseUrl).href
+				: target;
+		return safeHyperlinkTarget(href, sourceHref, this.options.baseUrl);
 	}
 
 	/**

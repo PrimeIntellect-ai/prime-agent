@@ -10,6 +10,7 @@ import {
 	type Rgb,
 	setDefaultTerminalColors,
 } from "./terminal-colors.js";
+import { sanitizeTerminalText } from "./utils.js";
 
 const cjsRequire = createRequire(import.meta.url);
 
@@ -585,8 +586,9 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setTitle(title: string): void {
-		// OSC 0;title BEL - set terminal window title
-		process.stdout.write(`\x1b]0;${title}\x07`);
+		// OSC 0;title BEL - set terminal window title. Titles derive from session
+		// names, so control bytes must not be able to terminate the OSC early.
+		process.stdout.write(`\x1b]0;${sanitizeTerminalText(title)}\x07`);
 	}
 
 	setProgress(active: boolean): void {

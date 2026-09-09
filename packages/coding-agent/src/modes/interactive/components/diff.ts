@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import * as Diff from "diff";
 import { highlightCode, theme } from "../theme/theme.js";
 
@@ -78,7 +78,7 @@ export interface RenderDiffOptions {
  * - Added lines: green, with inverse on changed tokens
  */
 export function renderDiff(diffText: string, _options: RenderDiffOptions = {}): string {
-	const lines = diffText.split("\n");
+	const lines = sanitizeTerminalText(diffText).split("\n");
 	const result: string[] = [];
 
 	let i = 0;
@@ -233,7 +233,7 @@ export function renderRichDiff(diffText: string, contentWidth: number, options: 
 	const useBlocks = theme.colorMode === "truecolor";
 	const rows: string[] = [];
 
-	for (const rawLine of diffText.split("\n")) {
+	for (const rawLine of sanitizeTerminalText(diffText).split("\n")) {
 		const parsed = parseDiffLine(rawLine);
 		if (!parsed) {
 			rows.push(

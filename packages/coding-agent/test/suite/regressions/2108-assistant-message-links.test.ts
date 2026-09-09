@@ -41,7 +41,6 @@ describe("assistant Markdown file links", () => {
 
 	test.each([
 		["audit-out/report.md", reportUrl],
-		["#overview", "#overview"],
 		["./audit-out/report.md", reportUrl],
 		["../report.md", pathToFileURL(resolve(cwd, "../report.md")).href],
 		["/tmp/report.md", pathToFileURL("/tmp/report.md").href],
@@ -49,7 +48,6 @@ describe("assistant Markdown file links", () => {
 		["audit-out/my%20report.md", pathToFileURL(resolve(cwd, "audit-out/my report.md")).href],
 		["audit-out/report%23draft%25.md", pathToFileURL(resolve(cwd, "audit-out/report#draft%.md")).href],
 		["audit-out/report.md#findings", `${reportUrl}#findings`],
-		["file:///tmp/report.md", "file:///tmp/report.md"],
 		["C:/repo/report.md", "file:///C:/repo/report.md"],
 		[String.raw`C:\repo\report.md`, "file:///C:/repo/report.md"],
 		["<D:/repo/my report.md>", "file:///D:/repo/my%20report.md"],
@@ -57,7 +55,6 @@ describe("assistant Markdown file links", () => {
 		["https://example.com/report?q=1#findings", "https://example.com/report?q=1#findings"],
 		["http://example.com/report", "http://example.com/report"],
 		["mailto:reader@example.com", "mailto:reader@example.com"],
-		["https://[invalid", "https://[invalid"],
 	])("resolves %s without changing the label", (href, expected) => {
 		const component = new AssistantMessageComponent(
 			{ ...message, content: [{ type: "text", text: `[Audit report](${href})` }] },
@@ -70,6 +67,25 @@ describe("assistant Markdown file links", () => {
 		expect(linkTargets(lines)).toEqual([expected]);
 		expect(stripAnsi(lines.join("\n")).trim()).toBe("Audit report");
 	});
+
+	// ENG-5344: OSC 8 targets are allowlisted (http, https, mailto, and file only
+	// when resolved from a local path via the session cwd). Anything else renders
+	// like a terminal without hyperlink support.
+	test.each(["#overview", "file:///tmp/report.md", "https://[invalid", "javascript:alert(1)"])(
+		"shows %s as text instead of an OSC 8 target",
+		(href) => {
+			const component = new AssistantMessageComponent(
+				{ ...message, content: [{ type: "text", text: `[Audit report](${href})` }] },
+				false,
+				undefined,
+				undefined,
+				{ cwd },
+			);
+			const lines = component.render(80);
+			expect(linkTargets(lines)).toEqual([]);
+			expect(stripAnsi(lines.join("\n")).trim()).toBe(`Audit report (${href})`);
+		},
+	);
 
 	test.each(["addMessageToChat", "startAssistantStreamingMessage"] as const)(
 		"%s uses the attached session cwd and produces an openable target",

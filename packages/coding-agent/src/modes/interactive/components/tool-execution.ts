@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type Component, Container, Image, Text, type TUI } from "@earendil-works/pi-tui";
+import { type Component, Container, Image, sanitizeTerminalText, Text, type TUI } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.js";
 import type { KernelSentAgentMessage } from "../../../core/kernel/index.js";
 import { createBashToolDefinition } from "../../../core/tools/bash.js";
@@ -507,7 +507,8 @@ export class ToolExecutionComponent extends Container {
 
 	private formatToolExecution(): string {
 		const parts: string[] = [];
-		const content = JSON.stringify(this.args, null, 2);
+		// JSON.stringify escapes C0 controls but leaves DEL and C1 controls intact.
+		const content = sanitizeTerminalText(JSON.stringify(this.args, null, 2) ?? "");
 		if (content) {
 			parts.push(content);
 		}

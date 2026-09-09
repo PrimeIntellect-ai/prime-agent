@@ -1,5 +1,6 @@
 import {
 	type Component,
+	sanitizeTerminalText,
 	truncateToWidth,
 	VersionedRenderCache,
 	visibleWidth,
@@ -132,7 +133,7 @@ export function getIpythonCodeFromArgs(args: unknown): string {
 		return "";
 	}
 	const code = (args as { code?: unknown }).code;
-	return typeof code === "string" ? code : "";
+	return typeof code === "string" ? sanitizeTerminalText(code) : "";
 }
 
 function readDetails(details: unknown): IpythonDetails {
@@ -211,7 +212,7 @@ function readDiffDisplays(value: unknown): DiffDisplay[] | undefined {
 		}
 		return [
 			{
-				path: record.path,
+				path: sanitizeTerminalText(record.path),
 				oldStr: record.oldStr,
 				newStr: record.newStr,
 				startLine: typeof record.startLine === "number" ? record.startLine : undefined,
@@ -268,10 +269,12 @@ function readErrorDetails(value: unknown): IpythonErrorDetails | undefined {
 		return undefined;
 	}
 	return {
-		ename: record.ename,
+		ename: sanitizeTerminalText(record.ename),
 		evalue: typeof record.evalue === "string" ? record.evalue : "",
 		traceback: Array.isArray(record.traceback)
-			? record.traceback.filter((line): line is string => typeof line === "string")
+			? record.traceback
+					.filter((line): line is string => typeof line === "string")
+					.map((line) => normalizeErrorDetails(line))
 			: [],
 	};
 }
@@ -333,17 +336,23 @@ function formatIpythonErrorSummary(error: IpythonErrorDetails): string {
 	return visibleWidth(value) <= 48 ? `${error.ename}: ${value}` : error.ename;
 }
 
+// Model-written code is untrusted; sanitize once per state update, not per render.
+function sanitizeState(state: IPythonCellState): IPythonCellState {
+	const code = sanitizeTerminalText(state.code);
+	return code === state.code ? state : { ...state, code };
+}
+
 export class IPythonCellComponent implements Component {
 	private readonly renderCache = new VersionedRenderCache();
 	private state: IPythonCellState;
 	private stateVersion = 0;
 
 	constructor(state: IPythonCellState) {
-		this.state = state;
+		this.state = sanitizeState(state);
 	}
 
 	update(state: IPythonCellState): void {
-		this.state = state;
+		this.state = sanitizeState(state);
 		this.stateVersion += 1;
 	}
 
