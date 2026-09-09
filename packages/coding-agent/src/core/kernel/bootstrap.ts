@@ -905,7 +905,7 @@ async function kernelReady(
 function formatBootstrapFailure(error: unknown): Error {
 	return new Error(
 		`Failed to set up the Python kernel runtime. ${errorMessage(error)}\n` +
-			"First-time setup needs internet to install uv, Python, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. " +
+			"First-time setup needs internet to install uv, Python, prime-agent-runtime, and default Python packages; once set up, preme-agent runs offline. " +
 			"An interrupted runtime upgrade needs network once more, so re-run this while online. " +
 			"Set SUPREME_AGENT_KERNEL_PYTHON to a Python with a current prime-agent-runtime and default Python packages installed to skip auto-bootstrap.",
 	);

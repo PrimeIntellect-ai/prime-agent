@@ -1,7 +1,7 @@
 <!--
 Pull requests are accepted from maintainers and vouched contributors only.
 If a maintainer has not invited this work, start with a GitHub Discussion:
-https://github.com/PrimeIntellect-ai/prime-agent/discussions
+https://github.com/PrimeIntellect-ai/preme-agent/discussions
 -->
 
 ## Context
