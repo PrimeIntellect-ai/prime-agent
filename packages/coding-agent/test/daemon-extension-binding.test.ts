@@ -18,6 +18,7 @@ import { createAgentConnectionState } from "../src/modes/agent-connection/snapsh
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { bindActiveSessionState } from "../src/modes/daemon/daemon-extension-binding.js";
 import type { DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
+import { conversationMessages } from "./suite/harness.js";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {
@@ -248,7 +249,7 @@ describe("daemon extension binding", () => {
 				message.type === "session_replaced",
 		);
 		expect(replaced?.state.recap).toBeUndefined();
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
+		expect(conversationMessages(runtime.session).map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:daemon replacement message",
 			"assistant:replacement reply",
 		]);
