@@ -194,6 +194,8 @@ On reload, the aggregate is reapplied to the parent message. Context-tree report
 
 `rlm.harness` is a persisted state ledger for prompt notes, memories, reusable skill descriptions, sub-agent specifications, and refinement events. It is not a second execution engine.
 
+Entries are written with three calls: `rlm.harness.create(title, content, kind=...)`, `rlm.harness.update(id, title, content, kind=...)`, and `rlm.harness.delete(id, kind=...)`. `kind` is `prompt`, `memory`, `skill`, or `subagent` and defaults to `memory`; `topic=` groups entries; only skill entries accept `reference=` and `arguments=`.
+
 Session-local state lives in the session artifact directory under `harness/harness_state.json`. Explicitly global entries live under `~/.prime/agent/harness/`. The Python store reloads after external modification so host-side `/refine` writes and kernel writes do not overwrite each other.
 
 `/refine` runs a dedicated review over the current trajectory and applies small create/update/delete edits. Rollback uses recorded before/after snapshots. The base system prompt remains immutable; refinements are supplemental state.

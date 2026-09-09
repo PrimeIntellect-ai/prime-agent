@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -129,7 +138,7 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 				id,
 				title: `${kind} title`,
 				content: `${kind} content`,
-				path: `${kind}/path`,
+				topic: `${kind}/topic`,
 				...skillArguments,
 				metadata: { seeded: true },
 			},
@@ -236,7 +245,7 @@ describe("harness refinement", () => {
 					id: `${kind}_entry`,
 					title: `${kind} title`,
 					content: `${kind} content`,
-					path: `${kind}/created`,
+					topic: `${kind}/created`,
 					...(kind === "skill"
 						? {
 								reference: skillReference,
@@ -260,7 +269,7 @@ describe("harness refinement", () => {
 				kind,
 				title: `${kind} title`,
 				content: `${kind} content`,
-				path: `${kind}/created`,
+				topic: `${kind}/created`,
 				metadata: { kind },
 				source: "refine",
 				version: 1,
@@ -278,7 +287,7 @@ describe("harness refinement", () => {
 					id: `${kind}_entry`,
 					title: `${kind} title updated`,
 					content: `${kind} content updated`,
-					path: `${kind}/updated`,
+					topic: `${kind}/updated`,
 					...(kind === "skill"
 						? {
 								reference: skillReference,
@@ -302,7 +311,7 @@ describe("harness refinement", () => {
 			expect(state.entries[kind][`${kind}_entry`]).toMatchObject({
 				title: `${kind} title updated`,
 				content: `${kind} content updated`,
-				path: `${kind}/updated`,
+				topic: `${kind}/updated`,
 				metadata: { updated: kind },
 				version: 2,
 			});
@@ -348,7 +357,7 @@ describe("harness refinement", () => {
 						id: "target_env_validation",
 						title: "Target environment validation",
 						content: "Run checks through the target repository environment.",
-						path: "validation",
+						topic: "validation",
 					},
 					{
 						action: "create",
@@ -411,7 +420,7 @@ describe("harness refinement", () => {
 		expect(state.refinements.map((event) => event.id)).toEqual(["refine_1", "refine_2"]);
 	});
 
-	it("creates ids from titles and uses default path and metadata when omitted", () => {
+	it("creates ids from titles and uses default topic and metadata when omitted", () => {
 		const state = loadHarnessState(makeTempDir());
 
 		const result = applyRefinementProposal(
@@ -441,7 +450,7 @@ describe("harness refinement", () => {
 			id: "native_check",
 			after: {
 				id: "native_check",
-				path: "general",
+				topic: "general",
 				reference: {
 					type: "python",
 					import: "agent_skills.native_check",
@@ -665,6 +674,36 @@ describe("harness refinement", () => {
 			trigger: "Add prompt note",
 			changes: ["create prompt:focused_edits"],
 		});
+	});
+
+	it("loads entries saved before the rename and resaves the grouping as topic", () => {
+		const dir = makeTempDir();
+		writeFileSync(
+			getHarnessStatePath(dir),
+			JSON.stringify({
+				schema: 1,
+				entries: {
+					memory: {
+						legacy: {
+							id: "legacy",
+							kind: "memory",
+							title: "Legacy",
+							content: "Saved before the rename.",
+							path: "repo/testing",
+						},
+					},
+				},
+			}),
+			"utf8",
+		);
+
+		const state = loadHarnessState(dir, "local");
+		expect(state.entries.memory.legacy.topic).toBe("repo/testing");
+
+		saveHarnessState(dir, state);
+		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8")).entries.memory.legacy;
+		expect(saved.topic).toBe("repo/testing");
+		expect(saved.path).toBeUndefined();
 	});
 
 	it.each(["not json at all", "null", "[]", '"a string"', "123"])(
@@ -1139,7 +1178,7 @@ describe("harness refinement", () => {
 					id: "kept_memory",
 					title: "Updated memory",
 					content: "Updated memory content",
-					path: "updated/path",
+					topic: "updated/topic",
 					metadata: { updated: true },
 				},
 				{
@@ -1170,14 +1209,14 @@ describe("harness refinement", () => {
 		expect(state.entries.memory.kept_memory).toMatchObject({
 			title: "memory title",
 			content: "memory content",
-			path: "memory/path",
+			topic: "memory/topic",
 			metadata: { seeded: true },
 			version: 3,
 		});
 		expect(state.entries.skill.deleted_skill).toMatchObject({
 			title: "skill title",
 			content: "skill content",
-			path: "skill/path",
+			topic: "skill/topic",
 			reference: skillReference,
 			arguments: { input: { type: "string", required: true, description: "Task input" } },
 			metadata: { seeded: true },
@@ -1254,7 +1293,7 @@ describe("global refinement history", () => {
 						kind: "memory",
 						title: "Legacy global memory",
 						content: "created globally",
-						path: "general",
+						topic: "general",
 						scope: "global",
 						reference: {},
 						arguments: {},

@@ -11,7 +11,7 @@ function editableEntry(entry: HarnessEntry): Record<string, unknown> {
 	return {
 		title: entry.title,
 		content: entry.content,
-		path: entry.path,
+		topic: entry.topic,
 		reference: entry.reference,
 		arguments: entry.arguments,
 		metadata: entry.metadata,
@@ -22,7 +22,7 @@ function proposedEntry(edit: AppliedRefinementEdit): Record<string, unknown> {
 	return {
 		...(edit.title === undefined ? {} : { title: edit.title }),
 		...(edit.content === undefined ? {} : { content: edit.content }),
-		...(edit.path === undefined ? {} : { path: edit.path }),
+		...(edit.topic === undefined ? {} : { topic: edit.topic }),
 		...(edit.reference === undefined ? {} : { reference: edit.reference }),
 		...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
 		...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
