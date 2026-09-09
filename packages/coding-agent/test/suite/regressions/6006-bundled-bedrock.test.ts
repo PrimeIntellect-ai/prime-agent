@@ -257,8 +257,9 @@ registerHooks({
 		expect(stdout).not.toContain("Cannot find module");
 		expect(requests).toHaveLength(1);
 		expect(requests[0]).toMatchObject({ method: "POST", path: "/model/amazon.nova-2-lite-v1%3A0/converse-stream" });
-		expect(JSON.parse(requests[0]!.body)).toMatchObject({
-			messages: [{ role: "user", content: [{ text: "Reply OK" }] }],
+		expect(JSON.parse(requests[0]!.body).messages.at(-1)).toEqual({
+			role: "user",
+			content: [{ text: "Reply OK" }],
 		});
 		const messages = stdout
 			.trim()
