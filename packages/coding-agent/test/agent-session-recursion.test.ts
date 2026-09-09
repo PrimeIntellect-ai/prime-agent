@@ -38,6 +38,7 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 import type { BashOperations } from "../src/core/tools/bash.js";
 import { type ActiveSessionState, resolveActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import { getMessageText } from "./suite/harness.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -849,7 +850,10 @@ describe("AgentSession rlm recursion", () => {
 			}),
 		]);
 		const child = root.getRlmChildSession(result.rlm_child_id);
-		expect(child?.messages[0]).toMatchObject({
+		expect(getMessageText(child?.messages[0])).toContain(
+			"The persistent memories produced across this session so far:",
+		);
+		expect(child?.messages[1]).toMatchObject({
 			role: "custom",
 			customType: "agent_message",
 			content: "[task from parent]\n\nsummarize shard 1",
@@ -4811,7 +4815,7 @@ describe("AgentSession RLM session dir", () => {
 		expect(env.RLM_HARNESS_STATE_DIR).toBe(join(ephemeralDir, "harness"));
 	});
 
-	it("loads the ephemeral RLM harness path into the host system prompt", () => {
+	it("loads the ephemeral RLM harness path into the session-start harness digest", () => {
 		const ephemeralDir = join(tempDir, "ephemeral-rlm");
 		mkdirSync(join(ephemeralDir, "harness"), { recursive: true });
 		writeFileSync(
@@ -4846,10 +4850,11 @@ describe("AgentSession RLM session dir", () => {
 		);
 		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
 
-		const prompt = root.systemPrompt;
+		const digest = (root as unknown as { _harnessDigest(): string })._harnessDigest();
 
-		expect(prompt).toContain("Ephemeral note");
-		expect(prompt).toContain("Loaded from the RLM session harness path.");
+		expect(root.systemPrompt).not.toContain("Ephemeral note");
+		expect(digest).toContain("Ephemeral note");
+		expect(digest).toContain("Loaded from the RLM session harness path.");
 	});
 
 	it("exports the configured agentDir to the kernel so skills find auth.json", () => {

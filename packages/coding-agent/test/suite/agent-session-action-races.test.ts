@@ -2,7 +2,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CustomMessage } from "../../src/core/messages.js";
 import type { ActionStore, SessionAction } from "../../src/core/session-action-store.js";
-import { createHarness, getMessageText, getUserTexts, type Harness } from "./harness.js";
+import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
 type ActionKind = "turn" | "command";
@@ -255,7 +255,7 @@ describe("AgentSession action commit-fence races", () => {
 		await yieldToEventLoop();
 
 		expect(internals._actionStore.unfinishedActions()[0]?.lifecycle.state).toBe("selected");
-		expect(harness.session.messages).toEqual([]);
+		expect(conversationMessages(harness.session)).toEqual([]);
 
 		refineGate.resolve();
 		await command;
@@ -325,7 +325,11 @@ describe("AgentSession action commit-fence races", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			(context) => {
-				deliveredMessages.push(...context.messages.map(getMessageText));
+				deliveredMessages.push(
+					...context.messages
+						.map(getMessageText)
+						.filter((text) => !text.startsWith("The persistent memories produced across this session so far:")),
+				);
 				return fauxAssistantMessage("done");
 			},
 		]);
