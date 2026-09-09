@@ -1027,12 +1027,24 @@ describe("ENG-4603 worker recovery convergence", () => {
 
 	it("shutdown --force removes hidden supervisors and workers through the public CLI", async () => {
 		if (process.platform === "win32") return;
+		const unrelatedPaths = await createPaths();
+		const unrelated = spawnSupervisor(unrelatedPaths);
+		await waitForType(unrelated, "booted");
+		unrelated.child.send({ type: "go" });
+		await waitForType(unrelated, "ready", 60_000);
+		const unrelatedProbe = await connectEventually(unrelatedPaths.socketPath);
+		const unrelatedPid = (await unrelatedProbe.waitForHello(2000)).supervisorPid;
+		unrelatedProbe.close();
+		if (!unrelatedPid) throw new Error("Unrelated supervisor did not expose its pid");
+		const unrelatedStartId = getProcessStartId(unrelatedPid);
 		const paths = await createPaths();
 		const predecessor = spawnSupervisor(paths);
 		await waitForType(predecessor, "booted");
 		predecessor.child.send({ type: "go" });
 		await waitForType(predecessor, "ready", 60_000);
 		const client = await connectEventually(paths.socketPath);
+		const predecessorPid = (await client.waitForHello(2000)).supervisorPid;
+		if (!predecessorPid) throw new Error("Predecessor supervisor did not expose its pid");
 		const session = await createResidentSession(client, paths.agentDir);
 		const workerPid = session.workerPid;
 		if (!workerPid) throw new Error("Resident worker did not expose its pid");
@@ -1045,27 +1057,58 @@ describe("ENG-4603 worker recovery convergence", () => {
 		await waitForType(successor, "booted");
 		successor.child.send({ type: "go" });
 		await waitForType(successor, "ready", 60_000);
+		const successorProbe = await connectEventually(paths.socketPath);
+		const successorPid = (await successorProbe.waitForHello(2000)).supervisorPid;
+		successorProbe.close();
+		if (!successorPid) throw new Error("Successor supervisor did not expose its pid");
 		const successorStartId = getProcessStartId(successor.child.pid!);
 		client.close();
 		const systemLsofPath = spawnSync("which", ["lsof"], { encoding: "utf8" }).stdout.trim();
 		if (!systemLsofPath) throw new Error("Could not locate lsof for the shutdown regression");
 		const lsofPath = join(paths.agentDir, "lsof");
-		writeFileSync(lsofPath, '#!/bin/sh\nexec "$ENG_4603_SYSTEM_LSOF" -nP -F pn -U -a -p "$ENG_4603_LSOF_PIDS"\n', {
-			mode: 0o700,
-		});
-		const lsofEnvironment = {
-			ENG_4603_LSOF_PIDS: `${predecessor.child.pid},${successor.child.pid},${workerPid}`,
+		writeFileSync(
+			lsofPath,
+			'#!/bin/sh\nexec "$ENG_4603_SYSTEM_LSOF" -nP -F pn -U -a -p "$ENG_4603_LISTENER_PIDS"\n',
+			{
+				mode: 0o700,
+			},
+		);
+		// Linux prefers ss over lsof; both discovery paths must stay inside this fixture.
+		const systemSsPath = spawnSync("which", ["ss"], { encoding: "utf8" }).stdout.trim();
+		writeFileSync(
+			join(paths.agentDir, "ss"),
+			[
+				"#!/bin/sh",
+				'[ -n "$ENG_4603_SYSTEM_SS" ] || exit 1',
+				'listeners=$("$ENG_4603_SYSTEM_SS" "$@") || exit $?',
+				`printf '%s\\n' "$listeners" | awk -v pids="$ENG_4603_LISTENER_PIDS" '`,
+				'BEGIN { count = split(pids, allowed, ",") }',
+				'{ for (i = 1; i <= count; i++) if (index($0, "pid=" allowed[i] ",")) { print; next } }',
+				"'",
+				"",
+			].join("\n"),
+			{ mode: 0o700 },
+		);
+		const listenerEnvironment = {
+			ENG_4603_LISTENER_PIDS: [
+				predecessor.child.pid,
+				predecessorPid,
+				successor.child.pid,
+				successorPid,
+				workerPid,
+			].join(","),
 			ENG_4603_SYSTEM_LSOF: systemLsofPath,
+			ENG_4603_SYSTEM_SS: systemSsPath,
 			PATH: `${paths.agentDir}:${process.env.PATH ?? ""}`,
 		};
 		const listenersBeforeShutdown = spawnSync(lsofPath, [], {
 			encoding: "utf8",
-			env: { ...process.env, ...lsofEnvironment },
+			env: { ...process.env, ...listenerEnvironment },
 		}).stdout;
 		expect(listenersBeforeShutdown).toContain(`p${predecessor.child.pid}`);
 		expect(listenersBeforeShutdown).toContain(`p${successor.child.pid}`);
 
-		const shutdown = await runCli(paths, ["shutdown", "--force", "--json"], 60_000, lsofEnvironment);
+		const shutdown = await runCli(paths, ["shutdown", "--force", "--json"], 60_000, listenerEnvironment);
 		expect(shutdown.code).toBe(0);
 		const shutdownResult = JSON.parse(shutdown.stdout) as { stopped: unknown[]; failed: unknown[] };
 		const survivingIdentities = [
@@ -1084,6 +1127,7 @@ describe("ENG-4603 worker recovery convergence", () => {
 		expect(exactProcessIsAlive(predecessor.child.pid!, predecessorStartId)).toBe(false);
 		expect(exactProcessIsAlive(successor.child.pid!, successorStartId)).toBe(false);
 		expect(exactProcessIsAlive(workerPid, workerStartId)).toBe(false);
+		expect(exactProcessIsAlive(unrelatedPid, unrelatedStartId)).toBe(true);
 
 		const contracts = [
 			{ args: ["status", "--json"], json: [] },
@@ -1091,16 +1135,19 @@ describe("ENG-4603 worker recovery convergence", () => {
 			{ args: ["shutdown", "--force", "--json"], json: { stopped: [], failed: [] } },
 		];
 		for (const contract of contracts) {
-			const result = await runCli(paths, contract.args, 60_000, lsofEnvironment);
+			const result = await runCli(paths, contract.args, 60_000, listenerEnvironment);
 			if (result.code !== 0) {
 				throw new Error(`${contract.args.join(" ")} exited ${result.code}: ${result.stderr}`);
 			}
 			expect(JSON.parse(result.stdout)).toEqual(contract.json);
 		}
 		for (const args of [["status"], ["doctor", "--fix"], ["shutdown", "--force"]]) {
-			const result = await runCli(paths, args, 60_000, lsofEnvironment);
+			const result = await runCli(paths, args, 60_000, listenerEnvironment);
 			expect(result.code).toBe(0);
 			expect(result.stdout).toBe("No background services found.\n");
 		}
+		const unrelatedClient = await connectEventually(unrelatedPaths.socketPath);
+		expect((await unrelatedClient.waitForHello(2000)).supervisorPid).toBe(unrelatedPid);
+		unrelatedClient.close();
 	}, 150_000);
 });
