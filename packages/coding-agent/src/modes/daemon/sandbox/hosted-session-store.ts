@@ -396,6 +396,26 @@ function isValidInputDraftTransaction(payload: Uint8Array): boolean {
 	return true;
 }
 
+function isValidCanonicalSealedTransaction(payload: Uint8Array): boolean {
+	if (payload.byteLength !== V5_TRANSACTION_SIZE || rangeIsZero(payload, 96, 128)) return false;
+	const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+	const planPayloadLength = view.getUint32(160, false);
+	if (planPayloadLength === 0 || planPayloadLength > V5_MAX_PLAN_PAYLOAD) return false;
+	const contentLength = view.getBigUint64(164, false);
+	if (contentLength > V5_MAX_CONTENT || !rangeIsZero(payload, 172, 176)) return false;
+	if (payload[176] !== 1 || !rangeIsZero(payload, 177, 180)) return false;
+	const planLength = BigInt(planPayloadLength);
+	const planCommitted = view.getBigUint64(180, false);
+	const contentCommitted = view.getBigUint64(188, false);
+	if (planCommitted !== planLength || contentCommitted !== contentLength) return false;
+	if (!rangeIsZero(payload, 196, 204) || view.getBigUint64(204, false) !== U64_NONE) return false;
+	if (!rangeIsZero(payload, 212, 216) || view.getBigUint64(216, false) !== 0n) return false;
+	if (!rangeIsZero(payload, 320, 384)) return false;
+	if (view.getUint32(384, false) !== U32_NONE || view.getUint32(388, false) !== U32_NONE) return false;
+	if (view.getBigUint64(392, false) !== V5_RESERVATION || payload[400] !== 0) return false;
+	return true;
+}
+
 function zeroReadonlyList(values: readonly Uint8Array[]): void {
 	for (let index = 0; index < values.length; index += 1) zeroBytes(values[index]);
 }
@@ -1180,7 +1200,7 @@ class HelperOwner {
 				const previous = pending.payloads.length === 0 ? undefined : pending.payloads[pending.payloads.length - 1];
 				if (
 					pending.payloads.length >= V5_MAX_ITEMS ||
-					!isValidInputDraftTransaction(payload) ||
+					(!isValidInputDraftTransaction(payload) && !isValidCanonicalSealedTransaction(payload)) ||
 					(previous !== undefined && compareLifecyclePrefix(previous, payload) >= 0)
 				) {
 					zeroBytes(payload);
