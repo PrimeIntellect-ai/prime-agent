@@ -52,10 +52,15 @@ export function supportsServiceTier<TApi extends Api>(model: Model<TApi>, tier: 
 	const openaiResponses = model.provider === "openai" && model.api === "openai-responses";
 	const codexResponses = model.provider === "openai-codex" && model.api === "openai-codex-responses";
 	if (!openaiResponses && !codexResponses) return false;
-	// "auto" defers the tier choice to OpenAI and is valid for every model there.
-	if (tier === "auto") return true;
+	// "auto" defers the tier choice to OpenAI and is valid for every model there;
+	// "scale" is entitlement-gated, so pass it through for callers that have it.
+	if (tier === "auto" || tier === "scale") return true;
 	const eligibleId =
-		model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-");
+		model.id === "gpt-5.4" ||
+		model.id === "gpt-5.5" ||
+		model.id === "gpt-5.6" ||
+		model.id === "gpt-6-astra" ||
+		model.id.startsWith("gpt-5.6-");
 	if (tier === "priority") return eligibleId;
 	// Flex processing is an API-key feature; the ChatGPT (Codex OAuth) backend has no flex tier.
 	return tier === "flex" && eligibleId && openaiResponses;

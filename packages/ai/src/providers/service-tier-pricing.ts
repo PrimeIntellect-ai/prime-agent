@@ -5,7 +5,7 @@ import type { ServiceTier, Usage } from "../types.js";
  * and completions streaming paths so the multiplier table has one owner.
  * Multipliers per https://developers.openai.com/api/docs/pricing (retrieved 2026-08-21).
  */
-export function getServiceTierCostMultiplier(modelId: string, serviceTier: ServiceTier | undefined): number {
+function getServiceTierCostMultiplier(modelId: string, serviceTier: ServiceTier | undefined): number {
 	switch (serviceTier) {
 		case "flex":
 			return 0.5;

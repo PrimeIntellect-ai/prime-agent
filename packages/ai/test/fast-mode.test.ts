@@ -19,7 +19,7 @@ function model(provider: string, id: string, api: Api): Model<Api> {
 }
 
 describe("Fast mode", () => {
-	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-luna"])("supports %s through ChatGPT auth", (id) => {
+	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-luna", "gpt-6-astra"])("supports %s through ChatGPT auth", (id) => {
 		expect(supportsFastMode(model("openai-codex", id, "openai-codex-responses"))).toBe(true);
 	});
 
@@ -57,5 +57,7 @@ describe("Service tier support", () => {
 		expect(clampServiceTier(undefined, "priority")).toBe("default");
 		expect(clampServiceTier(model("openai", "gpt-5.5", "openai-responses"), "flex")).toBe("flex");
 		expect(clampServiceTier(model("groq", "llama-4", "openai-completions"), "default")).toBe("default");
+		// "scale" is entitlement-gated on OpenAI surfaces and must pass through unclamped.
+		expect(clampServiceTier(model("openai", "gpt-4o", "openai-responses"), "scale")).toBe("scale");
 	});
 });

@@ -50,6 +50,23 @@ describe("ENG-4620 fast mode settings", () => {
 		expect(nextSession.serviceTier).toBe("default");
 	});
 
+	it("keeps the saved default when a requested tier is clamped for the current model", async () => {
+		harness = await createHarness({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			models: [{ id: "gpt-5.4" }],
+		});
+
+		harness.session.setServiceTier("priority");
+		expect(harness.settingsManager.getDefaultServiceTier()).toBe("priority");
+
+		// Codex OAuth has no flex tier: the session clamps to default, but the
+		// saved default must not be stomped by the clamped value.
+		harness.session.setServiceTier("flex");
+		expect(harness.session.serviceTier).toBe("default");
+		expect(harness.settingsManager.getDefaultServiceTier()).toBe("priority");
+	});
+
 	it("persists a flex tier session entry and restores it on resume", async () => {
 		harness = await createHarness({
 			api: "openai-responses",

@@ -7409,7 +7409,9 @@ export class AgentSession {
 		this._serviceTierPreference = effectiveServiceTier;
 		if (preferenceChanged) {
 			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			if (this.model && supportsServiceTier(this.model, effectiveServiceTier)) {
+			// Persist only when the model honors the REQUESTED tier; a clamped-to-default
+			// request must not stomp the user's saved default.
+			if (this.model && supportsServiceTier(this.model, serviceTier)) {
 				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
 			}
 		}
