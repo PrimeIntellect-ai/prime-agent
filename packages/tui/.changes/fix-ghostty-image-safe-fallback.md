@@ -1,0 +1,1 @@
+- Changed Ghostty inline images to use a safe text fallback by default, with explicit opt-in via `PI_ENABLE_GHOSTTY_IMAGES`.

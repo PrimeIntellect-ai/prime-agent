@@ -43,6 +43,9 @@ export function detectCapabilities(): TerminalCapabilities {
 	const termProgram = process.env.TERM_PROGRAM?.toLowerCase() || "";
 	const term = process.env.TERM?.toLowerCase() || "";
 	const colorTerm = process.env.COLORTERM?.toLowerCase() || "";
+	const enableGhosttyImages = ["1", "true", "yes", "on"].includes(
+		(process.env.PI_ENABLE_GHOSTTY_IMAGES ?? "").toLowerCase(),
+	);
 
 	// tmux and screen swallow OSC 8 by default (passthrough is opt-in and wraps
 	// sequences differently). Force hyperlinks off whenever we detect them, even
@@ -58,8 +61,20 @@ export function detectCapabilities(): TerminalCapabilities {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
-	if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
+	if (
+		enableGhosttyImages &&
+		(termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR)
+	) {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
+	}
+
+	if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
+		// Ghostty advertises Kitty graphics support, but Prime Agent's scrollback
+		// redraw loop has repeatedly frozen user sessions when image escape
+		// sequences are emitted inline. Prefer the text fallback by default so
+		// attach_image remains safe; opt in with PI_ENABLE_GHOSTTY_IMAGES=1 while
+		// testing terminal-image rendering changes.
+		return { images: null, trueColor: true, hyperlinks: true };
 	}
 
 	if (process.env.WEZTERM_PANE || termProgram === "wezterm") {

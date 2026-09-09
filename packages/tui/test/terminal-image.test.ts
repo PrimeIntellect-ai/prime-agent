@@ -21,6 +21,7 @@ const ENV_KEYS = [
 	"TMUX",
 	"KITTY_WINDOW_ID",
 	"GHOSTTY_RESOURCES_DIR",
+	"PI_ENABLE_GHOSTTY_IMAGES",
 	"WEZTERM_PANE",
 	"ITERM_SESSION_ID",
 	"CMUX_WORKSPACE_ID",
@@ -217,8 +218,16 @@ describe("detectCapabilities", () => {
 		});
 	});
 
-	it("does not disable Ghostty images solely because cmux is present", () => {
+	it("disables Ghostty images by default to avoid inline image freezes", () => {
 		withEnv({ TERM_PROGRAM: "ghostty", CMUX_WORKSPACE_ID: "workspace" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, null);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("can opt Ghostty back into Kitty images for rendering tests", () => {
+		withEnv({ TERM_PROGRAM: "ghostty", PI_ENABLE_GHOSTTY_IMAGES: "1" }, () => {
 			const caps = detectCapabilities();
 			assert.strictEqual(caps.images, "kitty");
 			assert.strictEqual(caps.hyperlinks, true);
