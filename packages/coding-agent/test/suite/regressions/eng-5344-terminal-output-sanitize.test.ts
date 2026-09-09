@@ -74,9 +74,13 @@ describe("ENG-5344 terminal output sanitization", () => {
 		expect(text?.type === "text" && text.text.includes(OSC52)).toBe(true);
 	});
 
-	test("assistant text keeps bold SGR and zone markers but no foreign sequences", () => {
+	test("assistant text keeps theme SGR and zone markers but no foreign sequences", () => {
 		const output = renderAssistant(message.content);
-		expect(output).toContain(`${ESC}[1m`);
+		// Positive control: renderer-owned styling survives. Theme colors are used
+		// rather than chalk bold, which is disabled under TERM=dumb in CI sandboxes.
+		expect(output).toMatch(/\x1b\[38;[25];/);
+		expect(stripAnsi(output)).toMatch(/\bbold\b/);
+		expect(stripAnsi(output)).not.toContain("**bold**");
 		expect(output).toContain(OSC133_ZONE_START);
 		expect(output).not.toContain(`${ESC}]52;`);
 		expect(output).not.toContain(`${ESC}[2J`);
