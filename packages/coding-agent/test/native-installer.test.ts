@@ -162,6 +162,15 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		expect(existsSync(command())).toBe(false);
 	});
 
+	it.each(["../outside", "/tmp/outside", ".", ".."])("rejects a command name containing a path: %s", async (name) => {
+		publish("1.0.0");
+		const result = await install("1.0.0", { PRIME_AGENT_CMD: name });
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("command name must be a basename");
+		expect(existsSync(command())).toBe(false);
+		expect(existsSync(join(home, ".local/outside"))).toBe(false);
+	});
+
 	it("does not steal another installation's lock", async () => {
 		publish("1.0.0");
 		const first = await install("1.0.0");

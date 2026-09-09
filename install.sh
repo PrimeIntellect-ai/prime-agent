@@ -1741,6 +1741,9 @@ prime_agent_native_check_public_link() {
 	native_public_bin="${PRIME_AGENT_BIN_DIR:-$HOME/.local/bin}"
 	case "$native_public_bin" in /*) ;; *) printf 'error: bin directory must be absolute.\n' >&2; exit 1 ;; esac
 	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" = 0 ]; then return; fi
+	case "$prime_agent_cmd" in
+		''|.|..|*/*) printf 'error: command name must be a basename.\n' >&2; exit 1 ;;
+	esac
 	if [ -e "$native_public_bin/$prime_agent_cmd" ] || [ -L "$native_public_bin/$prime_agent_cmd" ]; then
 		if [ ! -L "$native_public_bin/$prime_agent_cmd" ] || [ "$(readlink "$native_public_bin/$prime_agent_cmd")" != "$native_root/bin/prime-agent" ]; then
 			printf 'error: refusing to replace existing command %s/%s.\n' "$native_public_bin" "$prime_agent_cmd" >&2
