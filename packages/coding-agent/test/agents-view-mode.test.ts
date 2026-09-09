@@ -869,7 +869,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("keeps collapsed inactive sessions out of navigation and reveals them for search", () => {
+	it("always renders inactive sessions; search is the only filter", () => {
 		const live = summary({ sessionName: "live" });
 		const saved = summary({
 			id: "saved",
@@ -880,8 +880,11 @@ describe("AgentsViewMode", () => {
 			rosterStatus: "inactive",
 			lifecycle: "archived",
 		});
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		// The stale pre-removal collapse flag must be ignored.
+		const persistentState = { savedCatalogLoaded: true, inactiveExpanded: false } as AgentsViewPersistentState;
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
 		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
+		const showsSaved = () => rows().some((row) => row.summary.sessionId === saved.sessionId);
 		try {
 			Reflect.set(view, "lastListedSummaries", [live]);
 			Reflect.set(view, "savedSessions", [
@@ -898,17 +901,12 @@ describe("AgentsViewMode", () => {
 				},
 			]);
 			invoke("reconcileCatalogs", view);
-			expect(rows().map((row) => row.summary.sessionId)).toEqual([live.sessionId]);
-			invoke("moveSelection", view, 1);
-			expect(rows()[Reflect.get(view, "selectedIndex") as number]?.summary.sessionId).toBe(live.sessionId);
+			expect(showsSaved()).toBe(true);
+			// The removed Alt+I chord must not hide anything.
 			view.handleInput("\x1bi");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
-			view.handleInput("\x1bi");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
-			invoke("setSearchQuery", view, "archive-match");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
-			invoke("setSearchQuery", view, "");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
+			expect(showsSaved()).toBe(true);
+			invoke("setSearchQuery", view, "no-such-session");
+			expect(showsSaved()).toBe(false);
 		} finally {
 			stopThemeWatcher();
 		}

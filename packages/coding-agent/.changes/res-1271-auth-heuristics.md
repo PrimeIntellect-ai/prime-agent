@@ -1,2 +1,0 @@
-- Removed error-message matching from stale-auth decisions; only structured authentication failures mark credentials stale.
-- Added recovery from stale authentication through validated explicit model selection, while preserving cached private-model access only for the selected Prime team.
