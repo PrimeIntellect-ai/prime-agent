@@ -58,7 +58,11 @@ const cases: ReasoningCase[] = [
 
 describe("auxiliary reasoning settings", () => {
 	it.each(cases)("completes refinement, review, and side questions: $name", async (testCase) => {
-		const harness = await createHarness({ models: [{ id: "reasoning-contract", reasoning: testCase.reasoning }] });
+		const harness = await createHarness({
+			models: [
+				{ id: "reasoning-contract", reasoning: testCase.reasoning, contextWindow: 262_144, maxTokens: 128_000 },
+			],
+		});
 		harnesses.push(harness);
 		const parent = harness.session.agent;
 		const model = harness.getModel();
@@ -128,8 +132,8 @@ describe("auxiliary reasoning settings", () => {
 		).done;
 		expect(events.at(-1)).toMatchObject({ status: "complete", answer: "Side answer" });
 		expect(observed.map((options) => options.reasoning)).toEqual(Array(3).fill(testCase.expectedLevel));
-		expect(observed[0].maxTokens).toBe(Math.min(model.maxTokens, 32_000));
-		expect(observed[1].maxTokens).toBe(Math.min(model.maxTokens, 4_096));
+		expect(observed[0].maxTokens).toBe(testCase.expectedLevel === "off" ? 32_000 : model.maxTokens);
+		expect(observed[1].maxTokens).toBe(testCase.expectedLevel === "off" ? 4_096 : model.maxTokens);
 		expect(parent.state.thinkingLevel).toBe(testCase.parentLevel);
 		expect(parent.state.messages).toEqual(parentMessages);
 	});

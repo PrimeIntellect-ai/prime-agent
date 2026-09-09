@@ -1,1 +1,2 @@
 - Fixed refinement and side questions disabling reasoning when the session uses it, while respecting the selected model's supported thinking levels.
+- Removed fixed output caps from refinement with reasoning enabled, while respecting the model's output limit and reserving context space for the prompt.

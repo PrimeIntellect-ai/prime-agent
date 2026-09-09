@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
 import { realpathIfPresentSync, writeFileAtomicSync } from "../../utils/atomic-file.js";
@@ -178,24 +178,28 @@ Return JSON only:
   "instructions": "optional concise instructions for /refine if shouldRefine is true"
 }`;
 
-/**
- * Output budgets are derived from the selected model instead of fixed literals.
- * /refine input scales with harness size (entry overview, refinement history, and
- * the trajectory slice), so a constant output cap silently truncates exactly the
- * large multi-edit proposals that matter most. Math.min keeps small models honest.
- */
+// These caps apply only with reasoning off; thinking and JSON otherwise share the model's output budget.
 const REFINEMENT_MAX_OUTPUT_TOKENS = 32_000;
 const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS = 4_096;
+const REFINEMENT_CONTEXT_OVERHEAD_TOKENS = 1_024;
 
 const TRUNCATED_JSON_ERROR =
 	"the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
-function refinementMaxOutputTokens(model: Model<any>): number {
-	return Math.min(model.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS);
-}
-
-function autoRefineReviewMaxOutputTokens(model: Model<any>): number {
-	return Math.min(model.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
+function refinementRequestModel(model: Model<Api>, systemPrompt: string, userPrompt: string): Model<Api> {
+	// Reserve one token per UTF-8 byte plus message framing, without assuming an English chars/token ratio.
+	const inputReserve =
+		Buffer.byteLength(systemPrompt, "utf8") +
+		Buffer.byteLength(userPrompt, "utf8") +
+		REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
+	const maxTokens = Math.min(model.maxTokens, model.contextWindow - inputReserve);
+	if (maxTokens <= 0) {
+		throw new Error(
+			"Refinement prompt leaves no room for output in the model's context window; retry with a smaller request.",
+		);
+	}
+	// Bound the request's model ceiling too: some adapters add thinking tokens before clamping to it.
+	return { ...model, maxTokens };
 }
 
 function now(): string {
@@ -904,18 +908,22 @@ export async function planRefinement(
 	]
 		.filter(Boolean)
 		.join("\n\n");
+	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
+	const requestModel = refinementRequestModel(model, REFINEMENT_SYSTEM_PROMPT, userPrompt);
+	const maxTokens =
+		reasoning === "off" ? Math.min(requestModel.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : requestModel.maxTokens;
 
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
-				model,
+				requestModel,
 				{
 					systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
 				{
-					reasoning: getAuxiliaryThinkingLevel(model, thinkingLevel),
-					maxTokens: refinementMaxOutputTokens(model),
+					reasoning,
+					maxTokens,
 					signal,
 					apiKey,
 					headers,
@@ -979,17 +987,23 @@ ${conversationText}
 </conversation>`,
 		"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
 	].join("\n\n");
+	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
+	const requestModel = refinementRequestModel(model, AUTO_REFINE_REVIEW_SYSTEM_PROMPT, userPrompt);
+	const maxTokens =
+		reasoning === "off"
+			? Math.min(requestModel.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS)
+			: requestModel.maxTokens;
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
-				model,
+				requestModel,
 				{
 					systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
 				{
-					reasoning: getAuxiliaryThinkingLevel(model, thinkingLevel),
-					maxTokens: autoRefineReviewMaxOutputTokens(model),
+					reasoning,
+					maxTokens,
 					signal,
 					apiKey,
 					headers,
