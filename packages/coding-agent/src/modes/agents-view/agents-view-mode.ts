@@ -2579,7 +2579,7 @@ export class AgentsViewMode implements Component, Focusable {
 			formatTableCell(theme.fg("muted", formatSessionModel(row.summary)), layout.modelWidth),
 		];
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
-		cells.push(details);
+		cells.push(theme.fg("muted", details));
 		return markRow(formatTableCell(cells.join("  "), width));
 	}
 
@@ -2661,7 +2661,14 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private renderPrompt(width: number): string[] {
-		return this.editor.render(width);
+		const inline = !this.replyTarget && !this.renameTarget;
+		// A transparent surface preserves the editor's padding, scroll hints, and cursor without input chrome.
+		this.editor.backgroundColor = inline ? (text) => text : theme.getEditorBackgroundColor();
+		const lines = this.editor.render(width);
+		if (!inline) return lines;
+		return lines
+			.filter((line, index) => (index > 0 && index < lines.length - 1) || line.trim().length > 0)
+			.map((line) => theme.fg("muted", line));
 	}
 
 	private renderDock(width: number): string[] {

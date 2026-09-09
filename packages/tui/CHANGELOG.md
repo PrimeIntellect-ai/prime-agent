@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.4] - 2026-09-08
+
+- Table cell selection markers no longer crash the renderer when cell content contains a lone UTF-16 surrogate; the surrogate is replaced before encoding.
+- Fixed console windows flashing on Windows from background path-completion and open-link spawns. ([Discussion #1461](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1461))
+- Fixed raw multiline terminal paste being handled as separate key events.
+- Added source-line coordinates to editor layout lines and `styleDisplayText()` so subclasses can style wrapped or scrolled text against exact source offsets.
+- Added support for opening file links from the fullscreen terminal UI.
+- Added a base URL option for resolving relative Markdown links ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).
+- Fixed Windows drive paths in Markdown links to open as file URLs ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).
+
 ## [0.9.0] - 2026-09-01
 
 - Add an optional `transform` hook to `Markdown` so callers can rewrite markdown with the exact content width before rendering.

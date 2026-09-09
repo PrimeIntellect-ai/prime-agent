@@ -466,7 +466,8 @@ describe("daemon supervisor resident workers", () => {
 		// A fresh current-binary worker owns the reloaded idle session; the fake pre-roster pid is not adopted.
 		expect(restarted.workerPid).not.toBe(legacyProcess.pid);
 		expect(restarted.isSessionActive).toBe(false);
-		expect(restarted.messageCount).toBe(1);
+		// The seeded user message plus the harness digest injected on resume.
+		expect(restarted.messageCount).toBe(2);
 		await waitForProcessGone(legacyProcess.pid);
 		fakeWorker.close();
 		client.close();
@@ -1514,12 +1515,25 @@ describe("daemon supervisor resident workers", () => {
 		connection.subscribe((event) => {
 			connectionEvents.push(event.type === "connection_status" ? `${event.type}:${event.status}` : event.type);
 			if (event.type === "session_replaced") {
-				replacementMessageCounts.push(event.messages.length);
+				// Count conversation messages only; every session carries a harness digest.
+				replacementMessageCounts.push(
+					event.messages.filter(
+						(message) =>
+							!(
+								message.role === "custom" &&
+								(message as { customType?: string }).customType === "harness_digest"
+							),
+					).length,
+				);
 			}
 		});
 		const snapshot = await connection.getInitialSnapshot();
-		expect(snapshot.messages).toHaveLength(2);
-		expect(snapshot.messages[0]).toMatchObject({ role: "user", content: largePrompt });
+		const snapshotConversation = snapshot.messages.filter(
+			(message) =>
+				!(message.role === "custom" && (message as { customType?: string }).customType === "harness_digest"),
+		);
+		expect(snapshotConversation).toHaveLength(2);
+		expect(snapshotConversation[0]).toMatchObject({ role: "user", content: largePrompt });
 
 		const activeSessionId = createdSummary.activeSessionId ?? createdSummary.id;
 		const createdNew = await client.request({ type: "new_session", activeSessionId });

@@ -12,7 +12,7 @@ import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { createTestResourceLoader } from "../utilities.js";
-import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
+import { conversationMessages, createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 
 function assistantWithUsage(message: string | AssistantMessage, usage: Partial<Usage>): AssistantMessage {
 	const base = typeof message === "string" ? fauxAssistantMessage(message) : message;
@@ -160,6 +160,23 @@ describe("AgentSession goals", () => {
 		harnesses.push(harness);
 		return harness;
 	}
+
+	it("resumes an active goal after manual compaction", async () => {
+		const harness = await createGoalHarness();
+		const internals = harness.session as unknown as { _performCompaction(): Promise<unknown> };
+		vi.spyOn(internals, "_performCompaction").mockResolvedValue({ summary: "compacted" });
+		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ipython", COMPLETE_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Goal complete."),
+		]);
+
+		await harness.session.compact();
+		await harness.session.waitForHeadlessIdle();
+
+		expect(harness.session.goalState.status).toBe("complete");
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
 
 	it("keeps continuing until the model completes the goal through ipython", async () => {
 		const harness = await createGoalHarness();
@@ -645,7 +662,9 @@ describe("AgentSession goals", () => {
 		await harness.session.prompt("/goal clear");
 
 		expect(
-			harness.session.messages.map((message) => (message.role === "custom" ? message.customType : message.role)),
+			conversationMessages(harness.session).map((message) =>
+				message.role === "custom" ? message.customType : message.role,
+			),
 		).toEqual(["session_slash_command", "session_slash_command_result"]);
 		expect(harness.eventsOfType("goal_update").at(-1)?.goal.status).toBe("idle");
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -867,7 +886,9 @@ describe("AgentSession goals", () => {
 		await harness.session.prompt("/goal status");
 
 		expect(
-			harness.session.messages.map((message) => (message.role === "custom" ? message.customType : message.role)),
+			conversationMessages(harness.session).map((message) =>
+				message.role === "custom" ? message.customType : message.role,
+			),
 		).toEqual(["session_slash_command", "session_slash_command_result"]);
 		expect(harness.eventsOfType("goal_update").at(-1)?.goal.status).toBe("idle");
 		expect(harness.getPendingResponseCount()).toBe(1);
