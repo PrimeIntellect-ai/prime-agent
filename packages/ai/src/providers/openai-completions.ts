@@ -542,6 +542,10 @@ function createClient(
 		if (teamId) headers["X-Prime-Team-ID"] = teamId;
 	}
 
+	if (model.provider === "opencode-go" && sessionId) {
+		headers["x-opencode-session"] = sessionId;
+	}
+
 	if (sessionId && compat.sendSessionAffinityHeaders) {
 		headers.session_id = sessionId;
 		headers["x-client-request-id"] = sessionId;

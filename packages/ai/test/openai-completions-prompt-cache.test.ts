@@ -196,4 +196,24 @@ describe("openai-completions prompt caching", () => {
 		expect(headers["x-client-request-id"]).toBe("override-request");
 		expect(headers["x-session-affinity"]).toBe("override-affinity");
 	});
+
+	it("sends x-opencode-session for opencode-go regardless of sendSessionAffinityHeaders", async () => {
+		const model = createModel({
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+		const { headers } = await captureRequest({ sessionId: "session-go" }, model);
+
+		expect(headers["x-opencode-session"]).toBe("session-go");
+	});
+
+	it("omits x-opencode-session for opencode-go when cacheRetention is none", async () => {
+		const model = createModel({
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+		const { headers } = await captureRequest({ cacheRetention: "none", sessionId: "session-go" }, model);
+
+		expect(headers["x-opencode-session"]).toBeUndefined();
+	});
 });
