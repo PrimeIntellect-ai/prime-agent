@@ -912,7 +912,10 @@ export class AgentTraceDeliveryQueue {
 		let fingerprint: string | undefined;
 		if (credential) {
 			// Persist the salt with the shared rate state so replacement owners recognize rejected keys.
-			coordinator.credentialSalt ??= randomBytes(32).toString("hex");
+			if (typeof coordinator.credentialSalt !== "string" || !/^[a-f0-9]{64}$/.test(coordinator.credentialSalt)) {
+				coordinator.credentialSalt = randomBytes(32).toString("hex");
+				coordinator.invalidCredential = undefined;
+			}
 			fingerprint = await fingerprintCredential(credential.apiKey, coordinator.credentialSalt);
 		}
 		if (controller.signal.aborted) return false;

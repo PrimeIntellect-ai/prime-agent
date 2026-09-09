@@ -450,6 +450,35 @@ describe("durable background trace delivery", () => {
 		expect(fingerprints[0]).not.toBe(fingerprints[1]);
 		expect(fetchFn).toHaveBeenCalledTimes(2);
 	});
+	it.each([
+		{ label: "non-string", salt: 123 },
+		{ label: "wrong-length", salt: "corrupt" },
+		{ label: "non-hex", salt: "z".repeat(64) },
+	])("recovers a $label credential salt and discards the old rejected-key fingerprint", async ({ salt }) => {
+		const path = file();
+		await queue(path, true);
+		fetchFn.mockResolvedValueOnce(new Response("", { status: 401 }));
+		await run();
+		const coordinatorPath = join(dir, ".delivery-state");
+		const state = JSON.parse(readFileSync(coordinatorPath, "utf8")) as {
+			credentialSalt: string;
+			invalidCredential?: string;
+		};
+		expect(state.invalidCredential).toBeDefined();
+		writeFileSync(coordinatorPath, JSON.stringify({ ...state, credentialSalt: salt }));
+		let resumedState: typeof state | undefined;
+		fetchFn.mockImplementationOnce(async () => {
+			resumedState = JSON.parse(readFileSync(coordinatorPath, "utf8")) as typeof state;
+			return new Response("", { status: 200 });
+		});
+		now += 61_000;
+		await run();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		expect(job(path).state).toBe("delivered");
+		expect(resumedState?.credentialSalt).toMatch(/^[a-f0-9]{64}$/);
+		expect(resumedState?.credentialSalt).not.toBe(state.credentialSalt);
+		expect(resumedState?.invalidCredential).toBeUndefined();
+	});
 	it("pauses permanent HTTP failures until the automatic file or endpoint changes", async () => {
 		const path = file();
 		await queue(path);
