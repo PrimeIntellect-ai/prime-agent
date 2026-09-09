@@ -1305,8 +1305,11 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private getFilteredRecords(): UnifiedSessionRecord[] {
-		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
-		return filterUnifiedSessions(this.scopedRecords, (text) => matchesSearchText(text, query));
+		return filterUnifiedSessions(this.scopedRecords, (text) => matchesSearchText(text, this.getSearchQuery()));
+	}
+
+	private getSearchQuery(): string {
+		return this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
 	}
 
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
@@ -2490,8 +2493,11 @@ export class AgentsViewMode implements Component, Focusable {
 		const layout = buildCompactAgentsViewLayout(this.rows, width);
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
+		// A search hides sections it empties; without one, empty sections keep
+		// their zero-count headers so the layout stays stable.
+		const hideEmptySections = this.getSearchQuery().trim().length > 0;
 		for (const section of ["running", "idle", "inactive"] as const) {
-			if (counts[section] === 0) continue;
+			if (counts[section] === 0 && hideEmptySections) continue;
 			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {

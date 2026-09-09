@@ -943,6 +943,23 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("renders zero-count section headers unless a search empties them", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const lines = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
+		try {
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "only-idle" })]);
+			invoke("reconcileCatalogs", view);
+			const headers = lines().filter((line) => /^(Running|Idle|Inactive) \(\d+\)/.test(line));
+			expect(headers).toEqual(["Running (0)", "Idle (1)", "Inactive (0)"]);
+			// A filter that empties every section keeps the current search behavior.
+			invoke("setSearchQuery", view, "no-such-session");
+			expect(lines().filter((line) => /^(Running|Idle|Inactive) \(/.test(line))).toEqual([]);
+			expect(lines().join("\n")).toContain("No sessions match your search.");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("keeps a selection at the end of the list visible when the leading ellipsis is shown", () => {
 		const summaries = Array.from({ length: 12 }, (_, index) =>
 			summary({
