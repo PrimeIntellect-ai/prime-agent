@@ -2871,8 +2871,11 @@ function formatTableCell(value: string, width: number): string {
 	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
+// Model ids can embed a provider path ("moonshotai/kimi-k2"); the column shows
+// the bare model name. The actions panel keeps the full provider/id selector.
 function formatSessionModel(summary: SessionSummary): string {
-	return summary.model?.id ?? "-";
+	const id = summary.model?.id;
+	return id ? id.slice(id.lastIndexOf("/") + 1) || id : "-";
 }
 
 function formatSessionDuration(summary: SessionSummary): string {

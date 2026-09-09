@@ -760,7 +760,7 @@ describe("AgentsViewMode", () => {
 			activeSessionId: "spender",
 			sessionId: "spender-session",
 			sessionName: "spender",
-			model: { ...getModel("openai", "gpt-4o"), id: "gpt-5.6-sol" },
+			model: { ...getModel("openai", "gpt-4o"), id: "moonshotai/gpt-5.6-sol" },
 			created,
 			summary: "Analyzing runtime composition",
 			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
@@ -797,7 +797,9 @@ describe("AgentsViewMode", () => {
 				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
 			const parentLine = render(parentRow, 120);
 			const savedLine = render(savedRow, 120);
+			// Provider paths embedded in the model id are stripped to the bare model name.
 			expect(parentLine).toContain("gpt-5.6-sol");
+			expect(parentLine).not.toContain("moonshotai");
 			expect(savedLine).toContain("glm-5.2-fast");
 			expect(parentLine).toContain("$1.10");
 			expect(parentLine).not.toContain("$0.42");
