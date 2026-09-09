@@ -10,35 +10,26 @@ It requires no Slack Workflow Builder trigger or discussion-specific Icarus hand
 
 ## Slack setup
 
-1. Ask the existing CVE/alerts app's maintainers to provision a separate incoming
-   webhook for discussions under their app, after verifying its ownership and
-   authorization type. The CVE workflow's use of a webhook does not establish
-   that its Slack app has shared ownership.
-2. Require at least two current Engineering or Infrastructure maintainers as app
-   collaborators, with ownership reviewed during offboarding. Use the app's bot
-   `incoming-webhook` permission; do not use a personal user token. This sender
-   needs no message-history or user-token scopes.
-3. In that app's **Incoming Webhooks** settings, choose **Add New Webhook to
-   Workspace** and select `#notifications-27-prime-agent` (`C0BQHHJM3JA`). The
-   person installing must belong to this private channel. Create a new URL for
-   this channel; do not reuse or change the CVE channel's webhook.
-4. Save the generated `https://hooks.slack.com/services/...` URL as the repository
+Use the existing **prime-engineering-bot** app (`A0AUQU3D5MF`) as the notification
+sender. Its `incoming-webhook` permission is already approved in the workspace.
+Prime (`U0BT0M2HB88`) receives the mention and performs the investigation.
+
+1. An existing app collaborator must open the bot's
+   [Incoming Webhooks settings](https://api.slack.com/apps/A0AUQU3D5MF/incoming-webhooks),
+   choose **Add New Webhook to Workspace**, and select `#notifications-27-prime-agent`
+   (`C0BQHHJM3JA`). The person configuring it must belong to this private channel.
+   Create a separate URL for this channel, keeping the security webhook intact.
+   Slack's [app details page](https://primeintellect.slack.com/marketplace/A0AUQU3D5MF-prime-engineering-bot)
+   lists the current installation contacts. Kevin's account is not an app collaborator.
+2. Save the generated `https://hooks.slack.com/services/...` URL as the repository
    Actions secret `SLACK_DISCUSSION_WEBHOOK_URL`. Keep the URL out of source code
    and Slack messages. A Workflow Builder `/triggers/...` URL will not work here.
-5. Prime (`U0BT0M2HB88`) must also be a member of the notification channel.
+3. Prime must also be a member of the notification channel.
 
-If the existing alerts app cannot be reused, the prepared **Prime Discussion
-Alerts** app (`A0C0PF2PHV4`) is a fallback. Before installing it, add shared
-maintainers through its [Collaborators settings](https://app.slack.com/app-settings/T0742S5BEHW/A0C0PF2PHV4/collaborators)
-and obtain workspace approval for `incoming-webhook`. Do not activate it with
-Kevin as its sole collaborator.
-
-Slack documents that even an incoming-webhook-only app is uninstalled from its
-associated workspace when its last creator or collaborator leaves. See
-[Slack's app lifecycle rules](https://docs.slack.dev/app-management/distribution/#uninstalling-apps).
-Shared ownership and bot authorization avoid depending on one person's account.
-The GitHub workflow runs in the company repository and needs no personal GitHub
-token or process running on a maintainer's computer.
+Maintain shared ownership of the existing app and review its collaborators during
+offboarding. This sender needs no new Slack app, message-history scopes, personal
+user tokens, or process running on a maintainer's computer. The workflow and
+webhook secret belong to the company GitHub repository.
 
 ## Verify and activate
 
