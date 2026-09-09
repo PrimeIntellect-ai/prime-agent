@@ -325,10 +325,17 @@ function main() {
 	);
 	writeFileSync(join(artifactsDir, args.channel), `v${releaseVersion}\n`);
 	const manifestName = args.channel === "stable" ? "latest.json" : "beta.json";
+	const cliTarballFile = artifactFiles.get("coding-agent");
+	const cliTarball = tarballs.find((tarball) => tarball.file === cliTarballFile);
+	if (!cliTarball) {
+		throw new Error(`Missing release tarball entry for ${cliTarballFile}`);
+	}
+	// The self-updater verifies the downloaded tarball against this digest before installing it.
 	writeJson(join(artifactsDir, manifestName), {
 		version: `v${releaseVersion}`,
 		package: publicPackageName,
-		tarball: `releases/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
+		tarball: `releases/v${releaseVersion}/${cliTarballFile}`,
+		sha256: cliTarball.sha256,
 		tarballs: tarballs.map((tarball) => ({
 			package: tarball.name,
 			file: tarball.file,

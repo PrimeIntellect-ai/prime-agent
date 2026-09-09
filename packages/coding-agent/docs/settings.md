@@ -58,11 +58,17 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 {
   "version": "0.73.1",
   "package": "prime-agent",
-  "tarball": "releases/v0.73.1/prime-agent-0.73.1.tgz"
+  "tarball": "releases/v0.73.1/prime-agent-0.73.1.tgz",
+  "sha256": "<hex sha-256 of prime-agent-0.73.1.tgz>",
+  "tarballs": [{ "package": "prime-agent", "file": "prime-agent-0.73.1.tgz", "sha256": "<hex>" }]
 }
 ```
 
-`version` is required. `package` is optional and may also be named `packageName`; it defaults to the current package name. `tarball` is optional; when present, Prime Agent installs that tarball instead of the package name. Relative tarball paths resolve against `PRIME_AGENT_DOWNLOAD_BASE_URL`.
+`version` is required. `package` is optional and may also be named `packageName`; it must equal the installed package name. `tarball` is required for `prime-agent update`: the tarball must live on the same origin as the release base URL, be served over https, be named `<package>-<version>.tgz`, and have a SHA-256 digest in the manifest (top-level `sha256`, or a `tarballs[]` entry whose `file` matches). Relative tarball paths resolve against `PRIME_AGENT_DOWNLOAD_BASE_URL`.
+
+`prime-agent update` downloads the tarball to a temporary directory, verifies its SHA-256 against the manifest, and only then hands the local file to the package manager. Any manifest or digest check that fails aborts the update before the package manager runs; nothing is ever installed straight from a URL or from the npm registry by name.
+
+The base URL must be https. For a local or private plaintext mirror, set `PRIME_AGENT_ALLOW_INSECURE_DOWNLOAD_BASE_URL=1` together with an `http://` `PRIME_AGENT_DOWNLOAD_BASE_URL`; `file:` base URLs are never accepted.
 
 ### Pseudonymous usage analytics
 

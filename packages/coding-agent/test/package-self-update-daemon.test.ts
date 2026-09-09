@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as DaemonUpdateRestartModule from "../src/cli/daemon-update-restart.js";
 import {
@@ -26,6 +27,34 @@ import {
 	prepareDaemonUpdateRestart,
 	runDaemonUpdateRestartCoordinator,
 } from "../src/package-manager-cli.js";
+import { getReleaseTarballFileName } from "../src/utils/version-check.js";
+
+const releaseTarballBytes = Buffer.from("prime-agent release tarball fixture");
+const releaseTarballDigest = createHash("sha256").update(releaseTarballBytes).digest("hex");
+
+function releaseManifest(version: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	const fileName = getReleaseTarballFileName(PACKAGE_NAME, version);
+	return { version, tarball: `releases/v${version}/${fileName}`, sha256: releaseTarballDigest, ...overrides };
+}
+
+function stubReleaseFetch(manifest: unknown, tarballBody: Buffer = releaseTarballBytes): void {
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			mockState.calls.push(`fetch:${url}`);
+			if (url.endsWith(".tgz")) {
+				return new Response(tarballBody, { status: 200 });
+			}
+			return Response.json(manifest);
+		}),
+	);
+}
+
+function npmInstallSpec(): string | undefined {
+	const call = mockState.calls.find((entry) => entry.startsWith("spawn:npm ") && entry.includes(" install -g "));
+	return call?.split(" install -g ")[1];
+}
 
 interface MockSessionSummary {
 	id: string;
@@ -520,10 +549,7 @@ describe("self-update daemon restart", () => {
 			configurable: true,
 		});
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ npmCommand: ["npm"] }, null, 2));
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ version: "999.0.0" })),
-		);
+		stubReleaseFetch(releaseManifest("999.0.0"));
 	});
 
 	afterEach(() => {
@@ -567,10 +593,7 @@ describe("self-update daemon restart", () => {
 
 	it("uses the interactive no-change sentinel only when self-update is unchanged", async () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ version: "0.2.6" })),
-		);
+		stubReleaseFetch({ version: "0.2.6" });
 
 		await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
 
@@ -620,6 +643,107 @@ describe("self-update daemon restart", () => {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();
 		}
+	});
+
+	it("installs the verified local tarball instead of the manifest URL (ENG-5341)", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		try {
+			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+		} finally {
+			logSpy.mockRestore();
+		}
+
+		expect(process.exitCode).toBeUndefined();
+		const installSpec = npmInstallSpec();
+		expect(installSpec).toBeDefined();
+		expect(installSpec?.startsWith("http")).toBe(false);
+		expect(isAbsolute(installSpec ?? "")).toBe(true);
+		expect(basename(installSpec ?? "")).toBe(getReleaseTarballFileName(PACKAGE_NAME, "999.0.0"));
+		expect(existsSync(installSpec ?? "")).toBe(false);
+		const tarballFetchIndex = mockState.calls.findIndex((call) => call.startsWith("fetch:") && call.endsWith(".tgz"));
+		const spawnIndex = mockState.calls.findIndex((call) => call.startsWith("spawn:npm "));
+		expect(tarballFetchIndex).toBeGreaterThanOrEqual(0);
+		expect(tarballFetchIndex).toBeLessThan(spawnIndex);
+	});
+
+	it.each([
+		["a digest mismatch", releaseManifest("999.0.0"), Buffer.from("tampered tarball"), /SHA-256 mismatch/, true],
+		[
+			"a tarball off the release origin",
+			releaseManifest("999.0.0", { tarball: "https://attacker.invalid/pkg-999.0.0.tgz" }),
+			releaseTarballBytes,
+			/not on the release origin/,
+			false,
+		],
+		[
+			"a manifest naming another package",
+			releaseManifest("999.0.0", { package: "@attacker/anything" }),
+			releaseTarballBytes,
+			/names package "@attacker\/anything"/,
+			false,
+		],
+		[
+			"a tarball whose version does not match",
+			releaseManifest("999.0.0", { tarball: `releases/v1.0.0/${getReleaseTarballFileName(PACKAGE_NAME, "1.0.0")}` }),
+			releaseTarballBytes,
+			/does not match release version 999\.0\.0/,
+			false,
+		],
+		[
+			"a manifest without a tarball digest",
+			releaseManifest("999.0.0", { sha256: undefined }),
+			releaseTarballBytes,
+			/no SHA-256 digest/,
+			false,
+		],
+		[
+			"a manifest without a tarball",
+			{ version: "999.0.0" },
+			releaseTarballBytes,
+			/nothing verifiable to install/,
+			false,
+		],
+	])(
+		"rejects %s before invoking the package manager (ENG-5341)",
+		async (_name, manifest, tarballBody, expectedError, expectsDownload) => {
+			stubReleaseFetch(manifest, tarballBody);
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			try {
+				await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+				expect(errorSpy.mock.calls.flat().join("\n")).toMatch(expectedError);
+			} finally {
+				errorSpy.mockRestore();
+				logSpy.mockRestore();
+			}
+
+			expect(process.exitCode).toBe(1);
+			expect(mockState.calls.some((call) => call.startsWith("spawn:"))).toBe(false);
+			expect(mockState.calls.some((call) => call.startsWith("fetch:") && call.endsWith(".tgz"))).toBe(
+				expectsDownload,
+			);
+			expect(mockState.calls.some((call) => call === "daemon-request:prepare_update_restart")).toBe(false);
+		},
+	);
+
+	it("does not fall back to a registry install when the manifest is unreachable (ENG-5341)", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(null, { status: 503 })),
+		);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+			expect(errorSpy.mock.calls.flat().join("\n")).toMatch(/Could not fetch the .* release manifest/);
+		} finally {
+			errorSpy.mockRestore();
+		}
+
+		expect(process.exitCode).toBe(1);
+		expect(mockState.calls.some((call) => call.startsWith("spawn:"))).toBe(false);
 	});
 
 	it("defers the exact custom-socket restart to the interactive parent", async () => {

@@ -260,6 +260,8 @@ See [docs/settings.md](docs/settings.md) for all options.
 
 Prime Agent stable builds fetch `https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/latest.json` to check whether a newer version exists. Beta builds fetch `beta.json` and remain on the beta channel. Override the base URL with `PRIME_AGENT_DOWNLOAD_BASE_URL`. Disable version checks with `PI_SKIP_VERSION_CHECK=1`.
 
+`prime-agent update` only installs a release tarball that the manifest names on the same https origin and carries a SHA-256 digest for; the tarball is downloaded and verified before the package manager runs. See [docs/settings.md](docs/settings.md#update-checks).
+
 Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, including update checks and package update checks.
 
 ## Context Files
@@ -680,6 +682,7 @@ prime-agent --thinking high "Solve this complex problem"
 | `PRIME_AGENT_TELEMETRY_ENDPOINT` | Override the aggregate analytics ingestion endpoint |
 | `DO_NOT_TRACK` | Disable aggregate usage analytics when set to `1`/`true`/`yes` |
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
+| `PRIME_AGENT_ALLOW_INSECURE_DOWNLOAD_BASE_URL` | Set to `1` to allow a plaintext `http://` `PRIME_AGENT_DOWNLOAD_BASE_URL` mirror; release downloads otherwise require https |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing if it has `agent_traces` scope |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |

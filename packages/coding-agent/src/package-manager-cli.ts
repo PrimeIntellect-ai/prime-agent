@@ -68,7 +68,13 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
-import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
+import { downloadVerifiedReleaseTarball } from "./utils/self-update-artifact.js";
+import {
+	getLatestPiRelease,
+	isNewerPackageVersion,
+	type LatestPiRelease,
+	type ReleaseTarball,
+} from "./utils/version-check.js";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -426,38 +432,44 @@ function printSelfUpdateFallback(command: SelfUpdateCommand): void {
 	console.error(chalk.dim(`If this keeps failing, run this command yourself: ${command.display}`));
 }
 
-interface SelfUpdatePlan {
-	installSpec: string;
+// Package names a release manifest may announce as the successor of the installed package.
+// Empty until a rename is scheduled; anything else is rejected before the package manager runs.
+const SELF_UPDATE_RENAMED_PACKAGE_NAMES: readonly string[] = [];
+
+interface VerifiedSelfUpdateRelease extends LatestPiRelease {
 	packageName: string;
-	shouldRun: boolean;
-	targetVersion?: string;
+	tarball: ReleaseTarball;
 }
+
+type SelfUpdatePlan = { shouldRun: false } | { shouldRun: true; release: VerifiedSelfUpdateRelease };
 
 function setSelfUpdateNoChangeExitCode(): void {
 	process.exitCode =
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : undefined;
 }
 
+// Self-updates install only a release tarball that the manifest names and carries a digest for.
+// Validation failures throw and are reported before any package manager runs.
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
-	try {
-		const latestRelease = await getLatestPiRelease(VERSION);
-		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
-		const installSpec = latestRelease?.installSpec ?? packageName;
-		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
-		if (
-			force ||
-			!latestRelease ||
-			packageRenameRequiresUpdate ||
-			isNewerPackageVersion(latestRelease.version, VERSION)
-		) {
-			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
-		}
-	} catch {
-		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
+	const latestRelease = await getLatestPiRelease(VERSION, {
+		explicit: true,
+		packageName: PACKAGE_NAME,
+		allowedPackageNames: SELF_UPDATE_RENAMED_PACKAGE_NAMES,
+	});
+	if (!latestRelease) {
+		throw new Error(`Could not fetch the ${APP_NAME} release manifest. Try again later.`);
 	}
-
-	console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
-	return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false };
+	const packageName = latestRelease.packageName ?? PACKAGE_NAME;
+	if (!force && packageName === PACKAGE_NAME && !isNewerPackageVersion(latestRelease.version, VERSION)) {
+		console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
+		return { shouldRun: false };
+	}
+	if (!latestRelease.tarball) {
+		throw new Error(
+			`The ${APP_NAME} release manifest for v${latestRelease.version} does not name a release tarball with a SHA-256 digest, so there is nothing verifiable to install.`,
+		);
+	}
+	return { shouldRun: true, release: { ...latestRelease, packageName, tarball: latestRelease.tarball } };
 }
 
 async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
@@ -1570,18 +1582,12 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						setSelfUpdateNoChangeExitCode();
 						return true;
 					}
-					const selfUpdateCommand = getSelfUpdateCommand(
-						PACKAGE_NAME,
-						selfUpdateNpmCommand,
-						selfUpdatePlan.installSpec,
-						selfUpdatePlan.packageName,
-					);
-					if (!selfUpdateCommand) {
-						printSelfUpdateUnavailable(
-							selfUpdateNpmCommand,
-							selfUpdatePlan.installSpec,
-							selfUpdatePlan.packageName,
-						);
+					const { release } = selfUpdatePlan;
+					// Probe with the manifest URL so an unmanaged install is reported before anything downloads.
+					if (
+						!getSelfUpdateCommand(PACKAGE_NAME, selfUpdateNpmCommand, release.tarball.url, release.packageName)
+					) {
+						printSelfUpdateUnavailable(selfUpdateNpmCommand, release.tarball.url, release.packageName);
 						process.exitCode = 1;
 						return true;
 					}
@@ -1595,19 +1601,33 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						process.exitCode = 1;
 						return true;
 					}
+					console.log(chalk.dim(`Downloading and verifying ${release.tarball.fileName}...`));
+					const artifact = await downloadVerifiedReleaseTarball(release.tarball, { currentVersion: VERSION });
 					try {
-						await runSelfUpdate(selfUpdateCommand);
-					} catch (error: unknown) {
-						const message = error instanceof Error ? error.message : "Unknown package command error";
-						console.error(chalk.red(`Error: ${message}`));
-						printSelfUpdateFallback(selfUpdateCommand);
-						process.exitCode = 1;
-						return true;
+						const selfUpdateCommand = getSelfUpdateCommand(
+							PACKAGE_NAME,
+							selfUpdateNpmCommand,
+							artifact.path,
+							release.packageName,
+						);
+						if (!selfUpdateCommand) {
+							printSelfUpdateUnavailable(selfUpdateNpmCommand, release.tarball.url, release.packageName);
+							process.exitCode = 1;
+							return true;
+						}
+						try {
+							await runSelfUpdate(selfUpdateCommand);
+						} catch (error: unknown) {
+							const message = error instanceof Error ? error.message : "Unknown package command error";
+							console.error(chalk.red(`Error: ${message}`));
+							printSelfUpdateFallback(selfUpdateCommand);
+							process.exitCode = 1;
+							return true;
+						}
+					} finally {
+						artifact.cleanup();
 					}
-					const versionChange = selfUpdatePlan.targetVersion
-						? ` from v${VERSION} to v${selfUpdatePlan.targetVersion}`
-						: "";
-					console.log(chalk.green(`Updated ${APP_NAME}${versionChange}`));
+					console.log(chalk.green(`Updated ${APP_NAME} from v${VERSION} to v${release.version}`));
 					if (process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1") {
 						return true;
 					}
