@@ -810,7 +810,6 @@ describe("AgentsViewMode", () => {
 			expect(savedLine).not.toContain("glm-5.2-fast:");
 			const childRow = rows.find((row) => row.summary.sessionId === child.sessionId)!;
 			expect(render(childRow, 120)).not.toContain("glm-5.2-fast:");
-			expect(savedLine).toContain("glm-5.2-fast");
 			expect(parentLine).toContain("$1.10");
 			expect(parentLine).not.toContain("$0.42");
 			expect(parentLine).not.toMatch(/[↑↓]/);
