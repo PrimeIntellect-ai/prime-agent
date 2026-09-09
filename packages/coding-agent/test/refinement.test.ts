@@ -677,6 +677,35 @@ describe("harness refinement", () => {
 		});
 	});
 
+	it("keeps the grouping when a writer that only knows the path field rewrites the file", () => {
+		const dir = makeTempDir();
+		const state = loadHarnessState(dir, "local");
+		state.entries.memory.grouped = {
+			id: "grouped",
+			kind: "memory",
+			title: "Grouped",
+			content: "content",
+			topic: "repo/testing",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-01-01T00:00:00.000Z",
+			updated_at: "2026-01-01T00:00:00.000Z",
+			version: 1,
+		};
+		saveHarnessState(dir, state);
+
+		// A pre-topic build rewrites the file and drops fields it does not know.
+		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8"));
+		const { topic: _topic, ...withoutTopic } = saved.entries.memory.grouped;
+		saved.entries.memory.grouped = withoutTopic;
+		writeFileSync(getHarnessStatePath(dir), JSON.stringify(saved), "utf8");
+
+		expect(loadHarnessState(dir, "local").entries.memory.grouped.topic).toBe("repo/testing");
+	});
+
 	it("loads an entry that stores the grouping as path and resaves it as topic", () => {
 		const dir = makeTempDir();
 		writeFileSync(
@@ -704,7 +733,8 @@ describe("harness refinement", () => {
 		saveHarnessState(dir, state);
 		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8")).entries.memory.legacy;
 		expect(saved.topic).toBe("repo/testing");
-		expect(saved.path).toBeUndefined();
+		// The mirror keeps a pre-topic writer from resaving the entry ungrouped.
+		expect(saved.path).toBe("repo/testing");
 	});
 
 	it.each(["not json at all", "null", "[]", '"a string"', "123"])(

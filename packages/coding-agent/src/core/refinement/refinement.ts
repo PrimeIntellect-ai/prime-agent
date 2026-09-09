@@ -235,10 +235,10 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
-/** Grouping label of a stored entry. State and history files may still spell it `path`. */
-function harnessTopic(entry: { topic?: unknown; path?: unknown }): string {
+/** Grouping label of a stored entry, or undefined when it carries none. Older files spell it `path`. */
+export function harnessTopic(entry: { topic?: unknown; path?: unknown }): string | undefined {
 	if (typeof entry.topic === "string") return entry.topic;
-	return typeof entry.path === "string" ? entry.path : "general";
+	return typeof entry.path === "string" ? entry.path : undefined;
 }
 
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
@@ -309,7 +309,7 @@ export function loadHarnessState(
 				const { path: _path, ...rest } = entry as unknown as HarnessEntry & { path?: unknown };
 				state.entries[kind][id] = {
 					...rest,
-					topic: harnessTopic(entry),
+					topic: harnessTopic(entry) ?? "general",
 					scope: normalizeHarnessScope(entry.scope, scope),
 					reference: objectRecord(entry.reference) ?? {},
 					arguments: objectRecord(entry.arguments) ?? {},
@@ -343,12 +343,29 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 	return merged;
 }
 
+/**
+ * Writers that predate the topic field drop unknown keys and would resave every entry
+ * ungrouped. Mirror the grouping under the old `path` key so those writers round-trip
+ * it. Drop the mirror once no pre-topic build can reach a shared harness store.
+ */
+function serializeHarnessState(state: HarnessState): HarnessState {
+	const serialized = emptyHarnessState();
+	serialized.schema = state.schema;
+	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
+		for (const [id, entry] of Object.entries(state.entries[kind])) {
+			serialized.entries[kind][id] = { ...entry, path: entry.topic } as HarnessEntry;
+		}
+	}
+	serialized.refinements = state.refinements;
+	return serialized;
+}
+
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
 	const targetPath = realpathIfPresentSync(statePath);
 	const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
-	writeFileAtomicSync(targetPath, `${JSON.stringify(state, null, 2)}\n`, { mode });
+	writeFileAtomicSync(targetPath, `${JSON.stringify(serializeHarnessState(state), null, 2)}\n`, { mode });
 	return statePath;
 }
 
