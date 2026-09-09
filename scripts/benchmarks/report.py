@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from schema import Metric, Observation, Report
 
 MARKER = "<!-- prime-agent-benchmark:v1 -->"
+PERFORMANCE_NOISE_FLOOR = 0.2
 
 
 def fingerprint(report: Report) -> str:
@@ -36,31 +37,86 @@ class Definition:
 
 
 METRICS = (
-    Definition("cold", "Cold startup", 1000, "ms", 0.1, 0.05, "faster", "slower"),
-    Definition("warm", "Warm startup", 1000, "ms", 0.1, 0.05, "faster", "slower"),
-    Definition("install", "Installation", 1, "s", 1, 0.05, "faster", "slower"),
+    Definition("cold", "Cold startup", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
+    Definition("warm", "Warm startup", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
+    Definition("install", "Installation", 1, "s", 1, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
     Definition("bundle", "Compressed release artifacts", 1e-6, "MB", 65536, 0.005, "smaller", "larger"),
     Definition("disk", "Installed footprint", 1e-6, "MB", 1048576, 0.01, "smaller", "larger"),
-    Definition("rss", "Idle memory, summed RSS", 1e-6, "MB", 10485760, 0.05, "less memory", "more memory"),
+    Definition(
+        "rss",
+        "Idle memory, summed RSS",
+        1e-6,
+        "MB",
+        10485760,
+        PERFORMANCE_NOISE_FLOOR,
+        "less memory",
+        "more memory",
+    ),
 )
 RUNTIME_METRICS = (
-    Definition("kernel_start", "Python kernel startup", 1000, "ms", 0.005, 0.1, "faster", "slower"),
-    Definition("kernel_exec", "Python cell round trip", 1000, "ms", 0.0001, 0.1, "faster", "slower"),
-    Definition("bash", "Empty bash command", 1000, "ms", 0.001, 0.1, "faster", "slower"),
-    Definition("git_status", "Bash git status", 1000, "ms", 0.001, 0.1, "faster", "slower"),
-    Definition("output", "Bash 32 KiB output", 1000, "ms", 0.001, 0.1, "faster", "slower"),
-    Definition("mixed", "35 cells / 9 shell calls", 1000, "ms", 0.005, 0.1, "faster", "slower"),
-    Definition("interrupt", "Python interrupt to done", 1000, "ms", 0.0005, 0.1, "faster", "slower"),
-    Definition("snapshot", "Python state snapshot", 1000, "ms", 0.001, 0.1, "faster", "slower"),
-    Definition("restore", "Python state restore", 1000, "ms", 0.001, 0.1, "faster", "slower"),
-    Definition("kernel_rss", "Python idle RSS", 1e-6, "MB", 1048576, 0.05, "less memory", "more memory"),
+    Definition(
+        "kernel_start",
+        "Python kernel startup",
+        1000,
+        "ms",
+        0.005,
+        PERFORMANCE_NOISE_FLOOR,
+        "faster",
+        "slower",
+    ),
+    Definition(
+        "kernel_exec",
+        "Python cell round trip",
+        1000,
+        "ms",
+        0.0001,
+        PERFORMANCE_NOISE_FLOOR,
+        "faster",
+        "slower",
+    ),
+    Definition("bash", "Empty bash command", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
+    Definition(
+        "git_status", "Bash git status", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
+    ),
+    Definition(
+        "output", "Bash 32 KiB output", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
+    ),
+    Definition(
+        "mixed", "35 cells / 9 shell calls", 1000, "ms", 0.005, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
+    ),
+    Definition(
+        "interrupt",
+        "Python interrupt to done",
+        1000,
+        "ms",
+        0.0005,
+        PERFORMANCE_NOISE_FLOOR,
+        "faster",
+        "slower",
+    ),
+    Definition(
+        "snapshot", "Python state snapshot", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
+    ),
+    Definition(
+        "restore", "Python state restore", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
+    ),
+    Definition(
+        "kernel_rss",
+        "Python idle RSS",
+        1e-6,
+        "MB",
+        1048576,
+        PERFORMANCE_NOISE_FLOOR,
+        "less memory",
+        "more memory",
+    ),
     Definition(
         "loaded_rss",
         "Python RSS after pandas workload",
         1e-6,
         "MB",
         1048576,
-        0.05,
+        PERFORMANCE_NOISE_FLOOR,
         "less memory",
         "more memory",
     ),
@@ -208,7 +264,8 @@ def render(report: Report) -> str:
             f"Image: `{escape(report.config.image)}`.",
             "Stock tools, skills, daemon, and Python bootstrap enabled; fresh homes and a fixed Git fixture.",
             "Onboarding is dismissed; the editor starts without a selected model or submitted prompt.",
-            "Medians shown. Arrows use provisional thresholds and IQR, not a significance test.",
+            "Medians shown. Arrows require a 20% timing/memory change plus absolute floors and IQR.",
+            "These practical noise floors are not a statistical significance test.",
             "Cold means stopped Prime processes; OS filesystem caches are not flushed.",
             "No model requests or credentials. Installation excludes build/setup time.",
             "Installer tarballs use loopback; npm/Python downloads use the network with fresh caches.",

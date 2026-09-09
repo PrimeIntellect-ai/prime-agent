@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -103,6 +104,19 @@ while True:
 
 
 class ReportTests(unittest.TestCase):
+    def test_same_revision_sandbox_calibration_does_not_report_regressions(self):
+        calibration = json.loads(Path(__file__).with_name("calibration.json").read_text())
+        for definition in (*METRICS, *RUNTIME_METRICS):
+            with self.subTest(metric=definition.key):
+                samples = calibration["metrics"][definition.key]
+                result = comparison(
+                    definition,
+                    observations(*samples["main"]),
+                    observations(*samples["pr"]),
+                    len(samples["main"]),
+                )
+                self.assertEqual(result[-1], "no clear change")
+
     def test_slower_and_faster_have_consistent_signs_and_arrows(self):
         baseline = observations(*([2.0] * 10))
         slower = comparison(METRICS[0], baseline, observations(*([2.5] * 10)), 10)

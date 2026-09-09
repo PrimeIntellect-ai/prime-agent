@@ -100,8 +100,11 @@ subsystem measurements alongside the normal installed CLI benchmarks, not end-to
 
 The comment shows medians, signed absolute/percentage deltas, successful/attempted counts, and spread.
 `↓` means improvement, bold `↑` means regression, `≈` means no clear change, and `—` means unavailable
-or incomplete. Arrows require a change larger than the metric's provisional absolute/relative floor
-and observed spread. This is a practical noise filter, not a statistical significance test. Inspect
+or incomplete. Arrows require a change larger than the metric's absolute floor, relative floor,
+and observed spread. The initial relative floor is 20% for timings and memory, 0.5% for artifact
+size, and 1% for disk footprint. A same-revision calibration on separate sandboxes showed roughly
+7–18% variation across several timings; the conservative floor avoids labeling that as a code regression.
+Smaller signed differences remain visible. Revisit these floors after collecting more control runs. This is a practical noise filter, not a statistical significance test. Inspect
 raw trials before acting on small changes; sandbox scheduling and filesystem caches still introduce noise.
 
 ## Lifecycle and costs
