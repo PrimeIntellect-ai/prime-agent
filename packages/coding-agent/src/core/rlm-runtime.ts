@@ -197,7 +197,7 @@ export function createRlmCreateSessionHostHandler(handler: RlmCreateSessionHandl
 	};
 }
 
-/** Adapt an RlmRunHandler into the typed `rlm.run` kernel host handler (wire type kept for version skew). */
+/** Adapt an RlmRunHandler into the typed `rlm.run` kernel host handler. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.prompt !== "string") {
