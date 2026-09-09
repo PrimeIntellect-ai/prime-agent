@@ -196,6 +196,8 @@ describe.each(paths)("$kind shared reasoning and JSON budget", ({ kind, formerCa
 
 	it.each([
 		{ name: "empty trajectory", content: "", addedThinkingTokens: 0 },
+		{ name: "short English words", content: "a ".repeat(40_000), addedThinkingTokens: 0 },
+		{ name: "ASCII punctuation", content: "!@#$%^&*()".repeat(8_000), addedThinkingTokens: 0 },
 		{ name: "multibyte trajectory", content: "界".repeat(15_000), addedThinkingTokens: 0 },
 		{ name: "separate thinking allowance", content: "界".repeat(15_000), addedThinkingTokens: 16_384 },
 	])(
@@ -206,9 +208,12 @@ describe.each(paths)("$kind shared reasoning and JSON budget", ({ kind, formerCa
 			});
 			harnesses.push(harness);
 			const originalModel = structuredClone(harness.getModel());
+			const requests: SimpleStreamOptions[] = [];
+			let totalTokens = 0;
 			harness.setResponses([
 				(context, options, _state, model) => {
 					const request = options as SimpleStreamOptions;
+					requests.push(request);
 					// Synthetic tokenizer: English words, CJK characters, and punctuation, plus message framing.
 					const inputTokens =
 						[context.systemPrompt ?? "", ...context.messages.map(getMessageText)]
@@ -216,14 +221,15 @@ describe.each(paths)("$kind shared reasoning and JSON budget", ({ kind, formerCa
 							.match(/[\u4e00-\u9fff]|[A-Za-z0-9_]+|[^\s]/gu)!.length + 256;
 					// Some adapters add thinking tokens before clamping to the supplied model ceiling.
 					const wireMaxTokens = Math.min((request.maxTokens ?? 32_000) + addedThinkingTokens, model.maxTokens);
-					expect(inputTokens + wireMaxTokens).toBeLessThanOrEqual(model.contextWindow);
-					expect(request.maxTokens).toBeGreaterThan(formerCap);
-					expect(request.reasoning).toBe("low");
+					totalTokens = inputTokens + wireMaxTokens;
 					return fauxAssistantMessage(JSON.stringify(expected));
 				},
 			]);
 
 			await expect(requestRefinement(harness, kind, content)).resolves.toEqual(expected);
+			expect(totalTokens).toBeLessThanOrEqual(originalModel.contextWindow);
+			expect(requests[0].maxTokens).toBeGreaterThan(formerCap);
+			expect(requests[0].reasoning).toBe("low");
 			expect(harness.getModel()).toEqual(originalModel);
 			expect(harness.faux.state.callCount).toBe(1);
 		},

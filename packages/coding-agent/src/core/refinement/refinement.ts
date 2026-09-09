@@ -186,13 +186,9 @@ const REFINEMENT_CONTEXT_OVERHEAD_TOKENS = 1_024;
 const TRUNCATED_JSON_ERROR =
 	"the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
-function estimateRefinementTokens(text: string): number {
-	// Approximate English at four characters per token and other text at two UTF-8 bytes per token.
-	let asciiChars = 0;
-	for (let i = 0; i < text.length; i++) {
-		if (text.charCodeAt(i) <= 0x7f) asciiChars++;
-	}
-	return Math.ceil(asciiChars / 4 + (Buffer.byteLength(text, "utf8") - asciiChars) / 2);
+function refinementInputTokenBound(text: string): number {
+	// One token per UTF-8 byte bounds byte-based tokenizers, including dense or unusual text.
+	return Buffer.byteLength(text, "utf8");
 }
 
 function refinementRequest(
@@ -202,11 +198,11 @@ function refinementRequest(
 	buildPrompt: (conversation: string) => string,
 	outputReserve: number,
 ): { model: Model<Api>; userPrompt: string } {
-	const systemReserve = estimateRefinementTokens(systemPrompt) + REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
+	const systemReserve = refinementInputTokenBound(systemPrompt) + REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
 	const inputBudget =
 		model.contextWindow - Math.min(model.maxTokens, outputReserve, Math.floor(model.contextWindow / 2));
 	let userPrompt = buildPrompt(conversationText);
-	if (systemReserve + estimateRefinementTokens(userPrompt) > inputBudget && conversationText.length > 0) {
+	if (systemReserve + refinementInputTokenBound(userPrompt) > inputBudget && conversationText.length > 0) {
 		const promptForLength = (length: number): string => {
 			let start = conversationText.length - length;
 			const first = conversationText.charCodeAt(start);
@@ -219,14 +215,14 @@ function refinementRequest(
 		let high = conversationText.length;
 		while (low < high) {
 			const length = Math.ceil((low + high) / 2);
-			if (systemReserve + estimateRefinementTokens(promptForLength(length)) <= inputBudget) low = length;
+			if (systemReserve + refinementInputTokenBound(promptForLength(length)) <= inputBudget) low = length;
 			else high = length - 1;
 		}
 		userPrompt = promptForLength(low);
 	}
 	const maxTokens = Math.min(
 		model.maxTokens,
-		model.contextWindow - systemReserve - estimateRefinementTokens(userPrompt),
+		model.contextWindow - systemReserve - refinementInputTokenBound(userPrompt),
 	);
 	if (maxTokens <= 0) {
 		throw new Error(
@@ -967,7 +963,7 @@ export async function planRefinement(
 		REFINEMENT_SYSTEM_PROMPT,
 		conversationText,
 		buildPrompt,
-		REFINEMENT_MAX_OUTPUT_TOKENS,
+		reasoning === "off" ? REFINEMENT_MAX_OUTPUT_TOKENS : model.maxTokens,
 	);
 	const maxTokens =
 		reasoning === "off" ? Math.min(requestModel.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : requestModel.maxTokens;
@@ -1053,7 +1049,7 @@ ${conversation}
 		AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 		conversationText,
 		buildPrompt,
-		reasoning === "off" ? AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS : REFINEMENT_MAX_OUTPUT_TOKENS,
+		reasoning === "off" ? AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS : model.maxTokens,
 	);
 	const maxTokens =
 		reasoning === "off"
