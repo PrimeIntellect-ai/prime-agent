@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { type ChildProcess, spawn } from "node:child_process";
 import { types } from "node:util";
+import { readAbortState as signalState } from "./prime-sandbox-validation.js";
 
 const MAX_ARG_COUNT = 64;
 const MAX_ARG_BYTES = 8_192;
@@ -38,31 +39,6 @@ function failure(code: PrimeCliProcessFailureCode): Readonly<{ ok: false; code: 
 
 function success(stdout: string, stderr: string, exitCode: number, durationMs: number): PrimeCliProcessResult {
 	return Object.freeze({ ok: true, value: Object.freeze({ stdout, stderr, exitCode, durationMs }) });
-}
-
-function exactAbortSignal(value: unknown): value is AbortSignal {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === AbortSignal.prototype &&
-			!Object.hasOwn(value, "aborted") &&
-			!Object.hasOwn(value, "addEventListener") &&
-			!Object.hasOwn(value, "removeEventListener")
-		);
-	} catch {
-		return false;
-	}
-}
-
-function signalState(value: unknown): boolean | undefined {
-	if (value === undefined) return false;
-	try {
-		return exactAbortSignal(value) ? value.aborted : undefined;
-	} catch {
-		return undefined;
-	}
 }
 
 function exactString(value: unknown, maxBytes: number): value is string {

@@ -191,7 +191,7 @@ Object.freeze(PrimeCliCredentialAuthority.prototype);
 Object.freeze(PrimeCliCredentialAuthority);
 const credentials = new WeakMap<object, Uint8Array<ArrayBuffer>>();
 
-export type PrimeCliCredentialResult =
+type PrimeCliCredentialResult =
 	| Readonly<{ ok: true; value: PrimeCliCredentialAuthority }>
 	| Readonly<{ ok: false; code: "INPUT_INVALID" }>;
 
@@ -259,7 +259,7 @@ export function closePrimeCliCredentialAuthority(value: unknown): boolean {
 	return credentials.delete(value);
 }
 
-export type PrimeCliProvisionResult =
+type PrimeCliProvisionResult =
 	| Readonly<{ ok: true; value: PrimeCliAuthority }>
 	| Readonly<{
 			ok: false;

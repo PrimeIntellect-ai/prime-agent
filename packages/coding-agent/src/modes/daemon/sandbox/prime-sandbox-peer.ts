@@ -1,5 +1,4 @@
 import { closeSync, writeSync } from "node:fs";
-import { types } from "node:util";
 import {
 	acceptSandboxRuntimeActivation,
 	closeSandboxRuntimeActivation,
@@ -35,25 +34,10 @@ import {
 	type SandboxTransportChannel,
 	signSandboxReadinessBundle,
 } from "./prime-sandbox-transport.js";
+import { isExactUint8Array as exactBytes } from "./prime-sandbox-validation.js";
 
 const EXIT_FAILURE = 91;
 const ACTIVATION_TIMEOUT_MS = 3_000;
-
-function exactBytes(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
-}
 
 function zero(...values: (Uint8Array | undefined)[]): void {
 	for (const value of values) value?.fill(0);

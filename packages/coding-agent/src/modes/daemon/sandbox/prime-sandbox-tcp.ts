@@ -1,6 +1,6 @@
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { types } from "node:util";
 import type { SandboxHandshakeIo } from "./prime-sandbox-handshake.js";
+import { readAbortState as abortState, isExactUint8Array as exactUint8Array } from "./prime-sandbox-validation.js";
 
 const ISSUE = Object.freeze({});
 const CONNECT_TIMEOUT_MS = 5_000;
@@ -85,47 +85,6 @@ function validHost(value: unknown): value is string {
 
 function validPort(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 65_535;
-}
-
-function exactAbortSignal(value: unknown): value is AbortSignal {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === AbortSignal.prototype &&
-			!Object.hasOwn(value, "aborted") &&
-			!Object.hasOwn(value, "addEventListener") &&
-			!Object.hasOwn(value, "removeEventListener")
-		);
-	} catch {
-		return false;
-	}
-}
-
-function abortState(value: unknown): boolean | undefined {
-	if (value === undefined) return false;
-	try {
-		return exactAbortSignal(value) ? value.aborted : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function exactUint8Array(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
 }
 
 function copyWriteBytes(value: unknown): Uint8Array<ArrayBuffer> | undefined {

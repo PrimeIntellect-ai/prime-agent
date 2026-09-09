@@ -1,4 +1,3 @@
-import { types } from "node:util";
 import { copyLaunchConfigArchiveSha256, copyLaunchConfigHomePublicKey } from "./prime-sandbox-launch-config.js";
 import {
 	copyReadinessArchiveSha256,
@@ -25,6 +24,7 @@ import {
 	verifySandboxReadinessBundle,
 	verifySandboxRuntimeChallenge,
 } from "./prime-sandbox-transport.js";
+import { copyBytes, equalBytes, isExactUint8Array } from "./prime-sandbox-validation.js";
 
 const MAGIC = new Uint8Array([0x50, 0x33, 0x00]);
 const ACK = new Uint8Array([0x01]);
@@ -49,28 +49,6 @@ function failure(code: SandboxHandshakeError): Readonly<{ ok: false; code: Sandb
 	return Object.freeze({ ok: false, code });
 }
 
-function copyBytes(value: Uint8Array): Uint8Array<ArrayBuffer> {
-	const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
-	copy.set(value);
-	return copy;
-}
-
-function isExactUint8Array(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
-}
-
 function copyExact(value: unknown, length: number): Uint8Array<ArrayBuffer> | undefined {
 	try {
 		if (!isExactUint8Array(value) || value.byteLength !== length) {
@@ -89,13 +67,6 @@ function copyExact(value: unknown, length: number): Uint8Array<ArrayBuffer> | un
 	} catch {
 		return undefined;
 	}
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	let difference = 0;
-	for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
-	return difference === 0;
 }
 
 function zero(...values: (Uint8Array | undefined)[]): void {

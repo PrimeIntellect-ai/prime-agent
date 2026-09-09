@@ -1,5 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { types } from "node:util";
+import { copyBytes, equalBytes, isExactUint8Array } from "./prime-sandbox-validation.js";
 
 const ISSUE = Object.freeze({});
 const MAX_PLAINTEXT_BYTES = 256 * 1024;
@@ -132,30 +133,8 @@ function success<T>(value: T): Readonly<{ ok: true; value: T }> {
 	return Object.freeze({ ok: true, value });
 }
 
-function copyBytes(value: Uint8Array): Uint8Array<ArrayBuffer> {
-	const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
-	copy.set(value);
-	return copy;
-}
-
 function zero(value: Uint8Array | undefined): void {
 	if (value !== undefined) value.fill(0);
-}
-
-function isExactUint8Array(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
 }
 
 function isExactArrayBuffer(value: unknown): value is ArrayBuffer {
@@ -255,13 +234,6 @@ function concatenate(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> | un
 		offset += part.byteLength;
 	}
 	return output;
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	let difference = 0;
-	for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
-	return difference === 0;
 }
 
 function getPrivateEd25519(value: unknown): Ed25519Data | undefined {
@@ -949,5 +921,4 @@ export async function decryptSandboxTransportFrame(
 
 export const SANDBOX_TRANSPORT_HEADER_BYTES = HEADER_BYTES;
 export const SANDBOX_TRANSPORT_MAX_PLAINTEXT_BYTES = MAX_PLAINTEXT_BYTES;
-export const SANDBOX_TRANSPORT_MAX_WIRE_BYTES = MAX_WIRE_BYTES;
 export const SANDBOX_TRANSPORT_TAG_BYTES = TAG_BYTES;

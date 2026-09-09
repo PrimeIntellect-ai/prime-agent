@@ -26,6 +26,7 @@ import type {
 } from "./prime-sandbox-provider.js";
 import { copySandboxEd25519PublicKey } from "./prime-sandbox-transport.js";
 import { isPreparedFileUpload, type PreparedFileUpload } from "./prime-sandbox-upload-body.js";
+import { readAbortState as signalState } from "./prime-sandbox-validation.js";
 
 const ISSUE = Object.freeze({});
 const FIXED_IMAGE = "python:3.11.13-slim-bookworm";
@@ -123,31 +124,6 @@ function failure(code: PrimeSandboxSessionManagerCode): PrimeSandboxSessionManag
 
 function success<T>(value: T): Readonly<{ ok: true; value: T }> {
 	return Object.freeze({ ok: true, value });
-}
-
-function exactAbortSignal(value: unknown): value is AbortSignal {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === AbortSignal.prototype &&
-			!Object.hasOwn(value, "aborted") &&
-			!Object.hasOwn(value, "addEventListener") &&
-			!Object.hasOwn(value, "removeEventListener")
-		);
-	} catch {
-		return false;
-	}
-}
-
-function signalState(value: unknown): boolean | undefined {
-	if (value === undefined) return false;
-	try {
-		return exactAbortSignal(value) ? value.aborted : undefined;
-	} catch {
-		return undefined;
-	}
 }
 
 function exactOwnDataObject(value: unknown, keys: readonly string[]): value is object {

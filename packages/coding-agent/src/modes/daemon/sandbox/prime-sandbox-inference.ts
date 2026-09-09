@@ -1,6 +1,7 @@
 import { types } from "node:util";
 import { parseBoundedJson } from "./prime-sandbox-json.js";
 import { SANDBOX_TRANSPORT_MAX_PLAINTEXT_BYTES } from "./prime-sandbox-transport.js";
+import { equalBytes, isExactUint8Array as exactBytes } from "./prime-sandbox-validation.js";
 
 const ISSUE = Object.freeze({});
 const REQUEST_TAG = 0x03;
@@ -56,22 +57,6 @@ function failure(code: "INPUT_INVALID" | "PROTOCOL_ERROR"): Readonly<{
 	code: "INPUT_INVALID" | "PROTOCOL_ERROR";
 }> {
 	return Object.freeze({ ok: false, code });
-}
-
-function exactBytes(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
 }
 
 function copyExactBytes(value: unknown): Uint8Array<ArrayBuffer> | undefined {
@@ -144,13 +129,6 @@ function exactDataObject(value: unknown, keys: readonly string[]): value is Reco
 	} catch {
 		return false;
 	}
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	let difference = 0;
-	for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
-	return difference === 0;
 }
 
 function decodeCanonicalJson(bytes: Uint8Array<ArrayBuffer>): unknown {

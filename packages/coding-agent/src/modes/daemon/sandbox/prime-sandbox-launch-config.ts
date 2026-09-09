@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { types } from "node:util";
 import { parseBoundedJson } from "./prime-sandbox-json.js";
+import { copyBytes, equalBytes, isExactUint8Array } from "./prime-sandbox-validation.js";
 
 const MAX_LAUNCH_CONFIG_BYTES = 1024;
 const ISSUE = Object.freeze({});
@@ -38,28 +39,6 @@ Object.freeze(SandboxLaunchConfig);
 
 function failure(code: SandboxLaunchConfigError): Readonly<{ ok: false; code: SandboxLaunchConfigError }> {
 	return Object.freeze({ ok: false, code });
-}
-
-function copyBytes(value: Uint8Array): Uint8Array<ArrayBuffer> {
-	const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
-	copy.set(value);
-	return copy;
-}
-
-function isExactUint8Array(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
 }
 
 function isExactArrayBuffer(value: unknown): value is ArrayBuffer {
@@ -201,13 +180,6 @@ export function buildSandboxLaunchConfig(value: unknown): SandboxLaunchConfigBui
 	if (fields === undefined) return failure("INVALID_CONFIG");
 	const bytes = encodeConfig(fields.homePublicKey, fields.archiveSha256, fields.manifestSha256, fields.launcherSha256);
 	return Object.freeze({ ok: true, bytes });
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	let difference = 0;
-	for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
-	return difference === 0;
 }
 
 function decodeBase64(value: string): Uint8Array<ArrayBuffer> {

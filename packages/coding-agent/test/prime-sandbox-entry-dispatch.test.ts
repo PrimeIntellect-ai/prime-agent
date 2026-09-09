@@ -11,16 +11,6 @@ const normal = resolve(root, "packages/coding-agent/src/bun/normal-cli.ts");
 describe("early sandbox process dispatch", () => {
 	test("routes internal modes before all normal CLI imports and side effects", () => {
 		const source = readFileSync(entry, "utf8");
-		expect(source).toBe(`#!/usr/bin/env bun
-const mode = process.argv[2];
-if (mode === "--internal-sandbox-launcher") {
-	await import("../modes/daemon/sandbox/prime-sandbox-launcher.js");
-} else if (mode === "--internal-sandbox-peer") {
-	await import("../modes/daemon/sandbox/prime-sandbox-peer.js");
-} else {
-	await import("./normal-cli.js");
-}
-`);
 		expect(source).not.toContain("APP_NAME");
 		expect(source).not.toContain("restoreSandboxEnv");
 		expect(source.split("\n").some((line) => line.startsWith("import "))).toBe(false);

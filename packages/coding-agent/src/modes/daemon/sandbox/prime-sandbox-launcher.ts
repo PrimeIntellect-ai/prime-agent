@@ -19,6 +19,7 @@ import {
 	decodeSandboxReadinessBundle,
 } from "./prime-sandbox-readiness-bundle.js";
 import { verifySandboxReadinessBundle } from "./prime-sandbox-transport.js";
+import { equalBytes } from "./prime-sandbox-validation.js";
 
 interface SandboxPeerProcess {
 	readonly stdio: readonly unknown[];
@@ -56,13 +57,6 @@ const PEER_ENVIRONMENT = Object.freeze({
 
 function zero(...values: (Uint8Array | undefined)[]): void {
 	for (const value of values) value?.fill(0);
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	let difference = 0;
-	for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
-	return difference === 0;
 }
 
 async function readRendezvous(descriptor: number): Promise<Uint8Array<ArrayBuffer> | undefined> {

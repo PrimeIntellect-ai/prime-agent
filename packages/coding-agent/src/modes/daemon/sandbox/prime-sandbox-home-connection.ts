@@ -1,4 +1,3 @@
-import { types } from "node:util";
 import {
 	closeSandboxHomeActivation,
 	confirmSandboxHomeActivation,
@@ -27,6 +26,7 @@ import {
 	SANDBOX_TRANSPORT_TAG_BYTES,
 	type SandboxTransportChannel,
 } from "./prime-sandbox-transport.js";
+import { readAbortState as abortState, isExactUint8Array as exactBytes } from "./prime-sandbox-validation.js";
 
 const ISSUE = Object.freeze({});
 const PHASE_TIMEOUT_MS = 3_000;
@@ -95,47 +95,6 @@ function failure(
 		| "CLEANUP_UNCERTAIN";
 }> {
 	return Object.freeze({ ok: false, code });
-}
-
-function exactAbortSignal(value: unknown): value is AbortSignal {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === AbortSignal.prototype &&
-			!Object.hasOwn(value, "aborted") &&
-			!Object.hasOwn(value, "addEventListener") &&
-			!Object.hasOwn(value, "removeEventListener")
-		);
-	} catch {
-		return false;
-	}
-}
-
-function abortState(value: unknown): boolean | undefined {
-	if (value === undefined) return false;
-	try {
-		return exactAbortSignal(value) ? value.aborted : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function exactBytes(value: unknown): value is Uint8Array {
-	try {
-		return (
-			typeof value === "object" &&
-			value !== null &&
-			!types.isProxy(value) &&
-			Object.getPrototypeOf(value) === Uint8Array.prototype &&
-			!Object.hasOwn(value, "buffer") &&
-			!Object.hasOwn(value, "byteOffset") &&
-			!Object.hasOwn(value, "byteLength")
-		);
-	} catch {
-		return false;
-	}
 }
 
 async function readFrame(io: SandboxTcpIo, timeoutMs: number): Promise<Uint8Array<ArrayBuffer> | undefined> {

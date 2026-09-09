@@ -312,49 +312,6 @@ describe("compiled release archives", () => {
 });
 
 describe("entry manifest generation", () => {
-	function fixture(): FixturePaths {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-release-"));
-		temporaryRoots.push(root);
-		const binaries = join(root, "binaries");
-		const sidecars = join(root, "sidecars");
-		for (const platform of platforms) {
-			const dir = join(binaries, platform);
-			mkdirSync(dir, { recursive: true });
-			cpSync("/bin/echo", join(dir, "pi"));
-			chmodSync(join(dir, "pi"), 0o755);
-		}
-		mkdirSync(sidecars, { recursive: true });
-		for (const name of ["prime-agent-runtime", "skills", "theme", "assets", "export-html", "docs", "examples"]) {
-			mkdirSync(join(sidecars, name));
-			writeFileSync(join(sidecars, name, ".keep"), "fixture");
-		}
-		for (const name of [
-			"prime-agent-runtime/pyproject.toml",
-			"theme/prime.json",
-			"theme/dark.json",
-			"theme/light.json",
-			"theme/theme-schema.json",
-			"export-html/template.html",
-			"export-html/template.css",
-			"export-html/template.js",
-			"export-html/vendor/.keep",
-		]) {
-			mkdirSync(dirname(join(sidecars, name)), { recursive: true });
-			writeFileSync(join(sidecars, name), "fixture");
-		}
-		writeFileSync(join(sidecars, "package.json"), JSON.stringify({ name: "prime-agent", version: "1.2.3" }));
-		writeFileSync(join(sidecars, "README.md"), "readme");
-		writeFileSync(join(sidecars, "CHANGELOG.md"), "changelog");
-		const installerContent =
-			'#!/bin/sh\nbase="__PRIME_AGENT_DOWNLOAD_BASE_URL__"\nchannel="__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__"\n';
-		writeFileSync(join(sidecars, "install.sh"), installerContent);
-		writeFileSync(join(sidecars, "photon_rs_bg.wasm"), "wasm");
-		chmodSync(join(sidecars, "install.sh"), 0o755);
-		const output = join(releaseRoot, `test-${process.pid}-${Math.random().toString(36).slice(2)}`);
-		outputDirs.push(output);
-		return { root, binaries, sidecars, output };
-	}
-
 	function singlePack(f: FixturePaths, platform = "darwin-arm64", extra: string[] = []) {
 		const result = spawnSync(
 			process.execPath,
@@ -447,123 +404,17 @@ describe("entry manifest generation", () => {
 	});
 
 	test("rejects symlinks in staging tree", () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-link-reject-"));
-		temporaryRoots.push(root);
-		const binaries = join(root, "binaries");
-		const sidecars = join(root, "sidecars");
-		const linkOutput = join(releaseRoot, `link-test-${process.pid}-${Math.random().toString(36).slice(2)}`);
-		outputDirs.push(linkOutput);
-		mkdirSync(join(binaries, "darwin-arm64"), { recursive: true });
-		cpSync("/bin/echo", join(binaries, "darwin-arm64", "pi"));
-		chmodSync(join(binaries, "darwin-arm64", "pi"), 0o755);
-		mkdirSync(sidecars, { recursive: true });
-		writeFileSync(join(sidecars, "package.json"), JSON.stringify({ name: "p", version: "1.0.0" }));
-		writeFileSync(join(sidecars, "README.md"), "r");
-		writeFileSync(join(sidecars, "CHANGELOG.md"), "c");
-		writeFileSync(join(sidecars, "install.sh"), "#!/bin/sh");
-		chmodSync(join(sidecars, "install.sh"), 0o755);
-		writeFileSync(join(sidecars, "photon_rs_bg.wasm"), "w");
-		mkdirSync(join(sidecars, "prime-agent-runtime"));
-		writeFileSync(join(sidecars, "prime-agent-runtime", "pyproject.toml"), "x");
-		mkdirSync(join(sidecars, "skills"));
-		mkdirSync(join(sidecars, "theme"));
-		writeFileSync(join(sidecars, "theme", "prime.json"), "x");
-		writeFileSync(join(sidecars, "theme", "dark.json"), "x");
-		writeFileSync(join(sidecars, "theme", "light.json"), "x");
-		writeFileSync(join(sidecars, "theme", "theme-schema.json"), "x");
-		mkdirSync(join(sidecars, "assets"));
-		mkdirSync(join(sidecars, "export-html"));
-		writeFileSync(join(sidecars, "export-html", "template.html"), "x");
-		writeFileSync(join(sidecars, "export-html", "template.css"), "x");
-		writeFileSync(join(sidecars, "export-html", "template.js"), "x");
-		mkdirSync(join(sidecars, "export-html", "vendor"));
-		writeFileSync(join(sidecars, "export-html", "vendor", ".keep"), "x");
-		mkdirSync(join(sidecars, "docs"));
-		mkdirSync(join(sidecars, "examples"));
-		symlinkSync("/etc/passwd", join(sidecars, "prime-agent-runtime", "malicious-link"), "file");
-
-		const result = spawnSync(
-			process.execPath,
-			[
-				packScript,
-				"--base-url",
-				"https://downloads.example.test",
-				"--channel",
-				"stable",
-				"--version",
-				"0.0.0",
-				"--binary-base-dir",
-				binaries,
-				"--sidecar-dir",
-				sidecars,
-				"--out-dir",
-				linkOutput,
-				"--platform",
-				"darwin-arm64",
-			],
-			{ encoding: "utf8" },
-		);
+		const f = fixture();
+		symlinkSync("/etc/passwd", join(f.sidecars, "prime-agent-runtime", "malicious-link"), "file");
+		const result = singlePack(f);
 		expect(result.status).not.toBe(0);
 		expect(result.stderr).toContain("symlink");
 	});
 
 	test("rejects directory symlinks in staging tree", () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-dirlink-"));
-		temporaryRoots.push(root);
-		const binaries = join(root, "binaries");
-		const sidecars = join(root, "sidecars");
-		const linkOutput = join(releaseRoot, `dirlink-test-${process.pid}-${Math.random().toString(36).slice(2)}`);
-		outputDirs.push(linkOutput);
-		mkdirSync(join(binaries, "darwin-arm64"), { recursive: true });
-		cpSync("/bin/echo", join(binaries, "darwin-arm64", "pi"));
-		chmodSync(join(binaries, "darwin-arm64", "pi"), 0o755);
-		mkdirSync(sidecars, { recursive: true });
-		writeFileSync(join(sidecars, "package.json"), JSON.stringify({ name: "p", version: "1.0.0" }));
-		writeFileSync(join(sidecars, "README.md"), "r");
-		writeFileSync(join(sidecars, "CHANGELOG.md"), "c");
-		writeFileSync(join(sidecars, "install.sh"), "#!/bin/sh");
-		chmodSync(join(sidecars, "install.sh"), 0o755);
-		writeFileSync(join(sidecars, "photon_rs_bg.wasm"), "w");
-		mkdirSync(join(sidecars, "prime-agent-runtime"));
-		writeFileSync(join(sidecars, "prime-agent-runtime", "pyproject.toml"), "x");
-		mkdirSync(join(sidecars, "skills"));
-		mkdirSync(join(sidecars, "theme"));
-		writeFileSync(join(sidecars, "theme", "prime.json"), "x");
-		writeFileSync(join(sidecars, "theme", "dark.json"), "x");
-		writeFileSync(join(sidecars, "theme", "light.json"), "x");
-		writeFileSync(join(sidecars, "theme", "theme-schema.json"), "x");
-		mkdirSync(join(sidecars, "assets"));
-		mkdirSync(join(sidecars, "export-html"));
-		writeFileSync(join(sidecars, "export-html", "template.html"), "x");
-		writeFileSync(join(sidecars, "export-html", "template.css"), "x");
-		writeFileSync(join(sidecars, "export-html", "template.js"), "x");
-		mkdirSync(join(sidecars, "export-html", "vendor"));
-		writeFileSync(join(sidecars, "export-html", "vendor", ".keep"), "x");
-		mkdirSync(join(sidecars, "docs"));
-		mkdirSync(join(sidecars, "examples"));
-		symlinkSync("/tmp", join(sidecars, "prime-agent-runtime", "malicious-dir-link"), "dir");
-
-		const result = spawnSync(
-			process.execPath,
-			[
-				packScript,
-				"--base-url",
-				"https://downloads.example.test",
-				"--channel",
-				"stable",
-				"--version",
-				"0.0.0",
-				"--binary-base-dir",
-				binaries,
-				"--sidecar-dir",
-				sidecars,
-				"--out-dir",
-				linkOutput,
-				"--platform",
-				"darwin-arm64",
-			],
-			{ encoding: "utf8" },
-		);
+		const f = fixture();
+		symlinkSync("/tmp", join(f.sidecars, "prime-agent-runtime", "malicious-dir-link"), "dir");
+		const result = singlePack(f);
 		expect(result.status).not.toBe(0);
 		expect(result.stderr).toContain("symlink");
 	});
