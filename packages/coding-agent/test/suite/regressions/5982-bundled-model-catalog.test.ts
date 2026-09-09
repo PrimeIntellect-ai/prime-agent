@@ -4,6 +4,7 @@ import { createModelCatalog, getModel, getModels, parseModelCatalog } from "@ear
 import { setKeybindings, type TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { loadModelCatalogSnapshot } from "../../../scripts/model-catalog-snapshot.js";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { createBundledModelCatalog } from "../../../src/core/bundled-model-catalog.js";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
@@ -51,6 +52,7 @@ describe("ENG-5982 packaged onboarding catalog", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
 		vi.unstubAllEnvs();
 		harness.cleanup();
@@ -145,5 +147,54 @@ describe("ENG-5982 packaged onboarding catalog", () => {
 		]);
 		expect(catalog.models.some((model) => model.id === "internal/private")).toBe(false);
 		expect(JSON.stringify(catalog)).not.toContain("private-token");
+	});
+
+	test.each(["oversized name", "oversized price"])(
+		"uses compiled models when a successful Prime response has an %s",
+		async (invalidField) => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+			const data = getModels("prime-inference").map((model, index) => ({
+				id: model.id,
+				display_name: index === 0 && invalidField === "oversized name" ? "x".repeat(1_025) : model.name,
+				pricing: {
+					input_usd_per_mtok: index === 0 && invalidField === "oversized price" ? 1_000_001 : model.cost.input,
+					output_usd_per_mtok: model.cost.output,
+				},
+			}));
+			fetchFn.mockResolvedValue(new Response(JSON.stringify({ data })));
+			expect(await loadModelCatalogSnapshot(providerCatalog)).toEqual(createBundledModelCatalog(providerCatalog));
+			expect(warning).toHaveBeenCalledWith(expect.stringContaining("Using compiled Prime Inference models"));
+		},
+	);
+
+	test("rejects invalid curated data instead of treating it as a failed Prime refresh", async () => {
+		vi.stubEnv("PI_OFFLINE", "0");
+		await expect(loadModelCatalogSnapshot({ schemaVersion: 1, models: [] })).rejects.toThrow();
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+
+	test.each(["offline", "request failure"])("builds a compiled snapshot on %s", async (mode) => {
+		vi.stubEnv("PI_OFFLINE", mode === "offline" ? "1" : "0");
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		expect(await loadModelCatalogSnapshot(providerCatalog)).toEqual(createBundledModelCatalog(providerCatalog));
+		expect(fetchFn).toHaveBeenCalledTimes(mode === "offline" ? 0 : 1);
+	});
+
+	test("includes validated live Prime metadata in the install snapshot", async () => {
+		vi.stubEnv("PI_OFFLINE", "0");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const data = getModels("prime-inference").map((model) => ({
+			id: model.id,
+			display_name: "Updated Prime Model",
+			pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+		}));
+		fetchFn.mockResolvedValue(new Response(JSON.stringify({ data })));
+		const catalog = await loadModelCatalogSnapshot(providerCatalog);
+		expect(catalog.models.filter((model) => model.provider !== "prime-inference")).toEqual(providerCatalog.models);
+		const primeModels = catalog.models.filter((model) => model.provider === "prime-inference");
+		expect(primeModels).toHaveLength(data.length);
+		expect(primeModels.every((model) => model.name === "Updated Prime Model")).toBe(true);
+		expect(warning).not.toHaveBeenCalled();
 	});
 });
