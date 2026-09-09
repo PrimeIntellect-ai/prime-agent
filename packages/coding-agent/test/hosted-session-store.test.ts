@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	closeSync,
@@ -15,14 +15,18 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
 	createHostedSessionStore,
 	createStartupV5HostedSessionStore,
 } from "../src/modes/daemon/sandbox/hosted-session-store.js";
 
-const sourcePath = resolve(import.meta.dir, "../src/modes/daemon/sandbox/hosted-session-store.ts");
-const helperPath = resolve(import.meta.dir, "../src/modes/daemon/sandbox/hosted-session-store-posix-helper.py");
+const testDirectory = dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
+const sourcePath = resolve(testDirectory, "../src/modes/daemon/sandbox/hosted-session-store.ts");
+const helperPath = resolve(testDirectory, "../src/modes/daemon/sandbox/hosted-session-store-posix-helper.py");
 
 function expectExactFailure(value: unknown): void {
 	expect(typeof value).toBe("object");
@@ -463,17 +467,13 @@ sys.exit(main[0] if ok else 124)
 `;
 
 async function runBoundedSelfTest(command: string[], limit: number): Promise<unknown> {
-	const child = Bun.spawn([hostPython, "-c", boundedSelfTestRunner, JSON.stringify(command), String(limit)], {
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const stdoutPromise = new Response(child.stdout).text();
-	const stderrPromise = new Response(child.stderr).text();
-	const exitCode = await child.exited;
-	const stdout = await stdoutPromise;
-	const stderr = await stderrPromise;
-	return Object.freeze({ exitCode, stderr, value: JSON.parse(stdout) });
+	const { stdout, stderr } = await execFileAsync(hostPython, [
+		"-c",
+		boundedSelfTestRunner,
+		JSON.stringify(command),
+		String(limit),
+	]);
+	return Object.freeze({ exitCode: 0, stderr, value: JSON.parse(stdout) });
 }
 
 const settledSupervisorShape = Object.freeze({
@@ -714,7 +714,7 @@ describe("hosted session store source constraints", () => {
 
 	test("runs the combined Darwin descriptor gate on the authoritative Bun and Python", async () => {
 		expect(process.platform).toBe("darwin");
-		expect(Bun.version).toBe("1.4.0");
+		expect(process.versions.bun).toBe("1.4.0");
 		await descriptorExecutionGate("/opt/homebrew/bin/python3", "/dev/fd/3");
 	});
 
@@ -2505,7 +2505,7 @@ for scenario in ("case3","case4"):
   shutil.copyfile("/input-rollover-python3","/chroot/usr/local/bin/python3");os.chmod("/chroot/usr/local/bin/python3",0o755)
 `,
 		);
-		const sandboxDirectory = resolve(import.meta.dir, "../src/modes/daemon/sandbox");
+		const sandboxDirectory = resolve(testDirectory, "../src/modes/daemon/sandbox");
 		const bunPath =
 			"/Users/milkkarten/.prime/agent/session-artifacts/01a05fe9-d2a4-71a9-9556-da16f3cdef55/bun-linux-x64-1.4.0-input/extracted/bun";
 		expect(createHash("sha256").update(readFileSync(bunPath)).digest("hex")).toBe(
@@ -2586,17 +2586,12 @@ for scenario in ("case3","case4"):
 			setup,
 		];
 		try {
-			const child = Bun.spawn(
-				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "45"],
-				{ stdout: "pipe", stderr: "pipe" },
+			const { stdout } = await execFileAsync(
+				hostPython,
+				["-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "45"],
+				{ maxBuffer: 4 * 1024 * 1024 },
 			);
-			const stdoutPromise = new Response(child.stdout).text();
-			const stderrPromise = new Response(child.stderr).text();
-			const exitCode = await child.exited;
-			const stdout = await stdoutPromise;
-			const stderr = await stderrPromise;
 			console.log(stdout);
-			expect(exitCode, stderr).toBe(0);
 			expect(stdout).toContain("V5_RAW_PROTOCOL_OK");
 			expect(stdout).toContain("V5_NONEMPTY_READY_OK");
 			expect(stdout).toContain("V5_MATRIX_RUNNING_OK");
@@ -2620,16 +2615,11 @@ for scenario in ("case3","case4"):
 				if (value === setup) return faultSetup;
 				return value;
 			});
-			const faultChild = Bun.spawn(
-				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(faultArguments), faultContainerName, "100"],
-				{ stdout: "pipe", stderr: "pipe" },
+			const { stdout: faultStdout } = await execFileAsync(
+				hostPython,
+				["-c", dockerSupervisorRunner, JSON.stringify(faultArguments), faultContainerName, "100"],
+				{ maxBuffer: 4 * 1024 * 1024 },
 			);
-			const faultStdoutPromise = new Response(faultChild.stdout).text();
-			const faultStderrPromise = new Response(faultChild.stderr).text();
-			const faultExitCode = await faultChild.exited;
-			const faultStdout = await faultStdoutPromise;
-			const faultStderr = await faultStderrPromise;
-			expect(faultExitCode, faultStderr).toBe(0);
 			for (const scenario of [
 				"malformed-length",
 				"malformed-payload",
@@ -2661,16 +2651,11 @@ for scenario in ("case3","case4"):
 				if (value === setup) return rolloverSetup;
 				return value;
 			});
-			const rolloverChild = Bun.spawn(
-				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(rolloverArguments), rolloverContainerName, "30"],
-				{ stdout: "pipe", stderr: "pipe" },
+			const { stdout: rolloverStdout } = await execFileAsync(
+				hostPython,
+				["-c", dockerSupervisorRunner, JSON.stringify(rolloverArguments), rolloverContainerName, "30"],
+				{ maxBuffer: 4 * 1024 * 1024 },
 			);
-			const rolloverStdoutPromise = new Response(rolloverChild.stdout).text();
-			const rolloverStderrPromise = new Response(rolloverChild.stderr).text();
-			const rolloverExitCode = await rolloverChild.exited;
-			const rolloverStdout = await rolloverStdoutPromise;
-			const rolloverStderr = await rolloverStderrPromise;
-			expect(rolloverExitCode, rolloverStderr).toBe(0);
 			expect(rolloverStdout).toContain("ROLLOVER_PUBLICATION_CUT_OK case3");
 			expect(rolloverStdout).toContain("ROLLOVER_PUBLICATION_CUT_OK case4");
 
@@ -2683,16 +2668,11 @@ for scenario in ("case3","case4"):
 				if (value === setup) return timeoutSetup;
 				return value;
 			});
-			const timeoutChild = Bun.spawn(
-				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(timeoutArguments), timeoutContainerName, "45"],
-				{ stdout: "pipe", stderr: "pipe" },
+			const { stdout: timeoutStdout } = await execFileAsync(
+				hostPython,
+				["-c", dockerSupervisorRunner, JSON.stringify(timeoutArguments), timeoutContainerName, "45"],
+				{ maxBuffer: 4 * 1024 * 1024 },
 			);
-			const timeoutStdoutPromise = new Response(timeoutChild.stdout).text();
-			const timeoutStderrPromise = new Response(timeoutChild.stderr).text();
-			const timeoutExitCode = await timeoutChild.exited;
-			const timeoutStdout = await timeoutStdoutPromise;
-			const timeoutStderr = await timeoutStderrPromise;
-			expect(timeoutExitCode, timeoutStderr).toBe(0);
 			expect(timeoutStdout).toContain("STORE_TIMEOUT_TERM_KILL_ESRCH_OK");
 		} finally {
 			rmSync(temporary, { recursive: true, force: true });

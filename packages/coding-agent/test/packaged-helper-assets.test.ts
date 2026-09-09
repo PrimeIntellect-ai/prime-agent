@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
 	chmodSync,
@@ -93,7 +93,7 @@ function fixture(): { root: string; packageDir: string; sourceDir: string; distD
 	return { root, packageDir, sourceDir, distDir };
 }
 
-function run(packageDir: string, args: string[]): ReturnType<typeof spawnSync> {
+function run(packageDir: string, args: string[]): SpawnSyncReturns<string> {
 	return spawnSync(BUN, args, { cwd: packageDir, env: {}, encoding: "utf8", timeout: 30_000 });
 }
 
@@ -111,7 +111,7 @@ function expectHelper(path: string, helper: (typeof HELPERS)[number], anchorPath
 	expect(createHash("sha256").update(bytes).digest("hex")).toBe(helper.digest);
 }
 
-function runPackage(packageDir: string): ReturnType<typeof spawnSync> {
+function runPackage(packageDir: string): SpawnSyncReturns<string> {
 	return run(packageDir, ["scripts/copy-assets.ts", "package"]);
 }
 

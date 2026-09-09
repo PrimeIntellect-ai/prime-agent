@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
 	type DecodeResult,
@@ -17,6 +19,8 @@ import {
 	type OriginSubmit,
 	type RuntimeMultiplexer,
 } from "../src/modes/daemon/sandbox/prime-sandbox-v31-multiplexer.js";
+
+const execFileAsync = promisify(execFile);
 
 type InboundHandler = (streamRaw: unknown, plaintextRaw: unknown) => void;
 type WireResult = Readonly<{ code: "SENT" | "FAILED" }>;
@@ -313,7 +317,7 @@ describe("factory and dependency validation", () => {
 		expect(closes).toBe(1);
 	});
 
-	it("owns a delayed failed-init close rejection without an unhandled result", () => {
+	it("owns a delayed failed-init close rejection without an unhandled result", async () => {
 		const script = `
 import { createRuntimeMultiplexer } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v31-multiplexer.ts";
 function run() {
@@ -353,12 +357,9 @@ function run() {
 }
 run();
 `;
-		const probe = Bun.spawnSync([process.execPath, "-e", script], {
+		await execFileAsync(process.execPath, ["-e", script], {
 			cwd: process.cwd(),
-			stderr: "pipe",
-			stdout: "pipe",
 		});
-		expect(probe.exitCode).toBe(0);
 	});
 
 	it("uses captured physical functions", () => {
@@ -854,7 +855,7 @@ describe("cancellation and races", () => {
 });
 
 describe("captured collection operations", () => {
-	it("survives mutation of every used Array, Map, Set, and WeakMap method", () => {
+	it("survives mutation of every used Array, Map, Set, and WeakMap method", async () => {
 		const script = `
 import { createRuntimeMultiplexer } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v31-multiplexer.ts";
 import { encodeAppFrame, KIND_DELIVERY_ACK } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v15-application-codec.ts";
@@ -949,12 +950,9 @@ for (let index = 0; index < cases.length; index += 1) {
 	if (!(await exercise(entry[0], entry[1]))) process.exit(20 + index);
 }
 `;
-		const probe = Bun.spawnSync([process.execPath, "-e", script], {
+		await execFileAsync(process.execPath, ["-e", script], {
 			cwd: process.cwd(),
-			stderr: "pipe",
-			stdout: "pipe",
 		});
-		expect(probe.exitCode).toBe(0);
 	}, 20_000);
 });
 
@@ -993,7 +991,7 @@ describe("captured abort operations", () => {
 		expect(harness.runtimeBundles[0].signal.aborted).toBe(true);
 	});
 
-	it("ignores a permanent AbortSignal has-instance hook and poisons a signal-path callback fault", () => {
+	it("ignores a permanent AbortSignal has-instance hook and poisons a signal-path callback fault", async () => {
 		const script = `
 import { createRuntimeMultiplexer } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v31-multiplexer.ts";
 import { encodeAppFrame, KIND_REQUEST } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v15-application-codec.ts";
@@ -1062,12 +1060,9 @@ function run() {
 }
 run();
 `;
-		const probe = Bun.spawnSync([process.execPath, "-e", script], {
+		await execFileAsync(process.execPath, ["-e", script], {
 			cwd: process.cwd(),
-			stderr: "pipe",
-			stdout: "pipe",
 		});
-		expect(probe.exitCode).toBe(0);
 	});
 });
 
@@ -1314,7 +1309,7 @@ describe("physical send and close", () => {
 		expect(await closePromise).toEqual({ code: "CLEAN" });
 	});
 
-	it("uses the captured Object extensibility check after initialization", () => {
+	it("uses the captured Object extensibility check after initialization", async () => {
 		const script = `
 import { createRuntimeMultiplexer } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v31-multiplexer.ts";
 async function run() {
@@ -1343,12 +1338,9 @@ async function run() {
 }
 run();
 `;
-		const probe = Bun.spawnSync([process.execPath, "-e", script], {
+		await execFileAsync(process.execPath, ["-e", script], {
 			cwd: process.cwd(),
-			stderr: "pipe",
-			stdout: "pipe",
 		});
-		expect(probe.exitCode).toBe(0);
 	});
 
 	it("revokes a nonextensible send and waits for accepted physical shutdown", async () => {
@@ -1466,7 +1458,7 @@ run();
 		await observer;
 	});
 
-	it("poisons and drains when a physical settlement callback faults", () => {
+	it("poisons and drains when a physical settlement callback faults", async () => {
 		const script = `
 import { createRuntimeMultiplexer } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v31-multiplexer.ts";
 import { encodeAppFrame, KIND_REQUEST } from "./packages/coding-agent/src/modes/daemon/sandbox/prime-sandbox-v15-application-codec.ts";
@@ -1528,15 +1520,12 @@ function run() {
 }
 run();
 `;
-		const probe = Bun.spawnSync([process.execPath, "-e", script], {
+		await execFileAsync(process.execPath, ["-e", script], {
 			cwd: process.cwd(),
-			stderr: "pipe",
-			stdout: "pipe",
 		});
-		expect(probe.exitCode).toBe(0);
 	});
 
-	it("drains exact physical promises under permanent Promise mutations", () => {
+	it("drains exact physical promises under permanent Promise mutations", async () => {
 		const cases = [
 			["constructor", false],
 			["species", false],
@@ -1634,12 +1623,9 @@ function run() {
 }
 run();
 `;
-			const probe = Bun.spawnSync([process.execPath, "-e", script], {
+			await execFileAsync(process.execPath, ["-e", script], {
 				cwd: process.cwd(),
-				stderr: "pipe",
-				stdout: "pipe",
 			});
-			expect(probe.exitCode).toBe(0);
 		}
 	});
 

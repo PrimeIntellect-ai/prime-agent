@@ -9,7 +9,11 @@
  * - Proxy/getter/symbol/wrong prototype inputs, bounds
  */
 
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 // The SUT — all public functions accept unknown and return frozen result unions.
@@ -33,6 +37,9 @@ import {
 	validateGrammar,
 	validatePath,
 } from "../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.js";
+
+const testDirectory = dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
 
 // ========================================================================
 // Helper — shallow-fill a byte array from hex (zero-initialized)
@@ -1942,9 +1949,9 @@ describe("integrated V21 journal scan", () => {
 		expect(bytes[0]).toBe(0x5a);
 	});
 
-	it("admits exactly 32 MiB to one strict-copy pass and rejects 33 MiB before copying", () => {
-		const codecModulePath = `${import.meta.dir}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
-		const strictModulePath = `${import.meta.dir}/../src/modes/daemon/sandbox/prime-sandbox-strict-bytes.js`;
+	it("admits exactly 32 MiB to one strict-copy pass and rejects 33 MiB before copying", async () => {
+		const codecModulePath = `${testDirectory}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
+		const strictModulePath = `${testDirectory}/../src/modes/daemon/sandbox/prime-sandbox-strict-bytes.js`;
 		const script = `import { mock } from "bun:test";
 const NativeBytes = Uint8Array;
 let strictCalls = 0;
@@ -1972,8 +1979,7 @@ process.stdout.write(JSON.stringify({
  exactCalls: strictCalls - callsAfterOver,
  callerByte: bytes[0],
 }));`;
-		const run = Bun.spawnSync({ cmd: ["/Users/milkkarten/.bun/bin/bun", "-e", script] });
-		expect(run.exitCode).toBe(0);
+		const run = await execFileAsync("/Users/milkkarten/.bun/bin/bun", ["-e", script], { encoding: "buffer" });
 		expect(new TextDecoder().decode(run.stdout)).toBe(
 			'{"over":"BOUNDS_PAYLOAD","callsAfterOver":0,"exact":"TRUNCATED","exactCalls":32,"callerByte":90}',
 		);
@@ -2034,7 +2040,7 @@ describe("exact semantic input schemas", () => {
 		if (!scan.ok) return;
 		for (let index = 0; index < scan.records.length; index += 1) {
 			const records: unknown[] = scan.records.map((item) => item.value);
-			const record = records[index];
+			const record = scan.records[index].value;
 			let payload: unknown;
 			if (record.payload instanceof Uint8Array) {
 				payload = record.payload.slice();
@@ -2110,8 +2116,8 @@ describe("exact semantic input schemas", () => {
 });
 
 describe("transitive strict-byte mutation stability", () => {
-	it("keeps valid bytes valid after global Uint8Array replacement in a clean process", () => {
-		const codecModulePath = `${import.meta.dir}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
+	it("keeps valid bytes valid after global Uint8Array replacement in a clean process", async () => {
+		const codecModulePath = `${testDirectory}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
 		const script = `import { createHash } from "node:crypto";
 const NativeBytes = Uint8Array;
 const payload = new NativeBytes(104);
@@ -2128,13 +2134,12 @@ const codec = await import("${codecModulePath}?constructor-mutation");
 class ReplacementBytes extends NativeBytes {}
 Object.defineProperty(globalThis, "Uint8Array", { value: ReplacementBytes, configurable: true, writable: true });
 process.stdout.write(JSON.stringify(codec.parseRecord(record)));`;
-		const run = Bun.spawnSync({ cmd: ["/Users/milkkarten/.bun/bin/bun", "-e", script] });
-		expect(run.exitCode).toBe(0);
+		const run = await execFileAsync("/Users/milkkarten/.bun/bin/bun", ["-e", script], { encoding: "buffer" });
 		expect(JSON.parse(new TextDecoder().decode(run.stdout))).toMatchObject({ ok: true });
 	});
 
-	it("survives Object.prototype descriptor pollution and rejects accessor fields in a clean process", () => {
-		const codecModulePath = `${import.meta.dir}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
+	it("survives Object.prototype descriptor pollution and rejects accessor fields in a clean process", async () => {
+		const codecModulePath = `${testDirectory}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
 		const encodedInput = JSON.stringify(
 			namedChain(canonicalRawChain()).map((item) => ({ name: item.name, bytes: Array.from(item.bytes) })),
 		);
@@ -2187,17 +2192,16 @@ delete Object.prototype.enumerable;
 delete Object.prototype.configurable;
 delete Object.prototype.ok;
 process.stdout.write(JSON.stringify({ parseOk, scanOk, accessorRejected }));`;
-		const run = Bun.spawnSync({ cmd: ["/Users/milkkarten/.bun/bin/bun", "-e", script] });
+		const run = await execFileAsync("/Users/milkkarten/.bun/bin/bun", ["-e", script], { encoding: "buffer" });
 		expect(new TextDecoder().decode(run.stderr)).toBe("");
-		expect(run.exitCode).toBe(0);
 		expect(new TextDecoder().decode(run.stdout)).toBe('{"parseOk":true,"scanOk":true,"accessorRejected":true}');
 	});
 });
 
 describe("owned byte cleanup", () => {
-	it("clears owned copies and keeps only transferred bytes", () => {
-		const codecModulePath = `${import.meta.dir}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
-		const strictModulePath = `${import.meta.dir}/../src/modes/daemon/sandbox/prime-sandbox-strict-bytes.js`;
+	it("clears owned copies and keeps only transferred bytes", async () => {
+		const codecModulePath = `${testDirectory}/../src/modes/daemon/sandbox/prime-workspace-v21-record-codec.ts`;
+		const strictModulePath = `${testDirectory}/../src/modes/daemon/sandbox/prime-sandbox-strict-bytes.js`;
 		const script = `import { createHash } from "node:crypto";
 import { mock } from "bun:test";
 async function main() {
@@ -2280,8 +2284,7 @@ async function main() {
  process.stdout.write(JSON.stringify({ encodeSuccess, encodeFailure, planEntryFailure, aggregateCleanup, vectorCleanup, parseCleanup, digestSuccess }));
 }
 await main();`;
-		const run = Bun.spawnSync({ cmd: ["/Users/milkkarten/.bun/bin/bun", "-e", script] });
-		expect(run.exitCode).toBe(0);
+		const run = await execFileAsync("/Users/milkkarten/.bun/bin/bun", ["-e", script], { encoding: "buffer" });
 		expect(new TextDecoder().decode(run.stdout)).toBe(
 			'{"encodeSuccess":true,"encodeFailure":true,"planEntryFailure":true,"aggregateCleanup":true,"vectorCleanup":true,"parseCleanup":true,"digestSuccess":true}',
 		);
