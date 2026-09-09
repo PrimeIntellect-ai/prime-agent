@@ -23,6 +23,7 @@ import {
 	getLocalHarnessStateDir,
 	getRefinementHistory,
 	getRefinementHistoryPath,
+	type HarnessEntry,
 	type HarnessState,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
@@ -676,7 +677,7 @@ describe("harness refinement", () => {
 		});
 	});
 
-	it("loads entries saved before the rename and resaves the grouping as topic", () => {
+	it("loads an entry that stores the grouping as path and resaves it as topic", () => {
 		const dir = makeTempDir();
 		writeFileSync(
 			getHarnessStatePath(dir),
@@ -688,7 +689,7 @@ describe("harness refinement", () => {
 							id: "legacy",
 							kind: "memory",
 							title: "Legacy",
-							content: "Saved before the rename.",
+							content: "Stored with the older field name.",
 							path: "repo/testing",
 						},
 					},
@@ -1223,6 +1224,37 @@ describe("harness refinement", () => {
 			version: 1,
 		});
 		expect(state.refinements.at(-1)?.trigger).toBe("Rollback refinement refine_target");
+	});
+
+	it("rolls back a deletion recorded with the older path field into the same grouping", async () => {
+		const state = loadHarnessState(makeTempDir());
+		const deleted = {
+			id: "retired",
+			kind: "memory",
+			title: "Retired memory",
+			content: "Retired content",
+			path: "repo/testing",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-01-01T00:00:00.000Z",
+			updated_at: "2026-01-01T00:00:00.000Z",
+			version: 1,
+		} as unknown as HarnessEntry;
+		const target: RefinementResult = {
+			id: "refine_old",
+			summary: "Retire a memory",
+			rationale: "It was stale.",
+			expectedOutcome: "Less noise.",
+			appliedEdits: [{ action: "delete", kind: "memory", id: "retired", before: deleted, applied: true }],
+			harnessStatePath: "/tmp/harness_state.json",
+		};
+
+		await refineHarness([], state, [target], {} as never, "api-key", { rollbackId: "refine_old" });
+
+		expect(state.entries.memory.retired.topic).toBe("repo/testing");
 	});
 
 	it("throws when rollback target is missing", async () => {

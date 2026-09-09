@@ -119,7 +119,7 @@ class HarnessStateTest(unittest.TestCase):
                     str(caught.exception), f"{name} was removed; use rlm.harness.{replacement}"
                 )
 
-    def test_entries_saved_before_the_rename_load_and_resave_as_topic(self) -> None:
+    def test_entries_that_store_the_grouping_as_path_load_and_resave_as_topic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"
             state_path.write_text(
@@ -132,7 +132,7 @@ class HarnessStateTest(unittest.TestCase):
                                     "id": "legacy",
                                     "kind": "memory",
                                     "title": "Legacy",
-                                    "content": "Saved before the rename.",
+                                    "content": "Stored with the older field name.",
                                     "path": "repo/testing",
                                 }
                             }
@@ -145,7 +145,7 @@ class HarnessStateTest(unittest.TestCase):
             state = HarnessState(state_path)
             self.assertEqual(state.get("memory", "legacy").topic, "repo/testing")
 
-            state.update("legacy", "Legacy", "Resaved after the rename.")
+            state.update("legacy", "Legacy", "Resaved by the current writer.")
             saved = json.loads(state_path.read_text(encoding="utf-8"))["entries"]["memory"]["legacy"]
             self.assertEqual(saved["topic"], "repo/testing")
             self.assertNotIn("path", saved)

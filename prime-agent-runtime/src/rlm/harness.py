@@ -262,9 +262,9 @@ class HarnessState:
                         ):
                             continue
                         if not isinstance(entry_data.get("topic"), str):
-                            # Entries saved before the rename store the grouping as "path".
-                            legacy_topic = raw_entry.get("path")
-                            entry_data["topic"] = legacy_topic if isinstance(legacy_topic, str) else "general"
+                            # Older state files spell the grouping "path"; read both.
+                            stored_path = raw_entry.get("path")
+                            entry_data["topic"] = stored_path if isinstance(stored_path, str) else "general"
                         if entry_data.get("scope") not in ("local", "global"):
                             entry_data["scope"] = self.scope
                         if not isinstance(entry_data.get("source"), str):

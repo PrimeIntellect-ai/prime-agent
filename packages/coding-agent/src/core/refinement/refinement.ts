@@ -235,10 +235,10 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
-function normalizeHarnessTopic(topic: unknown, legacyPath: unknown): string {
-	if (typeof topic === "string") return topic;
-	// Entries saved before the rename store the grouping as "path"; the next save writes "topic".
-	return typeof legacyPath === "string" ? legacyPath : "general";
+/** Grouping label of a stored entry. State and history files may still spell it `path`. */
+function harnessTopic(entry: { topic?: unknown; path?: unknown }): string {
+	if (typeof entry.topic === "string") return entry.topic;
+	return typeof entry.path === "string" ? entry.path : "general";
 }
 
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
@@ -306,10 +306,10 @@ export function loadHarnessState(
 			for (const [id, rawEntry] of Object.entries(records)) {
 				const entry = objectRecord(rawEntry);
 				if (!entry) continue;
-				const { path: legacyTopic, ...rest } = entry as unknown as HarnessEntry & { path?: unknown };
+				const { path: _path, ...rest } = entry as unknown as HarnessEntry & { path?: unknown };
 				state.entries[kind][id] = {
 					...rest,
-					topic: normalizeHarnessTopic(entry.topic, legacyTopic),
+					topic: harnessTopic(entry),
 					scope: normalizeHarnessScope(entry.scope, scope),
 					reference: objectRecord(entry.reference) ?? {},
 					arguments: objectRecord(entry.arguments) ?? {},
@@ -832,7 +832,7 @@ function rollbackProposal(target: RefinementResult): RefinementProposal {
 				id: edit.id,
 				title: edit.before.title,
 				content: edit.before.content,
-				topic: edit.before.topic,
+				topic: harnessTopic(edit.before),
 				reference: edit.before.reference,
 				arguments: edit.before.arguments,
 				metadata: edit.before.metadata,
