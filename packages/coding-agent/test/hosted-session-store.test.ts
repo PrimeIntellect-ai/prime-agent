@@ -681,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(200324);
+		expect(bytes.byteLength).toBe(213852);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"c5edb8a96abbe6d92f21698012be1d74b2686b7b589293430b726f6f16d69319",
+			"e750b8b12966959b5aeba70d8aae1ec010a02714f7d5cfa9facac47423a45f13",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -2512,7 +2512,7 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"1b890ced31569755c427af05dc81067ebd6f51e0b2e7ae6418a3c10e5351aac5",
+			"ec4f4741d763d3b4d5cca7ce9ae0a5e8081ef6fabed55013275eb214125089df",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
 			"8f55f26572015b6cfcae8edc9a85d6f1b1ae38206f54a5e5b0572872280720ea",

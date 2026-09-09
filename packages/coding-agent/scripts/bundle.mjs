@@ -32,8 +32,8 @@ const unbundledDir = join(packageDir, "dist", "modes", "daemon", "sandbox");
 const HELPER_ASSETS = Object.freeze([
 	Object.freeze({
 		name: "hosted-session-store-posix-helper.py",
-		size: 200324,
-		digest: "c5edb8a96abbe6d92f21698012be1d74b2686b7b589293430b726f6f16d69319",
+		size: 213852,
+		digest: "e750b8b12966959b5aeba70d8aae1ec010a02714f7d5cfa9facac47423a45f13",
 		sourceAnchor: "hosted-session-store.ts",
 	}),
 	Object.freeze({
