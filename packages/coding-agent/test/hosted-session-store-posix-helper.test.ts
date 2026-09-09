@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 const HELPER = fileURLToPath(
 	new URL("../src/modes/daemon/sandbox/hosted-session-store-posix-helper.py", import.meta.url),
 );
+
+const execFileAsync = promisify(execFile);
 
 interface PythonFunction {
 	header: string;
@@ -2034,13 +2038,12 @@ if count!=304:raise RuntimeError("count")
 print("V5_B00_B13_PREFIX_MATRIX_OK 304")
 `;
 		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
-		const child = Bun.spawn([hostPython, "-c", probe, HELPER], { cwd: "/", env: {}, stdout: "pipe", stderr: "pipe" });
-		const stdoutPromise = new Response(child.stdout).text();
-		const stderrPromise = new Response(child.stderr).text();
-		const exitCode = await child.exited;
-		const stdout = await stdoutPromise;
-		const stderr = await stderrPromise;
-		expect(exitCode, stderr).toBe(0);
+		const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+			cwd: "/",
+			env: {},
+			timeout: 30_000,
+			maxBuffer: 1024,
+		});
 		expect(stderr).toBe("");
 		expect(stdout).toBe("V5_B00_B13_PREFIX_MATRIX_OK 304\n");
 	});
@@ -2158,16 +2161,264 @@ finally:shutil.rmtree(root,ignore_errors=True)
 print("V5_DRAFT_TRANSACTION_OK 401 300")
 `;
 		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
-		const child = Bun.spawn([hostPython, "-c", probe, HELPER], { cwd: "/", env: {}, stdout: "pipe", stderr: "pipe" });
-		const stdoutPromise = new Response(child.stdout).text();
-		const stderrPromise = new Response(child.stderr).text();
-		const exitCode = await child.exited;
-		const stdout = await stdoutPromise;
-		const stderr = await stderrPromise;
-		expect(exitCode, stderr).toBe(0);
+		const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+			cwd: "/",
+			env: {},
+			timeout: 30_000,
+			maxBuffer: 1024,
+		});
 		expect(stderr).toBe("");
 		expect(stdout).toBe("V5_DRAFT_TRANSACTION_OK 401 300\n");
 	});
+
+	test("V5 WS_INSPECT stays read-only, source-bound, and emits only exact selector rows", async () => {
+		const source = await readFile(HELPER, "utf8");
+		expect(source).toContain("_E_STALE = 0x12");
+		const selection = pythonFunction(source, "_v5_inspect_row").body;
+		expect(
+			tokensInOrder(selection, [
+				"lifecycle = payload[:32]",
+				"if _same_at(item, 0, lifecycle):",
+				"lifecycle_present = True",
+				"if matched is None and _same_at(item, 0, payload):",
+				"return matched, lifecycle_present",
+				"_zero(lifecycle)",
+			]),
+		).toBe(true);
+		for (const forbidden of ["_unlink(", "_rmdir(", "_fsync(", "_fdatasync(", "os.link", "_publish_", "_prove_"])
+			expect(selection).not.toContain(forbidden);
+		const command = pythonFunction(source, "_cmd_v5_inspect").body;
+		expect(
+			tokensInOrder(command, [
+				"items, unused_outstanding = _v5_collect_inventory(",
+				"matched, lifecycle_present = _v5_inspect_row(items, payload)",
+				"return _E_STALE",
+				"return _E_ABSENT",
+				"_write_frame(1, _WS_TRANSACTION, matched)",
+				"_v5_zero_transactions(items)",
+			]),
+		).toBe(true);
+		for (const forbidden of [
+			"_unlink(",
+			"_rmdir(",
+			"_fsync(",
+			"_fdatasync(",
+			"os.link",
+			"_publish_",
+			"_prove_",
+			"_write_temp",
+		])
+			expect(command).not.toContain(forbidden);
+		const dispatch = pythonFunction(source, "_dispatch_v5").body;
+		expect(
+			tokensInOrder(dispatch, [
+				"if opcode == _WS_INVENTORY:",
+				"if opcode == _WS_INSPECT:",
+				"error = _cmd_v5_inspect(",
+				"if error is not None:",
+				'return (v5_mode, "error", error)',
+				'return (v5_mode, "done", None)',
+				"if opcode == _WS_BEGIN:",
+				'return (v5_mode, "error", _E_BUSY)',
+				'return (v5_mode, "error", _E_ABSENT)',
+			]),
+		).toBe(true);
+	});
+
+	const linuxProbeTest = process.platform === "linux" ? test : test.skip;
+
+	linuxProbeTest(
+		"V5 WS_INSPECT dispatch serves exact rows, fixed arms, and malformed pre-effect on an authentic root",
+		async () => {
+			const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+spec=importlib.util.spec_from_file_location("store_v5_inspect_command_probe",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128));plan_nonce=bytes((7,))*32;content_nonce=bytes((8,))*32
+plan=b"PIWSPLN1"+struct.pack(">I",17);content=b"PIWSCNT1"+struct.pack(">Q",23);manifest=b"PIWSIMF5"+bytes(8)+bytes(lifecycle)+bytes(generation)+binding+tx+plan_digest+struct.pack(">I",17)+struct.pack(">Q",23)+plan_nonce+content_nonce+bytes(20)
+expected=bytearray(401);expected[0:32]=lifecycle;expected[32:64]=generation;expected[64:96]=binding;expected[96:128]=tx;expected[128:160]=plan_digest;struct.pack_into(">I",expected,160,17);struct.pack_into(">Q",expected,164,23);expected[216:224]=bytes((255,))*8;expected[384:392]=bytes((255,))*8;struct.pack_into(">Q",expected,392,1100000000);expected[400]=1
+selector=bytearray(lifecycle)+bytearray(generation)+bytearray(binding)+bytearray(tx)
+parent="/private/tmp" if sys.platform=="darwin" else "/tmp"
+def captured(call):
+ read_fd,write_fd=os.pipe();saved=os.dup(1);closed=False
+ try:
+  os.dup2(write_fd,1)
+  try:call()
+  finally:os.dup2(saved,1)
+  os.close(write_fd);closed=True
+  chunks=[]
+  while True:
+   chunk=os.read(read_fd,65536)
+   if not chunk:break
+   chunks.append(chunk)
+  return b"".join(chunks)
+ finally:
+  if not closed:os.close(write_fd)
+  os.close(saved);os.close(read_fd)
+def build(extra,alias):
+ root=tempfile.mkdtemp(prefix="store-v5-inspect-cmd-",dir=parent)
+ fds=None
+ try:
+  root_fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds=module.Fds();fds.add(root_fd)
+  root_device=os.fstat(root_fd).st_dev;root_inode=os.fstat(root_fd).st_ino
+  lock_fd,lock_device,lock_inode,lock_error=module._bind_lock(fds,root_fd,os.getuid(),root_device)
+  if lock_error is not None:raise RuntimeError("lock")
+  genesis=bytes(range(64));identity_digest=module._digest(genesis)
+  record=bytearray(module._WAL_SIZE);record[:11]=module._WAL_MAGIC;record[16]=module._W_ALLOCATED;struct.pack_into(">Q",record,24,1);record[32:64]=lifecycle;record[64:96]=generation;record[96:128]=module._ZERO32;record[128:160]=identity_digest
+  payload=bytes(lifecycle)+bytes(generation)+struct.pack(">I",len(genesis))+genesis+bytes(record)
+  module._zero(identity_digest)
+  result,create_error=module._cmd_create(fds,root_fd,payload,os.getuid(),root_device)
+  if create_error is not None:raise RuntimeError("create")
+  suffix=plan_nonce if alias else content_nonce
+  evidence=os.path.join(root,lifecycle.hex(),"generations",generation.hex(),"workspace-evidence")
+  os.mkdir(evidence,0o700)
+  for name,data in ((".ws-plan."+plan_nonce.hex(),plan),(".ws-content."+suffix.hex(),content),("input.manifest",manifest)):
+   path=os.path.join(evidence,name);fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(fd,data);os.close(fd)
+  if extra:
+   fd=os.open(os.path.join(evidence,"residue.rec"),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(fd,b"x");os.close(fd)
+  return root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode
+ except BaseException:
+  if fds is not None:fds.close_all()
+  shutil.rmtree(root,ignore_errors=True)
+  raise
+def dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,payload):
+ box=[]
+ def call():
+  box.append(module._dispatch_v5(fds,root_fd,os.getuid(),root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_INSPECT,payload,module._MODE_V5_READY))
+ emitted=captured(call)
+ return box[0],emitted
+def arms(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode):
+ frame=struct.pack(">BI",0x83,401)+bytes(expected)
+ outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,selector)
+ if outcome!=(module._MODE_V5_READY,"done",None) or emitted!=frame or len(emitted)!=406:raise RuntimeError("exact")
+ outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,selector)
+ if outcome!=(module._MODE_V5_READY,"done",None) or emitted!=frame or len(emitted)!=406:raise RuntimeError("repeat")
+ for offset in (32,64,96):
+  stale=bytearray(selector);stale[offset:offset+32]=bytes(range(96,128))
+  outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,stale)
+  if outcome!=(module._MODE_V5_READY,"error",module._E_STALE) or emitted!=b"":raise RuntimeError("stale")
+ absent=bytearray(selector);absent[0:32]=bytearray(range(64,96))
+ outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,absent)
+ if outcome!=(module._MODE_V5_READY,"error",module._E_ABSENT) or emitted!=b"":raise RuntimeError("absent")
+ for bad in (bytearray(127),bytearray(129)):
+  outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,bad)
+  if outcome!=(module._MODE_V5_READY,"error",module._E_INPUT) or emitted!=b"":raise RuntimeError("malformed")
+ zero_tx=bytearray(selector);zero_tx[96:128]=bytes(32)
+ outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,zero_tx)
+ if outcome!=(module._MODE_V5_READY,"error",module._E_INPUT) or emitted!=b"":raise RuntimeError("zero-tx")
+ outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,selector)
+ if outcome!=(module._MODE_V5_READY,"done",None) or emitted!=frame or len(emitted)!=406:raise RuntimeError("post-malformed")
+ items,outstanding=module._v5_collect_inventory(fds,root_fd,os.getuid(),root_device,root_inode,lock_fd,lock_device,lock_inode)
+ if len(items)!=1 or items[0]!=expected:raise RuntimeError("inventory")
+ module._v5_zero_transactions(items)
+ if any(items[0]):raise RuntimeError("zeroed")
+ outcome,emitted=dispatch_inspect(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,selector)
+ if outcome!=(module._MODE_V5_READY,"done",None) or emitted!=frame or len(emitted)!=406:raise RuntimeError("post-zero")
+ if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError("fds")
+for attempt in (0,1):
+ root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=build(False,False)
+ try:
+  arms(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode)
+ finally:
+  fds.close_all();shutil.rmtree(root,ignore_errors=True)
+module._zero(expected)
+print("V5_INSPECT_COMMAND_OK 8 406")
+`;
+			const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+			const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+				cwd: "/",
+				env: {},
+				timeout: 30_000,
+				maxBuffer: 1024,
+			});
+			expect(stderr).toBe("");
+			expect(stdout).toBe("V5_INSPECT_COMMAND_OK 8 406\n");
+		},
+	);
+
+	linuxProbeTest(
+		"V5 WS_INSPECT emits no frame on corrupt or aliased evidence and keeps descriptor discipline",
+		async () => {
+			const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+spec=importlib.util.spec_from_file_location("store_v5_inspect_fatal_probe",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128));plan_nonce=bytes((7,))*32;content_nonce=bytes((8,))*32
+plan=b"PIWSPLN1"+struct.pack(">I",17);content=b"PIWSCNT1"+struct.pack(">Q",23);manifest=b"PIWSIMF5"+bytes(8)+bytes(lifecycle)+bytes(generation)+binding+tx+plan_digest+struct.pack(">I",17)+struct.pack(">Q",23)+plan_nonce+content_nonce+bytes(20)
+selector=bytearray(lifecycle)+bytearray(generation)+bytearray(binding)+bytearray(tx)
+parent="/private/tmp" if sys.platform=="darwin" else "/tmp"
+def captured(call):
+ read_fd,write_fd=os.pipe();saved=os.dup(1);closed=False
+ try:
+  os.dup2(write_fd,1)
+  try:call()
+  finally:os.dup2(saved,1)
+  os.close(write_fd);closed=True
+  chunks=[]
+  while True:
+   chunk=os.read(read_fd,65536)
+   if not chunk:break
+   chunks.append(chunk)
+  return b"".join(chunks)
+ finally:
+  if not closed:os.close(write_fd)
+  os.close(saved);os.close(read_fd)
+def build(extra,alias):
+ root=tempfile.mkdtemp(prefix="store-v5-inspect-fatal-",dir=parent)
+ fds=None
+ try:
+  root_fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds=module.Fds();fds.add(root_fd)
+  root_device=os.fstat(root_fd).st_dev;root_inode=os.fstat(root_fd).st_ino
+  lock_fd,lock_device,lock_inode,lock_error=module._bind_lock(fds,root_fd,os.getuid(),root_device)
+  if lock_error is not None:raise RuntimeError("lock")
+  genesis=bytes(range(64));identity_digest=module._digest(genesis)
+  record=bytearray(module._WAL_SIZE);record[:11]=module._WAL_MAGIC;record[16]=module._W_ALLOCATED;struct.pack_into(">Q",record,24,1);record[32:64]=lifecycle;record[64:96]=generation;record[96:128]=module._ZERO32;record[128:160]=identity_digest
+  payload=bytes(lifecycle)+bytes(generation)+struct.pack(">I",len(genesis))+genesis+bytes(record)
+  module._zero(identity_digest)
+  result,create_error=module._cmd_create(fds,root_fd,payload,os.getuid(),root_device)
+  if create_error is not None:raise RuntimeError("create")
+  suffix=plan_nonce if alias else content_nonce
+  evidence=os.path.join(root,lifecycle.hex(),"generations",generation.hex(),"workspace-evidence")
+  os.mkdir(evidence,0o700)
+  for name,data in ((".ws-plan."+plan_nonce.hex(),plan),(".ws-content."+suffix.hex(),content),("input.manifest",manifest)):
+   path=os.path.join(evidence,name);fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(fd,data);os.close(fd)
+  if extra:
+   fd=os.open(os.path.join(evidence,"residue.rec"),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(fd,b"x");os.close(fd)
+  return root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode
+ except BaseException:
+  if fds is not None:fds.close_all()
+  shutil.rmtree(root,ignore_errors=True)
+  raise
+def expect_fatal(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode):
+ seen=[]
+ def call():
+  try:
+   module._dispatch_v5(fds,root_fd,os.getuid(),root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_INSPECT,selector,module._MODE_V5_READY)
+  except module.Fatal as failure:
+   seen.append(failure.code)
+ emitted=captured(call)
+ if len(seen)!=1:return None,emitted
+ return seen[0],emitted
+for extra,alias,label in ((True,False,"corrupt"),(False,True,"alias")):
+ root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=build(extra,alias)
+ try:
+  code,emitted=expect_fatal(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode)
+  if code!=module._E_STATE or emitted!=b"" or fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError(label)
+ finally:
+  fds.close_all();shutil.rmtree(root,ignore_errors=True)
+print("V5_INSPECT_FATAL_OK 14 14")
+`;
+			const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+			const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+				cwd: "/",
+				env: {},
+				timeout: 30_000,
+				maxBuffer: 1024,
+			});
+			expect(stderr).toBe("");
+			expect(stdout).toBe("V5_INSPECT_FATAL_OK 14 14\n");
+		},
+	);
 
 	test("static source keeps the hostile-input boundary and forbidden syntax closed", async () => {
 		const source = await readFile(HELPER, "utf8");

@@ -53,6 +53,7 @@ _E_STATE = 0x0E
 _E_FSYNC = 0x0F
 _E_IO = 0x10
 _E_UNCERTAIN = 0x11
+_E_STALE = 0x12
 
 _LOCK = b".lock"
 _IDENTITY = b"identity.rec"
@@ -4540,6 +4541,44 @@ def _cmd_v5_inventory(
             _v5_zero_transactions(items)
 
 
+def _v5_inspect_row(items, payload):
+    lifecycle = payload[:32]
+    matched = None
+    lifecycle_present = False
+    try:
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if _same_at(item, 0, lifecycle):
+                lifecycle_present = True
+                if matched is None and _same_at(item, 0, payload):
+                    matched = item
+            index += 1
+        return matched, lifecycle_present
+    finally:
+        _zero(lifecycle)
+
+
+def _cmd_v5_inspect(
+    fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_inode, payload
+):
+    items = None
+    try:
+        items, unused_outstanding = _v5_collect_inventory(
+            fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_inode
+        )
+        matched, lifecycle_present = _v5_inspect_row(items, payload)
+        if matched is None:
+            if lifecycle_present:
+                return _E_STALE
+            return _E_ABSENT
+        _write_frame(1, _WS_TRANSACTION, matched)
+        return None
+    finally:
+        if items is not None:
+            _v5_zero_transactions(items)
+
+
 def _v5_validate_request(opcode, payload):
     if opcode == _WS_INVENTORY:
         if len(payload) != 0:
@@ -4775,6 +4814,13 @@ def _dispatch_v5(
             lock_device,
             lock_inode,
         )
+        return (v5_mode, "done", None)
+    if opcode == _WS_INSPECT:
+        error = _cmd_v5_inspect(
+            fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_inode, payload
+        )
+        if error is not None:
+            return (v5_mode, "error", error)
         return (v5_mode, "done", None)
     if opcode == _WS_BEGIN:
         return (v5_mode, "error", _E_BUSY)

@@ -27,8 +27,8 @@ const mode = process.argv[2];
 const HELPER_ASSETS = Object.freeze([
 	Object.freeze({
 		name: "hosted-session-store-posix-helper.py",
-		size: 198891,
-		digest: "904b3998dafd0ce87a579a58280a54c27184a167b4034ca22bef4bfb1d616816",
+		size: 200324,
+		digest: "c5edb8a96abbe6d92f21698012be1d74b2686b7b589293430b726f6f16d69319",
 		sourceAnchor: "hosted-session-store.ts",
 	}),
 	Object.freeze({
