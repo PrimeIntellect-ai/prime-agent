@@ -108,7 +108,7 @@ can exceed estimates. Do not substitute a broad personal account token for the C
 
 ## Local development
 
-Run the isolated harness checks from this directory:
+The existing runtime Python CI job runs the harness checks. To run them locally from this directory:
 
 ```sh
 uv sync --locked
