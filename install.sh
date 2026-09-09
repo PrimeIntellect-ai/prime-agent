@@ -1728,6 +1728,9 @@ prime_agent_native_prepare_root() {
 		fi
 	done
 	prime_agent_native_stage=$(mktemp -d "$native_root/.install.XXXXXX")
+	if [ "${PRIME_AGENT_EXPECTED_CURRENT+x}" = x ] && [ "$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)" != "$PRIME_AGENT_EXPECTED_CURRENT" ]; then
+		printf 'error: the active release changed; retry the update.\n' >&2; exit 1
+	fi
 }
 
 prime_agent_native_valid_target() {
@@ -1831,17 +1834,15 @@ prime_agent_install_native() {
 	native_digest=$(awk '{ print $1 }' "$prime_agent_native_stage/selected.sha256")
 	native_release_name="$native_version-$native_platform-$native_digest"
 	native_destination="$native_root/releases/$native_release_name"
-	if [ -e "$native_destination" ]; then
-		[ ! -L "$native_destination" ] && [ -d "$native_destination" ] && \
-			[ "$(cat "$native_destination/.archive-sha256" 2>/dev/null || :)" = "$native_digest" ] && \
-			[ "$("$native_destination/prime-agent" --version)" = "$native_version" ] || {
-			printf 'error: existing release directory failed validation.\n' >&2; exit 1;
-		}
-	else
-		printf '%s\n' "$native_digest" >"$native_extracted/.archive-sha256"
-		printf '%s\n' "$prime_agent_base_url" >"$native_extracted/.install-source"
-		mv "$native_extracted" "$native_destination"
+	if [ -e "$native_destination" ] || [ -L "$native_destination" ]; then
+		# Reinstalls activate fresh assets without modifying a running release.
+		native_destination=$(mktemp -d "$native_destination.XXXXXX")
+		rmdir "$native_destination"
+		native_release_name=${native_destination##*/}
 	fi
+	printf '%s\n' "$native_digest" >"$native_extracted/.archive-sha256"
+	printf '%s\n' "$prime_agent_base_url" >"$native_extracted/.install-source"
+	mv "$native_extracted" "$native_destination"
 	if [ "${PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL:-}" != 0 ]; then
 		confirm_kernel_runtime_setup
 		if [ "$prime_agent_bootstrap_kernel_on_install" = 1 ]; then

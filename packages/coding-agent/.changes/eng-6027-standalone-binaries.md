@@ -1,2 +1,3 @@
 - Added standalone macOS and Linux release archives that run without Node, npm, or Bun, including the Python runtime sources and application assets.
 - Changed new installations to prefer verified compiled releases on supported machines, with Node installation available for other systems.
+- Fixed reinstalling the same compiled release to restore its assets without modifying files used by existing processes.

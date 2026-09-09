@@ -68,6 +68,8 @@ Set `PRIME_AGENT_INSTALL_METHOD=node` to explicitly keep the Node installation, 
 
 Each release keeps its executable and assets together under `releases/`. The stable `bin/prime-agent` link changes only after validation, and `bin/previous` retains the earlier release. The installer serializes changes with `.install-lock`; normal interruption cleans up the lock. After a forced kill, confirm its recorded process is no longer running before removing the stale lock. User data remains in `~/.prime/agent`.
 
+Reinstalling the same archive creates a fresh release directory with a unique suffix, so it can repair missing or changed assets without modifying files used by existing processes. Old release directories are retained; there is no automatic garbage collection yet.
+
 The installer still shows download and verification progress and can prepare Python. Compilation removes JavaScript dependency installation; Python and external tools still need preparation. Set `PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0` to defer Python setup.
 
 Existing npm installations and the in-app updater are handled by the next layers of the rollout. Homebrew packaging remains separate work.
