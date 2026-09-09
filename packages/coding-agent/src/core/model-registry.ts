@@ -31,6 +31,7 @@ import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
+import { getBundledModels } from "./bundled-model-catalog.js";
 import { MODEL_CATALOG_REFRESH_INTERVAL_MS, ModelCatalogCache } from "./model-catalog-cache.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import { mergePrimeInferenceModels, PRIME_INFERENCE_BASE_URL } from "./prime-inference-model-catalog.js";
@@ -321,6 +322,7 @@ function readOpenAICodexModelIds(value: unknown): Set<string> {
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry {
+	private readonly bundledCatalogModels = getBundledModels();
 	private models: Model<Api>[] = [];
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private staleProviderRequestAuthSources: Map<string, AuthSourceToken[]> = new Map();
@@ -353,7 +355,11 @@ export class ModelRegistry {
 		this.providerCatalog = new ModelCatalogCache(
 			PROVIDER_MODEL_CATALOG_URL,
 			cachePath("provider-model-catalog.v1.json"),
-			(payload) => parseProviderModelCatalog(payload, this.bundledModels()),
+			(payload) =>
+				parseProviderModelCatalog(
+					payload,
+					getProviders().flatMap((provider) => getModels(provider) as Model<Api>[]),
+				),
 		);
 		this.loadModels();
 	}
@@ -410,11 +416,14 @@ export class ModelRegistry {
 	}
 
 	private bundledModels(): Model<Api>[] {
-		return getProviders().flatMap((provider) => getModels(provider) as Model<Api>[]);
+		return this.bundledCatalogModels;
 	}
 
 	private bundledPrimeInferenceModels(): Model<"openai-completions">[] {
-		return getModels(PRIME_INFERENCE_PROVIDER_ID) as Model<"openai-completions">[];
+		return this.bundledCatalogModels.filter(
+			(model): model is Model<"openai-completions"> =>
+				model.provider === PRIME_INFERENCE_PROVIDER_ID && model.api === "openai-completions",
+		);
 	}
 
 	/**
