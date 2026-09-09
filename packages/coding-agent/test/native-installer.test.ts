@@ -205,6 +205,26 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		},
 	);
 
+	it("does not overwrite a command created at the public-link handoff", async () => {
+		publish("1.0.0");
+		expect((await install("1.0.0")).code).toBe(0);
+		const current = readlinkSync(command());
+		const publicCommand = join(home, ".local/bin/prime-agent");
+		rmSync(publicCommand);
+		const shim = join(root, "link-shim");
+		mkdirSync(shim);
+		writeFileSync(
+			join(shim, "ln"),
+			'#!/bin/sh\nif [ "$3" = "$RACE_COMMAND" ]; then printf "concurrent command" > "$RACE_COMMAND"; fi\nexec /bin/ln "$@"\n',
+			{ mode: 0o755 },
+		);
+		publish("1.0.1");
+		const result = await install("1.0.1", { PATH: `${shim}:/usr/bin:/bin`, RACE_COMMAND: publicCommand });
+		expect(result.code, result.output).not.toBe(0);
+		expect(readFileSync(publicCommand, "utf8")).toBe("concurrent command");
+		expect(readlinkSync(command())).toBe(current);
+	});
+
 	it("repairs missing assets on reinstall without replacing files used by an existing process", async () => {
 		publish("1.0.0");
 		expect((await install("1.0.0")).code).toBe(0);

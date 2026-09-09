@@ -1858,6 +1858,9 @@ prime_agent_install_native() {
 		fi
 	fi
 	prime_agent_native_check_public_link
+	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" != 0 ] && [ ! -L "$native_public_bin/$prime_agent_cmd" ]; then
+		ln -sn "$native_root/bin/prime-agent" "$native_public_bin/$prime_agent_cmd"
+	fi
 	native_target="../releases/$native_release_name/prime-agent"
 	if [ -L "$native_root/bin/prime-agent" ]; then
 		native_previous=$(readlink "$native_root/bin/prime-agent")
@@ -1867,7 +1870,6 @@ prime_agent_install_native() {
 	fi
 	prime_agent_native_atomic_link "$native_target" "$native_root/bin/prime-agent"
 	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" != 0 ]; then
-		prime_agent_native_atomic_link "$native_root/bin/prime-agent" "$native_public_bin/$prime_agent_cmd"
 		prime_agent_native_configure_path || printf 'Add %s to PATH to run Prime Agent.\n' "$native_public_bin" >&2
 	fi
 	prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
