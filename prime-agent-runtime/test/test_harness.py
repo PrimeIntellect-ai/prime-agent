@@ -102,6 +102,12 @@ class HarnessStateTest(unittest.TestCase):
                     state.create("Bad", "content", id=f"bad_{kind}", kind=kind, reference=PYTHON_REFERENCE)
                 with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
                     state.create("Bad", "content", id=f"bad_{kind}", kind=kind, arguments={})
+                with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
+                    state.update(default_entry.id, "Bad", "content", kind=kind, arguments={})
+
+            # An unknown kind is reported as such, not as a skill-only field error.
+            with self.assertRaisesRegex(ValueError, "unknown harness kind 'tool'"):
+                state.create("Bad", "content", kind="tool", reference=PYTHON_REFERENCE)
 
     def test_removed_per_kind_wrappers_name_their_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -164,6 +170,21 @@ class HarnessStateTest(unittest.TestCase):
 
             self.assertEqual(HarnessState(state_path).get("memory", "grouped").topic, "repo/testing")
 
+    def test_delete_and_update_name_the_kind_an_id_actually_has(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create("Policy note", "content", id="cadence", kind="prompt")
+
+            for mutate in (
+                lambda: state.delete("cadence"),
+                lambda: state.update("cadence", "Policy note", "new content"),
+            ):
+                with self.assertRaisesRegex(ValueError, "entry 'cadence' is kind='prompt'; pass kind='prompt'"):
+                    mutate()
+
+            self.assertIsNotNone(state.get("prompt", "cadence"))
+            # A plain miss still reports absence rather than a mismatch.
+            self.assertFalse(state.delete("absent"))
 
     def test_persists_entries_and_refinements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -882,7 +882,7 @@ async function ensureKernelPythonUncached(
 		const missing: string[] = [];
 		if (!(await hasPrimeAgentRuntime(python))) {
 			missing.push(
-				"a current prime-agent-runtime with callable rlm.run, rlm.create_session, rlm.host_request, and explicit harness CRUD methods",
+				"a current prime-agent-runtime with callable rlm.run, rlm.create_session, rlm.host_request, and rlm.harness.create/update/delete",
 			);
 		}
 		if (missing.length === 0) {

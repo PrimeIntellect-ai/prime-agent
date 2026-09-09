@@ -213,6 +213,19 @@ class HarnessState:
         self._loaded_mtime: int | None = None
         self.load()
 
+    def _require_kind(self, kind: HarnessKind) -> None:
+        if kind not in self.entries:
+            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
+
+    def _kind_of(self, id: str) -> HarnessKind | None:
+        """The kind an id is stored under, if any."""
+        return next((kind for kind in _KINDS if id in self.entries[kind]), None)
+
+    def _missing_entry_message(self, kind: HarnessKind, id: str) -> str:
+        if (actual := self._kind_of(id)) is not None:
+            return f"entry {id!r} is kind={actual!r}; pass kind={actual!r}"
+        return f"{kind} entry {id!r} does not exist"
+
     def _ensure_local_writable(self) -> None:
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
@@ -370,7 +383,6 @@ class HarnessState:
         reference: dict[str, Any] | None = None,
         arguments: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
-        source: str = "agent",
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
@@ -385,7 +397,6 @@ class HarnessState:
                 reference=reference,
                 arguments=arguments,
                 metadata=metadata,
-                source=source,
             )
         self._ensure_local_writable()
         self._sync_from_disk()
@@ -398,7 +409,6 @@ class HarnessState:
             reference=reference,
             arguments=arguments,
             metadata=metadata,
-            source=source,
         )
 
     def _upsert(
@@ -501,6 +511,7 @@ class HarnessState:
         contract and are rejected for other kinds. ``topic`` groups entries and
         defaults to "policy" for prompt notes and "general" otherwise.
         """
+        self._require_kind(kind)
         reference = _validate_kind_extras(kind, reference, arguments, required=True)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
@@ -516,8 +527,6 @@ class HarnessState:
             )
         self._ensure_local_writable()
         self._sync_from_disk()
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         entry_id = id or _slug(title, kind)
         if entry_id in self.entries[kind]:
             raise ValueError(f"{kind} entry {entry_id!r} already exists")
@@ -547,6 +556,7 @@ class HarnessState:
         **kwargs: Any,
     ) -> HarnessEntry:
         """Update an existing harness entry; omitted fields keep their value."""
+        self._require_kind(kind)
         reference = _validate_kind_extras(kind, reference, arguments, required=False)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
@@ -562,10 +572,8 @@ class HarnessState:
             )
         self._ensure_local_writable()
         self._sync_from_disk()
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
-            raise ValueError(f"{kind} entry {id!r} does not exist")
+            raise ValueError(self._missing_entry_message(kind, id))
         return self._upsert(
             kind,
             title,
@@ -579,14 +587,15 @@ class HarnessState:
 
     def delete(self, id: str, *, kind: HarnessKind = "memory", global_: bool = False, **kwargs: Any) -> bool:
         """Delete a harness entry; returns False when it does not exist."""
+        self._require_kind(kind)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
             return target.delete(id, kind=kind)
         self._ensure_local_writable()
         self._sync_from_disk()
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
+            if self._kind_of(id) is not None:
+                raise ValueError(self._missing_entry_message(kind, id))
             return False
         del self.entries[kind][id]
         self.save()
