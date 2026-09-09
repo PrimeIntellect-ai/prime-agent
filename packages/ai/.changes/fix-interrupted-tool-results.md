@@ -1,0 +1,1 @@
+- Fixed orphaned tool results in provider history after aborted or errored assistant turns.

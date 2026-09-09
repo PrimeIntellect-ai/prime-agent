@@ -388,6 +388,7 @@ describe("ENG-4531 agent message UI", () => {
 		const mode = {
 			chatContainer,
 			toolOutputExpanded: false,
+			getCurrentCwd: () => "/tmp",
 			getMarkdownThemeWithSettings: () => undefined,
 		};
 		Object.setPrototypeOf(mode, InteractiveMode.prototype);
