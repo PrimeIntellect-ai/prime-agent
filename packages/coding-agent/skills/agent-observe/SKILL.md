@@ -33,7 +33,7 @@ if child is not None:
   agent carries `sessionId`, optional `sessionName`, `relationship`
   (`parent`/`sibling`/`child`), `status`, `isSessionActive`, and the counts and
   message previews known for it: `latestMessage` for a live session,
-  `firstMessage` for a member read from disk. A member with no live session has
+  `firstMessage` for an inactive child. A member with no live session has
   no `activeSessionId` and no live detail; address it with `agent_message.send`
   using its `relationship` plus its `sessionName`, or its `sessionId` when the
   member has no name. For direct children,
