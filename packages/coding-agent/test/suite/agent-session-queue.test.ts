@@ -3667,6 +3667,7 @@ describe("AgentSession scheduler scenarios", () => {
 		setImmediate(() => {
 			// An arrival during the park must not be lost once the busy state clears.
 			secondPrompt = session.prompt("queued during park");
+			secondPrompt.catch(() => undefined);
 			releaseBash();
 		});
 		await idle;

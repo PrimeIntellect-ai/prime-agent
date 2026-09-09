@@ -6056,6 +6056,12 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Busy inputs: compaction, retry, bash, plus (for "pump") disposal,
+	 * suspension, queued-work pauses, and branch-summary mutation. Waiters
+	 * parked on this predicate rely on every clear site notifying the
+	 * session-input checkpoint waiters.
+	 */
 	private _isBusyForSessionInput(point: "preflight" | "pump"): boolean {
 		const externalBusy = this.isCompacting || this.isRetrying || this.isBashRunning;
 		if (point === "pump") {
@@ -7033,9 +7039,9 @@ export class AgentSession {
 	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
 		while (settlement === undefined || this._postCompactionContinuationSettlement === settlement) {
 			if (this._actionStore.queuedActions().length > 0) {
-				// Park while the pump would refuse selection: rescheduling a blocked
-				// pump completes on already-resolved promises, so looping here would
-				// spin on the microtask queue and starve the IO that ends the busy state.
+				// Park while the pump would refuse scheduling or selection: rescheduling
+				// a blocked pump completes on already-resolved promises, so looping here
+				// would spin on the microtask queue and starve the IO that ends the busy state.
 				if (this._isBusyForSessionInput("pump")) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
