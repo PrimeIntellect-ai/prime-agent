@@ -1325,7 +1325,7 @@ export class ReplKernelManager {
 			if (pid !== undefined && signaled) recordOrphanProcessState(pid, false);
 			// A killed/crashed kernel cannot run its own shutdown hook, so the host
 			// reaps the bash() process groups it journaled under this kernel pid.
-			if (pid !== undefined) reapKernelOrphanProcesses(pid);
+			if (pid !== undefined) void reapKernelOrphanProcesses(pid);
 		}
 		this.startPromise = undefined;
 	}
