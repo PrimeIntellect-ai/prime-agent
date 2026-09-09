@@ -1603,6 +1603,52 @@ describe("AgentSession compaction characterization", () => {
 		).toHaveLength(1);
 	});
 
+	it("does not emit the clamp notice from a stale post-compaction threshold check", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "summary from extension",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		await harness.session.compact();
+		harness.session.setContextLimit(1000, { scope: "global" });
+
+		const compactionEntry = harness.sessionManager.getEntries().find((entry) => entry.type === "compaction");
+		const staleAssistant = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: 50_000,
+			timestamp: new Date(compactionEntry!.timestamp).getTime() - 1000,
+		});
+		const shouldStop = await internals._shouldStopAfterTurn({
+			message: staleAssistant,
+			toolResults: [],
+			context: { systemPrompt: harness.session.systemPrompt, messages: [staleAssistant], tools: [] },
+			newMessages: [staleAssistant],
+		});
+
+		expect(shouldStop).toBe(false);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter(
+					(entry) => entry.type === "custom_message" && entry.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+				),
+		).toHaveLength(0);
+	});
+
 	it("still reports already-compacted when a clamped cap arrives on a compaction leaf", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
