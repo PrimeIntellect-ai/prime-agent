@@ -9,6 +9,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE } from "../../src/core/agent-session.js";
+import { convertToLlm } from "../../src/core/messages.js";
+import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
@@ -196,6 +198,87 @@ describe("AgentSession compaction characterization", () => {
 			role: "assistant",
 			content: [{ type: "text", text: "still usable" }],
 		});
+	});
+
+	it("prepends the harness digest to the compaction head message on initial and update-merge compactions", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			persistSession: true,
+		});
+		harnesses.push(harness);
+		const summarizerInputs: string[] = [];
+		harness.setResponses([
+			fauxAssistantMessage("one response"),
+			fauxAssistantMessage("two response"),
+			(context) => {
+				summarizerInputs.push(context.messages.map(getMessageText).join("\n"));
+				return fauxAssistantMessage("first summary");
+			},
+			(context) => {
+				summarizerInputs.push(context.messages.map(getMessageText).join("\n"));
+				return fauxAssistantMessage("first turn summary");
+			},
+		]);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+
+		// Written after construction: the compaction digest must be a fresh disk read.
+		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
+		expect(localDir).toBeDefined();
+		const state = loadHarnessState(localDir, "local");
+		state.entries.memory.compaction_test_memory = {
+			id: "compaction_test_memory",
+			kind: "memory",
+			title: "Compaction test memory",
+			content: "Written before compaction.",
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-09-07T00:00:00.000Z",
+			updated_at: "2026-09-07T00:00:00.000Z",
+			version: 1,
+		};
+		saveHarnessState(localDir!, state);
+
+		await harness.session.compact();
+
+		const head = harness.session.messages[0];
+		expect(head).toMatchObject({ role: "compactionSummary", summary: expect.stringContaining("first summary") });
+		const digest = (head as { harnessDigest?: string }).harnessDigest;
+		expect(digest).toContain("[local:compaction_test_memory] Compaction test memory");
+		// The session-start digest never reaches the summarizer input.
+		expect(summarizerInputs.length).toBeGreaterThan(0);
+		for (const input of summarizerInputs) {
+			expect(input).not.toContain("# Continual Harness State");
+		}
+		// Mechanical attachment: the digest never flows through the summarizer.
+		expect((head as { summary: string }).summary).not.toContain("# Continual Harness State");
+		// Memories-first rendering in LLM context: digest preamble before the summary wrapper.
+		const text = getMessageText(convertToLlm([head!])[0]);
+		expect(text.indexOf("The persistent memories produced across this session so far:")).toBe(0);
+		expect(text.indexOf("# Continual Harness State")).toBeLessThan(
+			text.indexOf("was compacted into the following summary"),
+		);
+
+		// Update-merge path: the second compaction head carries the digest too.
+		harness.setResponses([
+			fauxAssistantMessage("three response"),
+			fauxAssistantMessage("merged summary"),
+			fauxAssistantMessage("merged turn summary"),
+		]);
+		await harness.session.prompt("three");
+		await harness.session.compact();
+		const mergedHead = harness.session.messages[0];
+		expect(mergedHead).toMatchObject({
+			role: "compactionSummary",
+			summary: expect.stringContaining("merged summary"),
+		});
+		expect((mergedHead as { harnessDigest?: string }).harnessDigest).toContain(
+			"[local:compaction_test_memory] Compaction test memory",
+		);
 	});
 
 	it("renders an executing /compact as activity instead of queued work", async () => {

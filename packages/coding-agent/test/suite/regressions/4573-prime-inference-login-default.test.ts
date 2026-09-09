@@ -36,10 +36,10 @@ describe("ENG-4573 Prime Inference login default", () => {
 		}
 	});
 
-	test("persists GLM 5.2 so the next process starts with a valid model", async () => {
+	test("persists GLM 5.3 so the next process starts with a valid model", async () => {
 		const harness = await createHarness({
 			provider: PRIME_INFERENCE_PROVIDER_ID,
-			models: [{ id: PRIME_INFERENCE_DEFAULT_MODEL_ID, name: "GLM 5.2" }],
+			models: [{ id: PRIME_INFERENCE_DEFAULT_MODEL_ID, name: "GLM 5.3" }],
 		});
 		harnesses.push(harness);
 		const agentDir = join(harness.tempDir, "agent");
@@ -64,10 +64,10 @@ describe("ENG-4573 Prime Inference login default", () => {
 		expect(initial.model?.id).toBe(PRIME_INFERENCE_DEFAULT_MODEL_ID);
 	});
 
-	test("refreshes authenticated models before selecting and persisting GLM 5.2", async () => {
+	test("refreshes authenticated models before selecting and persisting GLM 5.3", async () => {
 		const fallbackModel: AgentConnectionModel = {
 			id: PRIME_INFERENCE_DEFAULT_MODEL_ID,
-			name: "GLM 5.2",
+			name: "GLM 5.3",
 			api: "openai-completions",
 			provider: PRIME_INFERENCE_PROVIDER_ID,
 			baseUrl: "https://api.pinference.ai/api/v1",

@@ -20,7 +20,7 @@ jobs:
           script: |
             const pr = context.payload.pull_request;
             const text = `${pr.title}\n${pr.body ?? ""}\n${pr.head.ref}`;
-            const ticket = /\bres-\d+\b|linear\.app\/[\w-]+\/issue\/res-\d+/i;
+            const ticket = /\b(?:eng|res)-\d+\b|linear\.app\/[\w-]+\/issue\/(?:eng|res)-\d+/i;
             const optOut = /^\s*No-Ticket:\s*\S.*$/im;
             if (ticket.test(text)) {
               core.info("Linear ticket reference found.");
@@ -34,9 +34,10 @@ jobs:
             core.setFailed(
               [
                 "No Linear ticket is linked in this pull request.",
-                "Prime Agent tickets should normally use the Research team and the Prime Agent: Long-Horizon research project.",
-                "Add the ticket ID (e.g. RES-1234) or a linear.app issue link to the PR title or description,",
-                "or use a branch named after the ticket (e.g. res-1234).",
+                "Engineering issues should use the Engineering (ENG) team and the Prime Agent V1 board.",
+                "Capabilities and research issues should use the Research (RES) team and the Prime Agent: Long-Horizon board.",
+                "Add the ticket ID (e.g. ENG-1234 or RES-1234) or a linear.app issue link to the PR title or description,",
+                "or use a branch named after the ticket (e.g. eng-1234 or res-1234).",
                 'If this change genuinely has no ticket, add a line to the PR description: "No-Ticket: <short reason>".',
               ].join(" "),
             );
