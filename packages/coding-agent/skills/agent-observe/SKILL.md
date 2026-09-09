@@ -7,9 +7,9 @@ description: Read-only roster and observation of an agent's parent, siblings, an
 
 Observe the current agent's nuclear family through the local daemon: parent,
 siblings, direct children, and self. `list_agents` is the one family roster and
-covers every member `agent_message.send` can reach. Transcript reads need a live
-session in this worker, so `get_agent` and `recent_messages` do not work on
-inactive members or on root siblings held by another worker.
+covers every member `agent_message.send` can reach. `get_agent` and
+`recent_messages` hydrate an inactive child before reading it, but they cannot
+read a root sibling held by another worker.
 This skill is read-only: it can list family sessions, inspect one session, and fetch
 bounded recent message previews. It cannot prompt, steer, clear, kill, rename, or
 otherwise mutate another session.

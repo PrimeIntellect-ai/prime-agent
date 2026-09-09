@@ -3356,10 +3356,11 @@ export class AgentDaemon {
 	}
 
 	private async createAgentObserveListResult(currentState: ActiveSessionState): Promise<AgentObserveListResult> {
+		const family = await this.createAgentFamily(currentState);
 		const residentBySessionId = new Map(
 			this.listTargetableSessionStates(currentState).map((state) => [state.runtime.session.sessionId, state]),
 		);
-		const agents = (await this.createAgentFamily(currentState)).map((member) => {
+		const agents = family.map((member) => {
 			const state = residentBySessionId.get(member.entry.id);
 			return state
 				? {
