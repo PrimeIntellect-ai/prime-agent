@@ -35,7 +35,7 @@ If a maintainer has invited a pull request:
 1. Keep the change focused on the accepted Issue or Discussion.
 2. Follow the repository's development rules and existing conventions.
 3. Add or update tests for behavioral changes.
-4. Run the relevant checks locally and describe the validation in the pull request.
+4. Run the relevant checks locally and describe the validation in the pull request. Tests must not read or modify real credential stores; live provider tests stay behind the `PI_LIVE_TESTS=1` / `PI_TEST_AUTH_FILE` opt-in described in `packages/ai/README.md`.
 5. Avoid unrelated refactors or dependency changes.
 
 Development setup and commands are documented in the [development guide](packages/coding-agent/docs/development.md).

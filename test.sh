@@ -1,23 +1,36 @@
 #!/usr/bin/env bash
 set -e
 
-AUTH_FILE="$HOME/.prime/agent/auth.json"
-AUTH_BACKUP="$HOME/.prime/agent/auth.json.bak"
+# Credential stores that must stay untouched while the suite runs: the current
+# agent store and the legacy one.
+AUTH_FILES=(
+    "$HOME/.prime/agent/auth.json"
+    "$HOME/.pi/agent/auth.json"
+)
 
-# Restore auth.json on exit (success or failure)
+# Restore every moved auth.json on exit (success or failure)
 cleanup() {
-    if [[ -f "$AUTH_BACKUP" ]]; then
-        mv "$AUTH_BACKUP" "$AUTH_FILE"
-        echo "Restored auth.json"
-    fi
+    for auth_file in "${AUTH_FILES[@]}"; do
+        if [[ -f "$auth_file.bak" ]]; then
+            mv "$auth_file.bak" "$auth_file"
+            echo "Restored $auth_file"
+        fi
+    done
 }
 trap cleanup EXIT
 
-# Move auth.json out of the way
-if [[ -f "$AUTH_FILE" ]]; then
-    mv "$AUTH_FILE" "$AUTH_BACKUP"
-    echo "Moved auth.json to backup"
-fi
+# Move the credential stores out of the way
+for auth_file in "${AUTH_FILES[@]}"; do
+    if [[ -f "$auth_file" ]]; then
+        mv "$auth_file" "$auth_file.bak"
+        echo "Moved $auth_file to backup"
+    fi
+done
+
+# Live provider tests are opt-in (see packages/ai/README.md, "Running tests").
+# Make sure the opt-in is off so no test reads or refreshes real credentials.
+unset PI_LIVE_TESTS
+unset PI_TEST_AUTH_FILE
 
 # Skip local LLM tests (ollama, lmstudio)
 export PI_NO_LOCAL_LLM=1
