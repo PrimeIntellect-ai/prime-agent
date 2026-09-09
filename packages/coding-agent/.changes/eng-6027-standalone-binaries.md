@@ -2,3 +2,4 @@
 - Changed new installations to prefer verified compiled releases on supported machines, with Node installation available for other systems.
 - Fixed reinstalling the same compiled release to restore its assets without modifying files used by existing processes.
 - Fixed installation to preserve a public command replaced by another installer during download.
+- Fixed terminal hangups leaving an installation lock behind.

@@ -62,8 +62,8 @@ function publish(version: string, options: { broken?: boolean; missing?: boolean
 	return filename;
 }
 
-async function install(version: string, extra: NodeJS.ProcessEnv = {}) {
-	const child = spawn("sh", [installer, version], {
+async function install(version: string, extra: NodeJS.ProcessEnv = {}, entrypoint = installer) {
+	const child = spawn("sh", [entrypoint, version], {
 		env: {
 			...process.env,
 			HOME: home,
@@ -230,6 +230,26 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		expect(result.code).not.toBe(0);
 		expect(result.output).toContain("installation is locked");
 		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(`${process.pid}\n`);
+	});
+
+	it("releases its installation lock after a terminal hangup", async () => {
+		const harness = join(root, "hangup.sh");
+		writeFileSync(
+			harness,
+			readFileSync(installer, "utf8").replace(
+				/\nmain "\$@"\s*$/,
+				() => '\nprime_agent_install_traps\nprime_agent_native_prepare_root\nkill -HUP "$$"\n',
+			),
+		);
+		const result = await install("", {}, harness);
+		expect(result.code, result.output).toBe(129);
+		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
+	});
+
+	it("reports the supported native platform without installation or release discovery", async () => {
+		const result = await install("--native-platform", { PRIME_AGENT_DOWNLOAD_BASE_URL: "http://127.0.0.1:1" });
+		expect(result).toEqual({ code: 0, output: platform });
+		expect(existsSync(join(home, "data/prime-agent"))).toBe(false);
 	});
 
 	it.skipIf(!process.env.PRIME_AGENT_TEST_ARCHIVE)(

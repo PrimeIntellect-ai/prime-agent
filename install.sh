@@ -61,6 +61,10 @@ prime_agent_native_stage=
 prime_agent_native_lock=
 
 main() {
+	if [ "${1:-}" = --native-platform ]; then
+		prime_agent_native_platform
+		return
+	fi
 	case "${PRIME_AGENT_INSTALL_METHOD:-auto}" in
 		auto|binary|node) ;;
 		*) printf 'error: PRIME_AGENT_INSTALL_METHOD must be auto, binary or node.\n' >&2; exit 1 ;;
@@ -179,6 +183,7 @@ prime_agent_install_traps() {
 	trap 'prime_agent_cleanup' EXIT
 	trap 'prime_agent_signal_cleanup 130' INT
 	trap 'prime_agent_signal_cleanup 143' TERM
+	trap 'prime_agent_signal_cleanup 129' HUP
 }
 
 prime_agent_cleanup() {
