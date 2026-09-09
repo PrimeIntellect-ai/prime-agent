@@ -1,0 +1,7 @@
+{
+  "primePackageVersion": "0.6.21",
+  "versionStdout": "Prime CLI version: 0.6.21\n",
+  "sandboxCommandSourceSha256": "2b7b79dc1296746730db1dd1c0d248524dc81ae129b3a5ac624dcff41bc7412f",
+  "sandboxModelSourceSha256": "1ba393881f9ce103fb0d8f44a44a8a3719724fda15a2b7f35a517cafc48bc1e4",
+  "createPlainStdout": "\nSuccessfully created sandbox sb_abc123\nUse 'prime sandbox get sb_abc123' to check the sandbox status\n"
+}

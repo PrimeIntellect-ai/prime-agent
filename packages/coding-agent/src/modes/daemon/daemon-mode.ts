@@ -89,11 +89,12 @@ import {
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
-import type {
-	CreateRlmRootSessionOptions,
-	CreateRlmSubagentRuntimeOptions,
-	RlmCreateSessionResult,
-	SubagentRuntimeHost,
+import {
+	type CreateRlmRootSessionOptions,
+	type CreateRlmSubagentRuntimeOptions,
+	RLM_SANDBOX_UNAVAILABLE_MESSAGE,
+	type RlmCreateSessionResult,
+	type SubagentRuntimeHost,
 } from "../../core/rlm-runtime.js";
 import {
 	canPassivateSession,
@@ -2778,6 +2779,7 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
+		if (options.sandbox === true) throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		sessionManager.newSession({
 			parentSession: options.parentSession.sessionFile,

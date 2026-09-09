@@ -1,0 +1,68 @@
+{
+  "primePackageVersion": "0.6.21",
+  "sandboxCommandSourceSha256": "2b7b79dc1296746730db1dd1c0d248524dc81ae129b3a5ac624dcff41bc7412f",
+  "sandboxModelSourceSha256": "1ba393881f9ce103fb0d8f44a44a8a3719724fda15a2b7f35a517cafc48bc1e4",
+  "timeUtilsSourceSha256": "5cd800696c7088b7d309d3b7d453b29ca052c90c1cd63aabaf683059ed060aa6",
+  "expectedLabel": "prime-agent:lifecycle:0123456789abcdef",
+  "list": {
+    "sandboxes": [
+      {
+        "id": "sb_abc123",
+        "name": "",
+        "image": "ubuntu:24.04",
+        "status": "RUNNING",
+        "resources": "1 CPU, 1GB RAM",
+        "region": null,
+        "labels": [
+          "prime-agent:lifecycle:0123456789abcdef"
+        ],
+        "created_at": "2026-09-04 01:02:03 UTC",
+        "timeout_minutes": 60,
+        "expires_at": "2026-09-04 02:02:03 UTC"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "per_page": 100,
+    "has_next": false
+  },
+  "get": {
+    "id": "sb_abc123",
+    "name": "",
+    "type": "Container",
+    "docker_image": "ubuntu:24.04",
+    "start_command": "tail -f /dev/null",
+    "status": "RUNNING",
+    "cpu_cores": 1.0,
+    "memory_gb": 1.0,
+    "disk_size_gb": 5.0,
+    "disk_mount_path": "/workspace",
+    "gpu_count": 0,
+    "gpu_type": null,
+    "vm": false,
+    "network_allowlist": null,
+    "network_denylist": null,
+    "timeout_minutes": 60,
+    "idle_timeout_minutes": null,
+    "termination_reason": null,
+    "labels": [
+      "prime-agent:lifecycle:0123456789abcdef"
+    ],
+    "created_at": "2026-09-04 01:02:03 UTC",
+    "user_id": null,
+    "team_id": null,
+    "region": null,
+    "registry_credentials_id": null,
+    "started_at": "2026-09-04 01:02:04 UTC",
+    "exit_code": 0,
+    "environment_vars": {
+      "VISIBLE": "v***e"
+    },
+    "secrets": {
+      "TOKEN": "***"
+    },
+    "advanced_configs": {
+      "futureFlag": true
+    }
+  }
+}
