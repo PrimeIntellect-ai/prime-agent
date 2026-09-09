@@ -76,10 +76,10 @@ The daemon routes direct messages between active sessions and retained daemon-ba
 prime-agent send <agent> "Please verify the latest migration"
 ```
 
-From the Python kernel, use the preloaded `agent_message` Python skill:
+From the Python kernel, use the preloaded `agent_observe` and `agent_message` Python skills:
 
 ```python
-roster = await agent_message.list_agents()
+roster = await agent_observe.list_agents()
 receipt = await agent_message.send(
     "Recheck the endpoint after the latest edit",
     receiver_role="sibling",

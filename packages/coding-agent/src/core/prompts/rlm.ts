@@ -160,13 +160,16 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
 			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.",
 		);
+		parts.push(
+			hasAgentObserve
+				? "Use `await agent_observe.list_agents()` to discover family, including inactive members, and `await rlm.list_subagents()` to recover direct child handles."
+				: "Use `await rlm.list_subagents()` to recover direct child handles after admission.",
+		);
 		if (hasAgentMessage) {
 			parts.push(
 				"Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply.",
-				"Use `await agent_message.list_agents()` to discover family and `await rlm.list_subagents()` to recover direct child handles. Use `agent_message.send(..., receiver_role='child', receiver_name=child.name)` for follow-ups.",
+				"Use `agent_message.send(..., receiver_role='child', receiver_name=child.name)` for follow-ups.",
 			);
-		} else {
-			parts.push("Use `await rlm.list_subagents()` to recover direct child handles after admission.");
 		}
 		if (hasAgentObserve) {
 			parts.push(

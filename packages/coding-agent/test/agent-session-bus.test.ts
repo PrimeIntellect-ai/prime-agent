@@ -6,12 +6,12 @@ import {
 	assertAgentMessageQueueCapacity,
 	assertAgentSessionNameAvailable,
 	assertDirectAgentMessageTarget,
-	buildAgentFamilyRoster,
 	createAgentMessageHostHandlers,
 	createAgentSessionMessagePrompt,
 	createAgentSessionMessageReceipt,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
+	selectAgentFamily,
 	sessionNameReservationKey,
 } from "../src/core/agent-messages.js";
 
@@ -170,14 +170,11 @@ describe("agent session bus", () => {
 			deliveredAt: new Date(0).toISOString(),
 		}));
 		const handlers = createAgentMessageHostHandlers({
-			roster: () => ({
-				current: { name: "builder", id: "builder", depth: 1 },
-				entries: [
-					{ relationship: "parent", name: "root", id: "root", depth: 0, status: "running" },
-					{ relationship: "sibling", name: "reviewer", id: "sibling", depth: 1, status: "idle" },
-					{ relationship: "child", name: "tester", id: "child", depth: 2, status: "inactive" },
-				],
-			}),
+			family: async () => [
+				{ relationship: "parent", entry: { id: "root", name: "root", depth: 0, status: "running" } },
+				{ relationship: "sibling", entry: { id: "sibling", name: "reviewer", depth: 1, status: "idle" } },
+				{ relationship: "child", entry: { id: "child", name: "tester", depth: 2, status: "inactive" } },
+			],
 			sendAgentMessage,
 		});
 
@@ -214,18 +211,18 @@ describe("agent session bus", () => {
 		expect(sendAgentMessage).not.toHaveBeenCalled();
 	});
 
-	it("rejects non-all string targets at the host boundary", async () => {
+	it("rejects non-all string targets and the removed roster call at the host boundary", async () => {
 		const sendAgentMessage = vi.fn();
 		const handlers = createAgentMessageHostHandlers({
-			roster: () => ({
-				current: { name: "builder", id: "builder", depth: 1 },
-				entries: [],
-			}),
+			family: async () => [],
 			sendAgentMessage,
 		});
 
 		await expect(handlers["agent_message.send"]!({ target: "reviewer", message: "status" })).rejects.toThrow(
 			"use receiver_role and receiver_name",
+		);
+		await expect(handlers["agent_message.list_agents"]!({})).rejects.toThrow(
+			"the family roster now lives in agent_observe.list_agents()",
 		);
 		expect(sendAgentMessage).not.toHaveBeenCalled();
 	});
@@ -243,13 +240,10 @@ describe("agent session bus", () => {
 			};
 		});
 		const handlers = createAgentMessageHostHandlers({
-			roster: () => ({
-				current: { name: "builder", id: "builder", depth: 1 },
-				entries: [
-					{ relationship: "parent", name: "root", id: "root", depth: 0, status: "running" },
-					{ relationship: "sibling", name: "reviewer", id: "sibling", depth: 1, status: "idle" },
-				],
-			}),
+			family: async () => [
+				{ relationship: "parent", entry: { id: "root", name: "root", depth: 0, status: "running" } },
+				{ relationship: "sibling", entry: { id: "sibling", name: "reviewer", depth: 1, status: "idle" } },
+			],
 			sendAgentMessage,
 		});
 
@@ -389,9 +383,9 @@ describe("agent session bus", () => {
 				parentSessionPath: "/unknown-root",
 			}),
 		).not.toThrow();
-		expect(buildAgentFamilyRoster(catalog[1]!, catalog).entries).toEqual([
-			{ relationship: "parent", name: "orchestrator", id: "root", depth: 0, status: "running" },
-			{ relationship: "sibling", name: "builder", id: "path-child", depth: 1, status: "inactive" },
+		expect(selectAgentFamily(catalog[1]!, catalog).map((member) => [member.relationship, member.entry.id])).toEqual([
+			["parent", "root"],
+			["sibling", "path-child"],
 		]);
 	});
 
@@ -413,16 +407,13 @@ describe("agent session bus", () => {
 			{ id: "cousin", name: "ignored", depth: 2, status: "idle" as const, parentSessionPath: "/other" },
 		];
 
-		expect(buildAgentFamilyRoster(catalog[1]!, catalog)).toEqual({
-			current: { name: "builder", id: "current", depth: 1 },
-			entries: [
-				{ relationship: "parent", name: "orchestrator", id: "root", depth: 0, status: "running" },
-				{ relationship: "sibling", name: "alpha", id: "sibling-a", depth: 1, status: "inactive" },
-				{ relationship: "sibling", name: "zeta", id: "sibling-z", depth: 1, status: "running" },
-				{ relationship: "child", name: "reviewer", id: "child-a", depth: 2, status: "idle" },
-				{ relationship: "child", name: "tester", id: "child-z", depth: 2, status: "inactive" },
-			],
-		});
+		expect(selectAgentFamily(catalog[1]!, catalog)).toEqual([
+			{ relationship: "parent", entry: catalog[0] },
+			{ relationship: "sibling", entry: catalog[3] },
+			{ relationship: "sibling", entry: catalog[2] },
+			{ relationship: "child", entry: catalog[5] },
+			{ relationship: "child", entry: catalog[4] },
+		]);
 	});
 
 	it("rate limits senders with a token bucket", () => {

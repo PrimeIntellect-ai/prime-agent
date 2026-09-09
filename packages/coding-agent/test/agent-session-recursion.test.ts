@@ -909,10 +909,9 @@ describe("AgentSession rlm recursion", () => {
 			depth: 1,
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "child", id: "child-session", depth: 1 },
-					entries: [{ relationship: "parent", name: "parent", id: "parent-session", depth: 0, status: "idle" }],
-				}),
+				family: async () => [
+					{ relationship: "parent", entry: { id: "parent-session", name: "parent", depth: 0, status: "idle" } },
+				],
 				sendAgentMessage,
 			},
 		});
@@ -943,24 +942,25 @@ describe("AgentSession rlm recursion", () => {
 			message: input.message,
 			deliveryStatus: "delivered" as const,
 		}));
-		const roster = vi.fn(() => ({
-			current: { name: "root", id: root.sessionId, depth: 0 },
-			entries: publishedChild
+		const family = vi.fn(async () =>
+			publishedChild
 				? [
 						{
 							relationship: "child" as const,
-							name: publishedChild.sessionName ?? publishedChild.sessionId,
-							id: publishedChild.sessionId,
-							depth: 1,
-							status: "running" as const,
+							entry: {
+								id: publishedChild.sessionId,
+								name: publishedChild.sessionName ?? publishedChild.sessionId,
+								depth: 1,
+								status: "running" as const,
+							},
 						},
 					]
 				: [],
-		}));
+		);
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster,
+				family,
 				sendAgentMessage,
 			},
 			subagentRuntimeHost: {
@@ -989,12 +989,12 @@ describe("AgentSession rlm recursion", () => {
 			receiver_name: spawned.rlm_child_id,
 		});
 		await sleep(0);
-		expect(roster).not.toHaveBeenCalled();
+		expect(family).not.toHaveBeenCalled();
 		expect(sendAgentMessage).not.toHaveBeenCalled();
 		publishChild?.();
 
 		await expect(pendingSend).resolves.toMatchObject({ message: "hello" });
-		expect(roster).toHaveBeenCalledTimes(1);
+		expect(family).toHaveBeenCalledTimes(1);
 		expect(sendAgentMessage).toHaveBeenCalledWith(
 			expect.objectContaining({ target: publishedChild?.sessionId, message: "hello" }),
 		);
@@ -1012,18 +1012,17 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [
-						{
-							relationship: "child" as const,
-							name: child.sessionName ?? child.sessionId,
+				family: async () => [
+					{
+						relationship: "child" as const,
+						entry: {
 							id: child.sessionId,
+							name: child.sessionName ?? child.sessionId,
 							depth: 1,
 							status: "idle" as const,
 						},
-					],
-				}),
+					},
+				],
 				sendAgentMessage,
 			},
 			subagentRuntimeHost: {
@@ -1053,10 +1052,7 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [],
-				}),
+				family: async () => [],
 				sendAgentMessage: async () => {
 					throw new Error("unexpected send");
 				},
@@ -1092,18 +1088,12 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [
-						{
-							relationship: "child" as const,
-							name: "shared-child",
-							id: "healthy-child-session",
-							depth: 1,
-							status: "idle" as const,
-						},
-					],
-				}),
+				family: async () => [
+					{
+						relationship: "child" as const,
+						entry: { id: "healthy-child-session", name: "shared-child", depth: 1, status: "idle" as const },
+					},
+				],
 				sendAgentMessage,
 			},
 			subagentRuntimeHost: {
@@ -1145,10 +1135,7 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [],
-				}),
+				family: async () => [],
 				sendAgentMessage: async () => {
 					throw new Error("unexpected send");
 				},
@@ -1177,18 +1164,12 @@ describe("AgentSession rlm recursion", () => {
 	});
 
 	it("marks a broadcast delivery to the parent as replied without reloading the roster", async () => {
-		const roster = vi.fn(() => ({
-			current: { name: "child", id: "child-session", depth: 1 },
-			entries: [
-				{
-					relationship: "parent" as const,
-					name: "parent",
-					id: "parent-session",
-					depth: 0,
-					status: "idle" as const,
-				},
-			],
-		}));
+		const family = vi.fn(async () => [
+			{
+				relationship: "parent" as const,
+				entry: { id: "parent-session", name: "parent", depth: 0, status: "idle" as const },
+			},
+		]);
 		const sendAgentMessage = vi.fn(async () => ({
 			id: "agentmsg-broadcast-reply",
 			source: "agent_message" as const,
@@ -1200,7 +1181,7 @@ describe("AgentSession rlm recursion", () => {
 			depth: 1,
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster,
+				family,
 				sendAgentMessage,
 			},
 		});
@@ -1211,7 +1192,7 @@ describe("AgentSession rlm recursion", () => {
 		await expect(send({ target: "all", message: "status" })).resolves.toMatchObject({
 			receipts: [{ message: "status" }],
 		});
-		expect(roster).toHaveBeenCalledTimes(1);
+		expect(family).toHaveBeenCalledTimes(1);
 		expect(child.repliedToParentSinceTask).toBe(true);
 	});
 
@@ -1446,10 +1427,9 @@ describe("AgentSession rlm recursion", () => {
 			rlmSessionDir: join(tempDir, "replying-child"),
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "reply-worker", id: child.sessionId, depth: 1 },
-					entries: [{ relationship: "parent", name: "parent", id: "parent-session", depth: 0, status: "idle" }],
-				}),
+				family: async () => [
+					{ relationship: "parent", entry: { id: "parent-session", name: "parent", depth: 0, status: "idle" } },
+				],
 				sendAgentMessage: async () => ({
 					id: "agentmsg-reply-before-follow-up",
 					source: "agent_message",
@@ -1761,7 +1741,7 @@ describe("AgentSession rlm recursion", () => {
 			rlmSessionDir: join(tempDir, "paused-terminal-child"),
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({ current: { name: "child", id: "child", depth: 1 }, entries: [] }),
+				family: async () => [],
 				sendAgentMessage: synthesizedAgentMessageSend,
 			},
 			streamFn: (_model, context) => {

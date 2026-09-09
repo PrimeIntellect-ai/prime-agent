@@ -99,7 +99,6 @@ describe("buildRlmPrompt", () => {
 			depth: 1,
 		});
 		expect(withoutCapabilities).not.toContain("agent_message.send");
-		expect(withoutCapabilities).not.toContain("agent_message.list_agents");
 		expect(withoutCapabilities).not.toContain("agent_observe");
 
 		const systemPromptWithoutCapabilities = buildSystemPrompt({
@@ -120,7 +119,7 @@ describe("buildRlmPrompt", () => {
 			depth: 1,
 		});
 		expect(withCapabilities).toContain("agent_message.send");
-		expect(withCapabilities).toContain("agent_message.list_agents");
+		expect(withCapabilities).toContain("agent_observe.list_agents()");
 		expect(withCapabilities).toContain("agent_observe");
 		expect(withCapabilities).toContain("restricted to your parent, siblings, and direct children");
 	});
