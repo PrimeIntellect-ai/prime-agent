@@ -23,6 +23,8 @@ export interface DaemonSocketClient {
 	rosterResyncPending?: boolean;
 	authenticated?: boolean;
 	authenticationRole?: "supervisor" | "session_client";
+	/** Nonce sent in daemon_hello; endpoint_handshake must answer it before the client is trusted. */
+	endpointChallenge?: string;
 	transport?: "jsonl" | "private-framed";
 	snapshotStreaming?: boolean;
 	snapshotActiveSessionIds?: Set<string>;

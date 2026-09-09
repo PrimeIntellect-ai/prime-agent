@@ -150,7 +150,8 @@ describe("daemon request timeouts", () => {
 			vi.useFakeTimers();
 			Object.defineProperty(process, "platform", { value: platform });
 			const socket = { destroyed: false, write: vi.fn(), end: vi.fn(), destroy: vi.fn() } as unknown as Socket;
-			const client = new DaemonClient(hello.socketPath);
+			// Timeouts only: the Windows endpoint identity policy is covered by daemon-endpoint-identity.test.ts.
+			const client = new DaemonClient(hello.socketPath, { requirePeerIdentity: false });
 			Object.assign(client, { socket, helloMessage: hello });
 			let settled = false;
 			const request = client.request({ type: command } as DaemonCommandBody, override);

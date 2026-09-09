@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
 	cleanupDaemonSocketPath,
 	DaemonSocketPathLease,
+	daemonEndpointOwnerKey,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
@@ -22,12 +23,12 @@ describe("normalizeSocketPath", () => {
 });
 
 describe("defaultDaemonSocketPath", () => {
-	it("uses a fixed Windows named pipe path", () => {
+	it("uses a per-user Windows named pipe path", () => {
 		if (process.platform !== "win32") {
 			return;
 		}
 
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+		expect(defaultDaemonSocketPath()).toBe(`\\\\.\\pipe\\prime-agent-daemon-${daemonEndpointOwnerKey()}`);
 	});
 
 	it("uses a per-user Unix socket directory", () => {

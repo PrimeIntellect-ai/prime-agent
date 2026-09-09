@@ -76,6 +76,13 @@ import {
 import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
+import {
+	createDaemonEndpointNonce,
+	createDaemonEndpointProof,
+	daemonEndpointIdentityRequired,
+	loadDaemonEndpointSecret,
+	verifyDaemonEndpointProof,
+} from "./daemon-endpoint-identity.js";
 import { DaemonSessionRecoveringError, deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import {
 	collectDaemonClientEnv,
@@ -230,6 +237,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"list",
 	"list_agent_peers",
 	"get_direct_worker_transport",
+	"endpoint_handshake",
 	"roster_subscribe",
 	"roster_unsubscribe",
 	"list_saved_sessions",
@@ -391,6 +399,12 @@ interface DaemonSupervisorOptions {
 	socketPath?: string;
 	defaultSessionConfig: AgentSessionRuntimeConfig;
 	descriptorDir?: string;
+	/**
+	 * Reject every public command until the client completes endpoint_handshake.
+	 * Defaults to daemonEndpointIdentityRequired(): on Windows the named pipe
+	 * gives no ownership guarantee, so the proof is the only peer check.
+	 */
+	requireEndpointHandshake?: boolean;
 }
 
 interface PersistedSupervisorConfig {
@@ -744,6 +758,9 @@ export class DaemonSupervisor {
 	private scheduledWakeRecompute?: Promise<void>;
 	private scheduledWakeRecomputeQueued = false;
 	private readonly scheduledWakeFailures = new Map<string, number>();
+	private readonly requireEndpointHandshake: boolean;
+	/** Shared with same-user clients through the agent dir; absent only when that file is unusable and not required. */
+	private readonly endpointSecret?: string;
 
 	constructor(
 		private readonly socketPath: string,
@@ -757,6 +774,17 @@ export class DaemonSupervisor {
 		const agentDir = options.defaultSessionConfig.agentDir;
 		if (!agentDir) {
 			throw new Error("Daemon supervisor config is missing agentDir");
+		}
+		this.requireEndpointHandshake = options.requireEndpointHandshake ?? daemonEndpointIdentityRequired();
+		try {
+			this.endpointSecret = loadDaemonEndpointSecret(agentDir);
+		} catch (error) {
+			if (this.requireEndpointHandshake) {
+				throw new Error(
+					`Daemon endpoint identity is required but the endpoint secret could not be prepared: ${String(error)}`,
+				);
+			}
+			this.endpointSecret = undefined;
 		}
 		this.descriptorDir = options.descriptorDir ?? defaultWorkerDescriptorDir(agentDir, socketPath);
 		this.supervisorConfigPath = join(this.descriptorDir, SUPERVISOR_CONFIG_FILE_NAME);
@@ -1436,7 +1464,10 @@ export class DaemonSupervisor {
 			attachedActiveSessionIds: new Set(),
 			catchupActiveSessionIds: new Set(),
 			backpressured: false,
-			authenticated: true,
+			// A Unix socket peer is already the same user (0700 dir, 0600 socket); a
+			// named-pipe peer is trusted only after endpoint_handshake.
+			authenticated: !this.requireEndpointHandshake,
+			...(this.endpointSecret ? { endpointChallenge: createDaemonEndpointNonce() } : {}),
 			snapshotActiveSessionIds: new Set(),
 			detachInput: () => {},
 			supportsExtensionUi: false,
@@ -1463,7 +1494,11 @@ export class DaemonSupervisor {
 						supervisorProcessStartId: this.ownership?.record.processStartId,
 						supervisorSocketPath: this.ownership?.record.socketPath,
 						clientId: client.id,
-						serverCapabilities: SUPERVISOR_SERVER_CAPABILITIES,
+						serverCapabilities: client.endpointChallenge
+							? [...SUPERVISOR_SERVER_CAPABILITIES, "endpoint_identity"]
+							: SUPERVISOR_SERVER_CAPABILITIES,
+						...(client.endpointChallenge ? { endpointChallenge: client.endpointChallenge } : {}),
+						...(this.requireEndpointHandshake ? { endpointHandshakeRequired: true as const } : {}),
 					});
 				}
 			},
@@ -1731,6 +1766,38 @@ export class DaemonSupervisor {
 		};
 	}
 
+	/**
+	 * Mutual proof of the shared endpoint secret. The client's proof binds our
+	 * per-connection challenge to its nonce; ours answers with the daemon role
+	 * so neither proof can be reflected. A failed proof ends the connection.
+	 */
+	private handleEndpointHandshake(
+		client: DaemonSocketClient,
+		command: Extract<DaemonCommand, { type: "endpoint_handshake" }>,
+	): void {
+		const challenge = client.endpointChallenge;
+		const secret = this.endpointSecret;
+		if (
+			!secret ||
+			!challenge ||
+			typeof command.nonce !== "string" ||
+			command.nonce.length === 0 ||
+			!verifyDaemonEndpointProof(secret, "client", challenge, command.nonce, command.proof)
+		) {
+			client.endpointChallenge = undefined;
+			this.write(client, failure(command.id, command.type, "Endpoint handshake failed"));
+			client.socket.end();
+			return;
+		}
+		client.authenticated = true;
+		this.write(
+			client,
+			success(command.id, command.type, {
+				proof: createDaemonEndpointProof(secret, "daemon", challenge, command.nonce),
+			}),
+		);
+	}
+
 	private async handleLine(client: DaemonSocketClient, line: string): Promise<void> {
 		try {
 			this.assertSupervisorServing();
@@ -1747,6 +1814,23 @@ export class DaemonSupervisor {
 		}
 		const command = preParsed.command;
 		const parsedAdmission = preParsed.admission;
+		if (command.type === "endpoint_handshake") {
+			this.handleEndpointHandshake(client, command);
+			return;
+		}
+		if (this.requireEndpointHandshake && client.authenticated !== true) {
+			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
+			this.write(
+				client,
+				failure(
+					command.id,
+					command.type,
+					"Endpoint handshake required: this daemon accepts commands only from clients that prove they hold the current user's daemon endpoint secret",
+				),
+			);
+			client.socket.end();
+			return;
+		}
 		if (command.type === "cancel_prompt_admission" && this.updateRestartPhase !== undefined) {
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
 			return;

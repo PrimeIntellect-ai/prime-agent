@@ -22,6 +22,7 @@ import {
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
+	meetsDaemonCommandCompatibility,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
 import {
@@ -382,6 +383,53 @@ describe("daemon protocol helpers", () => {
 				lastHeardFromAt: "2026-08-01T12:00:00.000Z",
 			}),
 		).toBe(true);
+	});
+
+	it("capability- and schema-gates the endpoint identity handshake in both directions", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.endpoint_handshake).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 28,
+			capability: "endpoint_identity",
+		});
+		expect(DAEMON_COMMAND_PLANE.endpoint_handshake).toBe("control");
+		// Not a mutation: no journal entry, no ack, and safe to repeat per connection.
+		expect(isDaemonMutatingCommand({ type: "endpoint_handshake" })).toBe(false);
+		// Workers never advertise it; only the supervisor answers the challenge.
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).not.toContain("endpoint_identity");
+		const handshake: DaemonCommand = { type: "endpoint_handshake", nonce: "n", proof: "p" };
+		// New client, old daemon: the hello has no capability, so the client must not send it.
+		expect(
+			getDaemonCommandCompatibilities(handshake).every((compatibility) =>
+				meetsDaemonCommandCompatibility(
+					{ protocol: { name: "prime-agent.daemon", version: 7 }, schemaRevision: 27, serverCapabilities: [] },
+					compatibility,
+				),
+			),
+		).toBe(false);
+		// New client, new daemon.
+		expect(
+			getDaemonCommandCompatibilities(handshake).every((compatibility) =>
+				meetsDaemonCommandCompatibility(
+					{
+						protocol: { name: "prime-agent.daemon", version: 7 },
+						schemaRevision: 28,
+						serverCapabilities: ["endpoint_identity"],
+					},
+					compatibility,
+				),
+			),
+		).toBe(true);
+		// Old client, new daemon: the hello additions are optional fields an old client ignores.
+		const hello: Extract<DaemonOutbound, { type: "daemon_hello" }> = {
+			type: "daemon_hello",
+			socketPath: "/tmp/daemon.sock",
+			protocol: DAEMON_PROTOCOL_INFO,
+			clientId: "client",
+			serverCapabilities: ["endpoint_identity"],
+			endpointChallenge: "challenge",
+			endpointHandshakeRequired: true,
+		};
+		expect(DAEMON_OUTBOUND_COMPATIBILITY[hello.type]).toEqual({ minProtocol: 7 });
 	});
 
 	it("capability-gates direct worker transport discovery as a supervisor-only surface", () => {
