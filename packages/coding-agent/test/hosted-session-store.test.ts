@@ -681,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(213852);
+		expect(bytes.byteLength).toBe(240996);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"e750b8b12966959b5aeba70d8aae1ec010a02714f7d5cfa9facac47423a45f13",
+			"c1caa6d23942fc2bf5f11993f71cd0a7431de1f467444a9b00bad459fbcfa56f",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -2112,6 +2112,310 @@ milestone("hostile-and-purge");
 console.log("INTEGRATION_OK");
 `,
 		);
+		const v5MainWireProbePath = resolve(temporary, "v5-main-fatal-wire-probe.py");
+		writeFileSync(
+			v5MainWireProbePath,
+			String.raw`import errno,hashlib,os,selectors,shutil,signal,struct,subprocess,time
+HELPER="/app/src/modes/daemon/sandbox/hosted-session-store-posix-helper.py"
+ROOT="/root/.prime/agent/sandbox-session-state-v1"
+FAULT_PY="/tmp/v5wire-fault-python3"
+FAULT_SCENARIO="/tmp/v5wire-fault-scenario"
+CAP=1048576
+
+def frame(opcode,payload=b""):
+ return bytes((opcode,))+struct.pack(">I",len(payload))+payload
+
+def parse(data):
+ rows=[];offset=0
+ while offset+5<=len(data):
+  opcode=data[offset];size=struct.unpack_from(">I",data,offset+1)[0];end=offset+5+size
+  if end>len(data):break
+  rows.append((opcode,data[offset+5:end]));offset=end
+ return rows
+
+def frames_bytes(rows):
+ return b"".join(bytes((opcode,))+struct.pack(">I",len(payload))+payload for opcode,payload in rows)
+
+def absent(pgid):
+ try:os.killpg(pgid,0)
+ except OSError as failure:
+  if failure.errno==errno.ESRCH:return True
+  raise
+ return False
+
+OPEN=frame(0xFE);QUIT=frame(0xFF);HELLO=frame(0xF0,b"PISTOV05")
+OK_OPEN=(0x80,b"\xfe");OK_QUIT=(0x80,b"\xff");READY=(0x84,b"\xf0PISTOV05");DONE=(0x82,b"")
+def error(opcode,code):return (0xE0,bytes((opcode,code)))
+def u64(value):return struct.pack(">Q",value)
+
+lifecycle=bytes(range(32));generation=bytes(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128))
+selector=bytes(lifecycle)+bytes(generation)+bytes(binding)+bytes(tx)
+PLAN_LENGTH=17;CONTENT_LENGTH=23
+plan_chunk=bytes(range(31,48));content_chunk=bytes(range(51,74));content_alt=bytes((7,))*23
+evidence=ROOT+"/"+lifecycle.hex()+"/generations/"+generation.hex()+"/workspace-evidence"
+genesis=bytes(range(64));identity_digest=hashlib.sha256(genesis).digest()
+record=bytearray(320);record[:11]=b"PIHOSTWALV1";record[16]=1;struct.pack_into(">Q",record,24,1);record[32:64]=lifecycle;record[64:96]=generation;record[96:128]=bytes(32);record[128:160]=identity_digest
+create_request=frame(0x02,bytes(lifecycle)+bytes(generation)+struct.pack(">I",len(genesis))+genesis+bytes(record))
+OK_CREATE=(0x80,bytes((0x02,))+hashlib.sha256(bytes(record)).digest())
+begin=selector+plan_digest+struct.pack(">I",PLAN_LENGTH)+u64(CONTENT_LENGTH)
+def write_request(kind,offset,data,digest=None):
+ payload=bytearray(169+len(data));payload[:128]=selector;payload[128]=kind;struct.pack_into(">Q",payload,129,offset);payload[137:169]=hashlib.sha256(data).digest() if digest is None else digest;payload[169:]=data
+ return frame(0x0B,bytes(payload))
+def ok_write(kind,revision,end):return (0x80,bytes((0x0B,kind))+u64(revision)+u64(end))
+OK_BEGIN=(0x80,bytes((0x0A,))+u64(0)+u64(0)+u64(0))
+row=bytearray(401)
+row[0:32]=lifecycle;row[32:64]=generation;row[64:96]=binding;row[96:128]=tx;row[128:160]=plan_digest
+struct.pack_into(">I",row,160,PLAN_LENGTH);struct.pack_into(">Q",row,164,CONTENT_LENGTH)
+struct.pack_into(">Q",row,180,PLAN_LENGTH);struct.pack_into(">Q",row,188,CONTENT_LENGTH)
+struct.pack_into(">Q",row,204,2);row[216:224]=bytes((255,))*8;row[384:392]=bytes((255,))*8
+struct.pack_into(">Q",row,392,1100000000);row[400]=1
+INVENTORY_ROW=(0x83,bytes(row))
+row0=bytearray(row)
+struct.pack_into(">Q",row0,180,0);struct.pack_into(">Q",row0,188,0);struct.pack_into(">Q",row0,204,0)
+INVENTORY_ROW0=(0x83,bytes(row0))
+V4_INSPECT_BARRIER=error(0x09,0x01)
+OVERSIZE_HEADER=bytes((0x0B,))+struct.pack(">I",0xFFFFFFFF)
+
+def draft_path(prefix):
+ names=[name for name in os.listdir(evidence) if name.startswith(prefix)]
+ if len(names)!=1:raise RuntimeError("draft-name")
+ return evidence+"/"+names[0]
+def corrupt_manifest_field():
+ data=bytearray(open(evidence+"/input.manifest","rb").read())
+ struct.pack_into(">Q",data,260,99)
+ handle=open(evidence+"/input.manifest","wb");handle.write(bytes(data));handle.close()
+def append_manifest():
+ handle=open(evidence+"/input.manifest","ab");handle.write(b"\x00");handle.close()
+def chmod_draft():
+ os.chmod(draft_path(".ws-plan."),0o644)
+def duplicate_plan():
+ shutil.copyfile(draft_path(".ws-plan."),evidence+"/.ws-plan."+("f"*64))
+def unlink_lock():
+ os.unlink(ROOT+"/.lock")
+def chmod_lock():
+ os.chmod(ROOT+"/.lock",0o644)
+
+FAULT_SOURCE='''#!/usr/local/bin/python3
+import errno,os,struct,sys
+scenario=open("/tmp/v5wire-fault-scenario").read().strip()
+state={"arm_stat":False,"arm_fsync":False,"arm_close":False}
+frame_write_ok=struct.pack(">BI",0x80,18)+bytes((0x0B,1))+struct.pack(">Q",1)+struct.pack(">Q",17)
+frame_begin_ok=struct.pack(">BI",0x80,25)+bytes((0x0A,))+bytes(24)
+frame_quit_ok=struct.pack(">BI",0x80,1)+bytes((0xFF,))
+frame_done_empty=struct.pack(">BI",0x82,0)
+real_write=os.write;real_stat=os.stat;real_fsync=os.fsync;real_close=os.close
+def write(fd,data,*args,**kwargs):
+ count=real_write(fd,data,*args,**kwargs)
+ if fd==1 and count==len(data):
+  if scenario=="post-emission-root" and bytes(data)==frame_write_ok:state["arm_stat"]=True
+  elif scenario=="quit-fsync" and bytes(data)==frame_begin_ok:state["arm_fsync"]=True
+  elif scenario=="quit-close" and bytes(data)==frame_quit_ok:state["arm_close"]=True
+  elif scenario=="v4-post-emission" and bytes(data)==frame_done_empty:state["arm_stat"]=True
+ return count
+def stat(path,*args,**kwargs):
+ if state["arm_stat"] and path in (".lock",b".lock"):
+  state["arm_stat"]=False
+  raise OSError(errno.ENOENT,"injected")
+ return real_stat(path,*args,**kwargs)
+def fsync(fd,*args,**kwargs):
+ if state["arm_fsync"]:
+  state["arm_fsync"]=False
+  raise OSError(errno.EIO,"injected")
+ return real_fsync(fd,*args,**kwargs)
+def close(fd,*args,**kwargs):
+ if state["arm_close"]:
+  state["arm_close"]=False
+  raise OSError(errno.EIO,"injected")
+ return real_close(fd,*args,**kwargs)
+os.write=write;os.stat=stat;os.fsync=fsync;os.close=close
+source=open(sys.argv[1]).read()
+exec(compile(source,sys.argv[1],"exec"))
+'''
+
+def install_fault_wrapper():
+ handle=open(FAULT_PY,"w");handle.write(FAULT_SOURCE);handle.close()
+ os.chmod(FAULT_PY,0o755)
+
+def drain_round(sel,out,err):
+ out_eof=False;err_eof=False
+ for key,unused_mask in sel.select(0.05):
+  try:chunk=os.read(key.fileobj.fileno(),65536)
+  except BlockingIOError:continue
+  if not chunk:
+   sel.unregister(key.fileobj);key.fileobj.close()
+   if key.data=="out":out_eof=True
+   else:err_eof=True
+   continue
+  target=out if key.data=="out" else err
+  if len(target)+len(chunk)>CAP:raise RuntimeError("output cap")
+  target.extend(chunk)
+ return out_eof,err_eof
+
+def reap_bounded(p,sel,out,err,label,seconds):
+ end=time.monotonic()+seconds
+ while time.monotonic()<end:
+  got_out_eof,got_err_eof=drain_round(sel,out,err)
+  if p.poll() is not None and absent(p.pid):return True
+ return p.poll() is not None and absent(p.pid)
+
+def run(label,phases,returncode,root_names=None,fresh=True,fault=None):
+ if fresh and os.path.exists(ROOT):shutil.rmtree(ROOT)
+ if fault is not None:
+  handle=open(FAULT_SCENARIO,"w");handle.write(fault);handle.close()
+ fd=os.open(HELPER,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ if fd!=3:
+  os.dup2(fd,3,inheritable=True);os.close(fd);fd=3
+ if os.lseek(fd,0,os.SEEK_CUR)!=0:raise RuntimeError(label+" helper offset")
+ p=None;sel=None;out=bytearray();err=bytearray();stdin_closed=False;out_eof=False;err_eof=False
+ expected_all=[]
+ for phase in phases:expected_all.extend(phase[2])
+ deadline=time.monotonic()+10
+ try:
+  interpreter=[FAULT_PY,"/proc/self/fd/3"] if fault is not None else ["/usr/local/bin/python3","/proc/self/fd/3"]
+  p=subprocess.Popen(interpreter,cwd="/",env={},stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,pass_fds=(fd,))
+  os.close(fd);fd=-1
+  if p.stdin is None or p.stdout is None or p.stderr is None:raise RuntimeError(label+" pipes")
+  os.set_blocking(p.stdout.fileno(),False);os.set_blocking(p.stderr.fileno(),False)
+  sel=selectors.DefaultSelector();sel.register(p.stdout,selectors.EVENT_READ,"out");sel.register(p.stderr,selectors.EVENT_READ,"err")
+  cumulative=0
+  for mutate,requests,expected in phases:
+   if mutate is not None:mutate()
+   request_data=b"".join(requests);sent=0
+   while sent<len(request_data):
+    try:count=os.write(p.stdin.fileno(),request_data[sent:])
+    except BrokenPipeError:
+     stdin_closed=True;break
+    if count<=0:raise RuntimeError(label+" stdin write")
+    sent+=count
+   if stdin_closed and sent<len(request_data):raise RuntimeError(label+" stdin broken")
+   cumulative+=len(expected)
+   while True:
+    exited=p.poll() is not None
+    rows=parse(bytes(out))
+    if len(rows)>=cumulative:break
+    if exited and out_eof:break
+    if time.monotonic()>=deadline:raise RuntimeError(label+" deadline rows="+repr(rows))
+    got_out_eof,got_err_eof=drain_round(sel,out,err)
+    out_eof=out_eof or got_out_eof;err_eof=err_eof or got_err_eof
+   rows=parse(bytes(out))
+   if rows[:cumulative]!=expected_all[:cumulative]:raise RuntimeError(label+" phase rows "+repr(rows)+" expected "+repr(expected_all[:cumulative])+" returncode="+str(p.poll()))
+  try:
+   p.stdin.close();stdin_closed=True
+  except OSError:
+   pass
+  while True:
+   exited=p.poll() is not None
+   if exited and out_eof and err_eof:break
+   if time.monotonic()>=deadline:raise RuntimeError(label+" drain deadline")
+   got_out_eof,got_err_eof=drain_round(sel,out,err)
+   out_eof=out_eof or got_out_eof;err_eof=err_eof or got_err_eof
+  if p.returncode!=returncode:raise RuntimeError(label+" returncode "+str(p.returncode))
+  if len(err)!=0:raise RuntimeError(label+" stderr "+repr(bytes(err)))
+  if not absent(p.pid):raise RuntimeError(label+" group present")
+  if bytes(out)!=frames_bytes(expected_all):raise RuntimeError(label+" frames "+repr(parse(bytes(out)))+" expected "+repr(expected_all))
+  if root_names is not None and sorted(os.listdir(ROOT))!=sorted(root_names):raise RuntimeError(label+" names "+repr(sorted(os.listdir(ROOT))))
+  print("WIRE_OK %s exit=%d frames=%s group_absent=1"%(label,p.returncode,bytes(out).hex()))
+  runs[0]+=1
+ finally:
+  if fd>=0:os.close(fd)
+  if p is not None and not absent(p.pid):
+   try:os.killpg(p.pid,signal.SIGTERM)
+   except OSError as failure:
+    if failure.errno!=errno.ESRCH:raise
+   if not reap_bounded(p,sel,out,err,label,2):
+    try:os.killpg(p.pid,signal.SIGKILL)
+    except OSError as failure:
+     if failure.errno!=errno.ESRCH:raise
+    if not reap_bounded(p,sel,out,err,label,2):raise RuntimeError(label+" cleanup absence")
+  if p is not None:
+   for stream in (p.stdin,p.stdout,p.stderr):
+    if stream is None:continue
+    try:
+     stream.close()
+    except OSError:
+     pass
+  if sel is not None:sel.close()
+
+runs=[0]
+EXPECTED_RUNS=36
+def create_setup():
+ run("create-setup",[(None,[OPEN,create_request,QUIT],[OK_OPEN,OK_CREATE,OK_QUIT])],0,root_names=[".lock",lifecycle.hex()])
+
+try:
+ install_fault_wrapper()
+ run("fresh-begin-busy",[(None,[OPEN,HELLO,frame(0x0A,begin),QUIT],[OK_OPEN,READY,error(0x0A,0x06),OK_QUIT])],0,root_names=[".lock"])
+ create_setup()
+ run("usable-recoverables",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN]),
+  (None,[write_request(1,0,bytes(17),digest=bytes(32)),write_request(1,0,plan_chunk[:5]),write_request(2,0,content_chunk),write_request(1,0,plan_chunk),write_request(1,0,plan_chunk),write_request(1,PLAN_LENGTH,b"Q"),write_request(2,0,content_chunk),write_request(3,0,b"V"),write_request(2,0,content_alt),frame(0x17),QUIT],
+   [error(0x0B,0x01),error(0x0B,0x03),error(0x0B,0x06),ok_write(1,1,PLAN_LENGTH),ok_write(1,1,PLAN_LENGTH),error(0x0B,0x03),ok_write(2,2,CONTENT_LENGTH),error(0x0B,0x04),error(0x0B,0x12),INVENTORY_ROW,DONE,OK_QUIT])],0,root_names=[".lock",lifecycle.hex()],fresh=False)
+ run("quit-clean-empty",[(None,[OPEN,HELLO,QUIT],[OK_OPEN,READY,OK_QUIT])],0,root_names=[".lock"])
+ create_setup()
+ run("write-state-integrity-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN]),
+  (None,[write_request(1,0,plan_chunk)],[ok_write(1,1,PLAN_LENGTH)]),
+  (corrupt_manifest_field,[write_request(1,0,plan_chunk)],[error(0x0B,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("write-oversize-retained-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN]),
+  (None,[write_request(1,0,plan_chunk)],[ok_write(1,1,PLAN_LENGTH)]),
+  (append_manifest,[write_request(1,0,plan_chunk)],[error(0x0B,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("write-mode-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN]),
+  (chmod_draft,[write_request(1,0,plan_chunk)],[error(0x0B,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("hello-recovery-fatal-setup",[(None,[OPEN,HELLO,frame(0x0A,begin),QUIT],[OK_OPEN,READY,OK_BEGIN,OK_QUIT])],0,root_names=[".lock",lifecycle.hex()],fresh=False)
+ duplicate_plan()
+ run("hello-recovery-fatal",[(None,[OPEN,HELLO],[OK_OPEN,error(0xF0,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("hello-recovery-manifest-setup",[(None,[OPEN,HELLO,frame(0x0A,begin),QUIT],[OK_OPEN,READY,OK_BEGIN,OK_QUIT])],0,root_names=[".lock",lifecycle.hex()],fresh=False)
+ corrupt_manifest_field()
+ run("hello-recovery-manifest-fatal",[(None,[OPEN,HELLO],[OK_OPEN,error(0xF0,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("pre-command-root-uncertain-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN]),
+  (None,[frame(0x17)],[INVENTORY_ROW0,DONE]),
+  (unlink_lock,[write_request(1,0,plan_chunk)],[error(0x0B,0x10)])],2,root_names=[lifecycle.hex()],fresh=False)
+ create_setup()
+ run("pre-command-root-mode-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN]),
+  (None,[frame(0x17)],[INVENTORY_ROW0,DONE]),
+  (chmod_lock,[write_request(1,0,plan_chunk)],[error(0x0B,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ run("pre-command-root-unselected-hello-fatal",[
+  (None,[OPEN],[OK_OPEN]),
+  (unlink_lock,[HELLO],[error(0xF0,0x10)])],2,root_names=[])
+ create_setup()
+ run("post-emission-eof-no-second-error",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("fault-post-emission-root-suppressed",[
+  (None,[OPEN,HELLO,frame(0x0A,begin),write_request(1,0,plan_chunk)],[OK_OPEN,READY,OK_BEGIN,ok_write(1,1,PLAN_LENGTH)])],2,root_names=[".lock",lifecycle.hex()],fresh=False,fault="post-emission-root")
+ create_setup()
+ run("fault-quit-fsync-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin),QUIT],[OK_OPEN,READY,OK_BEGIN,error(0xFF,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False,fault="quit-fsync")
+ create_setup()
+ run("fault-quit-close-suppressed",[
+  (None,[OPEN,HELLO,frame(0x0A,begin),write_request(1,0,plan_chunk),QUIT],[OK_OPEN,READY,OK_BEGIN,ok_write(1,1,PLAN_LENGTH),OK_QUIT])],2,root_names=[".lock",lifecycle.hex()],fresh=False,fault="quit-close")
+ run("v4-fatal-parity-raw-uncertain",[
+  (None,[OPEN,frame(0x01)],[OK_OPEN,DONE]),
+  (None,[frame(0x09)],[V4_INSPECT_BARRIER]),
+  (unlink_lock,[QUIT],[error(0xFF,0x11)])],2,root_names=[])
+ run("fault-v4-post-emission-parity",[
+  (None,[OPEN,frame(0x01)],[OK_OPEN,DONE,error(0x01,0x11)])],2,root_names=[".lock"],fault="v4-post-emission")
+ run("unselected-v5",[(None,[OPEN,frame(0x17)],[OK_OPEN,error(0x17,0x02)])],2,root_names=[".lock"])
+ run("v4-to-v5",[(None,[OPEN,frame(0x01),HELLO],[OK_OPEN,DONE,error(0xF0,0x02)])],2,root_names=[".lock"])
+ run("v5-to-v4",[(None,[OPEN,HELLO,frame(0x01)],[OK_OPEN,READY,error(0x01,0x02)])],2,root_names=[".lock"])
+ run("malformed-hello-recovery",[(None,[OPEN,frame(0xF0,b"XXXXXXXX"),HELLO,QUIT],[OK_OPEN,error(0xF0,0x02),READY,OK_QUIT])],0,root_names=[".lock"])
+ run("framing-oversize-payload",[(None,[OPEN,HELLO,OVERSIZE_HEADER],[OK_OPEN,READY,error(0x0B,0x03)])],2,root_names=[".lock"])
+ if runs[0]!=EXPECTED_RUNS:raise RuntimeError("verified count %d != expected %d"%(runs[0],EXPECTED_RUNS))
+ print("V5_MAIN_FATAL_WIRE_OK %d/%d"%(runs[0],EXPECTED_RUNS))
+finally:
+ if os.path.exists(ROOT):shutil.rmtree(ROOT)
+ for path in (FAULT_SCENARIO,FAULT_PY):
+  if os.path.exists(path):os.unlink(path)
+`,
+		);
 		const v5ProbePath = resolve(temporary, "v5-protocol-probe.py");
 		writeFileSync(
 			v5ProbePath,
@@ -2540,10 +2844,13 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"ec6bd2f04ee032e2e8b8fd70668884b96ae17fd86110b4b8e435d30f41e91115",
+			"14ee0755c755173a83f66c38947ce119dd4bb44fa5bde12c5b7353d7b6695627",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
 			"8f55f26572015b6cfcae8edc9a85d6f1b1ae38206f54a5e5b0572872280720ea",
+		);
+		expect(createHash("sha256").update(readFileSync(v5MainWireProbePath)).digest("hex")).toBe(
+			"8dbd40885bc78208adc227a407601aea8dfacec2ef2d02fbb509af60663a9ead",
 		);
 		expect(createHash("sha256").update(readFileSync(v5ProbePath)).digest("hex")).toBe(
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
@@ -2613,13 +2920,38 @@ for scenario in ("case3","case4"):
 			"-c",
 			setup,
 		];
+		const wireSetup = setup.replace(
+			"chroot /chroot /bun /app/integration.ts",
+			"install -m0600 /input-v5-main-wire-probe.py /chroot/app/v5-main-fatal-wire-probe.py; chroot /chroot /usr/local/bin/python3 /app/v5-main-fatal-wire-probe.py; chroot /chroot /bun /app/integration.ts",
+		);
+		const wireArguments = dockerArguments.map((value) => {
+			if (value === setup) return wireSetup;
+			if (value === "/chroot:rw,nosuid,nodev,exec,mode=0755,size=768m")
+				return "/chroot:rw,nosuid,nodev,exec,mode=0755,size=16g";
+			if (value === "-c") return "-ec";
+			return value;
+		});
+		wireArguments.splice(
+			wireArguments.indexOf(image),
+			0,
+			"--read-only",
+			"--cpus",
+			"1",
+			"--memory",
+			"1g",
+			"-v",
+			`${v5MainWireProbePath}:/input-v5-main-wire-probe.py:ro`,
+		);
 		try {
-			const { stdout } = await execFileAsync(
+			const { stdout, stderr } = await execFileAsync(
 				hostPython,
-				["-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "45"],
+				["-c", dockerSupervisorRunner, JSON.stringify(wireArguments), containerName, "90"],
 				{ maxBuffer: 4 * 1024 * 1024 },
 			);
 			console.log(stdout);
+			expect(stderr).toBe("");
+			expect(stdout.split("\n").filter((line) => line.startsWith("WIRE_OK ")).length).toBe(36);
+			expect(stdout).toContain("V5_MAIN_FATAL_WIRE_OK 36/36");
 			expect(stdout).toContain("V5_RAW_PROTOCOL_OK");
 			expect(stdout).toContain("V5_NONEMPTY_READY_OK");
 			expect(stdout).toContain("V5_MATRIX_RUNNING_OK");
@@ -2722,5 +3054,5 @@ for scenario in ("case3","case4"):
 			rmSync(temporary, { recursive: true, force: true });
 		}
 	},
-	300_000,
+	345_000,
 );

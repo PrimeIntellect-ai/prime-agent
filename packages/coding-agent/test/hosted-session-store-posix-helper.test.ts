@@ -2426,7 +2426,7 @@ print("V5_INSPECT_FATAL_OK 14 14")
 			"_E_QUOTA = 0x13",
 			"_V5_FLOOR_BYTES = 4294967296",
 			"_V5_U64_MAX = 18446744073709551615",
-			"_V5_EVIDENCE_PREFIXES = (_PLAN_DRAFT_PREFIX, _CONTENT_DRAFT_PREFIX, _INPUT_MANIFEST_TEMP_PREFIX)",
+			"_V5_EVIDENCE_PREFIXES = (\n    _PLAN_DRAFT_PREFIX,\n    _CONTENT_DRAFT_PREFIX,\n    _INPUT_MANIFEST_TEMP_PREFIX,\n    _INPUT_PROGRESS_TEMP_PREFIX,\n)",
 			"def _v5_available_bytes(",
 			"def _v5_write_prefix(",
 			"def _v5_validate_written(",
@@ -3308,6 +3308,1023 @@ print("V5_WS_BEGIN_CUTS_OK 22")
 		});
 		expect(stderr).toBe("");
 		expect(stdout).toBe("V5_WS_BEGIN_CUTS_OK 22\n");
+	});
+
+	test("V5 WS_WRITE_STREAM source keeps canonical geometry, retry arms, and R00-R08 ordering exact", async () => {
+		const source = await readFile(HELPER, "utf8");
+		for (const exact of [
+			"_WS_WRITE_STREAM = 0x0B",
+			'_INPUT_PROGRESS_TEMP_PREFIX = b".ws-\\x69nput-progress-tmp."',
+			"_MAX_STREAM_DATA = 1048407",
+			"_V5_EVIDENCE_PREFIXES = (\n    _PLAN_DRAFT_PREFIX,\n    _CONTENT_DRAFT_PREFIX,\n    _INPUT_MANIFEST_TEMP_PREFIX,\n    _INPUT_PROGRESS_TEMP_PREFIX,\n)",
+			"def _v5_canonical_end(",
+			"def _v5_chunk_count(",
+			"def _v5_input_manifest_progress(",
+			"def _v5_open_rw_file(",
+			"def _v5_read_at(",
+			"def _v5_write_at(",
+			"def _v5_truncate_suffix(",
+			"def _cmd_ws_write_stream(",
+		])
+			expect(source).toContain(exact);
+		const progress = pythonFunction(source, "_v5_input_manifest_progress").body;
+		expect(
+			tokensInOrder(progress, [
+				"if len(data) != _INPUT_MANIFEST_SIZE:",
+				"_v5_prefix_field(data, 0, _INPUT_MANIFEST_MAGIC)",
+				"_v5_prefix_field(data, 16, lifecycle)",
+				"_v5_prefix_field(data, 48, generation)",
+				"_range_zero(data, 112, 144)",
+				'_v5_prefix_field(data, 176, struct.pack(">I", plan_length))',
+				'_v5_prefix_field(data, 180, struct.pack(">Q", content_length))',
+				"_v5_prefix_field(data, 188, plan_nonce)",
+				"_v5_prefix_field(data, 220, content_nonce)",
+				"_v5_prefix_field(data, 268, bytes(4))",
+				'revision = struct.unpack_from(">Q", data, 8)[0]',
+				'plan_committed = struct.unpack_from(">Q", data, 252)[0]',
+				'content_committed = struct.unpack_from(">Q", data, 260)[0]',
+				"_v5_canonical_end(plan_committed, plan_length)",
+				"_v5_canonical_end(content_committed, content_length)",
+				"if plan_committed < plan_length and content_committed != 0:",
+				"if revision != _v5_chunk_count(plan_committed) + _v5_chunk_count(content_committed):",
+				"return revision, plan_committed, content_committed",
+			]),
+		).toBe(true);
+		const command = pythonFunction(source, "_cmd_ws_write_stream").body;
+		expect(
+			tokensInOrder(command, [
+				"lifecycle = payload[0:32]",
+				"items, unused_outstanding = _v5_collect_inventory(",
+				"selector = memoryview(payload)[:128]",
+				"selector.release()",
+				"if matched is None:",
+				'return (v5_mode, "error", _E_STALE)',
+				'return (v5_mode, "error", _E_ABSENT)',
+				"if stream_kind == 3:",
+				"lifecycle_dir_fd, open_error = _open_dir(fds, root_fd, lifecycle_name, uid, device)",
+				"allow_v5_evidence=True",
+				"current_generation = scan[7]",
+				"if not _same_at(payload, 32, current_generation):",
+				"_find_generation(scan[6], _hex_name(current_generation))",
+				"evidence_fd, evidence_error = _open_dir(fds, generation_fd, _WORKSPACE_EVIDENCE, uid, device)",
+				"entries = _list(evidence_fd)",
+				"if len(entries) != 3 or _INPUT_MANIFEST not in entries:",
+				"plan_fd, plan_error = _v5_open_rw_file(",
+				"content_fd, content_error = _v5_open_rw_file(",
+				"manifest_fd, manifest_error = _open_file(",
+				"progress_tuple = _v5_input_manifest_progress(",
+				"revision = progress_tuple[0]",
+				"if plan_stat.st_size != _PLAN_HEADER_SIZE + plan_committed:",
+				"if content_stat.st_size != _CONTENT_HEADER_SIZE + content_committed:",
+				"if plan_committed != plan_length:",
+				'return (v5_mode, "error", _E_BUSY)',
+				'offset = struct.unpack_from(">Q", payload, 129)[0]',
+				"data_len = len(payload) - 169",
+				"if offset == committed:",
+				"if committed >= total:",
+				'return (v5_mode, "error", _E_BOUNDS)',
+				"if data_len != expected:",
+				"resulting = plan_stat.st_size + content_stat.st_size + _INPUT_MANIFEST_SIZE + data_len",
+				"if resulting > _V5_ITEM_RESERVATION:",
+				"if revision == _V5_U64_MAX:",
+				"_v5_write_at(draft_fd, header_size + committed, data_view)",
+				"written = _fstat(draft_fd)",
+				"if written.st_size != header_size + new_end:",
+				"_fdatasync(draft_fd)",
+				"progress_fd, progress_name, progress_suffix = _v5_create_nonce_file(",
+				"_INPUT_PROGRESS_TEMP_PREFIX, entries, uid, device",
+				"next_manifest = bytearray(manifest_data)",
+				"_v5_write_prefix(progress_fd, next_manifest)",
+				"progress_stat = _v5_validate_written(",
+				"_fdatasync(progress_fd)",
+				"_v5_validate_retained_file(manifest_fd, manifest_stat, uid, device, 1)",
+				"_v5_validate_named_file(evidence_fd, _INPUT_MANIFEST, manifest_stat, uid, device, 1)",
+				"os.rename(",
+				"_v5_require_absent(evidence_fd, progress_name)",
+				"_fsync(evidence_fd)",
+				"_v5_validate_retained_file(progress_fd, progress_stat, uid, device, 1)",
+				"_v5_validate_named_file(evidence_fd, _INPUT_MANIFEST, progress_stat, uid, device, 1)",
+				"final_entries = _list(evidence_fd)",
+				"if final_entries != sorted([plan_name, content_name, _INPUT_MANIFEST]):",
+				"fds.close(progress_fd)",
+				"fds.close(lifecycle_dir_fd)",
+				"if fds.uncertain:",
+				"raise Fatal(_E_UNCERTAIN)",
+				"response = bytearray(18)",
+				"response[0] = _WS_WRITE_STREAM",
+				"response[1] = stream_kind",
+				'struct.pack_into(">Q", response, 2, revision + 1)',
+				'struct.pack_into(">Q", response, 10, new_end)',
+				"_write_frame(1, _OK, response)",
+				'return (v5_mode, "emitted", None)',
+				"if offset > committed:",
+				"if offset % _MAX_STREAM_DATA != 0:",
+				"end = offset + data_len",
+				"if end > committed:",
+				"if end % _MAX_STREAM_DATA != 0 and end != total:",
+				"stored = _v5_read_at(draft_fd, header_size + offset, data_len)",
+				"stored_matched = _same(stored, data_view)",
+				"_zero(stored)",
+				"if not stored_matched:",
+				'return (v5_mode, "error", _E_STALE)',
+				'struct.pack_into(">Q", response, 2, revision)',
+				'struct.pack_into(">Q", response, 10, committed)',
+			]),
+		).toBe(true);
+		expect(command).toContain(`if stream_kind == 3:
+            return (v5_mode, "error", _E_ABSENT)`);
+		for (const forbidden of [
+			"os.statvfs",
+			"_v5_available_bytes",
+			"_ok_payload",
+			"os.link",
+			"_make_dir",
+			"_write_temp",
+			"os.mkdir",
+			"_E_QUOTA",
+		])
+			expect(command).not.toContain(forbidden);
+		const recovery = pythonFunction(source, "_v5_recover_input_begin_prefix").body;
+		expect(
+			tokensInOrder(recovery, [
+				"_v5_input_manifest_progress(",
+				"revision, plan_committed, content_committed = progress_tuple",
+				"if plan_committed < plan_length:",
+				"next_kind = 1",
+				"elif content_committed < content_length:",
+				"next_kind = 2",
+				"if progress_name is not None:",
+				"if next_kind == 0:",
+				"next_manifest = bytearray(manifest_data)",
+				"progress_fd, progress_error = _open_file(",
+				"prefix_matched = _same(progress_data, next_manifest[:progress_stat.st_size])",
+				"_unlink(evidence_fd, progress_name)",
+				"_fsync(evidence_fd)",
+				"_v5_require_absent(evidence_fd, progress_name)",
+				"_v5_truncate_suffix(plan_fd, plan_base)",
+				"_v5_truncate_suffix(content_fd, content_base)",
+				"if next_kind == 1 and plan_stat.st_size > plan_base:",
+				"elif next_kind == 2 and content_stat.st_size > content_base:",
+			]),
+		).toBe(true);
+		expect(recovery).toContain(`        if progress_name is not None and not canonical_present:
+            raise Fatal(_E_STATE)`);
+		const collect = pythonFunction(source, "_v5_collect_draft_transaction").body;
+		expect(
+			tokensInOrder(collect, [
+				"plan_fd, plan_error = _open_file(",
+				"_PLAN_HEADER_SIZE + _MAX_PLAN_PAYLOAD",
+				"_CONTENT_HEADER_SIZE + _MAX_CONTENT_PAYLOAD",
+				"progress_tuple = _v5_input_manifest_progress(",
+				"if progress_tuple is None:",
+				"plan_committed = progress_tuple[1]",
+				"content_committed = progress_tuple[2]",
+				"if plan_stat.st_size != _PLAN_HEADER_SIZE + plan_committed:",
+				"if content_stat.st_size != _CONTENT_HEADER_SIZE + content_committed:",
+			]),
+		).toBe(true);
+		const create = pythonFunction(source, "_v5_create_nonce_file").body;
+		expect(create).toContain(`while index < len(entries):
+            if entries[index] == _INPUT_MANIFEST:
+                index += 1
+                continue
+            entry_prefix = None`);
+		const dispatch = pythonFunction(source, "_dispatch_v5").body;
+		expect(
+			tokensInOrder(dispatch, [
+				"if opcode == _WS_BEGIN:",
+				"return _cmd_ws_begin(",
+				"if opcode == _WS_WRITE_STREAM:",
+				"return _cmd_ws_write_stream(",
+				'return (v5_mode, "error", _E_ABSENT)',
+			]),
+		).toBe(true);
+		const writeAt = pythonFunction(source, "_v5_write_at").body;
+		expect(
+			tokensInOrder(writeAt, ["os.lseek(fd, offset, os.SEEK_SET)", "os.write(fd, view[moved:])", "view.release()"]),
+		).toBe(true);
+		const readAt = pythonFunction(source, "_v5_read_at").body;
+		expect(
+			tokensInOrder(readAt, [
+				"os.lseek(fd, offset, os.SEEK_SET)",
+				"os.readv(fd, (view[moved:],))",
+				"if not complete:",
+				"_zero(result)",
+			]),
+		).toBe(true);
+		const truncateAt = pythonFunction(source, "_v5_truncate_suffix").body;
+		expect(truncateAt).toContain("os.ftruncate(fd, size)");
+		expect(truncateAt).toContain("_fdatasync(fd)");
+	});
+
+	test("V5 stream model covers boundary goldens, manifest progress, and decoder shapes", async () => {
+		const probe = `import importlib.util,struct,sys
+spec=importlib.util.spec_from_file_location("store_v5_stream_model",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+MAX=module._MAX_STREAM_DATA
+count=0
+def check(condition,label):
+ global count
+ if not condition:raise RuntimeError(label)
+ count+=1
+if MAX!=1048407:raise RuntimeError("max")
+check(module._v5_canonical_end(0,1) and module._v5_canonical_end(1,1) and not module._v5_canonical_end(2,1),"t1-ends")
+check(module._v5_chunk_count(0)==0 and module._v5_chunk_count(1)==1,"t1-counts")
+check(module._v5_canonical_end(0,MAX) and module._v5_canonical_end(MAX,MAX) and not module._v5_canonical_end(MAX+1,MAX),"tmax-ends")
+check(module._v5_chunk_count(MAX)==1,"tmax-counts")
+check(module._v5_canonical_end(0,MAX+1) and module._v5_canonical_end(MAX,MAX+1) and module._v5_canonical_end(MAX+1,MAX+1) and not module._v5_canonical_end(1,MAX+1) and not module._v5_canonical_end(MAX-1,MAX+1),"tmax1-ends")
+check(module._v5_chunk_count(MAX+1)==2 and module._v5_chunk_count(2*MAX)==2 and module._v5_chunk_count(2*MAX+1)==3,"tmax1-counts")
+check((1048576+MAX-1)//MAX==2 and (1073741824+MAX-1)//MAX==1025 and (1048416+MAX-1)//MAX==2,"progress-counts")
+check(1+2+1025==1028 and 272*1028==279616 and 1+2==3 and 292*3==876,"manifest-bytes")
+check(1048576+1073741824+1048416==1075838816,"arbitrary-requests")
+check(1+1048576+1073741824==1074790401 and 1+1048416==1048417,"arbitrary-manifests")
+check(272*1074790401+292*1048417==292649126836,"arbitrary-bytes")
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128))
+plan_nonce=bytes((7,))*32;content_nonce=bytes((8,))*32
+def manifest(revision,plan_committed,content_committed,plan_length,content_length):
+ return b"PIWSIMF5"+struct.pack(">Q",revision)+bytes(lifecycle)+bytes(generation)+binding+tx+plan_digest+struct.pack(">I",plan_length)+struct.pack(">Q",content_length)+plan_nonce+content_nonce+struct.pack(">Q",plan_committed)+struct.pack(">Q",content_committed)+bytes(4)
+def progress(data,plan_length,content_length):
+ return module._v5_input_manifest_progress(data,lifecycle,generation,plan_nonce,content_nonce,plan_length,content_length)
+check(progress(manifest(0,0,0,17,23),17,23)==(0,0,0),"m0")
+check(progress(manifest(1,17,0,17,23),17,23)==(1,17,0),"m1")
+check(progress(manifest(2,17,23,17,23),17,23)==(2,17,23),"m2")
+check(progress(manifest(1,MAX,0,MAX,MAX+1),MAX,MAX+1)==(1,MAX,0),"m3")
+check(progress(manifest(2,MAX,MAX,MAX,MAX+1),MAX,MAX+1)==(2,MAX,MAX),"m4")
+check(progress(manifest(3,MAX,MAX+1,MAX,MAX+1),MAX,MAX+1)==(3,MAX,MAX+1),"m5")
+check(progress(manifest(1,1,0,1,0),1,0)==(1,1,0),"m6")
+check(progress(manifest(0,0,0,1,0),1,0)==(0,0,0),"m7")
+for label,data in (
+ ("rev-mismatch",manifest(2,17,0,17,23)),
+ ("plan-noncanonical",manifest(1,5,0,17,23)),
+ ("plan-overshoot",manifest(1,18,0,17,23)),
+ ("content-before-plan",manifest(1,0,23,17,23)),
+ ("reserved-nonzero",manifest(1,17,0,17,23)[:268]+bytes((1,))+manifest(1,17,0,17,23)[269:]),
+ ("zero-tx",manifest(1,17,0,17,23)[:112]+bytes(32)+manifest(1,17,0,17,23)[144:]),
+ ("wrong-nonce",manifest(1,17,0,17,23)[:188]+bytes((9,))*32+manifest(1,17,0,17,23)[220:]),
+ ("wrong-length",manifest(1,17,0,17,23)[:176]+struct.pack(">I",16)+manifest(1,17,0,17,23)[180:]),
+ ("wrong-magic",b"PIWSIMF4"+manifest(1,17,0,17,23)[8:]),
+ ("truncated",manifest(1,17,0,17,23)[:271]),
+):
+ check(progress(data,17,23) is None,label)
+def request(kind,offset,data,digest=None):
+ payload=bytearray(169+len(data));payload[0:32]=lifecycle;payload[32:64]=generation;payload[64:96]=binding;payload[96:128]=tx;payload[128]=kind;struct.pack_into(">Q",payload,129,offset);payload[137:169]=module._digest(data) if digest is None else digest;payload[169:]=data
+ return payload
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(1,0,b"P")) is None,"valid-shape")
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(1,0,b"P",bytes(32)))==module._E_INPUT,"digest-mismatch")
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(1,0,b""))==module._E_BOUNDS,"empty-data")
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(1,0,b"P")[:168])==module._E_INPUT,"short-fixed")
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(1,0,bytes(1048408)))==module._E_BOUNDS,"oversize-data")
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(0,0,b"P"))==module._E_INPUT,"kind-zero")
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(4,0,b"P"))==module._E_INPUT,"kind-four")
+zero_tx=request(1,0,b"P");zero_tx[96:128]=bytes(32)
+check(module._v5_validate_request(module._WS_WRITE_STREAM,zero_tx)==module._E_INPUT,"zero-tx-request")
+check(module._v5_validate_request(module._WS_WRITE_STREAM,request(1,0,b"P")) is None,"repeat-valid")
+module._zero(lifecycle)
+print("V5_STREAM_MODEL_OK %d"%count)
+`;
+		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+		const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+			cwd: "/",
+			env: {},
+			timeout: 30_000,
+			maxBuffer: 1024,
+		});
+		expect(stderr).toBe("");
+		expect(stdout).toBe("V5_STREAM_MODEL_OK 38\n");
+	});
+
+	linuxProbeTest("V5 WS_WRITE_STREAM admits, retries, and rejects on an authentic root", async () => {
+		const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+spec=importlib.util.spec_from_file_location("store_v5_write_command_probe",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+MAX=module._MAX_STREAM_DATA
+CONTENT_LENGTH=2*MAX+1
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128))
+uid=os.getuid()
+parent="/private/tmp" if sys.platform=="darwin" else "/tmp"
+def captured(call):
+ read_fd,write_fd=os.pipe();saved=os.dup(1);closed=False
+ try:
+  os.dup2(write_fd,1)
+  try:call()
+  finally:os.dup2(saved,1)
+  os.close(write_fd);closed=True
+  chunks=[]
+  while True:
+   chunk=os.read(read_fd,65536)
+   if not chunk:break
+   chunks.append(chunk)
+  return b"".join(chunks)
+ finally:
+  if not closed:os.close(write_fd)
+  os.close(saved);os.close(read_fd)
+def chunk_data(seed,length):
+ base=bytearray(range(256))
+ index=0
+ while index<256:
+  base[index]=(base[index]+seed)&255
+  index+=1
+ return (bytes(base)*((length+255)//256))[:length]
+plan_bytes=b"P"
+c0=chunk_data(1,MAX)
+c1=chunk_data(2,MAX)
+alt0=chunk_data(3,MAX)
+final_byte=b"Z"
+def build():
+ root=tempfile.mkdtemp(prefix="store-v5-write-",dir=parent)
+ fds=None
+ try:
+  root_fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds=module.Fds();fds.add(root_fd)
+  root_device=os.fstat(root_fd).st_dev;root_inode=os.fstat(root_fd).st_ino
+  lock_fd,lock_device,lock_inode,lock_error=module._bind_lock(fds,root_fd,uid,root_device)
+  if lock_error is not None:raise RuntimeError("lock")
+  genesis=bytes(range(64));identity_digest=module._digest(genesis)
+  record=bytearray(module._WAL_SIZE);record[:11]=module._WAL_MAGIC;record[16]=module._W_ALLOCATED;struct.pack_into(">Q",record,24,1);record[32:64]=lifecycle;record[64:96]=generation;record[96:128]=module._ZERO32;record[128:160]=identity_digest
+  payload=bytes(lifecycle)+bytes(generation)+struct.pack(">I",len(genesis))+genesis+bytes(record)
+  module._zero(identity_digest)
+  result,create_error=module._cmd_create(fds,root_fd,payload,uid,root_device)
+  if create_error is not None:raise RuntimeError("create")
+  return root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode
+ except BaseException:
+  if fds is not None:fds.close_all()
+  shutil.rmtree(root)
+  raise
+def dispatch(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,opcode,payload):
+ box=[]
+ def call():
+  box.append(module._dispatch_v5(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode,opcode,payload,module._MODE_V5_READY))
+ emitted=captured(call)
+ return box[0],emitted
+def begin_payload(plan_length,content_length):
+ payload=bytearray(172);payload[0:32]=lifecycle;payload[32:64]=generation;payload[64:96]=binding;payload[96:128]=tx;payload[128:160]=plan_digest;struct.pack_into(">I",payload,160,plan_length);struct.pack_into(">Q",payload,164,content_length)
+ return payload
+def write_payload(kind,offset,data,digest=None):
+ payload=bytearray(169+len(data));payload[0:32]=lifecycle;payload[32:64]=generation;payload[64:96]=binding;payload[96:128]=tx;payload[128]=kind;struct.pack_into(">Q",payload,129,offset);payload[137:169]=module._digest(data) if digest is None else digest;payload[169:]=data
+ return payload
+def ok_frame(kind,revision,end):
+ return struct.pack(">BI",0x80,18)+bytes((0x0B,kind))+struct.pack(">Q",revision)+struct.pack(">Q",end)
+def expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,payload,code,label):
+ outcome,emitted=dispatch(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,payload)
+ if outcome!=(module._MODE_V5_READY,"error",code) or emitted!=b"":raise RuntimeError(label+" outcome="+repr(outcome)+" frame="+emitted.hex())
+ if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError(label+"-fds")
+ module._zero(payload)
+def expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,payload,kind,revision,end,label):
+ outcome,emitted=dispatch(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,payload)
+ if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=ok_frame(kind,revision,end):raise RuntimeError(label+" outcome="+repr(outcome)+" frame="+emitted.hex()+" expected="+ok_frame(kind,revision,end).hex())
+ if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError(label+"-fds")
+ module._zero(payload)
+root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=build()
+expected=None
+try:
+ begin_frame=struct.pack(">BI",0x80,25)+bytes((0x0A,))+bytes(24)
+ outcome,emitted=dispatch(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_BEGIN,begin_payload(1,CONTENT_LENGTH))
+ if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=begin_frame:raise RuntimeError("begin")
+ evidence=os.path.join(root,lifecycle.hex(),"generations",generation.hex(),"workspace-evidence")
+ def entries_now():
+  return sorted(os.listdir(evidence))
+ def draft_name(prefix):
+  matches=[name for name in entries_now() if name.startswith(prefix)]
+  if len(matches)!=1:raise RuntimeError("draft-name")
+  return matches[0]
+ def draft_path(prefix):
+  return os.path.join(evidence,draft_name(prefix))
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,0,c0),module._E_BUSY,"order")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(3,0,b"V"),module._E_ABSENT,"vector-kind")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,0,b"PP"),module._E_BOUNDS,"plan-length")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,1,b"P"),module._E_BOUNDS,"plan-offset")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,0,b"P",bytes(32)),module._E_INPUT,"plan-digest")
+ if len(entries_now())!=3 or "input.manifest" not in entries_now():raise RuntimeError("untouched")
+ begin_inode=os.stat(os.path.join(evidence,"input.manifest")).st_ino
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,0,plan_bytes),1,1,1,"plan-commit")
+ manifest=open(os.path.join(evidence,"input.manifest"),"rb").read()
+ if struct.unpack_from(">Q",manifest,8)[0]!=1 or struct.unpack_from(">Q",manifest,252)[0]!=1 or struct.unpack_from(">Q",manifest,260)[0]!=0:raise RuntimeError("plan-manifest")
+ committed_inode=os.stat(os.path.join(evidence,"input.manifest")).st_ino
+ if committed_inode==begin_inode:raise RuntimeError("plan-inode-advanced")
+ if open(draft_path(".ws-plan."),"rb").read()!=b"PIWSPLN1"+struct.pack(">I",1)+plan_bytes:raise RuntimeError("plan-draft")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,0,plan_bytes),1,1,1,"plan-retry")
+ if open(os.path.join(evidence,"input.manifest"),"rb").read()!=manifest:raise RuntimeError("plan-retry-unchanged")
+ if os.stat(os.path.join(evidence,"input.manifest")).st_ino!=committed_inode:raise RuntimeError("plan-retry-inode")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,0,b"X"),module._E_STALE,"plan-stale")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,1,b"P"),module._E_BOUNDS,"plan-complete")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,0,c0),2,2,MAX,"content-chunk0")
+ if os.path.getsize(draft_path(".ws-content."))!=16+MAX:raise RuntimeError("content-draft-size")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,0,alt0),module._E_STALE,"content-stale")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,0,c0),2,2,MAX,"content-retry0")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,0,c0[:MAX-1]),module._E_BOUNDS,"content-partial")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,MAX,c1),2,3,2*MAX,"content-chunk1")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,MAX,c1),2,3,2*MAX,"content-retry1")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,0,b"Q"),module._E_BOUNDS,"partial-one-byte-zero")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,MAX,b"Q"),module._E_BOUNDS,"partial-one-byte-mid")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,MAX+1,b"Q"),module._E_BOUNDS,"noncanonical-offset")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,2*MAX,final_byte),2,4,2*MAX+1,"final-one-byte")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,2*MAX,final_byte),2,4,2*MAX+1,"final-one-byte-retry")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,2*MAX,b"Y"),module._E_STALE,"final-stale")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,2*MAX,b"ZZ"),module._E_BOUNDS,"retry-overshoot")
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(2,2*MAX+1,b"Q"),module._E_BOUNDS,"content-complete")
+ expect_ok(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,write_payload(1,0,plan_bytes),1,4,1,"plan-retry-after-content")
+ absent=write_payload(1,0,plan_bytes);absent[0:32]=bytearray(range(200,232))
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,absent,module._E_ABSENT,"absent-selector")
+ stale_tx=write_payload(1,0,plan_bytes);stale_tx[96:128]=bytearray(range(2,))+bytes(30)
+ expect_error(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,stale_tx,module._E_STALE,"stale-selector")
+ expected=bytearray(401);expected[0:32]=lifecycle;expected[32:64]=generation;expected[64:96]=binding;expected[96:128]=tx;expected[128:160]=plan_digest;struct.pack_into(">I",expected,160,1);struct.pack_into(">Q",expected,164,CONTENT_LENGTH);struct.pack_into(">Q",expected,180,1);struct.pack_into(">Q",expected,188,2*MAX+1);struct.pack_into(">Q",expected,204,4);expected[216:224]=bytes((255,))*8;expected[384:392]=bytes((255,))*8;struct.pack_into(">Q",expected,392,1100000000);expected[400]=1
+ selector=bytearray(lifecycle)+bytearray(generation)+bytearray(binding)+bytearray(tx)
+ outcome,emitted=dispatch(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_INSPECT,selector)
+ if outcome!=(module._MODE_V5_READY,"done",None) or emitted!=struct.pack(">BI",0x83,401)+bytes(expected):raise RuntimeError("inspect-row")
+ outcome,emitted=dispatch(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_INVENTORY,bytearray())
+ if outcome!=(module._MODE_V5_READY,"done",None) or emitted!=struct.pack(">BI",0x83,401)+bytes(expected):raise RuntimeError("inventory-row")
+ outcome,emitted=dispatch(fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_BEGIN,begin_payload(1,CONTENT_LENGTH))
+ begin_retry_frame=struct.pack(">BI",0x80,25)+bytes((0x0A,))+struct.pack(">Q",4)+struct.pack(">Q",1)+struct.pack(">Q",CONTENT_LENGTH)
+ if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=begin_retry_frame:raise RuntimeError("begin-retry")
+ items,outstanding=module._v5_collect_inventory(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode)
+ if len(items)!=1 or items[0]!=expected or outstanding!=1100000000-2097116:raise RuntimeError("inventory")
+ module._v5_zero_transactions(items)
+ manifest=open(os.path.join(evidence,"input.manifest"),"rb").read()
+ if manifest[8:16]!=struct.pack(">Q",4) or manifest[252:260]!=struct.pack(">Q",1) or manifest[260:268]!=struct.pack(">Q",CONTENT_LENGTH) or manifest[268:272]!=bytes(4):raise RuntimeError("final-manifest")
+ if manifest[188:220]!=bytes.fromhex(draft_name(".ws-plan.")[9:]) or manifest[220:252]!=bytes.fromhex(draft_name(".ws-content.")[12:]):raise RuntimeError("final-nonces")
+ if open(draft_path(".ws-plan."),"rb").read()!=b"PIWSPLN1"+struct.pack(">I",1)+plan_bytes:raise RuntimeError("final-plan-draft")
+ content_file=open(draft_path(".ws-content."),"rb").read()
+ if content_file[:16]!=b"PIWSCNT1"+struct.pack(">Q",CONTENT_LENGTH) or content_file[16:]!=c0+c1+final_byte:raise RuntimeError("final-content-draft")
+ for name in entries_now():
+  info=os.stat(os.path.join(evidence,name))
+  if oct(info.st_mode&0o777)!="0o600" or info.st_nlink!=1:raise RuntimeError("final-stats")
+ if len(entries_now())!=3:raise RuntimeError("final-entries")
+ if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError("final-fds")
+finally:
+ fds.close_all();shutil.rmtree(root)
+ if expected is not None:module._zero(expected)
+module._zero(lifecycle)
+print("V5_WRITE_STREAM_COMMAND_OK %d"%(2*MAX+1))
+`;
+		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+		const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+			cwd: "/",
+			env: {},
+			timeout: 120_000,
+			maxBuffer: 1024,
+		});
+		expect(stderr).toBe("");
+		expect(stdout).toBe("V5_WRITE_STREAM_COMMAND_OK 2096815\n");
+	});
+
+	linuxProbeTest("V5 WS_WRITE_STREAM crash cuts recover every R state and resumed retries stay exact", async () => {
+		const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+source=open(sys.argv[1]).read()
+spec=importlib.util.spec_from_file_location("store_v5_write_cut_real",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+MAX=module._MAX_STREAM_DATA
+uid=os.getuid()
+parent="/private/tmp" if sys.platform=="darwin" else "/tmp"
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128))
+PLAN_LENGTH=17
+CONTENT_LENGTH=MAX+1
+plan_chunk=bytes(range(31,48))
+content_chunk=(bytes(range(256))*((MAX+255)//256))[:MAX]
+content_final=b"Z"
+cut_renaming="            _v5_require_absent(evidence_fd, progress_name)\\n            _fsync(evidence_fd)"
+cuts=[
+ ("W-PARTIAL",
+  "                _v5_write_at(draft_fd, header_size + committed, data_view)",
+  "                _v5_write_at(draft_fd, header_size + committed, data_view[: data_len // 2])\\n                raise Fatal(_E_IO)",
+  0,0,20,None,False),
+ ("W-FULL",
+  "            _fdatasync(draft_fd)",
+  "            _fdatasync(draft_fd)\\n            raise Fatal(_E_IO)",
+  0,0,29,None,False),
+ ("R01",
+  "            _v5_write_prefix(progress_fd, next_manifest)",
+  "            raise Fatal(_E_IO)\\n            _v5_write_prefix(progress_fd, next_manifest)",
+  0,0,29,0,False),
+ ("R02",
+  "            _v5_write_prefix(progress_fd, next_manifest)",
+  "            _v5_write_prefix(progress_fd, next_manifest[:137])\\n            raise Fatal(_E_IO)",
+  0,0,29,137,False),
+ ("R03",
+  "            _fdatasync(progress_fd)",
+  "            _fdatasync(progress_fd)\\n            raise Fatal(_E_IO)",
+  0,0,29,272,False),
+ ("R04",
+  "            _v5_validate_retained_file(manifest_fd, manifest_stat, uid, device, 1)",
+  "            raise Fatal(_E_IO)\\n            _v5_validate_retained_file(manifest_fd, manifest_stat, uid, device, 1)",
+  0,0,29,272,False),
+ ("R05",
+  cut_renaming,
+  "            _v5_require_absent(evidence_fd, progress_name)\\n            raise Fatal(_E_IO)\\n            _fsync(evidence_fd)",
+  1,17,29,None,True),
+ ("R06",
+  "            _v5_validate_retained_file(progress_fd, progress_stat, uid, device, 1)",
+  "            raise Fatal(_E_IO)\\n            _v5_validate_retained_file(progress_fd, progress_stat, uid, device, 1)",
+  1,17,29,None,False),
+ ("R07",
+  "            _v5_validate_named_file(evidence_fd, _INPUT_MANIFEST, progress_stat, uid, device, 1)",
+  "            raise Fatal(_E_IO)\\n            _v5_validate_named_file(evidence_fd, _INPUT_MANIFEST, progress_stat, uid, device, 1)",
+  1,17,29,None,False),
+ ("R08",
+  "            struct.pack_into(\\">Q\\", response, 10, new_end)",
+  "            raise Fatal(_E_IO)",
+  1,17,29,None,False),
+ ("CLOSE-UNCERTAIN",
+  "            fds.close(lifecycle_dir_fd)\\n            lifecycle_dir_fd = None",
+  "            fds.close(lifecycle_dir_fd)\\n            fds.close(lifecycle_dir_fd)\\n            lifecycle_dir_fd = None",
+  1,17,29,None,True),
+]
+counter=[0]
+def mutated(anchor,replacement):
+ if source.count(anchor)!=1:raise RuntimeError("anchor")
+ text=source.replace(anchor,replacement,1)
+ counter[0]+=1
+ path=os.path.join(parent,"ws-write-cut-%d.py"%counter[0])
+ handle=open(path,"w")
+ handle.write(text)
+ handle.close()
+ try:
+  spec2=importlib.util.spec_from_file_location("ws_write_cut_%d"%counter[0],path)
+  loaded=importlib.util.module_from_spec(spec2)
+  spec2.loader.exec_module(loaded)
+ finally:
+  os.unlink(path)
+ return loaded
+def captured(call):
+ read_fd,write_fd=os.pipe();saved=os.dup(1);closed=False
+ try:
+  os.dup2(write_fd,1)
+  try:call()
+  finally:os.dup2(saved,1)
+  os.close(write_fd);closed=True
+  chunks=[]
+  while True:
+   chunk=os.read(read_fd,65536)
+   if not chunk:break
+   chunks.append(chunk)
+  return b"".join(chunks)
+ finally:
+  if not closed:os.close(write_fd)
+  os.close(saved);os.close(read_fd)
+def build(mod):
+ root=tempfile.mkdtemp(prefix="store-v5-write-cut-",dir=parent)
+ fds=None
+ try:
+  root_fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds=mod.Fds();fds.add(root_fd)
+  root_device=os.fstat(root_fd).st_dev;root_inode=os.fstat(root_fd).st_ino
+  lock_fd,lock_device,lock_inode,lock_error=mod._bind_lock(fds,root_fd,uid,root_device)
+  if lock_error is not None:raise RuntimeError("lock")
+  genesis=bytes(range(64));identity_digest=mod._digest(genesis)
+  record=bytearray(mod._WAL_SIZE);record[:11]=mod._WAL_MAGIC;record[16]=mod._W_ALLOCATED;struct.pack_into(">Q",record,24,1);record[32:64]=lifecycle;record[64:96]=generation;record[96:128]=mod._ZERO32;record[128:160]=identity_digest
+  payload=bytes(lifecycle)+bytes(generation)+struct.pack(">I",len(genesis))+genesis+bytes(record)
+  mod._zero(identity_digest)
+  result,create_error=mod._cmd_create(fds,root_fd,payload,uid,root_device)
+  if create_error is not None:raise RuntimeError("create")
+  return root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode
+ except BaseException:
+  if fds is not None:fds.close_all()
+  shutil.rmtree(root)
+  raise
+def dispatch(mod,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,opcode,payload):
+ box=[]
+ def call():
+  box.append(mod._dispatch_v5(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode,opcode,payload,module._MODE_V5_READY))
+ emitted=captured(call)
+ return box[0],emitted
+def begin_payload():
+ payload=bytearray(172);payload[0:32]=lifecycle;payload[32:64]=generation;payload[64:96]=binding;payload[96:128]=tx;payload[128:160]=plan_digest;struct.pack_into(">I",payload,160,PLAN_LENGTH);struct.pack_into(">Q",payload,164,CONTENT_LENGTH)
+ return payload
+def write_payload(kind,offset,data):
+ payload=bytearray(169+len(data));payload[0:32]=lifecycle;payload[32:64]=generation;payload[64:96]=binding;payload[96:128]=tx;payload[128]=kind;struct.pack_into(">Q",payload,129,offset);payload[137:169]=module._digest(data);payload[169:]=data
+ return payload
+def rebind(root,mod):
+ fds=mod.Fds()
+ root_fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds.add(root_fd)
+ root_device=os.fstat(root_fd).st_dev;root_inode=os.fstat(root_fd).st_ino
+ lock_fd,lock_device,lock_inode,lock_error=mod._bind_lock(fds,root_fd,uid,root_device)
+ if lock_error is not None:raise RuntimeError("relock")
+ return fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode
+def evidence_path(root):
+ return os.path.join(root,lifecycle.hex(),"generations",generation.hex(),"workspace-evidence")
+def state(root):
+ evidence=evidence_path(root)
+ entries=sorted(os.listdir(evidence))
+ temps=[name for name in entries if name.startswith(".ws-input-progress-tmp.")]
+ manifest=open(os.path.join(evidence,"input.manifest"),"rb").read()
+ revision=struct.unpack_from(">Q",manifest,8)[0]
+ plan_committed=struct.unpack_from(">Q",manifest,252)[0]
+ content_committed=struct.unpack_from(">Q",manifest,260)[0]
+ plan_name=[name for name in entries if name.startswith(".ws-plan.")][0]
+ content_name=[name for name in entries if name.startswith(".ws-content.")][0]
+ plan_size=os.path.getsize(os.path.join(evidence,plan_name))
+ content_size=os.path.getsize(os.path.join(evidence,content_name))
+ temp_size=os.path.getsize(os.path.join(evidence,temps[0])) if temps else None
+ inode=os.stat(os.path.join(evidence,"input.manifest")).st_ino
+ return revision,plan_committed,content_committed,plan_size,content_size,temp_size,inode
+def recover_direct(root):
+ generation_path=os.path.dirname(evidence_path(root))
+ recover_fds=module.Fds()
+ generation_fd=os.open(generation_path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ recover_fds.add(generation_fd)
+ try:
+  recovered=module._v5_recover_input_begin_prefix(recover_fds,generation_fd,lifecycle,generation,uid,os.fstat(generation_fd).st_dev)
+ finally:
+  recover_fds.close(generation_fd)
+ return recovered
+def recover_hello(root):
+ fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=rebind(root,module)
+ try:
+  outcome=module._v5_handle_hello(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode,b"PISTOV05")
+  if outcome!=(module._MODE_V5_READY,"v5_ready",None):raise RuntimeError("hello")
+  items,outstanding=module._v5_collect_inventory(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode)
+  if len(items)!=1:raise RuntimeError("hello-inventory")
+  row=items[0]
+  revision=struct.unpack_from(">Q",row,204)[0]
+  plan_committed=struct.unpack_from(">Q",row,180)[0]
+  content_committed=struct.unpack_from(">Q",row,188)[0]
+  module._v5_zero_transactions(items)
+  if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError("hello-fds")
+  return revision,plan_committed,content_committed
+ finally:
+  fds.close_all()
+def run_cut(label,anchor,replacement,expected_revision,expected_plan_committed,expected_plan_size,expected_temp,use_hello):
+ root=None
+ try:
+  mod=mutated(anchor,replacement)
+  root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=build(mod)
+  try:
+   outcome,emitted=dispatch(mod,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_BEGIN,begin_payload())
+   if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=struct.pack(">BI",0x80,25)+bytes((0x0A,))+bytes(24):raise RuntimeError(label+"-begin")
+   seen=[]
+   def cut_call():
+    try:
+     box_outcome=[]
+     def call():
+      box_outcome.append(mod._dispatch_v5(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,write_payload(1,0,plan_chunk),module._MODE_V5_READY))
+     captured(call)
+    except mod.Fatal as failure:
+     seen.append(failure.code)
+   cut_call()
+   if seen!=[mod._E_IO] and seen!=[mod._E_UNCERTAIN]:raise RuntimeError(label+"-cut")
+  finally:
+   fds.close_all()
+  revision,plan_committed,content_committed,plan_size,content_size,temp_size,inode=state(root)
+  if revision!=expected_revision or plan_committed!=expected_plan_committed or content_committed!=0:raise RuntimeError(label+"-state")
+  if plan_size!=expected_plan_size or content_size!=16:raise RuntimeError(label+"-sizes")
+  if temp_size!=expected_temp:raise RuntimeError(label+"-temp")
+  if use_hello:
+   revision,plan_committed,content_committed=recover_hello(root)
+  else:
+   recovered=recover_direct(root)
+   if recovered is not True:raise RuntimeError(label+"-recovery")
+  revision,plan_committed,content_committed,plan_size,content_size,temp_size,recovered_inode=state(root)
+  if temp_size is not None:raise RuntimeError(label+"-post-temp")
+  if expected_revision==0:
+   if revision!=0 or plan_committed!=0 or plan_size!=12:raise RuntimeError(label+"-post")
+  else:
+   if revision!=1 or plan_committed!=PLAN_LENGTH or plan_size!=12+PLAN_LENGTH:raise RuntimeError(label+"-post")
+  fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=rebind(root,module)
+  try:
+   frame=struct.pack(">BI",0x80,18)+bytes((0x0B,1))+struct.pack(">Q",1)+struct.pack(">Q",PLAN_LENGTH)
+   outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,write_payload(1,0,plan_chunk))
+   if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=frame:raise RuntimeError(label+"-retry")
+   revision,plan_committed,content_committed,plan_size,content_size,temp_size,retry_inode=state(root)
+   if revision!=1 or plan_committed!=PLAN_LENGTH or temp_size is not None:raise RuntimeError(label+"-retry-state")
+   if expected_revision==0:
+    if retry_inode==inode:raise RuntimeError(label+"-retry-committed")
+   else:
+    if retry_inode!=inode:raise RuntimeError(label+"-retry-unmutated")
+   if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError(label+"-fds")
+  finally:
+   fds.close_all()
+ finally:
+  if root is not None:shutil.rmtree(root)
+for label,anchor,replacement,expected_revision,expected_plan_committed,expected_plan_size,expected_temp,use_hello in cuts:
+ run_cut(label,anchor,replacement,expected_revision,expected_plan_committed,expected_plan_size,expected_temp,use_hello)
+# content-stream cut: plan committed first, then the mutated module cuts the first content chunk
+root=None
+fds=None
+try:
+ root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=build(module)
+ try:
+  outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_BEGIN,begin_payload())
+  if outcome!=(module._MODE_V5_READY,"emitted",None):raise RuntimeError("content-begin")
+  outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,write_payload(1,0,plan_chunk))
+  if outcome!=(module._MODE_V5_READY,"emitted",None):raise RuntimeError("content-plan")
+ finally:
+  fds.close_all()
+ mod=mutated("            _fdatasync(progress_fd)","            _fdatasync(progress_fd)\\n            raise Fatal(_E_IO)")
+ fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=rebind(root,mod)
+ try:
+  seen=[]
+  def content_cut():
+   try:
+    def call():
+     mod._dispatch_v5(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,write_payload(2,0,content_chunk),module._MODE_V5_READY)
+    captured(call)
+   except mod.Fatal as failure:
+    seen.append(failure.code)
+  content_cut()
+  if seen!=[mod._E_IO]:raise RuntimeError("content-cut")
+ finally:
+  fds.close_all()
+ revision,plan_committed,content_committed,plan_size,content_size,temp_size,inode=state(root)
+ if revision!=1 or plan_committed!=PLAN_LENGTH or content_committed!=0 or content_size!=16+MAX or temp_size!=272:raise RuntimeError("content-state")
+ if recover_direct(root) is not True:raise RuntimeError("content-recovery")
+ revision,plan_committed,content_committed,plan_size,content_size,temp_size,recovered_inode=state(root)
+ if revision!=1 or content_committed!=0 or content_size!=16 or temp_size is not None:raise RuntimeError("content-post")
+ fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=rebind(root,module)
+ try:
+  outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,write_payload(2,0,content_chunk))
+  if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=struct.pack(">BI",0x80,18)+bytes((0x0B,2))+struct.pack(">Q",2)+struct.pack(">Q",MAX):raise RuntimeError("content-retry")
+  outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,write_payload(2,MAX,content_final))
+  if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=struct.pack(">BI",0x80,18)+bytes((0x0B,2))+struct.pack(">Q",3)+struct.pack(">Q",CONTENT_LENGTH):raise RuntimeError("content-final")
+  selector=bytearray(lifecycle)+bytearray(generation)+bytearray(binding)+bytearray(tx)
+  outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_INSPECT,selector)
+  if outcome!=(module._MODE_V5_READY,"done",None):raise RuntimeError("content-inspect")
+  row=emitted[5:]
+  if struct.unpack_from(">Q",row,204)[0]!=3 or struct.unpack_from(">Q",row,180)[0]!=PLAN_LENGTH or struct.unpack_from(">Q",row,188)[0]!=CONTENT_LENGTH or row[400]!=1:raise RuntimeError("content-row")
+  if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError("content-fds")
+ finally:
+  fds.close_all()
+finally:
+ if fds is not None:fds.close_all()
+ if root is not None:shutil.rmtree(root)
+module._zero(lifecycle)
+print("V5_WRITE_STREAM_CUTS_OK %d"%(len(cuts)+1))
+`;
+		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+		const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+			cwd: "/",
+			env: {},
+			timeout: 180_000,
+			maxBuffer: 1024,
+		});
+		expect(stderr).toBe("");
+		expect(stdout).toBe("V5_WRITE_STREAM_CUTS_OK 12\n");
+	});
+
+	linuxProbeTest(
+		"V5 WS_WRITE_STREAM corrupted progress states fail closed and valid recovery truncates exactly",
+		async () => {
+			const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+source=open(sys.argv[1]).read()
+spec=importlib.util.spec_from_file_location("store_v5_write_corrupt_real",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+MAX=module._MAX_STREAM_DATA
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128))
+plan_nonce=bytes((7,))*32;content_nonce=bytes((8,))*32;progress_nonce=bytes((9,))*32;manifest_nonce=bytes((10,))*32
+plan_head=b"PIWSPLN1"+struct.pack(">I",17)
+content_head=b"PIWSCNT1"+struct.pack(">Q",23)
+plan_chunk=bytes(range(31,48))
+content_chunk=bytes(range(51,74))
+uid=os.getuid()
+parent="/private/tmp" if sys.platform=="darwin" else "/tmp"
+def manifest_bytes(revision,plan_committed,content_committed,plan_length=17,content_length=23,reserved=0):
+ return b"PIWSIMF5"+struct.pack(">Q",revision)+bytes(lifecycle)+bytes(generation)+binding+tx+plan_digest+struct.pack(">I",plan_length)+struct.pack(">Q",content_length)+plan_nonce+content_nonce+struct.pack(">Q",plan_committed)+struct.pack(">Q",content_committed)+struct.pack(">I",reserved)
+def written(path,data):
+ fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ try:
+  offset=0
+  while offset<len(data):
+   count=os.write(fd,data[offset:])
+   if count<=0:raise RuntimeError("write")
+   offset+=count
+ finally:os.close(fd)
+def fixture(plan_size=None,content_size=None,manifest=None,progress=None,progress_count=1,initial=None,extra=None,alias=False):
+ root=tempfile.mkdtemp(prefix="store-v5-write-corrupt-",dir=parent)
+ try:
+  generation_path=os.path.join(root,"generation");evidence=os.path.join(generation_path,"workspace-evidence")
+  os.mkdir(generation_path,0o700);os.mkdir(evidence,0o700)
+  plan_name=b".ws-plan."+plan_nonce.hex().encode("ascii")
+  content_name=(b".ws-content."+plan_nonce.hex().encode("ascii")) if alias else (b".ws-content."+content_nonce.hex().encode("ascii"))
+  if plan_size is not None:written(os.path.join(evidence,plan_name.decode()),(plan_head+plan_chunk+bytes(64))[:plan_size])
+  if content_size is not None:written(os.path.join(evidence,content_name.decode()),(content_head+content_chunk+bytes(64))[:content_size])
+  if manifest is not None:written(os.path.join(evidence,"input.manifest"),manifest)
+  if initial is not None:written(os.path.join(evidence,".ws-input-manifest-tmp."+manifest_nonce.hex()),manifest_bytes(0,0,0)[:initial])
+  if progress is not None:
+   index=0
+   while index<progress_count:
+    suffix=progress_nonce if index==0 else bytes((11,))*32
+    written(os.path.join(evidence,".ws-input-progress-tmp."+suffix.hex()),progress)
+    index+=1
+  if extra is not None:written(os.path.join(evidence,extra),b"x")
+  return root,generation_path,evidence
+ except BaseException:
+  shutil.rmtree(root)
+  raise
+entries3=sorted(["input.manifest",".ws-plan."+plan_nonce.hex(),".ws-content."+content_nonce.hex()])
+def run_recovery(root,generation_path,label,code,expect_true,checks=None):
+ generation_fd=os.open(generation_path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ closed=False
+ fds=None
+ seen=[]
+ result=None
+ try:
+  fds=module.Fds();fds.add(generation_fd)
+  try:
+   result=module._v5_recover_input_begin_prefix(fds,generation_fd,lifecycle,generation,uid,os.fstat(generation_fd).st_dev)
+  except module.Fatal as failure:
+   seen.append(failure.code)
+  finally:
+   if generation_fd in fds.items:
+    fds.close(generation_fd)
+    closed=True
+ finally:
+  if not closed:os.close(generation_fd)
+ if fds.uncertain or fds.items!=[]:raise RuntimeError(label+"-fds")
+ if expect_true:
+  if seen or result is not True:raise RuntimeError(label+"-result")
+ else:
+  if seen!=[code]:raise RuntimeError(label+"-code")
+ if checks is not None:checks()
+def size_checks(evidence,plan_size,content_size,entries,label):
+ def checks():
+  if os.path.getsize(os.path.join(evidence,".ws-plan."+plan_nonce.hex()))!=plan_size:raise RuntimeError(label+"-plan-size")
+  if os.path.getsize(os.path.join(evidence,".ws-content."+content_nonce.hex()))!=content_size:raise RuntimeError(label+"-content-size")
+  if sorted(os.listdir(evidence))!=entries:raise RuntimeError(label+"-entries")
+ return checks
+cases=[]
+def case(label,code,expect_true,checks_evidence=None,plan_size=None,content_size=None,manifest=None,progress=None,progress_count=1,initial=None,extra=None,alias=False):
+ cases.append((label,code,expect_true,plan_size,content_size,manifest,progress,progress_count,initial,extra,alias,checks_evidence))
+case("valid-rev1",None,True,"keep",plan_size=29,content_size=16,manifest=manifest_bytes(1,17,0))
+case("valid-plan-tail",None,True,"plan-tail",plan_size=20,content_size=16,manifest=manifest_bytes(0,0,0))
+case("valid-content-tail",None,True,"content-tail",plan_size=29,content_size=24,manifest=manifest_bytes(1,17,0))
+case("valid-complete",None,True,"keep-complete",plan_size=29,content_size=39,manifest=manifest_bytes(2,17,23))
+case("temp-zero-draft-full",None,True,"temp-full",plan_size=29,content_size=16,manifest=manifest_bytes(0,0,0),progress=b"")
+case("temp-partial-draft",module._E_STATE,False,None,plan_size=20,content_size=16,manifest=manifest_bytes(0,0,0),progress=b"")
+case("temp-wrong-bytes",module._E_STATE,False,None,plan_size=29,content_size=16,manifest=manifest_bytes(0,0,0),progress=b"\\xff"*5)
+case("temp-oversize",module._E_BOUNDS,False,None,plan_size=29,content_size=16,manifest=manifest_bytes(0,0,0),progress=b"\\x00"*273)
+case("two-temps",module._E_STATE,False,None,plan_size=29,content_size=16,manifest=manifest_bytes(0,0,0),progress=b"",progress_count=2)
+case("temp-no-canonical",module._E_STATE,False,None,plan_size=29,content_size=16,manifest=None,progress=b"")
+case("temp-and-initial",module._E_STATE,False,None,plan_size=12,content_size=16,manifest=manifest_bytes(0,0,0),progress=b"",initial=272)
+case("tail-beyond-chunk",module._E_STATE,False,None,plan_size=30,content_size=16,manifest=manifest_bytes(0,0,0))
+case("draft-below-committed",module._E_STATE,False,None,plan_size=12,content_size=16,manifest=manifest_bytes(1,17,0))
+case("revision-mismatch",module._E_STATE,False,None,plan_size=12,content_size=16,manifest=manifest_bytes(5,0,0))
+case("noncanonical-committed",module._E_STATE,False,None,plan_size=12,content_size=16,manifest=manifest_bytes(1,5,0))
+case("content-before-plan",module._E_STATE,False,None,plan_size=12,content_size=39,manifest=manifest_bytes(1,0,23))
+case("aliased-names",module._E_STATE,False,None,plan_size=29,content_size=16,manifest=manifest_bytes(1,17,0),alias=True)
+case("reserved-nonzero",module._E_STATE,False,None,plan_size=29,content_size=16,manifest=manifest_bytes(1,17,0,reserved=1))
+case("unknown-name",module._E_STATE,False,None,plan_size=29,content_size=16,manifest=manifest_bytes(1,17,0),extra="residue.rec")
+for label,code,expect_true,plan_size,content_size,manifest,progress,progress_count,initial,extra,alias,kind in cases:
+ root=None
+ generation_path=None
+ evidence=None
+ try:
+  root,generation_path,evidence=fixture(plan_size=plan_size,content_size=content_size,manifest=manifest,progress=progress,progress_count=progress_count,initial=initial,extra=extra,alias=alias)
+  checks=None
+  if kind=="keep":checks=size_checks(evidence,29,16,entries3,label)
+  elif kind=="plan-tail":checks=size_checks(evidence,12,16,entries3,label)
+  elif kind=="content-tail":checks=size_checks(evidence,29,16,entries3,label)
+  elif kind=="keep-complete":checks=size_checks(evidence,29,39,entries3,label)
+  elif kind=="temp-full":checks=size_checks(evidence,12,16,entries3,label)
+  run_recovery(root,generation_path,label,code,expect_true,checks)
+ finally:
+  if root is not None and os.path.isdir(root):shutil.rmtree(root)
+print("V5_WRITE_STREAM_CORRUPT_OK %d"%len(cases))
+module._zero(lifecycle)
+`;
+			const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+			const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+				cwd: "/",
+				env: {},
+				timeout: 120_000,
+				maxBuffer: 1024,
+			});
+			expect(stderr).toBe("");
+			expect(stdout).toBe("V5_WRITE_STREAM_CORRUPT_OK 19\n");
+		},
+	);
+
+	linuxProbeTest("V5 WS_WRITE_STREAM retries and BEGIN retries stay quota-free on progressed drafts", async () => {
+		const probe = `import importlib.util,os,shutil,struct,sys,tempfile
+source=open(sys.argv[1]).read()
+spec=importlib.util.spec_from_file_location("store_v5_write_arm_real",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+uid=os.getuid()
+parent="/private/tmp" if sys.platform=="darwin" else "/tmp"
+lifecycle=bytearray(range(32));generation=bytearray(range(32,64));binding=bytes(range(64,96));tx=bytes((1,))+bytes(31);plan_digest=bytes(range(96,128))
+PLAN_LENGTH=17
+plan_chunk=bytes(range(31,48))
+counter=[0]
+def mutated(anchor,replacement):
+ if source.count(anchor)!=1:raise RuntimeError("anchor")
+ text=source.replace(anchor,replacement,1)
+ counter[0]+=1
+ path=os.path.join(parent,"ws-write-arm-%d.py"%counter[0])
+ handle=open(path,"w")
+ handle.write(text)
+ handle.close()
+ try:
+  spec2=importlib.util.spec_from_file_location("ws_write_arm_%d"%counter[0],path)
+  loaded=importlib.util.module_from_spec(spec2)
+  spec2.loader.exec_module(loaded)
+ finally:
+  os.unlink(path)
+ return loaded
+def captured(call):
+ read_fd,write_fd=os.pipe();saved=os.dup(1);closed=False
+ try:
+  os.dup2(write_fd,1)
+  try:call()
+  finally:os.dup2(saved,1)
+  os.close(write_fd);closed=True
+  chunks=[]
+  while True:
+   chunk=os.read(read_fd,65536)
+   if not chunk:break
+   chunks.append(chunk)
+  return b"".join(chunks)
+ finally:
+  if not closed:os.close(write_fd)
+  os.close(saved);os.close(read_fd)
+def build(mod):
+ root=tempfile.mkdtemp(prefix="store-v5-write-arm-",dir=parent)
+ fds=None
+ try:
+  root_fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds=mod.Fds();fds.add(root_fd)
+  root_device=os.fstat(root_fd).st_dev;root_inode=os.fstat(root_fd).st_ino
+  lock_fd,lock_device,lock_inode,lock_error=mod._bind_lock(fds,root_fd,uid,root_device)
+  if lock_error is not None:raise RuntimeError("lock")
+  genesis=bytes(range(64));identity_digest=mod._digest(genesis)
+  record=bytearray(mod._WAL_SIZE);record[:11]=mod._WAL_MAGIC;record[16]=mod._W_ALLOCATED;struct.pack_into(">Q",record,24,1);record[32:64]=lifecycle;record[64:96]=generation;record[96:128]=mod._ZERO32;record[128:160]=identity_digest
+  payload=bytes(lifecycle)+bytes(generation)+struct.pack(">I",len(genesis))+genesis+bytes(record)
+  mod._zero(identity_digest)
+  result,create_error=mod._cmd_create(fds,root_fd,payload,uid,root_device)
+  if create_error is not None:raise RuntimeError("create")
+  return root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode
+ except BaseException:
+  if fds is not None:fds.close_all()
+  shutil.rmtree(root)
+  raise
+def dispatch(mod,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,opcode,payload):
+ box=[]
+ def call():
+  box.append(mod._dispatch_v5(fds,root_fd,uid,root_device,root_inode,lock_fd,lock_device,lock_inode,opcode,payload,module._MODE_V5_READY))
+ emitted=captured(call)
+ return box[0],emitted
+def rebind(root,mod):
+ fds=mod.Fds()
+ root_fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds.add(root_fd)
+ root_device=os.fstat(root_fd).st_dev;root_inode=os.fstat(root_fd).st_ino
+ lock_fd,lock_device,lock_inode,lock_error=mod._bind_lock(fds,root_fd,uid,root_device)
+ if lock_error is not None:raise RuntimeError("relock")
+ return fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode
+def begin_payload():
+ payload=bytearray(172);payload[0:32]=lifecycle;payload[32:64]=generation;payload[64:96]=binding;payload[96:128]=tx;payload[128:160]=plan_digest;struct.pack_into(">I",payload,160,PLAN_LENGTH);struct.pack_into(">Q",payload,164,23)
+ return payload
+def write_payload(kind,offset,data):
+ payload=bytearray(169+len(data));payload[0:32]=lifecycle;payload[32:64]=generation;payload[64:96]=binding;payload[96:128]=tx;payload[128]=kind;struct.pack_into(">Q",payload,129,offset);payload[137:169]=module._digest(data);payload[169:]=data
+ return payload
+root=None
+fds=None
+try:
+ root,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=build(module)
+ try:
+  outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_BEGIN,begin_payload())
+  if outcome!=(module._MODE_V5_READY,"emitted",None):raise RuntimeError("begin")
+  outcome,emitted=dispatch(module,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,module._WS_WRITE_STREAM,write_payload(1,0,plan_chunk))
+  if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=struct.pack(">BI",0x80,18)+bytes((0x0B,1))+struct.pack(">Q",1)+struct.pack(">Q",PLAN_LENGTH):raise RuntimeError("plan")
+ finally:
+  fds.close_all()
+ mod=mutated("_V5_FLOOR_BYTES = 4294967296","_V5_FLOOR_BYTES = 1152921504606846976")
+ fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode=rebind(root,mod)
+ try:
+  outcome,emitted=dispatch(mod,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,mod._WS_BEGIN,begin_payload())
+  retry_frame=struct.pack(">BI",0x80,25)+bytes((0x0A,))+struct.pack(">Q",1)+struct.pack(">Q",PLAN_LENGTH)+struct.pack(">Q",0)
+  if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=retry_frame:raise RuntimeError("begin-retry-quota-free")
+  outcome,emitted=dispatch(mod,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,mod._WS_WRITE_STREAM,write_payload(1,0,plan_chunk))
+  if outcome!=(module._MODE_V5_READY,"emitted",None) or emitted!=struct.pack(">BI",0x80,18)+bytes((0x0B,1))+struct.pack(">Q",1)+struct.pack(">Q",PLAN_LENGTH):raise RuntimeError("write-retry-quota-free")
+  selector=bytearray(lifecycle)+bytearray(generation)+bytearray(binding)+bytearray(tx)
+  outcome,emitted=dispatch(mod,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,mod._WS_INSPECT,selector)
+  if outcome!=(module._MODE_V5_READY,"done",None) or struct.unpack_from(">Q",emitted[5:],204)[0]!=1:raise RuntimeError("inspect")
+  lifecycle_b=bytearray(range(96,128));generation_b=bytearray(range(128,160))
+  genesis=bytes(range(64));identity_digest=mod._digest(genesis)
+  record=bytearray(mod._WAL_SIZE);record[:11]=mod._WAL_MAGIC;record[16]=mod._W_ALLOCATED;struct.pack_into(">Q",record,24,1);record[32:64]=lifecycle_b;record[64:96]=generation_b;record[96:128]=mod._ZERO32;record[128:160]=identity_digest
+  payload=bytes(lifecycle_b)+bytes(generation_b)+struct.pack(">I",len(genesis))+genesis+bytes(record)
+  mod._zero(identity_digest)
+  result,create_error=mod._cmd_create(fds,root_fd,payload,uid,root_device)
+  if create_error is not None:raise RuntimeError("create-b")
+  second=bytearray(172);second[0:32]=lifecycle_b;second[32:64]=generation_b;second[64:96]=binding;second[96:128]=tx;second[128:160]=plan_digest;struct.pack_into(">I",second,160,PLAN_LENGTH);struct.pack_into(">Q",second,164,23)
+  outcome,emitted=dispatch(mod,fds,root_fd,root_device,root_inode,lock_fd,lock_device,lock_inode,mod._WS_BEGIN,second)
+  if outcome!=(module._MODE_V5_READY,"error",mod._E_QUOTA) or emitted!=b"":raise RuntimeError("fresh-quota")
+  if os.path.exists(os.path.join(root,lifecycle_b.hex(),"generations",generation_b.hex(),"workspace-evidence")):raise RuntimeError("fresh-evidence")
+  if fds.uncertain or fds.items!=[root_fd,lock_fd]:raise RuntimeError("fds")
+ finally:
+  fds.close_all()
+finally:
+ if fds is not None:fds.close_all()
+ if root is not None:shutil.rmtree(root)
+module._zero(lifecycle)
+print("V5_WRITE_STREAM_ARMS_OK 1")
+`;
+		const hostPython = process.platform === "darwin" ? "/opt/homebrew/bin/python3" : "/usr/local/bin/python3";
+		const { stdout, stderr } = await execFileAsync(hostPython, ["-c", probe, HELPER], {
+			cwd: "/",
+			env: {},
+			timeout: 60_000,
+			maxBuffer: 1024,
+		});
+		expect(stderr).toBe("");
+		expect(stdout).toBe("V5_WRITE_STREAM_ARMS_OK 1\n");
 	});
 
 	test("static source keeps the hostile-input boundary and forbidden syntax closed", async () => {
