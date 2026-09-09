@@ -798,7 +798,7 @@ describe("hosted session store source constraints", () => {
 			"payload[8] === 0x35",
 			"if (opcode === WS_TRANSACTION_RESPONSE)",
 			"pending.payloads.length >= V5_MAX_ITEMS",
-			"!isValidRevisionZeroInputDraftTransaction(payload)",
+			"!isValidInputDraftTransaction(payload)",
 			"compareLifecyclePrefix(previous, payload) >= 0",
 			"pending.payloads[pending.payloads.length] = payload",
 			"if (opcode !== DONE || payload.byteLength !== 0)",
@@ -820,7 +820,9 @@ describe("hosted session store source constraints", () => {
 			"const V5_MAX_CONTENT = 1_073_741_824n;",
 			"const V5_RESERVATION = 1_100_000_000n;",
 			"rangeIsZero(payload, 96, 128)",
-			"rangeIsZero(payload, 172, 216)",
+			"rangeIsZero(payload, 172, 180)",
+			"rangeIsZero(payload, 196, 204)",
+			"rangeIsZero(payload, 212, 216)",
 			"view.getBigUint64(216, false) !== U64_NONE",
 			"rangeIsZero(payload, 224, 384)",
 			"view.getUint32(384, false) !== U32_NONE",
@@ -2325,8 +2327,31 @@ if scenario.startswith("v5-"):
   transaction[384:392]=bytes((0xff,))*8
   transaction[392:400]=struct.pack(">Q",1100000000)
   transaction[400]=1
+  progress_rows={
+   'v5-inventory-valid-progress-single':(1, 0, 1, 0, 1),
+   'v5-inventory-valid-progress-boundary':(1048407, 0, 1048407, 0, 1),
+   'v5-inventory-valid-progress-plan':(1048408, 0, 1048407, 0, 1),
+   'v5-inventory-valid-progress-plan-final-one':(1048408, 0, 1048408, 0, 2),
+   'v5-inventory-valid-progress-content':(1, 1048408, 1, 1048407, 2),
+   'v5-inventory-valid-progress-content-final-one':(1, 1048408, 1, 1048408, 3),
+   'v5-inventory-valid-progress-maximum':(1048576, 1073741824, 1048576, 1073741824, 1027),
+   'v5-inventory-invalid-progress-plan-partial':(1048408, 0, 1, 0, 1),
+   'v5-inventory-invalid-progress-content-partial':(1, 1048408, 1, 1, 2),
+   'v5-inventory-invalid-progress-content-order':(1, 1, 0, 1, 1),
+   'v5-inventory-invalid-progress-plan-overrun':(1, 0, 2, 0, 1),
+   'v5-inventory-invalid-progress-content-overrun':(1, 1, 1, 2, 2),
+   'v5-inventory-invalid-progress-revision-high':(1, 0, 1, 0, 2),
+   'v5-inventory-invalid-progress-revision-overflow':(1, 1, 1, 1, 18446744073709551615),
+  }
+  if scenario in progress_rows:
+   plan_length,content_length,plan_end,content_end,revision=progress_rows[scenario]
+   struct.pack_into(">I",transaction,160,plan_length)
+   struct.pack_into(">Q",transaction,164,content_length)
+   struct.pack_into(">Q",transaction,180,plan_end)
+   struct.pack_into(">Q",transaction,188,content_end)
+   struct.pack_into(">Q",transaction,204,revision)
   valid_transaction=bytes(transaction)
-  if scenario=="v5-inventory-valid-draft":
+  if scenario=="v5-inventory-valid-draft" or scenario.startswith("v5-inventory-valid-progress-"):
    emit(frame(0x83,valid_transaction)+frame(0x82))
    opcode,payload=request()
    if opcode!=0xFF or payload: raise SystemExit(9)
@@ -2342,6 +2367,7 @@ if scenario.startswith("v5-"):
   if scenario=="v5-inventory-short-transaction": emit(frame(0x83,valid_transaction[:-1]))
   elif scenario=="v5-inventory-long-transaction": emit(frame(0x83,valid_transaction+b"x"))
   elif scenario=="v5-inventory-zero-transaction": emit(frame(0x83,bytes(401)))
+  elif scenario in progress_rows: emit(frame(0x83,valid_transaction))
   elif scenario.startswith("v5-inventory-invalid-"):
    invalid=bytearray(valid_transaction)
    mutation=scenario[len("v5-inventory-invalid-"):]
@@ -2350,6 +2376,8 @@ if scenario.startswith("v5-"):
    elif mutation=="content": invalid[164:172]=struct.pack(">Q",1073741825)
    elif mutation=="state": invalid[176]=1
    elif mutation=="committed": invalid[180:188]=struct.pack(">Q",1)
+   elif mutation=="vector-committed": invalid[196:204]=struct.pack(">Q",1)
+   elif mutation=="attempt": invalid[212:216]=struct.pack(">I",1)
    elif mutation=="checkpoint": invalid[216:224]=bytes(8)
    elif mutation=="record": invalid[224]=1
    elif mutation=="ordinal": invalid[384:388]=bytes(4)
@@ -2396,7 +2424,7 @@ while True:
 				`
 def complete(r):
  return r[0] is not None and not r[3] and not r[4] and not r[5] and not r[6] and not r[7] and r[8] and r[9] and r[10] and r[11] and not r[12] and not r[13]
-cases=("malformed-length","malformed-payload","trailing","duplicate","reordered","late","wrong-opcode","stdout-overflow","stderr-overflow","v5-hello-protocol","v5-hello-state","v5-hello-busy","v5-ready-wrong-opcode","v5-ready-short","v5-ready-wrong-magic","v5-inventory-valid-draft","v5-inventory-eight-transactions","v5-inventory-short-transaction","v5-inventory-long-transaction","v5-inventory-zero-transaction","v5-inventory-invalid-tx","v5-inventory-invalid-plan","v5-inventory-invalid-content","v5-inventory-invalid-state","v5-inventory-invalid-committed","v5-inventory-invalid-checkpoint","v5-inventory-invalid-record","v5-inventory-invalid-ordinal","v5-inventory-invalid-reservation","v5-inventory-invalid-kind","v5-inventory-nine-transactions","v5-inventory-unsorted","v5-inventory-duplicate-prefix","v5-inventory-wrong-opcode","v5-inventory-session","v5-inventory-error")
+cases=("malformed-length","malformed-payload","trailing","duplicate","reordered","late","wrong-opcode","stdout-overflow","stderr-overflow","v5-hello-protocol","v5-hello-state","v5-hello-busy","v5-ready-wrong-opcode","v5-ready-short","v5-ready-wrong-magic","v5-inventory-valid-draft","v5-inventory-eight-transactions","v5-inventory-short-transaction","v5-inventory-long-transaction","v5-inventory-zero-transaction","v5-inventory-invalid-tx","v5-inventory-invalid-plan","v5-inventory-invalid-content","v5-inventory-invalid-state","v5-inventory-invalid-committed","v5-inventory-invalid-checkpoint","v5-inventory-invalid-record","v5-inventory-invalid-ordinal","v5-inventory-invalid-reservation","v5-inventory-invalid-kind","v5-inventory-nine-transactions","v5-inventory-unsorted","v5-inventory-duplicate-prefix","v5-inventory-wrong-opcode","v5-inventory-session","v5-inventory-error","v5-inventory-valid-progress-single","v5-inventory-valid-progress-boundary","v5-inventory-valid-progress-plan","v5-inventory-valid-progress-plan-final-one","v5-inventory-valid-progress-content","v5-inventory-valid-progress-content-final-one","v5-inventory-valid-progress-maximum","v5-inventory-invalid-progress-plan-partial","v5-inventory-invalid-progress-content-partial","v5-inventory-invalid-progress-content-order","v5-inventory-invalid-progress-plan-overrun","v5-inventory-invalid-progress-content-overrun","v5-inventory-invalid-progress-revision-high","v5-inventory-invalid-progress-revision-overflow","v5-inventory-invalid-vector-committed","v5-inventory-invalid-attempt")
 for scenario in cases:
  open("/chroot/tmp/fault-scenario","w",encoding="ascii").write(scenario)
  term_path="/chroot/tmp/fault-term-"+scenario
@@ -2415,7 +2443,7 @@ for scenario in cases:
  except OSError as failure: helper_absent=failure.errno==errno.ESRCH
  elapsed=time.monotonic()-started
  marker=(("V5_FAULT_OK " if scenario.startswith("v5-") else "FAULT_OK ")+scenario).encode()
- expected_term="" if scenario in ("v5-hello-protocol","v5-hello-state","v5-inventory-valid-draft","v5-inventory-eight-transactions") else "1"
+ expected_term="" if scenario in ("v5-hello-protocol","v5-hello-state","v5-inventory-valid-draft","v5-inventory-eight-transactions") or scenario.startswith("v5-inventory-valid-progress-") else "1"
  if not complete(r) or r[0]!=0 or marker not in out or term!=expected_term or not helper_absent or elapsed>5:
   raise RuntimeError(f"fault {scenario} result={r[0:1]+r[3:]} term={term!r} helper_absent={helper_absent} elapsed={elapsed} out={out!r} err={err!r}")
  print("FAULT_CASE_OK "+scenario)
@@ -2512,7 +2540,7 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"ec4f4741d763d3b4d5cca7ce9ae0a5e8081ef6fabed55013275eb214125089df",
+			"ec6bd2f04ee032e2e8b8fd70668884b96ae17fd86110b4b8e435d30f41e91115",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
 			"8f55f26572015b6cfcae8edc9a85d6f1b1ae38206f54a5e5b0572872280720ea",
@@ -2521,10 +2549,10 @@ for scenario in ("case3","case4"):
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
 		);
 		expect(createHash("sha256").update(readFileSync(faultInterpreterPath)).digest("hex")).toBe(
-			"c8a7a852c3cc0958bf9dda339a20b9f3c7845b32fa68b3932be31d847184faef",
+			"c0528a53442bc543bbc13c82b563c61e3ac090661ee99000b4f5b30684baaa40",
 		);
 		expect(createHash("sha256").update(readFileSync(faultControllerPath)).digest("hex")).toBe(
-			"8e08852d55b39a82c2a132f85c52739d4f06c3bfc541346672d0ebde6af1d476",
+			"0aa46ba7763cd189e604937998cc15b606769f15aa1ef40174ee7079f7c48738",
 		);
 		expect(createHash("sha256").update(readFileSync(rolloverInterpreterPath)).digest("hex")).toBe(
 			"0f791c80ecea328500be5ddf4baa12ad1cdb15685c85b2b1eadb36f207918464",
@@ -2608,7 +2636,7 @@ for scenario in ("case3","case4"):
 
 			const faultSetup = setup.replace(
 				"chroot /chroot /bun /app/integration.ts",
-				"mv /chroot/usr/local/bin/python3 /chroot/usr/local/bin/python3.real; install -m0755 /input-fault-python3 /chroot/usr/local/bin/python3; /usr/local/bin/python3 /input-fault-controller.py",
+				"mv /chroot/usr/local/bin/python3 /chroot/usr/local/bin/python3.real; install -m0755 /input-fault-python3 /chroot/usr/local/bin/python3; /usr/local/bin/python3 -u /input-fault-controller.py",
 			);
 			const faultArguments = dockerArguments.map((value) => {
 				if (value === containerName) return faultContainerName;
@@ -2617,7 +2645,7 @@ for scenario in ("case3","case4"):
 			});
 			const { stdout: faultStdout } = await execFileAsync(
 				hostPython,
-				["-c", dockerSupervisorRunner, JSON.stringify(faultArguments), faultContainerName, "100"],
+				["-c", dockerSupervisorRunner, JSON.stringify(faultArguments), faultContainerName, "150"],
 				{ maxBuffer: 4 * 1024 * 1024 },
 			);
 			for (const scenario of [
@@ -2639,6 +2667,22 @@ for scenario in ("case3","case4"):
 				"v5-inventory-wrong-opcode",
 				"v5-inventory-session",
 				"v5-inventory-error",
+				"v5-inventory-valid-progress-single",
+				"v5-inventory-valid-progress-boundary",
+				"v5-inventory-valid-progress-plan",
+				"v5-inventory-valid-progress-plan-final-one",
+				"v5-inventory-valid-progress-content",
+				"v5-inventory-valid-progress-content-final-one",
+				"v5-inventory-valid-progress-maximum",
+				"v5-inventory-invalid-progress-plan-partial",
+				"v5-inventory-invalid-progress-content-partial",
+				"v5-inventory-invalid-progress-content-order",
+				"v5-inventory-invalid-progress-plan-overrun",
+				"v5-inventory-invalid-progress-content-overrun",
+				"v5-inventory-invalid-progress-revision-high",
+				"v5-inventory-invalid-progress-revision-overflow",
+				"v5-inventory-invalid-vector-committed",
+				"v5-inventory-invalid-attempt",
 			])
 				expect(faultStdout).toContain(`FAULT_CASE_OK ${scenario}`);
 
@@ -2678,5 +2722,5 @@ for scenario in ("case3","case4"):
 			rmSync(temporary, { recursive: true, force: true });
 		}
 	},
-	250_000,
+	300_000,
 );

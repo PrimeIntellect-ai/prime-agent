@@ -371,13 +371,25 @@ function compareLifecyclePrefix(left: Uint8Array, right: Uint8Array): number {
 	return 0;
 }
 
-function isValidRevisionZeroInputDraftTransaction(payload: Uint8Array): boolean {
+function isValidInputDraftTransaction(payload: Uint8Array): boolean {
 	if (payload.byteLength !== V5_TRANSACTION_SIZE || rangeIsZero(payload, 96, 128)) return false;
 	const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
 	const planPayloadLength = view.getUint32(160, false);
 	if (planPayloadLength === 0 || planPayloadLength > V5_MAX_PLAN_PAYLOAD) return false;
-	if (view.getBigUint64(164, false) > V5_MAX_CONTENT) return false;
-	if (!rangeIsZero(payload, 172, 216)) return false;
+	const contentLength = view.getBigUint64(164, false);
+	if (contentLength > V5_MAX_CONTENT || !rangeIsZero(payload, 172, 180)) return false;
+	const planLength = BigInt(planPayloadLength);
+	const planCommitted = view.getBigUint64(180, false);
+	const contentCommitted = view.getBigUint64(188, false);
+	if (planCommitted > planLength || contentCommitted > contentLength) return false;
+	const chunkSize = 1048407n;
+	if (planCommitted !== planLength && planCommitted % chunkSize !== 0n) return false;
+	if (contentCommitted !== contentLength && contentCommitted % chunkSize !== 0n) return false;
+	if (contentCommitted !== 0n && planCommitted !== planLength) return false;
+	const planChunks = (planCommitted + chunkSize - 1n) / chunkSize;
+	const contentChunks = (contentCommitted + chunkSize - 1n) / chunkSize;
+	if (view.getBigUint64(204, false) !== planChunks + contentChunks) return false;
+	if (!rangeIsZero(payload, 196, 204) || !rangeIsZero(payload, 212, 216)) return false;
 	if (view.getBigUint64(216, false) !== U64_NONE || !rangeIsZero(payload, 224, 384)) return false;
 	if (view.getUint32(384, false) !== U32_NONE || view.getUint32(388, false) !== U32_NONE) return false;
 	if (view.getBigUint64(392, false) !== V5_RESERVATION || payload[400] !== 1) return false;
@@ -1168,7 +1180,7 @@ class HelperOwner {
 				const previous = pending.payloads.length === 0 ? undefined : pending.payloads[pending.payloads.length - 1];
 				if (
 					pending.payloads.length >= V5_MAX_ITEMS ||
-					!isValidRevisionZeroInputDraftTransaction(payload) ||
+					!isValidInputDraftTransaction(payload) ||
 					(previous !== undefined && compareLifecyclePrefix(previous, payload) >= 0)
 				) {
 					zeroBytes(payload);
