@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from uuid import uuid4
 from typing import Any, Iterator, Literal
@@ -281,7 +282,9 @@ class HarnessState:
             data = {}
 
         schema = data.get("schema")
-        self.schema = schema if type(schema) in (int, float) else 1
+        if type(schema) not in (int, float) or (isinstance(schema, float) and not isfinite(schema)):
+            schema = 1
+        self.schema = schema
 
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         raw_entries = data.get("entries", {})
@@ -399,7 +402,7 @@ class HarnessState:
             # Create no looser than the destination; retain the umask for new files.
             descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             with os.fdopen(descriptor, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                json.dump(data, f, indent=2, ensure_ascii=False, allow_nan=False)
             if existing_mode is not None:
                 os.chmod(temp_path, existing_mode)
             os.replace(temp_path, target_path)

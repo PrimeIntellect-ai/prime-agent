@@ -69,6 +69,9 @@ elif action == "schema":
     state.save()
 elif action == "refine":
     state.record_refinement(entry_id, [entry_id])
+elif action == "invalid-schema":
+    state.schema = float(entry_id)
+    state.save()
 else:
     state.create_memory(entry_id, entry_id, id=entry_id)
 print("accepted", flush=True)
@@ -245,6 +248,48 @@ describe("concurrent harness memory persistence", () => {
 			await Promise.all(writers.map((writer) => writer.cleanup()));
 		}
 	});
+
+	it.each(["nan", "inf", "-inf"])("rejects Python schema %s without corrupting accepted state", async (schema) => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const dir = join(harness.tempDir, "harness");
+		createHostMemory(dir, "seed-entry");
+		const accepted = loadHarnessState(dir);
+		const python = pythonWriter(dir, schema, false, "invalid-schema");
+		try {
+			const result = await python.done;
+			expect(result.code).toBe(1);
+			expect(result.stderr).toContain("Out of range float values are not JSON compliant");
+			expect(loadHarnessState(dir)).toEqual(accepted);
+			expect(existsSync(`${getHarnessStatePath(dir)}.lock`)).toBe(false);
+			createHostMemory(dir, "after-rejection");
+			expect(Object.keys(loadHarnessState(dir).entries.memory).sort()).toEqual(["after-rejection", "seed-entry"]);
+		} finally {
+			await python.cleanup();
+		}
+	});
+
+	it.each(["NaN", "Infinity", "-Infinity"])(
+		"normalizes an existing non-finite schema %s before Python saves",
+		async (schema) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const dir = join(harness.tempDir, "harness");
+			createHostMemory(dir, "seed-entry");
+			const state = loadHarnessState(dir);
+			writeFileSync(getHarnessStatePath(dir), JSON.stringify(state).replace('"schema":1', `"schema":${schema}`));
+			const python = pythonWriter(dir, "python-entry");
+			try {
+				expect((await python.done).code).toBe(0);
+				const saved = loadHarnessState(dir);
+				expect(saved.schema).toBe(1);
+				expect(Object.keys(saved.entries.memory).sort()).toEqual(["python-entry", "seed-entry"]);
+				expect(saved.refinements).toEqual(state.refinements);
+			} finally {
+				await python.cleanup();
+			}
+		},
+	);
 
 	it.each([
 		["Python", "reset"],

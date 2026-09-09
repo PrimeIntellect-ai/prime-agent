@@ -1,3 +1,4 @@
 - Fixed concurrent Python and refinement saves discarding unrelated accepted harness memories, and reported conflicting entry changes instead of overwriting them.
 - Fixed Python harness saves resetting the stored schema version, and rejected conflicting schema changes.
+- Fixed non-finite Python values corrupting the shared harness JSON on save.
 - Fixed concurrent Python refinements receiving duplicate IDs, and rejected appends to concurrently replaced refinement history.
