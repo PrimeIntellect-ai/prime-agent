@@ -43,6 +43,7 @@ export interface ConfigurationMenuOptions {
 	onSelectMcpConnection: (provider: AuthSelectorProvider) => void;
 	onSelectModel: (model: Model<Api>) => void;
 	onCancel: () => void;
+	onOpenCatalogTab?: () => void;
 }
 
 const TAB_LABELS: Record<ConfigurationMenuTab, string> = {
@@ -210,6 +211,7 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		this.addChild(this.activeBody);
 		this.activeBody.focused = this._focused;
 		this.options.requestRender();
+		if (tab === "models" || tab === "providers") this.options.onOpenCatalogTab?.();
 	}
 
 	refreshAuthentication(): void {

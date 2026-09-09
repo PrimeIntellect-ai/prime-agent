@@ -507,8 +507,18 @@ export async function findInitialModel(options: {
 	let model: Model<Api> | undefined;
 	let thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 	let cachedAvailableModels: Model<Api>[] | undefined;
-	const getAvailableModels = async (): Promise<Model<Api>[]> => {
-		cachedAvailableModels ??= await modelRegistry.refreshAvailableModels();
+	const getAvailableModels = async (requested?: Pick<Model<Api>, "provider" | "id">): Promise<Model<Api>[]> => {
+		cachedAvailableModels ??= await modelRegistry.refreshAvailableModels({ background: true });
+		// A cold private-model selection needs authorization before it can be restored.
+		if (
+			requested &&
+			isPrivatePrimeInferenceModel(requested) &&
+			!cachedAvailableModels.some(
+				(candidate) => candidate.provider === requested.provider && candidate.id === requested.id,
+			)
+		) {
+			cachedAvailableModels = await modelRegistry.refreshAvailableModels();
+		}
 		return cachedAvailableModels;
 	};
 	if (cliProvider && cliModel) {
@@ -525,7 +535,7 @@ export async function findInitialModel(options: {
 		const resolvedModel = resolved.model;
 		if (resolvedModel) {
 			if (isPrivatePrimeInferenceModel(resolvedModel)) {
-				const availableModel = (await getAvailableModels()).find((candidate) =>
+				const availableModel = (await getAvailableModels(resolvedModel)).find((candidate) =>
 					modelsAreEqual(candidate, resolvedModel),
 				);
 				if (!availableModel) {
@@ -546,7 +556,9 @@ export async function findInitialModel(options: {
 			fallbackMessage: undefined,
 		};
 	}
-	const availableModels = await getAvailableModels();
+	const availableModels = await getAvailableModels(
+		defaultProvider && defaultModelId ? { provider: defaultProvider, id: defaultModelId } : undefined,
+	);
 	if (defaultProvider && defaultModelId) {
 		// Rebuild from the provider template when the saved id is missing from this
 		// build's snapshot (e.g. prime-inference catalog churn), so it survives updates.
@@ -585,7 +597,13 @@ export async function restoreModelFromSession(
 	shouldPrintMessages: boolean,
 	modelRegistry: ModelRegistry,
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
-	const availableModels = await modelRegistry.refreshAvailableModels();
+	let availableModels = await modelRegistry.refreshAvailableModels({ background: true });
+	if (
+		isPrivatePrimeInferenceModel({ provider: savedProvider, id: savedModelId }) &&
+		!availableModels.some((model) => model.provider === savedProvider && model.id === savedModelId)
+	) {
+		availableModels = await modelRegistry.refreshAvailableModels();
+	}
 	const restoredModel = availableModels.find(
 		(candidate) => candidate.provider === savedProvider && candidate.id === savedModelId,
 	);

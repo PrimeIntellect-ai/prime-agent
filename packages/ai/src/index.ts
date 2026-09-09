@@ -4,6 +4,8 @@ export { Type } from "typebox";
 export * from "./api-registry.js";
 export * from "./env-api-keys.js";
 export * from "./log.js";
+export * from "./model-catalog.js";
+export { ProviderCompatSchema, ThinkingLevelMapSchema } from "./model-compat-schema.js";
 export * from "./models.js";
 export * from "./prime-inference-model-catalog.js";
 export type { BedrockOptions, BedrockThinkingDisplay } from "./providers/amazon-bedrock.js";

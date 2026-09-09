@@ -1,14 +1,7 @@
-import { isPrivatePrimeInferenceModelId, type Model } from "@earendil-works/pi-ai";
-import {
-	buildPrimeInferenceModels,
-	fetchPrimeInferenceModelCatalog,
-	PRIME_INFERENCE_BASE_URL,
-	PrimeInferenceCatalogRequestError,
-} from "./prime-inference-model-catalog.js";
+import { isPrivatePrimeInferenceModelId, type Model, parsePrimeInferenceModelCatalog } from "@earendil-works/pi-ai";
+import { buildPrimeInferenceModels, PRIME_INFERENCE_BASE_URL } from "./prime-inference-model-catalog.js";
 
 export { PRIME_INFERENCE_BASE_URL };
-
-const PRIVATE_MODEL_REFRESH_TIMEOUT_MS = 10_000;
 
 const PRIVATE_PRIME_INFERENCE_MODELS: readonly Model<"openai-completions">[] = [
 	{
@@ -43,46 +36,44 @@ export function getPrivatePrimeInferenceModels(): Model<"openai-completions">[] 
 	}));
 }
 
-export async function fetchAuthorizedPrivatePrimeInferenceModels(
-	apiKey: string,
-	teamHeaders: Record<string, string>,
-	publicModelIds: ReadonlySet<string>,
-	fetchFn: typeof fetch = fetch,
-	timeoutMs: number = PRIVATE_MODEL_REFRESH_TIMEOUT_MS,
-): Promise<Model<"openai-completions">[]> {
-	if (!teamHeaders["X-Prime-Team-ID"]) return [];
-	try {
-		const { payload, entries } = await fetchPrimeInferenceModelCatalog({
-			fetchFn,
-			timeoutMs,
-			allowEmpty: true,
-			headers: { ...teamHeaders, Authorization: `Bearer ${apiKey}` },
-		});
-		const publicIds = new Set([...publicModelIds].map((id) => id.toLowerCase()));
-		const bundledPrivateModels = getPrivatePrimeInferenceModels();
-		const bundledById = new Map(bundledPrivateModels.map((model) => [model.id.toLowerCase(), model]));
-		const entriesById = new Map(entries.map((entry) => [entry.id.toLowerCase(), entry]));
-		const data =
-			payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data) ? payload.data : [];
-		const privateEntries = data.flatMap((item) => {
-			if (!item || typeof item !== "object" || !("id" in item) || typeof item.id !== "string") return [];
-			const id = item.id.toLowerCase();
-			if (publicIds.has(id) || !isPrivatePrimeInferenceModelId(id)) return [];
-			const parsed = entriesById.get(id);
-			if (parsed) return [parsed];
-			const template = bundledById.get(id);
-			return template ? [{ id: item.id, input: template.cost.input, output: template.cost.output }] : [];
-		});
-		return (
-			buildPrimeInferenceModels(bundledPrivateModels, privateEntries, {
-				includePrivate: true,
-				minimumModels: 0,
-			}) ?? []
+export function parsePrimeInferenceCatalogModels(
+	payload: unknown,
+	bundledPublicModels: readonly Model<"openai-completions">[],
+	authenticated: boolean,
+): Model<"openai-completions">[] {
+	const templates = authenticated
+		? [...bundledPublicModels, ...getPrivatePrimeInferenceModels()]
+		: bundledPublicModels;
+	const entries = parsePrimeInferenceModelCatalog(payload, { allowEmpty: authenticated });
+	// Older private endpoints sometimes advertise a known route by ID alone.
+	if (authenticated && payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data)) {
+		const ids = new Set(entries.map((entry) => entry.id.toLowerCase()));
+		const privateTemplates = new Map(
+			getPrivatePrimeInferenceModels().map((model) => [model.id.toLowerCase(), model]),
 		);
-	} catch (error) {
-		if (error instanceof PrimeInferenceCatalogRequestError && (error.status === 401 || error.status === 403)) {
-			return [];
+		for (const item of payload.data) {
+			if (!item || typeof item !== "object" || typeof item.id !== "string" || ids.has(item.id.toLowerCase()))
+				continue;
+			const template = privateTemplates.get(item.id.toLowerCase());
+			if (template) {
+				entries.push({ id: item.id, input: template.cost.input, output: template.cost.output });
+				ids.add(item.id.toLowerCase());
+			}
 		}
-		throw error;
 	}
+	const models = buildPrimeInferenceModels(templates, entries, {
+		includePrivate: authenticated,
+		...(authenticated ? { minimumModels: 0 } : {}),
+	});
+	if (!models) throw new Error("Incomplete Prime Inference catalog");
+	if (authenticated) {
+		const publicModels = buildPrimeInferenceModels(bundledPublicModels, entries);
+		if (!publicModels) {
+			// A partial authenticated catalog can still revoke private routes; retain a usable public fallback.
+			const merged = new Map(bundledPublicModels.map((model) => [model.id, model]));
+			for (const model of models) merged.set(model.id, model);
+			return [...merged.values()];
+		}
+	}
+	return models;
 }

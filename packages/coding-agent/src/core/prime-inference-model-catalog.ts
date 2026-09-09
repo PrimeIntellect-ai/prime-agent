@@ -1,21 +1,13 @@
-import { Buffer } from "node:buffer";
-import { existsSync, readFileSync } from "node:fs";
 import {
 	type Api,
 	isPrivatePrimeInferenceModelId,
 	type Model,
 	type OpenAICompletionsCompat,
 	type PrimeInferenceCatalogEntry,
-	parsePrimeInferenceModelCatalog,
 } from "@earendil-works/pi-ai";
 
-import { writeFileAtomicSync } from "../utils/atomic-file.js";
-
 export const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
-const FETCH_TIMEOUT_MS = 5_000;
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MIN_CATALOG_COVERAGE = 0.5;
-const pendingRefreshes = new Map<string, Promise<Model<"openai-completions">[] | undefined>>();
 
 const DEFAULT_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: false,
@@ -75,96 +67,4 @@ export function mergePrimeInferenceModels(
 ): Model<Api>[] {
 	if (!livePrimeInferenceModels) return [...bundledModels];
 	return [...bundledModels.filter((model) => model.provider !== "prime-inference"), ...livePrimeInferenceModels];
-}
-
-export function readCachedPrimeInferenceModels(
-	cachePath: string,
-	bundledModels: readonly Model<"openai-completions">[],
-): Model<"openai-completions">[] | undefined {
-	if (!existsSync(cachePath)) return undefined;
-	try {
-		return buildPrimeInferenceModels(
-			bundledModels,
-			parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(cachePath, "utf8")) as unknown),
-		);
-	} catch {
-		return undefined;
-	}
-}
-
-function writeCache(cachePath: string, value: unknown): void {
-	try {
-		writeFileAtomicSync(cachePath, JSON.stringify(value), { mode: 0o600 });
-	} catch {
-		// The bundled catalog remains available when the cache cannot be persisted.
-	}
-}
-
-export class PrimeInferenceCatalogRequestError extends Error {
-	constructor(readonly status: number) {
-		super(`Prime Inference model catalog request failed with status ${status}`);
-	}
-}
-
-async function readResponse(response: Response): Promise<unknown> {
-	if (!response.ok) throw new PrimeInferenceCatalogRequestError(response.status);
-	const contentLength = Number(response.headers.get("content-length"));
-	if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) throw new Error("Response is too large");
-	if (!response.body) throw new Error("Response body is empty");
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let bytesRead = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			bytesRead += value.byteLength;
-			if (bytesRead > MAX_RESPONSE_BYTES) {
-				await reader.cancel().catch(() => {});
-				throw new Error("Response is too large");
-			}
-			chunks.push(value);
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	return JSON.parse(Buffer.concat(chunks, bytesRead).toString("utf8")) as unknown;
-}
-
-export async function fetchPrimeInferenceModelCatalog(
-	options: { fetchFn?: typeof fetch; headers?: Record<string, string>; timeoutMs?: number; allowEmpty?: boolean } = {},
-): Promise<{ payload: unknown; entries: PrimeInferenceCatalogEntry[] }> {
-	const response = await (options.fetchFn ?? fetch)(`${PRIME_INFERENCE_BASE_URL}/models`, {
-		headers: { accept: "application/json", ...options.headers },
-		signal: AbortSignal.timeout(options.timeoutMs ?? FETCH_TIMEOUT_MS),
-	});
-	const payload = await readResponse(response);
-	return { payload, entries: parsePrimeInferenceModelCatalog(payload, { allowEmpty: options.allowEmpty }) };
-}
-
-export async function refreshPrimeInferenceModels(
-	cachePath: string,
-	bundledModels: readonly Model<"openai-completions">[],
-	options: { fetchFn?: typeof fetch; offline?: boolean } = {},
-): Promise<Model<"openai-completions">[] | undefined> {
-	const cached = readCachedPrimeInferenceModels(cachePath, bundledModels);
-	if (options.offline) return cached;
-	const existing = pendingRefreshes.get(cachePath);
-	if (existing) return existing;
-	const promise = (async () => {
-		try {
-			const { payload, entries } = await fetchPrimeInferenceModelCatalog({ fetchFn: options.fetchFn });
-			const models = buildPrimeInferenceModels(bundledModels, entries);
-			if (!models) return cached;
-			writeCache(cachePath, payload);
-			return models;
-		} catch {
-			return cached;
-		}
-	})();
-	pendingRefreshes.set(cachePath, promise);
-	void promise.finally(() => {
-		if (pendingRefreshes.get(cachePath) === promise) pendingRefreshes.delete(cachePath);
-	});
-	return promise;
 }

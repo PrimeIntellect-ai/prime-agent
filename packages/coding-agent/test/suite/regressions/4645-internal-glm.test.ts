@@ -53,10 +53,12 @@ describe("ENG-4645 internal GLM configuration", () => {
 		expect(fetchMock).toHaveBeenCalledWith("https://api.pinference.ai/api/v1/models", {
 			headers: {
 				accept: "application/json",
+				"cache-control": "no-cache",
 				Authorization: "Bearer prime-key",
 				"X-Prime-Team-ID": "engineering-team",
 			},
 			signal: expect.any(AbortSignal),
+			redirect: "error",
 		});
 	});
 
@@ -84,12 +86,12 @@ describe("ENG-4645 internal GLM configuration", () => {
 	test("preserves authorization on transient failures only for the same team", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValueOnce(
-				new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }), { status: 200 }),
-			)
-			.mockResolvedValue(new Response(null, { status: 503 }));
+		let primeRequests = 0;
+		const fetchMock = vi.fn(async (url) => {
+			if (url === "https://api.pinference.ai/api/v1/models" && primeRequests++ === 0)
+				return new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }));
+			return new Response(null, { status: 503 });
+		});
 		vi.stubGlobal("fetch", fetchMock);
 		const authStorage = AuthStorage.inMemory({
 			"prime-inference": {
@@ -157,7 +159,8 @@ describe("ENG-4645 internal GLM configuration", () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
 		const fetchMock = vi.fn(
-			async () => new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }), { status: 200 }),
+			async (_url: string | URL | Request) =>
+				new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }), { status: 200 }),
 		);
 		vi.stubGlobal("fetch", fetchMock);
 		const authStorage = AuthStorage.inMemory({
@@ -178,7 +181,7 @@ describe("ENG-4645 internal GLM configuration", () => {
 		});
 
 		expect(initial.model?.id).toBe("internal/glm-5.2-fast");
-		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(fetchMock.mock.calls.filter(([url]) => url === "https://api.pinference.ai/api/v1/models")).toHaveLength(1);
 	});
 
 	test("refreshes private routes before cycling models", async () => {

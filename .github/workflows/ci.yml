@@ -63,6 +63,9 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Validate model catalog
+        run: npx tsx packages/ai/scripts/validate-model-catalog.ts
+
   test:
     name: Test (${{ matrix.name }})
     needs: trust

@@ -1,0 +1,1 @@
+- Added validation for the curated model catalog used to publish model updates independently of client releases.

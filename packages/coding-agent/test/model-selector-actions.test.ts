@@ -221,6 +221,44 @@ describe("ModelSelectorComponent", () => {
 		expect(output).toContain("No matching models");
 	});
 
+	it("preserves search, selected model, and its screen row when new models arrive", async () => {
+		const harness = await createHarness({
+			models: Array.from({ length: 20 }, (_, index) => ({
+				id: `faux-${index + 1}`,
+				name: `Faux Model ${index + 1}`,
+				reasoning: true,
+			})),
+		});
+		harnesses.push(harness);
+		const models = getFauxModels(harness, 20);
+		const select = vi.fn();
+		const requestRender = vi.fn();
+		const selector = new ModelSelectorComponent(
+			{ requestRender } as unknown as TUI,
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			select,
+			() => {},
+			"faux",
+			{ availableModels: models, getRows: () => 20 },
+		);
+		selector.handleInput("\x1b[A");
+		const before = stripAnsi(selector.render(120).join("\n")).split("\n");
+		const row = before.findIndex((line) => line.includes("faux-20"));
+		expect(row).toBeGreaterThan(0);
+		const updated = [...models, { ...models[0]!, id: "faux-21" }];
+		selector.updateAvailableModels(updated);
+		const after = stripAnsi(selector.render(120).join("\n")).split("\n");
+		expect(after.findIndex((line) => line.includes("faux-20"))).toBe(row);
+		expect(selector.getSearchInput().getValue()).toBe("faux");
+		requestRender.mockClear();
+		selector.updateAvailableModels(structuredClone(updated));
+		expect(requestRender).not.toHaveBeenCalled();
+		selector.handleInput("\r");
+		expect(select).toHaveBeenCalledWith(expect.objectContaining({ id: "faux-20" }));
+	});
+
 	it("keeps the model menu within a short terminal viewport", async () => {
 		const harness = await createHarness({
 			models: Array.from({ length: 12 }, (_, index) => ({

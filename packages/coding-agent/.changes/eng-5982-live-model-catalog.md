@@ -1,0 +1,2 @@
+- Added automatic model catalog updates from Prime Inference and GitHub with local caching and background picker refreshes.
+- Preserved model search, selection, and scroll position when refreshed models arrive.
