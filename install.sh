@@ -1852,6 +1852,7 @@ prime_agent_install_native() {
 			fi
 		fi
 	fi
+	prime_agent_native_check_public_link
 	native_target="../releases/$native_release_name/prime-agent"
 	if [ -L "$native_root/bin/prime-agent" ]; then
 		native_previous=$(readlink "$native_root/bin/prime-agent")

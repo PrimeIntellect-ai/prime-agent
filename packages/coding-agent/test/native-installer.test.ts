@@ -28,7 +28,9 @@ const assets = [
 ];
 const platform = `${process.platform}-${process.arch}`;
 const feed = new Map<string, Buffer>();
+let beforeArchiveResponse: (() => void) | undefined;
 const server = createServer((request, response) => {
+	if (request.url?.endsWith(".tar.gz")) beforeArchiveResponse?.();
 	const data = feed.get(request.url ?? "");
 	response.writeHead(data ? 200 : 404);
 	response.end(data ?? "not found");
@@ -105,6 +107,7 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 	beforeEach(() => {
 		home = mkdtempSync(join(root, "home with spaces-"));
 		feed.clear();
+		beforeArchiveResponse = undefined;
 	});
 	afterAll(async () => {
 		await new Promise<void>((done) => server.close(() => done()));
@@ -170,6 +173,23 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		expect(result.output).toContain("command name must be a basename");
 		expect(existsSync(command())).toBe(false);
 		expect(existsSync(join(home, ".local/outside"))).toBe(false);
+	});
+
+	it("preserves a public command replaced by another installer during download", async () => {
+		publish("1.0.0");
+		expect((await install("1.0.0")).code).toBe(0);
+		const current = readlinkSync(command());
+		const publicCommand = join(home, ".local/bin/prime-agent");
+		publish("1.0.1");
+		beforeArchiveResponse = () => {
+			rmSync(publicCommand);
+			writeFileSync(publicCommand, "owned by another installer");
+		};
+		const result = await install("1.0.1");
+		expect(result.code, result.output).not.toBe(0);
+		expect(result.output).toContain("refusing to replace existing command");
+		expect(readFileSync(publicCommand, "utf8")).toBe("owned by another installer");
+		expect(readlinkSync(command())).toBe(current);
 	});
 
 	it.each(["", "../releases/an-earlier-install/prime-agent"])(
