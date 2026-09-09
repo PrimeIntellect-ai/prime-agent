@@ -678,7 +678,7 @@ export function normalizeRefinementProposal(value: unknown): RefinementProposal 
 				id: typeof edit.id === "string" ? edit.id : undefined,
 				title: typeof edit.title === "string" ? edit.title : undefined,
 				content: typeof edit.content === "string" ? edit.content : undefined,
-				topic: typeof edit.topic === "string" ? edit.topic : undefined,
+				topic: harnessTopic(edit),
 				reference: objectRecord(edit.reference),
 				arguments: objectRecord(edit.arguments),
 				metadata:

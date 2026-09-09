@@ -30,6 +30,7 @@ import {
 	loadHarnessState,
 	mergeHarnessStates,
 	mergeRefinementHistory,
+	normalizeRefinementProposal,
 	planRefinement,
 	type RefinementAction,
 	type RefinementKind,
@@ -419,6 +420,27 @@ describe("harness refinement", () => {
 		expect(state.entries.skill.native_check.content).toContain("npm run check");
 		expect(state.entries.skill.native_check.version).toBe(2);
 		expect(state.refinements.map((event) => event.id)).toEqual(["refine_1", "refine_2"]);
+	});
+
+	it("stores the grouping when a proposal spells it path", () => {
+		const state = loadHarnessState(makeTempDir());
+
+		const normalized = normalizeRefinementProposal({
+			summary: "Group a memory",
+			edits: [
+				{
+					action: "create",
+					kind: "memory",
+					id: "grouped",
+					title: "Grouped",
+					content: "content",
+					path: "repo/testing",
+				},
+			],
+		});
+		applyRefinementProposal(state, normalized, { id: "refine_path_edit" });
+
+		expect(state.entries.memory.grouped.topic).toBe("repo/testing");
 	});
 
 	it("creates ids from titles and uses default topic and metadata when omitted", () => {
