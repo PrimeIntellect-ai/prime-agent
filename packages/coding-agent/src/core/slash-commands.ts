@@ -89,6 +89,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "[search]", takesArgument: true },
 	{ name: "effort", description: "Select reasoning/thinking level (opens selector UI)", argumentHint: "[level]" },
 	{ name: "fast", description: "Toggle OpenAI Fast mode" },
+	{ name: "tier", description: "Show or set the service tier", argumentHint: "[default|flex|priority|auto]" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{
 		name: "export",

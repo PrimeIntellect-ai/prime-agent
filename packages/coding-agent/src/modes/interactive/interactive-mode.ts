@@ -11,6 +11,7 @@ import {
 	type Model,
 	type ServiceTier,
 	supportsFastMode,
+	supportsServiceTier,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
@@ -553,6 +554,16 @@ const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	max: "Maximum reasoning",
 };
 
+const SERVICE_TIER_CHOICES: Exclude<ServiceTier, null>[] = ["default", "flex", "priority", "auto"];
+
+const SERVICE_TIER_DESCRIPTIONS: Record<Exclude<ServiceTier, null>, string> = {
+	default: "Standard processing",
+	flex: "Cheaper, slower, may hit capacity limits",
+	scale: "Reserved-capacity scale tier",
+	priority: "Faster, more expensive (fast mode)",
+	auto: "Provider picks the tier",
+};
+
 const HEARTBEAT_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
 	{
 		value: "every ",
@@ -1019,7 +1030,7 @@ export class InteractiveMode {
 	// Serializes session event handling; see subscribeToAgent
 	private sessionEventQueue: Promise<void> = Promise.resolve();
 	private sessionEventGeneration = 0;
-	private fastModeToggleQueue: Promise<void> = Promise.resolve();
+	private serviceTierChangeQueue: Promise<void> = Promise.resolve();
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private ipythonToolComponents = new Map<string, ToolExecutionComponent>();
@@ -1354,6 +1365,13 @@ export class InteractiveMode {
 			if (levels.length > 0) {
 				effortCommand.argumentHint = `[${levels.join("/")}]`;
 			}
+		}
+
+		const tierCommand = slashCommands.find((command) => command.name === "tier");
+		if (tierCommand) {
+			tierCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				this.getServiceTierCompletions(prefix);
+			tierCommand.argumentHint = `[${this.getAvailableServiceTiers().join("|")}]`;
 		}
 
 		const heartbeatCommand = slashCommands.find((command) => command.name === "heartbeat");
@@ -4769,6 +4787,11 @@ export class InteractiveMode {
 					}
 					return;
 				}
+				if (commandName === "tier") {
+					this.editor.setText("");
+					this.handleTierCommand(commandArgs);
+					return;
+				}
 				if (commandName === "export") {
 					await this.handleExportCommand(canonicalCommandText);
 					this.editor.setText("");
@@ -6149,8 +6172,11 @@ export class InteractiveMode {
 				parts.push(level);
 			}
 		}
-		if (this.connectionState?.serviceTier === "priority") {
+		const serviceTier = this.connectionState?.serviceTier;
+		if (serviceTier === "priority") {
 			parts.push("fast");
+		} else if (serviceTier && serviceTier !== "default") {
+			parts.push(serviceTier);
 		}
 		return parts.join(" • ");
 	}
@@ -7578,6 +7604,7 @@ export class InteractiveMode {
 					steeringMode: state.steeringMode,
 					followUpMode: state.followUpMode,
 					transport: this.settingsManager.getTransport(),
+					defaultServiceTier: this.settingsManager.getDefaultServiceTier() ?? "default",
 					thinkingLevel: state.thinkingLevel,
 					availableThinkingLevels: state.availableThinkingLevels,
 					currentTheme: this.settingsManager.getTheme() || "prime",
@@ -7638,6 +7665,13 @@ export class InteractiveMode {
 						void this.agentConnection.setFollowUpMode(mode).catch((error) => {
 							this.showError(error instanceof Error ? error.message : String(error));
 						});
+					},
+					onDefaultServiceTierChange: (serviceTier) => {
+						this.settingsManager.setDefaultServiceTier(serviceTier);
+						this.enqueueServiceTierChange(
+							() => serviceTier,
+							(applied) => `Default service tier: ${serviceTier} (session: ${applied ?? "default"})`,
+						);
 					},
 					onTransportChange: (transport) => {
 						void this.agentConnection.setTransport(transport).catch((error) => {
@@ -8025,19 +8059,78 @@ export class InteractiveMode {
 			this.showStatus(unavailableMessage);
 			return;
 		}
+		this.enqueueServiceTierChange(
+			() => {
+				if (!this.currentModelSupportsFastMode()) {
+					this.showStatus(unavailableMessage);
+					return undefined;
+				}
+				return this.connectionState?.serviceTier === "priority" ? "default" : "priority";
+			},
+			(serviceTier) => `Fast mode: ${serviceTier === "priority" ? "on" : "off"}`,
+		);
+	}
+
+	private getAvailableServiceTiers(): Exclude<ServiceTier, null>[] {
+		const model = this.getCurrentModel();
+		return SERVICE_TIER_CHOICES.filter(
+			(tier) => tier === "default" || (model !== undefined && supportsServiceTier(model, tier)),
+		);
+	}
+
+	private getServiceTierCompletions(prefix: string): AutocompleteItem[] | null {
+		const tiers = this.getAvailableServiceTiers();
+		const current = this.connectionState?.serviceTier ?? "default";
+		const term = prefix.trim().toLowerCase();
+		const matches = term ? tiers.filter((tier) => tier.startsWith(term)) : tiers;
+		if (matches.length === 0) return null;
+		return matches.map((tier) => ({
+			value: tier,
+			label: tier,
+			description:
+				tier === current ? `${SERVICE_TIER_DESCRIPTIONS[tier]} (current)` : SERVICE_TIER_DESCRIPTIONS[tier],
+		}));
+	}
+
+	private handleTierCommand(arg: string): void {
+		const tiers = this.getAvailableServiceTiers();
+		const requested = arg.trim().toLowerCase();
+		if (!requested) {
+			const current = this.connectionState?.serviceTier ?? "default";
+			this.showStatus(`Service tier: ${current} (available: ${tiers.join(", ")})`);
+			return;
+		}
+		if (!tiers.includes(requested as Exclude<ServiceTier, null>)) {
+			this.showError(
+				`Service tier '${requested}' is not available for the current model. Available: ${tiers.join(", ")}`,
+			);
+			return;
+		}
+		this.enqueueServiceTierChange(
+			() => requested as ServiceTier,
+			(serviceTier) => `Service tier: ${serviceTier ?? "default"}`,
+		);
+	}
+
+	/**
+	 * Serializes tier changes (/fast, /tier, settings row) through one queue so
+	 * rapid commands apply in order against the same session.
+	 */
+	private enqueueServiceTierChange(
+		computeTier: () => ServiceTier | undefined,
+		formatStatus: (serviceTier: ServiceTier) => string,
+	): void {
 		const connection = this.agentConnection;
 		const sessionId = this.connectionState?.sessionId;
-		this.fastModeToggleQueue = this.fastModeToggleQueue
+		this.serviceTierChangeQueue = this.serviceTierChangeQueue
 			.then(async () => {
 				if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) {
 					return;
 				}
-				if (!this.currentModelSupportsFastMode()) {
-					this.showStatus(unavailableMessage);
+				const serviceTier = computeTier();
+				if (serviceTier === undefined) {
 					return;
 				}
-				const enabled = this.connectionState?.serviceTier === "priority";
-				const serviceTier: ServiceTier = enabled ? "default" : "priority";
 				await connection.setServiceTier(serviceTier);
 				if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) {
 					return;
@@ -8053,7 +8146,7 @@ export class InteractiveMode {
 				this.patchConnectionState({ serviceTier: state.serviceTier });
 				this.footer.invalidate();
 				this.subagentSummaryLine.invalidate();
-				this.showStatus(`Fast mode: ${state.serviceTier === "priority" ? "on" : "off"}`);
+				this.showStatus(formatStatus(state.serviceTier));
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));

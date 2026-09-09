@@ -19,6 +19,7 @@ const config: SettingsConfig = {
 	steeringMode: "one-at-a-time",
 	followUpMode: "one-at-a-time",
 	transport: "sse",
+	defaultServiceTier: "default",
 	thinkingLevel: "off",
 	availableThinkingLevels: ["off"],
 	currentTheme: "dark",
@@ -47,6 +48,7 @@ const callbacks: SettingsCallbacks = {
 	onSteeringModeChange: () => {},
 	onFollowUpModeChange: () => {},
 	onTransportChange: () => {},
+	onDefaultServiceTierChange: () => {},
 	onThinkingLevelChange: () => {},
 	onThemeChange: () => {},
 	onHideThinkingBlockChange: () => {},
@@ -95,6 +97,17 @@ describe("SettingsSelectorComponent", () => {
 		list.handleInput("\r");
 
 		expect(onIdleEvictionMinutesChange).toHaveBeenCalledWith(180);
+	});
+
+	test("cycles the default service tier row and reports the new tier", () => {
+		const onDefaultServiceTierChange = vi.fn();
+		const component = new SettingsSelectorComponent(config, { ...callbacks, onDefaultServiceTierChange });
+		const list = component.getSettingsList();
+		for (const character of "service") list.handleInput(character);
+
+		list.handleInput("\r");
+
+		expect(onDefaultServiceTierChange).toHaveBeenCalledWith("flex");
 	});
 
 	test.each([0.5, 1.5])("round-trips a fractional idle eviction value of %s", (value) => {

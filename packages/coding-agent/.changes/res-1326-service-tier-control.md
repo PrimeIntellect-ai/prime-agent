@@ -1,0 +1,1 @@
+- Added `/tier` to show or set the session service tier (default, flex, priority, auto), a `Default service tier` row in `/settings` that also applies to the running session, and a footer badge for any non-default tier ([RES-1326](https://linear.app/primeintellect/issue/RES-1326)).

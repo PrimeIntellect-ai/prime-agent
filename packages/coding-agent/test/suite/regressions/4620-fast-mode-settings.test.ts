@@ -50,6 +50,33 @@ describe("ENG-4620 fast mode settings", () => {
 		expect(nextSession.serviceTier).toBe("default");
 	});
 
+	it("persists a flex tier session entry and restores it on resume", async () => {
+		harness = await createHarness({
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }],
+			persistSession: true,
+		});
+		const currentHarness = harness;
+
+		harness.session.setServiceTier("flex");
+		expect(harness.session.serviceTier).toBe("flex");
+		harness.session.dispose();
+
+		const { session } = await createAgentSession({
+			cwd: currentHarness.tempDir,
+			authStorage: currentHarness.authStorage,
+			model: currentHarness.getModel(),
+			resourceLoader: createTestResourceLoader(),
+			sessionManager: currentHarness.sessionManager,
+			settingsManager: currentHarness.settingsManager,
+		});
+		sessions.push(session);
+
+		expect(session.serviceTier).toBe("flex");
+		expect(session.sessionManager.buildSessionContext().serviceTier).toBe("flex");
+	});
+
 	it("persists the preference across settings manager restarts", async () => {
 		harness = await createHarness();
 		const agentDir = join(harness.tempDir, "agent");
