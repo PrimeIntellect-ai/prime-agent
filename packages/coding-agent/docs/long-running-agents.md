@@ -107,7 +107,7 @@ Delivery modes are:
 - `steer`: intentionally inject the message into active work; and
 - `follow_up`: wait until the target's current work finishes.
 
-A receipt is `delivered` when it reached an idle target's context or `queued` when accepted for later delivery. `agent_message.send("all", message)` broadcasts only within the family roster. The daemon derives sender identity and enforces message-size, rate, and pending-queue limits.
+A receipt is `delivered` when it reached an idle target's context or `queued` when accepted for later delivery. The daemon derives sender identity and enforces message-size, rate, and pending-queue limits.
 
 ## Heartbeats and Scheduled Prompts
 

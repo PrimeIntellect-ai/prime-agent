@@ -21,48 +21,29 @@ async def list_agents() -> dict[str, Any]:
 
 async def send(
     message: str,
-    broadcast_message: str | None = None,
     *,
     receiver_role: ReceiverRole | str | None = None,
     receiver_name: str | None = None,
 ) -> dict[str, Any]:
-    """Send one direct role-addressed message or broadcast to ``"all"``."""
-    roles = ("parent", "sibling", "child")
-    if broadcast_message is not None:
-        if message != "all":
-            raise TypeError(
-                "positional agent_message.send targets are not supported; "
-                "use receiver_role and receiver_name"
-            )
-        if receiver_role is not None or receiver_name is not None:
-            raise TypeError("broadcast cannot be combined with receiver_role/receiver_name")
-        payload: dict[str, Any] = {
-            "target": "all",
-            "message": broadcast_message,
-        }
-    else:
-        if receiver_role not in roles:
-            raise ValueError('receiver_role must be "parent", "sibling", or "child"')
-        if not isinstance(message, str):
-            raise TypeError(f"message must be str, got {type(message).__name__}")
-        if receiver_role == "parent":
-            if receiver_name is not None:
-                raise ValueError("receiver_name must be omitted for parent messages")
-        elif not isinstance(receiver_name, str) or not receiver_name.strip():
-            raise ValueError("receiver_name is required for sibling and child messages")
-        payload = {
+    """Send one direct role-addressed message to a family member."""
+    if receiver_role not in ("parent", "sibling", "child"):
+        raise ValueError('receiver_role must be "parent", "sibling", or "child"')
+    if not isinstance(message, str):
+        raise TypeError(f"message must be str, got {type(message).__name__}")
+    if receiver_role == "parent":
+        if receiver_name is not None:
+            raise ValueError("receiver_name must be omitted for parent messages")
+    elif not isinstance(receiver_name, str) or not receiver_name.strip():
+        raise ValueError("receiver_name is required for sibling and child messages")
+    receipt = await host_request(
+        "agent_message.send",
+        {
             "message": message,
             "receiver_role": receiver_role,
             "receiver_name": receiver_name,
-        }
-    receipt = await host_request("agent_message.send", payload)
-    receipts = receipt.get("receipts") if isinstance(receipt, dict) else None
-    if isinstance(receipts, list):
-        for item in receipts:
-            if isinstance(item, dict) and "deliveryStatus" in item:
-                _emit_sent_message(item)
-    else:
-        _emit_sent_message(receipt, receiver_role)
+        },
+    )
+    _emit_sent_message(receipt, receiver_role)
     return receipt
 
 

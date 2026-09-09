@@ -245,9 +245,8 @@ function isEditConfirmation(text: string | undefined, diffs: readonly DiffDispla
 /**
  * True when `text` is the `agent_message.send` receipt dict for one of the sent
  * messages already summarized above the output, so the raw receipt isn't shown.
- * Matches only a single-receipt repr — the receipt dict always starts with its
- * `id` key — so broadcast `{'receipts': [...]}` results (which can carry error
- * entries with no summary line) and results that merely mention an ID still render.
+ * Matches only a receipt repr, which always starts with its `id` key, so results
+ * that merely mention a sent-message id still render.
  */
 function isAgentMessageReceipt(text: string | undefined, messages: readonly SentAgentMessageDisplay[]): boolean {
 	if (!text || messages.length === 0) {
