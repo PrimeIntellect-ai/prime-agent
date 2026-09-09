@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { join, resolve } from "node:path";
@@ -8,8 +9,11 @@ import { type AssistantMessage, fauxAssistantMessage, type LogEntry } from "@ear
 import { EventStreamCodec } from "@smithy/core/event-streams";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.js";
+import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { DAEMON_PROTOCOL_VERSION } from "../../../src/modes/daemon/daemon-protocol.js";
 import { isProcessAlive } from "../../../src/utils/child-process.js";
+import { killProcessTree } from "../../../src/utils/shell.js";
 import { createHarness, getAssistantTexts, type Harness } from "../harness.js";
 
 const run = promisify(execFile);
@@ -43,29 +47,103 @@ describe("ENG-6006 bundled Bedrock provider", () => {
 		}
 	});
 
-	afterEach(async () => {
-		if (socketPath && existsSync(socketPath)) {
-			const client = new DaemonClient(socketPath);
-			try {
-				await client.connect(1000);
-				const { supervisorPid } = await client.waitForHello();
-				if (!supervisorPid) throw new Error("Missing fixture supervisor PID");
-				await client.request({ type: "shutdown" }, 5000);
-				client.close();
-				// The shutdown response precedes the daemon's final file writes.
-				await expect.poll(() => isProcessAlive(supervisorPid), { timeout: 10_000 }).toBe(false);
-			} finally {
-				client.close();
-			}
-		}
-		if (server) {
-			server.closeAllConnections();
-			await new Promise<void>((done) => server!.close(() => done()));
-		}
-		harness?.cleanup();
+	async function cleanupFixture(exitTimeoutMs = 10_000): Promise<void> {
+		const fixture = { harness, server, socketPath };
 		harness = undefined;
 		server = undefined;
 		socketPath = undefined;
+		let client: DaemonClient | undefined;
+		let supervisor: { pid: number; startId: string } | undefined;
+		try {
+			if (fixture.socketPath && existsSync(fixture.socketPath)) {
+				client = new DaemonClient(fixture.socketPath);
+				await client.connect(1000);
+				const { supervisorPid } = await client.waitForHello();
+				if (!supervisorPid) throw new Error("Missing fixture supervisor PID");
+				const startId = getProcessStartId(supervisorPid);
+				if (!startId) throw new Error("Missing fixture supervisor process identity");
+				supervisor = { pid: supervisorPid, startId };
+				const response = await client.request({ type: "shutdown", force: true }, 5000);
+				if (!response.success) throw new Error(response.error);
+				client.close();
+				// The shutdown response precedes the daemon's final file writes.
+				await expect.poll(() => isProcessAlive(supervisorPid), { timeout: exitTimeoutMs }).toBe(false);
+			}
+		} finally {
+			client?.close();
+			try {
+				if (
+					supervisor &&
+					isProcessAlive(supervisor.pid) &&
+					getProcessStartId(supervisor.pid) === supervisor.startId
+				) {
+					const { pid } = supervisor;
+					killProcessTree(pid);
+					await expect.poll(() => isProcessAlive(pid), { timeout: 2000 }).toBe(false);
+				}
+			} finally {
+				try {
+					if (fixture.server) {
+						fixture.server.closeAllConnections();
+						await new Promise<void>((done) => fixture.server!.close(() => done()));
+					}
+				} finally {
+					fixture.harness?.cleanup();
+				}
+			}
+		}
+	}
+
+	// Budget for the handshake, shutdown, exit waits, and the harness's bounded filesystem retries.
+	afterEach(() => cleanupFixture(), 90_000);
+
+	it.each(["does not exit", "rejects shutdown"])("cleans up when the fixture supervisor %s", async (failure) => {
+		harness = await createHarness();
+		const tempDir = harness.tempDir;
+		server = createServer();
+		const fixtureServer = server;
+		await new Promise<void>((done) => fixtureServer.listen(0, "127.0.0.1", done));
+		socketPath = join(tempDir, "unresponsive.sock");
+		const child = spawn(
+			process.execPath,
+			[
+				"--input-type=module",
+				"--eval",
+				[
+					'import { createServer } from "node:net";',
+					'import { createInterface } from "node:readline";',
+					"const [socketPath, failure, version] = process.argv.slice(1);",
+					"createServer((socket) => {",
+					'  const send = (message) => socket.write(JSON.stringify(message) + "\\n");',
+					'  send({ type: "daemon_hello", protocol: { version: Number(version) }, supervisorPid: process.pid });',
+					'  createInterface({ input: socket }).on("line", (line) => {',
+					"    const request = JSON.parse(line);",
+					"    const command = request.command ?? request;",
+					'    if (command.type === "shutdown") {',
+					'      send({ type: "response", id: request.id, command: "shutdown", success: failure !== "rejects shutdown", error: "fixture shutdown rejected" });',
+					"    }",
+					"  });",
+					'}).listen(socketPath, () => process.send("ready"));',
+				].join("\n"),
+				socketPath,
+				failure,
+				String(DAEMON_PROTOCOL_VERSION),
+			],
+			{
+				detached: true,
+				stdio: ["ignore", "ignore", "ignore", "ipc"],
+				env: { PATH: process.env.PATH, HOME: tempDir },
+			},
+		);
+		try {
+			await once(child, "message", { signal: AbortSignal.timeout(5000) });
+			await expect(cleanupFixture(50)).rejects.toThrow();
+			expect(isProcessAlive(child.pid!)).toBe(false);
+			expect(fixtureServer.listening).toBe(false);
+			expect(existsSync(tempDir)).toBe(false);
+		} finally {
+			child.kill("SIGKILL");
+		}
 	});
 
 	it("keeps Bedrock unloaded when the bundled CLI starts without a request", async () => {
