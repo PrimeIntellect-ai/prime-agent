@@ -127,7 +127,7 @@ class HarnessStateTest(unittest.TestCase):
                 reloaded.overview(),
             )
             overview = reloaded.overview()
-            self.assertIn("handle = await rlm('sub-task')", overview)
+            self.assertIn("handle = await rlm.spawn('sub-task')", overview)
             self.assertIn("never the child's answer", overview)
             self.assertIn("receiver_role='parent'", overview)
             self.assertIn("await rlm.list_subagents()", overview)

@@ -73,7 +73,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
 
         with patch.object(rlm_module, "host_request", host_request):
             result = asyncio.run(
-                rlm_module.rlm(
+                rlm_module.rlm.spawn(
                     "check the API",
                     name="api-reviewer",
                     model="deepseek/deepseek-v4-flash",
@@ -93,6 +93,13 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.rlm_child_id, "sub-a1b2c3d4")
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
+
+    def test_rejects_calling_rlm_directly_with_spawn_guidance(self) -> None:
+        for target in (rlm_module.rlm, rlm_module):
+            with self.assertRaisesRegex(TypeError, r"not callable; spawn a child with: handle = await rlm\.spawn\("):
+                target("check the API")
+        self.assertFalse(hasattr(rlm_module, "run"))
+        self.assertFalse(hasattr(rlm_module.rlm, "run"))
 
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(
