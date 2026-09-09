@@ -148,7 +148,22 @@ class HarnessStateTest(unittest.TestCase):
             state.update("legacy", "Legacy", "Resaved by the current writer.")
             saved = json.loads(state_path.read_text(encoding="utf-8"))["entries"]["memory"]["legacy"]
             self.assertEqual(saved["topic"], "repo/testing")
-            self.assertNotIn("path", saved)
+            # The mirror keeps a pre-topic writer from resaving the entry ungrouped.
+            self.assertEqual(saved["path"], "repo/testing")
+
+    def test_grouping_survives_a_writer_that_only_knows_the_path_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            HarnessState(state_path).create("Grouped", "content", id="grouped", topic="repo/testing")
+
+            # A pre-topic build rewrites the file and drops fields it does not know.
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            entry = saved["entries"]["memory"]["grouped"]
+            saved["entries"]["memory"]["grouped"] = {key: value for key, value in entry.items() if key != "topic"}
+            state_path.write_text(json.dumps(saved), encoding="utf-8")
+
+            self.assertEqual(HarnessState(state_path).get("memory", "grouped").topic, "repo/testing")
+
 
     def test_persists_entries_and_refinements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

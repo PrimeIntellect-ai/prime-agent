@@ -147,6 +147,15 @@ def _validate_python_skill_reference(reference: dict[str, Any] | None) -> dict[s
     return normalized
 
 
+def _serialize_entry(entry: HarnessEntry) -> dict[str, Any]:
+    record = asdict(entry)
+    # Writers that predate the topic field drop unknown keys and would resave every
+    # entry ungrouped. Mirror the value under the old "path" key so those writers
+    # round-trip it. Drop the mirror once no pre-topic build can reach a shared store.
+    record["path"] = entry.topic
+    return record
+
+
 def _default_topic(kind: HarnessKind) -> str:
     return "policy" if kind == "prompt" else "general"
 
@@ -324,7 +333,7 @@ class HarnessState:
         data = {
             "schema": 1,
             "entries": {
-                kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
+                kind: {entry_id: _serialize_entry(entry) for entry_id, entry in records.items()}
                 for kind, records in self.entries.items()
             },
             "refinements": [asdict(event) for event in self.refinements],
