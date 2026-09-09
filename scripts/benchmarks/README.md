@@ -42,6 +42,11 @@ The default configuration uses two Linux x64 containers, each with 4 vCPU, 8 GB 
 release cutoff. Provisioning, harness setup, and source compilation have separate recorded durations
 outside the timed installation interval. Interactive runs use the same small committed Git fixture.
 
+The base image supplies Node, npm, Git, curl, and Python. Untimed sandbox setup adds Python venv
+support, Cairo/Pango/JPEG/GIF/SVG development libraries, ripgrep, and fd. These prerequisites are
+shared within each sandbox; the normal installer still prepares each user's stock Python environment
+and other missing tools. Their setup time and disk usage are outside the installation metrics.
+
 - **Cold startup:** process launch until the editor visibly echoes a typed marker, after stopping all
   processes owned by the benchmark user. OS filesystem caches are not flushed.
 - **Warm startup:** the same input-ready measurement while retaining the daemon and stopping its
