@@ -7770,11 +7770,8 @@ export class InteractiveMode {
 			return undefined;
 		}
 
-		try {
-			return findExactModelReferenceMatch(searchTerm, await refreshPromise);
-		} catch {
-			return undefined;
-		}
+		void refreshPromise.catch(() => {});
+		return undefined;
 	}
 
 	private async applySelectedModel(model: AgentConnectionModel): Promise<void> {
@@ -7849,7 +7846,17 @@ export class InteractiveMode {
 		return this.connectionModelCatalog.filter((model) => this.connectionConfiguredProviders.has(model.provider));
 	}
 
-	private async getConnectionAvailableModels(): Promise<AgentConnectionModel[]> {
+	private async getConnectionAvailableModels(
+		options: { waitForRefresh?: boolean } = {},
+	): Promise<AgentConnectionModel[]> {
+		if (!options.waitForRefresh) {
+			const version = this.connectionModelsRefreshVersion;
+			const catalog = await this.agentConnection.getModelCatalog();
+			if (version !== this.connectionModelsRefreshVersion) return this.getAvailableConnectionModels();
+			this.applyConnectionModelCatalog(catalog);
+			void this.getConnectionAvailableModels({ waitForRefresh: true }).catch(() => {});
+			return this.getAvailableConnectionModels();
+		}
 		const inFlight = this.connectionModelsRefreshInFlight;
 		if (inFlight && inFlight.version === this.connectionModelsRefreshVersion) {
 			return [...(await inFlight.promise)];
@@ -7898,7 +7905,8 @@ export class InteractiveMode {
 	private getModelSelectorRefreshPromise(
 		options: { force?: boolean } = {},
 	): Promise<AgentConnectionModel[]> | undefined {
-		const refreshCatalog = () => this.getConnectionAvailableModels().then(() => this.getCachedModelCandidates());
+		const refreshCatalog = () =>
+			this.getConnectionAvailableModels({ waitForRefresh: true }).then(() => this.getCachedModelCandidates());
 		if (this.connectionModelsRefreshInFlight) {
 			return refreshCatalog();
 		}

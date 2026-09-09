@@ -109,7 +109,7 @@ describe("ENG-5982 packaged onboarding catalog", () => {
 			else {
 				await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(2));
 				for (const complete of finish) complete();
-				await registry.refreshAvailableModels();
+				await registry.refreshAvailableModels({ background: false });
 				expect(registry.find("prime-inference", primeModel.id)).toMatchObject(primeModel);
 			}
 		},
@@ -123,7 +123,7 @@ describe("ENG-5982 packaged onboarding catalog", () => {
 				? new Response(JSON.stringify(createModelCatalog([updated])))
 				: new Response(null, { status: 503 }),
 		);
-		await ModelRegistry.create(AuthStorage.inMemory(), modelsPath).refreshAvailableModels();
+		await ModelRegistry.create(AuthStorage.inMemory(), modelsPath).refreshAvailableModels({ background: false });
 		vi.stubEnv("PI_OFFLINE", "1");
 		fetchFn.mockClear();
 		const restarted = ModelRegistry.create(AuthStorage.inMemory(), modelsPath);

@@ -4933,7 +4933,7 @@ export class AgentDaemon {
 			case "get_available_models": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_available_models", {
-					models: await state.runtime.session.modelRegistry.refreshAvailableModels(),
+					models: await state.runtime.session.modelRegistry.refreshAvailableModels({ background: false }),
 				});
 			}
 

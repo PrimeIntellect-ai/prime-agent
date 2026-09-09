@@ -1,4 +1,5 @@
 - Added automatic model catalog updates from Prime Inference and GitHub with local caching and background picker refreshes.
 - Preserved model search, selection, and scroll position when refreshed models arrive.
-- Fixed startup with uncached model IDs to load catalog metadata before using provider defaults.
+- Kept startup and model selection responsive during catalog refreshes and reported missing saved-model metadata without substituting another model's limits.
+- Refreshed catalogs after credential or team changes without running credential commands in model availability checks.
 - Added a bundled JSON model catalog so first-run onboarding shows models and providers without waiting for network discovery.

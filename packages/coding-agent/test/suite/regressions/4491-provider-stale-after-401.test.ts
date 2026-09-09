@@ -318,7 +318,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 				}),
 			);
 		});
-		const availableModels = await registry.refreshAvailableModels();
+		const availableModels = await registry.refreshAvailableModels({ background: false });
 		expect(availableModels.some((model) => model.id === "internal/private-model")).toBe(true);
 		expect(availableModels.some((model) => model.id === "internal/unauthorized-model")).toBe(false);
 		fetchCatalog.mockClear();
@@ -334,7 +334,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 
 		// Refreshes during the stale window run keyless; they must preserve the
 		// cached entitlements the explicit re-selection validates against.
-		await registry.refreshAvailableModels();
+		await registry.refreshAvailableModels({ background: false });
 		expect(fetchCatalog.mock.calls.some(([url]) => url === "https://api.pinference.ai/api/v1/models")).toBe(false);
 
 		await harness.session.setModel(privateModel!);

@@ -33,7 +33,7 @@ describe("ENG-4645 internal GLM configuration", () => {
 		const registry = ModelRegistry.inMemory(authStorage);
 
 		expect(registry.getAvailable().some((model) => model.id === "internal/glm-5.2-fast")).toBe(false);
-		const models = await registry.refreshAvailableModels();
+		const models = await registry.refreshAvailableModels({ background: false });
 		const model = models.find((candidate) => candidate.id === "internal/glm-5.2-fast");
 
 		expect(model).toMatchObject({
@@ -78,9 +78,11 @@ describe("ENG-4645 internal GLM configuration", () => {
 		});
 		const registry = ModelRegistry.inMemory(authStorage);
 
-		expect((await registry.refreshAvailableModels()).some((model) => model.id === "internal/glm-5.2-fast")).toBe(
-			false,
-		);
+		expect(
+			(await registry.refreshAvailableModels({ background: false })).some(
+				(model) => model.id === "internal/glm-5.2-fast",
+			),
+		).toBe(false);
 	});
 
 	test("preserves authorization on transient failures only for the same team", async () => {
@@ -102,21 +104,27 @@ describe("ENG-4645 internal GLM configuration", () => {
 		});
 		const registry = ModelRegistry.inMemory(authStorage);
 
-		expect((await registry.refreshAvailableModels()).some((model) => model.id === "internal/glm-5.2-fast")).toBe(
-			true,
-		);
-		expect((await registry.refreshAvailableModels()).some((model) => model.id === "internal/glm-5.2-fast")).toBe(
-			true,
-		);
+		expect(
+			(await registry.refreshAvailableModels({ background: false })).some(
+				(model) => model.id === "internal/glm-5.2-fast",
+			),
+		).toBe(true);
+		expect(
+			(await registry.refreshAvailableModels({ background: false })).some(
+				(model) => model.id === "internal/glm-5.2-fast",
+			),
+		).toBe(true);
 
 		authStorage.set("prime-inference", {
 			type: "api_key",
 			key: "prime-key",
 			primeTeam: { teamId: "other-team", name: "Other Team" },
 		});
-		expect((await registry.refreshAvailableModels()).some((model) => model.id === "internal/glm-5.2-fast")).toBe(
-			false,
-		);
+		expect(
+			(await registry.refreshAvailableModels({ background: false })).some(
+				(model) => model.id === "internal/glm-5.2-fast",
+			),
+		).toBe(false);
 	});
 
 	test("does not restore a private route that the selected team cannot access", async () => {
@@ -155,7 +163,7 @@ describe("ENG-4645 internal GLM configuration", () => {
 		expect(restored.fallbackMessage).toContain("model is not available");
 	});
 
-	test("selects an authorized private route from a saved default on cold start", async () => {
+	test("selects a cached authorized private route from a saved default", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
 		const fetchMock = vi.fn(
@@ -172,6 +180,8 @@ describe("ENG-4645 internal GLM configuration", () => {
 		});
 		const registry = ModelRegistry.inMemory(authStorage);
 
+		await registry.refreshAvailableModels({ background: false });
+		fetchMock.mockClear();
 		const initial = await findInitialModel({
 			scopedModels: [],
 			isContinuing: false,

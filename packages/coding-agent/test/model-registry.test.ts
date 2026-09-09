@@ -687,7 +687,9 @@ describe("ModelRegistry", () => {
 			);
 			const firstRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
 			expect(
-				(await firstRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+				(await firstRegistry.refreshAvailableModels({ background: false })).find(
+					(model) => model.id === privateRoute.id,
+				),
 			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
 
 			vi.stubGlobal(
@@ -698,7 +700,9 @@ describe("ModelRegistry", () => {
 			);
 			const restoredRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
 			expect(
-				(await restoredRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+				(await restoredRegistry.refreshAvailableModels({ background: false })).find(
+					(model) => model.id === privateRoute.id,
+				),
 			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
 		});
 	});
@@ -1639,7 +1643,9 @@ describe("ModelRegistry", () => {
 				);
 				try {
 					registry.registerProvider("unrelated-extension", { baseUrl: "https://unused.invalid" });
-					const model = (await registry.refreshAvailableModels()).find((candidate) => candidate.id === modelId)!;
+					const model = (await registry.refreshAvailableModels({ background: false })).find(
+						(candidate) => candidate.id === modelId,
+					)!;
 					expect(model).toBeDefined();
 					expect(
 						fetchSpy.mock.calls.filter(([, init]) => new Headers(init?.headers).has("Authorization")),
@@ -1648,7 +1654,10 @@ describe("ModelRegistry", () => {
 
 					registry.unregisterProvider("unrelated-extension");
 					await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(true);
-					await Promise.all([registry.refreshAvailableModels(), registry.refreshAvailableModels()]);
+					await Promise.all([
+						registry.refreshAvailableModels({ background: false }),
+						registry.refreshAvailableModels({ background: false }),
+					]);
 					expect(registry.find("prime-inference", modelId)).toEqual(model);
 
 					expect(cliAuth.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "team-a" });
@@ -1688,7 +1697,7 @@ describe("ModelRegistry", () => {
 					);
 					expect(
 						fetchSpy.mock.calls.filter(([, init]) => new Headers(init?.headers).has("Authorization")),
-					).toHaveLength(1);
+					).toHaveLength(change === "active credentials" || change === "rotated credentials" ? 3 : 2);
 				} finally {
 					fetchSpy.mockRestore();
 					vi.unstubAllEnvs();
@@ -1704,7 +1713,7 @@ describe("ModelRegistry", () => {
 							: new Response(null, { status: 503 }),
 					),
 				);
-				const models = await registry.refreshAvailableModels();
+				const models = await registry.refreshAvailableModels({ background: false });
 				const model = models.find((candidate) => candidate.id === "internal/glm-5.2-fast");
 				if (!model) throw new Error("Expected authorized private model");
 				return model;
@@ -1718,10 +1727,10 @@ describe("ModelRegistry", () => {
 				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 				const model = await authorizePrivateRoute(registry);
 				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-				await registry.refreshAvailableModels();
+				await registry.refreshAvailableModels({ background: false });
 				await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(true);
 				headerSpy.mockReturnValue({ "X-Prime-Team-ID": "team-b" });
-				await registry.refreshAvailableModels();
+				await registry.refreshAvailableModels({ background: false });
 				await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(false);
 			});
 
@@ -1731,7 +1740,10 @@ describe("ModelRegistry", () => {
 				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 				const model = await authorizePrivateRoute(registry);
 				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-				await Promise.all([registry.refreshAvailableModels(), registry.refreshAvailableModels()]);
+				await Promise.all([
+					registry.refreshAvailableModels({ background: false }),
+					registry.refreshAvailableModels({ background: false }),
+				]);
 				await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(true);
 			});
 

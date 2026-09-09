@@ -121,11 +121,15 @@ describe("ENG-4575 model authentication", () => {
 		expect(row).not.toContain("sign in");
 	});
 
-	test("refetches configured providers after authentication changes", async () => {
+	test("refreshes local authentication status before a pending catalog request completes", async () => {
 		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
 		harnesses.push(harness);
 		const model = { ...harness.getModel("base")!, provider: "openai" } as AgentConnectionModel;
-		const getAvailableModels = vi.fn(async () => []);
+		let finishRefresh: (() => void) | undefined;
+		const liveModels = new Promise<AgentConnectionModel[]>((resolve) => {
+			finishRefresh = () => resolve([]);
+		});
+		const getAvailableModels = vi.fn(() => liveModels);
 		const getModelCatalog = vi.fn(async () => ({ models: [model], configuredProviders: [] }));
 		const fakeThis = Object.create(InteractiveMode.prototype) as ConnectionAuthRefreshHarness;
 		fakeThis.agentConnection = { getAvailableModels, getModelCatalog };
@@ -139,10 +143,12 @@ describe("ENG-4575 model authentication", () => {
 
 		expect(getAvailableModels).toHaveBeenCalledOnce();
 		expect(getModelCatalog).toHaveBeenCalledOnce();
-		expect(getAvailableModels.mock.invocationCallOrder[0]).toBeLessThan(getModelCatalog.mock.invocationCallOrder[0]!);
+		expect(getModelCatalog.mock.invocationCallOrder[0]).toBeLessThan(getAvailableModels.mock.invocationCallOrder[0]!);
 		expect(fakeThis.connectionConfiguredProviders).toEqual(new Set());
 		expect(fakeThis.getAvailableConnectionModels()).toEqual([]);
 		expect(fakeThis.connectionModelCatalog).toEqual([model]);
+		finishRefresh?.();
+		await vi.waitFor(() => expect(getModelCatalog).toHaveBeenCalledTimes(2));
 	});
 
 	test("returns the full public catalog to catalog-facing selectors", async () => {

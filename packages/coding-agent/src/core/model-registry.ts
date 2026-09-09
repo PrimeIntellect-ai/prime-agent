@@ -288,6 +288,7 @@ function readOpenAICodexAccountId(token: string): string | undefined {
  * Catalog behaviour measured 2026-08-13; see #702.
  */
 const OPENAI_CODEX_CLIENT_VERSION = "0.153.4";
+const CACHED_AUTH = { resolveCommands: false };
 
 function openAICodexModelsUrl(baseUrl: string): string {
 	const normalized = baseUrl.replace(/\/+$/, "");
@@ -336,6 +337,9 @@ export class ModelRegistry {
 	private lastPrimeCatalogScope?: string;
 	private lastPrimeCatalogTeamId?: string;
 	private catalogRefreshTimer?: ReturnType<typeof setInterval>;
+	private scheduledCatalogRefresh?: Promise<void>;
+	private primeCatalogRefresh?: { scope: string; authRevision: number; promise: Promise<void> };
+	private catalogAuthRevision = 0;
 	private loadError: string | undefined = undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
@@ -362,6 +366,14 @@ export class ModelRegistry {
 				),
 		);
 		this.loadModels();
+		const reference = new WeakRef(this);
+		const unsubscribe = authStorage.onChange(() => {
+			const registry = reference.deref();
+			if (registry) {
+				registry.catalogAuthRevision++;
+				void registry.scheduleCatalogRefresh().catch(() => {});
+			} else unsubscribe();
+		});
 	}
 
 	setOnOAuthProvidersReset(hook: () => void): void {
@@ -379,7 +391,7 @@ export class ModelRegistry {
 	/**
 	 * Reload models from disk (built-in + custom from models.json).
 	 */
-	refresh(): void {
+	refresh(options: { refreshCatalogs?: boolean } = {}): void {
 		this.providerRequestConfigs.clear();
 		this.modelRequestHeaders.clear();
 		this.lastProviderAuthSourceTokens.clear();
@@ -402,6 +414,17 @@ export class ModelRegistry {
 		this.onOAuthProvidersReset?.();
 
 		this.reloadModelsAfterCatalogChange();
+		if (options.refreshCatalogs !== false && this.catalogRefreshTimer)
+			void this.scheduleCatalogRefresh().catch(() => {});
+	}
+
+	private scheduleCatalogRefresh(): Promise<void> {
+		this.scheduledCatalogRefresh ??= Promise.resolve().then(async () => {
+			this.scheduledCatalogRefresh = undefined;
+			this.startCatalogRefreshTimer();
+			await Promise.all([this.refreshPrimeCatalog(true), this.refreshProviderCatalog(true)]);
+		});
+		return this.scheduledCatalogRefresh;
 	}
 
 	private reloadModelsAfterCatalogChange(): void {
@@ -686,27 +709,33 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
+		const privateIds = new Set(this.primeCatalog.get(this.getPrimeCatalogScope())?.map((model) => model.id));
+		const configured = new Map<string, boolean>();
 		return this.models.filter((model) => {
-			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
+			if (
+				isPrivatePrimeInferenceModel(model) &&
+				!this.explicitPrivatePrimeInferenceModelIds.has(model.id) &&
+				!privateIds.has(model.id)
+			) {
 				return false;
 			}
-			return this.hasConfiguredAuth(model);
+			if (!configured.has(model.provider)) configured.set(model.provider, this.hasConfiguredAuth(model));
+			return configured.get(model.provider);
 		});
 	}
 
-	/** Explicit refresh used by pickers; callers keep displaying their cached snapshot while this runs. */
+	/** Local data by default; background picker refreshes can explicitly await a new snapshot. */
 	async refreshAvailableModels(options: { background?: boolean } = {}): Promise<Model<Api>[]> {
-		this.refresh();
-		this.startCatalogRefreshTimer();
-		const refresh = Promise.all([this.refreshPrimeCatalog(true), this.refreshProviderCatalog(true)]);
-		if (options.background) void refresh.catch(() => {});
-		else await refresh;
+		this.refresh({ refreshCatalogs: false });
+		const refresh = this.scheduleCatalogRefresh();
+		if (options.background === false) await refresh;
+		else void refresh.catch(() => {});
 		return this.getAvailable();
 	}
 
 	private getPrimeCatalogScope(): string {
 		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
-		const token = this.authStorage.getCurrentAuthSourceToken(PRIME_INFERENCE_PROVIDER_ID);
+		const token = this.authStorage.getCurrentAuthSourceToken(PRIME_INFERENCE_PROVIDER_ID, CACHED_AUTH);
 		if (token) {
 			const scope = createHash("sha256")
 				.update(token.valueFingerprint)
@@ -719,7 +748,7 @@ export class ModelRegistry {
 		}
 		// Stale auth can be explicitly retried. Logout and team changes cannot reuse private entries.
 		if (
-			this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source === "stale" &&
+			this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID, CACHED_AUTH).source === "stale" &&
 			teamId === this.lastPrimeCatalogTeamId &&
 			this.lastPrimeCatalogScope
 		)
@@ -731,10 +760,30 @@ export class ModelRegistry {
 
 	private async refreshPrimeCatalog(force: boolean): Promise<void> {
 		const scope = this.getPrimeCatalogScope();
+		const authRevision = this.catalogAuthRevision;
+		if (this.primeCatalogRefresh?.scope === scope && this.primeCatalogRefresh.authRevision === authRevision)
+			return this.primeCatalogRefresh.promise;
+		const promise = this.fetchPrimeCatalog(force, authRevision);
+		this.primeCatalogRefresh = { scope, authRevision, promise };
+		try {
+			await promise;
+		} finally {
+			if (this.primeCatalogRefresh?.promise === promise) this.primeCatalogRefresh = undefined;
+		}
+	}
+
+	private async fetchPrimeCatalog(force: boolean, authRevision: number): Promise<void> {
+		const auth = await this.authStorage.getApiKeyWithSourceToken(PRIME_INFERENCE_PROVIDER_ID, {
+			refreshCommands: force && process.env.PI_OFFLINE !== "1",
+		});
+		if (authRevision !== this.catalogAuthRevision) return;
+		const scope = this.getPrimeCatalogScope();
 		this.primeCatalog.get(scope);
-		if (this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source === "stale") return;
-		const apiKey = scope === "public" ? undefined : await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
-		if (scope !== this.getPrimeCatalogScope() || (scope !== "public" && !apiKey)) return;
+		if (this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID, CACHED_AUTH).source === "stale") return;
+		const token = this.authStorage.getCurrentAuthSourceToken(PRIME_INFERENCE_PROVIDER_ID, CACHED_AUTH);
+		if (auth.sourceToken?.valueFingerprint !== token?.valueFingerprint) return;
+		const apiKey = auth.apiKey;
+		if (scope !== "public" && !apiKey) return;
 		await this.primeCatalog.refresh(scope, {
 			force,
 			headers: apiKey
@@ -766,9 +815,9 @@ export class ModelRegistry {
 
 	/** Return local data immediately. The first call also starts a background startup refresh. */
 	async refreshModelCatalog(): Promise<ModelCatalogSnapshot> {
-		this.refresh();
+		this.refresh({ refreshCatalogs: false });
 		const startup = this.startCatalogRefreshTimer();
-		void Promise.all([this.refreshPrimeCatalog(startup), this.refreshProviderCatalog(startup)]).catch(() => {});
+		if (startup) void this.scheduleCatalogRefresh().catch(() => {});
 		const availableModels = this.getAvailable();
 		const availablePrivateModels = new Set(
 			availableModels.filter(isPrivatePrimeInferenceModel).map((model) => model.id),
@@ -795,9 +844,8 @@ export class ModelRegistry {
 		}
 
 		if (this.isAuthorizedPrivatePrimeInferenceModel(model)) return true;
-		await this.refreshPrimeCatalog(false);
-		const availableModels = this.getAvailable();
-		return availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
+		void this.scheduleCatalogRefresh().catch(() => {});
+		return false;
 	}
 
 	private isAuthorizedPrivatePrimeInferenceModel(model: Model<Api>): boolean {
@@ -810,8 +858,8 @@ export class ModelRegistry {
 	async getExecutableModels(): Promise<Model<Api>[]> {
 		this.startCatalogRefreshTimer();
 		if (this.modelsJsonPath) void this.refreshProviderCatalog(false).catch(() => {});
-		if (this.modelsJsonPath || this.authStorage.hasAuth(PRIME_INFERENCE_PROVIDER_ID))
-			await this.refreshPrimeCatalog(false);
+		if (this.modelsJsonPath || this.authStorage.hasAuth(PRIME_INFERENCE_PROVIDER_ID, CACHED_AUTH))
+			void this.refreshPrimeCatalog(false).catch(() => {});
 		const availableModels = this.getAvailable();
 		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
 		if (codexModels.length === 0) {
@@ -869,7 +917,9 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		return this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider);
+		return (
+			this.authStorage.hasAuth(model.provider, CACHED_AUTH) || this.hasConfiguredProviderRequestAuth(model.provider)
+		);
 	}
 
 	private fingerprintProviderRequestAuthSource(source: ProviderRequestAuthSource["source"], material: string): string {
@@ -1207,7 +1257,7 @@ export class ModelRegistry {
 	 * This intentionally does not execute command-backed config values.
 	 */
 	getProviderAuthStatus(provider: string): AuthStatus {
-		const authStatus = this.authStorage.getAuthStatus(provider);
+		const authStatus = this.authStorage.getAuthStatus(provider, CACHED_AUTH);
 		if (authStatus.source && authStatus.source !== "stale") {
 			return authStatus;
 		}
@@ -1295,6 +1345,7 @@ export class ModelRegistry {
 		this.validateProviderConfig(providerName, config);
 		this.applyProviderConfig(providerName, config);
 		this.upsertRegisteredProvider(providerName, config);
+		if (this.catalogRefreshTimer) void this.scheduleCatalogRefresh().catch(() => {});
 	}
 
 	/**

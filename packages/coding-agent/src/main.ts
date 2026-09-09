@@ -62,6 +62,7 @@ import {
 	findInitialModel,
 	resolveCliModelFromCatalog,
 	resolveModelScope,
+	restoreModelFromSession,
 	type ScopedModel,
 } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
@@ -911,16 +912,18 @@ async function resolvePreparedStartupModel(options: {
 	let modelFallbackMessage: string | undefined;
 
 	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
-			model = restoredModel;
-		}
-		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
-		}
+		const restored = await restoreModelFromSession(
+			existingSession.model.provider,
+			existingSession.model.modelId,
+			undefined,
+			false,
+			modelRegistry,
+		);
+		model = restored.model;
+		modelFallbackMessage = restored.fallbackMessage;
 	}
 
-	if (!model) {
+	if (!model && !(hasExistingSession && existingSession.model)) {
 		const result = await findInitialModel({
 			scopedModels: prepared.scopedModels,
 			isContinuing: hasExistingSession,
@@ -930,8 +933,9 @@ async function resolvePreparedStartupModel(options: {
 			modelRegistry,
 		});
 		model = result.model;
+		modelFallbackMessage = result.fallbackMessage ?? modelFallbackMessage;
 		if (!model) {
-			modelFallbackMessage = formatNoModelsAvailableMessage();
+			modelFallbackMessage ??= formatNoModelsAvailableMessage();
 		} else if (modelFallbackMessage) {
 			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 		}
