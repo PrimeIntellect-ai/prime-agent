@@ -89,6 +89,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _finite_json_float(value: str) -> float | None:
+    number = float(value)
+    return number if isfinite(number) else None
+
+
 def _slug(raw: str, fallback: str) -> str:
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw.strip())
     normalized = "_".join(part for part in normalized.split("_") if part)
@@ -271,7 +276,7 @@ class HarnessState:
         mtime = self._disk_mtime()
         try:
             with self.file_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = json.load(f, parse_constant=lambda _: None, parse_float=_finite_json_float)
         except (OSError, ValueError):
             # A corrupt or unreadable state file must not crash the kernel or block
             # refinement. Treat it as empty; the next save() rewrites it cleanly.

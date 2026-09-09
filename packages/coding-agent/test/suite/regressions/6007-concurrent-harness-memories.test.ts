@@ -291,6 +291,39 @@ describe("concurrent harness memory persistence", () => {
 		},
 	);
 
+	it.each(["metadata", "reference", "arguments"] as const)(
+		"repairs non-finite persisted %s values during unrelated Python mutations",
+		async (field) => {
+			for (const value of ["NaN", "Infinity", "-Infinity", "1e400"]) {
+				for (const action of ["create", "update", "delete"]) {
+					const harness = await createHarness();
+					harnesses.push(harness);
+					const dir = join(harness.tempDir, "harness");
+					createHostMemory(dir, "seed-entry");
+					if (action !== "create") createHostMemory(dir, "target-entry");
+					const state = loadHarnessState(dir);
+					state.entries.memory["seed-entry"][field] = { invalid: "__NON_FINITE__", valid: "preserved" };
+					writeFileSync(getHarnessStatePath(dir), JSON.stringify(state).replace('"__NON_FINITE__"', value));
+					const python = pythonWriter(dir, "target-entry", false, action);
+					try {
+						const result = await python.done;
+						expect(result.code, `${field} ${value} ${action}: ${result.stderr}`).toBe(0);
+						const saved = loadHarnessState(dir);
+						expect(saved.entries.memory["seed-entry"][field]).toEqual({ invalid: null, valid: "preserved" });
+						expect(saved.refinements).toEqual(state.refinements);
+						if (action === "delete") expect(saved.entries.memory["target-entry"]).toBeUndefined();
+						else
+							expect(saved.entries.memory["target-entry"].content).toBe(
+								action === "update" ? "python update" : "target-entry",
+							);
+					} finally {
+						await python.cleanup();
+					}
+				}
+			}
+		},
+	);
+
 	it.each([
 		["Python", "reset"],
 		["Python", "rewrite"],

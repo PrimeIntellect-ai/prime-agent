@@ -4,7 +4,7 @@ The TypeScript refinement host and Python harness use the same adjacent `harness
 
 Both writers retain the schema version loaded from disk. An ordinary memory save preserves the latest schema version; an explicit schema change fails if another writer has already changed the version since the snapshot was loaded.
 
-Python normalizes an invalid stored schema to version 1. Writes containing non-finite numbers such as `NaN` or infinity fail before replacing the file, preserving the previously accepted state and keeping the JSON readable by the host.
+Python normalizes non-finite stored numbers to `null` and an invalid stored schema to version 1, so legacy invalid values do not block unrelated mutations. New writes containing non-finite numbers such as `NaN` or infinity fail before replacing the file, preserving the previously accepted state and keeping the JSON readable by the host.
 
 Python generates distinct default refinement event IDs for concurrent calls. A pending refinement append fails if another writer has reset or rewritten the existing history. A memory save that leaves its refinement history unchanged preserves that accepted history replacement.
 
