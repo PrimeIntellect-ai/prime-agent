@@ -8,8 +8,7 @@ import {
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE } from "../../src/core/agent-session.js";
-import { convertToLlm } from "../../src/core/messages.js";
+import { CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE, convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
@@ -1602,6 +1601,39 @@ describe("AgentSession compaction characterization", () => {
 					(entry) => entry.type === "custom_message" && entry.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
 				),
 		).toHaveLength(1);
+	});
+
+	it("still reports already-compacted when a clamped cap arrives on a compaction leaf", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "summary from extension",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		await harness.session.compact();
+		// Global scope: makes the clamped cap effective without appending a session entry.
+		harness.session.setContextLimit(1000, { scope: "global" });
+
+		await expect(harness.session.compact()).rejects.toThrow("Already compacted");
+		const entries = harness.sessionManager.getEntries();
+		expect(entries.filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(
+			entries.filter(
+				(entry) => entry.type === "custom_message" && entry.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+			),
+		).toHaveLength(0);
 	});
 
 	it("does not let the clamp notice defeat the assistant-last continuation heuristic", async () => {

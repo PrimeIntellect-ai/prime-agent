@@ -3,6 +3,7 @@ import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
 	type CustomMessage,
 	convertToLlm,
 	createCompactionOutcomeMessage,
@@ -166,6 +167,7 @@ describe("session command messages", () => {
 				customMessage(SESSION_SLASH_COMMAND_CUSTOM_TYPE),
 				customMessage(SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE),
 				customMessage(COMPACTION_OUTCOME_CUSTOM_TYPE),
+				customMessage(CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE),
 			]),
 		).toEqual([]);
 	});

@@ -173,6 +173,7 @@ import {
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
 	type AsyncBashCompletionDetails,
 	type BashExecutionMessage,
+	CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
 	type CustomMessage,
@@ -994,7 +995,6 @@ interface RlmSubagentModelSelection {
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 const CONTEXT_LIMIT_STATE_CUSTOM_TYPE = "context_limit_state";
-export const CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE = "context_cap_clamp_notice";
 
 interface PersistedContextLimitState {
 	maxContextTokens: number | null;
@@ -2955,7 +2955,6 @@ export class AgentSession {
 	private async _thresholdCompactionNeeded(context: ShouldStopAfterTurnContext): Promise<boolean> {
 		const settings = this._effectiveCompactionSettings();
 		if (!settings.enabled) return false;
-		this._noteClampedContextCapOnce(settings);
 
 		const contextWindow = this.model?.contextWindow ?? 0;
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
@@ -2963,6 +2962,8 @@ export class AgentSession {
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
 			return false;
 		}
+		// After the stale-message guard so a first-time notice cannot land directly on a compaction leaf.
+		this._noteClampedContextCapOnce(settings);
 
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
 		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) {

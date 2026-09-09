@@ -37,6 +37,7 @@ export const IPYTHON_STATE_RESTORED_CUSTOM_TYPE = "ipython_state_restored";
 export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
+export const CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE = "context_cap_clamp_notice";
 export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
 export const REFINEMENT_NOTICE_CUSTOM_TYPE = "refinement_notice";
 export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
@@ -607,7 +608,8 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						m.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE ||
 						m.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE ||
 						m.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
-						m.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE
+						m.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE ||
+						m.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE
 					) {
 						return undefined;
 					}
