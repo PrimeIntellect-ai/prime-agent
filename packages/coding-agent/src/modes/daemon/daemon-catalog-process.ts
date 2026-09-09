@@ -9,9 +9,7 @@ import { getPackageDir, isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
-import { spawnHidden } from "../../utils/child-process.js";
-
-import { WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../utils/child-process.js";
+import { spawnHidden, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../../utils/child-process.js";
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
 const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
 
