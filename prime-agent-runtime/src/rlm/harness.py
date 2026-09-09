@@ -75,6 +75,10 @@ def _merge_harness_changes(baseline: dict, proposed: dict, latest: dict) -> dict
         if baseline_events != latest["refinements"]:
             raise RuntimeError("Harness refinement history changed before save. Reload and retry.")
         merged["refinements"] = deepcopy(events)
+    if proposed["schema"] != baseline["schema"]:
+        if latest["schema"] != baseline["schema"]:
+            raise RuntimeError("Harness schema changed before save. Reload and retry.")
+        merged["schema"] = proposed["schema"]
     return merged
 
 
@@ -217,6 +221,7 @@ class HarnessState:
         # When set, local mutations raise instead of vanishing into a volatile
         # store; reads and global_=True delegation keep working.
         self._local_write_error = local_write_error
+        self.schema: int | float = 1
         self.entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         self.refinements: list[RefinementEvent] = []
         self._loaded_data = self._serialize()
@@ -254,6 +259,7 @@ class HarnessState:
         if self.file_path is None:
             return self
         if not self.file_path.exists():
+            self.schema = 1
             self.entries = {kind: {} for kind in _KINDS}
             self.refinements = []
             self._loaded_data = self._serialize()
@@ -271,6 +277,9 @@ class HarnessState:
         # string; coerce those to an empty object before attribute access.
         if not isinstance(data, dict):
             data = {}
+
+        schema = data.get("schema")
+        self.schema = schema if type(schema) in (int, float) else 1
 
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         raw_entries = data.get("entries", {})
@@ -368,7 +377,7 @@ class HarnessState:
 
     def _serialize(self) -> dict[str, Any]:
         return {
-            "schema": 1,
+            "schema": self.schema,
             "entries": {
                 kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
                 for kind, records in self.entries.items()

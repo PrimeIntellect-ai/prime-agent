@@ -63,6 +63,10 @@ if action == "update":
     state.update_memory(entry_id, entry_id, "python update")
 elif action == "delete":
     state.delete_memory(entry_id)
+elif action == "schema":
+    state._sync_from_disk()
+    state.schema = 3
+    state.save()
 else:
     state.create_memory(entry_id, entry_id, id=entry_id)
 print("accepted", flush=True)
@@ -189,6 +193,66 @@ describe("concurrent harness memory persistence", () => {
 			expect(Object.keys(loadHarnessState(dir).entries.memory).sort()).toEqual(["one", "two"]);
 		} finally {
 			await Promise.all(writers.map((writer) => writer.cleanup()));
+		}
+	});
+
+	it.each(["before Python loads", "after Python reloads"])("preserves a host schema change %s", async (timing) => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const dir = join(harness.tempDir, "harness");
+		createHostMemory(dir, "seed-entry");
+		const updateHost = () => {
+			const host = loadHarnessState(dir, "local");
+			host.schema = 2;
+			applyRefinementProposal(host, proposal("host-entry"), { id: "host-migration", scope: "local" });
+			saveHarnessState(dir, host);
+		};
+		const paused = timing === "after Python reloads";
+		if (!paused) updateHost();
+		const python = pythonWriter(dir, "python-entry", paused);
+		try {
+			if (paused) {
+				await python.waitReady();
+				updateHost();
+				python.release();
+			}
+			expect(await python.done).toEqual({ code: 0, stdout: "accepted\n", stderr: "" });
+			const state = loadHarnessState(dir);
+			expect(state.schema).toBe(2);
+			expect(Object.keys(state.entries.memory).sort()).toEqual(["host-entry", "python-entry", "seed-entry"]);
+			expect(state.refinements.some((event) => event.id === "host-migration")).toBe(true);
+		} finally {
+			await python.cleanup();
+		}
+	});
+
+	it.each(["Python", "host"])("rejects a conflicting schema change when %s saves last", async (lastWriter) => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const dir = join(harness.tempDir, "harness");
+		createHostMemory(dir, "seed-entry");
+		const host = loadHarnessState(dir, "local");
+		host.schema = 2;
+		const pythonLast = lastWriter === "Python";
+		const python = pythonWriter(dir, "schema-change", pythonLast, "schema");
+		try {
+			if (pythonLast) {
+				await python.waitReady();
+				saveHarnessState(dir, host);
+				python.release();
+				const result = await python.done;
+				expect(result.code).toBe(1);
+				expect(result.stderr).toContain("Harness schema changed before save");
+			} else {
+				expect(await python.done).toEqual({ code: 0, stdout: "accepted\n", stderr: "" });
+				expect(() => saveHarnessState(dir, host)).toThrow("Harness schema changed before save");
+			}
+			expect(loadHarnessState(dir).schema).toBe(pythonLast ? 2 : 3);
+			expect(Object.keys(loadHarnessState(dir).entries.memory)).toEqual(["seed-entry"]);
+			expect(existsSync(`${getHarnessStatePath(dir)}.lock`)).toBe(false);
+			createHostMemory(dir, "after-conflict");
+		} finally {
+			await python.cleanup();
 		}
 	});
 
