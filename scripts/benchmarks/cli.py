@@ -10,9 +10,9 @@ from pathlib import Path
 from prime_sandboxes import APIClient, SandboxClient
 
 from controller import Controller, cleanup
-from github import WORKFLOW, GitHub, catalog_price
+from github import WORKFLOW, GitHub
 from report import render
-from schema import DEFAULT_MODEL, Config, Report, Side, load_report, write_json
+from schema import Config, Report, Side, load_report, write_json
 
 
 def workflow_source(event: dict) -> dict:
@@ -38,8 +38,6 @@ def validate_completion(report: Report, request: Report, run: dict) -> None:
         "base_sha",
         "head_sha",
         "started_at",
-        "model",
-        "price",
         "config",
     }
     if report.model_dump(include=identity) != request.model_dump(include=identity):
@@ -77,7 +75,6 @@ def main() -> None:
     parser.add_argument("--head")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--pending-trust", action="store_true")
-    parser.add_argument("--model", default=os.environ.get("PINFERENCE_MODEL") or DEFAULT_MODEL)
     args = parser.parse_args()
     args.results.mkdir(parents=True, exist_ok=True)
     repository = os.environ.get("GITHUB_REPOSITORY", "PrimeIntellect-ai/prime-agent")
@@ -95,8 +92,6 @@ def main() -> None:
             base_sha=args.base,
             head_sha=args.head,
             started_at=datetime.now(UTC),
-            model=args.model,
-            price=catalog_price(args.model),
             config=config,
             main=Side(sha=args.base),
             pr_head=Side(sha=args.head),
@@ -121,7 +116,6 @@ def main() -> None:
             int(os.environ["GITHUB_RUN_ID"]),
             int(os.environ["GITHUB_RUN_ATTEMPT"]),
             config,
-            args.model,
         )
         write_json(args.results / "report.json", report)
         manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch" or report.attempt > 1
@@ -148,10 +142,9 @@ def main() -> None:
         ):
             raise ValueError("Result identity does not match the active workflow")
         if args.command == "run":
-            for key in ("PRIME_SANDBOX_API_KEY", "PINFERENCE_API_KEY"):
-                if not os.environ.get(key):
-                    report.status = "failed"
-                    report.errors.append(f"Repository secret {key} is not configured")
+            if not os.environ.get("PRIME_SANDBOX_API_KEY"):
+                report.status = "failed"
+                report.errors.append("Repository secret PRIME_SANDBOX_API_KEY is not configured")
             if report.status == "running":
                 controller = Controller(report, args.results)
                 controller.run()

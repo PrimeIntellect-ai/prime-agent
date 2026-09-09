@@ -7,8 +7,6 @@ from pathlib import Path
 import pexpect
 import pyte
 
-from schema import ANSWER
-
 QUERIES = {
     "\x1b[6n": "\x1b[1;1R",
     "\x1b[?6n": "\x1b[?1;1R",
@@ -62,17 +60,6 @@ class Display:
 
     def text(self) -> str:
         return "\n".join(row.rstrip() for row in self.screen.display)
-
-    def answer_prefix(self) -> str | None:
-        for row, line in enumerate(self.screen.display):
-            word = line.strip()
-            if not word or not ANSWER.startswith(word):
-                continue
-            column = line.index(word)
-            cells = [self.screen.buffer[row][column + offset] for offset in range(len(word))]
-            if all(cell.fg == "default" and cell.bg == "default" and not cell.italics for cell in cells):
-                return word
-        return None
 
 
 class Terminal:
@@ -128,10 +115,8 @@ class Terminal:
         self.until(lambda display: "benchready" not in display.text(), 5)
         return echoed - self.started
 
-    def close(self, secret: str = "") -> None:
+    def close(self) -> None:
         raw, snapshot = "".join(self.raw), self.display.text()
-        if secret:
-            raw, snapshot = raw.replace(secret, "[REDACTED]"), snapshot.replace(secret, "[REDACTED]")
         self.transcript.with_suffix(".raw").write_text(raw)
         self.transcript.with_suffix(".txt").write_text(snapshot)
         try:

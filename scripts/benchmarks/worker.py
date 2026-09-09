@@ -4,24 +4,31 @@ import argparse
 import json
 import os
 import pwd
+import shutil
 import signal
 import subprocess
 import time
 from pathlib import Path
 
+from kernel import (
+    BASH_EMPTY,
+    BASH_OUTPUT,
+    CELL_REPEATS,
+    FRAME_COLUMNS,
+    FRAME_ROWS,
+    GIT_STATUS,
+    OUTPUT_BYTES,
+    SHELL_REPEATS,
+    Kernel,
+)
 from schema import (
-    ANSWER,
-    PROMPT,
     ROOT,
-    InferenceUsage,
     Metric,
     Observation,
-    Price,
     ProcessMemory,
     Request,
     Result,
     Side,
-    finite_number,
     write_json,
 )
 from terminal import Terminal
@@ -31,15 +38,13 @@ SOURCE = HOMES / "builder/source"
 RESULTS = ROOT / "results"
 VERSION = "0.0.0-benchmark"
 ORIGIN = "http://127.0.0.1:18741"
-SECRET = os.environ.get("PRIME_API_KEY", "")
 
 
 def clean_error(error: Exception) -> str:
-    text = f"{type(error).__name__}: {error}"
-    return (text.replace(SECRET, "[REDACTED]") if SECRET else text)[:500]
+    return f"{type(error).__name__}: {error}"[:500]
 
 
-def environment(user: str, inference: bool = False) -> dict[str, str]:
+def environment(user: str) -> dict[str, str]:
     home = str(HOMES / user)
     env = {
         "HOME": home,
@@ -55,10 +60,6 @@ def environment(user: str, inference: bool = False) -> dict[str, str]:
         "UV_CACHE_DIR": f"{home}/.cache/uv",
         "UV_LINK_MODE": "copy",
     }
-    if inference:
-        env["PRIME_API_KEY"] = SECRET
-        if os.environ.get("PRIME_TEAM_ID"):
-            env["PRIME_TEAM_ID"] = os.environ["PRIME_TEAM_ID"]
     return env
 
 
@@ -69,11 +70,10 @@ def run_as(
     *,
     timeout: int = 60,
     log: Path | None = None,
-    inference: bool = False,
     extra_env: dict[str, str] | None = None,
     merge_output: bool = False,
 ) -> str:
-    env = environment(user, inference) | (extra_env or {})
+    env = environment(user) | (extra_env or {})
     command = ["/usr/sbin/runuser", "-u", user, "--", *args]
     if log:
         with log.open("a") as stream:
@@ -260,21 +260,10 @@ def install(request: Request, side: Side, trial: int) -> None:
         record(side, "install", trial, elapsed)
         if trial == 0:
             side.runtime["home_before_install_bytes"] = str(before)
-            config = home / ".prime/agent"
-            config.mkdir(parents=True, exist_ok=True)
-            models = {
-                "providers": {
-                    "prime-inference": {
-                        "modelOverrides": {
-                            request.model: {"maxTokens": request.config.max_output_tokens},
-                        }
-                    }
-                }
-            }
-            path = config / "models.json"
-            path.write_text(json.dumps(models))
             info = pwd.getpwnam(user)
-            os.chown(path, info.pw_uid, info.pw_gid)
+            settings = home / ".prime/agent/settings.json"
+            settings.write_text(json.dumps({"onboardingShown": True}) + "\n")
+            os.chown(settings, info.pw_uid, info.pw_gid)
             workspace = home / "workspace"
             workspace.mkdir()
             os.chown(workspace, info.pw_uid, info.pw_gid)
@@ -324,47 +313,6 @@ def install(request: Request, side: Side, trial: int) -> None:
         stop_processes(user)
 
 
-def read_messages(home: Path) -> list[dict]:
-    messages = []
-    for path in (home / ".prime/agent/sessions").glob("**/*.jsonl"):
-        if path.stat().st_size > 2_000_000:
-            raise RuntimeError("Session file exceeds the measurement limit")
-        for index, line in enumerate(path.read_text().splitlines()):
-            entry = json.loads(line)
-            message = entry.get("message", {})
-            if entry.get("type") == "message" and message.get("role") == "assistant":
-                messages.append(message | {"benchmark_id": f"{path.name}:{index}"})
-    return messages
-
-
-def usage_for(messages: list[dict], price: Price) -> InferenceUsage:
-    usage = InferenceUsage(prompts=1)
-    for message in messages:
-        raw = message.get("usage", {})
-        numbers = [finite_number(raw.get(key)) for key in ("input", "output", "cacheRead", "cacheWrite")]
-        if None in numbers:
-            continue
-        incoming, outgoing, cached, written = (int(value) for value in numbers if value is not None)
-        usage.responses += 1
-        usage.input_tokens += incoming + cached + written
-        usage.output_tokens += outgoing
-        usage.cached_tokens += cached
-        usage.estimated_usd += (
-            incoming * price.input
-            + written * (price.cache_write if price.cache_write is not None else price.input)
-            + outgoing * price.output
-            + cached * (price.cache_read if price.cache_read is not None else price.input)
-        ) / 1_000_000
-    if not usage.responses or not messages or messages[-1].get("stopReason") != "stop":
-        usage.incomplete_prompts = 1
-    return usage
-
-
-def add_usage(total: InferenceUsage, addition: InferenceUsage) -> None:
-    for field in InferenceUsage.model_fields:
-        setattr(total, field, getattr(total, field) + getattr(addition, field))
-
-
 def record(
     side: Side, metric: Metric, trial: int, value: float | None = None, error: str | None = None
 ) -> None:
@@ -374,14 +322,13 @@ def record(
 
 
 def stop_agents(home: Path) -> None:
-    listing = json.loads(run_as("benchmark1", ["prime-agent", "list", "--json"], home, inference=True))
+    listing = json.loads(run_as("benchmark1", ["prime-agent", "list", "--json"], home))
     for session in listing["sessions"]:
         if session.get("activeSessionId"):
             run_as(
                 "benchmark1",
                 ["prime-agent", "stop", session["activeSessionId"], "--json"],
                 home,
-                inference=True,
             )
 
 
@@ -390,12 +337,6 @@ def measure(request: Request, side: Side, trial: int) -> None:
         raise RuntimeError("The first installation must succeed before interactive measurements")
     home = HOMES / "benchmark1"
     stop_processes("benchmark1")
-    seen = {message["benchmark_id"] for message in read_messages(home)}
-
-    def fresh_messages() -> list[dict]:
-        return [message for message in read_messages(home) if message["benchmark_id"] not in seen]
-
-    submitted = False
     for mode in ("cold", "warm"):
         terminal = Terminal(
             [
@@ -404,15 +345,9 @@ def measure(request: Request, side: Side, trial: int) -> None:
                 "benchmark1",
                 "--",
                 "prime-agent",
-                "--provider",
-                "prime-inference",
-                "--model",
-                request.model,
-                "--thinking",
-                request.config.effort,
             ],
             home / "workspace",
-            environment("benchmark1", inference=True),
+            environment("benchmark1"),
             RESULTS / f"{mode}-{trial}",
         )
         try:
@@ -427,49 +362,112 @@ def measure(request: Request, side: Side, trial: int) -> None:
                     record(side, "pss", trial, sum(process.pss or 0 for process in processes))
                 side.processes = processes
                 write_json(RESULTS / f"memory-{trial}.json", Result(request=request, side=side))
-                if terminal.display.answer_prefix():
-                    raise RuntimeError("Answer fixture is already present before submission")
-                terminal.child.send(PROMPT)
-                terminal.until(lambda display: PROMPT in display.text(), 5)
-                entered = time.perf_counter()
-                terminal.child.send("\r")
-                submitted = True
-                first = terminal.until(lambda display: display.answer_prefix() is not None, 45)
-                if terminal.display.answer_prefix() != ANSWER:
-                    terminal.until(lambda display: display.answer_prefix() == ANSWER, 15)
-                deadline = time.monotonic() + 15
-                while time.monotonic() < deadline:
-                    terminal.settle(0.1)
-                    fresh = fresh_messages()
-                    if fresh and fresh[-1].get("stopReason") == "stop":
-                        answer = "".join(
-                            part.get("text", "")
-                            for part in fresh[-1].get("content", [])
-                            if part.get("type") == "text"
-                        )
-                        if answer.strip() != ANSWER:
-                            raise RuntimeError("Response did not match the answer fixture")
-                        record(side, "ttft", trial, first - entered)
-                        break
-                else:
-                    raise TimeoutError("Answer appeared but no completed session message was persisted")
         except Exception as error:
-            metric = "ttft" if mode == "cold" and submitted else mode
-            record(side, metric, trial, error=clean_error(error))
+            record(side, mode, trial, error=clean_error(error))
         finally:
-            terminal.close(SECRET)
+            terminal.close()
         if mode == "cold":
-            if submitted:
-                add_usage(side.inference, usage_for(fresh_messages(), request.price))
             stop_agents(home)
     stop_processes("benchmark1")
     if trial == 0 and any(sample.value is not None for sample in side.metrics.get("cold", [])):
         record(side, "disk", 0, disk_bytes(home) - int(side.runtime["home_before_install_bytes"]))
 
 
+def runtime(side: Side, trial: int) -> None:
+    home = HOMES / "benchmark1"
+    user = pwd.getpwnam("benchmark1")
+    stop_processes("benchmark1")
+    state = home / f"runtime-benchmark-{trial}"
+    state.mkdir()
+    os.chown(state, user.pw_uid, user.pw_gid)
+    command = [
+        "/usr/sbin/runuser",
+        "-u",
+        "benchmark1",
+        "--",
+        str(home / ".prime/agent/kernel-venv/bin/python"),
+        "-m",
+        "rlm.repl",
+    ]
+    kernel = None
+    metric: Metric = "kernel_start"
+
+    def rss() -> int:
+        processes = memory(user.pw_uid)
+        if not processes:
+            raise RuntimeError("No kernel processes found for memory measurement")
+        (RESULTS / f"{metric}-{trial}.json").write_text(
+            json.dumps([process.model_dump() for process in processes], indent=2) + "\n"
+        )
+        return sum(process.rss for process in processes)
+
+    try:
+        kernel = Kernel(command, home / "workspace", environment("benchmark1"), RESULTS / f"kernel-{trial}")
+        elapsed, python = kernel.ready()
+        record(side, metric, trial, elapsed)
+        side.runtime["python"] = python
+        metric = "kernel_rss"
+        record(side, metric, trial, rss())
+        kernel.execute("from rlm import bash")
+        kernel.batch("pass", 5)
+        kernel.batch(BASH_EMPTY, 1)
+        for metric, code, repeats, output in (
+            ("kernel_exec", "pass", CELL_REPEATS, None),
+            ("bash", BASH_EMPTY, SHELL_REPEATS, None),
+            ("git_status", GIT_STATUS, SHELL_REPEATS, None),
+            ("output", BASH_OUTPUT, SHELL_REPEATS, OUTPUT_BYTES),
+        ):
+            record(side, metric, trial, kernel.batch(code, repeats, output_bytes=output))
+        metric = "mixed"
+        record(side, metric, trial, kernel.mixed())
+        metric = "interrupt"
+        record(side, metric, trial, kernel.interrupt())
+        metric = "loaded_rss"
+        kernel.execute(
+            f"import pandas as pd\nframe = pd.DataFrame({{str(i): range({FRAME_ROWS}) "
+            f"for i in range({FRAME_COLUMNS})}})\npayload = list(range({FRAME_ROWS}))\n"
+            f"assert frame.shape == ({FRAME_ROWS}, {FRAME_COLUMNS})"
+        )
+        record(side, metric, trial, rss())
+        metric = "snapshot"
+        started = time.perf_counter()
+        events = kernel.request(
+            "snapshot", path=str(state / "state.pkl"), manifest_path=str(state / "manifest.json")
+        )
+        elapsed = time.perf_counter() - started
+        if not {"frame", "payload"} <= set(events[-1].get("saved", [])):
+            raise RuntimeError("Snapshot did not save the complete state fixture")
+        record(side, metric, trial, elapsed)
+        kernel.close()
+        kernel = None
+        metric = "restore"
+        kernel = Kernel(command, home / "workspace", environment("benchmark1"), RESULTS / f"restore-{trial}")
+        kernel.ready()
+        started = time.perf_counter()
+        events = kernel.request("restore", path=str(state / "state.pkl"))
+        elapsed = time.perf_counter() - started
+        if events[-1].get("failed") or not {"frame", "payload"} <= set(events[-1].get("restored", [])):
+            raise RuntimeError("Restore did not recover the complete state fixture")
+        kernel.execute(
+            f"assert frame.shape == ({FRAME_ROWS}, {FRAME_COLUMNS})\n"
+            f"assert int(frame.sum().sum()) == {FRAME_COLUMNS * FRAME_ROWS * (FRAME_ROWS - 1) // 2}\n"
+            f"assert payload == list(range({FRAME_ROWS}))"
+        )
+        record(side, metric, trial, elapsed)
+    except Exception as error:
+        record(side, metric, trial, error=clean_error(error))
+    finally:
+        try:
+            if kernel:
+                kernel.close()
+        finally:
+            stop_processes("benchmark1")
+            shutil.rmtree(state)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("prepare", "install", "measure"))
+    parser.add_argument("phase", choices=("prepare", "install", "measure", "runtime"))
     parser.add_argument("--trial", type=int, default=0)
     args = parser.parse_args()
     RESULTS.mkdir(exist_ok=True)
@@ -488,8 +486,10 @@ def main() -> None:
             prepare(request, result.side)
         elif args.phase == "install":
             install(request, result.side, args.trial)
-        else:
+        elif args.phase == "measure":
             measure(request, result.side, args.trial)
+        else:
+            runtime(result.side, args.trial)
     except Exception as error:
         result.side.error = clean_error(error)
         raise

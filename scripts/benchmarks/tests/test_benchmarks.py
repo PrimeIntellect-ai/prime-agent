@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,22 +15,19 @@ from pydantic import ValidationError
 from cli import completed_report, main, validate_completion, workflow_source
 from controller import Canceled, Controller, cleanup, labels, side_complete
 from github import TITLE, GitHub
-from report import MARKER, METRICS, comparison, render
+from report import MARKER, METRICS, RUNTIME_METRICS, comparison, render
 from schema import (
-    DEFAULT_MODEL,
     Config,
     Observation,
-    Price,
     ProcessMemory,
     Report,
     Request,
     Side,
-    finite_number,
     load_report,
     write_json,
 )
 from terminal import QUERIES, Display, Terminal
-from worker import install, measure, read_messages, usage_for
+from worker import environment, install, measure
 
 SHA = "a" * 40
 HEAD = "b" * 40
@@ -49,9 +44,7 @@ def fixture() -> Report:
         base_sha=SHA,
         head_sha=HEAD,
         started_at=datetime(2026, 9, 9, tzinfo=UTC),
-        model=DEFAULT_MODEL,
         config=Config.load(),
-        price=Price(input=2.5, output=15),
         main=Side(sha=SHA),
         pr_head=Side(sha=HEAD),
     )
@@ -62,7 +55,7 @@ def observations(*numbers: float) -> list[Observation]:
 
 
 class TerminalTests(unittest.TestCase):
-    def test_real_pty_detects_injected_startup_and_answer_delays(self):
+    def test_real_pty_detects_injected_startup_delays_without_submitting(self):
         script = """
 import os, sys, time, tty
 tty.setraw(0)
@@ -73,11 +66,7 @@ while True:
     if byte == b'\\x7f':
         os.write(1, b'\\b \\b')
     elif byte == b'\\r':
-        os.write(1, b'\\r\\n\\x1b[3mQUARTZ\\x1b[23m\\r\\n')
-        time.sleep(0.15)
-        os.write(1, b' Q')
-        time.sleep(0.05)
-        os.write(1, b'UARTZ')
+        raise RuntimeError('benchmark submitted a prompt')
     elif byte == b'\\x03':
         break
     else:
@@ -97,14 +86,6 @@ while True:
                 )
                 try:
                     measurements.append(terminal.ready())
-                    terminal.child.send("quartz")
-                    terminal.until(lambda display: "quartz" in display.text(), 2)
-                    started = time.perf_counter()
-                    terminal.child.send("\r")
-                    first = terminal.until(lambda display: display.answer_prefix() is not None, 2)
-                    self.assertGreater(first - started, 0.12)
-                    self.assertLess(first - started, 2)
-                    terminal.until(lambda display: display.answer_prefix() == "QUARTZ", 2)
                 finally:
                     terminal.close()
         self.assertGreater(measurements[1] - measurements[0], 0.25)
@@ -119,24 +100,6 @@ while True:
                     display.feed(query[boundary:] + "suffix")
                     self.assertEqual(replies, [reply])
                     self.assertTrue(display.text().startswith("prefixsuffix"))
-
-    def test_answer_does_not_match_echo_status_or_thinking(self):
-        display = Display(lambda _: None)
-        display.feed("Reply with only the uppercase form of quartz.\r\n")
-        display.feed("Qwen3 · Waiting\r\n\x1b[38;2;161;161;170mQUARTZ\x1b[39m\r\n")
-        display.feed("\x1b[3mQUARTZ\x1b[23m\r\n")
-        self.assertIsNone(display.answer_prefix())
-        display.feed(" Q")
-        self.assertEqual(display.answer_prefix(), "Q")
-        display.feed("UARTZ")
-        self.assertEqual(display.answer_prefix(), "QUARTZ")
-
-    def test_repaint_does_not_keep_a_cleared_answer(self):
-        display = Display(lambda _: None)
-        display.feed(" QUARTZ")
-        self.assertEqual(display.answer_prefix(), "QUARTZ")
-        display.feed("\r\x1b[2K Waiting")
-        self.assertIsNone(display.answer_prefix())
 
 
 class ReportTests(unittest.TestCase):
@@ -156,10 +119,10 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(comparison(METRICS[0], [], shifted, 10)[4], "unavailable")
 
     def test_zero_baseline_and_small_bundle_changes(self):
-        cells = comparison(METRICS[4], observations(0), observations(65537), 1)
+        cells = comparison(METRICS[3], observations(0), observations(65537), 1)
         self.assertEqual(cells[3], "N/A")
         self.assertIn("larger", cells[4])
-        unchanged = comparison(METRICS[4], observations(10_000_000), observations(10_001_000), 1)
+        unchanged = comparison(METRICS[3], observations(10_000_000), observations(10_001_000), 1)
         self.assertEqual(unchanged[4], "no clear change")
 
     def test_comment_escapes_untrusted_text_and_reports_failures(self):
@@ -171,7 +134,10 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("![click]", text)
         self.assertIn("&#124;", text)
         self.assertIn("0/0", text)
-        self.assertIn("direct Pinference", text)
+        self.assertNotIn("TTFT", text)
+        self.assertNotIn("Pinference", text)
+        for definition in RUNTIME_METRICS:
+            self.assertIn(definition.title, text)
 
     def test_schema_rejects_nonfinite_negative_duplicate_and_wrong_revision(self):
         for value in (float("nan"), float("inf"), -1, True, "1"):
@@ -185,8 +151,6 @@ class ReportTests(unittest.TestCase):
         report["main"]["metrics"] = {"cold": [{"trial": 0, "value": 1}] * 2}
         with self.assertRaises(ValidationError):
             Report.model_validate(report)
-        self.assertIsNone(finite_number(True))
-        self.assertIsNone(finite_number("1"))
 
     def test_report_round_trip_and_size_limit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -263,6 +227,22 @@ class PublishingTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_sandbox_creation_does_not_inject_credentials(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"PRIME_SANDBOX_API_KEY": "fake", "PINFERENCE_API_KEY": "must-not-use"}),
+        ):
+            controller = Controller(fixture(), Path(directory), live_github=False)
+            controller.client = Mock()
+            controller.client.create.return_value = SimpleNamespace(id="one")
+            controller.client.get.return_value = SimpleNamespace(status="RUNNING")
+            controller.client.execute_command.return_value = SimpleNamespace(exit_code=0)
+            controller.wait = Mock()
+            controller.start("main")
+            request = controller.client.create.call_args.args[0]
+            self.assertIsNone(request.secrets)
+            self.assertIsNone(request.environment_vars)
+
     def test_invalid_results_get_a_failure_notice_and_missing_results_preserve_pending_trust(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -282,7 +262,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertIn("Waiting for contributor vouch", render(pending))
 
     def test_automatic_duplicates_skip_but_manual_runs_and_new_comparisons_do_not(self):
-        for case in ("duplicate", "manual", "attempt", "main", "model", "config", "failed"):
+        for case in ("duplicate", "manual", "attempt", "main", "harness", "config", "failed"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 event, output = root / "event.json", root / "output.txt"
@@ -294,8 +274,8 @@ class LifecycleTests(unittest.TestCase):
                 report = fixture()
                 if case == "main":
                     report.base_sha = report.main.sha = "c" * 40
-                elif case == "model":
-                    report.model = "other/model"
+                elif case == "harness":
+                    report.harness_sha = "c" * 40
                 elif case == "config":
                     report.config.trials = 11
                 elif case == "attempt":
@@ -412,20 +392,12 @@ class LifecycleTests(unittest.TestCase):
             workflow_source({"workflow_run": run})
 
 
-class UsageTests(unittest.TestCase):
+class MeasurementTests(unittest.TestCase):
     def test_disk_footprint_is_measured_after_interactive_first_use(self):
         order = []
         terminal = Mock()
         terminal.ready.return_value = 0.5
-        terminal.display.answer_prefix.side_effect = [None, "QUARTZ"]
-        terminal.until.side_effect = lambda *_args: time.perf_counter()
         terminal.close.side_effect = lambda *_args: order.append("closed")
-        message = {
-            "benchmark_id": "session:1",
-            "stopReason": "stop",
-            "content": [{"type": "text", "text": "QUARTZ"}],
-            "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0},
-        }
         side = Side(
             sha=SHA, metrics={"install": observations(1)}, runtime={"home_before_install_bytes": "100"}
         )
@@ -440,8 +412,6 @@ class UsageTests(unittest.TestCase):
             attempt=1,
             role="main",
             config=report.config,
-            model=report.model,
-            price=report.price,
         )
 
         def disk(_home):
@@ -449,8 +419,7 @@ class UsageTests(unittest.TestCase):
             return 700
 
         with (
-            patch("worker.Terminal", return_value=terminal),
-            patch("worker.read_messages", side_effect=[[], [message], [message]]),
+            patch("worker.Terminal", return_value=terminal) as launch,
             patch("worker.memory", return_value=[ProcessMemory(pid=1, name="agent", rss=100)]),
             patch("worker.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=1)),
             patch("worker.stop_processes"),
@@ -460,7 +429,11 @@ class UsageTests(unittest.TestCase):
         ):
             measure(request, side, 0)
         self.assertEqual(side.metrics["disk"][0].value, 600)
-        self.assertIsNotNone(side.metrics["ttft"][0].value)
+        self.assertIsNotNone(side.metrics["cold"][0].value)
+        terminal.child.send.assert_not_called()
+        for call in launch.call_args_list:
+            self.assertEqual(call.args[0], ["/usr/sbin/runuser", "-u", "benchmark1", "--", "prime-agent"])
+            self.assertNotIn("PRIME_API_KEY", call.args[2])
 
     def test_dependency_inventory_warning_preserves_successful_installation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -485,43 +458,39 @@ class UsageTests(unittest.TestCase):
                 patch("worker.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=1, pw_gid=1)),
                 patch("worker.stop_processes"),
             ):
-                install(SimpleNamespace(model=DEFAULT_MODEL, config=Config.load()), side, 0)
+                install(SimpleNamespace(config=Config.load()), side, 0)
             self.assertIsNotNone(side.metrics["install"][0].value)
             self.assertIsNone(side.metrics["install"][0].error)
             self.assertIn("warnings", side.runtime["dependency_inventory"])
             self.assertTrue((home / "workspace/example.py").exists())
             self.assertNotIn("disk", side.metrics)
 
-    def test_usage_includes_cache_without_double_counting(self):
-        message = {
-            "stopReason": "stop",
-            "usage": {"input": 1000, "output": 100, "cacheRead": 2000, "cacheWrite": 0},
-        }
-        usage = usage_for([message], Price(input=2, output=10, cache_read=0.2))
-        self.assertEqual(usage.input_tokens, 3000)
-        self.assertAlmostEqual(usage.estimated_usd, 0.0034)
-        self.assertEqual(usage.incomplete_prompts, 0)
-
-    def test_missing_and_failed_usage_remains_visible(self):
-        self.assertEqual(usage_for([], Price(input=1, output=1)).incomplete_prompts, 1)
-        message = {"stopReason": "error", "usage": {"input": 1, "output": 0, "cacheRead": 0, "cacheWrite": 0}}
-        self.assertEqual(usage_for([message], Price(input=1, output=1)).incomplete_prompts, 1)
-
-    def test_session_message_ids_are_independent_of_file_order(self):
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            sessions = home / ".prime/agent/sessions"
-            sessions.mkdir(parents=True)
-            entry = {"type": "message", "message": {"role": "assistant", "content": []}}
-            (sessions / "z.jsonl").write_text(json.dumps(entry) + "\n")
-            seen = {message["benchmark_id"] for message in read_messages(home)}
-            (sessions / "a.jsonl").write_text(json.dumps(entry) + "\n")
-            fresh = [message for message in read_messages(home) if message["benchmark_id"] not in seen]
-            self.assertEqual(len(fresh), 1)
-            self.assertEqual(fresh[0]["benchmark_id"], "a.jsonl:0")
+    def test_child_environment_never_inherits_credentials_or_personal_settings(self):
+        with patch.dict(
+            os.environ,
+            {
+                "PRIME_API_KEY": "fake",
+                "PINFERENCE_API_KEY": "fake",
+                "PRIME_SANDBOX_API_KEY": "fake",
+                "GITHUB_TOKEN": "fake",
+                "PRIME_TEAM_ID": "private-team",
+                "PI_CODING_AGENT_DIR": "/personal",
+            },
+        ):
+            env = environment("benchmark1")
+        self.assertFalse(any("KEY" in name or "TOKEN" in name or "TEAM" in name for name in env))
+        self.assertNotIn("PI_CODING_AGENT_DIR", env)
 
     def test_completion_requires_every_metric(self):
-        self.assertFalse(side_complete(Side(sha=SHA), 10, 3))
+        side = Side(sha=SHA)
+        for definition in (*METRICS, *RUNTIME_METRICS):
+            count = 1 if definition.key in ("bundle", "disk") else (3 if definition.key == "install" else 10)
+            side.metrics[definition.key] = observations(*([1] * count))
+        self.assertTrue(side_complete(side, 10, 3))
+        for definition in (*METRICS, *RUNTIME_METRICS):
+            incomplete = side.model_copy(deep=True)
+            incomplete.metrics[definition.key][-1] = Observation(trial=0, error="failed")
+            self.assertFalse(side_complete(incomplete, 10, 3))
 
 
 if __name__ == "__main__":

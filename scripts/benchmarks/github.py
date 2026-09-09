@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import httpx
 
 from report import MARKER, fingerprint, render
-from schema import DEFAULT_MODEL, Config, Price, Report, Side
+from schema import Config, Report, Side
 
 WORKFLOW = "benchmarks.yml"
 TITLE = "Prime Agent benchmarks · PR #"
@@ -44,7 +44,7 @@ class GitHub:
             page += 1
 
     def resolve(
-        self, pr: int, harness_sha: str, run_id: int, attempt: int, config: Config, model: str = DEFAULT_MODEL
+        self, pr: int, harness_sha: str, run_id: int, attempt: int, config: Config
     ) -> tuple[Report, str]:
         pull = self.request("GET", f"pulls/{pr}")
         if pull["state"] != "open" or pull["base"]["ref"] != "main":
@@ -52,7 +52,6 @@ class GitHub:
         if pull["base"]["repo"]["full_name"] != self.repository:
             raise ValueError("PR belongs to another repository")
         base = self.request("GET", "git/ref/heads/main")["object"]["sha"]
-        price = catalog_price(model)
         report = Report(
             repository=self.repository,
             head_repository=pull["head"]["repo"]["full_name"],
@@ -63,8 +62,6 @@ class GitHub:
             base_sha=base,
             head_sha=pull["head"]["sha"],
             started_at=datetime.now(UTC),
-            model=model,
-            price=price,
             config=config,
             main=Side(sha=base),
             pr_head=Side(sha=pull["head"]["sha"]),
@@ -123,18 +120,3 @@ class GitHub:
         else:
             self.request("POST", f"issues/{report.pr}/comments", {"body": body})
         return True
-
-
-def catalog_price(model: str) -> Price:
-    response = httpx.get("https://api.pinference.ai/api/v1/models", timeout=30)
-    response.raise_for_status()
-    for entry in response.json()["data"]:
-        if entry.get("id") == model:
-            pricing = entry["pricing"]
-            return Price(
-                input=pricing["input_usd_per_mtok"],
-                output=pricing["output_usd_per_mtok"],
-                cache_read=pricing.get("cache_read_usd_per_mtok"),
-                cache_write=pricing.get("cache_write_usd_per_mtok"),
-            )
-    raise ValueError(f"Configured benchmark model is not in the Pinference catalog: {model}")

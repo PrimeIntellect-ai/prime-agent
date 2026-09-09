@@ -15,7 +15,6 @@ from report import render
 from schema import (
     ROOT,
     UV_VERSION,
-    InferenceUsage,
     Report,
     Request,
     Result,
@@ -26,7 +25,7 @@ from schema import (
 
 REMOTE = "/opt/prime-benchmark"
 OWNER_LABEL = "prime-agent-benchmarks-v1"
-FILES = ("schema.py", "terminal.py", "worker.py", "pyproject.toml", "uv.lock")
+FILES = ("schema.py", "terminal.py", "kernel.py", "worker.py", "pyproject.toml", "uv.lock")
 
 
 def elapsed_seconds(start: datetime) -> float:
@@ -89,11 +88,6 @@ class Controller:
                 raise Canceled("A newer PR head or benchmark run superseded this run")
 
     def save(self) -> None:
-        total = InferenceUsage()
-        for side in (self.report.main, self.report.pr_head):
-            for field in InferenceUsage.model_fields:
-                setattr(total, field, getattr(total, field) + getattr(side.inference, field))
-        self.report.inference = total
         self.report.errors = self.report.errors[:30]
         self.report = Report.model_validate(self.report.model_dump())
         write_json(self.results / "report.json", self.report)
@@ -120,12 +114,9 @@ class Controller:
             attempt=self.report.attempt,
             role=role,
             config=config,
-            model=self.report.model,
-            price=self.report.price,
         )
         self.requests[role] = request
         self.checkpoint()
-        env = {"PRIME_TEAM_ID": os.environ["PRIME_TEAM_ID"]} if os.environ.get("PRIME_TEAM_ID") else {}
         sandbox = self.client.create(
             CreateSandboxRequest(
                 name=f"agent-bench-{self.report.run_id}-{self.report.attempt}-{role}",
@@ -136,8 +127,6 @@ class Controller:
                 vm=False,
                 region=config.region,
                 timeout_minutes=config.ttl_minutes,
-                secrets={"PRIME_API_KEY": os.environ["PINFERENCE_API_KEY"]},
-                environment_vars=env,
                 labels=labels(self.report.repository, self.report.run_id, self.report.attempt)
                 + [f"role:{role}"],
                 idempotency_key=f"agent-bench-{self.report.repository}-{self.report.run_id}-{self.report.attempt}-{role}",
@@ -238,7 +227,7 @@ class Controller:
             "paths += [p for p in (root/'results').glob('*') "
             "if p.is_file() and p.stat().st_size < 8000000]; "
             "archive=tarfile.open(root/'logs.tar.gz','w:gz'); "
-            "[archive.add(p,arcname=str(p.relative_to(root)),recursive=False) for p in paths[:100]]; "
+            "[archive.add(p,arcname=str(p.relative_to(root)),recursive=False) for p in paths[:1000]]; "
             "archive.close()",
         ]
         result = self.client.execute_command(sandbox.id, shlex.join(args), timeout=30)
@@ -284,6 +273,7 @@ class Controller:
             for phase, count in (
                 ("install", self.report.config.install_trials),
                 ("measure", self.report.config.trials),
+                ("runtime", self.report.config.trials),
             ):
                 for trial in range(count):
                     for role in ready if trial % 2 == 0 else list(reversed(ready)):
@@ -295,14 +285,11 @@ class Controller:
                         except Exception as error:
                             if len(self.report.errors) < 25:
                                 self.report.errors.append(f"{role} {phase} {trial}: {type(error).__name__}")
-                        estimated = sum(
-                            side.inference.estimated_usd for side in (self.report.main, self.report.pr_head)
-                        )
                         compute = sum(
                             elapsed_seconds(sandbox.created_at) * self.report.config.hourly_cost() / 3600
                             for sandbox in self.sandboxes.values()
                         )
-                        if estimated + compute >= self.report.config.budget_usd:
+                        if compute >= self.report.config.budget_usd:
                             raise TimeoutError("Reached the estimated run budget")
             complete = all(
                 side_complete(side, self.report.config.trials, self.report.config.install_trials)
@@ -316,7 +303,7 @@ class Controller:
         except Exception as error:
             self.report.status = "failed"
             message = str(error)
-            for key in ("PRIME_SANDBOX_API_KEY", "PINFERENCE_API_KEY", "GITHUB_TOKEN"):
+            for key in ("PRIME_SANDBOX_API_KEY", "GITHUB_TOKEN"):
                 if os.environ.get(key):
                     message = message.replace(os.environ[key], "[REDACTED]")
             self.report.errors.append(message[:500])
@@ -360,7 +347,17 @@ def side_complete(side: Side, trials: int, installs: int) -> bool:
     expected = {
         "cold": trials,
         "warm": trials,
-        "ttft": trials,
+        "kernel_start": trials,
+        "kernel_exec": trials,
+        "bash": trials,
+        "git_status": trials,
+        "output": trials,
+        "mixed": trials,
+        "interrupt": trials,
+        "snapshot": trials,
+        "restore": trials,
+        "kernel_rss": trials,
+        "loaded_rss": trials,
         "rss": trials,
         "install": installs,
         "disk": 1,

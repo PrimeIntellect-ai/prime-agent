@@ -3,37 +3,28 @@
 Each push to an open, vouched PR starts an informational Prime Agent benchmark. Multiple commits in
 one push produce one run for the final head. Draft PRs are included. A two-second debounce and
 per-PR cancellation avoid finishing obsolete runs. `workflow_dispatch` reruns an open PR by number.
-Identical automatic requests reuse the completed comment when both SHAs, harness, model, prices, and
-configuration match. Manual dispatch and GitHub reruns force fresh measurements. Unvouched authors
+Identical automatic requests reuse the completed comment when both SHAs, harness, and configuration
+match. Manual dispatch and GitHub reruns force fresh measurements. Unvouched authors
 receive a pending-trust comment; a maintainer can rerun after vouching.
 
 The controller resolves current `main` and the PR head to full SHAs, builds both in separate Prime
 sandboxes, and alternates their measurements. Both use the same trusted harness revision, image
-digest, resource allocation, model, and reasoning effort. No performance gate blocks merging.
+digest and resource allocation. No performance gate blocks merging.
 
 ## Enable in GitHub
 
-Add these repository secrets:
-
-- `PRIME_SANDBOX_API_KEY`: a dedicated key with Sandbox permissions for provisioning and cleanup.
-- `PINFERENCE_API_KEY`: a dedicated key with **Inference-only** permission. Prime Sandboxes injects
-  this through its encrypted `secrets` field as `PRIME_API_KEY`, which the built-in `prime-inference`
-  provider reads directly. No proxy or provider implementation changes are involved.
-
-Optional repository variables:
-
-- `PRIME_BENCHMARK_TEAM_ID`: workspace used for sandbox and inference billing.
-- `PINFERENCE_BENCHMARK_MODEL`: defaults to `openai/gpt-5.6-terra`. Use a public, stable Pinference model
-  supported by both revisions. Model retirement produces a visible failure, never a silent fallback.
+Add the repository secret `PRIME_SANDBOX_API_KEY`: a dedicated key with Sandbox permissions for
+provisioning and cleanup. Optional `PRIME_BENCHMARK_TEAM_ID` selects the sandbox billing workspace.
+No inference key, model configuration, or login is required.
 
 The workflows must first land on `main`: both `pull_request_target` and the completion listener run
 trusted default-branch code. Trigger `Prime Agent benchmarks` manually with an open PR number after
-configuring the secrets. The first rollout should include a main-versus-main calibration.
+configuring the sandbox secret. The first rollout should include a main-versus-main calibration.
 
-PR code can read the inference token inside its sandbox. Use the existing Vouch trust gate and a
-dedicated token with an account-side spending limit. The sandbox control key and GitHub token stay on
-the trusted controller; a separate publisher owns GitHub comment write permission. No PR checkout,
+No credentials are injected into the sandboxes. The sandbox control key and GitHub token stay on the
+trusted controller; a separate publisher owns GitHub comment write permission. No PR checkout,
 build script, installer, executable, or archive is executed/extracted on a privileged GitHub runner.
+The existing Vouch gate controls who can trigger compute usage.
 
 ## Measurements
 
@@ -51,10 +42,6 @@ and other missing tools. Their setup time and disk usage are outside the install
   processes owned by the benchmark user. OS filesystem caches are not flushed.
 - **Warm startup:** the same input-ready measurement while retaining the daemon and stopping its
   previous active sessions. Each TUI launch opens a fresh conversation.
-- **TTFT:** Enter until the first visible character of the assistant's expected answer, excluding
-  echoed input, status text, and thinking. The fixed prompt asks for the uppercase form of `quartz`.
-  The completed session must contain exactly `QUARTZ`; mismatches/timeouts remain failed samples.
-  The built-in Pinference provider runs with medium effort and a 1,024-token output limit.
 - **Installation:** the normal installer and Python/tool bootstrap in three new user homes, each
   with empty npm and uv caches. Unpublished candidate release tarballs are served over loopback;
   npm/Python dependencies use the real network. This does not measure public release-CDN latency.
@@ -69,16 +56,53 @@ and other missing tools. Their setup time and disk usage are outside the install
   The controller, PTY harness, artifact server, and build user are excluded. RSS can double-count
   shared pages.
 
-Startup, TTFT, and memory use 10 trials per revision. Installation uses three; sizes are measured
-once. Stock tools, skills, prompts, daemon, persistence, and Python bootstrap remain enabled. Fresh
-homes contain no personal credentials, extensions, MCP servers, or custom skills. Only the dedicated
-Pinference credential and optional billing team are supplied.
+Startup and memory use 10 trials per revision. Installation uses three; sizes are measured once.
+Stock tools, skills, daemon, persistence, and Python bootstrap remain enabled. Homes contain no
+credentials, extensions, MCP servers, or personal skills. The onboarding splash is marked as already
+shown before timing, so startup measures the editor rather than waiting for a person to sign in.
+The editor runs without a selected model; no prompts are submitted. These measurements cover the
+local startup path, not authenticated provider discovery or inference.
+
+### Python runtime
+
+A separate probe drives the **installed** `python -m rlm.repl` over its JSONL protocol. It measures the
+CPython kernel and stock `rlm.bash` implementation, including IPC, serialization, and output capture.
+It does not include the TypeScript kernel manager, TUI rendering, or model execution. The harness
+fails visibly if either revision does not support the required runtime protocol; it never substitutes
+a plain Python process or omits a failed metric.
+
+Each of the 10 trials starts with all benchmark-user processes stopped and a new kernel:
+
+- **Kernel startup:** process spawn through the protocol-ready handshake. Includes the small
+  `runuser` launch overhead; excludes Python installation and host-side agent bootstrap.
+- **Python cell round trip:** mean of 50 sequential `pass` cells through the complete request/done
+  protocol. Five Python cells and one empty bash command warm the runtime before execution timings.
+- **Empty bash command:** mean of five `await bash(':')` calls with successful, empty results.
+- **Bash git status:** mean of five `git status --porcelain` calls in the fixed, clean Git fixture.
+- **Bash 32 KiB output:** mean of five shell commands producing exactly 32,768 bytes. The runtime
+  captures and forwards the entire output, and the probe verifies its byte count.
+- **35 cells / 9 shell calls:** total time for a fixed mix of 26 Python no-ops and nine git-status
+  calls, alternating one shell call with three Python cells.
+- **Interrupt to done:** after an executing cell signals readiness, send an interrupt and wait for
+  its KeyboardInterrupt/done acknowledgement. A subsequent cell must still execute successfully.
+- **State snapshot:** serialize a 10,000-row, eight-column integer pandas DataFrame and a
+  10,000-integer list to disk. Includes first-use serialization imports.
+- **State restore:** restore that state into a fresh kernel, including first-use pandas imports but
+  excluding kernel startup. Verify the recovered dimensions, sum, and list values after timing.
+- **Kernel idle RSS:** memory immediately after the ready handshake, before workload imports.
+- **Kernel RSS after pandas workload:** memory after the mixed calls and construction of the same
+  DataFrame/list used for snapshotting. Both memory measurements include only the isolated user's
+  Python process; raw per-process measurements are retained.
+
+The runtime rows show medians across the 10 independent trials. Batch iteration counts and fixture
+sizes are fixed in `kernel.py`; failures and incomplete output remain failed samples. These are
+subsystem measurements alongside the normal installed CLI benchmarks, not end-to-end tool latency.
 
 The comment shows medians, signed absolute/percentage deltas, successful/attempted counts, and spread.
 `↓` means improvement, bold `↑` means regression, `≈` means no clear change, and `—` means unavailable
 or incomplete. Arrows require a change larger than the metric's provisional absolute/relative floor
 and observed spread. This is a practical noise filter, not a statistical significance test. Inspect
-raw trials before acting on small changes; provider load and caches remain external sources of noise.
+raw trials before acting on small changes; sandbox scheduling and filesystem caches still introduce noise.
 
 ## Lifecycle and costs
 
@@ -89,10 +113,8 @@ older commit cannot overwrite a newer result, including when the newer run has t
 
 Results and logs are retained as GitHub artifacts for 14 days. They include exact source and harness
 SHAs, environment details, installed dependency inventory, transcripts, raw observations, failures,
-and estimated costs. Normalized session usage exposes input, output, and cached tokens; a separate
-reasoning-token count and an authoritative billed cost are unavailable, so neither is fabricated.
-The publisher validates schema, identity, finite numbers, and report size and
-escapes sandbox-provided text.
+and estimated sandbox costs. The publisher validates schema, identity, finite numbers, and report
+size and escapes sandbox-provided text.
 
 The controller stops scheduling work at 20 minutes or its $1 estimated budget target. Every sandbox
 has a 30-minute TTL. Teardown runs in `finally`; the independent completion workflow deletes any
@@ -100,11 +122,9 @@ remaining sandboxes with the exact repository/run/attempt labels, including afte
 Cleanup enumerates all pages before deleting so pagination cannot skip a sandbox.
 
 At the configured list rates, two sandboxes cost about $0.01/minute together. A 10-minute run costs
-about $0.10 in sandbox compute. Twenty prompts at 5,000 input and 250 output tokens each cost about
-$0.325 with the default model's September 2026 catalog rates ($2.50/$15 per million tokens), before
-cache discounts. Actual token usage and sandbox lifetime are recorded. The $1 target is **not** a
-hard billing cap: provider retries without final usage, cancellation latency, and direct-token use
-can exceed estimates. Do not substitute a broad personal account token for the CI inference key.
+about $0.10 in sandbox compute. There are no inference charges. Full sandbox lifetimes are recorded,
+including provisioning, setup, building, measurements, and cleanup. The $1 target is an estimate,
+not a hard billing cap; scheduling and deletion latency can increase the final bill.
 
 ## Local development
 
@@ -118,8 +138,7 @@ uv run --locked python -m unittest discover -s tests -v
 ```
 
 Tests use fake GitHub/SDK responses and terminal streams; they never invoke inference or provision
-sandboxes. A live run is separate and requires explicitly supplied `PRIME_SANDBOX_API_KEY` and
-`PINFERENCE_API_KEY` environment variables:
+sandboxes. A live run is separate and requires only the `PRIME_SANDBOX_API_KEY` environment variable:
 
 ```sh
 uv run --locked cli.py local --base FULL_MAIN_SHA --head FULL_HEAD_SHA --results results/local

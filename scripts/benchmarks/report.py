@@ -17,8 +17,6 @@ def fingerprint(report: Report) -> str:
         "base_sha",
         "head_sha",
         "harness_sha",
-        "model",
-        "price",
         "config",
     }
     data = json.dumps(report.model_dump(include=fields), sort_keys=True, separators=(",", ":"))
@@ -40,11 +38,32 @@ class Definition:
 METRICS = (
     Definition("cold", "Cold startup", 1000, "ms", 0.1, 0.05, "faster", "slower"),
     Definition("warm", "Warm startup", 1000, "ms", 0.1, 0.05, "faster", "slower"),
-    Definition("ttft", "TTFT", 1000, "ms", 0.1, 0.1, "faster", "slower"),
     Definition("install", "Installation", 1, "s", 1, 0.05, "faster", "slower"),
     Definition("bundle", "Compressed release artifacts", 1e-6, "MB", 65536, 0.005, "smaller", "larger"),
     Definition("disk", "Installed footprint", 1e-6, "MB", 1048576, 0.01, "smaller", "larger"),
     Definition("rss", "Idle memory, summed RSS", 1e-6, "MB", 10485760, 0.05, "less memory", "more memory"),
+)
+RUNTIME_METRICS = (
+    Definition("kernel_start", "Python kernel startup", 1000, "ms", 0.005, 0.1, "faster", "slower"),
+    Definition("kernel_exec", "Python cell round trip", 1000, "ms", 0.0001, 0.1, "faster", "slower"),
+    Definition("bash", "Empty bash command", 1000, "ms", 0.001, 0.1, "faster", "slower"),
+    Definition("git_status", "Bash git status", 1000, "ms", 0.001, 0.1, "faster", "slower"),
+    Definition("output", "Bash 32 KiB output", 1000, "ms", 0.001, 0.1, "faster", "slower"),
+    Definition("mixed", "35 cells / 9 shell calls", 1000, "ms", 0.005, 0.1, "faster", "slower"),
+    Definition("interrupt", "Python interrupt to done", 1000, "ms", 0.0005, 0.1, "faster", "slower"),
+    Definition("snapshot", "Python state snapshot", 1000, "ms", 0.001, 0.1, "faster", "slower"),
+    Definition("restore", "Python state restore", 1000, "ms", 0.001, 0.1, "faster", "slower"),
+    Definition("kernel_rss", "Python idle RSS", 1e-6, "MB", 1048576, 0.05, "less memory", "more memory"),
+    Definition(
+        "loaded_rss",
+        "Python RSS after pandas workload",
+        1e-6,
+        "MB",
+        1048576,
+        0.05,
+        "less memory",
+        "more memory",
+    ),
 )
 
 
@@ -84,7 +103,11 @@ def dispersion(samples: list[Observation], definition: Definition) -> str:
 
 def number(value: float, definition: Definition, signed: bool = False) -> str:
     scaled = value * definition.scale
-    precision = 1 if definition.unit == "ms" else 2
+    precision = (
+        3
+        if definition.unit == "ms" and definition.absolute < 0.001
+        else (1 if definition.unit == "ms" else 2)
+    )
     if scaled and abs(scaled) < 10 ** (-precision):
         return f"{scaled:+.2g}" if signed else f"{scaled:.2g}"
     return f"{scaled:+,.{precision}f}" if signed else f"{scaled:,.{precision}f}"
@@ -139,7 +162,17 @@ def render(report: Report) -> str:
         "| Metric | Main | This PR | Change | Change % | Result |",
         "| --- | ---: | ---: | ---: | ---: | --- |",
     ]
-    for definition in METRICS:
+    for definition in (*METRICS, *RUNTIME_METRICS):
+        if definition == RUNTIME_METRICS[0]:
+            lines.extend(
+                [
+                    "",
+                    "**Python runtime**",
+                    "",
+                    "| Metric | Main | This PR | Change | Change % | Result |",
+                    "| --- | ---: | ---: | ---: | ---: | --- |",
+                ]
+            )
         expected = report.config.install_trials if definition.key == "install" else report.config.trials
         if definition.key in ("bundle", "disk"):
             expected = 1
@@ -151,10 +184,8 @@ def render(report: Report) -> str:
         )
         lines.append(f"| {definition.title} | {' | '.join(cells)} |")
     compute = sum(s.estimated_usd for s in report.sandboxes)
-    usage = report.inference
-    cost = compute + usage.estimated_usd
     cost_text = (
-        f"**Run cost: ~${cost:.4f}** — sandbox ~${compute:.4f}; inference ~${usage.estimated_usd:.4f}."
+        f"**Sandbox cost: ~${compute:.4f}** — no inference calls."
         if report.sandboxes
         else "Cost pending or unavailable; sandbox usage has not been collected."
     )
@@ -167,35 +198,37 @@ def render(report: Report) -> str:
         [
             "",
             cost_text,
-            f"Inference: {usage.prompts} prompts, {usage.responses} recorded responses, "
-            f"{usage.input_tokens:,} input / {usage.output_tokens:,} output tokens. "
-            f"{usage.incomplete_prompts} prompts lack complete usage.",
             result_link,
             "",
             "<details><summary>Methodology and samples</summary>",
             "",
             f"Main resolved at {report.started_at.isoformat()}. Harness `{report.harness_sha[:8]}`.",
-            f"Model: {escape(report.model)}; effort: {report.config.effort}; direct Pinference; "
-            f"output limit {report.config.max_output_tokens:,} tokens.",
             f"Linux x64, {report.config.cpu_cores:g} vCPU, {report.config.memory_gb:g} GB RAM, "
             f"{report.config.disk_gb:g} GB disk; region {escape(report.config.region)}.",
             f"Image: `{escape(report.config.image)}`.",
             "Stock tools, skills, daemon, and Python bootstrap enabled; fresh homes and a fixed Git fixture.",
+            "Onboarding is dismissed; the editor starts without a selected model or submitted prompt.",
             "Medians shown. Arrows use provisional thresholds and IQR, not a significance test.",
-            "Cold means stopped Prime processes; OS and provider caches are not flushed.",
-            "TTFT includes model, network, and rendering. Installation excludes build/setup time.",
+            "Cold means stopped Prime processes; OS filesystem caches are not flushed.",
+            "No model requests or credentials. Installation excludes build/setup time.",
             "Installer tarballs use loopback; npm/Python downloads use the network with fresh caches.",
             "Artifact size counts release tarballs; footprint after first use includes registry packages.",
             "MB is decimal. Summed RSS can double-count shared pages; PSS is recorded when available.",
             "Provisioning, setup, and build durations are recorded separately in the raw results.",
-            "Costs use duration and token usage at catalog rates; retries without usage may be missing.",
+            "Kernel probes use the installed JSONL runtime, outside the TUI/TypeScript host.",
+            "Per trial: 50 Python cells, 5 calls per shell case, and one 35-cell mix (9 git status calls).",
+            "Cell/shell values are batch means; other runtime timings are single operations.",
+            "State fixture: a 10,000-row × 8-column integer DataFrame and a 10,000-integer list.",
+            "Restore runs in a fresh kernel, including pandas imports; kernel startup is excluded.",
+            "Kernel RSS covers the isolated Python process; loaded RSS follows the pandas workload.",
+            "Costs estimate full sandbox lifetimes at configured rates, including setup and build.",
             f"Budget target: ${report.config.budget_usd:g}; not a billing cap. Checks are informational.",
             "",
             "| Metric | Main successful/attempted | PR successful/attempted | Main spread | PR spread |",
             "| --- | ---: | ---: | ---: | ---: |",
         ]
     )
-    for definition in METRICS:
+    for definition in (*METRICS, *RUNTIME_METRICS):
         left = report.main.metrics.get(definition.key, [])
         right = report.pr_head.metrics.get(definition.key, [])
         lines.append(

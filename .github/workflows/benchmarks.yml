@@ -50,7 +50,6 @@ jobs:
         run: uv run --locked cli.py resolve --results request
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PINFERENCE_MODEL: ${{ vars.PINFERENCE_BENCHMARK_MODEL }}
       - name: Check contributor trust
         id: vouch
         if: steps.resolve.outputs.needed == 'true'
@@ -111,7 +110,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PRIME_SANDBOX_API_KEY: ${{ secrets.PRIME_SANDBOX_API_KEY }}
-          PINFERENCE_API_KEY: ${{ secrets.PINFERENCE_API_KEY }}
           PRIME_TEAM_ID: ${{ vars.PRIME_BENCHMARK_TEAM_ID }}
       - name: Save benchmark results
         if: always()
