@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -21,6 +22,14 @@ import {
 } from "../src/modes/daemon/sandbox/prime-sandbox-v31-multiplexer.js";
 
 const execFileAsync = promisify(execFile);
+
+function peek(value: unknown): unknown {
+	const runtime: unknown = Reflect.get(globalThis, "Bun");
+	assert(runtime !== null && typeof runtime === "object" && "peek" in runtime);
+	const operation: unknown = runtime.peek;
+	assert(typeof operation === "function");
+	return Reflect.apply(operation, runtime, [value]);
+}
 
 type InboundHandler = (streamRaw: unknown, plaintextRaw: unknown) => void;
 type WireResult = Readonly<{ code: "SENT" | "FAILED" }>;
@@ -310,10 +319,10 @@ describe("factory and dependency validation", () => {
 		);
 		expect(result).toEqual({ code: "INIT_FAILURE" });
 		expect(closes).toBe(1);
-		expect(Bun.peek(closeGate.promise)).toBe(closeGate.promise);
+		expect(peek(closeGate.promise)).toBe(closeGate.promise);
 		closeGate.settle(Object.freeze({ code: "CLOSED" }));
 		await tick();
-		expect(Bun.peek(closeGate.promise)).toEqual({ code: "CLOSED" });
+		expect(peek(closeGate.promise)).toEqual({ code: "CLOSED" });
 		expect(closes).toBe(1);
 	});
 
@@ -1382,7 +1391,7 @@ run();
 		expect(await managerClose).toEqual({ code: "POISONED" });
 		await closeObserver;
 		expect(Array.from(retainedBytes).every((value) => value === 0)).toBe(true);
-		expect(Bun.peek(sendGate.promise)).toBe(sendGate.promise);
+		expect(peek(sendGate.promise)).toBe(sendGate.promise);
 		expect(closes).toBe(1);
 		sendGate.settle(Object.freeze({ code: "SENT" }));
 	});
@@ -1413,8 +1422,8 @@ run();
 		const releasedBytes = sentBytes;
 		if (releasedBytes === null) return;
 		expect(Array.from(releasedBytes).every((value) => value === 0)).toBe(true);
-		expect(Bun.peek(sendGate.promise)).toBe(sendGate.promise);
-		expect(Bun.peek(closeGate.promise)).toBe(closeGate.promise);
+		expect(peek(sendGate.promise)).toBe(sendGate.promise);
+		expect(peek(closeGate.promise)).toBe(closeGate.promise);
 		sendGate.settle(Object.freeze({ code: "SENT" }));
 		closeGate.settle(Object.freeze({ code: "CLOSED" }));
 	});

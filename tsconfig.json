@@ -2,6 +2,7 @@
 	"extends": "./tsconfig.base.json",
 	"compilerOptions": {
 		"noEmit": true,
+		"allowImportingTsExtensions": true,
 		"paths": {
 			"*": ["./*"],
 			"@earendil-works/pi-ai": ["./packages/ai/src/index.ts"],

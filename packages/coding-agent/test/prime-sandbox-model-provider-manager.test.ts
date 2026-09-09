@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { decodeModelReplyBytes, encodeModelRequest } from "../src/modes/daemon/sandbox/prime-sandbox-model-codec.ts";
 import { createModelStreamProviderManager } from "../src/modes/daemon/sandbox/prime-sandbox-model-provider-manager.ts";
 
@@ -695,14 +697,9 @@ await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await
 const result = await manager.shutdown();
 process.stdout.write(JSON.stringify({ code: result.code, calls: shutdownState.calls }));
 `;
-		const child = Bun.spawn(["bun", "-e", script], {
+		const { stdout: output, stderr: errorOutput } = await promisify(execFile)("bun", ["-e", script], {
 			cwd: process.cwd(),
-			stdout: "pipe",
-			stderr: "pipe",
 		});
-		const output = await new Response(child.stdout).text();
-		const errorOutput = await new Response(child.stderr).text();
-		expect(await child.exited).toBe(0);
 		expect(errorOutput).toBe("");
 		expect(output.trim()).toBe('{"code":"POISONED","calls":1}');
 	});
