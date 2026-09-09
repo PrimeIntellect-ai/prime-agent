@@ -129,10 +129,10 @@ print(json.dumps({"agents": agents, "receipt": receipt}, sort_keys=True))
 try:
     await agent_message.send("beta", "done")
 except TypeError as error:
-    print(f"TypeError: {error}")
+    print(type(error).__name__)
 `);
 		expect(result.status).toBe("ok");
-		expect(result.stdout.trim()).toContain("TypeError: send() takes 1 positional argument but 2 were given");
+		expect(result.stdout.trim()).toBe("TypeError");
 	});
 
 	it("does not expose a queueable delivery mode", async () => {

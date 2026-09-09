@@ -203,8 +203,12 @@ describe("agent session bus", () => {
 			sendAgentMessage,
 		});
 
-		for (const target of ["all", "reviewer"]) {
-			await expect(handlers["agent_message.send"]!({ target, message: "status" })).rejects.toThrow(
+		for (const payload of [
+			{ target: "all", message: "status" },
+			{ target: "reviewer", message: "status" },
+			{ target: "all", message: undefined },
+		]) {
+			await expect(handlers["agent_message.send"]!(payload)).rejects.toThrow(
 				"agent_message.send no longer takes a target or broadcast_message",
 			);
 		}

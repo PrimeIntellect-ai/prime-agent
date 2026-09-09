@@ -543,15 +543,15 @@ export function createAgentMessageHostHandlers(
 			return (await controller.roster()) as unknown as Record<string, unknown>;
 		},
 		"agent_message.send": async (payload) => {
-			if (typeof payload.message !== "string") {
-				throw new Error("agent_message.send message must be a string");
-			}
 			if (payload.target !== undefined) {
 				throw new Error(
 					"agent_message.send no longer takes a target or broadcast_message; broadcasting was removed. " +
 						"Restart the Python kernel to load the current agent-message skill, then call " +
 						"send(message, receiver_role=..., receiver_name=...).",
 				);
+			}
+			if (typeof payload.message !== "string") {
+				throw new Error("agent_message.send message must be a string");
 			}
 			const role = payload.receiver_role;
 			if (role !== "parent" && role !== "sibling" && role !== "child") {
