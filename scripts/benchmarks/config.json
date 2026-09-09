@@ -6,7 +6,7 @@
   "disk_gb": 20,
   "trials": 10,
   "install_trials": 3,
-  "debounce_seconds": 60,
+  "debounce_seconds": 2,
   "timeout_seconds": 1200,
   "ttl_minutes": 30,
   "budget_usd": 1,

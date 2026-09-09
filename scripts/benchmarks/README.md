@@ -1,7 +1,7 @@
 # PR performance benchmarks
 
 Each push to an open, vouched PR starts an informational Prime Agent benchmark. Multiple commits in
-one push produce one run for the final head. Draft PRs are included. A 60-second debounce and
+one push produce one run for the final head. Draft PRs are included. A two-second debounce and
 per-PR cancellation avoid finishing obsolete runs. `workflow_dispatch` reruns an open PR by number.
 Identical automatic requests reuse the completed comment when both SHAs, harness, model, prices, and
 configuration match. Manual dispatch and GitHub reruns force fresh measurements. Unvouched authors
