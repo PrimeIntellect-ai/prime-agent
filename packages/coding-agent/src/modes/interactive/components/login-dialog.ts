@@ -1,4 +1,3 @@
-import { win32 } from "node:path";
 import { getOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import {
 	type Component,
@@ -13,7 +12,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
-import { execFileHidden } from "../../../utils/child-process.js";
+import { openUrlInBrowser, sanitizeUrlForDisplay, validateBrowserUrl } from "../../../utils/browser-url.js";
 import { copyToClipboard } from "../../../utils/clipboard.js";
 import { theme } from "../theme/theme.js";
 import { formatKeyText, keyHint } from "./keybinding-hints.js";
@@ -152,17 +151,31 @@ export class LoginDialogComponent extends Container implements Focusable {
 	}
 
 	/**
-	 * Called by onAuth callback - show URL and optional instructions
+	 * Called by onAuth callback - show URL and optional instructions. Only an
+	 * http(s) URL is opened or rendered as a hyperlink; anything else is shown as
+	 * sanitized text so a hostile string can never reach the OS opener or terminal.
 	 */
 	showAuth(url: string, instructions?: string): void {
 		this.startContent();
-		this.authUrl = url;
+		const browserUrl = validateBrowserUrl(url);
+		this.authUrl = browserUrl;
 		this.addSectionTitle("Browser sign-in");
-		this.addMutedText("The sign-in page should already be opening. If it did not open, use the link below.");
-		this.contentContainer.addChild(new Spacer(1));
-		this.addLabel("Sign-in link");
-		const linkedUrl = getCapabilities().hyperlinks ? `\x1b]8;;${url}\x07${url}\x1b]8;;\x07` : url;
-		this.contentContainer.addChild(new Text(theme.fg("text", linkedUrl), 0, 0));
+		if (browserUrl) {
+			this.addMutedText("The sign-in page should already be opening. If it did not open, use the link below.");
+			this.contentContainer.addChild(new Spacer(1));
+			this.addLabel("Sign-in link");
+			const linkedUrl = getCapabilities().hyperlinks
+				? `\x1b]8;;${browserUrl}\x07${browserUrl}\x1b]8;;\x07`
+				: browserUrl;
+			this.contentContainer.addChild(new Text(theme.fg("text", linkedUrl), 0, 0));
+		} else {
+			this.addMutedText(
+				"The sign-in link was not opened because it is not a valid http(s) URL. Check the provider configuration.",
+			);
+			this.contentContainer.addChild(new Spacer(1));
+			this.addLabel("Sign-in link (not opened)");
+			this.contentContainer.addChild(new Text(theme.fg("text", sanitizeUrlForDisplay(url)), 0, 0));
+		}
 		this.authActions = new Text(this.getAuthActionsText(), 0, 0);
 		this.contentContainer.addChild(this.authActions);
 
@@ -171,18 +184,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.addInstructions(instructions);
 		}
 
-		// Try to open browser
-		const [command, ...args] =
-			process.platform === "darwin"
-				? ["open", url]
-				: process.platform === "win32"
-					? [
-							win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "rundll32.exe"),
-							"url.dll,FileProtocolHandler",
-							url,
-						]
-					: ["xdg-open", url];
-		execFileHidden(command, args, {}, () => {});
+		if (browserUrl) openUrlInBrowser(browserUrl);
 
 		this.tui.requestRender();
 	}
@@ -349,7 +351,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			? configuredCopyKeys.filter((key) => !isTextEntryKeybinding(key))
 			: configuredCopyKeys.slice(0, 1);
 		const copyHint =
-			copyKeys.length > 0
+			this.authUrl && copyKeys.length > 0
 				? theme.fg("dim", formatKeyText(copyKeys.join("/"))) +
 					theme.fg("muted", ` ${status === "failed" ? "retry" : "copy"}`)
 				: undefined;

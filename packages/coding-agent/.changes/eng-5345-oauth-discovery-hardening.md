@@ -1,0 +1,2 @@
+- Added `allowPrivateNetwork` (`mcp add --allow-private-network`) for OAuth MCP servers on private or loopback addresses, which discovery now rejects by default.
+- Fixed the login dialog launching the system browser opener with non-http(s) or control-character sign-in links; such links are now shown as text with a message instead.

@@ -72,6 +72,41 @@ describe("McpManager", () => {
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
 	});
 
+	it("passes allowPrivateNetwork through to the user server's OAuth provider", async () => {
+		const requested: string[] = [];
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async (input: unknown): Promise<Response> => {
+			requested.push(typeof input === "string" ? input : String(input));
+			return new Response("", { status: 404 });
+		}) as typeof fetch;
+		try {
+			const attempt = async (config: McpServerConfig): Promise<string> => {
+				resetOAuthProviders();
+				new McpManager({ authStorage, getUserServers: () => ({ internal: config }) });
+				const provider = getOAuthProvider("mcp:internal");
+				if (!provider) throw new Error("provider not registered");
+				return provider.login({ onAuth: () => {}, onPrompt: async () => "" }).then(
+					() => "unexpected success",
+					(error: Error) => error.message,
+				);
+			};
+			const denied = await attempt({ type: "http", url: "https://10.0.0.7/mcp", oauth: true });
+			expect(denied).toMatch(/private, loopback or local-network host/);
+			expect(requested).toEqual([]);
+
+			const allowed = await attempt({
+				type: "http",
+				url: "https://10.0.0.7/mcp",
+				oauth: true,
+				allowPrivateNetwork: true,
+			});
+			expect(allowed).toMatch(/Could not discover OAuth metadata/);
+			expect(requested).toContain("https://10.0.0.7/mcp");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
 	it("exposes only mcp.refresh when no interactive login is wired", async () => {
 		const manager = new McpManager({ authStorage });
 		const handlers = manager.hostHandlers();

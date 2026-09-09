@@ -99,7 +99,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["mcp", "add"],
-		usage: "mcp add <name> --url <url> [--bearer-token-env-var <env>|--oauth] [--force]",
+		usage: "mcp add <name> --url <url> [--bearer-token-env-var <env>|--oauth [--allow-private-network]] [--force]",
 		summary: "Add an HTTP or stdio MCP server",
 		description: "For stdio, use: mcp add <name> [--cwd <dir>] [--env CHILD=SOURCE] -- <command> [args...]",
 	},
