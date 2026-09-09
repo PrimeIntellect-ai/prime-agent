@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
 import type { SessionBeforeRefineEvent } from "../../src/core/extensions/index.js";
 import { loadHarnessState, type RefinementProposal } from "../../src/core/refinement/index.js";
-import { createHarness, type Harness } from "./harness.js";
+import { createHarness, getMessageText, type Harness } from "./harness.js";
 
 describe("AgentSession session_before_refine extension hook", () => {
 	const harnesses: Harness[] = [];
@@ -49,6 +49,12 @@ describe("AgentSession session_before_refine extension hook", () => {
 		expect(result.summary).toBe("extension summary");
 		expect(result.appliedEdits).toHaveLength(1);
 		expect(result.appliedEdits[0]?.applied).toBe(true);
+		// The notice reaches context without starting a turn of its own.
+		const notice = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "refinement_notice",
+		);
+		expect(getMessageText(notice)).toMatch(/^\[user-refinement\]\n\n/);
+		expect(harness.session.isStreaming).toBe(false);
 		expect(events).toHaveLength(1);
 		expect(events[0]?.preparation.trigger).toBe("manual");
 		expect(events[0]?.preparation.scope).toBe("local");
@@ -87,6 +93,12 @@ describe("AgentSession session_before_refine extension hook", () => {
 
 		expect(result.appliedEdits[0]?.applied).toBe(false);
 		expect(result.appliedEdits[0]?.error).toContain("requires id");
+		// Zero applied edits emit no refinement notice.
+		expect(
+			harness.session.messages.some(
+				(message) => message.role === "custom" && message.customType === "refinement_notice",
+			),
+		).toBe(false);
 	});
 
 	it("normalizes malformed runtime extension proposals before applying them", async () => {
@@ -125,6 +137,50 @@ describe("AgentSession session_before_refine extension hook", () => {
 			}
 			expect(harness.eventsOfType("refine_failed")).toHaveLength(0);
 		}
+	});
+
+	it("labels auto- and self-triggered refinements in the notice", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			extensionFactories: [
+				(pi) => {
+					let round = 0;
+					pi.on("session_before_refine", async () => {
+						round += 1;
+						return {
+							proposal: {
+								summary: "auto summary",
+								rationale: "auto rationale",
+								expectedOutcome: "auto outcome",
+								edits: [
+									{
+										action: "create" as const,
+										kind: "memory" as const,
+										title: `Auto memory ${round}`,
+										content: "auto",
+									},
+								],
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([]);
+		await harness.session.prompt("hello").catch(() => {});
+
+		await harness.session.refine({ instructions: "capture" }, { trigger: "auto" });
+
+		const notices = () =>
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "refinement_notice",
+			);
+		expect(getMessageText(notices().at(-1))).toMatch(/^\[auto-refinement\]\n\n/);
+
+		// Agent-callable refine.run flows carry the explicit self source.
+		await harness.session.refine({ instructions: "capture" }, { source: "self" });
+		expect(getMessageText(notices().at(-1))).toMatch(/^\[self-refinement\]\n\n/);
 	});
 
 	it("skips the refinement round when an extension returns skip", async () => {

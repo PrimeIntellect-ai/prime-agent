@@ -1,1 +1,0 @@
-- Fixed assistant Markdown file links to open relative to the session's working directory, including Windows drive paths ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).

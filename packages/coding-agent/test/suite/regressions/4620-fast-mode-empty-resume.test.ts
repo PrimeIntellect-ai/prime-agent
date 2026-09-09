@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
 import { createTestResourceLoader } from "../../utilities.js";
-import { createHarness, type Harness } from "../harness.js";
+import { conversationMessages, createHarness, type Harness } from "../harness.js";
 
 describe("ENG-4620 fast mode empty resume", () => {
 	let harness: Harness | undefined;
@@ -43,7 +43,7 @@ describe("ENG-4620 fast mode empty resume", () => {
 		const { session } = await createSession();
 		sessions.push(session);
 		session.setServiceTier("priority");
-		expect(session.messages).toHaveLength(0);
+		expect(conversationMessages(session)).toHaveLength(0);
 		session.dispose();
 
 		const { session: resumedSession } = await createSession();

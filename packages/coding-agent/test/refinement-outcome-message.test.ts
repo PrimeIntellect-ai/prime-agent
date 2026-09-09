@@ -2,7 +2,12 @@ import { setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
-import { convertToLlm, createRefinementOutcomeMessage, isRefinementOutcomeMessage } from "../src/core/messages.js";
+import {
+	convertToLlm,
+	createRefinementNoticeMessage,
+	createRefinementOutcomeMessage,
+	isRefinementOutcomeMessage,
+} from "../src/core/messages.js";
 import type { HarnessEntry, RefinementResult } from "../src/core/refinement/refinement.js";
 import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
 import { RefinementOutcomeMessageComponent } from "../src/modes/interactive/components/refinement-outcome-message.js";
@@ -49,6 +54,14 @@ function result(): RefinementResult {
 		harnessStatePath: "/tmp/harness/state.json",
 		scope: "local",
 	};
+}
+
+function getLlmText(message: unknown): string {
+	const content = (message as { content: Array<{ type: string; text?: string }> }).content;
+	return content
+		.filter((part) => part.type === "text")
+		.map((part) => part.text)
+		.join("\n");
 }
 
 function rendered(component: RefinementOutcomeMessageComponent): string {
@@ -147,5 +160,26 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(isRefinementOutcomeMessage(message)).toBe(true);
 		expect(convertToLlm([message])).toEqual([]);
 		expect(isRefinementOutcomeMessage({ ...message, details: { ...message.details, edits: [{}] } })).toBe(false);
+	});
+
+	test("refinement notices pass through to the model while outcomes stay filtered", () => {
+		const outcome = createRefinementOutcomeMessage(result());
+		const notice = createRefinementNoticeMessage(result(), "self");
+
+		const llm = convertToLlm([outcome, notice]);
+		expect(llm).toHaveLength(1);
+		expect(llm[0]?.role).toBe("user");
+		const text = getLlmText(llm[0]);
+		expect(text).toMatch(/^\[self-refinement\]\n\n/);
+		expect(text).toContain("Added local guidance to make conversational responses rhyme.");
+		expect(text).toContain(
+			"- create prompt [local:rhyme-response-guidance] Rhyme response guidance: Make conversational responses rhyme.",
+		);
+		expect(getLlmText(convertToLlm([createRefinementNoticeMessage(result(), "auto")])[0])).toMatch(
+			/^\[auto-refinement\]/,
+		);
+		expect(getLlmText(convertToLlm([createRefinementNoticeMessage(result(), "user")])[0])).toMatch(
+			/^\[user-refinement\]/,
+		);
 	});
 });

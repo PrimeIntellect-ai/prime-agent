@@ -13,7 +13,7 @@ import {
 	isInjectedPromptMessage,
 } from "../../../src/modes/interactive/components/injected-prompt-message.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
-import { createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
+import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type StateRestoreHost = {
 	_onIpythonStateRestored(result: RestoreResult): void;
@@ -154,7 +154,7 @@ describe("ENG-4530 IPython state restore message", () => {
 		expect(
 			queued?.payload.kind === "turn" ? queued.payload.records.filter((record) => record.role === "prefix") : [],
 		).toEqual([]);
-		expect(harness.session.messages).toEqual([
+		expect(conversationMessages(harness.session)).toEqual([
 			expect.objectContaining({ customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE }),
 		]);
 	});

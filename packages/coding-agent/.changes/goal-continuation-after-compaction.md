@@ -1,0 +1,1 @@
+- Fixed active goals stalling after manual compaction.
