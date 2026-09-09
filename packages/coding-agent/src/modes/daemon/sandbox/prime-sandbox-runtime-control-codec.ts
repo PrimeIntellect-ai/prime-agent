@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
-import { types } from "node:util";
-import type { AgentSessionMessageEndpoint, AgentSessionMessagePayload } from "../../../core/agent-messages.js";
+import { type TextDecoder as NodeTextDecoder, type TextEncoder as NodeTextEncoder, types } from "node:util";
+import type {
+	AgentSessionMessageEndpoint,
+	AgentSessionMessagePayload,
+	AgentSessionMessageSender,
+} from "../../../core/agent-messages.js";
 import type {
 	HostedRlmAbortResult,
 	HostedRlmAdmissionResult,
@@ -27,8 +31,8 @@ const ID_PATTERN: RegExp = /^[a-zA-Z0-9_./:-]{1,128}$/;
 const PRINTABLE_ASCII_PATTERN: RegExp = /^[!-~]{1,128}$/;
 const HEX64_PATTERN: RegExp = /^[0-9a-fA-F]{64}$/;
 
-const TEXT_DECODER_FATAL: TextDecoder = new TextDecoder("utf-8", { fatal: true });
-const TEXT_ENCODER: TextEncoder = new TextEncoder();
+const TEXT_DECODER_FATAL: NodeTextDecoder = new TextDecoder("utf-8", { fatal: true });
+const TEXT_ENCODER: NodeTextEncoder = new TextEncoder();
 
 // ---------- captured intrinsics ----------
 
@@ -38,6 +42,7 @@ const _getOwnPropertyDescriptors: typeof Object.getOwnPropertyDescriptors = Obje
 const _hasOwn: typeof Object.hasOwn = Object.hasOwn;
 const _keys: typeof Object.keys = Object.keys;
 const _freeze: typeof Object.freeze = Object.freeze;
+const _assign: typeof Object.assign = Object.assign;
 const _is: typeof Object.is = Object.is;
 const _isSafeInteger: typeof Number.isSafeInteger = Number.isSafeInteger;
 const _isProxy: (value: object) => boolean = types.isProxy;
@@ -551,8 +556,9 @@ function validateTaskResult(raw: unknown): HostedRlmTaskResult | null {
 	const hasUsage = _hasOwn(record, "usage");
 	let parsedUsage: Readonly<{ inputTokens: number; outputTokens: number }> | undefined;
 	if (hasUsage) {
-		parsedUsage = validateUsage(record.usage);
-		if (parsedUsage === null) return null;
+		const candidateUsage = validateUsage(record.usage);
+		if (candidateUsage === null) return null;
+		parsedUsage = candidateUsage;
 	}
 	const hasLastCommittedRequestId = _hasOwn(record, "lastCommittedRequestId");
 	let lastCommittedRequestId: string | undefined;
@@ -592,7 +598,15 @@ function completedResult(
 	parsedUsage: Readonly<{ inputTokens: number; outputTokens: number }> | undefined,
 	lastCommittedRequestId: string | undefined,
 ): HostedRlmTaskResult {
-	const result: Record<string, unknown> = { status: "completed", durationMs, parentReplyCount, toolUseCount };
+	const result: {
+		status: "completed";
+		durationMs: number;
+		parentReplyCount: number;
+		toolUseCount: number;
+		answerPreview?: string;
+		usage?: Readonly<{ inputTokens: number; outputTokens: number }>;
+		lastCommittedRequestId?: string;
+	} = { status: "completed", durationMs, parentReplyCount, toolUseCount };
 	if (answerPreview !== undefined) result.answerPreview = answerPreview;
 	if (parsedUsage !== undefined) result.usage = parsedUsage;
 	if (lastCommittedRequestId !== undefined) result.lastCommittedRequestId = lastCommittedRequestId;
@@ -628,7 +642,7 @@ function errorResult(
 	durationMs: number,
 	parentReplyCount: number,
 	toolUseCount: number,
-	errorCode: unknown,
+	errorCode: "TIMEOUT" | "ADMISSION_FAILED" | "INTERNAL_ERROR",
 	parsedUsage: Readonly<{ inputTokens: number; outputTokens: number }> | undefined,
 ): HostedRlmTaskResult {
 	if (parsedUsage !== undefined) {
@@ -690,10 +704,19 @@ function validateObservation(raw: unknown): HostedRlmObservationSnapshot | null 
 	const hasUsage = _hasOwn(record, "usage");
 	let parsedUsage: Readonly<{ inputTokens: number; outputTokens: number }> | undefined;
 	if (hasUsage) {
-		parsedUsage = validateUsage(record.usage);
-		if (parsedUsage === null) return null;
+		const candidateUsage = validateUsage(record.usage);
+		if (candidateUsage === null) return null;
+		parsedUsage = candidateUsage;
 	}
-	const result: Record<string, unknown> = {
+	const result: {
+		status: HostedRlmRuntimeStatus;
+		messageCount: number;
+		toolUseCount: number;
+		agentRunning: boolean;
+		parentReplyCount: number;
+		answerPreview?: string;
+		usage?: Readonly<{ inputTokens: number; outputTokens: number }>;
+	} = {
 		status,
 		messageCount,
 		toolUseCount,
@@ -752,7 +775,7 @@ function encodeSuccess(bytes: Uint8Array): LifecycleEncodeResult {
 	return _freeze({ ok: true, bytes });
 }
 
-function encodeJsonOnly(value: Record<string, unknown>): Uint8Array {
+function encodeJsonOnly(value: Record<string, unknown> | HostedRlmObservationSnapshot): Uint8Array {
 	const text: string = _JSON_stringify(value);
 	return _encode(text);
 }
@@ -924,7 +947,7 @@ const SENDER_KEYS: ReadonlyArray<string> = _freeze([
 ]);
 const PAYLOAD_KEYS: ReadonlyArray<string> = _freeze(["id", "source", "target", "from", "fromRelationship", "message"]);
 
-const AGENT_MESSAGE_SOURCE_LITERAL: string = "agent_message";
+const AGENT_MESSAGE_SOURCE_LITERAL: "agent_message" = "agent_message";
 
 function validateTargetEndpoint(raw: unknown): AgentSessionMessageEndpoint | undefined {
 	if (!isRecord(raw)) return undefined;
@@ -939,21 +962,33 @@ function validateTargetEndpoint(raw: unknown): AgentSessionMessageEndpoint | und
 	}
 	if (!_hasOwn(out, "activeSessionId") || !_hasOwn(out, "sessionId")) return undefined;
 	if (!boundedIdentifier(out.activeSessionId) || !boundedIdentifier(out.sessionId)) return undefined;
-	if (_hasOwn(out, "sessionName") && !boundedIdentifier(out.sessionName)) return undefined;
+	let sessionName: string | undefined;
+	if (_hasOwn(out, "sessionName")) {
+		const candidate: unknown = out.sessionName;
+		if (!boundedIdentifier(candidate)) return undefined;
+		sessionName = candidate;
+	}
+	let runtimeKind: "top-level" | "subagent" | undefined;
 	if (_hasOwn(out, "runtimeKind")) {
 		const rk: unknown = out.runtimeKind;
 		if (rk !== "top-level" && rk !== "subagent") return undefined;
+		runtimeKind = rk;
 	}
-	const endpoint: Record<string, unknown> = {
+	const endpoint: {
+		activeSessionId: string;
+		sessionId: string;
+		sessionName?: string;
+		runtimeKind?: "top-level" | "subagent";
+	} = {
 		activeSessionId: out.activeSessionId,
 		sessionId: out.sessionId,
 	};
-	if (_hasOwn(out, "sessionName")) endpoint.sessionName = out.sessionName;
-	if (_hasOwn(out, "runtimeKind")) endpoint.runtimeKind = out.runtimeKind;
+	if (sessionName !== undefined) endpoint.sessionName = sessionName;
+	if (runtimeKind !== undefined) endpoint.runtimeKind = runtimeKind;
 	return _freeze(endpoint);
 }
 
-function validateSender(raw: unknown): Record<string, unknown> | undefined {
+function validateSender(raw: unknown): AgentSessionMessageSender | undefined {
 	if (!isRecord(raw)) return undefined;
 	const ct: DescriptorTable | undefined = captureDescriptors(raw);
 	if (ct === undefined) return undefined;
@@ -964,18 +999,31 @@ function validateSender(raw: unknown): Record<string, unknown> | undefined {
 		if (SENDER_KEYS.indexOf(key) < 0) return undefined;
 		out[key] = getValue(ct.table, key);
 	}
-	if (_hasOwn(out, "activeSessionId") && !boundedIdentifier(out.activeSessionId)) return undefined;
-	if (_hasOwn(out, "sessionId") && !boundedIdentifier(out.sessionId)) return undefined;
-	if (_hasOwn(out, "sessionName") && !boundedIdentifier(out.sessionName)) return undefined;
+	const sender: AgentSessionMessageSender = {};
+	if (_hasOwn(out, "activeSessionId")) {
+		const candidate: unknown = out.activeSessionId;
+		if (!boundedIdentifier(candidate)) return undefined;
+		sender.activeSessionId = candidate;
+	}
+	if (_hasOwn(out, "sessionId")) {
+		const candidate: unknown = out.sessionId;
+		if (!boundedIdentifier(candidate)) return undefined;
+		sender.sessionId = candidate;
+	}
+	if (_hasOwn(out, "sessionName")) {
+		const candidate: unknown = out.sessionName;
+		if (!boundedIdentifier(candidate)) return undefined;
+		sender.sessionName = candidate;
+	}
 	if (_hasOwn(out, "runtimeKind")) {
 		const rk: unknown = out.runtimeKind;
 		if (rk !== "top-level" && rk !== "subagent") return undefined;
+		sender.runtimeKind = rk;
 	}
-	if (_hasOwn(out, "clientId") && !boundedIdentifier(out.clientId)) return undefined;
-	const sender: Record<string, unknown> = {};
-	for (let i: number = 0; i < SENDER_KEYS.length; i++) {
-		const key: string = SENDER_KEYS[i];
-		if (_hasOwn(out, key)) sender[key] = out[key];
+	if (_hasOwn(out, "clientId")) {
+		const candidate: unknown = out.clientId;
+		if (!boundedIdentifier(candidate)) return undefined;
+		sender.clientId = candidate;
 	}
 	return sender;
 }
@@ -1001,12 +1049,12 @@ function validateDeliverMessageBodyInput(raw: unknown): AgentSessionMessagePaylo
 	if (!_hasOwn(payloadRecord, "target")) return undefined;
 	const target = validateTargetEndpoint(payloadRecord.target);
 	if (target === undefined) return undefined;
-	let sender: Record<string, unknown> | undefined;
+	let sender: AgentSessionMessageSender | undefined;
 	if (_hasOwn(payloadRecord, "from")) {
 		sender = validateSender(payloadRecord.from);
 		if (sender === undefined) return undefined;
 	}
-	let fromRelationship: string | undefined;
+	let fromRelationship: "parent" | "sibling" | "child" | undefined;
 	if (_hasOwn(payloadRecord, "fromRelationship")) {
 		const fr: unknown = payloadRecord.fromRelationship;
 		if (fr !== "parent" && fr !== "sibling" && fr !== "child") return undefined;
@@ -1017,15 +1065,21 @@ function validateDeliverMessageBodyInput(raw: unknown): AgentSessionMessagePaylo
 	if (typeof message !== "string" || message.length < 1) return undefined;
 	if (!isScalarString(message)) return undefined;
 	if (utf8ByteCount(message) > MAX_MESSAGE_UTF8_BYTES) return undefined;
-	const canonical: Record<string, unknown> = {
+	const canonical: {
+		id: string;
+		source: "agent_message";
+		message?: string;
+		from?: AgentSessionMessageSender;
+		fromRelationship?: "parent" | "sibling" | "child";
+		target: AgentSessionMessageEndpoint;
+	} = {
 		id: id,
 		source: AGENT_MESSAGE_SOURCE_LITERAL,
 		target,
 	};
 	if (sender !== undefined) canonical.from = sender;
 	if (fromRelationship !== undefined) canonical.fromRelationship = fromRelationship;
-	canonical.message = message;
-	return _freeze(canonical);
+	return _freeze(_assign(canonical, { message }));
 }
 
 // ---------- encodeLifecycleRecord ----------
@@ -1052,7 +1106,7 @@ export function encodeLifecycleRecord(input: unknown): LifecycleEncodeResult {
 		const inputBody = validateStartBodyInput(bodyRaw);
 		if (inputBody === undefined) return FAIL_INPUT_INVALID;
 		const body = encodeStartBody(inputBody);
-		const bytes: Uint8Array = encodeEnvelope(identity, opStr, body);
+		const bytes = encodeEnvelope(identity, opStr, body);
 		if (bytes === undefined) return FAIL_INPUT_INVALID;
 		if (bytes.byteLength > MAX_LIFECYCLE_PAYLOAD) return FAIL_BOUNDS_EXCEEDED;
 		return encodeSuccess(bytes);
@@ -1158,7 +1212,15 @@ export function decodeLifecycleRecord(input: unknown): LifecycleDecodeRecordResu
 			const canonicalBytes = makeCanonicalJson(canonical);
 			if (!bytesEqual(canonicalBytes, buf)) return fail(FAIL_RECORD_CANONICAL_MISMATCH);
 			zeroBuf();
-			const record: Record<string, unknown> = {
+			const record: {
+				ok: true;
+				op: "START";
+				identity: HostedRlmRuntimeIdentity;
+				prompt: string;
+				promptSha256: string;
+				spawnCode?: string;
+				spawnCodeSha256?: string;
+			} = {
 				ok: true,
 				op: "START",
 				identity,
