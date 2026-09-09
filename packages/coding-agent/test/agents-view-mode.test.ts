@@ -803,7 +803,12 @@ describe("AgentsViewMode", () => {
 			expect(parentLine).not.toContain("$0.42");
 			// Token scope matches the cost column: own plus descendants.
 			expect(parentLine).toContain("↑13k ↓1.3k");
-			expect(savedLine).toContain("↑900 ↓80");
+			expect(savedLine).toContain("↑900");
+			// Each legend label right-aligns exactly over its value sub-column.
+			const legend = stripAnsi(buildCompactAgentsViewLayout(rows, 120).legend);
+			expect(legend.indexOf("↑in") + "↑in".length).toBe(parentLine.indexOf("↑13k") + "↑13k".length);
+			expect(legend.indexOf("↓out") + "↓out".length).toBe(parentLine.indexOf("↓1.3k") + "↓1.3k".length);
+			expect(legend.indexOf("↓out") + "↓out".length).toBe(savedLine.indexOf("↓80") + "↓80".length);
 			expect(parentLine).toMatch(/2m\s*$/);
 			expect(parentLine.indexOf("$1.10") + "$1.10".length).toBe(savedLine.indexOf("$123.45") + "$123.45".length);
 			// Shrink order: tokens drop before cost and age on narrow terminals.
@@ -828,7 +833,7 @@ describe("AgentsViewMode", () => {
 			]);
 			expect(stripAnsi(buildCompactAgentsViewLayout(longModelRows, 80).legend)).not.toContain("↑in");
 			expect(stripAnsi(buildCompactAgentsViewLayout(longModelRows, 80).legend)).toContain("Cost");
-			expect(stripAnsi(buildCompactAgentsViewLayout(longModelRows, 120).legend)).toContain("↑in ↓out");
+			expect(stripAnsi(buildCompactAgentsViewLayout(longModelRows, 120).legend)).toMatch(/↑in\s+↓out/);
 		} finally {
 			stopThemeWatcher();
 		}

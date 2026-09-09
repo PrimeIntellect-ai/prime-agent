@@ -2825,15 +2825,23 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const entries = sessions.map((row) => ({
 		identity: row.identity,
 		// Same scope as the cost column: own plus every descendant's tokens.
-		tokens: `↑${formatTokenCount(row.recursiveInputTokens)} ↓${formatTokenCount(row.recursiveOutputTokens)}`,
+		tokensIn: `↑${formatTokenCount(row.recursiveInputTokens)}`,
+		tokensOut: `↓${formatTokenCount(row.recursiveOutputTokens)}`,
 		cost: `$${row.recursiveCost.toFixed(2)}`,
 		age: formatSessionDuration(row.summary),
 	}));
-	const tokensLabel = "↑in ↓out";
-	const tokensWidth = entries.reduce(
-		(size, entry) => Math.max(size, visibleWidth(entry.tokens)),
-		visibleWidth(tokensLabel),
+	// Independent in/out sub-columns so each label sits over its value group.
+	const tokensInLabel = "↑in";
+	const tokensOutLabel = "↓out";
+	const tokensInWidth = entries.reduce(
+		(size, entry) => Math.max(size, visibleWidth(entry.tokensIn)),
+		visibleWidth(tokensInLabel),
 	);
+	const tokensOutWidth = entries.reduce(
+		(size, entry) => Math.max(size, visibleWidth(entry.tokensOut)),
+		visibleWidth(tokensOutLabel),
+	);
+	const tokensWidth = tokensInWidth + 1 + tokensOutWidth;
 	const costWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.cost)), 4);
 	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
 	const desiredModelWidth = sessions.reduce(
@@ -2849,14 +2857,16 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
-	const detailLine = (tokens: string, cost: string, age: string) =>
-		`${showTokens ? `${padCellStart(tokens, tokensWidth)}  ` : ""}${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
+	const detailLine = (tokensIn: string, tokensOut: string, cost: string, age: string) =>
+		`${showTokens ? `${padCellStart(tokensIn, tokensInWidth)} ${padCellStart(tokensOut, tokensOutWidth)}  ` : ""}${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
 	const headings = [formatTableCell("Session", nameWidth), formatTableCell("Model", modelWidth)];
 	if (activityWidth > 0) headings.push(formatTableCell("Activity", activityWidth));
-	headings.push(detailLine(tokensLabel, "Cost", "Age"));
+	headings.push(detailLine(tokensInLabel, tokensOutLabel, "Cost", "Age"));
 	return {
 		legend: formatTableCell(headings.join("  "), width),
-		details: new Map(entries.map((entry) => [entry.identity, detailLine(entry.tokens, entry.cost, entry.age)])),
+		details: new Map(
+			entries.map((entry) => [entry.identity, detailLine(entry.tokensIn, entry.tokensOut, entry.cost, entry.age)]),
+		),
 		nameWidth,
 		modelWidth,
 		activityWidth,
