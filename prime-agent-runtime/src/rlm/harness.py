@@ -25,7 +25,6 @@ _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _REMOVED_WRAPPER_KINDS: dict[str, HarnessKind] = {
-    "memory": "memory",
     "prompt_note": "prompt",
     "skill": "skill",
     "subagent": "subagent",
@@ -54,6 +53,8 @@ def _agent_dir() -> Path:
 
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
     extra = dict(extra or {})
+    if "path" in extra:
+        raise TypeError("path was renamed to topic; pass topic=")
     if "global" in extra:
         value = extra.pop("global")
         if not isinstance(value, bool):
@@ -490,7 +491,7 @@ class HarnessState:
             records.extend(self.entries[current_kind].values())
         return sorted(records, key=lambda entry: (entry.kind, entry.topic, entry.title, entry.id))
 
-    def create(
+    def create_memory(
         self,
         title: str,
         content: str,
@@ -506,16 +507,17 @@ class HarnessState:
     ) -> HarnessEntry:
         """Create a harness entry; fails when the id already exists.
 
-        ``kind`` defaults to "memory" because that is the kind models write in
-        practice. ``reference`` and ``arguments`` describe a skill's Python call
-        contract and are rejected for other kinds. ``topic`` groups entries and
-        defaults to "policy" for prompt notes and "general" otherwise.
+        Prompt notes, skills, and subagent specs are subtypes of memory, so one
+        method with ``kind`` covers them all. ``reference`` and ``arguments``
+        describe a skill's Python call contract and are rejected for other kinds.
+        ``topic`` groups entries and defaults to "policy" for prompt notes and
+        "general" otherwise; it was named ``path`` before.
         """
         self._require_kind(kind)
         reference = _validate_kind_extras(kind, reference, arguments, required=True)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
-            return target.create(
+            return target.create_memory(
                 title,
                 content,
                 kind=kind,
@@ -541,7 +543,7 @@ class HarnessState:
             metadata=metadata,
         )
 
-    def update(
+    def update_memory(
         self,
         id: str,
         title: str,
@@ -560,7 +562,7 @@ class HarnessState:
         reference = _validate_kind_extras(kind, reference, arguments, required=False)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
-            return target.update(
+            return target.update_memory(
                 id,
                 title,
                 content,
@@ -585,12 +587,12 @@ class HarnessState:
             metadata=metadata,
         )
 
-    def delete(self, id: str, *, kind: HarnessKind = "memory", global_: bool = False, **kwargs: Any) -> bool:
+    def delete_memory(self, id: str, *, kind: HarnessKind = "memory", global_: bool = False, **kwargs: Any) -> bool:
         """Delete a harness entry; returns False when it does not exist."""
         self._require_kind(kind)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
-            return target.delete(id, kind=kind)
+            return target.delete_memory(id, kind=kind)
         self._ensure_local_writable()
         self._sync_from_disk()
         if id not in self.entries[kind]:
@@ -602,13 +604,14 @@ class HarnessState:
         return True
 
     def __getattr__(self, name: str) -> Any:
-        # The per-kind wrappers (create_memory, update_skill, delete_subagent, ...)
-        # were replaced by the generic trio. Kernels and transcripts still carry the
-        # old names, so name the replacement instead of a bare AttributeError.
+        # The per-kind wrappers for the non-memory kinds (create_skill, update_subagent,
+        # delete_prompt_note, ...) were folded into the *_memory methods. Kernels and
+        # transcripts still carry them, so name the replacement instead of a bare
+        # AttributeError.
         action, _, suffix = name.partition("_")
         kind = _REMOVED_WRAPPER_KINDS.get(suffix)
         if kind and action in ("create", "update", "delete"):
-            raise AttributeError(f"{name} was removed; use rlm.harness.{action}(..., kind={kind!r})")
+            raise AttributeError(f"{name} was removed; use rlm.harness.{action}_memory(..., kind={kind!r})")
         raise AttributeError(name)
 
     def record_refinement(

@@ -1949,7 +1949,7 @@ describe("P0 concurrency regressions", () => {
 
 	it("serialized same-entry Python harness-write: concurrent kernel write rejected via baselineState", async () => {
 		// Verify that a concurrent Python kernel harness write (e.g.
-		// rlm.harness.create) during serialized background planning
+		// rlm.harness.create_memory) during serialized background planning
 		// is detected via baselineState comparison and the stale edit is
 		// rejected, preserving the concurrent write.
 		const harness = await createHarness({

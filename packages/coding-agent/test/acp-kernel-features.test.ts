@@ -95,10 +95,10 @@ describe("ACP mode over a real Python kernel", () => {
 
 		const allKinds = await manager.execute(`
 import json
-mem = rlm.harness.create(title="m", content="memory content", global_=True)
-note = rlm.harness.create(title="n", content="prompt note content", kind="prompt", global_=True)
-spec = rlm.harness.create(title="s", content="subagent spec content", kind="subagent", global_=True)
-skill = rlm.harness.create(
+mem = rlm.harness.create_memory(title="m", content="memory content", global_=True)
+note = rlm.harness.create_memory(title="n", content="prompt note content", kind="prompt", global_=True)
+spec = rlm.harness.create_memory(title="s", content="subagent spec content", kind="subagent", global_=True)
+skill = rlm.harness.create_memory(
     title="k",
     content="skill content",
     kind="skill",
@@ -121,14 +121,14 @@ print(json.dumps({
 
 		const result = await manager.execute(`
 import json
-entry = rlm.harness.create(
+entry = rlm.harness.create_memory(
     title="ACP verification memory",
     content="ACP mode preserves continual harness CRUD.",
     global_=True,
 )
 found = rlm.harness.get("memory", entry.id, global_=True)
 listed = [item.id for item in rlm.harness.list("memory", global_=True)]
-deleted = rlm.harness.delete(entry.id, kind="memory", global_=True)
+deleted = rlm.harness.delete_memory(entry.id, kind="memory", global_=True)
 after = rlm.harness.get("memory", entry.id, global_=True)
 print(json.dumps({
     "created": entry.id,
