@@ -15,6 +15,7 @@ import type { AssistantMessage } from "../types.js";
  * - xAI: "This model's maximum prompt length is 131072 but the request contains 537812 tokens"
  * - Groq: "Please reduce the length of the messages or completion"
  * - OpenRouter: "This endpoint's maximum context length is X tokens. However, you requested about Y tokens"
+ * - LiteLLM: "Requested token count exceeds the model's maximum context length of X tokens"
  * - llama.cpp: "the request exceeds the available context size, try increasing it"
  * - LM Studio: "tokens to keep from the initial prompt is greater than the context length"
  * - GitHub Copilot: "prompt token count of X exceeds the limit of Y"
@@ -37,6 +38,7 @@ const OVERFLOW_PATTERNS = [
 	/maximum prompt length is \d+/i, // xAI (Grok)
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
+	/exceeds the model's maximum context length/i, // LiteLLM (input + requested output)
 	/exceeds the limit of \d+/i, // GitHub Copilot
 	/exceeds the available context size/i, // llama.cpp server
 	/greater than the context length/i, // LM Studio
@@ -86,6 +88,7 @@ const NON_OVERFLOW_PATTERNS = [
  * - Cerebras: 400/413 status code (no body)
  * - Mistral: "Prompt contains X tokens ... too large for model with Y maximum context length"
  * - OpenRouter (all backends): "maximum context length is X tokens"
+ * - LiteLLM: "exceeds the model's maximum context length of X tokens"
  * - llama.cpp: "exceeds the available context size"
  * - LM Studio: "greater than the context length"
  * - Kimi For Coding: "exceeded model token limit: X (requested: Y)"

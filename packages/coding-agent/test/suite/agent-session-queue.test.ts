@@ -29,7 +29,14 @@ import {
 	saveHarnessState,
 } from "../../src/core/refinement/index.js";
 import { parseSessionSlashCommand } from "../../src/core/slash-commands.js";
-import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
+import {
+	conversationMessages,
+	createHarness,
+	getAssistantTexts,
+	getMessageText,
+	getUserTexts,
+	type Harness,
+} from "./harness.js";
 import { createDeferred, createWaitingHarness, gatedHook, withStreaming } from "./scheduling.js";
 
 type AutoRefineReason = "turn_interval" | "compact";
@@ -1415,7 +1422,7 @@ describe("AgentSession queue characterization", () => {
 		await completion;
 		await expect(harness.session.promptAndWait("/fail")).rejects.toThrow("extension exploded");
 		expect(extensionErrors).toEqual(["extension exploded"]);
-		expect(harness.session.messages).toEqual([]);
+		expect(conversationMessages(harness.session)).toEqual([]);
 	});
 
 	it("settles a visibly queued session command while an earlier action is preparing", async () => {
@@ -1949,7 +1956,7 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.prompt("normal prompt");
 
 		expect(sawCustomMessage).toBe(true);
-		expect(harness.session.messages.map((message) => message.role)).toEqual([
+		expect(conversationMessages(harness.session).map((message) => message.role)).toEqual([
 			"user",
 			"assistant",
 			"custom",
@@ -2337,7 +2344,9 @@ describe("AgentSession queue characterization", () => {
 		]);
 
 		expect(
-			harness.session.messages.filter((message) => message.role === "custom").map((message) => message.content),
+			conversationMessages(harness.session)
+				.filter((message) => message.role === "custom")
+				.map((message) => message.content),
 		).toEqual(["first", "second"]);
 	});
 

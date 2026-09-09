@@ -1,0 +1,2 @@
+- Changed Agents View session statistics to use muted secondary text while preserving the available details ([ENG-6000](https://linear.app/primeintellect/issue/ENG-6000)).
+- Changed Agents View session search to inline editable text without an input background or border ([ENG-6001](https://linear.app/primeintellect/issue/ENG-6001)).
