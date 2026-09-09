@@ -2,9 +2,16 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHostedRlmRunController, type HostedRlmRunController } from "../src/core/hosted-rlm-run-controller.js";
 import {
 	createHostedRlmRuntimePort,
+	type HostedRlmAbortResult,
+	type HostedRlmAdmissionResult,
+	type HostedRlmCloseResult,
+	type HostedRlmObservationSnapshot,
 	type HostedRlmPortResult,
 	type HostedRlmRuntimeIdentity,
 	type HostedRlmRuntimePort,
+	type HostedRlmSubscribeResult,
+	type HostedRlmSubscription,
+	type HostedRlmTaskResult,
 } from "../src/core/hosted-rlm-runtime-port.js";
 
 const IDENTITY: HostedRlmRuntimeIdentity = {
@@ -45,6 +52,8 @@ type Overrides = {
 	observe?: () => unknown;
 	close?: () => unknown;
 };
+
+type PortOverrides = { -readonly [K in keyof HostedRlmRuntimePort]?: HostedRlmRuntimePort[K] };
 
 function deferred(): Deferred {
 	let resolveValue: (value: unknown) => void = () => undefined;
@@ -535,7 +544,7 @@ describe("hosted RLM run controller", () => {
 		async (kind) => {
 			await withoutUnhandledRejection(async () => {
 				let getterCalls = 0;
-				let rejected: Promise<unknown>;
+				let rejected: Promise<never>;
 				if (kind === "subclass") {
 					class SupplierPromise<T> extends Promise<T> {}
 					rejected = SupplierPromise.reject(new Error("subclass"));
@@ -851,20 +860,38 @@ describe("hosted RLM run controller", () => {
 		let owner: HostedRlmRuntimePort | undefined;
 		let receiverMatched = false;
 		const base = directPort();
-		const replacement = function (this: HostedRlmRuntimePort): Promise<HostedRlmPortResult<unknown>> {
-			receiverMatched = this === owner;
-			if (lane === "start") return Promise.resolve({ ok: true, value: { code: "ADMITTED" } });
-			if (lane === "terminal") return Promise.resolve({ ok: true, value: TASK });
-			if (lane === "abort") return Promise.resolve({ ok: true, value: { status: "aborted" } });
-			if (lane === "observe") return Promise.resolve({ ok: true, value: SNAPSHOT });
-			return Promise.resolve({ ok: true, value: { status: "closed" } });
-		};
-		const overrides: Partial<HostedRlmRuntimePort> = {};
-		if (lane === "start") overrides.startInitialTask = replacement;
-		if (lane === "terminal") overrides.awaitTerminal = replacement;
-		if (lane === "abort") overrides.abort = replacement;
-		if (lane === "observe") overrides.observe = replacement;
-		if (lane === "close") overrides.close = replacement;
+		const overrides: PortOverrides = {};
+		if (lane === "start")
+			overrides.startInitialTask = function (
+				this: HostedRlmRuntimePort,
+			): Promise<HostedRlmPortResult<HostedRlmAdmissionResult>> {
+				receiverMatched = this === owner;
+				return Promise.resolve({ ok: true, value: { code: "ADMITTED" } });
+			};
+		if (lane === "terminal")
+			overrides.awaitTerminal = function (
+				this: HostedRlmRuntimePort,
+			): Promise<HostedRlmPortResult<HostedRlmTaskResult>> {
+				receiverMatched = this === owner;
+				return Promise.resolve({ ok: true, value: TASK });
+			};
+		if (lane === "abort")
+			overrides.abort = function (this: HostedRlmRuntimePort): Promise<HostedRlmPortResult<HostedRlmAbortResult>> {
+				receiverMatched = this === owner;
+				return Promise.resolve({ ok: true, value: { status: "aborted" } });
+			};
+		if (lane === "observe")
+			overrides.observe = function (
+				this: HostedRlmRuntimePort,
+			): Promise<HostedRlmPortResult<HostedRlmObservationSnapshot>> {
+				receiverMatched = this === owner;
+				return Promise.resolve({ ok: true, value: SNAPSHOT });
+			};
+		if (lane === "close")
+			overrides.close = function (this: HostedRlmRuntimePort): Promise<HostedRlmPortResult<HostedRlmCloseResult>> {
+				receiverMatched = this === owner;
+				return Promise.resolve({ ok: true, value: { status: "closed" } });
+			};
 		owner = directPort({ ...base, ...overrides });
 		const run = controller(owner);
 		if (lane === "start") await run.start({ prompt: "go" });
@@ -886,14 +913,14 @@ describe("hosted RLM run controller", () => {
 		let tokenOwner: object | undefined;
 		let subscribeReceiver = false;
 		let unsubscribeReceiver = false;
-		const token = {
+		const token: HostedRlmSubscription = {
 			unsubscribe() {
 				unsubscribeReceiver = this === tokenOwner;
 				return { ok: true };
 			},
 		};
 		tokenOwner = token;
-		const subscribe = function (this: HostedRlmRuntimePort) {
+		const subscribe = function (this: HostedRlmRuntimePort): HostedRlmSubscribeResult {
 			subscribeReceiver = this === portOwner;
 			return { ok: true, value: token };
 		};
