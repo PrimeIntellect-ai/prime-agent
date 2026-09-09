@@ -307,6 +307,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			};
 
 			let responseServiceTier: ChatCompletionChunk["service_tier"] | undefined;
+			let responseUpstreamProvider: string | undefined;
 			for await (const chunk of openaiStream) {
 				if (!chunk || typeof chunk !== "object") continue;
 
@@ -315,6 +316,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				output.responseId ||= chunk.id;
 				if (typeof chunk.service_tier === "string") {
 					responseServiceTier = chunk.service_tier;
+				}
+				// OpenRouter chunks name the upstream that served the request (e.g. "OpenAI").
+				const chunkProvider = (chunk as { provider?: unknown }).provider;
+				if (typeof chunkProvider === "string") {
+					responseUpstreamProvider = chunkProvider;
 				}
 				if (typeof chunk.model === "string" && chunk.model.length > 0 && chunk.model !== model.id) {
 					output.responseModel ||= chunk.model;
@@ -464,7 +470,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 			// Like the responses path: price by the tier that served the request,
 			// falling back to the requested tier when the provider does not echo one.
-			applyServiceTierPricing(output.usage, responseServiceTier ?? params.service_tier, model.id);
+			// The multiplier table is OpenAI's; OpenRouter bills tier requests at the
+			// serving provider's own rate, so apply it only when OpenAI served.
+			if (model.provider !== "openrouter" || responseUpstreamProvider?.toLowerCase() === "openai") {
+				applyServiceTierPricing(output.usage, responseServiceTier ?? params.service_tier, model.id);
+			}
 
 			for (const block of blocks) {
 				finishBlock(block);

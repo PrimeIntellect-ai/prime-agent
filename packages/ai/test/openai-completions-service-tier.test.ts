@@ -9,6 +9,7 @@ interface CapturedCompletionsPayload {
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as CapturedCompletionsPayload | undefined,
 	responseServiceTier: undefined as ServiceTier | undefined,
+	responseProvider: undefined as string | undefined,
 }));
 
 vi.mock("openai", () => {
@@ -22,6 +23,7 @@ vi.mock("openai", () => {
 							yield {
 								id: "chatcmpl-1",
 								service_tier: mockState.responseServiceTier,
+								provider: mockState.responseProvider,
 								choices: [{ delta: {}, finish_reason: "stop" }],
 								usage: { prompt_tokens: 100, completion_tokens: 50 },
 							};
@@ -74,6 +76,7 @@ describe("openai-completions service tier", () => {
 	beforeEach(() => {
 		mockState.lastParams = undefined;
 		mockState.responseServiceTier = undefined;
+		mockState.responseProvider = undefined;
 	});
 
 	it("forwards service_tier for OpenRouter requests", async () => {
@@ -90,10 +93,21 @@ describe("openai-completions service tier", () => {
 
 	it("prices usage by the tier that served the request", async () => {
 		mockState.responseServiceTier = "flex";
+		mockState.responseProvider = "OpenAI";
 		const message = await run(createModel(), "flex");
 
 		// 150 catalog-rate tokens at $1/M, halved by the flex multiplier.
 		expect(message.usage.cost.total).toBeCloseTo(0.000075, 10);
+	});
+
+	it("keeps catalog rates when OpenRouter routes a tier request to a non-OpenAI provider", async () => {
+		// OpenRouter bills tier requests at the serving provider's own rate;
+		// the multiplier table is OpenAI's, so it must not apply here.
+		mockState.responseServiceTier = "priority";
+		mockState.responseProvider = "Anthropic";
+		const message = await run(createModel(), "priority");
+
+		expect(message.usage.cost.total).toBeCloseTo(0.00015, 10);
 	});
 
 	it("keeps catalog-rate pricing when no tier is in play", async () => {
