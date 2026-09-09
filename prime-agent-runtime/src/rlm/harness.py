@@ -127,7 +127,7 @@ class HarnessEntry:
 
 @dataclass
 class RefinementEvent:
-    """A refinement pass recorded by the refinement engine when it applies edits."""
+    """A refinement pass recorded by the refinement engine; ``changes`` is empty when no edit applied."""
 
     id: str
     trigger: str

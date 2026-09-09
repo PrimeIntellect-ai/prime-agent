@@ -210,7 +210,7 @@ class HarnessStateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"
             kernel_state = HarnessState(state_path)
-            kernel_state.create("Kernel note", "Written before the refinement.", id="kernel")
+            kernel_state.create_memory("Kernel note", "Written before the refinement.", id="kernel")
 
             # The refinement engine rewrites the same file from the host process.
             engine_write = json.loads(state_path.read_text(encoding="utf-8"))
@@ -222,7 +222,7 @@ class HarnessStateTest(unittest.TestCase):
             future = state_path.stat().st_mtime + 5
             os.utime(state_path, (future, future))
 
-            kernel_state.create("Later note", "Written after the refinement.", id="later")
+            kernel_state.create_memory("Later note", "Written after the refinement.", id="later")
 
             reloaded = HarnessState(state_path)
             self.assertEqual([event.id for event in reloaded.refinements], ["refine_1"])
