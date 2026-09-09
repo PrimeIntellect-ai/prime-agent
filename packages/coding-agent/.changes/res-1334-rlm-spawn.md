@@ -1,1 +1,2 @@
 - Changed recursive subagent spawning to the explicit `await rlm.spawn(...)` call; the `rlm` object is no longer callable and calling it raises an error naming `rlm.spawn`.
+- Changed `rlm.spawn` to require an explicit `name` keyword argument for every spawned child.

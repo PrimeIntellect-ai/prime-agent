@@ -122,7 +122,7 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		expect(unknown.error?.evalue).toContain('host request type "test.unknown" is not available');
 	}, 30_000);
 
-	it("spawns through rlm.spawn over the unchanged rlm.run wire type and refuses a direct rlm call", async () => {
+	it("spawns through rlm.spawn over the unchanged rlm.run wire type, requires a child name, and refuses a direct rlm call", async () => {
 		const requestTypes: string[] = [];
 		const hostHandlers: HostRequestHandlers = {
 			"rlm.run": async (payload) => {
@@ -138,9 +138,17 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		};
 		manager = new ReplKernelManager({ python: python as string, cwd: dir, hostHandlers });
 
-		const spawned = await manager.execute("import rlm\nhandle = await rlm.spawn('child work')\nhandle.name");
+		const spawned = await manager.execute(
+			"import rlm\nhandle = await rlm.spawn('child work', name='worker')\nhandle.name",
+		);
 		expect(spawned.status).toBe("ok");
 		expect(spawned.result).toBe("'worker'");
+		expect(requestTypes).toEqual(["rlm.run"]);
+
+		const nameless = await manager.execute("await rlm.spawn('child work')");
+		expect(nameless.status).toBe("error");
+		expect(nameless.error?.ename).toBe("TypeError");
+		expect(nameless.error?.evalue).toContain("required keyword-only argument: 'name'");
 		expect(requestTypes).toEqual(["rlm.run"]);
 
 		const called = await manager.execute("await rlm('child work')");

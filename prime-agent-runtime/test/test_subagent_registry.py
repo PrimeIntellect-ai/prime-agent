@@ -94,12 +94,21 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
+    def test_requires_an_explicit_child_name(self) -> None:
+        host_request = AsyncMock()
+        with patch.object(rlm_module, "host_request", host_request):
+            with self.assertRaisesRegex(TypeError, r"missing 1 required keyword-only argument: 'name'"):
+                asyncio.run(rlm_module.rlm.spawn("check the API"))
+        host_request.assert_not_awaited()
+
     def test_rejects_calling_rlm_directly_with_spawn_guidance(self) -> None:
         for target in (rlm_module.rlm, rlm_module):
             with self.assertRaisesRegex(TypeError, r"not callable; spawn a child with: handle = await rlm\.spawn\("):
                 target("check the API")
-        self.assertFalse(hasattr(rlm_module, "run"))
-        self.assertFalse(hasattr(rlm_module.rlm, "run"))
+        for target in (rlm_module, rlm_module.rlm):
+            with self.assertRaisesRegex(AttributeError, r"rlm\.run was renamed; spawn a child with: handle = await rlm\.spawn\("):
+                target.run
+            self.assertFalse(hasattr(target, "run"))
 
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(

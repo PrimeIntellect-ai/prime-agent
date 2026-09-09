@@ -4674,7 +4674,7 @@ import rlm
 
 async def _delayed_rlm():
     await asyncio.sleep(0.05)
-    return await rlm.spawn("detached child after idle")
+    return await rlm.spawn("detached child after idle", name="detached-worker")
 
 _task = asyncio.create_task(_delayed_rlm())
 print("scheduled")

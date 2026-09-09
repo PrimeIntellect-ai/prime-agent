@@ -12,6 +12,7 @@ from .bash import BashHandle, BashResult, bash
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
+_RENAMED_RUN_MESSAGE = "rlm.run was renamed; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
 
 
 @dataclass(frozen=True)
@@ -120,15 +121,27 @@ def emit(data: dict[str, Any]) -> None:
     repl.emit(data)
 
 
-async def spawn(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
+async def spawn(
+    prompt: str,
+    *,
+    name: str,
+    model: str | None = None,
+    thinking: str | None = None,
+) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
+    ``name`` is required and must be unique among siblings.
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    kwargs: dict[str, Any] = {"name": name}
+    if model is not None:
+        kwargs["model"] = model
+    if thinking is not None:
+        kwargs["thinking"] = thinking
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -293,8 +306,15 @@ class _RLMNamespace:
     harness = _harness_state
     get_harness_state = staticmethod(get_harness_state)
 
-    async def spawn(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
-        return await spawn(prompt, **kwargs)
+    async def spawn(
+        self,
+        prompt: str,
+        *,
+        name: str,
+        model: str | None = None,
+        thinking: str | None = None,
+    ) -> RLMSpawnHandle:
+        return await spawn(prompt, name=name, model=model, thinking=thinking)
 
     async def create_session(
         self,
@@ -317,6 +337,12 @@ class _RLMNamespace:
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
+
+    # AttributeError keeps hasattr() semantics intact while still naming the replacement.
+    def __getattr__(self, name: str) -> Any:
+        if name == "run":
+            raise AttributeError(_RENAMED_RUN_MESSAGE)
+        raise AttributeError(f"'rlm' object has no attribute {name!r}")
 
 
 rlm = _RLMNamespace()
@@ -367,4 +393,6 @@ def __getattr__(name: str) -> Any:  # noqa: D401 - module-level lazy attr hook
         from . import mcp_base
 
         return getattr(mcp_base, name)
+    if name == "run":
+        raise AttributeError(_RENAMED_RUN_MESSAGE)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

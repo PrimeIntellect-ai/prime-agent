@@ -63,7 +63,7 @@ Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and 
 
 ### 2. Subagents are native RLM calls
 
-The callable `rlm` object is preloaded in the kernel. Spawn a child with a direct call:
+The `rlm` object is preloaded in the kernel. Spawn a child with `rlm.spawn`, which requires a `name`:
 
 ```python
 handle = await rlm.spawn("Review the authentication flow for security issues", name="auth-reviewer")
@@ -80,7 +80,7 @@ test_review = await rlm.spawn("Review the test coverage", name="test-reviewer")
 integration_audit = await rlm.spawn("Run the slow integration audit", name="integration-audit")
 ```
 
-Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. Children reply when an answer is needed:
+Results arrive only through explicit `agent_message` replies or files, never as an `rlm.spawn()` return value. Children reply when an answer is needed:
 
 ```python
 await agent_message.send(message, receiver_role="parent")

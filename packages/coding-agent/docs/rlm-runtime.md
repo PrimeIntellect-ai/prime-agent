@@ -67,7 +67,7 @@ sequenceDiagram
 | `src/core/tools/ipython.ts` | Agent tool wrapper, lazy kernel provisioning, namespace bootstrap, and output shaping. |
 | `src/core/agent-session.ts` | RLM policy, child creation, registry, usage attribution, cancellation, and goal handlers. |
 | `src/core/rlm-runtime.ts` | Typed request/spawn-handle validation for `rlm.spawn`, model discovery, list, and delete. |
-| `prime-agent-runtime/src/rlm/` | Python shim, handle types, callable `rlm`, and session-backed harness state. |
+| `prime-agent-runtime/src/rlm/` | Python shim, handle types, the `rlm` namespace object, and session-backed harness state. |
 
 The Python side does not call providers or implement an agent loop.
 
@@ -103,7 +103,7 @@ Calls to `ReplKernelManager.execute()` are serialized. One kernel has one shared
 A running cell can await task admission:
 
 ```python
-handle = await rlm.spawn("subtask")
+handle = await rlm.spawn("subtask", name="worker")
 ```
 
 The runtime ships the call to the host as a `host_request` event and keeps its event loop free while awaiting the reply. The host dispatches the typed request and answers with a `host_reply` request carrying the same id, so a cell can block on admission without stalling other runtime work. Child answers do not use this response path; they arrive later through explicit `agent_message` replies or files.
@@ -114,7 +114,7 @@ The runtime ships the call to the host as a `host_request` event and keeps its e
 
 ```python
 rlm
-spawn(prompt: str, **kwargs)
+spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None)
 find_models(query: str = "", limit: int = 8)
 list_subagents()
 delete_subagent(selector)
@@ -124,13 +124,12 @@ RLMModel
 RLMSubagent
 ```
 
-The kernel bootstrap places the `rlm` object in the user namespace, so a cell calls `await rlm.spawn("subtask")`. The `rlm` object itself is not callable; calling it raises a `TypeError` naming `rlm.spawn`.
+The kernel bootstrap places the `rlm` object in the user namespace, so a cell calls `await rlm.spawn("subtask", name="worker")`. The `rlm` object itself is not callable, and the old `rlm.run` attribute is gone; both raise an error naming `rlm.spawn`.
 
 `RLMSpawnHandle` contains `rlm_child_id`, `name`, `session_dir`, and `model`. It confirms admission only and never contains the child's answer.
 
-Supported `rlm.spawn` options are:
+`name` is required. The other `rlm.spawn` options are:
 
-- `name`: a unique readable child session name;
 - `model`: an exact `provider/model` selector from `rlm.find_models()`; and
 - `thinking`: an explicit child reasoning level; must be valid for the resolved child model, defaults to the parent level (clamped to the child model).
 
