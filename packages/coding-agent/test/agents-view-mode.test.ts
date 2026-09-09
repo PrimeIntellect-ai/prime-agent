@@ -801,15 +801,18 @@ describe("AgentsViewMode", () => {
 			expect(savedLine).toContain("glm-5.2-fast");
 			expect(parentLine).toContain("$1.10");
 			expect(parentLine).not.toContain("$0.42");
-			expect(parentLine).not.toMatch(/[↑↓]/);
+			expect(parentLine).toContain("↑12k ↓1.2k");
+			expect(savedLine).toContain("↑900 ↓80");
 			expect(parentLine).toMatch(/2m\s*$/);
 			expect(parentLine.indexOf("$1.10") + "$1.10".length).toBe(savedLine.indexOf("$123.45") + "$123.45".length);
+			// Shrink order: tokens drop before cost and age on narrow terminals.
 			for (const width of [60, 80]) {
 				const narrow = render(parentRow, width);
 				expect(narrow).toContain("gpt-5.6-sol");
 				expect(narrow).toContain("$1.10");
 				expect(narrow).toMatch(/2m\s*$/);
 				expect(narrow.length).toBeLessThanOrEqual(width);
+				expect(/[↑↓]/.test(narrow)).toBe(width >= 80);
 			}
 		} finally {
 			stopThemeWatcher();
@@ -852,7 +855,8 @@ describe("AgentsViewMode", () => {
 			expect(lines.filter((line) => /Model/.test(line) && /Age/i.test(line))).toHaveLength(1);
 			expect(lines.some((line) => line.startsWith("Running"))).toBe(true);
 			expect(lines.some((line) => line.startsWith("Idle"))).toBe(true);
-			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
+			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent/);
+			expect(lines.find((line) => /Model/.test(line))).toContain("↑in ↓out");
 			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
 			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
 			for (const line of rendered) {

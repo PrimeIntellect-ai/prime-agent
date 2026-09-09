@@ -1,0 +1,1 @@
+- Added input/output token columns (`↑in ↓out`) back to agents view rows and the column legend; the column drops first on narrow terminals.

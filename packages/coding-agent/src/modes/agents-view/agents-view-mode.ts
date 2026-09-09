@@ -45,6 +45,7 @@ import {
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
 import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
@@ -2823,12 +2824,21 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const sessions = rows.filter((row) => row.kind === "agent" || row.kind === "subagent");
 	const entries = sessions.map((row) => ({
 		identity: row.identity,
+		tokens: `↑${formatTokenCount(row.summary.usage?.inputTokens ?? 0)} ↓${formatTokenCount(row.summary.usage?.outputTokens ?? 0)}`,
 		cost: `$${row.recursiveCost.toFixed(2)}`,
 		age: formatSessionDuration(row.summary),
 	}));
+	const tokensLabel = "↑in ↓out";
+	const tokensWidth = entries.reduce(
+		(size, entry) => Math.max(size, visibleWidth(entry.tokens)),
+		visibleWidth(tokensLabel),
+	);
 	const costWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.cost)), 4);
 	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
-	const detailsWidth = costWidth + 2 + ageWidth;
+	// Tokens are the first detail dropped on narrow terminals: session and model
+	// keep their usual room (28 + 12) before the column earns its place.
+	const showTokens = width - (tokensWidth + 2 + costWidth + 2 + ageWidth) - 4 >= 40;
+	const detailsWidth = (showTokens ? tokensWidth + 2 : 0) + costWidth + 2 + ageWidth;
 	const available = Math.max(0, width - detailsWidth - 4);
 	const desiredModelWidth = sessions.reduce(
 		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
@@ -2837,13 +2847,14 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
-	const detailLine = (cost: string, age: string) => `${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
+	const detailLine = (tokens: string, cost: string, age: string) =>
+		`${showTokens ? `${padCellStart(tokens, tokensWidth)}  ` : ""}${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
 	const headings = [formatTableCell("Session", nameWidth), formatTableCell("Model", modelWidth)];
 	if (activityWidth > 0) headings.push(formatTableCell("Activity", activityWidth));
-	headings.push(detailLine("Cost", "Age"));
+	headings.push(detailLine(tokensLabel, "Cost", "Age"));
 	return {
 		legend: formatTableCell(headings.join("  "), width),
-		details: new Map(entries.map((entry) => [entry.identity, detailLine(entry.cost, entry.age)])),
+		details: new Map(entries.map((entry) => [entry.identity, detailLine(entry.tokens, entry.cost, entry.age)])),
 		nameWidth,
 		modelWidth,
 		activityWidth,
