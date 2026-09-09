@@ -73,8 +73,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
-export const DAEMON_SCHEMA_REVISION = 27;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-962b8b4c5e35";
+// Revision 28 adds the capability-gated endpoint identity handshake (hello challenge + endpoint_handshake).
+export const DAEMON_SCHEMA_REVISION = 28;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-da026c968f60";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -121,7 +122,12 @@ export type DaemonServerCapability =
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
-	| "direct_peer_transport";
+	| "direct_peer_transport"
+	// The daemon proves it holds the user's endpoint secret (daemon_hello carries
+	// endpointChallenge; endpoint_handshake answers it). Clients must check the
+	// capability before sending the handshake; on Windows they refuse to send
+	// anything else to a daemon without it.
+	| "endpoint_identity";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -245,6 +251,19 @@ export function collectDaemonClientEnv(source: NodeJS.ProcessEnv = process.env):
 	return Object.keys(env).length > 0 ? env : undefined;
 }
 
+/**
+ * The client's full environment, forwarded on create so the supervisor can
+ * spawn the session worker with the environment the user launched from. The
+ * worker is a detached process started by a long-lived daemon whose own env
+ * reflects whichever shell started it first; the client's PATH, HOME, provider
+ * keys and base URLs, proxy settings, locale, and tool configuration must win
+ * for the session to behave like a locally launched agent, and there is no
+ * allowlist that covers arbitrary user setups without silently breaking some
+ * of them. Only PRIME_AGENT_INTERNAL_* (daemon plumbing) is dropped. Because
+ * this carries credentials, clients must not send it before the peer's
+ * identity is established: Unix relies on the 0600 socket, Windows on the
+ * endpoint_identity handshake (see daemon-endpoint-identity.ts).
+ */
 export function collectDaemonLaunchEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(source)) {
@@ -402,6 +421,8 @@ export type DaemonCommand =
 	| { id?: string; type: "get_direct_worker_transport"; activeSessionId: string }
 	| { id?: string; type: "roster_subscribe" }
 	| { id?: string; type: "roster_unsubscribe" }
+	/** Mutual proof of the shared endpoint secret; nonce is the client's, proof answers the hello challenge. */
+	| { id?: string; type: "endpoint_handshake"; nonce: string; proof: string }
 	| ({
 			id?: string;
 			type: "create";
@@ -743,6 +764,11 @@ const DIRECT_PEER_TRANSPORT_COMMAND = {
 	minSchemaRevision: 25,
 	capability: "direct_peer_transport",
 } as const;
+const ENDPOINT_IDENTITY_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 28,
+	capability: "endpoint_identity",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -750,6 +776,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
 	list_agent_peers: AGENT_PEER_LIST_COMMAND,
 	get_direct_worker_transport: DIRECT_PEER_TRANSPORT_COMMAND,
+	endpoint_handshake: ENDPOINT_IDENTITY_COMMAND,
 	create: LEGACY_DAEMON_COMMAND,
 	attach: LEGACY_DAEMON_COMMAND,
 	reattach: LEGACY_DAEMON_COMMAND,
@@ -868,6 +895,7 @@ export const DAEMON_COMMAND_PLANE = {
 	list_saved_sessions: "control",
 	list_agent_peers: "control",
 	get_direct_worker_transport: "control",
+	endpoint_handshake: "control",
 	create: "control",
 	attach: "session",
 	reattach: "control",
@@ -1118,6 +1146,10 @@ export type DaemonOutbound =
 			supervisorSocketPath?: string;
 			clientId: DaemonClientId;
 			serverCapabilities: readonly DaemonServerCapability[];
+			/** Per-connection nonce for endpoint_handshake; present with the endpoint_identity capability. */
+			endpointChallenge?: string;
+			/** The daemon rejects every other command until the handshake succeeds (Windows, or opt-in). */
+			endpointHandshakeRequired?: true;
 	  }
 	| { type: "daemon_closing"; reason: DaemonClosingReason }
 	| { type: "heartbeats_changed" }
@@ -1285,6 +1317,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"list_saved_sessions",
 	"list_agent_peers",
 	"get_direct_worker_transport",
+	"endpoint_handshake",
 	"attach",
 	"reattach",
 	"roster_subscribe",

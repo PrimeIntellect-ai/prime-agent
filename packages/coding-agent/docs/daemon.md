@@ -94,6 +94,18 @@ Protocol v1 is retained only for the one-release update handoff that prepares an
 
 JSON and RPC client modes do not expose daemon greetings, envelopes, snapshot records, lifecycle events, or connection metadata.
 
+## Endpoint Ownership and Peer Identity
+
+The public endpoint is a Unix socket in a per-user 0700 directory (`$TMPDIR/prime-agent-<uid>/daemon.sock`, mode 0600) or, on Windows, the named pipe `\\.\pipe\prime-agent-daemon-<key>` where `<key>` hashes the account (domain and username) and the agent directory. A supervisor refuses to start when something already answers on its endpoint.
+
+Unix peers are the same user by construction. Named pipes give no such guarantee, so on Windows (or anywhere with `PRIME_AGENT_DAEMON_REQUIRE_ENDPOINT_IDENTITY=1`) both sides prove they can read `<agent dir>/daemon-endpoint-secret`, a 32-byte owner-only file created on first use, before anything else happens on a connection:
+
+1. `daemon_hello` carries the `endpoint_identity` capability, a per-connection `endpointChallenge`, and `endpointHandshakeRequired: true` when the daemon enforces the check.
+2. The client sends `endpoint_handshake { nonce, proof }` with `proof = HMAC(secret, "client", challenge, nonce)`. The daemon rejects every other command from an unverified connection and closes it.
+3. The daemon answers with `HMAC(secret, "daemon", challenge, nonce)`. The client sends `create`, `attach`, prompts, and the launch environment only after that proof verifies; a wrong proof drops the connection.
+
+The secret never crosses the endpoint. Where identity is required, a client sends only `list` and `shutdown` to a daemon that lacks the capability (enough to retire a stale daemon before starting a current one); an old client that never sends the handshake gets an explicit `Endpoint handshake required` error from a new daemon. On Unix the check is off by default and the wire behaviour is unchanged.
+
 ## Reconnect, Replay, and Snapshots
 
 Every sequenced event belongs to a worker generation. Clients retain the last `{ generation, sequence }` cursor and present it on attach. The server reports whether the requested interval is complete, partial, or unavailable.

@@ -1,0 +1,1 @@
+- Fixed the Windows daemon endpoint: the named pipe is now named per user and agent directory, the daemon refuses to start when the endpoint is already occupied, and clients and daemon prove they share the owner-only endpoint secret before any session data or launch environment is sent (`PRIME_AGENT_DAEMON_REQUIRE_ENDPOINT_IDENTITY=1` opts in on other platforms).

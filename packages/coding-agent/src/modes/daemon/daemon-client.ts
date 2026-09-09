@@ -3,6 +3,13 @@ import { createConnection, type Socket } from "node:net";
 import { getDaemonLogPath } from "../../config.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import {
+	createDaemonEndpointNonce,
+	createDaemonEndpointProof,
+	daemonEndpointIdentityRequired,
+	loadDaemonEndpointSecret,
+	verifyDaemonEndpointProof,
+} from "./daemon-endpoint-identity.js";
+import {
 	createDaemonCommandEnvelope,
 	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
 	DAEMON_PROTOCOL_VERSION,
@@ -92,8 +99,47 @@ export class DaemonCapabilityUnavailableError extends Error {
 	}
 }
 
+export class DaemonPeerIdentityError extends Error {
+	constructor(socketPath: string, detail: string) {
+		super(
+			`Could not verify that the process serving the Prime Agent daemon endpoint belongs to the current user (${detail}). ` +
+				`No session data was sent to it. ${daemonEndpointDetails(socketPath)}`,
+		);
+		this.name = "DaemonPeerIdentityError";
+	}
+}
+
 export function getDaemonSocketCloseReason(error: Error): DaemonClosingReason | undefined {
 	return error instanceof DaemonSocketClosedError ? error.daemonClosingReason : undefined;
+}
+
+/**
+ * Commands a client may send to a daemon whose identity it cannot verify: they
+ * carry no client secrets and are what the launcher needs to retire a stale
+ * (pre-endpoint-identity) daemon before starting a current one.
+ */
+export const DAEMON_UNVERIFIED_PEER_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set(["list", "shutdown"]);
+
+export interface DaemonClientOptions {
+	/**
+	 * Verify the daemon holds this user's endpoint secret before sending
+	 * anything but DAEMON_UNVERIFIED_PEER_COMMANDS. Defaults to
+	 * daemonEndpointIdentityRequired(): always on Windows, opt-in elsewhere. A
+	 * daemon whose hello says the handshake is required is verified regardless.
+	 */
+	requirePeerIdentity?: boolean;
+	/** Source of the shared secret; defaults to the agent-dir secret file. */
+	loadEndpointSecret?: () => string;
+}
+
+const ENDPOINT_HANDSHAKE_TIMEOUT_MS = 5000;
+
+function helloSupportsPeerIdentity(hello: DaemonHello): hello is DaemonHello & { endpointChallenge: string } {
+	return (
+		hello.serverCapabilities?.includes("endpoint_identity") === true &&
+		typeof hello.endpointChallenge === "string" &&
+		hello.endpointChallenge.length > 0
+	);
 }
 
 export type DaemonClientReconnectStatus =
@@ -157,13 +203,21 @@ export class DaemonClient {
 	private helloMessage?: DaemonHello;
 	private daemonClosingReason?: DaemonClosingReason;
 	private reconnectPromise?: Promise<void>;
+	private readonly requirePeerIdentity: boolean;
+	/** One handshake per connection; parked replays and requests share it. */
+	private peerVerification?: { socket: Socket; promise: Promise<void> };
 	private readonly helloWaiters = new Set<{
 		resolve: (hello: DaemonHello) => void;
 		reject: (error: Error) => void;
 		timeout: ReturnType<typeof setTimeout>;
 	}>();
 
-	constructor(private readonly socketPath: string) {}
+	constructor(
+		private readonly socketPath: string,
+		private readonly options: DaemonClientOptions = {},
+	) {
+		this.requirePeerIdentity = options.requirePeerIdentity ?? daemonEndpointIdentityRequired();
+	}
 
 	get hello(): DaemonHello | undefined {
 		return this.helloMessage;
@@ -346,6 +400,10 @@ export class DaemonClient {
 		if (missingCompatibility) {
 			throw new DaemonCapabilityUnavailableError(command.type, missingCompatibility.capability);
 		}
+		// Awaiting only when needed keeps the write synchronous for trusted Unix sockets.
+		if (this.peerIdentityNeeded(hello)) {
+			await this.ensurePeerIdentity(hello, command.type);
+		}
 		const envelopeProtocolVersion = Math.min(hello.protocol.version, DAEMON_PROTOCOL_VERSION);
 		return this.requestWire(
 			command,
@@ -414,6 +472,77 @@ export class DaemonClient {
 		});
 	}
 
+	private peerIdentityNeeded(hello: DaemonHello): boolean {
+		return this.requirePeerIdentity || hello.endpointHandshakeRequired === true;
+	}
+
+	/**
+	 * Resolve once the current connection's peer has proven it holds the shared
+	 * endpoint secret, or when no proof is needed. A daemon without the
+	 * capability is refused for everything but DAEMON_UNVERIFIED_PEER_COMMANDS;
+	 * a failed proof rejects and drops the connection so nothing else is sent.
+	 */
+	private async ensurePeerIdentity(hello: DaemonHello, commandType?: DaemonCommand["type"]): Promise<void> {
+		if (!this.peerIdentityNeeded(hello)) {
+			return;
+		}
+		const socket = this.socket;
+		if (!socket || socket.destroyed) {
+			throw new Error(
+				`Cannot verify the Prime Agent daemon endpoint because the daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
+			);
+		}
+		if (!helloSupportsPeerIdentity(hello)) {
+			if (commandType !== undefined && DAEMON_UNVERIFIED_PEER_COMMANDS.has(commandType)) {
+				return;
+			}
+			throw new DaemonCapabilityUnavailableError(commandType ?? "endpoint_handshake", "endpoint_identity");
+		}
+		if (this.peerVerification?.socket !== socket) {
+			this.peerVerification = { socket, promise: this.performEndpointHandshake(hello, socket) };
+		}
+		await this.peerVerification.promise;
+	}
+
+	private async performEndpointHandshake(
+		hello: DaemonHello & { endpointChallenge: string },
+		socket: Socket,
+	): Promise<void> {
+		const secret = (this.options.loadEndpointSecret ?? loadDaemonEndpointSecret)();
+		const nonce = createDaemonEndpointNonce();
+		const proof = createDaemonEndpointProof(secret, "client", hello.endpointChallenge, nonce);
+		const protocolVersion = Math.min(hello.protocol.version, DAEMON_PROTOCOL_VERSION);
+		let response: DaemonResponse;
+		try {
+			response = await this.requestWire(
+				{ type: "endpoint_handshake", nonce, proof },
+				ENDPOINT_HANDSHAKE_TIMEOUT_MS,
+				{ recoverable: false },
+				protocolVersion >= DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION ? protocolVersion : undefined,
+			);
+		} catch (error) {
+			throw new DaemonPeerIdentityError(this.socketPath, error instanceof Error ? error.message : String(error));
+		}
+		const daemonProof =
+			response.success && response.data && typeof response.data === "object"
+				? (response.data as { proof?: unknown }).proof
+				: undefined;
+		if (
+			response.success &&
+			verifyDaemonEndpointProof(secret, "daemon", hello.endpointChallenge, nonce, daemonProof)
+		) {
+			return;
+		}
+		const error = new DaemonPeerIdentityError(
+			this.socketPath,
+			response.success ? "the daemon returned an invalid endpoint proof" : response.error,
+		);
+		if (this.socket === socket && !socket.destroyed) {
+			socket.destroy(error);
+		}
+		throw error;
+	}
+
 	private armPendingRequestTimeout(id: string, pending: PendingDaemonRequest): void {
 		pending.timeout = setTimeout(() => {
 			this.pendingRequests.delete(id);
@@ -459,33 +588,17 @@ export class DaemonClient {
 
 		if (isDaemonHello(message)) {
 			this.helloMessage = message;
+			this.peerVerification = undefined;
 			for (const waiter of [...this.helloWaiters]) {
 				clearTimeout(waiter.timeout);
 				this.helloWaiters.delete(waiter);
 				waiter.resolve(message);
 			}
 			if (this.socket && !this.socket.destroyed) {
-				for (const [id, pending] of this.pendingRequests) {
-					if (!pending.awaitingReconnect) {
-						continue;
-					}
-					pending.awaitingReconnect = false;
-					const missingCompatibility = pending.compatibilities.find(
-						(compatibility) => !meetsDaemonCommandCompatibility(message, compatibility),
-					);
-					if (missingCompatibility) {
-						this.pendingRequests.delete(id);
-						pending.reject(
-							new DaemonCapabilityUnavailableError(
-								pending.commandType as DaemonCommand["type"],
-								missingCompatibility.capability,
-								true,
-							),
-						);
-						continue;
-					}
-					this.armPendingRequestTimeout(id, pending);
-					this.socket.write(pending.wireData);
+				if (this.peerIdentityNeeded(message)) {
+					void this.replayParkedRequestsAfterPeerVerification(message, this.socket);
+				} else {
+					this.replayParkedRequests(message, this.socket);
 				}
 			}
 		}
@@ -521,6 +634,74 @@ export class DaemonClient {
 			} catch {
 				// A consumer failure must not interrupt protocol parsing for other clients.
 			}
+		}
+	}
+
+	private replayParkedRequests(hello: DaemonHello, socket: Socket): void {
+		for (const [id, pending] of this.pendingRequests) {
+			if (!pending.awaitingReconnect) {
+				continue;
+			}
+			pending.awaitingReconnect = false;
+			const missingCompatibility = pending.compatibilities.find(
+				(compatibility) => !meetsDaemonCommandCompatibility(hello, compatibility),
+			);
+			if (missingCompatibility) {
+				this.pendingRequests.delete(id);
+				pending.reject(
+					new DaemonCapabilityUnavailableError(
+						pending.commandType as DaemonCommand["type"],
+						missingCompatibility.capability,
+						true,
+					),
+				);
+				continue;
+			}
+			this.armPendingRequestTimeout(id, pending);
+			socket.write(pending.wireData);
+		}
+	}
+
+	/** Parked commands must not reach a reconnected daemon before it has proven its identity. */
+	private async replayParkedRequestsAfterPeerVerification(hello: DaemonHello, socket: Socket): Promise<void> {
+		const parked = [...this.pendingRequests].filter(([, pending]) => pending.awaitingReconnect);
+		if (parked.length === 0) {
+			return;
+		}
+		if (!helloSupportsPeerIdentity(hello)) {
+			for (const [id, pending] of parked) {
+				if (DAEMON_UNVERIFIED_PEER_COMMANDS.has(pending.commandType as DaemonCommand["type"])) {
+					continue;
+				}
+				pending.awaitingReconnect = false;
+				this.pendingRequests.delete(id);
+				pending.reject(
+					new DaemonCapabilityUnavailableError(
+						pending.commandType as DaemonCommand["type"],
+						"endpoint_identity",
+						true,
+					),
+				);
+			}
+			this.replayParkedRequests(hello, socket);
+			return;
+		}
+		try {
+			await this.ensurePeerIdentity(hello);
+		} catch (error) {
+			const failure = error instanceof Error ? error : new Error(String(error));
+			for (const [id, pending] of this.pendingRequests) {
+				if (!pending.awaitingReconnect) {
+					continue;
+				}
+				pending.awaitingReconnect = false;
+				this.pendingRequests.delete(id);
+				pending.reject(failure);
+			}
+			return;
+		}
+		if (this.socket === socket && !socket.destroyed) {
+			this.replayParkedRequests(hello, socket);
 		}
 	}
 

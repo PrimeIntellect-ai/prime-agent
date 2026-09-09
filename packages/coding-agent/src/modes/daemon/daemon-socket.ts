@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
+import { getAgentDir } from "../../config.js";
 
 export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 
@@ -67,9 +69,39 @@ export interface DaemonSocketIdentity {
 	ino: number;
 }
 
+/**
+ * Per-user endpoint key for Windows named pipes, which live in one global
+ * namespace with no per-user directory to scope them. The key binds the pipe
+ * name to the account (domain and username) and the agent directory so
+ * accounts and profiles on one machine never share an endpoint name. It is a
+ * namespace, not a secret: peer identity is proven separately by
+ * daemon-endpoint-identity.ts.
+ */
+export function daemonEndpointOwnerKey(
+	agentDir: string = getAgentDir(),
+	environment: NodeJS.ProcessEnv = process.env,
+	username: string = currentUsername(environment),
+): string {
+	const domain = environment.USERDOMAIN ?? "";
+	return createHash("sha256")
+		.update(`${domain}\\${username}\u0000${resolve(agentDir).toLowerCase()}`)
+		.digest("hex")
+		.slice(0, 16);
+}
+
+function currentUsername(environment: NodeJS.ProcessEnv): string {
+	try {
+		const name = userInfo().username;
+		if (name) return name;
+	} catch {
+		// No account database entry for this uid; fall back to the environment.
+	}
+	return environment.USERNAME || environment.USER || "user";
+}
+
 export function defaultDaemonSocketPath(): string {
 	if (process.platform === "win32") {
-		return "\\\\.\\pipe\\prime-agent-daemon";
+		return `\\\\.\\pipe\\prime-agent-daemon-${daemonEndpointOwnerKey()}`;
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
@@ -105,6 +137,12 @@ export async function prepareDaemonSocketPath(socketPath: string, lease?: Daemon
 	ensureDefaultDaemonSocketDir(socketPath);
 
 	if (process.platform === "win32") {
+		// A named pipe has no filesystem entry to inspect or unlink; the only
+		// occupancy signal is whether something answers on it. Refuse to start
+		// over a live server, whoever owns it, instead of racing it for clients.
+		if (await canConnectToEndpoint(socketPath)) {
+			throw new Error(`Daemon socket already in use: ${socketPath}`);
+		}
 		return;
 	}
 	if (lease) {
@@ -116,7 +154,7 @@ export async function prepareDaemonSocketPath(socketPath: string, lease?: Daemon
 	if (!existsSync(socketPath)) {
 		return;
 	}
-	if (await canConnectToUnixSocket(socketPath)) {
+	if (await canConnectToEndpoint(socketPath)) {
 		throw new Error(`Daemon socket already in use: ${socketPath}`);
 	}
 	const ownedLease = await acquireDaemonSocketPathLease(socketPath);
@@ -146,7 +184,7 @@ async function prepareUnixDaemonSocketPath(socketPath: string, lease?: DaemonSoc
 	}
 
 	const staleIdentity: DaemonSocketIdentity = { dev: stat.dev, ino: stat.ino };
-	if (await canConnectToUnixSocket(socketPath)) {
+	if (await canConnectToEndpoint(socketPath)) {
 		throw new Error(`Daemon socket already in use: ${socketPath}`);
 	}
 	const deadline = Date.now() + DAEMON_SOCKET_RELEASE_GRACE_MS;
@@ -167,7 +205,7 @@ async function prepareUnixDaemonSocketPath(socketPath: string, lease?: DaemonSoc
 		if (!currentIdentity || currentIdentity.dev !== staleIdentity.dev || currentIdentity.ino !== staleIdentity.ino) {
 			throw new Error(`Daemon socket changed ownership while waiting for cleanup: ${socketPath}`);
 		}
-		if (await canConnectToUnixSocket(socketPath)) {
+		if (await canConnectToEndpoint(socketPath)) {
 			throw new Error(`Daemon socket already in use: ${socketPath}`);
 		}
 	}
@@ -302,7 +340,7 @@ function ensureDefaultDaemonSocketDir(socketPath: string): void {
 	chmodSync(defaultDaemonSocketDir(), DAEMON_SOCKET_DIR_MODE);
 }
 
-function canConnectToUnixSocket(socketPath: string): Promise<boolean> {
+function canConnectToEndpoint(socketPath: string): Promise<boolean> {
 	return new Promise((resolveConnect) => {
 		const socket = createConnection(socketPath);
 		let settled = false;
