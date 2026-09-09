@@ -7655,7 +7655,8 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		if (!options.skipAbort) await this.abort();
 		let didCompact = false;
-		this._compactionAbortController = new AbortController();
+		const compactionAbort = new AbortController();
+		this._compactionAbortController = compactionAbort;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
@@ -7678,7 +7679,7 @@ export class AgentSession {
 				apiKey,
 				headers,
 				customInstructions,
-				signal: this._compactionAbortController.signal,
+				signal: compactionAbort.signal,
 			});
 
 			this._emit({
@@ -7720,13 +7721,21 @@ export class AgentSession {
 			this._scheduleSessionInputPump();
 			if (didCompact) {
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+				if (this._goalState.status === "active" && !compactionAbort.signal.aborted) {
+					this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages();
+					this.resumeQueuedWork();
+					if (this.agent.hasQueuedMessages()) this._schedulePostCompactionContinue();
+				}
 				if (hadPostCompactionContinue) {
 					this._schedulePostCompactionContinue(continueAfterSessionInput);
 				}
 				// Queued agent or session-owned inputs resume the loop; defer refine
 				// behind them instead of interleaving it before their turns.
 				this._scheduleAutoRefineAfterCompaction(
-					hadPostCompactionContinue || this.agent.hasQueuedMessages() || this.unfinishedActionCount > 0,
+					this._goalContinuationAwaitsRlmWork ||
+						hadPostCompactionContinue ||
+						this.agent.hasQueuedMessages() ||
+						this.unfinishedActionCount > 0,
 				);
 			}
 		}
