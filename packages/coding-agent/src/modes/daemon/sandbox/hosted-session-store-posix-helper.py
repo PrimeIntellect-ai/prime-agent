@@ -3250,6 +3250,125 @@ def _v5_recover_input_begin_prefix(fds, generation_fd, lifecycle, generation, ui
             raise Fatal(_E_STATE)
         if progress_name is not None and not canonical_present:
             raise Fatal(_E_STATE)
+        if canonical_present and manifest_name is None and progress_name is None and content_name is None:
+            abort_manifest_fd = None
+            abort_plan_fd = None
+            abort_manifest_data = None
+            abort_plan_data = None
+            abort_plan_nonce = None
+            abort_content_nonce = None
+            try:
+                abort_manifest_fd, abort_manifest_error = _open_file(
+                    fds,
+                    evidence_fd,
+                    _INPUT_MANIFEST,
+                    uid,
+                    device,
+                    _INPUT_MANIFEST_SIZE,
+                    _INPUT_MANIFEST_SIZE,
+                )
+                if abort_manifest_fd is None or abort_manifest_error is not None:
+                    raise Fatal(_E_UNCERTAIN)
+                abort_manifest_stat = _fstat(abort_manifest_fd)
+                abort_manifest_data = _v5_read_open_file(abort_manifest_fd, _INPUT_MANIFEST_SIZE)
+                if not _v5_prefix_field(abort_manifest_data, 0, _INPUT_MANIFEST_MAGIC):
+                    raise Fatal(_E_STATE)
+                if not _v5_prefix_field(abort_manifest_data, 16, lifecycle):
+                    raise Fatal(_E_STATE)
+                if not _v5_prefix_field(abort_manifest_data, 48, generation):
+                    raise Fatal(_E_STATE)
+                if _range_zero(abort_manifest_data, 112, 144):
+                    raise Fatal(_E_STATE)
+                if not _v5_prefix_field(abort_manifest_data, 268, bytes(4)):
+                    raise Fatal(_E_STATE)
+                abort_plan_nonce = abort_manifest_data[188:220]
+                abort_content_nonce = abort_manifest_data[220:252]
+                if _all_zero(abort_plan_nonce) or _all_zero(abort_content_nonce):
+                    raise Fatal(_E_STATE)
+                if _same(abort_plan_nonce, abort_content_nonce):
+                    raise Fatal(_E_STATE)
+                abort_plan_length = struct.unpack_from(">I", abort_manifest_data, 176)[0]
+                abort_content_length = struct.unpack_from(">Q", abort_manifest_data, 180)[0]
+                if abort_plan_length < 1 or abort_plan_length > _MAX_PLAN_PAYLOAD:
+                    raise Fatal(_E_STATE)
+                if abort_content_length > _MAX_CONTENT_PAYLOAD:
+                    raise Fatal(_E_STATE)
+                abort_revision = struct.unpack_from(">Q", abort_manifest_data, 8)[0]
+                abort_plan_committed = struct.unpack_from(">Q", abort_manifest_data, 252)[0]
+                abort_content_committed = struct.unpack_from(">Q", abort_manifest_data, 260)[0]
+                if not _v5_canonical_end(abort_plan_committed, abort_plan_length):
+                    raise Fatal(_E_STATE)
+                if not _v5_canonical_end(abort_content_committed, abort_content_length):
+                    raise Fatal(_E_STATE)
+                if abort_plan_committed < abort_plan_length and abort_content_committed != 0:
+                    raise Fatal(_E_STATE)
+                if abort_revision != _v5_chunk_count(abort_plan_committed) + _v5_chunk_count(abort_content_committed):
+                    raise Fatal(_E_STATE)
+                if plan_name is not None:
+                    if not _same(plan_suffix, abort_plan_nonce):
+                        raise Fatal(_E_STATE)
+                    abort_plan_fd, abort_plan_error = _open_file(
+                        fds,
+                        evidence_fd,
+                        plan_name,
+                        uid,
+                        device,
+                        _PLAN_HEADER_SIZE + _MAX_PLAN_PAYLOAD,
+                    )
+                    if abort_plan_fd is None or abort_plan_error is not None:
+                        raise Fatal(_E_UNCERTAIN)
+                    abort_plan_stat = _fstat(abort_plan_fd)
+                    if abort_plan_stat.st_size < _PLAN_HEADER_SIZE:
+                        raise Fatal(_E_STATE)
+                    abort_plan_data = _v5_read_open_file(abort_plan_fd, _PLAN_HEADER_SIZE)
+                    abort_valid, abort_complete, abort_header_length = _v5_header_prefix(
+                        abort_plan_data, _PLAN_RECORD_MAGIC, 4, 1, _MAX_PLAN_PAYLOAD
+                    )
+                    if not abort_valid or not abort_complete or abort_header_length != abort_plan_length:
+                        raise Fatal(_E_STATE)
+                    if abort_plan_stat.st_size != _PLAN_HEADER_SIZE + abort_plan_committed:
+                        raise Fatal(_E_STATE)
+                    if _v5_same_inode(abort_plan_stat, abort_manifest_stat):
+                        raise Fatal(_E_IO)
+                    _v5_validate_inventory_name(
+                        evidence_fd, plan_name, abort_plan_stat, uid, device, abort_plan_stat.st_size
+                    )
+                _v5_validate_inventory_name(
+                    evidence_fd, _INPUT_MANIFEST, abort_manifest_stat, uid, device, _INPUT_MANIFEST_SIZE
+                )
+                if plan_name is not None:
+                    _unlink(evidence_fd, plan_name)
+                    _fsync(evidence_fd)
+                    _v5_require_absent(evidence_fd, plan_name)
+                _unlink(evidence_fd, _INPUT_MANIFEST)
+                _fsync(evidence_fd)
+                _v5_require_absent(evidence_fd, _INPUT_MANIFEST)
+                if len(_list(evidence_fd)) != 0:
+                    raise Fatal(_E_STATE)
+                if abort_plan_fd is not None:
+                    fds.close_for_recovery(abort_plan_fd)
+                    abort_plan_fd = None
+                fds.close_for_recovery(abort_manifest_fd)
+                abort_manifest_fd = None
+                fds.close_for_recovery(evidence_fd)
+                evidence_fd = None
+                _rmdir(generation_fd, _WORKSPACE_EVIDENCE)
+                _fsync(generation_fd)
+                _v5_require_absent(generation_fd, _WORKSPACE_EVIDENCE)
+                return True
+            finally:
+                if abort_content_nonce is not None:
+                    _zero(abort_content_nonce)
+                if abort_plan_nonce is not None:
+                    _zero(abort_plan_nonce)
+                if abort_plan_data is not None:
+                    _zero(abort_plan_data)
+                if abort_manifest_data is not None:
+                    _zero(abort_manifest_data)
+                if abort_plan_fd is not None:
+                    fds.close_for_recovery(abort_plan_fd)
+                if abort_manifest_fd is not None:
+                    fds.close_for_recovery(abort_manifest_fd)
         plan_complete = False
         plan_length = 0
         plan_stat = None
@@ -5584,6 +5703,249 @@ def _cmd_ws_write_stream(
             raise Fatal(_E_UNCERTAIN)
 
 
+def _cmd_ws_abort_draft(
+    fds,
+    root_fd,
+    uid,
+    device,
+    root_inode,
+    lock_fd,
+    lock_device,
+    lock_inode,
+    payload,
+    v5_mode,
+):
+    mark = fds.mark()
+    lifecycle = None
+    lifecycle_dir_fd = None
+    scan = None
+    items = None
+    evidence_fd = None
+    plan_fd = None
+    content_fd = None
+    manifest_fd = None
+    plan_name = None
+    content_name = None
+    plan_suffix = None
+    content_suffix = None
+    plan_data = None
+    content_data = None
+    manifest_data = None
+    response = None
+    try:
+        lifecycle = payload[0:32]
+        lifecycle_name = _hex_name(lifecycle)
+        items, unused_outstanding = _v5_collect_inventory(
+            fds, root_fd, uid, device, root_inode, lock_fd, lock_device, lock_inode
+        )
+        selector = memoryview(payload)[:128]
+        try:
+            matched = None
+            lifecycle_present = False
+            index = 0
+            while index < len(items):
+                item = items[index]
+                if _same_at(item, 0, lifecycle):
+                    lifecycle_present = True
+                    if matched is None and _same_at(item, 0, selector):
+                        matched = item
+                index += 1
+        finally:
+            selector.release()
+        if matched is None:
+            if lifecycle_present:
+                return (v5_mode, "error", _E_STALE)
+            return (v5_mode, "error", _E_ABSENT)
+        stream_kind = payload[128]
+        if stream_kind == 3:
+            return (v5_mode, "error", _E_ABSENT)
+        lifecycle_dir_fd, open_error = _open_dir(fds, root_fd, lifecycle_name, uid, device)
+        if lifecycle_dir_fd is None:
+            raise Fatal(_E_UNCERTAIN)
+        scan = _scan_lifecycle(
+            fds, lifecycle_dir_fd, lifecycle, uid, device, False, allow_v5_evidence=True
+        )
+        current_generation = scan[7]
+        if not _same_at(payload, 32, current_generation):
+            raise Fatal(_E_STATE)
+        current_entry = _find_generation(scan[6], _hex_name(current_generation))
+        if current_entry is None:
+            raise Fatal(_E_STATE)
+        generation_fd = current_entry[1]
+        evidence_fd, evidence_error = _open_dir(fds, generation_fd, _WORKSPACE_EVIDENCE, uid, device)
+        if evidence_fd is None:
+            raise Fatal(_E_UNCERTAIN)
+        entries = _list(evidence_fd)
+        if len(entries) != 3 or _INPUT_MANIFEST not in entries:
+            raise Fatal(_E_STATE)
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            if entry.startswith(_PLAN_DRAFT_PREFIX):
+                suffix = _v5_random_suffix(entry, _PLAN_DRAFT_PREFIX)
+                if suffix is None or plan_name is not None:
+                    if suffix is not None:
+                        _zero(suffix)
+                    raise Fatal(_E_STATE)
+                plan_name = entry
+                plan_suffix = suffix
+            elif entry.startswith(_CONTENT_DRAFT_PREFIX):
+                suffix = _v5_random_suffix(entry, _CONTENT_DRAFT_PREFIX)
+                if suffix is None or content_name is not None:
+                    if suffix is not None:
+                        _zero(suffix)
+                    raise Fatal(_E_STATE)
+                content_name = entry
+                content_suffix = suffix
+            elif entry != _INPUT_MANIFEST:
+                raise Fatal(_E_STATE)
+            index += 1
+        if plan_name is None or content_name is None or plan_suffix is None or content_suffix is None:
+            raise Fatal(_E_STATE)
+        if _same(plan_suffix, content_suffix):
+            raise Fatal(_E_STATE)
+        plan_fd, plan_error = _v5_open_rw_file(
+            fds, evidence_fd, plan_name, uid, device, _PLAN_HEADER_SIZE + _MAX_PLAN_PAYLOAD
+        )
+        content_fd, content_error = _v5_open_rw_file(
+            fds,
+            evidence_fd,
+            content_name,
+            uid,
+            device,
+            _CONTENT_HEADER_SIZE + _MAX_CONTENT_PAYLOAD,
+        )
+        manifest_fd, manifest_error = _open_file(
+            fds,
+            evidence_fd,
+            _INPUT_MANIFEST,
+            uid,
+            device,
+            _INPUT_MANIFEST_SIZE,
+            _INPUT_MANIFEST_SIZE,
+        )
+        if plan_fd is None or content_fd is None or manifest_fd is None:
+            raise Fatal(_E_UNCERTAIN)
+        if plan_error is not None or content_error is not None or manifest_error is not None:
+            raise Fatal(_E_UNCERTAIN)
+        plan_stat = _fstat(plan_fd)
+        content_stat = _fstat(content_fd)
+        manifest_stat = _fstat(manifest_fd)
+        _validate_file_stat(plan_stat, uid, device)
+        _validate_file_stat(content_stat, uid, device)
+        _validate_file_stat(manifest_stat, uid, device)
+        if _v5_same_inode(plan_stat, content_stat) or _v5_same_inode(plan_stat, manifest_stat) or _v5_same_inode(content_stat, manifest_stat):
+            raise Fatal(_E_IO)
+        if plan_stat.st_size < _PLAN_HEADER_SIZE or content_stat.st_size < _CONTENT_HEADER_SIZE:
+            raise Fatal(_E_STATE)
+        plan_data = _v5_read_open_file(plan_fd, _PLAN_HEADER_SIZE)
+        content_data = _v5_read_open_file(content_fd, _CONTENT_HEADER_SIZE)
+        manifest_data = _v5_read_open_file(manifest_fd, _INPUT_MANIFEST_SIZE)
+        plan_valid, plan_complete, plan_length = _v5_header_prefix(
+            plan_data, _PLAN_RECORD_MAGIC, 4, 1, _MAX_PLAN_PAYLOAD
+        )
+        content_valid, content_complete, content_length = _v5_header_prefix(
+            content_data, _CONTENT_RECORD_MAGIC, 8, 0, _MAX_CONTENT_PAYLOAD
+        )
+        if not plan_valid or not plan_complete or not content_valid or not content_complete:
+            raise Fatal(_E_STATE)
+        progress_tuple = _v5_input_manifest_progress(
+            manifest_data,
+            lifecycle,
+            current_generation,
+            plan_suffix,
+            content_suffix,
+            plan_length,
+            content_length,
+        )
+        if progress_tuple is None:
+            raise Fatal(_E_STATE)
+        plan_committed = progress_tuple[1]
+        content_committed = progress_tuple[2]
+        if plan_stat.st_size != _PLAN_HEADER_SIZE + plan_committed:
+            raise Fatal(_E_STATE)
+        if content_stat.st_size != _CONTENT_HEADER_SIZE + content_committed:
+            raise Fatal(_E_STATE)
+        _v5_validate_inventory_name(
+            evidence_fd, plan_name, plan_stat, uid, device, plan_stat.st_size
+        )
+        _v5_validate_inventory_name(
+            evidence_fd, content_name, content_stat, uid, device, content_stat.st_size
+        )
+        _v5_validate_inventory_name(
+            evidence_fd, _INPUT_MANIFEST, manifest_stat, uid, device, _INPUT_MANIFEST_SIZE
+        )
+        if not _same_at(manifest_data, 80, payload[64:128]):
+            return (v5_mode, "error", _E_STALE)
+        if not _same_at(manifest_data, 8, payload[129:137]):
+            return (v5_mode, "error", _E_STALE)
+        _unlink(evidence_fd, content_name)
+        _fsync(evidence_fd)
+        _v5_require_absent(evidence_fd, content_name)
+        _unlink(evidence_fd, plan_name)
+        _fsync(evidence_fd)
+        _v5_require_absent(evidence_fd, plan_name)
+        _unlink(evidence_fd, _INPUT_MANIFEST)
+        _fsync(evidence_fd)
+        _v5_require_absent(evidence_fd, _INPUT_MANIFEST)
+        if len(_list(evidence_fd)) != 0:
+            raise Fatal(_E_STATE)
+        fds.close(content_fd)
+        content_fd = None
+        fds.close(plan_fd)
+        plan_fd = None
+        fds.close(manifest_fd)
+        manifest_fd = None
+        fds.close(evidence_fd)
+        evidence_fd = None
+        _rmdir(generation_fd, _WORKSPACE_EVIDENCE)
+        _fsync(generation_fd)
+        _v5_require_absent(generation_fd, _WORKSPACE_EVIDENCE)
+        _close_scan(fds, scan)
+        scan = None
+        fds.close(lifecycle_dir_fd)
+        lifecycle_dir_fd = None
+        if fds.uncertain:
+            raise Fatal(_E_UNCERTAIN)
+        response = bytearray(2)
+        response[0] = _WS_ABORT_DRAFT
+        response[1] = stream_kind
+        _write_frame(1, _OK, response)
+        return (v5_mode, "emitted", None)
+    finally:
+        if response is not None:
+            _zero(response)
+        if manifest_data is not None:
+            _zero(manifest_data)
+        if content_data is not None:
+            _zero(content_data)
+        if plan_data is not None:
+            _zero(plan_data)
+        if content_suffix is not None:
+            _zero(content_suffix)
+        if plan_suffix is not None:
+            _zero(plan_suffix)
+        if manifest_fd is not None:
+            fds.close(manifest_fd)
+        if content_fd is not None:
+            fds.close(content_fd)
+        if plan_fd is not None:
+            fds.close(plan_fd)
+        if evidence_fd is not None:
+            fds.close(evidence_fd)
+        if scan is not None:
+            _close_scan(fds, scan)
+        if lifecycle_dir_fd is not None:
+            fds.close(lifecycle_dir_fd)
+        if items is not None:
+            _v5_zero_transactions(items)
+        if lifecycle is not None:
+            _zero(lifecycle)
+        fds.close_after(mark)
+        if fds.mark() != mark or fds.uncertain:
+            raise Fatal(_E_UNCERTAIN)
+
+
 def _v5_validate_request(opcode, payload):
     if opcode == _WS_INVENTORY:
         if len(payload) != 0:
@@ -5842,6 +6204,19 @@ def _dispatch_v5(
         )
     if opcode == _WS_WRITE_STREAM:
         return _cmd_ws_write_stream(
+            fds,
+            root_fd,
+            uid,
+            device,
+            root_inode,
+            lock_fd,
+            lock_device,
+            lock_inode,
+            payload,
+            v5_mode,
+        )
+    if opcode == _WS_ABORT_DRAFT:
+        return _cmd_ws_abort_draft(
             fds,
             root_fd,
             uid,

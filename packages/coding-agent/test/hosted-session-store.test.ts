@@ -681,9 +681,9 @@ describe("hosted session store source constraints", () => {
 	test("binds the accepted helper bytes and file invariant", () => {
 		const bytes = readFileSync(helperPath);
 		const stat = lstatSync(helperPath);
-		expect(bytes.byteLength).toBe(240996);
+		expect(bytes.byteLength).toBe(257100);
 		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
-			"c1caa6d23942fc2bf5f11993f71cd0a7431de1f467444a9b00bad459fbcfa56f",
+			"931628ad6a93d3d971393580fb5d48df15cdf307f34b47d772c41e93dc559e6d",
 		);
 		expect(stat.isFile()).toBe(true);
 		expect(stat.nlink).toBe(1);
@@ -2194,6 +2194,20 @@ def unlink_lock():
  os.unlink(ROOT+"/.lock")
 def chmod_lock():
  os.chmod(ROOT+"/.lock",0o644)
+abort_mode_snapshot={}
+def chmod_manifest():
+ for name in os.listdir(evidence):
+  with open(evidence+"/"+name,"rb") as handle:abort_mode_snapshot[name]=handle.read(1048576)
+ os.chmod(evidence+"/input.manifest",0o644)
+def chmod_manifest_restore():
+ if sorted(os.listdir(evidence))!=sorted(abort_mode_snapshot):raise RuntimeError("abort mode names changed")
+ for name,data in abort_mode_snapshot.items():
+  with open(evidence+"/"+name,"rb") as handle:
+   if handle.read(1048576)!=data:raise RuntimeError("abort mode bytes changed")
+ os.chmod(evidence+"/input.manifest",0o600)
+OK_ABORT=(0x80,bytes((0x0C,1)))
+def abort_request(kind,revision):
+ return frame(0x0C,selector+bytes((kind,))+u64(revision))
 
 FAULT_SOURCE='''#!/usr/local/bin/python3
 import errno,os,struct,sys
@@ -2202,8 +2216,10 @@ state={"arm_stat":False,"arm_fsync":False,"arm_close":False}
 frame_write_ok=struct.pack(">BI",0x80,18)+bytes((0x0B,1))+struct.pack(">Q",1)+struct.pack(">Q",17)
 frame_begin_ok=struct.pack(">BI",0x80,25)+bytes((0x0A,))+bytes(24)
 frame_quit_ok=struct.pack(">BI",0x80,1)+bytes((0xFF,))
+frame_abort_ok=struct.pack(">BI",0x80,2)+bytes((0x0C,1))
 frame_done_empty=struct.pack(">BI",0x82,0)
 real_write=os.write;real_stat=os.stat;real_fsync=os.fsync;real_close=os.close
+real_unlink=os.unlink
 def write(fd,data,*args,**kwargs):
  count=real_write(fd,data,*args,**kwargs)
  if fd==1 and count==len(data):
@@ -2211,6 +2227,7 @@ def write(fd,data,*args,**kwargs):
   elif scenario=="quit-fsync" and bytes(data)==frame_begin_ok:state["arm_fsync"]=True
   elif scenario=="quit-close" and bytes(data)==frame_quit_ok:state["arm_close"]=True
   elif scenario=="v4-post-emission" and bytes(data)==frame_done_empty:state["arm_stat"]=True
+  elif scenario=="abort-post-emission" and bytes(data)==frame_abort_ok:state["arm_stat"]=True
  return count
 def stat(path,*args,**kwargs):
  if state["arm_stat"] and path in (".lock",b".lock"):
@@ -2227,7 +2244,14 @@ def close(fd,*args,**kwargs):
   state["arm_close"]=False
   raise OSError(errno.EIO,"injected")
  return real_close(fd,*args,**kwargs)
-os.write=write;os.stat=stat;os.fsync=fsync;os.close=close
+def unlink(*args,**kwargs):
+ result=real_unlink(*args,**kwargs)
+ if scenario=="abort-fsync":
+  name=args[0] if args else kwargs.get("path")
+  if isinstance(name,bytes) and name.startswith(b".ws-content."):state["arm_fsync"]=True
+  elif isinstance(name,str) and name.startswith(".ws-content."):state["arm_fsync"]=True
+ return result
+os.write=write;os.stat=stat;os.fsync=fsync;os.close=close;os.unlink=unlink
 source=open(sys.argv[1]).read()
 exec(compile(source,sys.argv[1],"exec"))
 '''
@@ -2337,7 +2361,7 @@ def run(label,phases,returncode,root_names=None,fresh=True,fault=None):
   if sel is not None:sel.close()
 
 runs=[0]
-EXPECTED_RUNS=36
+EXPECTED_RUNS=46
 def create_setup():
  run("create-setup",[(None,[OPEN,create_request,QUIT],[OK_OPEN,OK_CREATE,OK_QUIT])],0,root_names=[".lock",lifecycle.hex()])
 
@@ -2408,8 +2432,31 @@ try:
  run("v5-to-v4",[(None,[OPEN,HELLO,frame(0x01)],[OK_OPEN,READY,error(0x01,0x02)])],2,root_names=[".lock"])
  run("malformed-hello-recovery",[(None,[OPEN,frame(0xF0,b"XXXXXXXX"),HELLO,QUIT],[OK_OPEN,error(0xF0,0x02),READY,OK_QUIT])],0,root_names=[".lock"])
  run("framing-oversize-payload",[(None,[OPEN,HELLO,OVERSIZE_HEADER],[OK_OPEN,READY,error(0x0B,0x03)])],2,root_names=[".lock"])
+ create_setup()
+ run("abort-authority-arms",[
+  (None,[OPEN,HELLO,frame(0x0A,begin),write_request(1,0,plan_chunk)],[OK_OPEN,READY,OK_BEGIN,ok_write(1,1,PLAN_LENGTH)]),
+  (None,[abort_request(1,0),abort_request(3,0),abort_request(1,1)],[error(0x0C,0x12),error(0x0C,0x04),OK_ABORT]),
+  (None,[frame(0x17)],[DONE]),
+  (None,[abort_request(1,0)],[error(0x0C,0x04)]),
+  (None,[frame(0x0A,begin),abort_request(1,0)],[OK_BEGIN,OK_ABORT]),
+  (None,[QUIT],[OK_QUIT])],0,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("abort-mode-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin)],[OK_OPEN,READY,OK_BEGIN]),
+  (chmod_manifest,[abort_request(1,0)],[error(0x0C,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False)
+ run("abort-mode-no-deletion",[
+  (chmod_manifest_restore,[OPEN,HELLO,abort_request(1,0)],[OK_OPEN,READY,OK_ABORT]),
+  (None,[frame(0x17),QUIT],[DONE,OK_QUIT])],0,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("fault-abort-fsync-fatal",[
+  (None,[OPEN,HELLO,frame(0x0A,begin),write_request(1,0,plan_chunk),abort_request(1,1)],[OK_OPEN,READY,OK_BEGIN,ok_write(1,1,PLAN_LENGTH),error(0x0C,0x10)])],2,root_names=[".lock",lifecycle.hex()],fresh=False,fault="abort-fsync")
+ run("abort-fsync-restart-forward",[
+  (None,[OPEN,HELLO,frame(0x17),QUIT],[OK_OPEN,READY,DONE,OK_QUIT])],0,root_names=[".lock",lifecycle.hex()],fresh=False)
+ create_setup()
+ run("fault-abort-post-emission-suppressed",[
+  (None,[OPEN,HELLO,frame(0x0A,begin),write_request(1,0,plan_chunk),abort_request(1,1)],[OK_OPEN,READY,OK_BEGIN,ok_write(1,1,PLAN_LENGTH),OK_ABORT])],2,root_names=[".lock",lifecycle.hex()],fresh=False,fault="abort-post-emission")
  if runs[0]!=EXPECTED_RUNS:raise RuntimeError("verified count %d != expected %d"%(runs[0],EXPECTED_RUNS))
- print("V5_MAIN_FATAL_WIRE_OK %d/%d"%(runs[0],EXPECTED_RUNS))
+ print("V5_MAIN_ABORT_WIRE_OK %d/%d"%(runs[0],EXPECTED_RUNS))
 finally:
  if os.path.exists(ROOT):shutil.rmtree(ROOT)
  for path in (FAULT_SCENARIO,FAULT_PY):
@@ -2844,13 +2891,13 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"14ee0755c755173a83f66c38947ce119dd4bb44fa5bde12c5b7353d7b6695627",
+			"8395aea5e8d8e784429640b0a0edc8d12d580417d4788824a975f9f2b0b1372d",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
 			"8f55f26572015b6cfcae8edc9a85d6f1b1ae38206f54a5e5b0572872280720ea",
 		);
 		expect(createHash("sha256").update(readFileSync(v5MainWireProbePath)).digest("hex")).toBe(
-			"8dbd40885bc78208adc227a407601aea8dfacec2ef2d02fbb509af60663a9ead",
+			"386a53507269e1a365f18b57cb6eff096685405be6cf5db406ee605275cad91d",
 		);
 		expect(createHash("sha256").update(readFileSync(v5ProbePath)).digest("hex")).toBe(
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
@@ -2950,8 +2997,8 @@ for scenario in ("case3","case4"):
 			);
 			console.log(stdout);
 			expect(stderr).toBe("");
-			expect(stdout.split("\n").filter((line) => line.startsWith("WIRE_OK ")).length).toBe(36);
-			expect(stdout).toContain("V5_MAIN_FATAL_WIRE_OK 36/36");
+			expect(stdout.split("\n").filter((line) => line.startsWith("WIRE_OK ")).length).toBe(46);
+			expect(stdout).toContain("V5_MAIN_ABORT_WIRE_OK 46/46");
 			expect(stdout).toContain("V5_RAW_PROTOCOL_OK");
 			expect(stdout).toContain("V5_NONEMPTY_READY_OK");
 			expect(stdout).toContain("V5_MATRIX_RUNNING_OK");

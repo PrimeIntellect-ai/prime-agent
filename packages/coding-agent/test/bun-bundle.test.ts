@@ -11,8 +11,8 @@ const bun = process.execPath;
 const helpers = [
 	{
 		name: "hosted-session-store-posix-helper.py",
-		size: 240996,
-		digest: "c1caa6d23942fc2bf5f11993f71cd0a7431de1f467444a9b00bad459fbcfa56f",
+		size: 257100,
+		digest: "931628ad6a93d3d971393580fb5d48df15cdf307f34b47d772c41e93dc559e6d",
 	},
 	{
 		name: "ws-posix-helper.py",
