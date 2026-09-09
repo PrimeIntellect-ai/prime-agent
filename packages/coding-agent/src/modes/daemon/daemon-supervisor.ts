@@ -5022,6 +5022,12 @@ export class DaemonSupervisor {
 			await worker.recovery;
 		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
+		const renameTarget =
+			command.type === "rename_saved_session"
+				? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
+				: command.type === "rename" || command.type === "set_session_name"
+					? this.roster().byActiveSessionId(command.activeSessionId)
+					: undefined;
 		const response = await client.request(withoutCommandId(command), timeoutMs);
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
@@ -5030,23 +5036,25 @@ export class DaemonSupervisor {
 			response.success &&
 			(command.type === "rename" || command.type === "set_session_name" || command.type === "rename_saved_session")
 		) {
-			// Commit the acknowledged name before releasing its reservation, after earlier roster frames.
-			await this.chainWorkerRosterApply(worker, client, () => {
-				if (command.type === "rename" && isSessionSummary(response.data)) {
-					this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
-					return;
-				}
-				const entry =
-					command.type === "rename_saved_session"
-						? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
-						: this.roster().byActiveSessionId(command.activeSessionId);
-				if (entry?.workerId === worker.descriptor.workerId) {
-					this.writeRosterEntry(
-						{ ...entry, summary: { ...entry.summary, sessionName: command.name.trim() } },
-						worker,
-					);
-				}
-			});
+			// An acknowledged name survives disconnects. Drain earlier frames, then amend the
+			// same session's current row before releasing its name reservation.
+			await worker.rosterApplyChain;
+			const entry =
+				command.type === "rename_saved_session"
+					? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
+					: renameTarget
+						? this.roster().get(renameTarget.agentId)
+						: undefined;
+			if (
+				entry?.workerId === worker.descriptor.workerId &&
+				(command.type === "rename_saved_session" || entry.summary.sessionId === renameTarget?.summary.sessionId)
+			) {
+				const name =
+					command.type === "rename" && isSessionSummary(response.data)
+						? (response.data.sessionName ?? command.name.trim())
+						: command.name.trim();
+				this.writeRosterEntry({ ...entry, summary: { ...entry.summary, sessionName: name } }, worker);
+			}
 			if (command.type === "rename" && isSessionSummary(response.data)) {
 				return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 			}

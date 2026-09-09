@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import { readSessionInfo, SessionManager } from "../../../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
-import { type WorkerRosterEntry, workerRosterEntryFromSummary } from "../../../src/modes/daemon/agent-roster.js";
+import {
+	type AgentRoster,
+	type WorkerRosterEntry,
+	workerRosterEntryFromSummary,
+} from "../../../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
 import {
 	type DaemonCommand,
@@ -45,6 +49,7 @@ interface SupervisorInternals {
 	writeRosterEntry(entry: WorkerRosterEntry, worker?: WorkerFixture): void;
 	consumeWorkerRosterDelta(worker: WorkerFixture, payload: Buffer): void;
 	launchWorker(command: DaemonCommand): Promise<WorkerFixture>;
+	roster(): AgentRoster;
 }
 
 interface WorkerInternals {
@@ -356,4 +361,79 @@ describe("ENG-6013: saved-session names survive live worker activity", () => {
 			expect((await row())?.sessionName).toBe("Current name");
 		},
 	);
+
+	it.each(["rename_saved_session", "set_session_name", "rename"] as const)(
+		"retains an acknowledged %s when the worker disconnects before queued roster application",
+		async (type) => {
+			const first = await createFixture();
+			const second = await createFixture(first.supervisor);
+			const { supervisor, worker, client, sessionPath, activeSessionId, request } = first;
+			let release!: () => void;
+			worker.rosterApplyChain = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const handleRequest = request.getMockImplementation()!;
+			request.mockImplementationOnce(async (command) => {
+				const response = await handleRequest(command);
+				worker.client = undefined;
+				worker.descriptor.lifecycle = "recovering";
+				release();
+				return response;
+			});
+			await expect(
+				supervisor.handleCommand(client, {
+					type,
+					activeSessionId,
+					sessionPath,
+					name: "Accepted before disconnect",
+				}),
+			).resolves.toMatchObject({ success: true });
+			expect((await first.row())?.sessionName).toBe("Accepted before disconnect");
+			await expect(
+				supervisor.handleCommand(client, {
+					type: "rename_saved_session",
+					sessionPath: second.sessionPath,
+					name: "Accepted before disconnect",
+				}),
+			).rejects.toThrow(/already/);
+			expect(second.request).not.toHaveBeenCalled();
+		},
+	);
+
+	it("commits a path rename when its roster row first arrives during the command", async () => {
+		const first = await createFixture();
+		const second = await createFixture(first.supervisor);
+		const { supervisor, worker, client, sessionPath, request } = first;
+		const previous = workerRosterEntryFromSummary((await first.row())!);
+		supervisor.roster().delete(previous.agentId);
+		let release!: () => void;
+		worker.rosterApplyChain = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		supervisor.consumeWorkerRosterDelta(
+			worker,
+			Buffer.from(JSON.stringify({ type: "roster_delta", entries: [previous] })),
+		);
+		const handleRequest = request.getMockImplementation()!;
+		request.mockImplementationOnce(async (command) => {
+			const response = await handleRequest(command);
+			release();
+			return response;
+		});
+		await expect(
+			supervisor.handleCommand(client, {
+				type: "rename_saved_session",
+				sessionPath,
+				name: "Claimed before snapshot",
+			}),
+		).resolves.toMatchObject({ success: true });
+		expect((await first.row())?.sessionName).toBe("Claimed before snapshot");
+		await expect(
+			supervisor.handleCommand(client, {
+				type: "rename_saved_session",
+				sessionPath: second.sessionPath,
+				name: "Claimed before snapshot",
+			}),
+		).rejects.toThrow(/already/);
+	});
 });
