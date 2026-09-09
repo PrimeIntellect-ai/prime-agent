@@ -980,7 +980,7 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 			if (this.keybindings.matches(data, "app.agents.expand")) {
 				const row = this.rows[this.selectedIndex];
-				if (row && row.descendantCount > 0) this.toggleSubagentList(row);
+				if (row && (row.kind === "subagent-summary" || row.descendantCount > 0)) this.toggleSubagentList(row);
 				return;
 			}
 		}
@@ -1320,7 +1320,7 @@ export class AgentsViewMode implements Component, Focusable {
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
 		);
-		this.rows = compactSessionRows(this.allRows);
+		this.rows = this.allRows;
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
 		if (index >= 0) {
@@ -1400,6 +1400,10 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!row?.selectable || this.isPendingDeleteRow(row)) {
 			return;
 		}
+		if (row.kind === "subagent-summary") {
+			this.toggleSubagentList(row);
+			return;
+		}
 		if (row.kind === "subagent") {
 			this.openSelectedSubagent(row);
 			return;
@@ -1420,7 +1424,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private toggleSubagentList(row: AgentsViewRow): void {
-		const target = row.identity;
+		const target = row.kind === "subagent-summary" ? (row.parentIdentity ?? row.identity) : row.identity;
 		if (this.expandedSubagentParents.has(target)) {
 			this.expandedSubagentParents.delete(target);
 			this.programShownParents.delete(target);
@@ -2187,7 +2191,7 @@ export class AgentsViewMode implements Component, Focusable {
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
 		);
-		this.rows = compactSessionRows(this.allRows);
+		this.rows = this.allRows;
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
 		this.ui.requestRender();
@@ -2496,13 +2500,6 @@ export class AgentsViewMode implements Component, Focusable {
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {
 				displayItems.push({ type: "row", row });
-				if (
-					(row.kind === "agent" || row.kind === "subagent") &&
-					row.runningSubagentCount > 0 &&
-					!this.expandedSubagentParents.has(row.identity)
-				) {
-					displayItems.push({ type: "running-subagents", row });
-				}
 			}
 		}
 		if (displayItems.length === 0) {
@@ -2525,14 +2522,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
 		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
 			if (item.type === "spacer") return "";
-			if (item.type === "running-subagents") {
-				const count = item.row.runningSubagentCount;
-				const indent = "  ".repeat(item.row.depth + 1);
-				return theme.fg(
-					"success",
-					truncateToWidth(`${indent}${count} subagent${count === 1 ? "" : "s"} running`, width),
-				);
-			}
 			if (item.type === "heading") {
 				return theme.bold(truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
 			}
@@ -2552,6 +2541,10 @@ export class AgentsViewMode implements Component, Focusable {
 		const selected = row.selectable && row.identity === this.rows[this.selectedIndex]?.identity;
 		const markRow = (line: string): string => (selected ? `${SELECTED_ROW_MARKER}${line}` : line);
 		if (row.kind === "subagent-code") return this.renderCodeRow(row);
+		if (row.kind === "subagent-summary") {
+			const indent = "  ".repeat(row.depth);
+			return markRow(formatTableCell(`${indent}${row.expanded ? "▾" : "▸"} ${row.title}`, width));
+		}
 		const pendingDelete = row.kind === "agent" && this.isPendingDeleteRow(row);
 		const pendingKill = row.kind === "subagent" && this.isPendingKillSubagentRow(row);
 		const details = layout.details.get(row.identity) ?? "";
@@ -2565,10 +2558,9 @@ export class AgentsViewMode implements Component, Focusable {
 			return markRow(formatTableCell(theme.fg("error", title), width));
 		}
 		const icon = this.formatRowIcon(row.section, this.getRowIcon(row.section));
-		const expand = row.descendantCount > 0 ? (this.expandedSubagentParents.has(row.identity) ? "▾" : "▸") : " ";
 		const badge = formatHeartbeatBadge(row.heartbeat);
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
-		const title = `${"  ".repeat(row.depth)}${icon}${expand} ${heartbeat}${styleRowTitle(row)}`;
+		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
 		const status =
 			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
 				? row.statusLabel
@@ -2764,13 +2756,7 @@ export class AgentsViewMode implements Component, Focusable {
 type DisplayItem =
 	| { type: "spacer" }
 	| { type: "heading"; section: AgentsViewSection }
-	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };
-
-// Summary rows fold into the running-subagents display items.
-function compactSessionRows(rows: readonly AgentsViewRow[]): AgentsViewRow[] {
-	return rows.filter((row) => row.kind !== "subagent-summary");
-}
 
 // Nested rows (subagent summaries and expanded subagents) always render in
 // their top-level agent's section block, regardless of their own section.

@@ -1,0 +1,1 @@
+- Changed the agents view subagent expand/collapse control: the arrow now sits on the always-visible subagent summary line instead of hiding on the session row.
