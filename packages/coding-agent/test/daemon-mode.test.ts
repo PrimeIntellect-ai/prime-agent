@@ -886,8 +886,9 @@ describe("daemon mode helpers", () => {
 			target: { activeSessionId: subagentState.activeSessionId, runtimeKind: "subagent" },
 		});
 		expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(acceptAgentMessagePrompt.mock.calls[0]?.[0]).toContain(`To: ${defaultSubagentName}, active child`);
-		expect(acceptAgentMessagePrompt.mock.calls[0]?.[0]).toContain("report current progress");
+		expect(acceptAgentMessagePrompt.mock.calls[0]?.[0]).toBe(
+			"[agent-message from sibling:Parent]\n\nreport current progress",
+		);
 	});
 
 	it("closes a hosted child through the release hook and persists cancellation", async () => {
