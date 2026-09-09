@@ -123,12 +123,16 @@ class HarnessStateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
 
-            with self.assertRaises(AttributeError) as caught:
-                getattr(state, "record_refinement")
-            self.assertEqual(
-                str(caught.exception),
-                "record_refinement was removed; refinement events are recorded automatically when refinements run",
-            )
+            for name, message in (
+                (
+                    "record_refinement",
+                    "record_refinement was removed; refinement events are recorded automatically when refinements run",
+                ),
+                ("plan_refinement", "plan_refinement was removed; use await refine.run() to schedule a refinement"),
+            ):
+                with self.assertRaises(AttributeError) as caught:
+                    getattr(state, name)
+                self.assertEqual(str(caught.exception), message)
 
             for name, replacement in (
                 ("update_skill", "update_memory(..., kind='skill')"),
@@ -205,22 +209,24 @@ class HarnessStateTest(unittest.TestCase):
     def test_engine_recorded_refinements_survive_a_kernel_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"
-            state_path.write_text(
-                json.dumps(
-                    {
-                        "schema": 1,
-                        "entries": {},
-                        "refinements": [{"id": "refine_1", "trigger": "engine pass", "changes": ["create memory:x"]}],
-                    }
-                ),
-                encoding="utf-8",
-            )
+            kernel_state = HarnessState(state_path)
+            kernel_state.create("Kernel note", "Written before the refinement.", id="kernel")
 
-            state = HarnessState(state_path)
-            state.create("Kernel note", "Written after the engine pass.")
+            # The refinement engine rewrites the same file from the host process.
+            engine_write = json.loads(state_path.read_text(encoding="utf-8"))
+            engine_write["refinements"] = [
+                {"id": "refine_1", "trigger": "engine pass", "changes": ["create memory:kernel"]}
+            ]
+            state_path.write_text(json.dumps(engine_write), encoding="utf-8")
+            # Guarantee the mtime advances even on coarse-resolution filesystems.
+            future = state_path.stat().st_mtime + 5
+            os.utime(state_path, (future, future))
+
+            kernel_state.create("Later note", "Written after the refinement.", id="later")
 
             reloaded = HarnessState(state_path)
             self.assertEqual([event.id for event in reloaded.refinements], ["refine_1"])
+            self.assertIsNotNone(reloaded.get("memory", "later"))
             self.assertIn("refinements: 1", reloaded.overview())
 
     def test_persists_entries(self) -> None:

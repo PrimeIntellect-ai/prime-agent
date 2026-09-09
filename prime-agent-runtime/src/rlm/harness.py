@@ -24,6 +24,12 @@ HarnessScope = Literal["local", "global"]
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
+_REMOVED_METHOD_GUIDANCE = {
+    "record_refinement": (
+        "record_refinement was removed; refinement events are recorded automatically when refinements run"
+    ),
+    "plan_refinement": "plan_refinement was removed; use await refine.run() to schedule a refinement",
+}
 _REMOVED_WRAPPER_KINDS: dict[str, HarnessKind] = {
     "prompt_note": "prompt",
     "skill": "skill",
@@ -604,36 +610,17 @@ class HarnessState:
         return True
 
     def __getattr__(self, name: str) -> Any:
-        # The per-kind wrappers for the non-memory kinds (create_skill, update_subagent,
-        # delete_prompt_note, ...) were folded into the *_memory methods, and the manual
-        # record_refinement was removed. Kernels and transcripts still carry the old
-        # names, so name the replacement instead of a bare AttributeError.
-        if name == "record_refinement":
-            raise AttributeError(
-                "record_refinement was removed; refinement events are recorded automatically when refinements run"
-            )
+        # Removed methods: the per-kind wrappers for the non-memory kinds (create_skill,
+        # update_subagent, ...), record_refinement, and plan_refinement. Kernels and
+        # transcripts still carry the old names, so name the replacement instead of a
+        # bare AttributeError.
+        if guidance := _REMOVED_METHOD_GUIDANCE.get(name):
+            raise AttributeError(guidance)
         action, _, suffix = name.partition("_")
         kind = _REMOVED_WRAPPER_KINDS.get(suffix)
         if kind and action in ("create", "update", "delete"):
             raise AttributeError(f"{name} was removed; use rlm.harness.{action}_memory(..., kind={kind!r})")
         raise AttributeError(name)
-
-    def plan_refinement(
-        self,
-        observation: str,
-        *,
-        failing_component: str = "",
-        next_step: str = "",
-    ) -> list[str]:
-        target = f" for {failing_component}" if failing_component else ""
-        plan = [
-            f"Diagnose the repeated failure or opportunity{target}: {observation}",
-            "Update the smallest useful prompt note, memory item, skill, or subagent spec.",
-            "Run the next action with the changed harness state and check whether it helped.",
-        ]
-        if next_step:
-            plan.append(f"Immediate validation step: {next_step}")
-        return plan
 
     def overview(self, *, max_entries_per_kind: int = 20, global_: bool = False, **kwargs: Any) -> str:
         if target := self._global_target(global_, kwargs):
