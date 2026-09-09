@@ -669,12 +669,18 @@ describe("agents view state", () => {
 		});
 
 		const branchOnly = reconcileUnifiedSessions([source], [branch]);
-		expect(computeRecursiveRollups(branchOnly).get(branchOnly[0]!)).toEqual({ cost: 0.4, descendantCount: 0 });
+		expect(computeRecursiveRollups(branchOnly).get(branchOnly[0]!)).toEqual({
+			cost: 0.4,
+			inputTokens: 100,
+			outputTokens: 10,
+			descendantCount: 0,
+		});
 
 		const withChild = reconcileUnifiedSessions([source], [branch, child]);
 		const rollup = computeRecursiveRollups(withChild).get(withChild[0]!);
 		expect(rollup?.descendantCount).toBe(1);
 		expect(rollup?.cost).toBeCloseTo(0.5);
+		expect(rollup).toMatchObject({ inputTokens: 120, outputTokens: 12 });
 
 		// The tree shares that definition of "child": the branch renders as its
 		// own top-level session while only the spawned child nests and counts.

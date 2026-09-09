@@ -801,7 +801,8 @@ describe("AgentsViewMode", () => {
 			expect(savedLine).toContain("glm-5.2-fast");
 			expect(parentLine).toContain("$1.10");
 			expect(parentLine).not.toContain("$0.42");
-			expect(parentLine).toContain("↑12k ↓1.2k");
+			// Token scope matches the cost column: own plus descendants.
+			expect(parentLine).toContain("↑13k ↓1.3k");
 			expect(savedLine).toContain("↑900 ↓80");
 			expect(parentLine).toMatch(/2m\s*$/);
 			expect(parentLine.indexOf("$1.10") + "$1.10".length).toBe(savedLine.indexOf("$123.45") + "$123.45".length);
@@ -814,6 +815,20 @@ describe("AgentsViewMode", () => {
 				expect(narrow.length).toBeLessThanOrEqual(width);
 				expect(/[↑↓]/.test(narrow)).toBe(width >= 80);
 			}
+			// A long model id claims its column room before tokens earn theirs.
+			const longModelRows = buildAgentsViewRows([
+				summary({
+					id: "wide",
+					activeSessionId: "wide",
+					sessionId: "wide-session",
+					model: { ...getModel("openai", "gpt-4o"), id: "a-very-long-model-identifier-32ch" },
+					created,
+					usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
+				}),
+			]);
+			expect(stripAnsi(buildCompactAgentsViewLayout(longModelRows, 80).legend)).not.toContain("↑in");
+			expect(stripAnsi(buildCompactAgentsViewLayout(longModelRows, 80).legend)).toContain("Cost");
+			expect(stripAnsi(buildCompactAgentsViewLayout(longModelRows, 120).legend)).toContain("↑in ↓out");
 		} finally {
 			stopThemeWatcher();
 		}

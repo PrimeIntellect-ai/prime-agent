@@ -168,6 +168,7 @@ describe("formatTokenCount", () => {
 	test("drops the decimal at 10k and above", () => {
 		expect(formatTokenCount(12340)).toBe("12k");
 		expect(formatTokenCount(250400)).toBe("250k");
+		expect(formatTokenCount(999999)).toBe("1.0M");
 	});
 
 	test("formats millions", () => {

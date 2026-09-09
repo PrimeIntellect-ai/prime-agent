@@ -77,6 +77,9 @@ export interface AgentsViewRow {
 	selectable: boolean;
 	runningSubagentCount: number;
 	recursiveCost: number;
+	/** Own tokens plus every descendant's, same scope as recursiveCost. */
+	recursiveInputTokens: number;
+	recursiveOutputTokens: number;
 	/** Total descendant sessions (resident + passive) under this row. */
 	descendantCount: number;
 	/** Unique selection identity for this row. */
@@ -432,6 +435,9 @@ export interface UnifiedSessionIndex {
 export interface AgentsViewRecursiveRollup {
 	/** Own cost plus every descendant's cost. */
 	cost: number;
+	/** Own tokens plus every descendant's tokens, same scope as cost. */
+	inputTokens: number;
+	outputTokens: number;
 	/** Total descendant sessions (resident + passive) under this record. */
 	descendantCount: number;
 }
@@ -454,15 +460,20 @@ export function computeRecursiveRollups(
 	const rollups = new Map<UnifiedSessionRecord, AgentsViewRecursiveRollup>();
 	for (let position = order.length - 1; position >= 0; position--) {
 		const record = order[position]!;
-		let cost = record.daemon?.usage?.cost ?? record.saved?.usage?.cost ?? 0;
+		const usage = record.daemon?.usage ?? record.saved?.usage;
+		let cost = usage?.cost ?? 0;
+		let inputTokens = usage?.inputTokens ?? 0;
+		let outputTokens = usage?.outputTokens ?? 0;
 		let descendantCount = 0;
 		for (const child of index.childrenByParent.get(record) ?? []) {
 			if (!isSubagentDescendantRecord(child, record)) continue;
 			const childRollup = rollups.get(child);
 			cost += childRollup?.cost ?? 0;
+			inputTokens += childRollup?.inputTokens ?? 0;
+			outputTokens += childRollup?.outputTokens ?? 0;
 			descendantCount += 1 + (childRollup?.descendantCount ?? 0);
 		}
-		rollups.set(record, { cost, descendantCount });
+		rollups.set(record, { cost, inputTokens, outputTokens, descendantCount });
 	}
 	return rollups;
 }
@@ -762,6 +773,8 @@ export function buildAgentsViewRows(
 			selectable: true,
 			runningSubagentCount: 0,
 			recursiveCost: summary.usage?.cost ?? 0,
+			recursiveInputTokens: summary.usage?.inputTokens ?? 0,
+			recursiveOutputTokens: summary.usage?.outputTokens ?? 0,
 			descendantCount: 0,
 			identity: record?.identity ?? getAgentsViewSummaryIdentity(summary),
 			...(record ? { record, heartbeat: record.heartbeat } : {}),
@@ -805,15 +818,22 @@ export function buildAgentsViewRows(
 		const row = tallyOrder[index]!;
 		let count = 0;
 		let descendantsCost = 0;
+		let descendantsInputTokens = 0;
+		let descendantsOutputTokens = 0;
 		let descendants = 0;
 		for (const child of childrenByParent.get(row) ?? []) {
 			count += (child.section === "running" ? 1 : 0) + child.runningSubagentCount;
 			descendantsCost += child.recursiveCost;
+			descendantsInputTokens += child.recursiveInputTokens;
+			descendantsOutputTokens += child.recursiveOutputTokens;
 			descendants += 1 + child.descendantCount;
 		}
 		row.runningSubagentCount = count;
 		const rollup = row.record ? recursiveRollups?.get(row.record) : undefined;
 		row.recursiveCost = rollup?.cost ?? (row.summary.usage?.cost ?? 0) + descendantsCost;
+		row.recursiveInputTokens = rollup?.inputTokens ?? (row.summary.usage?.inputTokens ?? 0) + descendantsInputTokens;
+		row.recursiveOutputTokens =
+			rollup?.outputTokens ?? (row.summary.usage?.outputTokens ?? 0) + descendantsOutputTokens;
 		row.descendantCount = rollup?.descendantCount ?? descendants;
 	}
 
@@ -894,6 +914,8 @@ function createSubagentSummaryRow(
 		selectable: true,
 		runningSubagentCount: running,
 		recursiveCost: 0,
+		recursiveInputTokens: 0,
+		recursiveOutputTokens: 0,
 		descendantCount: 0,
 		identity: `subagents:${parent.identity}`,
 		parentIdentity: parent.identity,
@@ -950,6 +972,8 @@ function buildSpawnCodeRows(
 		selectable: false,
 		runningSubagentCount: 0,
 		recursiveCost: 0,
+		recursiveInputTokens: 0,
+		recursiveOutputTokens: 0,
 		descendantCount: 0,
 		identity: `code:${parent.identity}:${groupIndex}:${lineIndex}`,
 		parentIdentity: parent.identity,

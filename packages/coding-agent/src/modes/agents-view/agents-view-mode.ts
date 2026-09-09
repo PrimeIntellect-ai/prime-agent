@@ -2824,7 +2824,8 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const sessions = rows.filter((row) => row.kind === "agent" || row.kind === "subagent");
 	const entries = sessions.map((row) => ({
 		identity: row.identity,
-		tokens: `↑${formatTokenCount(row.summary.usage?.inputTokens ?? 0)} ↓${formatTokenCount(row.summary.usage?.outputTokens ?? 0)}`,
+		// Same scope as the cost column: own plus every descendant's tokens.
+		tokens: `↑${formatTokenCount(row.recursiveInputTokens)} ↓${formatTokenCount(row.recursiveOutputTokens)}`,
 		cost: `$${row.recursiveCost.toFixed(2)}`,
 		age: formatSessionDuration(row.summary),
 	}));
@@ -2835,15 +2836,16 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	);
 	const costWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.cost)), 4);
 	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
-	// Tokens are the first detail dropped on narrow terminals: session and model
-	// keep their usual room (28 + 12) before the column earns its place.
-	const showTokens = width - (tokensWidth + 2 + costWidth + 2 + ageWidth) - 4 >= 40;
-	const detailsWidth = (showTokens ? tokensWidth + 2 : 0) + costWidth + 2 + ageWidth;
-	const available = Math.max(0, width - detailsWidth - 4);
 	const desiredModelWidth = sessions.reduce(
 		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
 		12,
 	);
+	// Tokens are the first detail dropped on narrow terminals: the Session and
+	// Model columns keep the room they would get without a tokens column.
+	const showTokens =
+		width - (tokensWidth + 2 + costWidth + 2 + ageWidth) - 4 >= 28 + Math.min(desiredModelWidth, 32) + 2;
+	const detailsWidth = (showTokens ? tokensWidth + 2 : 0) + costWidth + 2 + ageWidth;
+	const available = Math.max(0, width - detailsWidth - 4);
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
