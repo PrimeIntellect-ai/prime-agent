@@ -1,0 +1,194 @@
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+const installer = resolve(__dirname, "../../../install.sh");
+const assets = [
+	"package.json",
+	"install.sh",
+	"prime-agent-runtime/pyproject.toml",
+	"prime-agent-runtime/src/rlm/repl.py",
+	"theme/prime.json",
+	"export-html/template.html",
+	"photon_rs_bg.wasm",
+];
+const platform = `${process.platform}-${process.arch}`;
+const feed = new Map<string, Buffer>();
+const server = createServer((request, response) => {
+	const data = feed.get(request.url ?? "");
+	response.writeHead(data ? 200 : 404);
+	response.end(data ?? "not found");
+});
+let root: string;
+let home: string;
+let base: string;
+
+function publish(version: string, options: { broken?: boolean; missing?: boolean; link?: boolean } = {}) {
+	const source = mkdtempSync(join(root, "archive-"));
+	for (const asset of assets) {
+		if (options.missing && asset === assets[2]) continue;
+		mkdirSync(dirname(join(source, asset)), { recursive: true });
+		writeFileSync(join(source, asset), "fixture\n");
+	}
+	writeFileSync(
+		join(source, "prime-agent"),
+		options.broken ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\nprintf '%s\\n' '${version}'\n`,
+		{ mode: 0o755 },
+	);
+	if (options.link) symlinkSync("/tmp", join(source, "outside"));
+	const filename = `prime-agent-${version}-${platform}.tar.gz`;
+	const archive = join(root, filename);
+	execFileSync("tar", ["-czf", archive, "-C", source, "."]);
+	const bytes = readFileSync(archive);
+	const digest = createHash("sha256").update(bytes).digest("hex");
+	feed.set(`/releases/v${version}/${filename}`, bytes);
+	feed.set(`/releases/v${version}/SHA256SUMS`, Buffer.from(`${digest}  ${filename}\n`));
+	return filename;
+}
+
+async function install(version: string, extra: NodeJS.ProcessEnv = {}) {
+	const child = spawn("sh", [installer, version], {
+		env: {
+			...process.env,
+			HOME: home,
+			PATH: "/usr/bin:/bin",
+			XDG_DATA_HOME: join(home, "data"),
+			SHELL: "/bin/sh",
+			PRIME_AGENT_INSTALL_METHOD: "binary",
+			PRIME_AGENT_INSTALLER_NONINTERACTIVE: "1",
+			PRIME_AGENT_INSTALLER_PLAIN: "1",
+			PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL: "0",
+			PRIME_AGENT_DOWNLOAD_BASE_URL: base,
+			...extra,
+		},
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let output = "";
+	child.stdout.on("data", (chunk) => {
+		output += chunk.toString();
+	});
+	child.stderr.on("data", (chunk) => {
+		output += chunk.toString();
+	});
+	return await new Promise<{ code: number | null; output: string }>((done, reject) => {
+		child.once("error", reject);
+		child.once("close", (code) => done({ code, output }));
+	});
+}
+
+function command() {
+	return join(home, "data/prime-agent/bin/prime-agent");
+}
+
+describe.skipIf(process.platform === "win32")("managed compiled installer", () => {
+	beforeAll(async () => {
+		root = mkdtempSync(join(tmpdir(), "native-installer-"));
+		await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("missing server address");
+		base = `http://127.0.0.1:${address.port}`;
+	});
+	beforeEach(() => {
+		home = mkdtempSync(join(root, "home with spaces-"));
+		feed.clear();
+	});
+	afterAll(async () => {
+		await new Promise<void>((done) => server.close(() => done()));
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("defaults to a verified executable without Node, preserves user data, and retains the previous release", async () => {
+		publish("1.0.0");
+		publish("1.0.1");
+		mkdirSync(join(home, ".prime/agent"), { recursive: true });
+		writeFileSync(join(home, ".prime/agent/auth.json"), "keep credentials");
+		const first = await install("1.0.0", { PRIME_AGENT_INSTALL_METHOD: "auto" });
+		expect(first.code, first.output).toBe(0);
+		expect(execFileSync(join(home, ".local/bin/prime-agent"), ["--version"], { encoding: "utf8" })).toBe("1.0.0\n");
+		const previous = readlinkSync(command());
+		const second = await install("1.0.1");
+		expect(second.code, second.output).toBe(0);
+		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(previous);
+		expect(readFileSync(join(home, ".prime/agent/auth.json"), "utf8")).toBe("keep credentials");
+		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
+	});
+
+	it.each(["checksum", "missing", "broken", "link", "duplicate"])(
+		"leaves the current command working after %s validation fails",
+		async (failure) => {
+			publish("1.0.0");
+			const first = await install("1.0.0");
+			expect(first.code, first.output).toBe(0);
+			const target = readlinkSync(command());
+			const filename = publish("1.0.1", {
+				missing: failure === "missing",
+				broken: failure === "broken",
+				link: failure === "link",
+			});
+			if (failure === "checksum") feed.set(`/releases/v1.0.1/${filename}`, Buffer.from("corrupt"));
+			if (failure === "duplicate")
+				feed.set(
+					"/releases/v1.0.1/SHA256SUMS",
+					Buffer.concat([feed.get("/releases/v1.0.1/SHA256SUMS")!, feed.get("/releases/v1.0.1/SHA256SUMS")!]),
+				);
+			const result = await install("1.0.1");
+			expect(result.code, result.output).not.toBe(0);
+			expect(readlinkSync(command())).toBe(target);
+			expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.0\n");
+			expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
+		},
+	);
+
+	it("refuses to replace an unrelated public command", async () => {
+		publish("1.0.0");
+		mkdirSync(join(home, ".local/bin"), { recursive: true });
+		writeFileSync(join(home, ".local/bin/prime-agent"), "owned by another installer");
+		const result = await install("1.0.0");
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("refusing to replace existing command");
+		expect(existsSync(command())).toBe(false);
+	});
+
+	it("does not steal another installation's lock", async () => {
+		publish("1.0.0");
+		const first = await install("1.0.0");
+		expect(first.code, first.output).toBe(0);
+		const lock = join(home, "data/prime-agent/.install-lock");
+		mkdirSync(lock);
+		writeFileSync(join(lock, "pid"), `${process.pid}\n`);
+		const result = await install("1.0.0");
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("installation is locked");
+		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(`${process.pid}\n`);
+	});
+
+	it.skipIf(!process.env.PRIME_AGENT_TEST_ARCHIVE)(
+		"installs the actual compiled release archive",
+		async () => {
+			const archive = process.env.PRIME_AGENT_TEST_ARCHIVE!;
+			const name = basename(archive);
+			const version = name.slice("prime-agent-".length, -`-${platform}.tar.gz`.length);
+			feed.set(`/releases/v${version}/${name}`, readFileSync(archive));
+			feed.set(`/releases/v${version}/SHA256SUMS`, readFileSync(join(dirname(archive), "SHA256SUMS")));
+			const result = await install(version);
+			expect(result.code, result.output).toBe(0);
+			expect(
+				execFileSync(command(), ["--version"], { encoding: "utf8", env: { HOME: home, PATH: "/usr/bin:/bin" } }),
+			).toBe(`${version}\n`);
+		},
+		60000,
+	);
+});

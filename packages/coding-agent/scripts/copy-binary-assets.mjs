@@ -17,6 +17,7 @@ const excluded = new Set([
 
 export const binaryAssets = [
 	"package.json",
+	"install.sh",
 	"README.md",
 	"CHANGELOG.md",
 	"LICENSE",
@@ -40,6 +41,7 @@ export function copyBinaryAssets(destination) {
 	mkdirSync(destination, { recursive: true });
 	const sources = {
 		"package.json": join(packageDir, "package.json"),
+		"install.sh": join(root, "install.sh"),
 		"README.md": join(packageDir, "README.md"),
 		"CHANGELOG.md": join(packageDir, "CHANGELOG.md"),
 		LICENSE: join(root, "LICENSE"),

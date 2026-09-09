@@ -31,6 +31,7 @@ This creates platform tarballs, `SHA256SUMS`, and `binaries.json`. The version a
 
 ```text
 prime-agent
+install.sh
 package.json
 LICENSE, README.md, CHANGELOG.md
 prime-agent-runtime/
@@ -59,4 +60,14 @@ CI builds and tests natively on all four target platforms. Before testing, it mo
 
 The release workflow consumes those tested artifacts, adds the stable or beta package version, and includes all four archives in the existing aggregate `SHA256SUMS`. Existing npm tarballs and manifest fields remain. The `binaries` array adds `{ platform, file, sha256 }` entries; each file lives under `releases/v<version>/`. Stable/beta pointers retain their existing routing. Production and beta uploads use the same archives for GitHub and R2.
 
-The current installer and update lifecycle remain unchanged. Standalone archive users download and extract a new version manually. Homebrew packaging and automated binary installation/update are separate work.
+## Installation
+
+The published installer defaults to the compiled archive on macOS 13+ and glibc Linux, on ARM64 or x64. It checks the exact release checksum, rejects unsafe archive entries, validates required assets, and runs the executable before activating it. Machines outside those targets use the existing Node installer; an executable that cannot run also falls back to Node. A failed checksum never triggers a fallback.
+
+Set `PRIME_AGENT_INSTALL_METHOD=node` to explicitly keep the Node installation, or `binary` to require the compiled application. `PRIME_AGENT_INSTALL_DIR` overrides the managed root (default `$XDG_DATA_HOME/prime-agent` or `~/.local/share/prime-agent`); `PRIME_AGENT_BIN_DIR` overrides the public command directory (default `~/.local/bin`). Both must be absolute. Existing unrelated commands are never replaced. `PRIME_AGENT_INSTALL_LINK=0` installs without a public link.
+
+Each release keeps its executable and assets together under `releases/`. The stable `bin/prime-agent` link changes only after validation, and `bin/previous` retains the earlier release. The installer serializes changes with `.install-lock`; normal interruption cleans up the lock. After a forced kill, confirm its recorded process is no longer running before removing the stale lock. User data remains in `~/.prime/agent`.
+
+The installer still shows download and verification progress and can prepare Python. Compilation removes JavaScript dependency installation; Python and external tools still need preparation. Set `PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0` to defer Python setup.
+
+Existing npm installations and the in-app updater are handled by the next layers of the rollout. Homebrew packaging remains separate work.
