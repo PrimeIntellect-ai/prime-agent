@@ -73,6 +73,13 @@ interface AsyncBashCompletionRequest {
 }
 
 type AsyncBashCompletionHandler = (request: AsyncBashCompletionRequest) => void | Promise<void>;
+
+interface AsyncBashConsumedRequest {
+	pid: number;
+	command: string;
+}
+
+type AsyncBashConsumedHandler = (request: AsyncBashConsumedRequest) => void | Promise<void>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -228,6 +235,21 @@ export function createAsyncBashCompletionHostHandler(handler: AsyncBashCompletio
 			throw new Error("bash.completed exitCode must be an integer");
 		}
 		await handler({ pid, command, exitCode });
+		return {};
+	};
+}
+
+/** The kernel read a finished command's result, so its completion notice is stale. */
+export function createAsyncBashConsumedHostHandler(handler: AsyncBashConsumedHandler): HostRequestHandler {
+	return async (payload) => {
+		const { pid, command } = payload;
+		if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+			throw new Error("bash.consumed pid must be a positive integer");
+		}
+		if (typeof command !== "string" || !command) {
+			throw new Error("bash.consumed command must be a non-empty string");
+		}
+		await handler({ pid, command });
 		return {};
 	};
 }

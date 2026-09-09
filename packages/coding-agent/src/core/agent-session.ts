@@ -234,6 +234,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.j
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createAsyncBashCompletionHostHandler,
+	createAsyncBashConsumedHostHandler,
 	createDefaultRlmSubagentSessionName,
 	createRlmCreateSessionHostHandler,
 	createRlmDeleteSubagentHostHandler,
@@ -4905,6 +4906,31 @@ export class AgentSession {
 			actions,
 		);
 		for (const id of ids) this._durableRlmTerminalNoticeActionIds.delete(id);
+	}
+
+	/**
+	 * The kernel read the command's result before the notice reached the model, so
+	 * the notice has nothing left to report: drop it while it is still queued.
+	 * Delivered notices are no longer clearable, which makes this a no-op.
+	 */
+	private _withdrawAsyncBashCompletionNotice(details: { pid: number; command: string }): void {
+		const withdrawn = this._cancelSessionActions(
+			(action) => this._isAsyncBashCompletionActionFor(action, details),
+			new Error("Background command completion notice withdrawn: the kernel read the result first."),
+		);
+		if (withdrawn.length > 0) this._emitQueueUpdate();
+	}
+
+	private _isAsyncBashCompletionActionFor(
+		action: QueuedSessionAction,
+		details: { pid: number; command: string },
+	): boolean {
+		if (action.payload.kind !== "turn") return false;
+		const message = primaryDeliveryRecord(action).message;
+		if (message.role !== "custom" || message.customType !== ASYNC_BASH_COMPLETION_CUSTOM_TYPE) return false;
+		// pids are reused across handles, so the command has to match too.
+		const completion = message.details as AsyncBashCompletionDetails | undefined;
+		return completion?.pid === details.pid && completion.command === details.command;
 	}
 
 	private async _promptInjectedMessage(
@@ -9591,6 +9617,9 @@ export class AgentSession {
 						}
 					}
 				}
+			}),
+			"bash.consumed": createAsyncBashConsumedHostHandler((details) => {
+				this._withdrawAsyncBashCompletionNotice(details);
 			}),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),

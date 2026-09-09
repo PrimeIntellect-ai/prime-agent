@@ -5,7 +5,7 @@ import {
 	convertToLlm,
 	createAsyncBashCompletionMessage,
 } from "../src/core/messages.js";
-import { createAsyncBashCompletionHostHandler } from "../src/core/rlm-runtime.js";
+import { createAsyncBashCompletionHostHandler, createAsyncBashConsumedHostHandler } from "../src/core/rlm-runtime.js";
 
 describe("async bash completion", () => {
 	it("creates a bracket-grammar completion notice without a standing handle hint", () => {
@@ -38,6 +38,17 @@ describe("async bash completion", () => {
 
 		await expect(handler(payload)).resolves.toEqual({});
 		expect(completion).toHaveBeenCalledWith(payload);
+	});
+
+	it("validates and forwards kernel result-read payloads", async () => {
+		const consumed = vi.fn();
+		const handler = createAsyncBashConsumedHostHandler(consumed);
+		const payload = { pid: 42, command: "npm test" };
+
+		await expect(handler(payload)).resolves.toEqual({});
+		expect(consumed).toHaveBeenCalledWith(payload);
+		await expect(handler({ pid: 0, command: "npm test" })).rejects.toThrow("positive integer");
+		await expect(handler({ pid: 42, command: "" })).rejects.toThrow("non-empty string");
 	});
 
 	it.each([
