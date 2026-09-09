@@ -842,6 +842,14 @@ describe("AgentsViewMode", () => {
 			expect(render("with-model")).toContain("glm-4.7");
 			expect(render("bare")).toMatch(/\s-\s/);
 			expect(render("bare")).not.toContain("glm-4.7");
+			// The actions panel shows the same recorded model instead of "unknown".
+			Reflect.set(
+				view,
+				"selectedIndex",
+				rows.findIndex((row) => row.summary.sessionId === "with-model"),
+			);
+			const actions = (invoke("renderActions", view, 120) as string[]).map(stripAnsi).join("\n");
+			expect(actions).toContain("Model: prime-inference/glm-4.7");
 		} finally {
 			stopThemeWatcher();
 		}

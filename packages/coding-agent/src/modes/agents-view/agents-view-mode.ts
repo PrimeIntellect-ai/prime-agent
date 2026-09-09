@@ -2593,11 +2593,17 @@ export class AgentsViewMode implements Component, Focusable {
 		];
 		if (row) {
 			const model = row.summary.model;
+			const savedModel = row.record?.saved?.model;
+			const modelLabel = model
+				? `${model.provider}/${model.id}`
+				: savedModel
+					? `${savedModel.provider}/${savedModel.modelId}`
+					: "unknown";
 			const usage = row.summary.usage;
 			actions.push(
 				"",
 				row.title,
-				`Model: ${model ? `${model.provider}/${model.id}` : "unknown"}${row.summary.thinkingLevel ? ` · ${row.summary.thinkingLevel}` : ""}`,
+				`Model: ${modelLabel}${row.summary.thinkingLevel ? ` · ${row.summary.thinkingLevel}` : ""}`,
 				`Directory: ${row.summary.cwd}`,
 				`Tokens: ${usage?.inputTokens ?? 0} in · ${usage?.outputTokens ?? 0} out`,
 				`Cost: $${(usage?.cost ?? 0).toFixed(2)} session · $${row.recursiveCost.toFixed(2)} including subagents`,
