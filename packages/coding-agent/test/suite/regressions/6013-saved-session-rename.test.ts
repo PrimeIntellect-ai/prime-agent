@@ -28,6 +28,7 @@ import type {
 import { createHarness, type Harness } from "../harness.js";
 
 interface WorkerFixture {
+	descriptorPath: string;
 	descriptor: Pick<
 		DaemonWorkerDescriptor,
 		| "workerId"
@@ -113,6 +114,7 @@ async function createFixture(sharedSupervisor?: SupervisorInternals) {
 		return response;
 	});
 	const worker: WorkerFixture = {
+		descriptorPath: join(harness.tempDir, "worker.json"),
 		descriptor: {
 			workerId: `fixture-worker-${harnesses.length}`,
 			lifecycle: "ready",
@@ -127,10 +129,13 @@ async function createFixture(sharedSupervisor?: SupervisorInternals) {
 	const catalogRename = vi.fn(async (path: string, name: string) => {
 		SessionManager.open(path).appendSessionInfo(name.trim());
 	});
+	const catalogList = vi.fn(async () =>
+		Promise.all(harnesses.map((item) => readSessionInfo(item.session.sessionFile!))),
+	);
 	if (!sharedSupervisor) {
 		Object.assign(supervisor, {
 			catalog: {
-				list: async () => Promise.all(harnesses.map((item) => readSessionInfo(item.session.sessionFile!))),
+				list: catalogList,
 				rename: catalogRename,
 			},
 		});
@@ -167,6 +172,7 @@ async function createFixture(sharedSupervisor?: SupervisorInternals) {
 		client,
 		request,
 		catalogRename,
+		catalogList,
 		sessionPath,
 		activeSessionId,
 		row,
@@ -400,40 +406,101 @@ describe("ENG-6013: saved-session names survive live worker activity", () => {
 		},
 	);
 
-	it("commits a path rename when its roster row first arrives during the command", async () => {
+	it.each(["rename_saved_session", "set_session_name", "rename"] as const)(
+		"commits %s when its roster row arrives after the availability check",
+		async (type) => {
+			const first = await createFixture();
+			const second = await createFixture(first.supervisor);
+			const { supervisor, worker, client, sessionPath, request } = first;
+			const previous = workerRosterEntryFromSummary((await first.row())!);
+			const list = first.catalogList.getMockImplementation()!;
+			first.catalogList.mockImplementationOnce(async () => {
+				supervisor.roster().delete(previous.agentId);
+				return list();
+			});
+			let release!: () => void;
+			worker.rosterApplyChain = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			supervisor.consumeWorkerRosterDelta(
+				worker,
+				Buffer.from(JSON.stringify({ type: "roster_delta", entries: [previous] })),
+			);
+			const handleRequest = request.getMockImplementation()!;
+			request.mockImplementationOnce(async (command) => {
+				const response = await handleRequest(command);
+				release();
+				return response;
+			});
+			const command: DaemonCommand =
+				type === "rename_saved_session"
+					? { type, sessionPath, name: "Claimed before snapshot" }
+					: { type, activeSessionId: first.activeSessionId, name: "Claimed before snapshot" };
+			await expect(supervisor.handleCommand(client, command)).resolves.toMatchObject({ success: true });
+			expect((await first.row())?.sessionName).toBe("Claimed before snapshot");
+			await expect(
+				supervisor.handleCommand(client, {
+					type: "rename_saved_session",
+					sessionPath: second.sessionPath,
+					name: "Claimed before snapshot",
+				}),
+			).rejects.toThrow(/already/);
+		},
+	);
+
+	it("uses the session identity acknowledged by rename after a session switch", async () => {
 		const first = await createFixture();
 		const second = await createFixture(first.supervisor);
-		const { supervisor, worker, client, sessionPath, request } = first;
-		const previous = workerRosterEntryFromSummary((await first.row())!);
-		supervisor.roster().delete(previous.agentId);
-		let release!: () => void;
-		worker.rosterApplyChain = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		supervisor.consumeWorkerRosterDelta(
-			worker,
-			Buffer.from(JSON.stringify({ type: "roster_delta", entries: [previous] })),
-		);
+		const { harness, supervisor, client, request, activeSessionId } = first;
+		const originalSessionId = harness.session.sessionId;
 		const handleRequest = request.getMockImplementation()!;
 		request.mockImplementationOnce(async (command) => {
-			const response = await handleRequest(command);
-			release();
-			return response;
+			harness.sessionManager.newSession();
+			harness.setResponses([fauxAssistantMessage("New session answer")]);
+			await harness.session.prompt("New session task");
+			harness.session.setSessionName("Replacement session");
+			await first.flushRoster();
+			return handleRequest(command);
 		});
 		await expect(
-			supervisor.handleCommand(client, {
-				type: "rename_saved_session",
-				sessionPath,
-				name: "Claimed before snapshot",
-			}),
+			supervisor.handleCommand(client, { type: "rename", activeSessionId, name: "Acknowledged session name" }),
 		).resolves.toMatchObject({ success: true });
-		expect((await first.row())?.sessionName).toBe("Claimed before snapshot");
+		expect(harness.session.sessionId).not.toBe(originalSessionId);
+		expect((await first.row())?.sessionId).toBe(harness.session.sessionId);
+		expect((await first.row())?.sessionName).toBe("Acknowledged session name");
 		await expect(
 			supervisor.handleCommand(client, {
 				type: "rename_saved_session",
 				sessionPath: second.sessionPath,
-				name: "Claimed before snapshot",
+				name: "Acknowledged session name",
 			}),
 		).rejects.toThrow(/already/);
 	});
+
+	it.each(["rename_saved_session", "set_session_name", "rename"] as const)(
+		"keeps %s reserved through the saved catalog when its roster row disappears",
+		async (type) => {
+			const first = await createFixture();
+			const second = await createFixture(first.supervisor);
+			const { supervisor, client, request, sessionPath, activeSessionId } = first;
+			const previous = workerRosterEntryFromSummary((await first.row())!);
+			const handleRequest = request.getMockImplementation()!;
+			request.mockImplementationOnce(async (command) => {
+				const response = await handleRequest(command);
+				supervisor.roster().delete(previous.agentId);
+				return response;
+			});
+			await expect(
+				supervisor.handleCommand(client, { type, activeSessionId, sessionPath, name: "Saved accepted name" }),
+			).resolves.toMatchObject({ success: true });
+			expect(supervisor.roster().get(previous.agentId)).toBeUndefined();
+			await expect(
+				supervisor.handleCommand(client, {
+					type: "rename_saved_session",
+					sessionPath: second.sessionPath,
+					name: "Saved accepted name",
+				}),
+			).rejects.toThrow(/already/);
+		},
+	);
 });

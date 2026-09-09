@@ -5039,15 +5039,19 @@ export class DaemonSupervisor {
 			// An acknowledged name survives disconnects. Drain earlier frames, then amend the
 			// same session's current row before releasing its name reservation.
 			await worker.rosterApplyChain;
+			const renamedSummary =
+				command.type === "rename" && isSessionSummary(response.data) ? response.data : renameTarget?.summary;
 			const entry =
 				command.type === "rename_saved_session"
 					? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
-					: renameTarget
-						? this.roster().get(renameTarget.agentId)
-						: undefined;
+					: renamedSummary?.sessionFile
+						? this.roster().bySessionFile(canonicalSessionPath(renamedSummary.sessionFile))
+						: this.roster().byActiveSessionId(command.activeSessionId);
 			if (
 				entry?.workerId === worker.descriptor.workerId &&
-				(command.type === "rename_saved_session" || entry.summary.sessionId === renameTarget?.summary.sessionId)
+				(command.type === "rename_saved_session" ||
+					!renamedSummary ||
+					entry.summary.sessionId === renamedSummary.sessionId)
 			) {
 				const name =
 					command.type === "rename" && isSessionSummary(response.data)
