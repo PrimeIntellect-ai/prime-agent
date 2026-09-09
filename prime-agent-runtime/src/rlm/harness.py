@@ -1,8 +1,8 @@
 """Persistent harness-state helpers for Prime Agent's RLM kernel.
 
 The state model is intentionally small: it records prompt notes, memory,
-skills, subagent specs, and refinement events in the session-local harness
-store by default; pass ``global_=True`` for the cross-session global store.
+skills, subagent specs, and engine-recorded refinement events in the
+session-local harness store by default; pass ``global_=True`` for the cross-session global store.
 Execution still belongs to Prime Agent's TypeScript host and the existing
 ``rlm.run`` recursion bridge.
 """
@@ -121,7 +121,7 @@ class HarnessEntry:
 
 @dataclass
 class RefinementEvent:
-    """A recorded online harness-refinement pass."""
+    """A refinement pass recorded by the refinement engine when it applies edits."""
 
     id: str
     trigger: str
@@ -605,42 +605,18 @@ class HarnessState:
 
     def __getattr__(self, name: str) -> Any:
         # The per-kind wrappers for the non-memory kinds (create_skill, update_subagent,
-        # delete_prompt_note, ...) were folded into the *_memory methods. Kernels and
-        # transcripts still carry them, so name the replacement instead of a bare
-        # AttributeError.
+        # delete_prompt_note, ...) were folded into the *_memory methods, and the manual
+        # record_refinement was removed. Kernels and transcripts still carry the old
+        # names, so name the replacement instead of a bare AttributeError.
+        if name == "record_refinement":
+            raise AttributeError(
+                "record_refinement was removed; refinement events are recorded automatically when refinements run"
+            )
         action, _, suffix = name.partition("_")
         kind = _REMOVED_WRAPPER_KINDS.get(suffix)
         if kind and action in ("create", "update", "delete"):
             raise AttributeError(f"{name} was removed; use rlm.harness.{action}_memory(..., kind={kind!r})")
         raise AttributeError(name)
-
-    def record_refinement(
-        self,
-        trigger: str,
-        changes: list[str] | str,
-        *,
-        evidence: str = "",
-        outcome: str = "",
-        id: str | None = None,
-        global_: bool = False,
-        **kwargs: Any,
-    ) -> RefinementEvent:
-        if target := self._global_target(global_, kwargs):
-            return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
-        self._ensure_local_writable()
-        self._sync_from_disk()
-        event_id = id or f"refine_{len(self.refinements) + 1:04d}"
-        normalized_changes = [changes] if isinstance(changes, str) else list(changes)
-        event = RefinementEvent(
-            id=event_id,
-            trigger=trigger,
-            changes=normalized_changes,
-            evidence=evidence,
-            outcome=outcome,
-        )
-        self.refinements.append(event)
-        self.save()
-        return event
 
     def plan_refinement(
         self,
@@ -653,7 +629,7 @@ class HarnessState:
         plan = [
             f"Diagnose the repeated failure or opportunity{target}: {observation}",
             "Update the smallest useful prompt note, memory item, skill, or subagent spec.",
-            "Run the next action with the changed harness state, then record the outcome.",
+            "Run the next action with the changed harness state and check whether it helped.",
         ]
         if next_step:
             plan.append(f"Immediate validation step: {next_step}")
