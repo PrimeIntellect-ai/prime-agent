@@ -116,6 +116,18 @@ def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] 
     return execution.finished, execution.owner
 
 
+def active_cell_task() -> asyncio.Task[Any] | None:
+    """The body task of the cell executing right now, or None between cells.
+
+    Global kernel state rather than the cell contextvar: a detached task keeps
+    its spawning cell's context long after that cell ended, so only this answers
+    whether a live cell can still receive what the caller is doing.
+    """
+    with _interrupt_lock:
+        task = _active["task"]
+    return task if isinstance(task, asyncio.Task) and not task.done() else None
+
+
 async def host_request(data: dict[str, Any]) -> dict[str, Any]:
     """Send one typed request to the host and await its raw reply dict."""
     if _loop is None:

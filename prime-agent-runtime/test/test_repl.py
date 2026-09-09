@@ -796,6 +796,31 @@ class ReplTest(unittest.TestCase):
                 self.assertEqual(one(again, "done")["status"], "ok")
                 self.assertEqual(stream_text(again, "stderr"), "")
 
+    def test_detached_read_between_turns_keeps_bash_completion(self):
+        # A watcher reading the handle with no cell running reaches nobody: the
+        # notice is the only wake-up an idle session gets, so it must survive.
+        code = "\n".join(
+            [
+                "from rlm import bash",
+                "import asyncio",
+                "handle = bash('sleep 0.2; printf detached-read')",
+                "async def watch():",
+                "    await handle._wait()",
+                "    globals()['seen'] = handle.output()",
+                "asyncio.create_task(watch())",
+                "handle.pid",
+            ]
+        )
+        started = self.repl.execute("detached-read", code)
+        pid = int(one(started, "result")["text"])
+        request = wait_for_host_request(self.repl, started)
+        self.assertEqual(request["data"]["type"], "bash.completed")
+        self.assertEqual(request["data"]["pid"], pid)
+        reply_ok(self.repl, request)
+        probe = self.repl.execute("detached-read-probe", "await asyncio.sleep(0.05)\nseen")
+        self.assertIsNone(one(probe, "host_request"))
+        self.assertEqual(one(probe, "result")["text"], "'detached-read'")
+
     def test_result_read_in_creating_cell_suppresses_bash_completion(self):
         events = self.repl.execute(
             "read-in-cell",

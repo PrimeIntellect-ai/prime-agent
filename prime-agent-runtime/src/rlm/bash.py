@@ -158,14 +158,16 @@ def _creating_cell_waits_for(
     return _completion_reaches(awaiter, targets)
 
 
-def _current_cell_awaits(awaiter: asyncio.Task[Any] | None) -> bool:
-    """Whether the cell running right now is the one receiving this result.
+def _live_cell_owner() -> asyncio.Task[Any] | None:
+    """Body task of the cell executing right now, ignoring detached context copies."""
+    try:
+        from . import repl
 
-    Consumers that outlive their cell (a create_task or as_completed wrapper)
-    resolve with no live cell waiting for them, so the model never sees the result.
-    """
-    context = _current_cell_completion_context()
-    return context is not None and _creating_cell_waits_for(context[1], awaiter)
+        if repl.is_active():
+            return repl.active_cell_task()
+    except (ImportError, RuntimeError):
+        pass
+    return None
 
 
 @dataclass(frozen=True)
@@ -648,10 +650,22 @@ class BashHandle:
                 return
         callback()
 
-    def _note_result_consumed(self) -> None:
-        # Reading a finished command's result makes its completion notice
-        # redundant. Reads while the command still runs are not a result read.
+    def _note_result_consumed(self, awaiter: asyncio.Task[Any] | None = None) -> None:
+        """Record a read of the finished result; an awaiting read passes its task.
+
+        A read only reaches the model from inside a cell: the value, and anything
+        the reader prints, ride that cell's turn. Between turns nothing is
+        delivered, so a detached reader leaves the completion notice in place --
+        that notice is the only wake-up an idle session gets. An awaiting reader
+        must also be one the live cell waits for, because a discarded or detached
+        wrapper task awaits a value the model never sees.
+        """
         if not self._done.is_set():
+            return
+        owner = _live_cell_owner()
+        if owner is None:
+            return
+        if awaiter is not None and not _creating_cell_waits_for(owner, awaiter):
             return
         with self._callback_lock:
             if self._result_consumed:
@@ -924,8 +938,8 @@ class BashHandle:
                 or _creating_cell_waits_for(self._creating_cell_task, current_task)
             ):
                 self._awaited_by_creating_cell = True
-            if completed and _current_cell_awaits(current_task):
-                self._note_result_consumed()
+            if completed:
+                self._note_result_consumed(current_task)
 
     def __repr__(self) -> str:
         state = f"exit_code={self._result.exit_code}" if self._result else "running"
