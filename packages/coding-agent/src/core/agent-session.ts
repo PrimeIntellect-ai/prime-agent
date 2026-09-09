@@ -7033,7 +7033,13 @@ export class AgentSession {
 	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
 		while (settlement === undefined || this._postCompactionContinuationSettlement === settlement) {
 			if (this._actionStore.queuedActions().length > 0) {
-				if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) {
+				// Park while the pump would refuse selection (suspension, pauses, or
+				// external busyness such as bash/compaction/retry): rescheduling a
+				// pump that immediately returns blocked re-resolves every awaited
+				// promise below in the same microtask drain, so this loop would spin
+				// without ever reaching the macrotask queue — starving the IO that
+				// clears the busy state (RES-1332 wedged a 97-session worker this way).
+				if (this._isBusyForSessionInput("pump")) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;

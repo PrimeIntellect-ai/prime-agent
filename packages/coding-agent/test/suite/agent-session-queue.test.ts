@@ -29,6 +29,7 @@ import {
 	saveHarnessState,
 } from "../../src/core/refinement/index.js";
 import { parseSessionSlashCommand } from "../../src/core/slash-commands.js";
+import type { BashOperations } from "../../src/core/tools/bash.js";
 import {
 	conversationMessages,
 	createHarness,
@@ -3630,5 +3631,50 @@ describe("AgentSession scheduler scenarios", () => {
 				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
 			}
 		}
+	});
+
+	it("waitForIdle parks instead of microtask-spinning while a running bash blocks queued input", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const session = harness.session;
+		let releaseBash!: () => void;
+		const gate = new Promise<{ exitCode: number | null }>((resolve) => {
+			releaseBash = () => resolve({ exitCode: 0 });
+		});
+		const operations: BashOperations = { exec: async () => await gate };
+		const bashPromise = session.executeBash("blocked", undefined, { operations });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(session.isBashRunning).toBe(true);
+
+		harness.setResponses([fauxAssistantMessage("first done"), fauxAssistantMessage("second done")]);
+		const firstPrompt = session.prompt("queued while bash runs");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// Count pump scheduling from the idle wait. Unfixed, the wait loop respun the
+		// blocked pump purely in microtasks, so the setImmediate below never fired and
+		// only the 200th reschedule (the escape hatch) released the gate.
+		const internals = session as unknown as { _scheduleSessionInputPump(): void };
+		const originalSchedule = internals._scheduleSessionInputPump.bind(session);
+		let scheduleCount = 0;
+		let secondPrompt: Promise<void> | undefined;
+		internals._scheduleSessionInputPump = () => {
+			scheduleCount++;
+			if (scheduleCount === 200) releaseBash();
+			originalSchedule();
+		};
+
+		const idle = session.waitForIdle();
+		setImmediate(() => {
+			// An arrival during the park must not be lost once the busy state clears.
+			secondPrompt = session.prompt("queued during park");
+			releaseBash();
+		});
+		await idle;
+		await bashPromise;
+		await firstPrompt;
+		await secondPrompt;
+
+		expect(scheduleCount).toBeLessThan(200);
+		expect(getAssistantTexts(harness)).toEqual(["first done", "second done"]);
 	});
 });
