@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentCronJob } from "../../src/core/cron-jobs.js";
 import type { ExtensionAPI } from "../../src/index.js";
-import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
+import { conversationMessages, createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 
 function createDeferred<T = void>(): {
 	promise: Promise<T>;
@@ -299,7 +299,7 @@ describe("AgentSession model and extension characterization", () => {
 		const prompt = harness.session.prompt("hi");
 		await flushAsyncWork();
 
-		expect(harness.session.messages).toHaveLength(0);
+		expect(conversationMessages(harness.session)).toHaveLength(0);
 
 		finishHandler.resolve();
 		await prompt;
@@ -308,7 +308,9 @@ describe("AgentSession model and extension characterization", () => {
 		}
 
 		expect(
-			harness.session.messages.slice(0, 2).map((message) => ({ role: message.role, text: getMessageText(message) })),
+			conversationMessages(harness.session)
+				.slice(0, 2)
+				.map((message) => ({ role: message.role, text: getMessageText(message) })),
 		).toEqual([
 			{ role: "custom", text: "model context" },
 			{ role: "user", text: "hi" },
@@ -352,14 +354,16 @@ describe("AgentSession model and extension characterization", () => {
 		});
 		await flushAsyncWork();
 
-		expect(harness.session.messages).toHaveLength(0);
+		expect(conversationMessages(harness.session)).toHaveLength(0);
 
 		finishHandler.resolve();
 		await accepted;
 		await harness.session.agent.waitForIdle();
 
 		expect(
-			harness.session.messages.slice(0, 2).map((message) => ({ role: message.role, text: getMessageText(message) })),
+			conversationMessages(harness.session)
+				.slice(0, 2)
+				.map((message) => ({ role: message.role, text: getMessageText(message) })),
 		).toEqual([
 			{ role: "custom", text: "accepted model context" },
 			{ role: "user", text: "agent-to-agent payload" },
@@ -434,14 +438,16 @@ describe("AgentSession model and extension characterization", () => {
 		const heartbeat = harness.session.promptHeartbeat(createHeartbeat());
 		await flushAsyncWork();
 
-		expect(harness.session.messages).toHaveLength(0);
+		expect(conversationMessages(harness.session)).toHaveLength(0);
 
 		finishHandler.resolve();
 		await heartbeat;
 		await harness.session.agent.waitForIdle();
 
 		expect(
-			harness.session.messages.slice(0, 2).map((message) => ({ role: message.role, text: getMessageText(message) })),
+			conversationMessages(harness.session)
+				.slice(0, 2)
+				.map((message) => ({ role: message.role, text: getMessageText(message) })),
 		).toEqual([
 			{ role: "custom", text: "heartbeat model context" },
 			{ role: "custom", text: "Check whether the long-running task needs another step." },
@@ -662,7 +668,7 @@ describe("AgentSession model and extension characterization", () => {
 		let providerUserText = "";
 		harness.setResponses([
 			(context) => {
-				const user = context.messages.find((message) => message.role === "user");
+				const user = context.messages.filter((message) => message.role === "user").at(-1);
 				providerUserText =
 					user && typeof user.content !== "string"
 						? user.content
@@ -703,7 +709,7 @@ describe("AgentSession model and extension characterization", () => {
 		let providerUserText = "";
 		transformedHarness.setResponses([
 			(context) => {
-				const user = context.messages.find((message) => message.role === "user");
+				const user = context.messages.filter((message) => message.role === "user").at(-1);
 				providerUserText =
 					user && typeof user.content !== "string"
 						? user.content

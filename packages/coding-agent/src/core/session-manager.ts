@@ -128,6 +128,8 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	fromHook?: boolean;
 	customInstructions?: string;
 	usage?: Usage;
+	/** Harness digest snapshot taken at compaction time; rendered before the summary in LLM context. */
+	harnessDigest?: string;
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
@@ -513,6 +515,7 @@ export function buildSessionContext(
 				compaction.timestamp,
 				compaction.customInstructions,
 				retainedMessages.length,
+				compaction.harnessDigest,
 			),
 			...retainedMessages,
 		);
@@ -1760,6 +1763,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		customInstructions?: string,
 		usage?: Usage,
+		harnessDigest?: string,
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1773,6 +1777,7 @@ export class SessionManager {
 			fromHook,
 			customInstructions,
 			usage,
+			harnessDigest,
 		};
 		this._appendEntry(entry);
 		return entry.id;

@@ -30,6 +30,33 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 }
 
 describe("isContextOverflow", () => {
+	const litellmError =
+		"400 litellm.BadRequestError: OpenAIException - Requested token count exceeds the model's maximum context length of 262144 tokens. You requested a total of 270128 tokens: 261936 tokens from the input messages and 8192 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.. Received Model Group=qwen3.8-27b-nvfp4";
+
+	it.each([262144, undefined])("detects LiteLLM context rejection with contextWindow=%s", (contextWindow) => {
+		expect(isContextOverflow(createErrorMessage(litellmError), contextWindow)).toBe(true);
+	});
+
+	it("detects context rejection without a proxy prefix, regardless of case", () => {
+		const message = createErrorMessage(
+			"REQUESTED TOKEN COUNT EXCEEDS THE MODEL'S MAXIMUM CONTEXT LENGTH OF 262144 TOKENS.",
+		);
+		expect(isContextOverflow(message)).toBe(true);
+	});
+
+	it.each([
+		"429 rate limit: too many tokens",
+		"Requested token count exceeds the per-minute token quota.",
+		"400 litellm.BadRequestError: unsupported parameter: temperature",
+		`429 rate limit: upstream previously returned ${litellmError}`,
+	])("does not classify an unrelated or rate-limited rejection as overflow: %s", (errorMessage) => {
+		expect(isContextOverflow(createErrorMessage(errorMessage), 262144)).toBe(false);
+	});
+
+	it.each(["stop", "aborted"] as const)("ignores context error text with stopReason=%s", (stopReason) => {
+		expect(isContextOverflow({ ...createErrorMessage(litellmError), stopReason }, 262144)).toBe(false);
+	});
+
 	it("detects explicit Ollama prompt-too-long errors", () => {
 		const message = createErrorMessage("400 `prompt too long; exceeded max context length by 100918 tokens`");
 		expect(isContextOverflow(message, 32768)).toBe(true);

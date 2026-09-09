@@ -1,0 +1,1 @@
+- Changed the default Prime Inference model from GLM 5.2 to GLM 5.3.

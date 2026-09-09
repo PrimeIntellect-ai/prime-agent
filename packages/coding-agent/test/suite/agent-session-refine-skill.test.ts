@@ -181,7 +181,7 @@ describe("AgentSession refine skill host requests", () => {
 		const internals = harness.session as unknown as SessionInternals;
 		const refineSpy = vi.spyOn(internals, "refine").mockResolvedValue({});
 		internals._consumePendingRequestedRefine();
-		expect(refineSpy).toHaveBeenCalledWith({ instructions: "test", global: undefined });
+		expect(refineSpy).toHaveBeenCalledWith({ instructions: "test", global: undefined }, { source: "self" });
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 	});
 
