@@ -37,16 +37,17 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: source/package-lock.json
+          package-manager-cache: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: '1.4.0'
+          no-cache: true
 
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           version: '0.11.7'
+          enable-cache: false
 
       - name: Install native development dependencies
         if: runner.os == 'Linux'

@@ -115,11 +115,23 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 			"rm",
 			"ls",
 			"sleep",
+			"cc",
+			"clang",
+			"ld",
+			"ar",
+			"ranlib",
+			"xcrun",
+			"install_name_tool",
 		]) {
 			const source = ["/bin", "/usr/bin"].map((path) => join(path, command)).find(existsSync);
 			if (source) symlinkSync(source, join(bin, command));
 		}
-		if (uv) symlinkSync(resolve(uv), join(bin, "uv"));
+		if (uv) {
+			symlinkSync(resolve(uv), join(bin, "uv-real"));
+			writeFileSync(join(bin, "uv"), `#!/bin/sh\nexec "\${0%/*}/uv-real" "$@" 2>> "$HOME/uv.log"\n`, {
+				mode: 0o755,
+			});
+		}
 	});
 	beforeEach(() => {
 		home = mkdtempSync(join(root, "home-"));
@@ -316,9 +328,10 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 		const result = await run(
 			[...sessionArgs(), "--tools", "ipython", "-p", "artifact python"],
 			{ PRIME_AGENT_ARTIFACT_CASE: "python" },
-			180000,
+			300000,
 		);
-		expect(result.code, result.stderr).toBe(0);
+		const uvLog = join(home, "uv.log");
+		expect(result.code, `${result.stderr}\n${existsSync(uvLog) ? readFileSync(uvLog, "utf8") : ""}`).toBe(0);
 		expect(result.stdout).toContain("artifact-python-result 42");
 		expect(result.stdout).toContain("artifact-shell-ok");
 		const bootstrap = JSON.parse(readFileSync(join(home, ".prime/agent/kernel-venv/.bootstrap-version"), "utf8"));
@@ -327,5 +340,5 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 		expect(
 			bootstrap.pythonSkills.every((skill: { packagePath: string }) => skill.packagePath.startsWith(extracted)),
 		).toBe(true);
-	}, 200000);
+	}, 320000);
 });
