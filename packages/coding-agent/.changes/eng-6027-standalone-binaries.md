@@ -1,0 +1,1 @@
+- Added standalone macOS and Linux release archives that run without Node, npm, or Bun, including the Python runtime sources and application assets.

@@ -115,9 +115,15 @@ jobs:
           echo "Production: $publish_production ${production_version:+v${production_version}}"
           echo "Beta: $publish_beta ${beta_version:+v${beta_version}}"
 
+  standalone:
+    needs: release-context
+    uses: ./.github/workflows/standalone-binaries.yml
+    with:
+      ref: ${{ needs.release-context.outputs.build_ref }}
+
   build:
     runs-on: ubuntu-latest
-    needs: release-context
+    needs: [release-context, standalone]
     permissions:
       contents: read
     env:
@@ -148,6 +154,22 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Download tested standalone archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: standalone-*
+          path: standalone-artifacts
+
+      - name: Verify and stage standalone binaries
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            source_dir="standalone-artifacts/standalone-$platform"
+            (cd "$source_dir" && sha256sum --check SHA256SUMS)
+            destination="packages/coding-agent/binaries/$platform"
+            mkdir -p "$destination"
+            tar -xzf "$source_dir"/*.tar.gz -C "$destination"
+          done
+
       - name: Pack production release
         if: env.PUBLISH_PRODUCTION == 'true'
         env:
@@ -158,6 +180,7 @@ jobs:
             --channel stable \
             --version "$PRODUCTION_VERSION" \
             --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+            --binary-dir packages/coding-agent/binaries \
             --out-dir packages/coding-agent/release/production
 
       - name: Pack beta release
@@ -170,6 +193,7 @@ jobs:
             --channel beta \
             --version "$BETA_VERSION" \
             --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+            --binary-dir packages/coding-agent/binaries \
             --out-dir packages/coding-agent/release/beta
 
       - name: Smoke test installer with npm 12
@@ -301,7 +325,8 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$PRODUCTION_DIR"/*.tgz; do
+          (cd "$PRODUCTION_DIR" && sha256sum --check SHA256SUMS)
+          for artifact in "$PRODUCTION_DIR"/*.tgz "$PRODUCTION_DIR"/*.tar.gz; do
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
@@ -369,7 +394,8 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$BETA_DIR"/*.tgz; do
+          (cd "$BETA_DIR" && sha256sum --check SHA256SUMS)
+          for artifact in "$BETA_DIR"/*.tgz "$BETA_DIR"/*.tar.gz; do
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
