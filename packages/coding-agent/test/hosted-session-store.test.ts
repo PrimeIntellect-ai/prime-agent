@@ -782,7 +782,7 @@ describe("hosted session store source constraints", () => {
 		const parser = source.slice(parserStart, parserEnd);
 		const errorBranch = parser.indexOf("if (opcode === ERROR)");
 		const readyBranch = parser.indexOf("if (pending.responseMode === V5_READY_MODE)");
-		const inventoryBranch = parser.indexOf("if (pending.responseMode === V5_EMPTY_INVENTORY_MODE)", readyBranch);
+		const inventoryBranch = parser.indexOf("if (pending.responseMode === V5_BOUNDED_INVENTORY_MODE)", readyBranch);
 		const v4Branch = parser.indexOf("if (pending.inventory || pending.inspect)");
 		expect(parserStart).toBeGreaterThanOrEqual(0);
 		expect(parserEnd).toBeGreaterThan(parserStart);
@@ -791,11 +791,16 @@ describe("hosted session store source constraints", () => {
 		expect(inventoryBranch).toBeGreaterThan(readyBranch);
 		expect(v4Branch).toBeGreaterThan(inventoryBranch);
 		for (const exact of [
-			"if (pending.responseMode === V5_EMPTY_INVENTORY_MODE)",
+			"if (pending.responseMode === V5_BOUNDED_INVENTORY_MODE)",
 			"opcode === V5_READY_RESPONSE",
 			"payload.byteLength === 9",
 			"payload[0] === V5_HELLO_OPCODE",
 			"payload[8] === 0x35",
+			"if (opcode === WS_TRANSACTION_RESPONSE)",
+			"pending.payloads.length >= V5_MAX_ITEMS",
+			"!isValidRevisionZeroInputDraftTransaction(payload)",
+			"compareLifecyclePrefix(previous, payload) >= 0",
+			"pending.payloads[pending.payloads.length] = payload",
 			"if (opcode !== DONE || payload.byteLength !== 0)",
 			"zeroBytes(payload)",
 			"this.fatal()",
@@ -805,8 +810,27 @@ describe("hosted session store source constraints", () => {
 			"const result = this.command(V5_HELLO_OPCODE, payload, 30_000, false, false, V5_READY_MODE);",
 		);
 		expect(source).toContain(
-			"return this.command(WS_INVENTORY_OPCODE, new Uint8Array(0), 30_000, false, false, V5_EMPTY_INVENTORY_MODE);",
+			"return this.command(WS_INVENTORY_OPCODE, new Uint8Array(0), 30_000, false, false, V5_BOUNDED_INVENTORY_MODE);",
 		);
+		for (const exact of [
+			"const WS_TRANSACTION_RESPONSE = 0x83;",
+			"const V5_TRANSACTION_SIZE = 401;",
+			"const V5_MAX_ITEMS = 8;",
+			"const V5_MAX_PLAN_PAYLOAD = 1_048_576;",
+			"const V5_MAX_CONTENT = 1_073_741_824n;",
+			"const V5_RESERVATION = 1_100_000_000n;",
+			"rangeIsZero(payload, 96, 128)",
+			"rangeIsZero(payload, 172, 216)",
+			"view.getBigUint64(216, false) !== U64_NONE",
+			"rangeIsZero(payload, 224, 384)",
+			"view.getUint32(384, false) !== U32_NONE",
+			"view.getUint32(388, false) !== U32_NONE",
+			"view.getBigUint64(392, false) !== V5_RESERVATION",
+			"payload[400] !== 1",
+			"zeroReadonlyList(invResult.payloads)",
+			"this.failClean(resolveStart, true)",
+		])
+			expect(source).toContain(exact);
 		expect(source).toContain('this.gateState = "RECOVERY_CLOSED";');
 		expect(source).toContain('this.gateState = "ADMISSION_OPEN";');
 		expect(source).toContain('this.gateState = "GLOBAL_REVOKED";');
@@ -2290,7 +2314,59 @@ if scenario.startswith("v5-"):
   emit(frame(0x84,bytes((0xF0,))+b"PISTOV05"))
   opcode,payload=request()
   if opcode!=0x17 or payload: raise SystemExit(7)
-  if scenario=="v5-inventory-wrong-opcode": emit(frame(0x80,bytes((0x17,))))
+  transaction=bytearray(401)
+  transaction[:32]=bytes((1,))*32
+  transaction[32:64]=bytes((2,))*32
+  transaction[64:96]=bytes((3,))*32
+  transaction[96:128]=bytes((4,))*32
+  transaction[128:160]=bytes((5,))*32
+  transaction[160:164]=struct.pack(">I",1)
+  transaction[216:224]=bytes((0xff,))*8
+  transaction[384:392]=bytes((0xff,))*8
+  transaction[392:400]=struct.pack(">Q",1100000000)
+  transaction[400]=1
+  valid_transaction=bytes(transaction)
+  if scenario=="v5-inventory-valid-draft":
+   emit(frame(0x83,valid_transaction)+frame(0x82))
+   opcode,payload=request()
+   if opcode!=0xFF or payload: raise SystemExit(9)
+   emit(frame(0x80,bytes((0xFF,))));raise SystemExit(0)
+  if scenario=="v5-inventory-eight-transactions":
+   transactions=[]
+   for index in range(1,9):
+    item=bytearray(valid_transaction);item[:32]=bytes((index,))*32;transactions.append(frame(0x83,bytes(item)))
+   emit(b"".join(transactions)+frame(0x82))
+   opcode,payload=request()
+   if opcode!=0xFF or payload: raise SystemExit(9)
+   emit(frame(0x80,bytes((0xFF,))));raise SystemExit(0)
+  if scenario=="v5-inventory-short-transaction": emit(frame(0x83,valid_transaction[:-1]))
+  elif scenario=="v5-inventory-long-transaction": emit(frame(0x83,valid_transaction+b"x"))
+  elif scenario=="v5-inventory-zero-transaction": emit(frame(0x83,bytes(401)))
+  elif scenario.startswith("v5-inventory-invalid-"):
+   invalid=bytearray(valid_transaction)
+   mutation=scenario[len("v5-inventory-invalid-"):]
+   if mutation=="tx": invalid[96:128]=bytes(32)
+   elif mutation=="plan": invalid[160:164]=bytes(4)
+   elif mutation=="content": invalid[164:172]=struct.pack(">Q",1073741825)
+   elif mutation=="state": invalid[176]=1
+   elif mutation=="committed": invalid[180:188]=struct.pack(">Q",1)
+   elif mutation=="checkpoint": invalid[216:224]=bytes(8)
+   elif mutation=="record": invalid[224]=1
+   elif mutation=="ordinal": invalid[384:388]=bytes(4)
+   elif mutation=="reservation": invalid[392:400]=bytes(8)
+   elif mutation=="kind": invalid[400]=0
+   else: raise SystemExit(10)
+   emit(frame(0x83,bytes(invalid)))
+  elif scenario=="v5-inventory-nine-transactions":
+   transactions=[]
+   for index in range(1,10):
+    item=bytearray(valid_transaction);item[:32]=bytes((index,))*32;transactions.append(frame(0x83,bytes(item)))
+   emit(b"".join(transactions))
+  elif scenario=="v5-inventory-unsorted":
+   earlier=bytearray(valid_transaction);earlier[:32]=bytes(32)
+   emit(frame(0x83,valid_transaction)+frame(0x83,bytes(earlier)))
+  elif scenario=="v5-inventory-duplicate-prefix": emit(frame(0x83,valid_transaction)+frame(0x83,valid_transaction))
+  elif scenario=="v5-inventory-wrong-opcode": emit(frame(0x80,bytes((0x17,))))
   elif scenario=="v5-inventory-session": emit(frame(0x81,b"x"))
   elif scenario=="v5-inventory-error": emit(frame(0xE0,bytes((0x17,0x02))))
   else: raise SystemExit(8)
@@ -2320,7 +2396,7 @@ while True:
 				`
 def complete(r):
  return r[0] is not None and not r[3] and not r[4] and not r[5] and not r[6] and not r[7] and r[8] and r[9] and r[10] and r[11] and not r[12] and not r[13]
-cases=("malformed-length","malformed-payload","trailing","duplicate","reordered","late","wrong-opcode","stdout-overflow","stderr-overflow","v5-hello-protocol","v5-hello-state","v5-hello-busy","v5-ready-wrong-opcode","v5-ready-short","v5-ready-wrong-magic","v5-inventory-wrong-opcode","v5-inventory-session","v5-inventory-error")
+cases=("malformed-length","malformed-payload","trailing","duplicate","reordered","late","wrong-opcode","stdout-overflow","stderr-overflow","v5-hello-protocol","v5-hello-state","v5-hello-busy","v5-ready-wrong-opcode","v5-ready-short","v5-ready-wrong-magic","v5-inventory-valid-draft","v5-inventory-eight-transactions","v5-inventory-short-transaction","v5-inventory-long-transaction","v5-inventory-zero-transaction","v5-inventory-invalid-tx","v5-inventory-invalid-plan","v5-inventory-invalid-content","v5-inventory-invalid-state","v5-inventory-invalid-committed","v5-inventory-invalid-checkpoint","v5-inventory-invalid-record","v5-inventory-invalid-ordinal","v5-inventory-invalid-reservation","v5-inventory-invalid-kind","v5-inventory-nine-transactions","v5-inventory-unsorted","v5-inventory-duplicate-prefix","v5-inventory-wrong-opcode","v5-inventory-session","v5-inventory-error")
 for scenario in cases:
  open("/chroot/tmp/fault-scenario","w",encoding="ascii").write(scenario)
  term_path="/chroot/tmp/fault-term-"+scenario
@@ -2339,7 +2415,7 @@ for scenario in cases:
  except OSError as failure: helper_absent=failure.errno==errno.ESRCH
  elapsed=time.monotonic()-started
  marker=(("V5_FAULT_OK " if scenario.startswith("v5-") else "FAULT_OK ")+scenario).encode()
- expected_term="" if scenario in ("v5-hello-protocol","v5-hello-state") else "1"
+ expected_term="" if scenario in ("v5-hello-protocol","v5-hello-state","v5-inventory-valid-draft","v5-inventory-eight-transactions") else "1"
  if not complete(r) or r[0]!=0 or marker not in out or term!=expected_term or not helper_absent or elapsed>5:
   raise RuntimeError(f"fault {scenario} result={r[0:1]+r[3:]} term={term!r} helper_absent={helper_absent} elapsed={elapsed} out={out!r} err={err!r}")
  print("FAULT_CASE_OK "+scenario)
@@ -2436,7 +2512,7 @@ for scenario in ("case3","case4"):
 			"33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b",
 		);
 		expect(createHash("sha256").update(readFileSync(sourcePath)).digest("hex")).toBe(
-			"47e242ab60fe7351a68da43ea07421a7fa3b003c43d904f4f5c181222f7db841",
+			"198c2471fdba6a9033df990576ea4c13aface47a2a4eed93cf64fd8651403644",
 		);
 		expect(createHash("sha256").update(readFileSync(harnessPath)).digest("hex")).toBe(
 			"8f55f26572015b6cfcae8edc9a85d6f1b1ae38206f54a5e5b0572872280720ea",
@@ -2445,10 +2521,10 @@ for scenario in ("case3","case4"):
 			"e05bf518f6b9be329c76aa361fca0af3bcc6bc3407b71107dc49ae9db5a752d8",
 		);
 		expect(createHash("sha256").update(readFileSync(faultInterpreterPath)).digest("hex")).toBe(
-			"b8aea9844ddf317b66e1cf38a441946fb15dd9ada6751d47415d6e54cca0642f",
+			"c8a7a852c3cc0958bf9dda339a20b9f3c7845b32fa68b3932be31d847184faef",
 		);
 		expect(createHash("sha256").update(readFileSync(faultControllerPath)).digest("hex")).toBe(
-			"baea4373d74736909d2302a974858dc5c8e1b174e07e0ce6f4c25beec0390d60",
+			"8e08852d55b39a82c2a132f85c52739d4f06c3bfc541346672d0ebde6af1d476",
 		);
 		expect(createHash("sha256").update(readFileSync(rolloverInterpreterPath)).digest("hex")).toBe(
 			"0f791c80ecea328500be5ddf4baa12ad1cdb15685c85b2b1eadb36f207918464",
@@ -2511,7 +2587,7 @@ for scenario in ("case3","case4"):
 		];
 		try {
 			const child = Bun.spawn(
-				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "60"],
+				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(dockerArguments), containerName, "45"],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
 			const stdoutPromise = new Response(child.stdout).text();
@@ -2545,7 +2621,7 @@ for scenario in ("case3","case4"):
 				return value;
 			});
 			const faultChild = Bun.spawn(
-				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(faultArguments), faultContainerName, "60"],
+				[hostPython, "-c", dockerSupervisorRunner, JSON.stringify(faultArguments), faultContainerName, "100"],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
 			const faultStdoutPromise = new Response(faultChild.stdout).text();
@@ -2622,5 +2698,5 @@ for scenario in ("case3","case4"):
 			rmSync(temporary, { recursive: true, force: true });
 		}
 	},
-	180_000,
+	250_000,
 );

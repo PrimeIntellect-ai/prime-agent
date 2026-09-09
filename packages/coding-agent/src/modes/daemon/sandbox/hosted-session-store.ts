@@ -224,6 +224,7 @@ const SESSION = 0x81;
 const DONE = 0x82;
 const ERROR = 0xe0;
 const ABSENT_ERROR = 0x04;
+const WS_TRANSACTION_RESPONSE = 0x83;
 const V5_READY_RESPONSE = 0x84;
 const V5_HELLO_OPCODE = 0xf0;
 const WS_INVENTORY_OPCODE = 0x17;
@@ -231,8 +232,15 @@ const PROTOCOL_ERROR = 0x02;
 const STATE_ERROR = 0x0e;
 const V4_RESPONSE_MODE = 0;
 const V5_READY_MODE = 1;
-const V5_EMPTY_INVENTORY_MODE = 2;
-type ResponseMode = typeof V4_RESPONSE_MODE | typeof V5_READY_MODE | typeof V5_EMPTY_INVENTORY_MODE;
+const V5_BOUNDED_INVENTORY_MODE = 2;
+const V5_TRANSACTION_SIZE = 401;
+const V5_MAX_ITEMS = 8;
+const V5_MAX_PLAN_PAYLOAD = 1_048_576;
+const V5_MAX_CONTENT = 1_073_741_824n;
+const V5_RESERVATION = 1_100_000_000n;
+const U32_NONE = 0xffff_ffff;
+const U64_NONE = 0xffff_ffff_ffff_ffffn;
+type ResponseMode = typeof V4_RESPONSE_MODE | typeof V5_READY_MODE | typeof V5_BOUNDED_INVENTORY_MODE;
 type StartupGateState = "RECOVERY_CLOSED" | "ADMISSION_OPEN" | "GLOBAL_REVOKED";
 
 function failedResult(): { code: "FAILED" } {
@@ -348,6 +356,36 @@ function copyRange(source: Uint8Array, start: number, end: number): Uint8Array {
 	const output = new Uint8Array(end - start);
 	for (let index = start; index < end; index += 1) output[index - start] = source[index];
 	return output;
+}
+
+function rangeIsZero(source: Uint8Array, start: number, end: number): boolean {
+	for (let index = start; index < end; index += 1) if (source[index] !== 0) return false;
+	return true;
+}
+
+function compareLifecyclePrefix(left: Uint8Array, right: Uint8Array): number {
+	for (let index = 0; index < 32; index += 1) {
+		if (left[index] < right[index]) return -1;
+		if (left[index] > right[index]) return 1;
+	}
+	return 0;
+}
+
+function isValidRevisionZeroInputDraftTransaction(payload: Uint8Array): boolean {
+	if (payload.byteLength !== V5_TRANSACTION_SIZE || rangeIsZero(payload, 96, 128)) return false;
+	const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+	const planPayloadLength = view.getUint32(160, false);
+	if (planPayloadLength === 0 || planPayloadLength > V5_MAX_PLAN_PAYLOAD) return false;
+	if (view.getBigUint64(164, false) > V5_MAX_CONTENT) return false;
+	if (!rangeIsZero(payload, 172, 216)) return false;
+	if (view.getBigUint64(216, false) !== U64_NONE || !rangeIsZero(payload, 224, 384)) return false;
+	if (view.getUint32(384, false) !== U32_NONE || view.getUint32(388, false) !== U32_NONE) return false;
+	if (view.getBigUint64(392, false) !== V5_RESERVATION || payload[400] !== 1) return false;
+	return true;
+}
+
+function zeroReadonlyList(values: readonly Uint8Array[]): void {
+	for (let index = 0; index < values.length; index += 1) zeroBytes(values[index]);
 }
 
 function copyBytes(source: Uint8Array): Uint8Array {
@@ -1081,7 +1119,7 @@ class HelperOwner {
 			return;
 		}
 		if (opcode === ERROR) {
-			if (pending.responseMode === V5_EMPTY_INVENTORY_MODE) {
+			if (pending.responseMode === V5_BOUNDED_INVENTORY_MODE) {
 				zeroBytes(payload);
 				this.fatal();
 				return;
@@ -1125,14 +1163,28 @@ class HelperOwner {
 			this.finishPending();
 			return;
 		}
-		if (pending.responseMode === V5_EMPTY_INVENTORY_MODE) {
+		if (pending.responseMode === V5_BOUNDED_INVENTORY_MODE) {
+			if (opcode === WS_TRANSACTION_RESPONSE) {
+				const previous = pending.payloads.length === 0 ? undefined : pending.payloads[pending.payloads.length - 1];
+				if (
+					pending.payloads.length >= V5_MAX_ITEMS ||
+					!isValidRevisionZeroInputDraftTransaction(payload) ||
+					(previous !== undefined && compareLifecyclePrefix(previous, payload) >= 0)
+				) {
+					zeroBytes(payload);
+					this.fatal();
+					return;
+				}
+				pending.payloads[pending.payloads.length] = payload;
+				return;
+			}
 			if (opcode !== DONE || payload.byteLength !== 0) {
 				zeroBytes(payload);
 				this.fatal();
 				return;
 			}
 			zeroBytes(payload);
-			pending.response = _freeze({ ok: true, payloads: _freeze([]) });
+			pending.response = _freeze({ ok: true, payloads: pending.payloads });
 			this.finishPending();
 			return;
 		}
@@ -1257,7 +1309,7 @@ class HelperOwner {
 	}
 
 	v5Inventory(): Promise<HelperResult> {
-		return this.command(WS_INVENTORY_OPCODE, new Uint8Array(0), 30_000, false, false, V5_EMPTY_INVENTORY_MODE);
+		return this.command(WS_INVENTORY_OPCODE, new Uint8Array(0), 30_000, false, false, V5_BOUNDED_INVENTORY_MODE);
 	}
 
 	private releaseWrites(): void {
@@ -2927,6 +2979,11 @@ export function createStartupV5HostedSessionStore(
 									(invResult: HelperResult) => {
 										if (invResult.ok === false) {
 											this.failClean(resolveStart, false);
+											return;
+										}
+										if (invResult.payloads.length !== 0) {
+											zeroReadonlyList(invResult.payloads);
+											this.failClean(resolveStart, true);
 											return;
 										}
 										this.gateState = "ADMISSION_OPEN";
