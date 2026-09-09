@@ -373,10 +373,15 @@ export function buildRlmChildSnapshots(
 			return childId ? [[childId, candidate.activeSessionId] as const] : [];
 		}),
 	);
-	return root.runtime.session.getRlmChildSnapshots().map((snapshot) => ({
-		...snapshot,
-		activeSessionId: activeSessionIds.get(snapshot.id),
-	}));
+	return root.runtime.session.getRlmChildSnapshots().map((snapshot) => {
+		if ("execution" in snapshot) {
+			return snapshot;
+		}
+		return {
+			...snapshot,
+			activeSessionId: activeSessionIds.get(snapshot.id),
+		};
+	});
 }
 
 function firstUserMessageText(session: ActiveSessionState["runtime"]["session"]): string | undefined {

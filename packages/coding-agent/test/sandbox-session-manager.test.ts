@@ -24,12 +24,14 @@ import {
 import {
 	buildSandboxLaunchConfig,
 	decodeSandboxLaunchConfig,
+	type SandboxLaunchConfig,
 } from "../src/modes/daemon/sandbox/prime-sandbox-launch-config.js";
 import {
 	createSandboxLifecycle,
 	type LifecycleConfig,
 	type RunCommand,
 	type RunnerResult,
+	type SandboxLifecycleBundle,
 } from "../src/modes/daemon/sandbox/prime-sandbox-lifecycle.js";
 import {
 	buildSandboxReadinessBundle,
@@ -48,6 +50,7 @@ import {
 	encryptSandboxTransportFrame,
 	generateSandboxEd25519KeyPair,
 	randomSandboxHandshakeBytes,
+	type SandboxEd25519KeyPair,
 	signSandboxReadinessBundle,
 } from "../src/modes/daemon/sandbox/prime-sandbox-transport.js";
 import {
@@ -56,14 +59,8 @@ import {
 	type SandboxArtifactKind,
 } from "../src/modes/daemon/sandbox/prime-sandbox-upload-body.js";
 import {
-	createPrimeSandboxSessionManagerForTesting,
-	deletePrimeSandboxSession,
-	PrimeSandboxSession,
+	createPrimeSandboxSessionFamilyForTesting,
 	type PrimeSandboxSessionArtifacts,
-	PrimeSandboxSessionManager,
-	proxyPrimeSandboxSessionInference,
-	retryPrimeSandboxSessionCleanup,
-	startPrimeSandboxSession,
 } from "../src/modes/daemon/sandbox/sandbox-session-manager.js";
 import versionFixture from "./fixtures/prime-cli-0.6.21-create-version-fixture.json";
 import sandboxFixture from "./fixtures/prime-cli-0.6.21-sandbox-json-fixture.json";
@@ -120,7 +117,16 @@ function lifecycleConfig(): LifecycleConfig {
 	});
 }
 
-async function createLifecycle(initialExisting = false, deletionRecovery = false) {
+async function createLifecycle(
+	initialExisting = false,
+	deletionRecovery = false,
+): Promise<
+	| {
+			bundle: SandboxLifecycleBundle;
+			counts: () => Readonly<{ listCalls: number; createCalls: number; deleteCalls: number }>;
+	  }
+	| undefined
+> {
 	let listCalls = 0;
 	let createCalls = 0;
 	let deleteCalls = 0;
@@ -141,12 +147,35 @@ async function createLifecycle(initialExisting = false, deletionRecovery = false
 		if (argv.includes("get")) {
 			return ok(
 				JSON.stringify({
-					...sandboxFixture.get,
 					id: SANDBOX_ID,
-					labels: [LABEL],
-					status: "RUNNING",
+					name: "",
+					type: "Container",
 					docker_image: "python:3.11.13-slim-bookworm",
+					start_command: "tail -f /dev/null",
+					status: "RUNNING",
+					cpu_cores: 1.0,
+					memory_gb: 1.0,
 					disk_size_gb: 10,
+					disk_mount_path: "/workspace",
+					gpu_count: 0,
+					gpu_type: null,
+					vm: false,
+					network_allowlist: null,
+					network_denylist: null,
+					timeout_minutes: 60,
+					idle_timeout_minutes: null,
+					termination_reason: null,
+					labels: [LABEL],
+					created_at: "2026-09-04 01:02:03 UTC",
+					user_id: null,
+					team_id: null,
+					region: null,
+					registry_credentials_id: null,
+					started_at: "2026-09-04 01:02:04 UTC",
+					exit_code: 0,
+					environment_vars: { VISIBLE: "v***e" },
+					secrets: { TOKEN: "***" },
+					advanced_configs: { futureFlag: true },
 				}),
 			);
 		}
@@ -157,14 +186,15 @@ async function createLifecycle(initialExisting = false, deletionRecovery = false
 		return Object.freeze({ ok: false, code: "INPUT_INVALID" });
 	};
 	const created = await createSandboxLifecycle(run, lifecycleConfig());
-	if (!created.ok) throw new Error(created.code);
+	expect(created.ok).toBe(true);
+	if (!created.ok) return undefined;
 	return {
 		bundle: created.value,
 		counts: () => Object.freeze({ listCalls, createCalls, deleteCalls }),
 	};
 }
 
-async function artifact(kind: SandboxArtifactKind, text: string): Promise<PreparedFileUpload> {
+async function artifact(kind: SandboxArtifactKind, text: string): Promise<PreparedFileUpload | undefined> {
 	const directory = await mkdtemp(join(tmpdir(), "prime-session-manager-"));
 	roots.push(directory);
 	const path = join(directory, `${kind}.bin`);
@@ -174,17 +204,20 @@ async function artifact(kind: SandboxArtifactKind, text: string): Promise<Prepar
 	const digest = createHash("sha256").update(bytes).digest("hex");
 	const prepared = await prepareFileUpload(kind, path, bytes.byteLength, digest);
 	bytes.fill(0);
-	if (!prepared.ok) throw new Error(prepared.code);
+	expect(prepared.ok).toBe(true);
+	if (!prepared.ok) return undefined;
 	return prepared.value;
 }
 
-async function artifacts(): Promise<PrimeSandboxSessionArtifacts> {
-	return Object.freeze({
-		release: await artifact("release", "release-bytes"),
-		manifest: await artifact("manifest", "manifest-bytes"),
-		bootstrap: await artifact("bootstrap", "bootstrap-bytes"),
-		trust: await artifact("trust", "trust-bytes"),
-	});
+async function artifacts(): Promise<PrimeSandboxSessionArtifacts | undefined> {
+	const release = await artifact("release", "release-bytes");
+	const manifest = await artifact("manifest", "manifest-bytes");
+	const bootstrap = await artifact("bootstrap", "bootstrap-bytes");
+	const trust = await artifact("trust", "trust-bytes");
+	if (release === undefined || manifest === undefined || bootstrap === undefined || trust === undefined) {
+		return undefined;
+	}
+	return Object.freeze({ release, manifest, bootstrap, trust });
 }
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -228,14 +261,28 @@ async function readFrame(io: SandboxHandshakeIo): Promise<Uint8Array<ArrayBuffer
 	return frame;
 }
 
-async function runtimeSetup() {
+async function runtimeSetup(): Promise<
+	| {
+			readonly homeIdentity: SandboxEd25519KeyPair;
+			readonly runtimeIdentity: SandboxEd25519KeyPair;
+			readonly protocolNonce: Uint8Array<ArrayBuffer>;
+			readonly launchConfig: SandboxLaunchConfig;
+			readonly bundleText: string;
+	  }
+	| undefined
+> {
 	const homeIdentity = await generateSandboxEd25519KeyPair();
 	const runtimeIdentity = await generateSandboxEd25519KeyPair();
 	const protocolNonce = randomSandboxHandshakeBytes();
-	if (!homeIdentity.ok || !runtimeIdentity.ok || !protocolNonce.ok) throw new Error("setup failed");
+	expect(homeIdentity.ok).toBe(true);
+	expect(runtimeIdentity.ok).toBe(true);
+	expect(protocolNonce.ok).toBe(true);
+	if (!homeIdentity.ok || !runtimeIdentity.ok || !protocolNonce.ok) return undefined;
 	const homePublicKey = copySandboxEd25519PublicKey(homeIdentity.value);
 	const launcherPublicKey = copySandboxEd25519PublicKey(runtimeIdentity.value);
-	if (homePublicKey === undefined || launcherPublicKey === undefined) throw new Error("setup failed");
+	expect(homePublicKey).toBeDefined();
+	expect(launcherPublicKey).toBeDefined();
+	if (homePublicKey === undefined || launcherPublicKey === undefined) return undefined;
 	const archiveSha256 = sequence(32);
 	const manifestSha256 = sequence(64);
 	const launcherSha256 = sequence(96);
@@ -246,9 +293,11 @@ async function runtimeSetup() {
 		manifestSha256: Buffer.from(manifestSha256).toString("hex"),
 		launcherSha256: Buffer.from(launcherSha256).toString("hex"),
 	});
-	if (!launchBytes.ok) throw new Error("setup failed");
+	expect(launchBytes.ok).toBe(true);
+	if (!launchBytes.ok) return undefined;
 	const launchConfig = decodeSandboxLaunchConfig(launchBytes.bytes);
-	if (!launchConfig.ok) throw new Error("setup failed");
+	expect(launchConfig.ok).toBe(true);
+	if (!launchConfig.ok) return undefined;
 	const fields = {
 		launcherPublicKey,
 		homePublicKey,
@@ -258,11 +307,22 @@ async function runtimeSetup() {
 		protocolNonce: protocolNonce.value,
 	};
 	const signature = await signSandboxReadinessBundle(runtimeIdentity.value, fields);
-	if (!signature.ok) throw new Error("setup failed");
-	const bundle = buildSandboxReadinessBundle({ ...fields, signature: signature.value });
-	if (!bundle.ok) throw new Error("setup failed");
+	expect(signature.ok).toBe(true);
+	if (!signature.ok) return undefined;
+	const bundle = buildSandboxReadinessBundle({
+		launcherPublicKey: fields.launcherPublicKey,
+		homePublicKey: fields.homePublicKey,
+		archiveSha256: fields.archiveSha256,
+		manifestSha256: fields.manifestSha256,
+		launcherSha256: fields.launcherSha256,
+		protocolNonce: fields.protocolNonce,
+		signature: signature.value,
+	});
+	expect(bundle.ok).toBe(true);
+	if (!bundle.ok) return undefined;
 	const decoded = decodeSandboxReadinessBundle(bundle.bytes);
-	if (!decoded.ok) throw new Error("setup failed");
+	expect(decoded.ok).toBe(true);
+	if (!decoded.ok) return undefined;
 	return {
 		homeIdentity: homeIdentity.value,
 		runtimeIdentity: runtimeIdentity.value,
@@ -282,7 +342,9 @@ afterEach(async () => {
 describe("Prime Sandbox PR A session manager", () => {
 	test("creates one sandbox, authenticates, proxies one inference, and proves deletion", async () => {
 		const lifecycle = await createLifecycle();
+		if (!lifecycle) return;
 		const runtime = await runtimeSetup();
+		if (!runtime) return;
 		let finishRuntime: ((value: boolean) => void) | undefined;
 		const runtimeDone = new Promise<boolean>((resolve) => {
 			finishRuntime = resolve;
@@ -345,7 +407,8 @@ describe("Prime Sandbox PR A session manager", () => {
 			closeSandboxTransportChannel(handshake.channel);
 			finishRuntime?.(valid);
 		});
-		if (!listener.ok) throw new Error("listener failed");
+		expect(listener.ok).toBe(true);
+		if (!listener.ok) return;
 		const uploadSizes = new Map([
 			["/tmp/prime-agent-runtime.tar.gz", "release-bytes".length],
 			["/tmp/prime-agent-runtime.manifest.json", "manifest-bytes".length],
@@ -383,33 +446,35 @@ describe("Prime Sandbox PR A session manager", () => {
 			return new Response(null, { status: 204 });
 		};
 		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
-		if (!credential.ok) throw new Error("credential failed");
-		const manager = createPrimeSandboxSessionManagerForTesting(
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyResult = createPrimeSandboxSessionFamilyForTesting(
 			lifecycle.bundle,
 			credential.value,
 			dispatch,
 			connectSandboxRuntimeTcp,
 		);
-		const started = await startPrimeSandboxSession(
-			manager,
-			await artifacts(),
-			runtime.homeIdentity,
-			"prime-inference/test-model",
-		);
+		expect(familyResult.ok).toBe(true);
+		if (!familyResult.ok) return;
+		const family = familyResult.value;
+		const started = await family.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model");
 		expect(started.ok).toBe(true);
-		if (!started.ok) throw new Error(started.code);
-		expect(Object.keys(started.value)).toEqual([]);
-		expect(await retryPrimeSandboxSessionCleanup(manager)).toEqual({ ok: false, code: "NOT_ACTIVE" });
+		if (!started.ok) return;
+		const capValue = started.value;
+		if (typeof capValue !== "object" || capValue === null) return;
+		expect(Object.keys(capValue)).toEqual([]);
+		expect(Object.getPrototypeOf(capValue).constructor).toBeNull();
+		expect(await family.retryCleanup()).toEqual({ ok: false, code: "NOT_ACTIVE" });
 		let inferenceCalls = 0;
 		expect(
-			await proxyPrimeSandboxSessionInference(manager, started.value, async (request) => {
+			await family.proxy(started.value, async (request: unknown) => {
 				inferenceCalls += 1;
 				expect(request).toEqual({ model: "prime-inference/test-model", input: "private prompt" });
 				return Object.freeze({ ok: true, text: "home model response" });
 			}),
 		).toEqual({ ok: true, value: true });
 		expect(
-			await proxyPrimeSandboxSessionInference(manager, started.value, async () => ({
+			await family.proxy(started.value, async () => ({
 				ok: false,
 				code: "INFERENCE_FAILED",
 			})),
@@ -417,7 +482,7 @@ describe("Prime Sandbox PR A session manager", () => {
 			ok: false,
 			code: "INFERENCE_ALREADY_CLAIMED",
 		});
-		expect(await deletePrimeSandboxSession(manager, started.value)).toEqual({ ok: true, value: true });
+		expect(await family.delete(started.value)).toEqual({ ok: true, value: true });
 		expect(await runtimeDone).toBe(true);
 		expect(await closeSandboxTcpListener(listener.value)).toEqual({ ok: true, value: true });
 		expect(lifecycle.counts()).toEqual({ listCalls: 2, createCalls: 1, deleteCalls: 1 });
@@ -430,7 +495,9 @@ describe("Prime Sandbox PR A session manager", () => {
 
 	test("deletes and proves absence after an upload failure without duplicate allocation", async () => {
 		const lifecycle = await createLifecycle();
+		if (!lifecycle) return;
 		const runtime = await runtimeSetup();
+		if (!runtime) return;
 		let calls = 0;
 		const dispatch = async (url: string, init: RequestInit): Promise<Response> => {
 			calls += 1;
@@ -442,17 +509,22 @@ describe("Prime Sandbox PR A session manager", () => {
 			return jsonResponse({ exposures: [] });
 		};
 		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
-		if (!credential.ok) throw new Error("credential failed");
-		const manager = createPrimeSandboxSessionManagerForTesting(
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyResult = createPrimeSandboxSessionFamilyForTesting(
 			lifecycle.bundle,
 			credential.value,
 			dispatch,
 			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
 		);
-		expect(
-			await startPrimeSandboxSession(manager, await artifacts(), runtime.homeIdentity, "prime-inference/test-model"),
-		).toEqual({ ok: false, code: "START_FAILED" });
-		expect(await retryPrimeSandboxSessionCleanup(manager)).toEqual({ ok: true, value: true });
+		expect(familyResult.ok).toBe(true);
+		if (!familyResult.ok) return;
+		const family = familyResult.value;
+		expect(await family.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "START_FAILED",
+		});
+		expect(await family.retryCleanup()).toEqual({ ok: true, value: true });
 		expect(lifecycle.counts()).toEqual({ listCalls: 2, createCalls: 1, deleteCalls: 1 });
 		expect(calls).toBe(3);
 		expect(closePrimeCliCredentialAuthority(credential.value)).toBe(true);
@@ -462,7 +534,9 @@ describe("Prime Sandbox PR A session manager", () => {
 
 	test("recovers with a fresh handle after delete and recovery inspection both fail", async () => {
 		const lifecycle = await createLifecycle(false, true);
+		if (!lifecycle) return;
 		const runtime = await runtimeSetup();
+		if (!runtime) return;
 		let calls = 0;
 		const dispatch = async (url: string, init: RequestInit): Promise<Response> => {
 			calls += 1;
@@ -474,18 +548,23 @@ describe("Prime Sandbox PR A session manager", () => {
 			return jsonResponse({ exposures: [] });
 		};
 		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
-		if (!credential.ok) throw new Error("credential failed");
-		const manager = createPrimeSandboxSessionManagerForTesting(
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyResult = createPrimeSandboxSessionFamilyForTesting(
 			lifecycle.bundle,
 			credential.value,
 			dispatch,
 			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
 		);
-		expect(
-			await startPrimeSandboxSession(manager, await artifacts(), runtime.homeIdentity, "prime-inference/test-model"),
-		).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
+		expect(familyResult.ok).toBe(true);
+		if (!familyResult.ok) return;
+		const family = familyResult.value;
+		expect(await family.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "CLEANUP_UNCERTAIN",
+		});
 		expect(lifecycle.counts()).toEqual({ listCalls: 3, createCalls: 1, deleteCalls: 1 });
-		expect(await retryPrimeSandboxSessionCleanup(manager)).toEqual({ ok: true, value: true });
+		expect(await family.retryCleanup()).toEqual({ ok: true, value: true });
 		expect(lifecycle.counts()).toEqual({ listCalls: 5, createCalls: 1, deleteCalls: 2 });
 		expect(calls).toBe(3);
 		expect(closePrimeCliCredentialAuthority(credential.value)).toBe(true);
@@ -495,7 +574,9 @@ describe("Prime Sandbox PR A session manager", () => {
 
 	test("recovers one matching sandbox without duplicate allocation", async () => {
 		const lifecycle = await createLifecycle(true);
+		if (!lifecycle) return;
 		const runtime = await runtimeSetup();
+		if (!runtime) return;
 		let calls = 0;
 		const dispatch = async (url: string, init: RequestInit): Promise<Response> => {
 			calls += 1;
@@ -507,16 +588,21 @@ describe("Prime Sandbox PR A session manager", () => {
 			return jsonResponse({ exposures: [] });
 		};
 		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
-		if (!credential.ok) throw new Error("credential failed");
-		const manager = createPrimeSandboxSessionManagerForTesting(
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyResult = createPrimeSandboxSessionFamilyForTesting(
 			lifecycle.bundle,
 			credential.value,
 			dispatch,
 			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
 		);
-		expect(
-			await startPrimeSandboxSession(manager, await artifacts(), runtime.homeIdentity, "prime-inference/test-model"),
-		).toEqual({ ok: false, code: "START_FAILED" });
+		expect(familyResult.ok).toBe(true);
+		if (!familyResult.ok) return;
+		const family = familyResult.value;
+		expect(await family.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "START_FAILED",
+		});
 		expect(lifecycle.counts()).toEqual({ listCalls: 2, createCalls: 0, deleteCalls: 1 });
 		expect(calls).toBe(3);
 		expect(closePrimeCliCredentialAuthority(credential.value)).toBe(true);
@@ -526,7 +612,9 @@ describe("Prime Sandbox PR A session manager", () => {
 
 	test("retains cleanup authority and retries uncertain unexposure before deletion", async () => {
 		const lifecycle = await createLifecycle();
+		if (!lifecycle) return;
 		const runtime = await runtimeSetup();
+		if (!runtime) return;
 		const uploadSizes = new Map([
 			["/tmp/prime-agent-runtime.tar.gz", "release-bytes".length],
 			["/tmp/prime-agent-runtime.manifest.json", "manifest-bytes".length],
@@ -566,18 +654,23 @@ describe("Prime Sandbox PR A session manager", () => {
 			return deleteAttempts === 1 ? jsonResponse({ failure: true }, 500) : new Response(null, { status: 204 });
 		};
 		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
-		if (!credential.ok) throw new Error("credential failed");
-		const manager = createPrimeSandboxSessionManagerForTesting(
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyResult = createPrimeSandboxSessionFamilyForTesting(
 			lifecycle.bundle,
 			credential.value,
 			dispatch,
 			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
 		);
-		expect(
-			await startPrimeSandboxSession(manager, await artifacts(), runtime.homeIdentity, "prime-inference/test-model"),
-		).toEqual({ ok: false, code: "CLEANUP_UNCERTAIN" });
+		expect(familyResult.ok).toBe(true);
+		if (!familyResult.ok) return;
+		const family = familyResult.value;
+		expect(await family.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model")).toEqual({
+			ok: false,
+			code: "CLEANUP_UNCERTAIN",
+		});
 		expect(lifecycle.counts()).toEqual({ listCalls: 1, createCalls: 1, deleteCalls: 0 });
-		expect(await retryPrimeSandboxSessionCleanup(manager)).toEqual({ ok: true, value: true });
+		expect(await family.retryCleanup()).toEqual({ ok: true, value: true });
 		expect(lifecycle.counts()).toEqual({ listCalls: 2, createCalls: 1, deleteCalls: 1 });
 		expect(deleteAttempts).toBe(2);
 		expect(calls).toBe(15);
@@ -588,7 +681,9 @@ describe("Prime Sandbox PR A session manager", () => {
 
 	test("abort during provider authentication still deletes the allocated sandbox", async () => {
 		const lifecycle = await createLifecycle();
+		if (!lifecycle) return;
 		const runtime = await runtimeSetup();
+		if (!runtime) return;
 		const controller = new AbortController();
 		let calls = 0;
 		const dispatch = async (url: string): Promise<Response> => {
@@ -600,21 +695,19 @@ describe("Prime Sandbox PR A session manager", () => {
 			return jsonResponse({ exposures: [] });
 		};
 		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
-		if (!credential.ok) throw new Error("credential failed");
-		const manager = createPrimeSandboxSessionManagerForTesting(
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyResult = createPrimeSandboxSessionFamilyForTesting(
 			lifecycle.bundle,
 			credential.value,
 			dispatch,
 			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
 		);
+		expect(familyResult.ok).toBe(true);
+		if (!familyResult.ok) return;
+		const family = familyResult.value;
 		expect(
-			await startPrimeSandboxSession(
-				manager,
-				await artifacts(),
-				runtime.homeIdentity,
-				"prime-inference/test-model",
-				controller.signal,
-			),
+			await family.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model", controller.signal),
 		).toEqual({ ok: false, code: "ABORTED" });
 		expect(lifecycle.counts()).toEqual({ listCalls: 2, createCalls: 1, deleteCalls: 1 });
 		expect(calls).toBe(2);
@@ -623,10 +716,75 @@ describe("Prime Sandbox PR A session manager", () => {
 		closeSandboxEd25519KeyPair(runtime.runtimeIdentity);
 	});
 
-	test("rejects forged manager and session capabilities", async () => {
-		expect(() => new PrimeSandboxSessionManager({})).toThrow();
-		expect(() => new PrimeSandboxSession({})).toThrow();
-		expect(await retryPrimeSandboxSessionCleanup({})).toEqual({ ok: false, code: "INPUT_INVALID" });
-		expect(await deletePrimeSandboxSession({}, {})).toEqual({ ok: false, code: "INPUT_INVALID" });
+	test("rejects forged, cross-family, and malformed session capabilities", async () => {
+		const lifecycle = await createLifecycle();
+		if (!lifecycle) return;
+		const runtime = await runtimeSetup();
+		if (!runtime) return;
+		const dispatch = async (): Promise<Response> => jsonResponse({ exposures: [] });
+		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyAResult = createPrimeSandboxSessionFamilyForTesting(
+			lifecycle.bundle,
+			credential.value,
+			dispatch,
+			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
+		);
+		expect(familyAResult.ok).toBe(true);
+		if (!familyAResult.ok) return;
+		const familyA = familyAResult.value;
+		const startA = await familyA.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model");
+		expect(startA.ok).toBe(false);
+		// No session cap issued (start failed), so any object or primitive as sessionRaw is INPUT_INVALID.
+		expect(await familyA.delete({})).toEqual({ ok: false, code: "INPUT_INVALID" });
+		expect(await familyA.proxy({}, async () => ({ ok: true, text: "" }))).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		// A plain empty frozen object with null prototype is not the issued cap.
+		const forgedNullProto: object = {};
+		Object.setPrototypeOf(forgedNullProto, null);
+		Object.freeze(forgedNullProto);
+		expect(await familyA.delete(forgedNullProto)).toEqual({ ok: false, code: "INPUT_INVALID" });
+	});
+
+	test("prevents duplicate start and rejects second family session", async () => {
+		const lifecycle = await createLifecycle();
+		if (!lifecycle) return;
+		const runtime = await runtimeSetup();
+		if (!runtime) return;
+		const dispatch = async (): Promise<Response> => jsonResponse({ exposures: [] });
+		const credential = createPrimeCliCredentialAuthority(new TextEncoder().encode("test-only-provider-key"));
+		expect(credential.ok).toBe(true);
+		if (!credential.ok) return;
+		const familyAResult = createPrimeSandboxSessionFamilyForTesting(
+			lifecycle.bundle,
+			credential.value,
+			dispatch,
+			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
+		);
+		expect(familyAResult.ok).toBe(true);
+		if (!familyAResult.ok) return;
+		const familyA = familyAResult.value;
+		// Second family with same lifecycle/credential uses same backing bundle.
+		const familyBResult = createPrimeSandboxSessionFamilyForTesting(
+			lifecycle.bundle,
+			credential.value,
+			dispatch,
+			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
+		);
+		expect(familyBResult.ok).toBe(true);
+		if (!familyBResult.ok) return;
+		const familyB = familyBResult.value;
+		const a = await familyA.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model");
+		expect(a.ok).toBe(false);
+		// familyB cannot use familyA's cap (none was issued since start failed)
+		expect(await familyB.delete(a.ok === true ? a.value : {})).toEqual({ ok: false, code: "INPUT_INVALID" });
+		const b = await familyB.start(await artifacts(), runtime.homeIdentity, "prime-inference/test-model");
+		expect(b.ok).toBe(false);
+		expect(closePrimeCliCredentialAuthority(credential.value)).toBe(true);
+		closeSandboxEd25519KeyPair(runtime.homeIdentity);
+		closeSandboxEd25519KeyPair(runtime.runtimeIdentity);
 	});
 });

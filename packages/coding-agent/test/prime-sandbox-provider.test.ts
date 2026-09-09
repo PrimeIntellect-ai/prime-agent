@@ -367,6 +367,9 @@ describe("Home-private Prime Sandbox provider adapter", () => {
 		};
 		let resolveConnect: ((value: Readonly<{ ok: true; value: SandboxTcpIo }>) => void) | undefined;
 		const io: SandboxTcpIo = Object.freeze({
+			async readClassified() {
+				return Object.freeze({ type: "IO_FAILURE" });
+			},
 			async readExact() {
 				return undefined;
 			},
@@ -419,6 +422,9 @@ describe("Home-private Prime Sandbox provider adapter", () => {
 			resolveClosed = resolve;
 		});
 		const io: SandboxTcpIo = Object.freeze({
+			async readClassified() {
+				return Object.freeze({ type: "IO_FAILURE" });
+			},
 			async readExact() {
 				return undefined;
 			},

@@ -26,9 +26,14 @@ import {
 	SANDBOX_TRANSPORT_TAG_BYTES,
 	type SandboxTransportChannel,
 } from "./prime-sandbox-transport.js";
+import { createSandboxV31PhysicalPort, type SandboxV31PhysicalPort } from "./prime-sandbox-v31-physical-port.js";
 import { readAbortState as abortState, isExactUint8Array as exactBytes } from "./prime-sandbox-validation.js";
 
 const ISSUE = Object.freeze({});
+const capturedFreeze = Object.freeze;
+const capturedWeakMapGet = WeakMap.prototype.get;
+const capturedWeakMapDelete = WeakMap.prototype.delete;
+const capturedApply = Reflect.apply;
 const PHASE_TIMEOUT_MS = 3_000;
 const CLOSE_TIMEOUT_MS = 1_000;
 
@@ -43,12 +48,12 @@ interface ConnectionState {
 export class SandboxHomeRuntimeConnection {
 	constructor(token: object) {
 		if (token !== ISSUE) throw new Error();
-		Object.freeze(this);
+		capturedFreeze(this);
 	}
 }
 
-Object.freeze(SandboxHomeRuntimeConnection.prototype);
-Object.freeze(SandboxHomeRuntimeConnection);
+capturedFreeze(SandboxHomeRuntimeConnection.prototype);
+capturedFreeze(SandboxHomeRuntimeConnection);
 
 const connections = new WeakMap<object, ConnectionState>();
 
@@ -71,7 +76,7 @@ export type SandboxHomeConnectionCloseResult =
 	| Readonly<{ ok: false; code: "INPUT_INVALID" | "CLEANUP_UNCERTAIN" }>;
 
 function success(value: SandboxHomeRuntimeConnection): Readonly<{ ok: true; value: SandboxHomeRuntimeConnection }> {
-	return Object.freeze({ ok: true, value });
+	return capturedFreeze({ ok: true, value });
 }
 
 function failure(
@@ -94,7 +99,7 @@ function failure(
 		| "ACTIVATION_FAILED"
 		| "CLEANUP_UNCERTAIN";
 }> {
-	return Object.freeze({ ok: false, code });
+	return capturedFreeze({ ok: false, code });
 }
 
 async function readFrame(io: SandboxTcpIo, timeoutMs: number): Promise<Uint8Array<ArrayBuffer> | undefined> {
@@ -259,7 +264,7 @@ export type SandboxInferenceProxyResult =
 function proxyFailure(
 	code: "INPUT_INVALID" | "BUSY" | "ABORTED" | "IO_FAILURE" | "PROTOCOL_ERROR" | "CLEANUP_UNCERTAIN",
 ): SandboxInferenceProxyResult {
-	return Object.freeze({ ok: false, code });
+	return capturedFreeze({ ok: false, code });
 }
 
 async function terminateConnectionState(value: object, state: ConnectionState): Promise<boolean> {
@@ -363,7 +368,7 @@ export async function proxyNextSandboxInference(
 										const replyWritten = await writeEncryptedApplicationFrame(state, executed.value);
 										result =
 											replyWritten === "OK"
-												? Object.freeze({ ok: true, value: true })
+												? capturedFreeze({ ok: true, value: true })
 												: proxyFailure(replyWritten);
 									}
 								}
@@ -389,11 +394,42 @@ export async function proxyNextSandboxInference(
 }
 
 export async function closeSandboxHomeRuntimeConnection(value: unknown): Promise<SandboxHomeConnectionCloseResult> {
-	if (typeof value !== "object" || value === null) return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+	if (typeof value !== "object" || value === null) return capturedFreeze({ ok: false, code: "INPUT_INVALID" });
 	const state = connections.get(value);
-	if (state === undefined) return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+	if (state === undefined) return capturedFreeze({ ok: false, code: "INPUT_INVALID" });
 	closeSandboxTransportChannel(state.channel);
-	if (!(await settleClosed(state.io))) return Object.freeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
+	if (!(await settleClosed(state.io))) return capturedFreeze({ ok: false, code: "CLEANUP_UNCERTAIN" });
 	connections.delete(value);
-	return Object.freeze({ ok: true, value: true });
+	return capturedFreeze({ ok: true, value: true });
+}
+
+export type SandboxHomeV31UpgradeResult =
+	| Readonly<{ ok: true; value: SandboxV31PhysicalPort }>
+	| Readonly<{ ok: false; code: "INPUT_INVALID" | "ALREADY_CONSUMED" }>;
+
+export function upgradeSandboxHomeRuntimeConnectionToV31(
+	connectionRaw: unknown,
+	expectedAllowedModelRaw: unknown,
+): SandboxHomeV31UpgradeResult {
+	if (typeof connectionRaw !== "object" || connectionRaw === null) {
+		return capturedFreeze({ ok: false, code: "INPUT_INVALID" });
+	}
+	if (!isSandboxInferenceModel(expectedAllowedModelRaw)) {
+		return capturedFreeze({ ok: false, code: "INPUT_INVALID" });
+	}
+	const state: ConnectionState | undefined = capturedApply(capturedWeakMapGet, connections, [connectionRaw]);
+	if (state === undefined) return capturedFreeze({ ok: false, code: "INPUT_INVALID" });
+	if (state.busy) return capturedFreeze({ ok: false, code: "ALREADY_CONSUMED" });
+	if (state.allowedModel !== expectedAllowedModelRaw) {
+		return capturedFreeze({ ok: false, code: "INPUT_INVALID" });
+	}
+	state.busy = true;
+	const result = createSandboxV31PhysicalPort(state.io, state.channel);
+	if (!result.ok) {
+		state.busy = false;
+		return capturedFreeze({ ok: false, code: "INPUT_INVALID" });
+	}
+	const frozenOk = capturedFreeze({ ok: true, value: result.value });
+	capturedApply(capturedWeakMapDelete, connections, [connectionRaw]);
+	return frozenOk;
 }

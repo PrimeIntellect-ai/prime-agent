@@ -10,11 +10,30 @@ const MAX_BUFFERED_BYTES = 262_512;
 const MAX_BUFFERED_CHUNKS = 4_096;
 const RUNTIME_PORT = 9_443;
 
-interface PendingRead {
+interface PendingReadBase {
 	readonly length: number;
-	readonly resolve: (value: unknown) => void;
 	readonly timer: ReturnType<typeof setTimeout>;
 }
+
+interface PendingReadLegacy extends PendingReadBase {
+	readonly classified: false;
+	readonly resolve: (value: unknown) => void;
+}
+
+interface PendingReadClassified extends PendingReadBase {
+	readonly classified: true;
+	readonly resolve: (value: SandboxClassifiedReadResult) => void;
+}
+
+type PendingRead = PendingReadLegacy | PendingReadClassified;
+
+export type SandboxClassifiedReadResult =
+	| Readonly<{ type: "DATA"; data: Uint8Array<ArrayBuffer> }>
+	| Readonly<{ type: "TIMEOUT" }>
+	| Readonly<{ type: "EOF" }>
+	| Readonly<{ type: "IO_FAILURE" }>;
+
+type CloseReason = "EOF" | "ERROR" | "CLOSE";
 
 interface PendingWrite {
 	readonly resolve: (value: boolean) => void;
@@ -30,6 +49,8 @@ interface SocketState {
 	chunkIndex: number;
 	bufferedBytes: number;
 	closed: boolean;
+	closeReason: CloseReason | undefined;
+	terminal: "EOF" | "IO_FAILURE" | undefined;
 	pendingRead: PendingRead | undefined;
 	pendingWrite: PendingWrite | undefined;
 	readonly onClosed: () => void;
@@ -45,6 +66,7 @@ interface ListenerState {
 }
 
 export interface SandboxTcpIo extends SandboxHandshakeIo {
+	readClassified(length: number, timeoutMs: number): Promise<SandboxClassifiedReadResult>;
 	waitClosed(): Promise<void>;
 }
 
@@ -116,12 +138,22 @@ function zeroChunks(state: SocketState): void {
 	state.bufferedBytes = 0;
 }
 
-function finishRead(state: SocketState, value: unknown): void {
+function finishRead(state: SocketState, value: Uint8Array<ArrayBuffer> | undefined): void {
 	const pending = state.pendingRead;
 	state.pendingRead = undefined;
 	if (pending === undefined) return;
 	clearTimeout(pending.timer);
-	pending.resolve(value);
+	if (pending.classified) {
+		if (value !== undefined) {
+			pending.resolve(Object.freeze({ type: "DATA", data: value }));
+		} else if (state.terminal === "EOF") {
+			pending.resolve(Object.freeze({ type: "EOF" }));
+		} else {
+			pending.resolve(Object.freeze({ type: "IO_FAILURE" }));
+		}
+	} else {
+		pending.resolve(value);
+	}
 }
 
 function finishWrite(state: SocketState, value: boolean): void {
@@ -136,19 +168,18 @@ function finishWrite(state: SocketState, value: boolean): void {
 function closeState(state: SocketState): void {
 	if (state.closed) return;
 	state.closed = true;
+	if (state.terminal === undefined && state.closeReason !== "EOF") {
+		state.terminal = "IO_FAILURE";
+	}
 	finishRead(state, undefined);
 	finishWrite(state, false);
-	zeroChunks(state);
+	if (state.closeReason !== "EOF") {
+		zeroChunks(state);
+	}
 	try {
 		state.socket.destroy();
 	} catch {
 		// The state is closed even if the native destroy call fails.
-	}
-	state.resolveClosed();
-	try {
-		state.onClosed();
-	} catch {
-		// The socket authority does not expose callback failures.
 	}
 }
 
@@ -221,6 +252,8 @@ function createSocketIo(socket: Socket, onClosed: () => void): SandboxTcpIo {
 		chunkIndex: 0,
 		bufferedBytes: 0,
 		closed: false,
+		closeReason: undefined,
+		terminal: undefined,
 		pendingRead: undefined,
 		pendingWrite: undefined,
 		onClosed,
@@ -249,7 +282,7 @@ function createSocketIo(socket: Socket, onClosed: () => void): SandboxTcpIo {
 					resolve(undefined);
 					closeState(state);
 				}, timeoutMs);
-				state.pendingRead = Object.freeze({ length, resolve, timer });
+				state.pendingRead = Object.freeze({ length, resolve, timer, classified: false });
 			});
 		},
 		async writeExact(bytes: Uint8Array<ArrayBuffer>, timeoutMs: number): Promise<boolean> {
@@ -289,15 +322,103 @@ function createSocketIo(socket: Socket, onClosed: () => void): SandboxTcpIo {
 		close(): void {
 			closeState(state);
 		},
+		async readClassified(length: number, timeoutMs: number): Promise<SandboxClassifiedReadResult> {
+			if (
+				!Number.isSafeInteger(length) ||
+				length < 1 ||
+				length > MAX_BUFFERED_BYTES ||
+				state.pendingRead !== undefined ||
+				!Number.isSafeInteger(timeoutMs) ||
+				timeoutMs < 1 ||
+				timeoutMs > MAX_IO_TIMEOUT_MS
+			) {
+				state.terminal = "IO_FAILURE";
+				zeroChunks(state);
+				closeState(state);
+				return Object.freeze({ type: "IO_FAILURE" });
+			}
+			if (state.terminal === "IO_FAILURE") return Object.freeze({ type: "IO_FAILURE" });
+			if (state.terminal === "EOF" || state.closeReason === "EOF") {
+				const data = take(state, length);
+				if (data !== undefined) return Object.freeze({ type: "DATA", data });
+				if (state.bufferedBytes > 0) {
+					state.terminal = "IO_FAILURE";
+					zeroChunks(state);
+					return Object.freeze({ type: "IO_FAILURE" });
+				}
+				state.terminal = "EOF";
+				return Object.freeze({ type: "EOF" });
+			}
+			if (state.closed) {
+				closeState(state);
+				return Object.freeze({ type: "IO_FAILURE" });
+			}
+			const immediate = take(state, length);
+			if (immediate !== undefined) return Object.freeze({ type: "DATA", data: immediate });
+			return new Promise<SandboxClassifiedReadResult>((resolve) => {
+				const timer = setTimeout(() => {
+					if (state.pendingRead?.resolve !== resolve) return;
+					state.pendingRead = undefined;
+					if (state.bufferedBytes === 0) {
+						resolve(Object.freeze({ type: "TIMEOUT" }));
+					} else {
+						resolve(Object.freeze({ type: "IO_FAILURE" }));
+						closeState(state);
+					}
+				}, timeoutMs);
+				state.pendingRead = Object.freeze({ length, resolve, timer, classified: true });
+			});
+		},
 		async waitClosed(): Promise<void> {
 			await state.closedPromise;
 		},
 	});
 	socket.setNoDelay(true);
 	socket.on("data", (value: Uint8Array) => receive(state, value));
-	socket.once("end", () => closeState(state));
-	socket.once("close", () => closeState(state));
-	socket.once("error", () => closeState(state));
+	socket.once("end", () => {
+		if (state.closeReason === undefined) state.closeReason = "EOF";
+		const pending = state.pendingRead;
+		if (pending !== undefined) {
+			state.pendingRead = undefined;
+			clearTimeout(pending.timer);
+			if (pending.classified) {
+				if (state.bufferedBytes === 0) {
+					state.terminal = "EOF";
+					pending.resolve(Object.freeze({ type: "EOF" }));
+				} else {
+					state.terminal = "IO_FAILURE";
+					pending.resolve(Object.freeze({ type: "IO_FAILURE" }));
+					zeroChunks(state);
+				}
+			} else {
+				pending.resolve(undefined);
+			}
+		}
+		// Begin TCP close exchange so the close event fires
+		try {
+			state.socket.end();
+		} catch {
+			try {
+				state.socket.destroy();
+			} catch {
+				// Bounded cleanup.
+			}
+		}
+	});
+	socket.once("close", () => {
+		if (state.closeReason === undefined) state.closeReason = "CLOSE";
+		closeState(state);
+		state.resolveClosed();
+		try {
+			state.onClosed();
+		} catch {
+			// The socket close authority does not expose callback failures.
+		}
+	});
+	socket.once("error", () => {
+		if (state.closeReason === undefined) state.closeReason = "ERROR";
+		closeState(state);
+	});
 	socket.resume();
 	return io;
 }

@@ -33,7 +33,7 @@ import { dirname, join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
-import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
+import type { CreateLocalRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import * as sessionManagerModule from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
@@ -483,7 +483,7 @@ function makeDaemonFixture(tempDir: string) {
 		createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
 		createRlmSubagentRuntime(
 			parentState: ActiveSessionState,
-			options: CreateRlmSubagentRuntimeOptions,
+			options: CreateLocalRlmSubagentRuntimeOptions,
 		): Promise<ActiveSessionState["runtime"]>;
 		createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost;
 		recordRlmSubagentDeletion(
@@ -512,7 +512,7 @@ function makeRuntimeSession(
 		rlmDepth: sessionManager.getHeader()?.rlmDepth ?? 0,
 		setSubagentRuntimeHost: vi.fn(),
 		getRlmChildRunStatus: vi.fn(() => "running"),
-		registerRlmChildSession: vi.fn(() => true),
+		registerRlmChildSession: vi.fn(async () => true),
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
 		subscribe: vi.fn(() => vi.fn()),
 		bindExtensions: vi.fn(async () => {}),
@@ -530,8 +530,9 @@ function makeRuntimeSession(
 
 function subagentRuntimeOptions(
 	parentState: ActiveSessionState,
-	overrides: Partial<CreateRlmSubagentRuntimeOptions> & Pick<CreateRlmSubagentRuntimeOptions, "id" | "sessionDir">,
-): CreateRlmSubagentRuntimeOptions {
+	overrides: Partial<CreateLocalRlmSubagentRuntimeOptions> &
+		Pick<CreateLocalRlmSubagentRuntimeOptions, "id" | "sessionDir">,
+): CreateLocalRlmSubagentRuntimeOptions {
 	return {
 		parentSession: parentState.runtime.session,
 		prompt: "do the work",

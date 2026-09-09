@@ -13,7 +13,7 @@ export function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
 	return difference === 0;
 }
 
-function isExactAbortSignal(value: unknown): value is AbortSignal {
+export function isExactAbortSignal(value: unknown): value is AbortSignal {
 	try {
 		return (
 			typeof value === "object" &&

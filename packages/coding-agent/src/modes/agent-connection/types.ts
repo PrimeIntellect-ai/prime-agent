@@ -548,7 +548,7 @@ export interface AgentConnectionRlmChildAgentActivity {
 	toolName?: string;
 }
 
-export interface AgentConnectionRlmChildAgentSnapshot {
+export interface AgentConnectionLocalRlmChildAgentSnapshot {
 	id: string;
 	parentId?: string;
 	/** Child daemon active-session id, for direct attachment. */
@@ -569,6 +569,33 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 	activity?: AgentConnectionRlmChildAgentActivity;
 	error?: string;
 }
+
+export interface AgentConnectionHostedRlmChildAgentSnapshot {
+	id: string;
+	parentId?: string;
+	/** Child daemon active-session id, assigned before hosted runtime creation. */
+	activeSessionId: string;
+	/** Stable daemon-visible child name for addressing and display. */
+	sessionName?: string;
+	/** Exact provider/model selector used by the child. */
+	model?: string;
+	label: string;
+	status: AgentConnectionRlmChildAgentStatus;
+	durationMs?: number;
+	answerPreview?: string;
+	repliedSinceTask?: boolean;
+	toolUseCount?: number;
+	tokenCount?: number;
+	recap?: string;
+	/** Immutable execution context. */
+	readonly execution: { readonly type: "prime-sandbox" };
+	activity?: AgentConnectionRlmChildAgentActivity;
+	error?: string;
+}
+
+export type AgentConnectionRlmChildAgentSnapshot =
+	| AgentConnectionLocalRlmChildAgentSnapshot
+	| AgentConnectionHostedRlmChildAgentSnapshot;
 
 export type AgentConnectionSessionEvent =
 	| AgentEvent

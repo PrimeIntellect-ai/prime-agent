@@ -22,13 +22,16 @@ import { AgentSession, type RlmChildAgentSnapshot } from "../src/core/agent-sess
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { computeOwnAndTotalUsage } from "../src/core/context-tree.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
+import type { HostedRlmRuntimeEvent, HostedRlmTaskResult } from "../src/core/hosted-rlm-runtime-port.js";
 import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
 import { ASYNC_BASH_COMPLETION_CUSTOM_TYPE, convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import {
+	type CreateHostedRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
 	createRlmRunHostHandler,
+	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
@@ -96,7 +99,9 @@ interface InspectableRlmRun {
 	id: string;
 	prompt?: string;
 	sessionName?: string;
-	sessionDir: string;
+	activeSessionId?: string;
+	sessionId?: string;
+	location: { type: "local"; sessionDir: string } | { type: "hosted"; execution: { readonly type: "prime-sandbox" } };
 	model?: typeof model;
 	abort: () => void;
 	status: string;
@@ -108,11 +113,15 @@ interface InspectableRlmRun {
 	publication?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	settlement?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	detachedDeletion?: Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number];
+	releaseSettlement?: Promise<boolean>;
+	lifecycleSettlement?: Promise<void>;
+	lifecycleObserver?: Promise<void>;
 	session?: AgentSession;
 }
 
 interface InspectableRlmSession {
 	_disposing: boolean;
+	_hostedRlmDisposalSettlement?: Promise<boolean>;
 	_activeRlmChildRuns: Map<string, InspectableRlmRun>;
 	_unsettledRlmChildRuns: Set<InspectableRlmRun>;
 	_deletingRlmChildren: Map<
@@ -164,6 +173,68 @@ function deferred<T = void>(): {
 		reject = rejectPromise;
 	});
 	return { promise, resolve, reject };
+}
+
+interface HostedRuntimeFixtureOptions {
+	admission?: Promise<Readonly<{ code: "ADMITTED" }>>;
+	terminal?: Promise<HostedRlmTaskResult>;
+	abort?: () => Promise<Readonly<{ status: "aborted" | "already_terminal" }>>;
+	close?: () => Promise<Readonly<{ status: "closed" }>>;
+}
+
+function createRawHostedRuntime(
+	options: CreateHostedRlmSubagentRuntimeOptions,
+	fixtureOptions: HostedRuntimeFixtureOptions = {},
+): {
+	runtime: Readonly<{ hostedPort: object }>;
+	startInitialTask: ReturnType<typeof vi.fn>;
+	awaitTerminal: ReturnType<typeof vi.fn>;
+	abort: ReturnType<typeof vi.fn>;
+	close: ReturnType<typeof vi.fn>;
+	emit: (event: HostedRlmRuntimeEvent) => void;
+} {
+	let listener: ((event: HostedRlmRuntimeEvent) => void) | undefined;
+	const terminal =
+		fixtureOptions.terminal ??
+		Promise.resolve(Object.freeze({ status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 }));
+	const startInitialTask = vi.fn(
+		() => fixtureOptions.admission ?? Promise.resolve(Object.freeze({ code: "ADMITTED" })),
+	);
+	const awaitTerminal = vi.fn(() => terminal);
+	const abort = vi.fn(fixtureOptions.abort ?? (() => Promise.resolve(Object.freeze({ status: "aborted" }))));
+	const close = vi.fn(fixtureOptions.close ?? (() => Promise.resolve(Object.freeze({ status: "closed" }))));
+	const runtime = Object.freeze({
+		hostedPort: {
+			identity: {
+				childId: options.id,
+				sessionId: options.sessionId,
+				sessionName: options.sessionName,
+				modelSelector: options.modelSelector,
+			},
+			startInitialTask,
+			awaitTerminal,
+			abort,
+			observe: vi.fn(() =>
+				Promise.resolve(
+					Object.freeze({
+						status: "running",
+						messageCount: 0,
+						toolUseCount: 0,
+						agentRunning: true,
+						parentReplyCount: 0,
+					}),
+				),
+			),
+			subscribe: vi.fn((next: (event: HostedRlmRuntimeEvent) => void) => {
+				listener = next;
+				return Object.freeze({
+					unsubscribe: vi.fn(() => Object.freeze({ status: "unsubscribed" })),
+				});
+			}),
+			close,
+		},
+	});
+	return { runtime, startInitialTask, awaitTerminal, abort, close, emit: (event) => listener?.(event) };
 }
 
 describe("AgentSession rlm recursion", () => {
@@ -503,8 +574,8 @@ describe("AgentSession rlm recursion", () => {
 		const second = createSession({ rlmSessionDir: join(tempDir, "second") });
 		second.setSessionName(first.sessionId);
 		const root = createSession();
-		expect(root.registerRlmChildSession("first-child", first)).toBe(true);
-		expect(root.registerRlmChildSession("second-child", second)).toBe(true);
+		await expect(root.registerRlmChildSession("first-child", first)).resolves.toBe(true);
+		await expect(root.registerRlmChildSession("second-child", second)).resolves.toBe(true);
 		const states = new Map<string, ActiveSessionState>([
 			[
 				"first-active",
@@ -584,7 +655,7 @@ describe("AgentSession rlm recursion", () => {
 			}
 		});
 
-		expect(root.registerRlmChildSession(childId, child)).toBe(true);
+		await expect(root.registerRlmChildSession(childId, child)).resolves.toBe(true);
 		expect(root.getRlmChildSnapshots()).toEqual([
 			expect.objectContaining({
 				id: childId,
@@ -628,7 +699,7 @@ describe("AgentSession rlm recursion", () => {
 			},
 		});
 		const root = createSession();
-		expect(root.registerRlmChildSession(childId, child)).toBe(true);
+		await expect(root.registerRlmChildSession(childId, child)).resolves.toBe(true);
 
 		const followUp = child.prompt("follow-up work");
 		await waitFor(() => followUpStarted);
@@ -651,12 +722,14 @@ describe("AgentSession rlm recursion", () => {
 		const child = createSession({ rlmSessionDir: childDir });
 		child.setSessionName("retained-retry-worker");
 		let deleteAttempts = 0;
-		const deleteRuntime = vi.fn(async (_childId: string, session: AgentSession) => {
+		const deleteRuntime = vi.fn(async (_childId: string, runtime?: RlmSubagentRuntime) => {
+			let session: AgentSession | undefined;
+			if (runtime && "session" in runtime) session = runtime.session;
 			deleteAttempts++;
 			if (deleteAttempts === 1) {
 				throw new Error("retained close failed");
 			}
-			await session.disposeAsync();
+			if (session) await session.disposeAsync();
 		});
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
@@ -682,7 +755,7 @@ describe("AgentSession rlm recursion", () => {
 		});
 		root.sessionManager.appendMessage({ role: "user", content: "history before cleanup", timestamp: Date.now() });
 		root.sessionManager.appendMessage(assistantMessage("history response"));
-		expect(root.registerRlmChildSession(childId, child)).toBe(true);
+		await expect(root.registerRlmChildSession(childId, child)).resolves.toBe(true);
 
 		await expect(root.deleteRlmSubagent("retained-retry-worker")).rejects.toThrow("retained close failed");
 		const internals = root as unknown as InspectableRlmSession;
@@ -717,7 +790,7 @@ describe("AgentSession rlm recursion", () => {
 				id: nestedId,
 				prompt: "still working",
 				sessionName: nestedId,
-				sessionDir: join(tempDir, nestedId),
+				location: { type: "local", sessionDir: join(tempDir, nestedId) },
 				model,
 				abort: () => {},
 				status: index === 1 ? "queued" : "running",
@@ -729,7 +802,7 @@ describe("AgentSession rlm recursion", () => {
 					id,
 					prompt: "hidden parent",
 					sessionName: id,
-					sessionDir: join(tempDir, id),
+					location: { type: "local", sessionDir: join(tempDir, id) },
 					model,
 					abort: () => {},
 					status: "cancelled",
@@ -968,7 +1041,10 @@ describe("AgentSession rlm recursion", () => {
 					options.onSessionPublished?.(child);
 					return { session: child };
 				},
-				deleteRlmSubagentRuntime: async (_id, child) => child?.disposeAsync(),
+				deleteRlmSubagentRuntime: async (_id, runtime) => {
+					const sess = runtime && "session" in runtime ? runtime.session : undefined;
+					return sess?.disposeAsync();
+				},
 			},
 		});
 		const spawned = await root.runRlmChild("pending task", { name: "pending-child" });
@@ -1024,7 +1100,10 @@ describe("AgentSession rlm recursion", () => {
 			},
 			subagentRuntimeHost: {
 				createRlmSubagentRuntime: async () => ({ session: child }),
-				deleteRlmSubagentRuntime: async (_id, session) => session?.disposeAsync(),
+				deleteRlmSubagentRuntime: async (_id, runtime) => {
+					const sess = runtime && "session" in runtime ? runtime.session : undefined;
+					return sess?.disposeAsync();
+				},
 			},
 		});
 		const spawned = await root.runRlmChild("completed task", { name: "completed-worker" });
@@ -1155,7 +1234,10 @@ describe("AgentSession rlm recursion", () => {
 					await runtimeCreationGate;
 					return { session: hostedChild };
 				},
-				deleteRlmSubagentRuntime: async (_id, child) => child?.disposeAsync(),
+				deleteRlmSubagentRuntime: async (_id, runtime) => {
+					const sess = runtime && "session" in runtime ? runtime.session : undefined;
+					return sess?.disposeAsync();
+				},
 			},
 		});
 		await root.runRlmChild("blocked startup", { name: "deleted-child" });
@@ -1503,7 +1585,10 @@ describe("AgentSession rlm recursion", () => {
 					await runtimeCreationGate;
 					return { session: child };
 				},
-				deleteRlmSubagentRuntime: async (_id, session) => session?.disposeAsync(),
+				deleteRlmSubagentRuntime: async (_id, runtime) => {
+					const sess = runtime && "session" in runtime ? runtime.session : undefined;
+					return sess?.disposeAsync();
+				},
 			},
 		});
 
@@ -1585,7 +1670,7 @@ describe("AgentSession rlm recursion", () => {
 
 		await expect(child.waitForIdle()).resolves.toBeUndefined();
 		const root = createSession();
-		expect(root.registerRlmChildSession("bash-active-child", child)).toBe(true);
+		await expect(root.registerRlmChildSession("bash-active-child", child)).resolves.toBe(true);
 		const originalHeadlessIdle = child.waitForHeadlessIdle.bind(child);
 		let headlessIdleCalls = 0;
 		vi.spyOn(child, "waitForHeadlessIdle").mockImplementation(async () => {
@@ -1627,7 +1712,7 @@ describe("AgentSession rlm recursion", () => {
 		const parentBashStarted = deferred<void>();
 		const parentBashCompletion = deferred<void>();
 		const root = createSession();
-		expect(root.registerRlmChildSession("boundary-active-child", child)).toBe(true);
+		await expect(root.registerRlmChildSession("boundary-active-child", child)).resolves.toBe(true);
 		const originalChildQuiescence = child.waitForRlmQuiescence.bind(child);
 		const childWaitStarted = deferred<void>();
 		let parentBash: Promise<unknown> | undefined;
@@ -1683,7 +1768,7 @@ describe("AgentSession rlm recursion", () => {
 		const bash = child.executeBash("cancelled-gate", undefined, { operations });
 		await bashStarted.promise;
 		const root = createSession();
-		expect(root.registerRlmChildSession("cancelled-bash-active-child", child)).toBe(true);
+		await expect(root.registerRlmChildSession("cancelled-bash-active-child", child)).resolves.toBe(true);
 
 		const quiescence = root.waitForRlmQuiescence();
 		await vi.waitFor(() => expect((child as unknown as InspectableRlmSession)._rlmQuiescenceWaitAborts.size).toBe(1));
@@ -1723,8 +1808,8 @@ describe("AgentSession rlm recursion", () => {
 		});
 		await Promise.all([childAStarted.promise, childBStarted.promise]);
 		const root = createSession();
-		expect(root.registerRlmChildSession("failing-wait-child", childA)).toBe(true);
-		expect(root.registerRlmChildSession("sibling-wait-child", childB)).toBe(true);
+		await expect(root.registerRlmChildSession("failing-wait-child", childA)).resolves.toBe(true);
+		await expect(root.registerRlmChildSession("sibling-wait-child", childB)).resolves.toBe(true);
 
 		const quiescence = root.waitForRlmQuiescence();
 		await vi.waitFor(() => {
@@ -1978,9 +2063,10 @@ describe("AgentSession rlm recursion", () => {
 		const firstCleanup = deferred<void>();
 		const retryCleanup = deferred<void>();
 		let cleanupAttempts = 0;
-		const deleteRlmSubagentRuntime = vi.fn(async (_id: string, session?: AgentSession) => {
+		const deleteRlmSubagentRuntime = vi.fn(async (_id: string, runtime?: RlmSubagentRuntime) => {
 			const cleanup = ++cleanupAttempts === 1 ? firstCleanup.promise : retryCleanup.promise;
 			await cleanup;
+			const session = runtime && "session" in runtime ? runtime.session : undefined;
 			await session?.disposeAsync();
 		});
 		const root = createSession({
@@ -2052,18 +2138,21 @@ describe("AgentSession rlm recursion", () => {
 
 	it("notifies the runtime host when the initial child task completes", async () => {
 		const child = createSession({ rlmSessionDir: join(tempDir, "host-completion-child") });
-		const completeRlmSubagentRuntime = vi.fn(() => true);
+		const completeRlmSubagentRuntime = vi.fn((_id: string, _runtime: RlmSubagentRuntime) => true);
 		const root = createSession({
 			subagentRuntimeHost: {
 				createRlmSubagentRuntime: async () => ({ session: child }),
 				completeRlmSubagentRuntime,
-				deleteRlmSubagentRuntime: async (_id, session) => session?.disposeAsync(),
+				deleteRlmSubagentRuntime: async (_id, runtime) => {
+					const sess = runtime && "session" in runtime ? runtime.session : undefined;
+					return sess?.disposeAsync();
+				},
 			},
 		});
 
 		const spawned = await root.runRlmChild("persist completion");
 		await vi.waitFor(() => {
-			expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, child);
+			expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, { session: child });
 		});
 		expect((await root.listRlmSubagents()).subagents).toContainEqual(
 			expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "completed" }),
@@ -2402,7 +2491,7 @@ describe("AgentSession rlm recursion", () => {
 										unfinishedActionCount: 0,
 										parentActiveSessionId: "parent-active",
 										rlmChildId: run.id,
-										sessionDir: run.sessionDir,
+										sessionDir: (run.location as { type: "local"; sessionDir: string }).sessionDir,
 									},
 								]
 							: [],
@@ -2434,7 +2523,7 @@ describe("AgentSession rlm recursion", () => {
 					active_session_id: "running-active",
 					session_id: rootRun.session.sessionId,
 					session_name: createDefaultRlmSubagentSessionName("slow shard", rootRun.id),
-					session_dir: rootRun.sessionDir,
+					session_dir: (rootRun.location as { type: "local"; sessionDir: string }).sessionDir,
 					status: "running",
 				},
 			],
@@ -3283,6 +3372,1160 @@ describe("AgentSession rlm recursion", () => {
 		expect(readdirSync(join(tempDir, "sessions")).sort()).toEqual(beforeEntries);
 	});
 
+	it("rejects non-printable and over-count hosted metadata before host allocation", async () => {
+		const createHosted = vi.fn((_options: CreateHostedRlmSubagentRuntimeOptions, settle: (result: unknown) => void) =>
+			settle(Object.freeze({ ok: false })),
+		);
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: createHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const nonPrintable = createSession({ subagentRuntimeHost: host });
+		await expect(nonPrintable.runRlmChild("metadata", { sandbox: true, name: "bad name" })).rejects.toThrow(
+			"Hosted RLM selector metadata is invalid",
+		);
+		expect(createHosted).not.toHaveBeenCalled();
+
+		const overCount = createSession({ subagentRuntimeHost: host });
+		(overCount as unknown as { _allowedToolNames: Set<string> })._allowedToolNames = new Set(
+			Array.from({ length: 513 }, (_, index) => `tool-${index}`),
+		);
+		await expect(overCount.runRlmChild("metadata", { sandbox: true })).rejects.toThrow(
+			"Hosted RLM selector metadata is invalid",
+		);
+		expect(createHosted).not.toHaveBeenCalled();
+
+		const overLength = createSession({ subagentRuntimeHost: host });
+		(overLength as unknown as { _allowedToolNames: Set<string> })._allowedToolNames = new Set(["A".repeat(129)]);
+		await expect(overLength.runRlmChild("metadata", { sandbox: true })).rejects.toThrow(
+			"Hosted RLM selector metadata is invalid",
+		);
+		expect(createHosted).not.toHaveBeenCalled();
+	});
+
+	it("does not derive an unnamed hosted allocation identity from prompt text", async () => {
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				settle(Object.freeze({ ok: false }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await expect(root.runRlmChild("ultra secret codename", { sandbox: true })).rejects.toThrow(
+			"Hosted RLM runtime creation failed",
+		);
+		if (!hostedOptions) throw new Error("missing hosted options");
+		expect(hostedOptions.sessionName).toMatch(/^subagent-worker-/);
+		expect(hostedOptions.sessionName).not.toContain("ultra");
+		expect(hostedOptions.sessionName).not.toContain("secret");
+		expect(hostedOptions.sessionName).not.toContain("codename");
+	});
+
+	it("keeps an explicit hosted name reserved through private allocation and admission", async () => {
+		const listingGate = deferred<void>();
+		let listingStarted = false;
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((_options, settle) => settle(Object.freeze({ ok: false }))),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const root = createSession({
+			subagentRuntimeHost: host,
+			agentMessageController: {
+				assertSessionNameAvailable: () => undefined,
+				listAgents: async () => {
+					listingStarted = true;
+					await listingGate.promise;
+					return { current: { activeSessionId: "parent-active", sessionId: root.sessionId }, agents: [] };
+				},
+				sendAgentMessage: vi.fn(),
+			},
+		});
+		const first = root.runRlmChild("first hosted", { sandbox: true, name: "same-hosted-name" });
+		await waitFor(() => listingStarted);
+		await expect(root.runRlmChild("second hosted", { sandbox: true, name: "same-hosted-name" })).rejects.toThrow(
+			"is unavailable",
+		);
+		listingGate.resolve();
+		await expect(first).rejects.toThrow("Hosted RLM runtime creation failed");
+		expect(host.createHostedRlmSubagentRuntime).toHaveBeenCalledTimes(1);
+	});
+
+	it("publishes one hosted running update only after exact ADMITTED", async () => {
+		const admission = deferred<Readonly<{ code: "ADMITTED" }>>();
+		const terminal = deferred<HostedRlmTaskResult>();
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		let fixture: ReturnType<typeof createRawHostedRuntime> | undefined;
+		const releaseGate = deferred<void>();
+		const releaseHosted = vi.fn(
+			(_runtime: unknown, _options: CreateHostedRlmSubagentRuntimeOptions) => releaseGate.promise,
+		);
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				fixture = createRawHostedRuntime(options, { admission: admission.promise, terminal: terminal.promise });
+				settle(Object.freeze({ ok: true, runtime: fixture.runtime }));
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const updates: RlmChildAgentSnapshot[] = [];
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") updates.push(event.child);
+		});
+		const beforeEntries = readdirSync(join(tempDir, "sessions")).sort();
+		let spawnSettled = false;
+		const spawn = root
+			.runRlmChild(
+				"hosted task\nsecond line",
+				{ sandbox: true, name: "hosted-worker" },
+				'print("one")\nprint("two")',
+			)
+			.then((value) => {
+				spawnSettled = true;
+				return value;
+			});
+		await waitFor(() => hostedOptions !== undefined && fixture !== undefined);
+		expect(spawnSettled).toBe(false);
+		expect(updates).toEqual([]);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+		expect(readdirSync(join(tempDir, "sessions")).sort()).toEqual(beforeEntries);
+		if (!hostedOptions || !fixture) throw new Error("missing hosted allocation");
+		fixture.emit({ type: "writing", answerPreview: "PRE_ADMISSION_SECRET" });
+		fixture.emit({ type: "executing", toolName: "secret-tool" });
+		fixture.emit({
+			type: "child_update",
+			status: "running",
+			toolUseCount: 9,
+			parentReplyCount: 7,
+			answerPreview: "PRE_ADMISSION_SECRET_UPDATE",
+		});
+		expect(updates).toEqual([]);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+		expect(Object.keys(hostedOptions).sort()).toEqual(
+			[
+				"activeSessionId",
+				"activeToolNames",
+				"allowedToolNames",
+				"id",
+				"includeCompactSkill",
+				"includeGoals",
+				"modelSelector",
+				"parentActiveSessionId",
+				"parentSessionId",
+				"rlmDepth",
+				"rlmMaxDepth",
+				"rlmParentNodeId",
+				"sandbox",
+				"scopedModels",
+				"serviceTier",
+				"sessionId",
+				"sessionName",
+				"spawnedByRequestId",
+				"thinkingLevel",
+			].sort(),
+		);
+		for (const forbidden of [
+			"prompt",
+			"spawnCode",
+			"parentSession",
+			"sessionDir",
+			"model",
+			"apiKey",
+			"provider",
+			"customTools",
+		]) {
+			expect(Object.hasOwn(hostedOptions, forbidden)).toBe(false);
+		}
+		expect(Object.isFrozen(hostedOptions)).toBe(true);
+		expect(Object.isFrozen(hostedOptions.scopedModels)).toBe(true);
+		expect(Object.isFrozen(hostedOptions.activeToolNames)).toBe(true);
+		expect(fixture.startInitialTask).toHaveBeenCalledWith({
+			prompt: "hosted task\nsecond line",
+			spawnCode: 'print("one")\nprint("two")',
+		});
+		admission.resolve(Object.freeze({ code: "ADMITTED" }));
+		const handle = await spawn;
+		expect(Object.keys(handle)).toEqual(["rlm_child_id", "name", "model", "execution"]);
+		expect(Object.isFrozen(handle)).toBe(true);
+		expect(Object.isFrozen(handle.execution)).toBe(true);
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.status).toBe("running");
+		expect(updates[0]?.answerPreview).toBeUndefined();
+		expect(updates[0]?.activity).toBeUndefined();
+		expect(updates[0]?.toolUseCount).toBeUndefined();
+		expect(root.getRlmChildSession(handle.rlm_child_id)).toBeUndefined();
+		fixture.emit({ type: "writing", answerPreview: "working" });
+		expect(updates.at(-1)?.answerPreview).toBe("working");
+		expect(updates.at(-1)?.activity).toEqual({ kind: "writing" });
+		terminal.resolve({
+			status: "completed",
+			durationMs: 31_001,
+			parentReplyCount: 1,
+			toolUseCount: 4,
+			answerPreview: "done",
+			usage: { inputTokens: 11, outputTokens: 7 },
+		});
+		await waitFor(() => releaseHosted.mock.calls.length === 1);
+		expect(releaseHosted.mock.calls[0]?.[0]).toBe(fixture.runtime);
+		expect(releaseHosted.mock.calls[0]?.[1]).toBe(hostedOptions);
+		releaseGate.resolve();
+		await waitFor(() => (root as unknown as InspectableRlmSession)._activeRlmChildRuns.size === 0);
+	});
+
+	it("does not inspect a supplier-owned return and rejects a Proxy callback result without effects", async () => {
+		let returnGets = 0;
+		let callbackOwnKeys = 0;
+		const returned = new Proxy(
+			{},
+			{
+				get() {
+					returnGets += 1;
+					return undefined;
+				},
+			},
+		);
+		const callbackResult = new Proxy(
+			{},
+			{
+				ownKeys() {
+					callbackOwnKeys += 1;
+					throw new Error("secret callback trap");
+				},
+			},
+		);
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((_options, settle) => {
+				settle(callbackResult);
+				return returned;
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await expect(root.runRlmChild("bad callback", { sandbox: true })).rejects.toThrow(
+			"Hosted RLM runtime creation failed",
+		);
+		expect(returnGets).toBe(0);
+		expect(callbackOwnKeys).toBe(0);
+		expect(deleteHosted).toHaveBeenCalledTimes(1);
+		expect(deleteHosted.mock.calls[0]?.[1]).toBeUndefined();
+	});
+
+	it("deletes every exact successful token after duplicate callback and throw-after-success", async () => {
+		const rawTokens: object[] = [];
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				const first = createRawHostedRuntime(options).runtime;
+				const second = createRawHostedRuntime(options).runtime;
+				rawTokens.push(first, second);
+				settle(Object.freeze({ ok: true, runtime: first }));
+				settle(Object.freeze({ ok: true, runtime: second }));
+				throw new Error("secret throw after success");
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await expect(root.runRlmChild("throw after success", { sandbox: true })).rejects.toThrow(
+			"Hosted RLM runtime creation failed",
+		);
+		await waitFor(() => deleteHosted.mock.calls.length === 2);
+		expect(deleteHosted.mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining(rawTokens));
+	});
+
+	it("ignores an Object.is-identical duplicate success without deleting the admitted token", async () => {
+		let rawRuntime: object | undefined;
+		const releaseHosted = vi.fn((_runtime: unknown, _options: CreateHostedRlmSubagentRuntimeOptions) =>
+			Promise.resolve(),
+		);
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				rawRuntime = createRawHostedRuntime(options).runtime;
+				const success = Object.freeze({ ok: true, runtime: rawRuntime });
+				settle(success);
+				settle(success);
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await root.runRlmChild("same-token duplicate", { sandbox: true });
+		await waitFor(() => releaseHosted.mock.calls.length === 1);
+		expect(releaseHosted.mock.calls[0]?.[0]).toBe(rawRuntime);
+		expect(deleteHosted).not.toHaveBeenCalled();
+	});
+
+	it("retains and deletes the exact raw token on identity mismatch", async () => {
+		let rawRuntime: object | undefined;
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				const fixture = createRawHostedRuntime({ ...options, id: `${options.id}-wrong` });
+				rawRuntime = fixture.runtime;
+				settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await expect(root.runRlmChild("bad identity", { sandbox: true })).rejects.toThrow("Invalid subagent runtime");
+		expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+	});
+
+	it("cancels a callback-pending allocation privately and deletes a late exact token", async () => {
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		let settleAllocation: ((result: unknown) => void) | undefined;
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				settleAllocation = settle;
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const updates: RlmChildAgentSnapshot[] = [];
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") updates.push(event.child);
+		});
+		const spawn = root.runRlmChild("pending hosted", { sandbox: true, name: "pending-hosted" });
+		await waitFor(() => hostedOptions !== undefined && settleAllocation !== undefined);
+		if (!hostedOptions || !settleAllocation) throw new Error("missing pending allocation");
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+		expect(root.cancelRlmChildRun(hostedOptions.id)).toBe(true);
+		await expect(spawn).rejects.toThrow("Cancelled by user");
+		await waitFor(() => deleteHosted.mock.calls.length === 1);
+		expect(deleteHosted).toHaveBeenNthCalledWith(1, hostedOptions.id);
+		expect(updates).toEqual([]);
+		const lateRuntime = createRawHostedRuntime(hostedOptions).runtime;
+		settleAllocation(Object.freeze({ ok: true, runtime: lateRuntime }));
+		await waitFor(() => deleteHosted.mock.calls.length === 2);
+		expect(deleteHosted).toHaveBeenNthCalledWith(2, hostedOptions.id, lateRuntime);
+	});
+
+	it("cancels a pre-ADMITTED controller without waiting for admission or control promises", async () => {
+		const admission = new Promise<Readonly<{ code: "ADMITTED" }>>(() => undefined);
+		const stalledAbort = () => new Promise<Readonly<{ status: "aborted" | "already_terminal" }>>(() => undefined);
+		const stalledClose = () => new Promise<Readonly<{ status: "closed" }>>(() => undefined);
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		let rawRuntime: object | undefined;
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				const fixture = createRawHostedRuntime(options, {
+					admission,
+					abort: stalledAbort,
+					close: stalledClose,
+				});
+				rawRuntime = fixture.runtime;
+				settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const spawn = root.runRlmChild("never admitted", { sandbox: true });
+		await waitFor(() => hostedOptions !== undefined);
+		if (!hostedOptions) throw new Error("missing hosted options");
+		expect(root.cancelRlmChildRun(hostedOptions.id)).toBe(true);
+		await expect(spawn).rejects.toThrow("Cancelled by user");
+		await waitFor(() => deleteHosted.mock.calls.length === 1);
+		expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+	});
+
+	it("cancels admission without dispatching an allocator mutation of Promise.race", async () => {
+		const raceKey = ["r", "a", "c", "e"].join("");
+		const originalRace = Object.getOwnPropertyDescriptor(Promise, raceKey);
+		if (!originalRace) throw new Error("missing native Promise.race descriptor");
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		let hostileRaceCalls = 0;
+		const admission = new Promise<Readonly<{ code: "ADMITTED" }>>(() => undefined);
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				const runtime = createRawHostedRuntime(options, { admission }).runtime;
+				settle(Object.freeze({ ok: true, runtime }));
+				Object.defineProperty(Promise, raceKey, {
+					configurable: true,
+					writable: true,
+					value: () => {
+						hostileRaceCalls += 1;
+						return new Promise(() => undefined);
+					},
+				});
+				queueMicrotask(() => queueMicrotask(() => Object.defineProperty(Promise, raceKey, originalRace)));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const spawn = root.runRlmChild("allocator race mutation", { sandbox: true });
+		await waitFor(() => hostedOptions !== undefined);
+		if (!hostedOptions) throw new Error("missing hosted options");
+		expect(root.cancelRlmChildRun(hostedOptions.id)).toBe(true);
+		await expect(spawn).rejects.toThrow("Cancelled by user");
+		expect(hostileRaceCalls).toBe(0);
+	});
+
+	it("settles cancel, parent abort, and disposal through host deletion while terminal and controls stall", async () => {
+		for (const cancelKind of ["direct", "parent", "dispose"] as const) {
+			const terminal = new Promise<HostedRlmTaskResult>(() => undefined);
+			const stalledAbort = () => new Promise<Readonly<{ status: "aborted" | "already_terminal" }>>(() => undefined);
+			const stalledClose = () => new Promise<Readonly<{ status: "closed" }>>(() => undefined);
+			let rawRuntime: object | undefined;
+			const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+			const host: SubagentRuntimeHost = {
+				createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+				createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+					const fixture = createRawHostedRuntime(options, {
+						terminal,
+						abort: stalledAbort,
+						close: stalledClose,
+					});
+					rawRuntime = fixture.runtime;
+					settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+				}),
+				deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+				deleteHostedRlmSubagentRuntime: deleteHosted,
+			};
+			const root = createSession({ subagentRuntimeHost: host });
+			const handle = await root.runRlmChild(`${cancelKind} cancel`, { sandbox: true });
+			if (cancelKind === "direct") expect(root.cancelRlmChildRun(handle.rlm_child_id)).toBe(true);
+			else if (cancelKind === "parent") await root.abort();
+			else await root.disposeAsync({ kernelSnapshot: false });
+			await waitFor(() => deleteHosted.mock.calls.length === 1);
+			expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+			await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+			root.dispose();
+		}
+	});
+
+	it("deletes after terminal completion without waiting for a stalled close", async () => {
+		for (const cleanupKind of ["cancel", "delete", "dispose"] as const) {
+			const closeStarted = deferred<void>();
+			let rawRuntime: object | undefined;
+			const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+			const host: SubagentRuntimeHost = {
+				createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+				createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+					const fixture = createRawHostedRuntime(options, {
+						terminal: Promise.resolve({
+							status: "completed",
+							durationMs: 1,
+							parentReplyCount: 0,
+							toolUseCount: 0,
+						}),
+						close: () => {
+							closeStarted.resolve();
+							return new Promise<Readonly<{ status: "closed" }>>(() => undefined);
+						},
+					});
+					rawRuntime = fixture.runtime;
+					settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+				}),
+				releaseHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+				deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+				deleteHostedRlmSubagentRuntime: deleteHosted,
+			};
+			const root = createSession({ subagentRuntimeHost: host });
+			const handle = await root.runRlmChild(`post-terminal ${cleanupKind}`, { sandbox: true });
+			await closeStarted.promise;
+			await waitFor(() => root.getRlmChildRunStatus(handle.rlm_child_id) === "done");
+			if (cleanupKind === "cancel") expect(root.cancelRlmChildRun(handle.rlm_child_id)).toBe(true);
+			else if (cleanupKind === "delete") await root.deleteRlmSubagent(handle.rlm_child_id);
+			else await root.disposeAsync({ kernelSnapshot: false });
+			await waitFor(() => deleteHosted.mock.calls.length === 1);
+			expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+			await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+			root.dispose();
+		}
+	});
+
+	it.each([
+		{ label: "success", releaseRejects: false },
+		{ label: "failure", releaseRejects: true },
+	])(
+		"serializes explicit deletion after an already-dispatched hosted release ($label)",
+		async ({ releaseRejects }) => {
+			const terminal = deferred<HostedRlmTaskResult>();
+			const releaseGate = deferred<void>();
+			let rawRuntime: object | undefined;
+			const releaseHosted = vi.fn(
+				(
+					_runtime: unknown,
+					_options: CreateHostedRlmSubagentRuntimeOptions,
+					_status: "done" | "error" | "cancelled",
+				) => releaseGate.promise,
+			);
+			const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+			const host: SubagentRuntimeHost = {
+				createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+				createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+					rawRuntime = createRawHostedRuntime(options, { terminal: terminal.promise }).runtime;
+					settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+				}),
+				releaseHostedRlmSubagentRuntime: releaseHosted,
+				deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+				deleteHostedRlmSubagentRuntime: deleteHosted,
+			};
+			const root = createSession({ subagentRuntimeHost: host });
+			const handle = await root.runRlmChild("serialize hosted release and delete", { sandbox: true });
+			terminal.resolve({ status: "completed", durationMs: 1, parentReplyCount: 1, toolUseCount: 0 });
+			await waitFor(() => releaseHosted.mock.calls.length === 1);
+			await root.deleteRlmSubagent(handle.rlm_child_id);
+			expect(deleteHosted).not.toHaveBeenCalled();
+			if (releaseRejects) releaseGate.reject(new Error("release failed"));
+			else releaseGate.resolve();
+			await waitFor(() => deleteHosted.mock.calls.length === 1);
+			expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+			expect(releaseHosted.mock.calls[0]?.[0]).toBe(rawRuntime);
+			await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+		},
+	);
+
+	it("skips hosted release when deletion wins before dispatch", async () => {
+		const terminal = deferred<HostedRlmTaskResult>();
+		let rawRuntime: object | undefined;
+		const releaseHosted = vi.fn(() => Promise.resolve());
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				rawRuntime = createRawHostedRuntime(options, { terminal: terminal.promise }).runtime;
+				settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const handle = await root.runRlmChild("delete before hosted release", { sandbox: true });
+		expect(root.cancelRlmChildRun(handle.rlm_child_id)).toBe(true);
+		terminal.resolve({ status: "completed", durationMs: 1, parentReplyCount: 0, toolUseCount: 0 });
+		await waitFor(() => deleteHosted.mock.calls.length === 1);
+		expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+		expect(releaseHosted).not.toHaveBeenCalled();
+		await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+	});
+
+	it("turns a malformed hosted deletion return into a retryable ID-only cleanup failure", async () => {
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		const deleteHosted = vi
+			.fn((_childId: string, _runtime?: unknown) => Promise.resolve())
+			.mockImplementationOnce(() => Reflect.get({}, "missing"))
+			.mockResolvedValue(undefined);
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				settle(Object.freeze({ ok: false }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await expect(root.runRlmChild("malformed delete", { sandbox: true })).rejects.toThrow(
+			"Hosted RLM runtime creation failed",
+		);
+		if (!hostedOptions) throw new Error("missing hosted options");
+		expect((root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.has(hostedOptions.id)).toBe(true);
+		await root.deleteRlmSubagent(hostedOptions.id);
+		await waitFor(() => deleteHosted.mock.calls.length === 2);
+		expect(deleteHosted).toHaveBeenNthCalledWith(1, hostedOptions.id);
+		expect(deleteHosted).toHaveBeenNthCalledWith(2, hostedOptions.id);
+	});
+
+	it("retries an exact raw token after a malformed hosted deletion return", async () => {
+		let rawRuntime: object | undefined;
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		const deleteHosted = vi
+			.fn((_childId: string, _runtime?: unknown) => Promise.resolve())
+			.mockImplementationOnce(() => Reflect.get({}, "missing"))
+			.mockResolvedValue(undefined);
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				rawRuntime = createRawHostedRuntime({ ...options, id: `${options.id}-wrong` }).runtime;
+				settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await expect(root.runRlmChild("malformed exact delete", { sandbox: true })).rejects.toThrow(
+			"Invalid subagent runtime",
+		);
+		if (!hostedOptions) throw new Error("missing hosted options");
+		expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+		await root.deleteRlmSubagent(hostedOptions.id);
+		await waitFor(() => deleteHosted.mock.calls.length === 2);
+		expect(deleteHosted.mock.calls[1]?.[1]).toBe(rawRuntime);
+	});
+
+	it("turns a malformed hosted release return into retryable exact deletion", async () => {
+		let rawRuntime: object | undefined;
+		const malformedRelease: NonNullable<SubagentRuntimeHost["releaseHostedRlmSubagentRuntime"]> = vi.fn(() =>
+			Reflect.get({}, "missing"),
+		);
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				rawRuntime = createRawHostedRuntime(options).runtime;
+				settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+			}),
+			releaseHostedRlmSubagentRuntime: malformedRelease,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const handle = await root.runRlmChild("malformed release", { sandbox: true });
+		await waitFor(() => (root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.has(handle.rlm_child_id));
+		await root.deleteRlmSubagent(handle.rlm_child_id);
+		await waitFor(() => deleteHosted.mock.calls.length === 1);
+		expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+		await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+	});
+
+	it("observes a branded hosted release Promise without invoking its constructor accessor", async () => {
+		let constructorGets = 0;
+		const releasePromise = Promise.resolve();
+		Object.defineProperty(releasePromise, "constructor", {
+			configurable: true,
+			get() {
+				constructorGets += 1;
+				return Promise;
+			},
+		});
+		const releaseHosted = vi.fn(() => releasePromise);
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				settle(Object.freeze({ ok: true, runtime: createRawHostedRuntime(options).runtime }));
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const handle = await root.runRlmChild("hostile branded release", { sandbox: true });
+		await waitFor(() => (root as unknown as InspectableRlmSession)._activeRlmChildRuns.size === 0);
+		expect(root.getRlmChildRunStatus(handle.rlm_child_id)).toBeUndefined();
+		expect(constructorGets).toBe(0);
+		expect(deleteHosted).not.toHaveBeenCalled();
+	});
+
+	it("fails hosted deletion closed without invoking a mutated Promise species accessor", async () => {
+		const terminal = new Promise<HostedRlmTaskResult>(() => undefined);
+		const originalSpecies = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+		if (!originalSpecies) throw new Error("missing native Promise species descriptor");
+		let speciesGets = 0;
+		let firstDeletion = true;
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => {
+			if (!firstDeletion) return Promise.resolve();
+			firstDeletion = false;
+			const deletion = Promise.resolve();
+			Object.defineProperty(Promise, Symbol.species, {
+				configurable: true,
+				get() {
+					speciesGets += 1;
+					return Promise;
+				},
+			});
+			queueMicrotask(() => Object.defineProperty(Promise, Symbol.species, originalSpecies));
+			return deletion;
+		});
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				const runtime = createRawHostedRuntime(options, { terminal }).runtime;
+				settle(Object.freeze({ ok: true, runtime }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const handle = await root.runRlmChild("mutated species delete", { sandbox: true });
+		expect(root.cancelRlmChildRun(handle.rlm_child_id)).toBe(true);
+		await waitFor(() => (root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.has(handle.rlm_child_id));
+		expect(speciesGets).toBe(0);
+		await root.deleteRlmSubagent(handle.rlm_child_id);
+		await waitFor(() => deleteHosted.mock.calls.length >= 2);
+		expect(deleteHosted.mock.calls.every((call) => call[1] !== undefined)).toBe(true);
+		expect(speciesGets).toBe(0);
+	});
+
+	it("fails hosted deletion closed without dispatching a mutated Promise.prototype.then", async () => {
+		const terminal = new Promise<HostedRlmTaskResult>(() => undefined);
+		const thenKey = ["t", "h", "e", "n"].join("");
+		const originalThen = Object.getOwnPropertyDescriptor(Promise.prototype, thenKey);
+		if (!originalThen) throw new Error("missing native Promise.then descriptor");
+		let hostileThenCalls = 0;
+		let firstDeletion = true;
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => {
+			if (!firstDeletion) return Promise.resolve();
+			firstDeletion = false;
+			const deletion = Promise.resolve();
+			Object.defineProperty(Promise.prototype, thenKey, {
+				configurable: true,
+				writable: true,
+				value: () => {
+					hostileThenCalls += 1;
+					throw new Error("hostile then dispatched");
+				},
+			});
+			queueMicrotask(() => Object.defineProperty(Promise.prototype, thenKey, originalThen));
+			return deletion;
+		});
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				const runtime = createRawHostedRuntime(options, { terminal }).runtime;
+				settle(Object.freeze({ ok: true, runtime }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const handle = await root.runRlmChild("mutated then delete", { sandbox: true });
+		expect(root.cancelRlmChildRun(handle.rlm_child_id)).toBe(true);
+		await waitFor(() => (root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.has(handle.rlm_child_id));
+		expect(hostileThenCalls).toBe(0);
+		await root.deleteRlmSubagent(handle.rlm_child_id);
+		await waitFor(() => deleteHosted.mock.calls.length >= 2);
+		expect(hostileThenCalls).toBe(0);
+	});
+
+	it("does not dispatch a Promise.race mutation from a hostile close callback", async () => {
+		const raceKey = ["r", "a", "c", "e"].join("");
+		const originalRace = Object.getOwnPropertyDescriptor(Promise, raceKey);
+		if (!originalRace) throw new Error("missing native Promise.race descriptor");
+		let hostileRaceCalls = 0;
+		const releaseHosted = vi.fn(() => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				const runtime = createRawHostedRuntime(options, {
+					close: () => {
+						const close = Promise.resolve(Object.freeze({ status: "closed" as const }));
+						Object.defineProperty(Promise, raceKey, {
+							configurable: true,
+							writable: true,
+							value: () => {
+								hostileRaceCalls += 1;
+								return new Promise(() => undefined);
+							},
+						});
+						queueMicrotask(() => Object.defineProperty(Promise, raceKey, originalRace));
+						return close;
+					},
+				}).runtime;
+				settle(Object.freeze({ ok: true, runtime }));
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await root.runRlmChild("mutated race close", { sandbox: true });
+		await waitFor(() => releaseHosted.mock.calls.length === 1);
+		expect(hostileRaceCalls).toBe(0);
+	});
+
+	it("does not dispatch a Promise.then mutation from a hostile close callback", async () => {
+		const thenKey = ["t", "h", "e", "n"].join("");
+		const originalThen = Object.getOwnPropertyDescriptor(Promise.prototype, thenKey);
+		if (!originalThen) throw new Error("missing native Promise.then descriptor");
+		let hostileThenCalls = 0;
+		const deleteHosted = vi.fn((_childId: string, _runtime?: unknown) => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				const runtime = createRawHostedRuntime(options, {
+					close: () => {
+						const close = Promise.resolve(Object.freeze({ status: "closed" as const }));
+						Object.defineProperty(Promise.prototype, thenKey, {
+							configurable: true,
+							writable: true,
+							value: () => {
+								hostileThenCalls += 1;
+								throw new Error("hostile close then dispatched");
+							},
+						});
+						queueMicrotask(() => Object.defineProperty(Promise.prototype, thenKey, originalThen));
+						return close;
+					},
+				}).runtime;
+				settle(Object.freeze({ ok: true, runtime }));
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await root.runRlmChild("mutated then close", { sandbox: true });
+		await waitFor(() => deleteHosted.mock.calls.length >= 1);
+		expect(hostileThenCalls).toBe(0);
+		await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+		expect(hostileThenCalls).toBe(0);
+	});
+
+	it("retries failed hosted release and deletion with the same raw token", async () => {
+		const terminal = deferred<HostedRlmTaskResult>();
+		let rawRuntime: object | undefined;
+		const releaseHosted = vi.fn(() => Promise.reject(new Error("release failed")));
+		const deleteHosted = vi
+			.fn((_childId: string, _runtime?: unknown) => Promise.resolve())
+			.mockRejectedValueOnce(new Error("delete failed"))
+			.mockResolvedValue(undefined);
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				const fixture = createRawHostedRuntime(options, { terminal: terminal.promise });
+				rawRuntime = fixture.runtime;
+				settle(Object.freeze({ ok: true, runtime: rawRuntime }));
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const handle = await root.runRlmChild("retry cleanup", { sandbox: true, name: "retry-hosted" });
+		terminal.resolve({ status: "completed", durationMs: 1, parentReplyCount: 1, toolUseCount: 0 });
+		await waitFor(() => (root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.has(handle.rlm_child_id));
+		await root.deleteRlmSubagent(handle.rlm_child_id);
+		await waitFor(() => deleteHosted.mock.calls.length === 1);
+		expect(deleteHosted.mock.calls[0]?.[1]).toBe(rawRuntime);
+		await waitFor(() => (root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.has(handle.rlm_child_id));
+		await root.deleteRlmSubagent(handle.rlm_child_id);
+		await waitFor(() => deleteHosted.mock.calls.length === 2);
+		expect(deleteHosted.mock.calls[1]?.[1]).toBe(rawRuntime);
+		expect(releaseHosted).toHaveBeenCalledTimes(1);
+	});
+
+	it("contains hosted usage-attribution failure and still releases and settles", async () => {
+		const terminal = deferred<HostedRlmTaskResult>();
+		const releaseGate = deferred<void>();
+		const releaseHosted = vi.fn(() => releaseGate.promise);
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				settle(
+					Object.freeze({
+						ok: true,
+						runtime: createRawHostedRuntime(options, { terminal: terminal.promise }).runtime,
+					}),
+				);
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+		root.agent.state.messages.push(parentAssistant);
+		root.sessionManager.appendMessage(parentAssistant);
+		vi.spyOn(root.sessionManager, "appendChildUsageAttribution").mockImplementation(() => {
+			throw new Error("ATTRIBUTION_WRITE_FAILED");
+		});
+		const handle = await root.runRlmChild("attribution failure hosted", { sandbox: true });
+		terminal.resolve({
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 1,
+			toolUseCount: 0,
+			usage: { inputTokens: 3, outputTokens: 2 },
+		});
+		await waitFor(() => releaseHosted.mock.calls.length === 1);
+		const run = (root as unknown as InspectableRlmSession)._activeRlmChildRuns.get(handle.rlm_child_id);
+		expect(run?.error).toBe("Hosted RLM lifecycle bookkeeping failed");
+		expect(run?.error).not.toContain("ATTRIBUTION_WRITE_FAILED");
+		expect(run?.lifecycleSettlement).toBeInstanceOf(Promise);
+		expect(run?.lifecycleObserver).toBeInstanceOf(Promise);
+		if (!run?.lifecycleObserver) throw new Error("missing hosted lifecycle observer");
+		releaseGate.resolve();
+		await expect(run.lifecycleObserver).resolves.toBeUndefined();
+		await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+		expect(releaseHosted).toHaveBeenCalledTimes(1);
+		expect((root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.size).toBe(0);
+	});
+
+	it("contains hosted semantic-return failure and still releases and settles", async () => {
+		const terminal = deferred<HostedRlmTaskResult>();
+		const releaseGate = deferred<void>();
+		const releaseHosted = vi.fn(() => releaseGate.promise);
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				settle(
+					Object.freeze({
+						ok: true,
+						runtime: createRawHostedRuntime(options, { terminal: terminal.promise }).runtime,
+					}),
+				);
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		vi.spyOn(root.semanticEdges, "recordChildReturned").mockImplementation(() => {
+			throw new Error("SEMANTIC_WRITE_FAILED");
+		});
+		const handle = await root.runRlmChild("semantic failure hosted", { sandbox: true });
+		terminal.resolve({
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 1,
+			toolUseCount: 0,
+			lastCommittedRequestId: "request-failed",
+		});
+		await waitFor(() => releaseHosted.mock.calls.length === 1);
+		const run = (root as unknown as InspectableRlmSession)._activeRlmChildRuns.get(handle.rlm_child_id);
+		expect(run?.error).toBe("Hosted RLM lifecycle bookkeeping failed");
+		expect(run?.error).not.toContain("SEMANTIC_WRITE_FAILED");
+		expect(run?.lifecycleObserver).toBeInstanceOf(Promise);
+		if (!run?.lifecycleObserver) throw new Error("missing hosted lifecycle observer");
+		releaseGate.resolve();
+		await expect(run.lifecycleObserver).resolves.toBeUndefined();
+		await waitFor(() => (root as unknown as InspectableRlmSession)._unsettledRlmChildRuns.size === 0);
+		expect(releaseHosted).toHaveBeenCalledTimes(1);
+		expect((root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.size).toBe(0);
+	});
+
+	it("attributes hosted usage and records one completed semantic return only", async () => {
+		const terminal = deferred<HostedRlmTaskResult>();
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		const releaseHosted = vi.fn(() => Promise.resolve());
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+				hostedOptions = options;
+				settle(
+					Object.freeze({
+						ok: true,
+						runtime: createRawHostedRuntime(options, { terminal: terminal.promise }).runtime,
+					}),
+				);
+			}),
+			releaseHostedRlmSubagentRuntime: releaseHosted,
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const spawningRequestId = root.semanticEdges.startTurnRequest("hosted-parent-body");
+		Object.defineProperty(root, "isStreaming", { configurable: true, get: () => true });
+		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+		root.agent.state.messages.push(parentAssistant);
+		root.sessionManager.appendMessage(parentAssistant);
+		const recordReturn = vi.spyOn(root.semanticEdges, "recordChildReturned");
+		await root.runRlmChild("usage hosted", { sandbox: true });
+		terminal.resolve({
+			status: "completed",
+			durationMs: 1,
+			parentReplyCount: 1,
+			toolUseCount: 0,
+			usage: { inputTokens: 13, outputTokens: 5 },
+			lastCommittedRequestId: "request-1",
+		});
+		await waitFor(() => releaseHosted.mock.calls.length === 1);
+		expect(parentAssistant.usage.input).toBe(13);
+		expect(parentAssistant.usage.output).toBe(5);
+		expect(parentAssistant.usage.totalTokens).toBe(0);
+		expect(parentAssistant.usage.cost.total).toBe(0);
+		expect(root.sessionManager.getEntries().filter((entry) => entry.type === "child_usage_attributed")).toHaveLength(
+			1,
+		);
+		expect(recordReturn).toHaveBeenCalledWith(expect.any(String), "request-1");
+		expect(recordReturn).toHaveBeenCalledTimes(1);
+		expect(hostedOptions).toBeDefined();
+		if (!hostedOptions) throw new Error("missing hosted options");
+		expect(hostedOptions.spawnedByRequestId).toBe(spawningRequestId);
+	});
+
+	it("does not record semantic returns for hosted errors or cancellations", async () => {
+		const terminalResults: HostedRlmTaskResult[] = [
+			{ status: "error", durationMs: 1, parentReplyCount: 0, toolUseCount: 0, errorCode: "INTERNAL_ERROR" },
+			{ status: "cancelled", durationMs: 1, parentReplyCount: 0, toolUseCount: 0, errorCode: "CANCELLED" },
+		];
+		for (const terminalResult of terminalResults) {
+			const releaseHosted = vi.fn(() => Promise.resolve());
+			const host: SubagentRuntimeHost = {
+				createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+				createHostedRlmSubagentRuntime: vi.fn((options, settle) => {
+					const terminal = Promise.resolve(terminalResult);
+					settle(Object.freeze({ ok: true, runtime: createRawHostedRuntime(options, { terminal }).runtime }));
+				}),
+				releaseHostedRlmSubagentRuntime: releaseHosted,
+				deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+				deleteHostedRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			};
+			const root = createSession({ subagentRuntimeHost: host });
+			const recordReturn = vi.spyOn(root.semanticEdges, "recordChildReturned");
+			await root.runRlmChild("non-completed hosted", { sandbox: true });
+			await waitFor(() => releaseHosted.mock.calls.length === 1);
+			expect(recordReturn).not.toHaveBeenCalled();
+			root.dispose();
+		}
+	});
+
+	it("observes aggregate hosted disposal without reading a Proxy Promise", async () => {
+		let getterCalls = 0;
+		const proxied = new Proxy(Promise.resolve(), {
+			get() {
+				getterCalls += 1;
+				throw new Error("aggregate disposal Promise getter dispatched");
+			},
+		});
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			disposeRlmSubagentRuntimes: vi.fn(() => proxied),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await root.disposeAsync({ kernelSnapshot: false });
+		expect(getterCalls).toBe(0);
+		const settlement = (root as unknown as InspectableRlmSession)._hostedRlmDisposalSettlement;
+		if (!settlement) throw new Error("missing aggregate hosted disposal observer");
+		await expect(settlement).resolves.toBe(false);
+	});
+
+	it("owns normal and rejected aggregate hosted disposal Promises", async () => {
+		let constructorGets = 0;
+		for (const shouldReject of [false, true]) {
+			const actual = shouldReject ? Promise.reject(new Error("HOST_DISPOSAL_FAILED")) : Promise.resolve();
+			if (shouldReject) {
+				Object.defineProperty(actual, "constructor", {
+					configurable: true,
+					get() {
+						constructorGets += 1;
+						return Promise;
+					},
+				});
+			}
+			const host: SubagentRuntimeHost = {
+				createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+				deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+				disposeRlmSubagentRuntimes: vi.fn(() => actual),
+			};
+			const root = createSession({ subagentRuntimeHost: host });
+			await root.disposeAsync({ kernelSnapshot: false });
+			const settlement = (root as unknown as InspectableRlmSession)._hostedRlmDisposalSettlement;
+			if (!settlement) throw new Error("missing aggregate hosted disposal observer");
+			await expect(settlement).resolves.toBe(!shouldReject);
+		}
+		expect(constructorGets).toBe(0);
+	});
+
+	it("fails malformed aggregate hosted disposal closed without constructor or species dispatch", async () => {
+		let constructorGets = 0;
+		const malformedConstructor = Promise.resolve();
+		Object.defineProperty(malformedConstructor, "constructor", {
+			configurable: false,
+			get() {
+				constructorGets += 1;
+				return Promise;
+			},
+		});
+		const originalSpecies = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+		if (!originalSpecies) throw new Error("missing native Promise species descriptor");
+		let speciesGets = 0;
+		const values: unknown[] = [malformedConstructor, undefined];
+		for (let index = 0; index < values.length; index += 1) {
+			const host: SubagentRuntimeHost = {
+				createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+				deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+				disposeRlmSubagentRuntimes: vi.fn(() => {
+					if (index === 1) {
+						const actual = Promise.resolve();
+						Object.defineProperty(Promise, Symbol.species, {
+							configurable: true,
+							get() {
+								speciesGets += 1;
+								return Promise;
+							},
+						});
+						queueMicrotask(() => Object.defineProperty(Promise, Symbol.species, originalSpecies));
+						return actual;
+					}
+					return values[index];
+				}),
+			};
+			const root = createSession({ subagentRuntimeHost: host });
+			await root.disposeAsync({ kernelSnapshot: false });
+			const settlement = (root as unknown as InspectableRlmSession)._hostedRlmDisposalSettlement;
+			if (!settlement) throw new Error("missing aggregate hosted disposal observer");
+			await expect(settlement).resolves.toBe(false);
+		}
+		expect(constructorGets).toBe(0);
+		expect(speciesGets).toBe(0);
+	});
+
+	it("contains synchronous aggregate hosted disposal failure", async () => {
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			disposeRlmSubagentRuntimes: vi.fn(() => {
+				throw new Error("HOST_DISPOSAL_SYNC_FAILED");
+			}),
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		await root.disposeAsync({ kernelSnapshot: false });
+		const settlement = (root as unknown as InspectableRlmSession)._hostedRlmDisposalSettlement;
+		if (!settlement) throw new Error("missing aggregate hosted disposal observer");
+		await expect(settlement).resolves.toBe(false);
+	});
+
+	it("keeps failed hosted disposal authority without publishing a pre-admission child", async () => {
+		let hostedOptions: CreateHostedRlmSubagentRuntimeOptions | undefined;
+		const deleteHosted = vi.fn(() => Promise.reject(new Error("delete failed")));
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: vi.fn(() => Promise.reject(new Error("local path must not run"))),
+			createHostedRlmSubagentRuntime: vi.fn((options) => {
+				hostedOptions = options;
+			}),
+			deleteRlmSubagentRuntime: vi.fn(() => Promise.resolve()),
+			deleteHostedRlmSubagentRuntime: deleteHosted,
+		};
+		const root = createSession({ subagentRuntimeHost: host });
+		const spawn = root.runRlmChild("dispose pending", { sandbox: true, name: "dispose-pending" });
+		await waitFor(() => hostedOptions !== undefined);
+		if (!hostedOptions) throw new Error("missing hosted options");
+		await root.disposeAsync({ kernelSnapshot: false });
+		await expect(spawn).rejects.toThrow("Parent session disposed");
+		expect((root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.has(hostedOptions.id)).toBe(true);
+		expect(deleteHosted).toHaveBeenCalledWith(hostedOptions.id);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+	});
+
 	it("rejects non-boolean sandbox values with a fixed error", async () => {
 		const root = createSession();
 		await expect(root.runRlmChild("sandbox child", { sandbox: "true" })).rejects.toThrow(
@@ -3457,7 +4700,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "live-grandchild",
 			prompt: "still working",
 			sessionName: "live-grandchild",
-			sessionDir: join(tempDir, "live-grandchild"),
+			location: { type: "local", sessionDir: join(tempDir, "live-grandchild") },
 			model,
 			abort: () => {},
 			status: "running",
@@ -3469,7 +4712,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "update-restart-parent",
 			prompt: "parent work",
 			sessionName: "update-restart-parent",
-			sessionDir: join(tempDir, "update-restart-parent"),
+			location: { type: "local", sessionDir: join(tempDir, "update-restart-parent") },
 			model,
 			abort: () => {},
 			status: "running",
@@ -3615,6 +4858,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "deep-1",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort: deepAbort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -3658,6 +4902,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "sub-dup",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -3705,6 +4950,7 @@ describe("AgentSession rlm recursion", () => {
 				id: `chain-${level}`,
 				status: "done",
 				settled: true,
+				location: { type: "local", sessionDir: "/tmp/test" },
 				session,
 				abort: vi.fn(),
 				publication: { reject: vi.fn() },
@@ -3717,6 +4963,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "leaf-run",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort: leafAbort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -3762,6 +5009,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "grandchild-1",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -3841,7 +5089,8 @@ describe("AgentSession rlm recursion", () => {
 				createRlmSubagentRuntime: async () => ({ session: retainedChild }),
 				deleteRlmSubagentRuntime: deleteRuntime,
 				releaseRlmSubagentRuntime: async (runtime, options) => {
-					options.parentSession.registerRlmChildSession(options.id, runtime.session);
+					if (!("session" in runtime) || options.sandbox === true) throw new Error("local runtime expected");
+					await options.parentSession.registerRlmChildSession(options.id, runtime.session);
 				},
 			},
 		});
@@ -3858,7 +5107,7 @@ describe("AgentSession rlm recursion", () => {
 			() => (root as unknown as InspectableRlmSession)._activeRlmChildRuns.get(childId)?.status !== "running",
 		);
 		await expect(root.deleteInactiveRlmSubagent(childId)).resolves.toBe("deleted");
-		expect(deleteRuntime).toHaveBeenCalledWith(childId, retainedChild);
+		expect(deleteRuntime).toHaveBeenCalledWith(childId, { session: retainedChild });
 		await expect(root.deleteInactiveRlmSubagent("unknown-child")).resolves.toBe("not_found");
 	});
 
@@ -4360,13 +5609,14 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			subagentRuntimeHost: {
 				createRlmSubagentRuntime: async () => ({ session: child }),
-				deleteRlmSubagentRuntime: async (_id, session) => {
+				deleteRlmSubagentRuntime: async (_id, runtime) => {
+					const session = runtime && "session" in runtime ? runtime.session : undefined;
 					if (++attempts === 1) throw new Error("close failed");
 					await session?.disposeAsync();
 				},
 			},
 		});
-		expect(root.registerRlmChildSession("retry-child", child)).toBe(true);
+		await expect(root.registerRlmChildSession("retry-child", child)).resolves.toBe(true);
 		await expect(root.deleteRlmSubagent("release-worker")).rejects.toThrow("close failed");
 		expect(await root.listRlmSubagents()).toEqual({ subagents: [] });
 		expect((root as unknown as InspectableRlmSession)._rlmChildCleanupFailures.size).toBe(1);
@@ -4387,7 +5637,7 @@ describe("AgentSession rlm recursion", () => {
 				},
 			},
 		});
-		expect(root.registerRlmChildSession("teardown-child", child)).toBe(true);
+		await expect(root.registerRlmChildSession("teardown-child", child)).resolves.toBe(true);
 		await expect(root.deleteRlmSubagent("teardown-worker")).rejects.toThrow("close failed during teardown");
 		root.dispose();
 		const internals = root as unknown as InspectableRlmSession;
@@ -4439,7 +5689,10 @@ describe("AgentSession rlm recursion", () => {
 					await runtimeCreationGate;
 					return { session: hostedChild };
 				},
-				deleteRlmSubagentRuntime: async (_id, child) => child?.disposeAsync(),
+				deleteRlmSubagentRuntime: async (_id, runtime) => {
+					const sess = runtime && "session" in runtime ? runtime.session : undefined;
+					return sess?.disposeAsync();
+				},
 			},
 		});
 		await root.runRlmChild("blocked before runtime creation", { name: "reserved-worker" });
@@ -4737,6 +5990,87 @@ print(_result.name)
 			expect(finished.stdout.trim()).toBe("detached-worker");
 		} finally {
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+	});
+	it("blocks every local-session fallback for an active hosted id collision", async () => {
+		const root = createSession();
+		const internals = root as unknown as InspectableRlmSession;
+		const hostedRun: InspectableRlmRun = {
+			id: "hosted-collision",
+			prompt: "hosted task",
+			sessionName: "hosted-worker",
+			activeSessionId: "active-hosted-collision",
+			sessionId: "session-hosted-collision",
+			location: Object.freeze({
+				type: "hosted",
+				execution: Object.freeze({ type: "prime-sandbox" }),
+			}),
+			model,
+			status: "done",
+			settled: true,
+			abort: () => {},
+		};
+		internals._activeRlmChildRuns.set(hostedRun.id, hostedRun);
+		internals._rlmChildSessions.set(hostedRun.id, { session: root });
+
+		try {
+			expect(root.getRlmChildSession(hostedRun.id)).toBeUndefined();
+			expect(await root.registerRlmChildSession(hostedRun.id, root)).toBe(false);
+			expect(root.cancelRlmChildRun(hostedRun.id)).toBe(false);
+		} finally {
+			internals._activeRlmChildRuns.clear();
+			internals._rlmChildSessions.clear();
+		}
+	});
+
+	it("omits hosted context nodes while preserving an unresolved local placeholder", () => {
+		const root = createSession();
+		const internals = root as unknown as InspectableRlmSession;
+		const hostedRun: InspectableRlmRun = {
+			id: "hosted-running",
+			prompt: "hosted task",
+			sessionName: "hosted-worker",
+			activeSessionId: "active-hosted-running",
+			sessionId: "session-hosted-running",
+			location: Object.freeze({
+				type: "hosted",
+				execution: Object.freeze({ type: "prime-sandbox" }),
+			}),
+			model,
+			status: "running",
+			settled: false,
+			abort: () => {},
+		};
+		const localRun: InspectableRlmRun = {
+			id: "local-unpublished",
+			prompt: "local task",
+			sessionName: "local-worker",
+			location: Object.freeze({ type: "local", sessionDir: join(tempDir, "missing-local-child") }),
+			model,
+			status: "running",
+			settled: false,
+			abort: () => {},
+		};
+		mkdirSync(localRun.location.type === "local" ? localRun.location.sessionDir : tempDir, { recursive: true });
+		internals._activeRlmChildRuns.set(hostedRun.id, hostedRun);
+		internals._activeRlmChildRuns.set(localRun.id, localRun);
+		internals._rlmChildSessions.set(hostedRun.id, { session: root });
+
+		try {
+			const hostedSnapshot = root.getRlmChildSnapshots().find((entry) => entry.id === hostedRun.id);
+			expect(hostedSnapshot).toMatchObject({
+				id: hostedRun.id,
+				execution: { type: "prime-sandbox" },
+			});
+			expect(hostedSnapshot).not.toHaveProperty("sessionDir");
+			expect(hostedSnapshot).not.toHaveProperty("recap");
+
+			const contextChildren = root.getContextTree().children;
+			expect(contextChildren.some((entry) => entry.id === hostedRun.id)).toBe(false);
+			expect(contextChildren.some((entry) => entry.id === localRun.id)).toBe(true);
+		} finally {
+			internals._activeRlmChildRuns.clear();
+			internals._rlmChildSessions.clear();
 		}
 	});
 });

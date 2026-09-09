@@ -139,6 +139,8 @@ export interface AgentSessionMessageReceipt {
 	source: typeof AGENT_MESSAGE_SOURCE;
 	target: AgentSessionMessageEndpoint;
 	from?: AgentSessionMessageSender;
+	/** Sender relationship from the receiver's point of view. */
+	fromRelationship?: AgentFamilyRelationship;
 	message: string;
 	// Not named "status": the kernel host bridge envelope reserves that key.
 	deliveryStatus: AgentSessionMessageDeliveryStatus;
@@ -459,6 +461,7 @@ export function createAgentSessionMessageReceipt(
 		source: payload.source,
 		target: payload.target,
 		from: payload.from,
+		...(payload.fromRelationship === undefined ? {} : { fromRelationship: payload.fromRelationship }),
 		message: payload.message,
 		deliveryStatus: status,
 		...(status === "delivered" ? { deliveredAt: at } : { queuedAt: at }),

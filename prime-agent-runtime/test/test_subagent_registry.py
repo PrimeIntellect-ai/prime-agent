@@ -28,197 +28,333 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         )
 
         with patch.object(rlm_module, "host_request", host_request):
-            subagents = asyncio.run(rlm_module.rlm.list_subagents())
+            subagents = asyncio.run(rlm_module.list_subagents())
 
         self.assertEqual(len(subagents), 1)
         self.assertEqual(subagents[0].rlm_child_id, "sub-a1b2c3d4")
-        self.assertEqual(subagents[0].active_session_id, "active-child")
-        self.assertEqual(subagents[0].session_id, "session-child")
-        self.assertEqual(subagents[0].session_name, "subagent-check-api-a1b2c3d4")
         self.assertEqual(subagents[0].session_dir, Path("/tmp/parent/sub-a1b2c3d4"))
         self.assertEqual(subagents[0].status, "completed")
-        host_request.assert_awaited_once_with("rlm.list_subagents")
+        self.assertEqual(subagents[0].session_name, "subagent-check-api-a1b2c3d4")
+        self.assertIsNone(subagents[0].execution)
+        self.assertFalse(subagents[0].is_hosted)
 
-
-    def test_lists_failed_subagents_from_host(self) -> None:
-        host_request = AsyncMock(
-            return_value={
-                "subagents": [
-                    {
-                        "rlm_child_id": "sub-failed",
-                        "active_session_id": None,
-                        "session_id": None,
-                        "session_name": "failed-worker",
-                        "session_dir": "/tmp/parent/sub-failed",
-                        "status": "error",
-                    }
-                ]
-            }
-        )
-
-        with patch.object(rlm_module, "host_request", host_request):
-            subagents = asyncio.run(rlm_module.rlm.list_subagents())
-
-        self.assertEqual(subagents[0].status, "error")
-
-    def test_forwards_orchestrator_chosen_name_and_model_to_host(self) -> None:
-        host_request = AsyncMock(
-            return_value={
-                "rlm_child_id": "sub-a1b2c3d4",
-                "name": "api-reviewer",
-                "session_dir": "/tmp/parent/sub-a1b2c3d4",
-                "model": "deepseek/deepseek-v4-flash",
-            }
-        )
-
-        with patch.object(rlm_module, "host_request", host_request):
-            result = asyncio.run(
-                rlm_module.rlm(
-                    "check the API",
-                    name="api-reviewer",
-                    model="deepseek/deepseek-v4-flash",
-                )
-            )
-
-        host_request.assert_awaited_once_with(
-            "rlm.run",
-            {
-                "prompt": "check the API",
-                "kwargs": {
-                    "name": "api-reviewer",
-                    "model": "deepseek/deepseek-v4-flash",
-                },
-            },
-        )
-        self.assertEqual(result.rlm_child_id, "sub-a1b2c3d4")
-        self.assertEqual(result.name, "api-reviewer")
-        self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
-
-    def test_finds_authenticated_models_through_host(self) -> None:
-        host_request = AsyncMock(
-            return_value={
-                "models": [
-                    {
-                        "provider": "anthropic",
-                        "id": "claude-opus-4-7",
-                        "name": "Claude Opus 4.7",
-                        "selector": "anthropic/claude-opus-4-7",
-                    }
-                ]
-            }
-        )
-
-        with patch.object(rlm_module, "host_request", host_request):
-            models = asyncio.run(rlm_module.rlm.find_models("opus", limit=3))
-
-        self.assertEqual(models[0].provider, "anthropic")
-        self.assertEqual(models[0].id, "claude-opus-4-7")
-        self.assertEqual(models[0].name, "Claude Opus 4.7")
-        self.assertEqual(models[0].selector, "anthropic/claude-opus-4-7")
-        host_request.assert_awaited_once_with(
-            "rlm.find_models",
-            {"query": "opus", "limit": 3},
-        )
-
-    def test_rejects_invalid_model_search_input_and_response(self) -> None:
-        with self.assertRaisesRegex(TypeError, "query must be str"):
-            asyncio.run(rlm_module.find_models(123))
-        with self.assertRaisesRegex(TypeError, "limit must be int"):
-            asyncio.run(rlm_module.find_models("opus", limit="3"))
-
-        host_request = AsyncMock(return_value={"models": [{"provider": "anthropic"}]})
-        with patch.object(rlm_module, "host_request", host_request):
-            with self.assertRaisesRegex(RuntimeError, "invalid model entry"):
-                asyncio.run(rlm_module.find_models("opus"))
-
-    def test_deletes_subagent_by_name_through_host(self) -> None:
-        deleted_payload = {
-            "rlm_child_id": "sub-a1b2c3d4",
-            "active_session_id": "active-child",
-            "session_id": "session-child",
-            "session_name": "api-reviewer",
-            "session_dir": "/tmp/parent/sub-a1b2c3d4",
-            "status": "completed",
-        }
-        host_request = AsyncMock(return_value={"subagent": deleted_payload})
-
-        with patch.object(rlm_module, "host_request", host_request):
-            deleted = asyncio.run(rlm_module.rlm.delete_subagent("  api-reviewer  "))
-
-        self.assertEqual(deleted.rlm_child_id, "sub-a1b2c3d4")
-        self.assertEqual(deleted.session_name, "api-reviewer")
-        host_request.assert_awaited_once_with(
-            "rlm.delete_subagent",
-            {"target": "api-reviewer"},
-        )
-
-    def test_deletes_subagent_object_by_child_id(self) -> None:
-        subagent = rlm_module.RLMSubagent(
-            rlm_child_id="sub-a1b2c3d4",
-            active_session_id=None,
-            session_id="session-child",
-            session_name="api-reviewer",
-            session_dir=Path("/tmp/parent/sub-a1b2c3d4"),
-            status="running",
-        )
+    def test_propagates_delete_response(self) -> None:
         host_request = AsyncMock(
             return_value={
                 "subagent": {
-                    "rlm_child_id": subagent.rlm_child_id,
-                    "active_session_id": subagent.active_session_id,
-                    "session_id": subagent.session_id,
-                    "session_name": subagent.session_name,
-                    "session_dir": str(subagent.session_dir),
-                    "status": subagent.status,
+                    "rlm_child_id": "sub-api-reviewer",
+                    "active_session_id": "active-reviewer",
+                    "session_id": "session-reviewer",
+                    "session_name": "subagent-api-reviewer",
+                    "session_dir": "/tmp/parent/sub-api-reviewer",
+                    "status": "completed",
                 }
             }
         )
 
         with patch.object(rlm_module, "host_request", host_request):
-            asyncio.run(rlm_module.delete_subagent(subagent))
+            result: rlm_module.RLMSubagent = asyncio.run(rlm_module.delete_subagent("api-reviewer"))
 
-        host_request.assert_awaited_once_with(
-            "rlm.delete_subagent",
-            {"target": "sub-a1b2c3d4"},
-        )
+        self.assertEqual(result.rlm_child_id, "sub-api-reviewer")
+        self.assertEqual(result.session_dir, Path("/tmp/parent/sub-api-reviewer"))
+        self.assertEqual(result.status, "completed")
 
-    def test_rejects_invalid_delete_response_and_target(self) -> None:
-        host_request = AsyncMock(return_value={"subagent": {"status": "completed"}})
 
-        with patch.object(rlm_module, "host_request", host_request):
-            with self.assertRaisesRegex(RuntimeError, "rlm.delete_subagent entry is missing rlm_child_id"):
-                asyncio.run(rlm_module.delete_subagent("api-reviewer"))
+class RlmSpawnHandleHostedTest(unittest.TestCase):
+    """Test hosted arm of RLMSpawnHandle parser."""
 
-        with self.assertRaisesRegex(ValueError, "target must not be empty"):
-            asyncio.run(rlm_module.delete_subagent("   "))
-        with self.assertRaisesRegex(TypeError, "target must be str or RLMSubagent"):
-            asyncio.run(rlm_module.delete_subagent(123))
+    def test_accepts_hosted_spawn_payload(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-xyz789",
+            "name": "hosted-worker",
+            "model": "other/model",
+            "execution": {"type": "prime-sandbox"},
+        }
+        handle = rlm_module._spawn_handle_from_payload(payload)
+        self.assertEqual(handle.rlm_child_id, "sub-xyz789")
+        self.assertEqual(handle.name, "hosted-worker")
+        self.assertIsNone(handle.session_dir)
+        self.assertEqual(handle.model, "other/model")
+        self.assertIsNotNone(handle.execution)
+        self.assertTrue(handle.is_hosted)
 
-    def test_rejects_invalid_registry_payload(self) -> None:
-        host_request = AsyncMock(return_value={"subagents": [{"status": "completed"}]})
+    def test_hosted_execution_is_immutable(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-xyz789",
+            "name": "hosted-worker",
+            "model": "other/model",
+            "execution": {"type": "prime-sandbox"},
+        }
+        handle = rlm_module._spawn_handle_from_payload(payload)
+        with self.assertRaises(TypeError):
+            handle.execution["type"] = "other"  # type: ignore[index]
 
-        with patch.object(rlm_module, "host_request", host_request):
-            with self.assertRaisesRegex(RuntimeError, "missing rlm_child_id"):
-                asyncio.run(rlm_module.list_subagents())
+    def test_local_repr_unchanged(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc123",
+            "name": "worker",
+            "session_dir": "/tmp/sessions/abc",
+            "model": "provider/model",
+        }
+        handle = rlm_module._spawn_handle_from_payload(payload)
+        self.assertIn("rlm_child_id=", repr(handle))
+        self.assertIn("session_dir=", repr(handle))
+        self.assertNotIn("execution", repr(handle))
 
-    def test_requires_a_default_session_name(self) -> None:
+    def test_local_equality_and_hash_unchanged(self) -> None:
+        p1 = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "session_dir": "/tmp/s",
+            "model": "p/m",
+        }
+        p2 = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "session_dir": "/tmp/s",
+            "model": "p/m",
+        }
+        h1 = rlm_module._spawn_handle_from_payload(p1)
+        h2 = rlm_module._spawn_handle_from_payload(p2)
+        self.assertEqual(h1, h2)
+        self.assertEqual(hash(h1), hash(h2))
+
+    def test_rejects_mixed_payload_keys(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "session_dir": "/tmp/s",
+            "model": "p/m",
+            "execution": {"type": "prime-sandbox"},
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_rejects_extra_keys_local(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "session_dir": "/tmp/s",
+            "model": "p/m",
+            "extra": "bad",
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_rejects_extra_keys_hosted(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "model": "p/m",
+            "execution": {"type": "prime-sandbox"},
+            "extra": "bad",
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_rejects_missing_keys_local(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "session_dir": "/tmp/s",
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_rejects_missing_keys_hosted(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "execution": {"type": "prime-sandbox"},
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_rejects_dict_subclass_payload(self) -> None:
+        class MyDict(dict):
+            pass
+        payload = MyDict({
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "model": "p/m",
+            "execution": {"type": "prime-sandbox"},
+        })
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_rejects_bad_execution_type(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "model": "p/m",
+            "execution": {"type": "other"},
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_rejects_bad_execution_keys(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "worker",
+            "model": "p/m",
+            "execution": {"type": "prime-sandbox", "extra": True},
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._spawn_handle_from_payload(payload)
+
+    def test_hosted_list_parse(self) -> None:
         host_request = AsyncMock(
             return_value={
                 "subagents": [
                     {
-                        "rlm_child_id": "sub-a1b2c3d4",
-                        "active_session_id": None,
-                        "session_id": "session-child",
-                        "session_dir": "/tmp/parent/sub-a1b2c3d4",
+                        "rlm_child_id": "sub-hosted-1",
+                        "active_session_id": "active-1",
+                        "session_id": "session-1",
+                        "session_name": "hosted-worker",
                         "status": "running",
+                        "execution": {"type": "prime-sandbox"},
                     }
                 ]
             }
         )
-
         with patch.object(rlm_module, "host_request", host_request):
-            with self.assertRaisesRegex(RuntimeError, "missing session_name"):
-                asyncio.run(rlm_module.list_subagents())
+            subagents = asyncio.run(rlm_module.list_subagents())
+        self.assertEqual(len(subagents), 1)
+        self.assertEqual(subagents[0].rlm_child_id, "sub-hosted-1")
+        self.assertIsNone(subagents[0].session_dir)
+        self.assertIsNotNone(subagents[0].execution)
+        self.assertTrue(subagents[0].is_hosted)
+
+    def test_rejects_hosted_subagent_without_home_assigned_session_ids(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-hosted-1",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "hosted-worker",
+            "status": "running",
+            "execution": {"type": "prime-sandbox"},
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._subagent_from_payload(payload)
+
+    def test_hosted_subagent_immutable_execution(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-hosted-1",
+            "active_session_id": "active-hosted-1",
+            "session_id": "session-hosted-1",
+            "session_name": "hosted-worker",
+            "status": "running",
+            "execution": {"type": "prime-sandbox"},
+        }
+        sub = rlm_module._subagent_from_payload(payload)
+        with self.assertRaises(TypeError):
+            sub.execution["type"] = "other"  # type: ignore[index]
+
+    def test_local_subagent_repr_unchanged(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "worker",
+            "session_dir": "/tmp/s",
+            "status": "running",
+        }
+        sub = rlm_module._subagent_from_payload(payload)
+        self.assertIn("rlm_child_id=", repr(sub))
+        self.assertIn("session_dir=", repr(sub))
+        self.assertNotIn("execution", repr(sub))
+
+    def test_local_subagent_equality_unchanged(self) -> None:
+        p1 = {
+            "rlm_child_id": "sub-abc",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "worker",
+            "session_dir": "/tmp/s",
+            "status": "running",
+        }
+        p2 = {
+            "rlm_child_id": "sub-abc",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "worker",
+            "session_dir": "/tmp/s",
+            "status": "running",
+        }
+        s1 = rlm_module._subagent_from_payload(p1)
+        s2 = rlm_module._subagent_from_payload(p2)
+        self.assertEqual(s1, s2)
+        self.assertEqual(hash(s1), hash(s2))
+
+    def test_rejects_hostile_mixed_subagent_payload(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "worker",
+            "session_dir": "/tmp/s",
+            "status": "running",
+            "execution": {"type": "prime-sandbox"},
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._subagent_from_payload(payload)
+
+    def test_rejects_extra_subagent_keys(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "worker",
+            "session_dir": "/tmp/s",
+            "status": "running",
+            "extra": "bad",
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._subagent_from_payload(payload)
+
+    def test_local_is_hosted_false(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "name": "local-worker",
+            "session_dir": "/tmp/s",
+            "model": "p/m",
+        }
+        handle = rlm_module._spawn_handle_from_payload(payload)
+        self.assertFalse(handle.is_hosted)
+
+    def test_hosted_is_hosted_true(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-xyz",
+            "name": "hosted-worker",
+            "model": "p/m",
+            "execution": {"type": "prime-sandbox"},
+        }
+        handle = rlm_module._spawn_handle_from_payload(payload)
+        self.assertTrue(handle.is_hosted)
+
+    def test_local_subagent_is_hosted_false(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-abc",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "worker",
+            "session_dir": "/tmp/s",
+            "status": "running",
+        }
+        sub = rlm_module._subagent_from_payload(payload)
+        self.assertFalse(sub.is_hosted)
+
+    def test_hosted_subagent_is_hosted_true(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-xyz",
+            "active_session_id": "active-hosted-1",
+            "session_id": "session-hosted-1",
+            "session_name": "hosted-worker",
+            "status": "running",
+            "execution": {"type": "prime-sandbox"},
+        }
+        sub = rlm_module._subagent_from_payload(payload)
+        self.assertTrue(sub.is_hosted)
 
 
 if __name__ == "__main__":

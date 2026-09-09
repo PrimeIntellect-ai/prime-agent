@@ -148,6 +148,19 @@ describe("agent session bus", () => {
 			queuedAt: "2026-06-15T12:00:00.000Z",
 		});
 		expect(createAgentSessionMessageReceipt(payload, "queued")).not.toHaveProperty("deliveredAt");
+		expect(
+			createAgentSessionMessageReceipt(
+				{
+					id: "agentmsg-relationship",
+					source: AGENT_MESSAGE_SOURCE,
+					message: "attributed",
+					fromRelationship: "parent",
+					target: { activeSessionId: "target", sessionId: "session-target" },
+				},
+				"delivered",
+				"2026-06-15T12:00:00.000Z",
+			),
+		).toMatchObject({ fromRelationship: "parent" });
 		expect(() => normalizeAgentSessionMessage("  ")).toThrow("Agent session message cannot be empty");
 		expect(() => normalizeAgentSessionMessage("abcd", 3)).toThrow("Agent session message is too long");
 	});

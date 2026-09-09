@@ -581,6 +581,19 @@ describe("buildRlmChildSnapshots", () => {
 		]);
 	});
 
+	it("preserves the Home-assigned hosted active session id without daemon-map fallback", () => {
+		const hosted = {
+			id: "sub-hosted",
+			activeSessionId: "hosted-active",
+			label: "Hosted task",
+			status: "running" as const,
+			execution: Object.freeze({ type: "prime-sandbox" as const }),
+		};
+		const parent = makeState({ activeSessionId: "parent", childSnapshots: [hosted] });
+
+		expect(buildRlmChildSnapshots("parent", [parent])).toEqual([hosted]);
+	});
+
 	it("returns no snapshots when the root is not resident", () => {
 		expect(buildRlmChildSnapshots("missing", [])).toEqual([]);
 	});

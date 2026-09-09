@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from .bash import BashHandle, BashResult, bash
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
@@ -15,8 +16,24 @@ from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, 
 class RLMSpawnHandle:
     rlm_child_id: str
     name: str
-    session_dir: Path
+    session_dir: Path | None
     model: str
+    execution: Mapping[str, str] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
+
+    @property
+    def is_hosted(self) -> bool:
+        return self.execution is not None
+
+    def __repr__(self) -> str:
+        cls = type(self).__name__
+        if self.execution is None:
+            return f"{cls}(rlm_child_id={self.rlm_child_id!r}, name={self.name!r}, session_dir={self.session_dir!r}, model={self.model!r})"
+        return f"{cls}(rlm_child_id={self.rlm_child_id!r}, name={self.name!r}, session_dir=None, model={self.model!r})"
 
 
 @dataclass(frozen=True)
@@ -42,25 +59,62 @@ class RLMSubagent:
     active_session_id: str | None
     session_id: str | None
     session_name: str
-    session_dir: Path
+    session_dir: Path | None
     status: str
+    execution: Mapping[str, str] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
+
+    @property
+    def is_hosted(self) -> bool:
+        return self.execution is not None
+
+    def __repr__(self) -> str:
+        cls = type(self).__name__
+        if self.execution is None:
+            return f"{cls}(rlm_child_id={self.rlm_child_id!r}, active_session_id={self.active_session_id!r}, session_id={self.session_id!r}, session_name={self.session_name!r}, session_dir={self.session_dir!r}, status={self.status!r})"
+        return f"{cls}(rlm_child_id={self.rlm_child_id!r}, active_session_id={self.active_session_id!r}, session_id={self.session_id!r}, session_name={self.session_name!r}, session_dir=None, status={self.status!r})"
 
 
 def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
-    if not isinstance(payload, dict):
+    if type(payload) is not dict:
         raise RuntimeError("rlm.run returned an invalid spawn handle")
-    child_id = payload.get("rlm_child_id")
-    name = payload.get("name")
-    session_dir = payload.get("session_dir")
-    model = payload.get("model")
-    if not all(isinstance(value, str) and value for value in (child_id, name, session_dir, model)):
-        raise RuntimeError("rlm.run returned an invalid spawn handle")
-    return RLMSpawnHandle(
-        rlm_child_id=child_id,
-        name=name,
-        session_dir=Path(session_dir),
-        model=model,
-    )
+    # Local form: exactly {rlm_child_id, name, session_dir, model}
+    if payload.keys() == {"rlm_child_id", "name", "session_dir", "model"}:
+        child_id = payload["rlm_child_id"]
+        name = payload["name"]
+        session_dir = payload["session_dir"]
+        model = payload["model"]
+        if not all(isinstance(value, str) and value for value in (child_id, name, session_dir, model)):
+            raise RuntimeError("rlm.run returned an invalid local spawn handle")
+        return RLMSpawnHandle(
+            rlm_child_id=child_id,
+            name=name,
+            session_dir=Path(session_dir),
+            model=model,
+        )
+    # Hosted form: exactly {rlm_child_id, name, model, execution}
+    if payload.keys() == {"rlm_child_id", "name", "model", "execution"}:
+        child_id = payload["rlm_child_id"]
+        name = payload["name"]
+        model = payload["model"]
+        execution = payload["execution"]
+        if not (isinstance(child_id, str) and child_id and isinstance(name, str) and name and isinstance(model, str) and model):
+            raise RuntimeError("rlm.run returned an invalid hosted spawn handle")
+        if type(execution) is not dict or execution.keys() != {"type"} or execution.get("type") != "prime-sandbox":
+            raise RuntimeError("rlm.run returned an invalid hosted spawn handle execution")
+        frozen_execution = MappingProxyType(dict(execution))
+        return RLMSpawnHandle(
+            rlm_child_id=child_id,
+            name=name,
+            session_dir=None,
+            model=model,
+            execution=frozen_execution,
+        )
+    raise RuntimeError("rlm.run returned an invalid spawn handle: unexpected key set")
 
 
 def _create_session_handle_from_payload(payload: Any) -> RLMCreateSessionHandle:
@@ -183,34 +237,68 @@ async def find_models(query: str = "", limit: int = 8) -> list[RLMModel]:
 
 
 def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") -> RLMSubagent:
-    if not isinstance(payload, dict):
+    if type(payload) is not dict:
         raise RuntimeError(f"{operation} returned an invalid subagent entry")
-    child_id = payload.get("rlm_child_id")
-    active_session_id = payload.get("active_session_id")
-    session_id = payload.get("session_id")
-    session_name = payload.get("session_name")
-    session_dir = payload.get("session_dir")
-    status = payload.get("status")
-    if not isinstance(child_id, str) or not child_id:
-        raise RuntimeError(f"{operation} entry is missing rlm_child_id")
-    if active_session_id is not None and not isinstance(active_session_id, str):
-        raise RuntimeError(f"{operation} entry has invalid active_session_id")
-    if session_id is not None and not isinstance(session_id, str):
-        raise RuntimeError(f"{operation} entry has invalid session_id")
-    if not isinstance(session_name, str) or not session_name:
-        raise RuntimeError(f"{operation} entry is missing session_name")
-    if not isinstance(session_dir, str) or not session_dir:
-        raise RuntimeError(f"{operation} entry is missing session_dir")
-    if status not in {"running", "completed", "error"}:
-        raise RuntimeError(f"{operation} entry has invalid status")
-    return RLMSubagent(
-        rlm_child_id=child_id,
-        active_session_id=active_session_id,
-        session_id=session_id,
-        session_name=session_name,
-        session_dir=Path(session_dir),
-        status=status,
-    )
+    keys = set(payload.keys())
+    local_keys = {"rlm_child_id", "active_session_id", "session_id", "session_name", "session_dir", "status"}
+    hosted_keys = {"rlm_child_id", "active_session_id", "session_id", "session_name", "status", "execution"}
+    if keys == local_keys:
+        child_id = payload["rlm_child_id"]
+        active_session_id = payload["active_session_id"]
+        session_id = payload["session_id"]
+        session_name = payload["session_name"]
+        session_dir = payload["session_dir"]
+        status = payload["status"]
+        if not isinstance(child_id, str) or not child_id:
+            raise RuntimeError(f"{operation} entry is missing rlm_child_id")
+        if active_session_id is not None and not isinstance(active_session_id, str):
+            raise RuntimeError(f"{operation} entry has invalid active_session_id")
+        if session_id is not None and not isinstance(session_id, str):
+            raise RuntimeError(f"{operation} entry has invalid session_id")
+        if not isinstance(session_name, str) or not session_name:
+            raise RuntimeError(f"{operation} entry is missing session_name")
+        if not isinstance(session_dir, str) or not session_dir:
+            raise RuntimeError(f"{operation} entry is missing session_dir")
+        if status not in {"running", "completed", "error"}:
+            raise RuntimeError(f"{operation} entry has invalid status")
+        return RLMSubagent(
+            rlm_child_id=child_id,
+            active_session_id=active_session_id,
+            session_id=session_id,
+            session_name=session_name,
+            session_dir=Path(session_dir),
+            status=status,
+        )
+    if keys == hosted_keys:
+        child_id = payload["rlm_child_id"]
+        active_session_id = payload["active_session_id"]
+        session_id = payload["session_id"]
+        session_name = payload["session_name"]
+        status = payload["status"]
+        execution = payload["execution"]
+        if not isinstance(child_id, str) or not child_id:
+            raise RuntimeError(f"{operation} entry is missing rlm_child_id")
+        if not isinstance(active_session_id, str) or not active_session_id:
+            raise RuntimeError(f"{operation} entry has invalid active_session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError(f"{operation} entry has invalid session_id")
+        if not isinstance(session_name, str) or not session_name:
+            raise RuntimeError(f"{operation} entry is missing session_name")
+        if status not in {"running", "completed", "error"}:
+            raise RuntimeError(f"{operation} entry has invalid status")
+        if type(execution) is not dict or execution.keys() != {"type"} or execution.get("type") != "prime-sandbox":
+            raise RuntimeError(f"{operation} entry has invalid execution")
+        frozen_execution = MappingProxyType(dict(execution))
+        return RLMSubagent(
+            rlm_child_id=child_id,
+            active_session_id=active_session_id,
+            session_id=session_id,
+            session_name=session_name,
+            session_dir=None,
+            status=status,
+            execution=frozen_execution,
+        )
+    raise RuntimeError(f"{operation} entry has unexpected key set: {sorted(keys)}")
 
 
 async def list_subagents() -> list[RLMSubagent]:

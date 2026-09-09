@@ -400,18 +400,30 @@ function mergeSubagentSnapshot(
 	incoming: AgentConnectionRlmChildAgentSnapshot,
 ): AgentConnectionRlmChildAgentSnapshot {
 	const active = incoming.status === "running" || incoming.status === "queued";
-	return {
-		...previous,
-		...incoming,
+	const common = {
+		id: incoming.id,
 		parentId: incoming.parentId ?? previous.parentId,
-		// Active updates may omit a previously known daemon session id, but a
-		// terminal update without one means the child is no longer resident.
 		activeSessionId: active ? (incoming.activeSessionId ?? previous.activeSessionId) : incoming.activeSessionId,
+		sessionName: incoming.sessionName,
+		model: incoming.model,
+		label: incoming.label,
+		status: incoming.status,
+		durationMs: incoming.durationMs,
+		answerPreview: incoming.answerPreview,
+		repliedSinceTask: incoming.repliedSinceTask,
+		toolUseCount: incoming.toolUseCount,
+		tokenCount: incoming.tokenCount,
+		recap: incoming.recap,
 		// A completed retained child can become active again when it receives a
 		// follow-up. Its RLM run status stays terminal, so activity must remain an
 		// independent projection of the live session state.
 		activity: active ? (incoming.activity ?? previous.activity) : incoming.activity,
+		error: incoming.error,
 	};
+	if ("execution" in incoming) {
+		return { ...common, activeSessionId: incoming.activeSessionId, execution: incoming.execution };
+	}
+	return { ...common, sessionDir: incoming.sessionDir };
 }
 
 export function truncatePathMiddle(value: string, width: number): string {
