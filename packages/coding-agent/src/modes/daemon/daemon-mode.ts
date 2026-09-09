@@ -1740,6 +1740,19 @@ export class AgentDaemon {
 		}
 	}
 
+	/**
+	 * Sessions bind their extensions before any client attaches, so the project
+	 * skill trust selector fired at bind time had nobody to answer it. Re-ask once
+	 * a client that renders extension UI is attached; the response is written first.
+	 */
+	private promptProjectSkillTrustWhenUiAttached(client: DaemonSocketClient, state: ActiveSessionState): void {
+		if (!daemonClientSupportsExtensionUi(client, state.activeSessionId)) return;
+		setImmediate(() => {
+			if (this.sessions.get(state.activeSessionId) !== state) return;
+			state.runtime.session.promptProjectSkillTrust();
+		});
+	}
+
 	private async createRuntime(
 		command: Extract<DaemonCommand, { type: "create" }>,
 		runtimeOpenGuard?: RuntimeOpenGuard,
@@ -3955,6 +3968,7 @@ export class AgentDaemon {
 					);
 					state.clients.add(client);
 					client.attachedActiveSessionIds.add(state.activeSessionId);
+					this.promptProjectSkillTrustWhenUiAttached(client, state);
 					this.write(client, success(command.id, "attach", summaryForActiveSession(state)));
 					return;
 				}
@@ -4206,6 +4220,7 @@ export class AgentDaemon {
 				}
 				state.clients.add(client);
 				client.attachedActiveSessionIds.add(state.activeSessionId);
+				this.promptProjectSkillTrustWhenUiAttached(client, state);
 				// Carrier-less mutation: a direct viewer changes directAttachedClients with no session event.
 				if (client.authenticationRole === "session_client") this.scheduleRosterFlush();
 				if (deferClientEnv && clientEnv) {

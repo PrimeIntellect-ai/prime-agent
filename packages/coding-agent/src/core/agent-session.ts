@@ -1261,7 +1261,8 @@ export class AgentSession {
 	private _ipythonRuntimeBuilt = false;
 	private readonly _prewarmIpythonKernel: boolean;
 	private readonly _projectSkillTrust: ProjectSkillTrustStore;
-	private _projectSkillTrustPrompted = false;
+	/** Set when the user answered "not now": stay quiet for the rest of this session. */
+	private _projectSkillTrustDeferred = false;
 	private _projectSkillTrustPromptAbort?: AbortController;
 	private _rlmDepth: number;
 	private readonly _configuredRlmMaxDepth: number | undefined;
@@ -9136,8 +9137,17 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
-		// Deliberately not awaited: the selector waits on the user while the client
-		// finishes its own startup, and the kernel keeps prewarming without project skills.
+		this.promptProjectSkillTrust();
+	}
+
+	/**
+	 * Ask for a trust decision on this project's Python skills when one is still
+	 * needed and a UI is bound. Not awaited: the selector waits on the user while
+	 * the client finishes starting up, and the kernel keeps prewarming without the
+	 * project skills. Safe to call again, e.g. when a UI client attaches to a
+	 * daemon session whose bind-time prompt had nobody to answer it.
+	 */
+	promptProjectSkillTrust(): void {
 		void this._promptProjectSkillTrust();
 	}
 
@@ -9168,16 +9178,16 @@ export class AgentSession {
 	}
 
 	/**
-	 * Ask once per session, only when a UI is bound. Headless modes (print, JSON,
-	 * ACP, subagents) never prompt, so an undecided project stays untrusted there.
+	 * Only prompts when a UI is bound. Headless modes (print, JSON, ACP, subagents)
+	 * never prompt, so an undecided project stays untrusted there.
 	 */
 	private async _promptProjectSkillTrust(): Promise<void> {
-		if (this._projectSkillTrustPrompted || this._rlmDepth > 0 || this._disposed || this._disposing) return;
+		if (this._projectSkillTrustPromptAbort || this._projectSkillTrustDeferred) return;
+		if (this._rlmDepth > 0 || this._disposed || this._disposing) return;
 		const ui = this._extensionUIContext;
 		if (!ui || !this._extensionRunner.hasUI()) return;
 		const status = this.getProjectSkillTrust();
 		if (status.skills.length === 0 || status.decision !== "undecided") return;
-		this._projectSkillTrustPrompted = true;
 		const abort = new AbortController();
 		this._projectSkillTrustPromptAbort = abort;
 		const names = status.skills.map((skill) => skill.name);
@@ -9194,6 +9204,9 @@ export class AgentSession {
 			if (this._projectSkillTrustPromptAbort === abort) this._projectSkillTrustPromptAbort = undefined;
 		}
 		if (abort.signal.aborted || this._disposed || this._disposing) return;
+		// Dismissed, or no client could answer (a daemon session bound before its
+		// client attached): stay undecided and ask again when a UI shows up.
+		if (choice === undefined) return;
 		if (choice === PROJECT_SKILL_TRUST_CHOICES.trust) {
 			this.setProjectSkillTrust("trusted");
 			ui.notify(
@@ -9210,6 +9223,7 @@ export class AgentSession {
 			);
 			return;
 		}
+		this._projectSkillTrustDeferred = true;
 		ui.notify(
 			`Project Python skills are disabled this session: ${names.join(", ")}. Run /${PROJECT_SKILL_TRUST_COMMAND} on to enable them.`,
 			"warning",

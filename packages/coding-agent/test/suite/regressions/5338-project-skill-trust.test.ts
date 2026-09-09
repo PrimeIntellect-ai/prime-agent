@@ -170,6 +170,32 @@ describe("ENG-5338: project Python skills require an explicit trust decision", (
 		expect(select).toHaveBeenCalledTimes(1);
 	});
 
+	it("asks again when a UI arrives after a prompt nobody could answer (daemon bind before attach)", async () => {
+		const { harness, store } = await createSkillHarness();
+		// The daemon UI bridge resolves dialogs with undefined while no UI client is attached.
+		let answer: string | undefined;
+		const select = vi.fn(async () => answer);
+		const { ui, notifications } = createUi(select);
+
+		await harness.session.bindExtensions({ uiContext: ui });
+		await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(store.getDecision(harness.tempDir)).toBe("undecided");
+		expect(notifications).toEqual([]);
+
+		// A UI-capable client attaches: the daemon re-asks and the user trusts the project.
+		answer = PROJECT_SKILL_TRUST_CHOICES.trust;
+		harness.session.promptProjectSkillTrust();
+		await vi.waitFor(() => expect(store.getDecision(harness.tempDir)).toBe("trusted"));
+		expect(select).toHaveBeenCalledTimes(2);
+		expect(kernelImportNames(harness)).toEqual(expect.arrayContaining(["marker_skill", "web_search"]));
+
+		// Decided: further attaches never ask again.
+		harness.session.promptProjectSkillTrust();
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(select).toHaveBeenCalledTimes(2);
+	});
+
 	it("persists a 'never' answer and keeps the project skills disabled", async () => {
 		const { harness, store } = await createSkillHarness();
 		const select = vi.fn(async () => PROJECT_SKILL_TRUST_CHOICES.never);
@@ -193,6 +219,11 @@ describe("ENG-5338: project Python skills require an explicit trust decision", (
 		expect(notifications[0]).toMatchObject({ type: "warning" });
 		expect(notifications[0]?.message).toContain(`/${PROJECT_SKILL_TRUST_COMMAND}`);
 		expect(kernelImportNames(harness)).toEqual(["web_search"]);
+
+		// "Not now" holds for the rest of the session, even when another UI client attaches.
+		harness.session.promptProjectSkillTrust();
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(notifications).toHaveLength(1);
 	});
 
 	it("applies a persisted trust decision at startup without prompting", async () => {
