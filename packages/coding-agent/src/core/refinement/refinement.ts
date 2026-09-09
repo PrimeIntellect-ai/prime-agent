@@ -186,20 +186,55 @@ const REFINEMENT_CONTEXT_OVERHEAD_TOKENS = 1_024;
 const TRUNCATED_JSON_ERROR =
 	"the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
-function refinementRequestModel(model: Model<Api>, systemPrompt: string, userPrompt: string): Model<Api> {
-	// Reserve one token per UTF-8 byte plus message framing, without assuming an English chars/token ratio.
-	const inputReserve =
-		Buffer.byteLength(systemPrompt, "utf8") +
-		Buffer.byteLength(userPrompt, "utf8") +
-		REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
-	const maxTokens = Math.min(model.maxTokens, model.contextWindow - inputReserve);
+function estimateRefinementTokens(text: string): number {
+	// Approximate English at four characters per token and other text at two UTF-8 bytes per token.
+	let asciiChars = 0;
+	for (let i = 0; i < text.length; i++) {
+		if (text.charCodeAt(i) <= 0x7f) asciiChars++;
+	}
+	return Math.ceil(asciiChars / 4 + (Buffer.byteLength(text, "utf8") - asciiChars) / 2);
+}
+
+function refinementRequest(
+	model: Model<Api>,
+	systemPrompt: string,
+	conversationText: string,
+	buildPrompt: (conversation: string) => string,
+	outputReserve: number,
+): { model: Model<Api>; userPrompt: string } {
+	const systemReserve = estimateRefinementTokens(systemPrompt) + REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
+	const inputBudget =
+		model.contextWindow - Math.min(model.maxTokens, outputReserve, Math.floor(model.contextWindow / 2));
+	let userPrompt = buildPrompt(conversationText);
+	if (systemReserve + estimateRefinementTokens(userPrompt) > inputBudget && conversationText.length > 0) {
+		const promptForLength = (length: number): string => {
+			let start = conversationText.length - length;
+			const first = conversationText.charCodeAt(start);
+			if (first >= 0xdc00 && first <= 0xdfff) start++;
+			return buildPrompt(
+				`[Earlier conversation omitted to fit the model context.]\n${conversationText.slice(start)}`,
+			);
+		};
+		let low = 0;
+		let high = conversationText.length;
+		while (low < high) {
+			const length = Math.ceil((low + high) / 2);
+			if (systemReserve + estimateRefinementTokens(promptForLength(length)) <= inputBudget) low = length;
+			else high = length - 1;
+		}
+		userPrompt = promptForLength(low);
+	}
+	const maxTokens = Math.min(
+		model.maxTokens,
+		model.contextWindow - systemReserve - estimateRefinementTokens(userPrompt),
+	);
 	if (maxTokens <= 0) {
 		throw new Error(
 			"Refinement prompt leaves no room for output in the model's context window; retry with a smaller request.",
 		);
 	}
 	// Bound the request's model ceiling too: some adapters add thinking tokens before clamping to it.
-	return { ...model, maxTokens };
+	return { model: { ...model, maxTokens }, userPrompt };
 }
 
 function now(): string {
@@ -898,18 +933,25 @@ export async function planRefinement(
 	const scopeInstruction = options.global
 		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
 		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed.";
-	const userPrompt = [
-		`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
-		`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
-		`<conversation>\n${conversationText}\n</conversation>`,
-		`<scope_policy>\n${scopeInstruction}\n</scope_policy>`,
-		options.instructions ? `<user_refine_instructions>\n${options.instructions}\n</user_refine_instructions>` : "",
-		"Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale.",
-	]
-		.filter(Boolean)
-		.join("\n\n");
+	const buildPrompt = (conversation: string): string =>
+		[
+			`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
+			`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
+			`<conversation>\n${conversation}\n</conversation>`,
+			`<scope_policy>\n${scopeInstruction}\n</scope_policy>`,
+			options.instructions ? `<user_refine_instructions>\n${options.instructions}\n</user_refine_instructions>` : "",
+			"Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale.",
+		]
+			.filter(Boolean)
+			.join("\n\n");
 	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
-	const requestModel = refinementRequestModel(model, REFINEMENT_SYSTEM_PROMPT, userPrompt);
+	const { model: requestModel, userPrompt } = refinementRequest(
+		model,
+		REFINEMENT_SYSTEM_PROMPT,
+		conversationText,
+		buildPrompt,
+		REFINEMENT_MAX_OUTPUT_TOKENS,
+	);
 	const maxTokens =
 		reasoning === "off" ? Math.min(requestModel.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : requestModel.maxTokens;
 
@@ -972,23 +1014,30 @@ export async function reviewAutoRefine(
 	retry?: ProviderRetryPolicy,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
-	const userPrompt = [
-		`<trigger>
+	const buildPrompt = (conversation: string): string =>
+		[
+			`<trigger>
 ${context.reason}; ${context.turnsSinceLastReview} assistant turns since last auto-refine review
 </trigger>`,
-		`<current_harness_state>
+			`<current_harness_state>
 ${overviewForPrompt(state)}
 </current_harness_state>`,
-		`<refinement_history>
+			`<refinement_history>
 ${historyForPrompt(history)}
 </refinement_history>`,
-		`<conversation>
-${conversationText}
+			`<conversation>
+${conversation}
 </conversation>`,
-		"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
-	].join("\n\n");
+			"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
+		].join("\n\n");
 	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
-	const requestModel = refinementRequestModel(model, AUTO_REFINE_REVIEW_SYSTEM_PROMPT, userPrompt);
+	const { model: requestModel, userPrompt } = refinementRequest(
+		model,
+		AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
+		conversationText,
+		buildPrompt,
+		reasoning === "off" ? AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS : REFINEMENT_MAX_OUTPUT_TOKENS,
+	);
 	const maxTokens =
 		reasoning === "off"
 			? Math.min(requestModel.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS)

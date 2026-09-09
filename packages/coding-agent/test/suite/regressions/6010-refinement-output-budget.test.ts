@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	completeSimple,
 	type FauxResponseFactory,
@@ -21,7 +22,12 @@ afterEach(() => {
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 });
 
-async function requestRefinement(harness: Harness, kind: "plan" | "review", content = "") {
+async function requestRefinement(
+	harness: Harness,
+	kind: "plan" | "review",
+	content = "",
+	thinkingLevel: ThinkingLevel = "high",
+) {
 	const state: HarnessState = {
 		schema: 1,
 		entries: { prompt: {}, memory: {}, skill: {}, subagent: {} },
@@ -38,7 +44,7 @@ async function requestRefinement(harness: Harness, kind: "plan" | "review", cont
 			{ retry },
 			undefined,
 			undefined,
-			"high",
+			thinkingLevel,
 		);
 		return result.proposal;
 	}
@@ -51,7 +57,7 @@ async function requestRefinement(harness: Harness, kind: "plan" | "review", cont
 		{ reason: "turn_interval", turnsSinceLastReview: 5 },
 		undefined,
 		undefined,
-		"high",
+		thinkingLevel,
 		retry,
 	);
 }
@@ -74,6 +80,77 @@ function budgetedResponse(text: string, reasoningTokens: number, requests: Simpl
 }
 
 describe.each(paths)("$kind shared reasoning and JSON budget", ({ kind, formerCap, expected }) => {
+	it.each(["off", "high"] as const)(
+		"accepts a long English trajectory on a 64k model with reasoning %s",
+		async (thinkingLevel) => {
+			const harness = await createHarness({
+				models: [{ id: "glm-context", reasoning: true, contextWindow: 65_536, maxTokens: 16_384 }],
+			});
+			harnesses.push(harness);
+			const content = `${"The project now stores the result locally. ".repeat(2_000)}Latest fact: preserve local state.`;
+			let observedPrompt = "";
+			const requests: SimpleStreamOptions[] = [];
+			harness.setResponses([
+				(context, options) => {
+					observedPrompt = context.messages.map(getMessageText).join("");
+					requests.push(options as SimpleStreamOptions);
+					return fauxAssistantMessage(JSON.stringify(expected));
+				},
+			]);
+			await expect(requestRefinement(harness, kind, content, thinkingLevel)).resolves.toEqual(expected);
+			expect(observedPrompt).toContain(content.slice(-39_000));
+			expect(requests[0].maxTokens).toBe(thinkingLevel === "off" ? Math.min(formerCap, 16_384) : 16_384);
+		},
+	);
+
+	it.each(["off", "high"] as const)("accepts a full multibyte trajectory with reasoning %s", async (thinkingLevel) => {
+		const harness = await createHarness({
+			models: [{ id: "multibyte-context", reasoning: true, contextWindow: 200_000, maxTokens: 65_536 }],
+		});
+		harnesses.push(harness);
+		const content = `${"项目记录".repeat(20_000)}最新事实`;
+		harness.setResponses([fauxAssistantMessage(JSON.stringify(expected))]);
+		await expect(requestRefinement(harness, kind, content, thinkingLevel)).resolves.toEqual(expected);
+	});
+
+	it.each(["界", "😀"])(
+		"retains recent %s context and valid Unicode when shortening a dense trajectory",
+		async (character) => {
+			const harness = await createHarness({
+				models: [{ id: "dense-context", reasoning: true, contextWindow: 32_768, maxTokens: 8_192 }],
+			});
+			harnesses.push(harness);
+			const content = `${character.repeat(80_000)}Latest fact: retain the newest decision.`;
+			let observedPrompt = "";
+			let maxTokens: number | undefined;
+			harness.setResponses([
+				(context, options) => {
+					observedPrompt = context.messages.map(getMessageText).join("");
+					maxTokens = (options as SimpleStreamOptions).maxTokens;
+					return fauxAssistantMessage(JSON.stringify(expected));
+				},
+			]);
+			await expect(requestRefinement(harness, kind, content)).resolves.toEqual(expected);
+			expect(observedPrompt).toContain("Earlier conversation omitted");
+			expect(observedPrompt).toContain("Latest fact: retain the newest decision.");
+			expect(observedPrompt).toContain(kind === "plan" ? "<scope_policy>" : "<trigger>");
+			expect([...observedPrompt].some((point) => point.length === 1 && /[\ud800-\udfff]/u.test(point))).toBe(false);
+			expect(maxTokens).toBe(8_192);
+		},
+	);
+
+	it("leaves at least 60k output tokens for a long English trajectory on a 128k model", async () => {
+		const harness = await createHarness({
+			models: [{ id: "wide-context", reasoning: true, contextWindow: 128_000, maxTokens: 100_000 }],
+		});
+		harnesses.push(harness);
+		const requests: SimpleStreamOptions[] = [];
+		harness.setResponses([budgetedResponse(JSON.stringify(expected), 60_000, requests)]);
+		await expect(requestRefinement(harness, kind, "Keep the useful project facts. ".repeat(3_000))).resolves.toEqual(
+			expected,
+		);
+		expect(requests[0].maxTokens).toBeGreaterThan(60_000);
+	});
 	it.each([0, 8])("completes when the former cap leaves only %i JSON tokens", async (visibleTokens) => {
 		const harness = await createHarness({
 			models: [{ id: "shared-output-budget", reasoning: true, maxTokens: 65_536 }],
@@ -132,14 +209,11 @@ describe.each(paths)("$kind shared reasoning and JSON budget", ({ kind, formerCa
 			harness.setResponses([
 				(context, options, _state, model) => {
 					const request = options as SimpleStreamOptions;
-					// A synthetic byte tokenizer with message framing, independent of the budgeting helper.
+					// Synthetic tokenizer: English words, CJK characters, and punctuation, plus message framing.
 					const inputTokens =
-						Buffer.byteLength(context.systemPrompt ?? "", "utf8") +
-						context.messages.reduce(
-							(total, message) => total + Buffer.byteLength(getMessageText(message), "utf8"),
-							0,
-						) +
-						256;
+						[context.systemPrompt ?? "", ...context.messages.map(getMessageText)]
+							.join("")
+							.match(/[\u4e00-\u9fff]|[A-Za-z0-9_]+|[^\s]/gu)!.length + 256;
 					// Some adapters add thinking tokens before clamping to the supplied model ceiling.
 					const wireMaxTokens = Math.min((request.maxTokens ?? 32_000) + addedThinkingTokens, model.maxTokens);
 					expect(inputTokens + wireMaxTokens).toBeLessThanOrEqual(model.contextWindow);

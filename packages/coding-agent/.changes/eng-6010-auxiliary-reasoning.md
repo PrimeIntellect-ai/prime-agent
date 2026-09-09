@@ -1,2 +1,3 @@
 - Fixed refinement and side questions disabling reasoning when the session uses it, while respecting the selected model's supported thinking levels.
 - Removed fixed output caps from refinement with reasoning enabled, while respecting the model's output limit and reserving context space for the prompt.
+- Fixed long refinement trajectories being rejected by byte-based context estimates, retaining recent context when a shorter trajectory is needed.
