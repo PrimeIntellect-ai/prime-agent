@@ -9,6 +9,7 @@ import { EventStreamCodec } from "@smithy/core/event-streams";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.js";
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { isProcessAlive } from "../../../src/utils/child-process.js";
 import { createHarness, getAssistantTexts, type Harness } from "../harness.js";
 
 const run = promisify(execFile);
@@ -47,7 +48,12 @@ describe("ENG-6006 bundled Bedrock provider", () => {
 			const client = new DaemonClient(socketPath);
 			try {
 				await client.connect(1000);
+				const { supervisorPid } = await client.waitForHello();
+				if (!supervisorPid) throw new Error("Missing fixture supervisor PID");
 				await client.request({ type: "shutdown" }, 5000);
+				client.close();
+				// The shutdown response precedes the daemon's final file writes.
+				await expect.poll(() => isProcessAlive(supervisorPid), { timeout: 10_000 }).toBe(false);
 			} finally {
 				client.close();
 			}
