@@ -81,6 +81,8 @@ The kernel is created lazily on first Python REPL use. Python resolution is:
 
 The managed environment includes Python 3.11, `prime-agent-runtime`, `dill`, and the default Python packages. A bootstrap marker detects stale environments.
 
+When no `uv` is found on `PATH`, in `~/.prime/agent/bin`, or in `~/.local/bin`, the bootstrap offers to install one. Set `PRIME_AGENT_INSTALL_UV=1` to accept without a prompt (the installer does this) or `PRIME_AGENT_INSTALL_UV=0` to refuse. The install downloads the pinned `uv` release archive from GitHub, verifies it against the SHA-256 bundled in `src/utils/helper-tool-releases.ts`, checks that the extracted binary runs, and only then places it in `~/.prime/agent/bin/uv`; no remote script is executed. The optional `fd` and `rg` search helpers are provisioned into the same directory the same way. Pinned versions are bumped with `scripts/pin-helper-tools.ts`.
+
 Startup spawns `python -m rlm.repl` and exchanges newline-delimited JSON over stdio: the runtime announces itself with a single `ready` event, then requests and events flow one JSON object per line (see `prime-agent-runtime/src/rlm/repl.md`).
 
 The manager owns the child process and a bounded stderr tail. Shutdown sends a `shutdown` request, waits for the process to exit, and terminates it as a fallback. Persistent sessions may snapshot the kernel namespace into their session artifact directory for revival.

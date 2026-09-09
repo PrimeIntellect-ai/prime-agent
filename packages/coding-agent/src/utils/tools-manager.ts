@@ -1,15 +1,13 @@
 import chalk from "chalk";
-import extractZip from "extract-zip";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "fs";
+import { existsSync } from "fs";
 import { arch, platform } from "os";
 import { join } from "path";
-import { Readable } from "stream";
-import { pipeline } from "stream/promises";
-import { APP_NAME, getBinDir } from "../config.js";
+import { getBinDir } from "../config.js";
 import { spawnSyncHidden } from "./child-process.js";
+import { installPinnedHelperTool, UnsupportedHelperPlatformError } from "./helper-tool-install.js";
+import { HELPER_TOOL_RELEASES } from "./helper-tool-releases.js";
 
 const TOOLS_DIR = getBinDir();
-const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 5_000;
 const RIPGREP_INSTALL_URL = "https://github.com/BurntSushi/ripgrep#installation";
@@ -41,59 +39,19 @@ function isOfflineModeEnabled(): boolean {
 
 interface ToolConfig {
 	name: string;
-	repo: string; // GitHub repo (e.g., "sharkdp/fd")
 	binaryName: string; // Name of the binary inside the archive
 	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
-	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
-	getAssetName: (version: string, plat: string, architecture: string) => string | null;
 }
 
-const TOOLS: Record<string, ToolConfig> = {
+const TOOLS: Record<ManagedTool, ToolConfig> = {
 	fd: {
 		name: "fd",
-		repo: "sharkdp/fd",
 		binaryName: "fd",
 		systemBinaryNames: ["fd", "fdfind"],
-		tagPrefix: "v",
-		getAssetName: (version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `fd-v${version}-${archStr}-apple-darwin.tar.gz`;
-			} else if (plat === "linux") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `fd-v${version}-${archStr}-unknown-linux-gnu.tar.gz`;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `fd-v${version}-${archStr}-pc-windows-msvc.zip`;
-			}
-			return null;
-		},
 	},
 	rg: {
 		name: "ripgrep",
-		repo: "BurntSushi/ripgrep",
 		binaryName: "rg",
-		tagPrefix: "",
-		getAssetName: (version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `ripgrep-${version}-${archStr}-apple-darwin.tar.gz`;
-			} else if (plat === "linux") {
-				if (architecture === "arm64") {
-					return `ripgrep-${version}-aarch64-unknown-linux-gnu.tar.gz`;
-				}
-				return architecture === "x64" ? `ripgrep-${version}-x86_64-unknown-linux-musl.tar.gz` : null;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `ripgrep-${version}-${archStr}-pc-windows-msvc.zip`;
-			}
-			return null;
-		},
 	},
 };
 
@@ -129,145 +87,22 @@ export function getToolPath(tool: ManagedTool): string | null {
 	return null;
 }
 
-// Fetch latest release version from GitHub
-async function getLatestVersion(repo: string): Promise<string> {
-	const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-		headers: { "User-Agent": `${APP_NAME}-coding-agent` },
-		signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
-	});
-
-	if (!response.ok) {
-		throw new Error(`GitHub API error: ${response.status}`);
-	}
-
-	const data = (await response.json()) as { tag_name: string };
-	return data.tag_name.replace(/^v/, "");
-}
-
-// Download a file from URL
-async function downloadFile(url: string, dest: string): Promise<void> {
-	const response = await fetch(url, {
-		signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-	});
-
-	if (!response.ok) {
-		throw new Error(`Failed to download: ${response.status}`);
-	}
-
-	if (!response.body) {
-		throw new Error("No response body");
-	}
-
-	const fileStream = createWriteStream(dest);
-	await pipeline(Readable.fromWeb(response.body as any), fileStream);
-}
-
-function findBinaryRecursively(rootDir: string, binaryFileName: string): string | null {
-	const stack: string[] = [rootDir];
-
-	while (stack.length > 0) {
-		const currentDir = stack.pop();
-		if (!currentDir) continue;
-
-		const entries = readdirSync(currentDir, { withFileTypes: true });
-		for (const entry of entries) {
-			const fullPath = join(currentDir, entry.name);
-			if (entry.isFile() && entry.name === binaryFileName) {
-				return fullPath;
-			}
-			if (entry.isDirectory()) {
-				stack.push(fullPath);
-			}
-		}
-	}
-
-	return null;
-}
-
-// Download and install a tool
-class UnsupportedToolPlatformError extends Error {}
-
+// Download the pinned release, verify its digest, and install it into TOOLS_DIR.
 async function downloadTool(tool: ManagedTool): Promise<string> {
 	const config = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
 
 	const plat = platform();
-	const architecture = arch();
-
-	if (!config.getAssetName("VERSION", plat, architecture)) {
-		throw new UnsupportedToolPlatformError(`Unsupported platform: ${plat}/${architecture}`);
-	}
-
-	// Get latest version and the matching platform asset.
-	const version = await getLatestVersion(config.repo);
-	const assetName = config.getAssetName(version, plat, architecture);
-	if (!assetName) throw new UnsupportedToolPlatformError(`Unsupported platform: ${plat}/${architecture}`);
-
-	// Create tools directory
-	mkdirSync(TOOLS_DIR, { recursive: true });
-
-	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
-	const archivePath = join(TOOLS_DIR, assetName);
-	const binaryExt = plat === "win32" ? ".exe" : "";
-	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);
-
-	// Download
-	await downloadFile(downloadUrl, archivePath);
-
-	// Extract into a unique temp directory. fd and rg downloads can run concurrently
-	// during startup, so sharing a fixed directory causes races.
-	const extractDir = join(
-		TOOLS_DIR,
-		`extract_tmp_${config.binaryName}_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-	);
-	mkdirSync(extractDir, { recursive: true });
-
-	try {
-		if (assetName.endsWith(".tar.gz")) {
-			const extractResult = spawnSyncHidden("tar", ["xzf", archivePath, "-C", extractDir], { stdio: "pipe" });
-			if (extractResult.error || extractResult.status !== 0) {
-				const errMsg = extractResult.error?.message ?? extractResult.stderr?.toString().trim() ?? "unknown error";
-				throw new Error(`Failed to extract ${assetName}: ${errMsg}`);
-			}
-		} else if (assetName.endsWith(".zip")) {
-			await extractZip(archivePath, { dir: extractDir });
-		} else {
-			throw new Error(`Unsupported archive format: ${assetName}`);
-		}
-
-		// Find the binary in extracted files. Some archives contain files directly
-		// at root, others nest under a versioned subdirectory.
-		const binaryFileName = config.binaryName + binaryExt;
-		const extractedDir = join(extractDir, assetName.replace(/\.(tar\.gz|zip)$/, ""));
-		const extractedBinaryCandidates = [join(extractedDir, binaryFileName), join(extractDir, binaryFileName)];
-		let extractedBinary = extractedBinaryCandidates.find((candidate) => existsSync(candidate));
-
-		if (!extractedBinary) {
-			extractedBinary = findBinaryRecursively(extractDir, binaryFileName) ?? undefined;
-		}
-
-		if (extractedBinary) {
-			rmSync(binaryPath, { force: true });
-			renameSync(extractedBinary, binaryPath);
-		} else {
-			throw new Error(`Binary not found in archive: expected ${binaryFileName} under ${extractDir}`);
-		}
-
-		// Make executable (Unix only)
-		if (plat !== "win32") {
-			chmodSync(binaryPath, 0o755);
-		}
-		if (!commandWorks(binaryPath)) {
-			rmSync(binaryPath, { force: true });
-			throw new Error(`Installed ${config.name} binary failed its version check`);
-		}
-	} finally {
-		// Cleanup
-		rmSync(archivePath, { force: true });
-		rmSync(extractDir, { recursive: true, force: true });
-	}
-
-	return binaryPath;
+	const binaryFileName = config.binaryName + (plat === "win32" ? ".exe" : "");
+	return installPinnedHelperTool({
+		tool,
+		platform: plat,
+		architecture: arch(),
+		destDir: TOOLS_DIR,
+		binaryFileName,
+		verifyBinary: commandWorks,
+		timeoutMs: DOWNLOAD_TIMEOUT_MS,
+	});
 }
 
 // Termux package names for tools
@@ -352,9 +187,9 @@ export async function ensureToolWithStatus(tool: ManagedTool, silent: boolean = 
 		};
 	}
 
-	// Tool not found - download it
+	// Tool not found - download the pinned release
 	if (!silent) {
-		console.log(chalk.dim(`${config.name} not found. Downloading...`));
+		console.log(chalk.dim(`${config.name} not found. Downloading ${HELPER_TOOL_RELEASES[tool].version}...`));
 	}
 
 	try {
@@ -369,7 +204,7 @@ export async function ensureToolWithStatus(tool: ManagedTool, silent: boolean = 
 		}
 		return {
 			status: "unavailable",
-			reason: e instanceof UnsupportedToolPlatformError ? "unsupported_platform" : "download_failed",
+			reason: e instanceof UnsupportedHelperPlatformError ? "unsupported_platform" : "download_failed",
 			platform: platformName,
 			architecture,
 			detail: e instanceof Error ? e.message : String(e),

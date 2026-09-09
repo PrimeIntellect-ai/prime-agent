@@ -7,9 +7,11 @@ import { stderr, stdin } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { getPackageDir } from "../../config.js";
+import { getBinDir, getPackageDir } from "../../config.js";
 import { isProcessAlive, spawnHidden } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
+import { installPinnedHelperTool } from "../../utils/helper-tool-install.js";
+import { HELPER_TOOL_RELEASES } from "../../utils/helper-tool-releases.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 9;
@@ -71,7 +73,9 @@ export function buildBatchShimInvocation(
 	};
 }
 
-const UV_INSTALL_COMMAND = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+const UV_RELEASE = HELPER_TOOL_RELEASES.uv;
+const UV_INSTALL_DOCS_URL = "https://docs.astral.sh/uv/getting-started/installation/";
+const UV_DOWNLOAD_TIMEOUT_MS = 120_000;
 const REQUIRED_HARNESS_METHODS = [
 	"create_memory",
 	"update_memory",
@@ -542,35 +546,57 @@ async function findExecutable(name: string): Promise<string | null> {
 	return null;
 }
 
+function uvBinaryFileName(): string {
+	return process.platform === "win32" ? "uv.exe" : "uv";
+}
+
+async function uvWorks(uv: string): Promise<boolean> {
+	try {
+		await run(uv, ["--version"], { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 	const fromPath = await findExecutable("uv");
 	if (fromPath) return fromPath;
 
-	const localUv = path.join(os.homedir(), ".local", "bin", process.platform === "win32" ? "uv.exe" : "uv");
+	const managedUv = path.join(getBinDir(), uvBinaryFileName());
+	if (await isExecutable(managedUv)) return managedUv;
+
+	const localUv = path.join(os.homedir(), ".local", "bin", uvBinaryFileName());
 	if (await isExecutable(localUv)) return localUv;
 
 	const shouldInstallUv =
 		process.env.PRIME_AGENT_INSTALL_UV === "1" || (!options.onProgress && (await confirmUvInstall()));
 	if (!shouldInstallUv) {
 		throw new Error(
-			`uv is required to set up the Python kernel. Install uv yourself: ${UV_INSTALL_COMMAND}, ` +
-				"or set PRIME_AGENT_INSTALL_UV=1 to let prime-agent run that installer.",
+			`uv is required to set up the Python kernel. Install uv yourself (${UV_INSTALL_DOCS_URL}), ` +
+				`or set PRIME_AGENT_INSTALL_UV=1 to let prime-agent download uv ${UV_RELEASE.version} from GitHub releases with SHA-256 verification.`,
 		);
 	}
 
-	reportProgress(options, "› installing uv (one-time)…");
+	reportProgress(options, `› installing uv ${UV_RELEASE.version} (one-time)…`);
 	try {
-		await run("sh", ["-c", UV_INSTALL_COMMAND], { stdio: options.onProgress ? "ignore" : "inherit" });
+		// Downloads the pinned release archive from GitHub and checks its bundled SHA-256
+		// before extraction; nothing from the network is ever piped into a shell.
+		return await installPinnedHelperTool({
+			tool: "uv",
+			platform: process.platform,
+			architecture: process.arch,
+			destDir: getBinDir(),
+			binaryFileName: uvBinaryFileName(),
+			verifyBinary: uvWorks,
+			timeoutMs: UV_DOWNLOAD_TIMEOUT_MS,
+		});
 	} catch (error) {
 		throw new Error(
-			`couldn't install uv from astral.sh; install it yourself: ${UV_INSTALL_COMMAND}, then re-run prime-agent. ${errorMessage(error)}`,
+			`couldn't install uv ${UV_RELEASE.version} from ${UV_RELEASE.repo} releases: ${errorMessage(error)}. ` +
+				`Install uv yourself (${UV_INSTALL_DOCS_URL}), then re-run prime-agent.`,
 		);
 	}
-
-	if (await isExecutable(localUv)) return localUv;
-	const installedFromPath = await findExecutable("uv");
-	if (installedFromPath) return installedFromPath;
-	throw new Error("uv install completed but binary not found at ~/.local/bin/uv");
 }
 
 async function confirmUvInstall(): Promise<boolean> {
@@ -579,7 +605,11 @@ async function confirmUvInstall(): Promise<boolean> {
 
 	const rl = createInterface({ input: stdin, output: stderr });
 	try {
-		const answer = (await rl.question("Prime Agent needs uv to set up Python. Install uv from astral.sh now? [Y/n] "))
+		const answer = (
+			await rl.question(
+				`Prime Agent needs uv to set up Python. Download uv ${UV_RELEASE.version} from GitHub releases (SHA-256 verified) now? [Y/n] `,
+			)
+		)
 			.trim()
 			.toLowerCase();
 		return answer !== "n" && answer !== "no";
