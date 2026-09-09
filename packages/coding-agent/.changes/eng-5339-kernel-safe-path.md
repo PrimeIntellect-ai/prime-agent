@@ -1,0 +1,1 @@
+- Fixed the Python kernel and its bootstrap probes importing `rlm`, `dill`, or stdlib modules from the project directory; the kernel now launches with `python -P`, so a checkout can no longer shadow runtime imports (project modules are not on the kernel's `sys.path`).
