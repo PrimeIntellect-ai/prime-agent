@@ -1269,6 +1269,8 @@ export class AgentsViewMode implements Component, Focusable {
 		while (added) {
 			added = false;
 			for (const row of this.rows) {
+				// Summary/code rows reuse their parent's summary; only session rows own expansion keys.
+				if (row.kind !== "agent" && row.kind !== "subagent") continue;
 				if (wanted.has(row.summary.sessionId) && !this.expandedSubagentParents.has(row.identity)) {
 					this.expandedSubagentParents.add(row.identity);
 					added = true;
@@ -2576,7 +2578,12 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private renderActions(width: number): string[] {
-		const row = this.rows[this.selectedIndex];
+		const selected = this.rows[this.selectedIndex];
+		// The summary row is an expansion control; its details are the owning row's.
+		const row =
+			selected?.kind === "subagent-summary"
+				? this.rows.find((candidate) => candidate.identity === selected.parentIdentity)
+				: selected;
 		const actions = [
 			`${keyText("tui.select.confirm")} open   ${keyText("app.agents.open")} open   ${keyText("app.agents.new")} new`,
 			`${keyText("app.agents.expand")} expand/collapse subagents   ${keyText("app.agents.program")} program`,

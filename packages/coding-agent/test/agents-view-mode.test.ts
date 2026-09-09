@@ -704,6 +704,31 @@ describe("AgentsViewMode", () => {
 		expect(collapsedView.expandedSubagentParents.size).toBe(0);
 	});
 
+	it("records only session-row identities when re-expanding pending ancestors", () => {
+		const parent = summary({ sessionName: "parent" });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		try {
+			Reflect.set(view, "lastListedSummaries", [parent, child]);
+			invoke("reconcileCatalogs", view);
+			const persistentState = Reflect.get(view, "persistentState") as AgentsViewPersistentState;
+			persistentState.pendingExpandedAncestorSessionIds = [parent.sessionId];
+			invoke("applyPendingAncestorExpansion", view);
+			const expanded = Reflect.get(view, "expandedSubagentParents") as Set<string>;
+			expect(expanded).toEqual(new Set(["file:/tmp/scope.jsonl"]));
+			expect((Reflect.get(view, "rows") as AgentsViewRow[]).some((row) => row.kind === "subagent")).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("toggles subagent list expansion from the parent row", () => {
 		const expandedSubagentParents = new Set(["root-row"]);
 		const programShownParents = new Set(["root-row"]);
@@ -976,12 +1001,30 @@ describe("AgentsViewMode", () => {
 		try {
 			Reflect.set(view, "lastListedSummaries", [
 				summary({ sessionName: "parent", usage: { inputTokens: 1234, outputTokens: 56, cost: 1.23 } }),
+				summary({
+					id: "child",
+					activeSessionId: "child",
+					sessionId: "child-session",
+					sessionFile: "/tmp/child.jsonl",
+					runtimeKind: "subagent",
+					parentActiveSessionId: "scope-active",
+					usage: { inputTokens: 10, outputTokens: 2, cost: 0.5 },
+				}),
 			]);
 			invoke("reconcileCatalogs", view);
+			// The summary row is an expansion control: its actions show the parent's data.
+			const builtRows = Reflect.get(view, "rows") as AgentsViewRow[];
+			Reflect.set(
+				view,
+				"selectedIndex",
+				builtRows.findIndex((row) => row.kind === "subagent-summary"),
+			);
 			view.handleInput("?");
 			const actions = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
+			expect(actions).toContain("parent");
 			expect(actions).toContain("1234 in");
 			expect(actions).toContain("$1.23");
+			expect(actions).toContain("$1.73 including subagents");
 			view.handleInput("p");
 			expect(Reflect.get(view, "showActions")).toBe(false);
 			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
