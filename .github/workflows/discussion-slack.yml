@@ -1,0 +1,87 @@
+name: Discussion notifications
+
+on:
+  discussion:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  notify:
+    if: github.repository == 'PrimeIntellect-ai/prime-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ask Prime to investigate the discussion
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DISCUSSION_WEBHOOK_URL }}
+          PRIME_BOT_MENTION: "<@U0BT0M2HB88>"
+        run: |
+          python3 - <<'PY'
+          import html
+          import http.client
+          import json
+          import os
+          from urllib.parse import urlsplit
+
+          webhook = urlsplit(os.environ.get("SLACK_WEBHOOK_URL", ""))
+          if (
+              webhook.scheme != "https"
+              or webhook.netloc != "hooks.slack.com"
+              or not webhook.path.startswith("/services/")
+              or webhook.query
+              or webhook.fragment
+          ):
+              raise SystemExit("Configure SLACK_DISCUSSION_WEBHOOK_URL with a Slack incoming webhook URL.")
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
+              event = json.load(event_file)
+          if event.get("action") != "created":
+              raise SystemExit("Expected a newly created discussion.")
+
+          discussion = event["discussion"]
+          number = discussion["number"]
+          if type(number) is not int or number < 1:
+              raise SystemExit("Expected a valid discussion number.")
+          repository = os.environ["GITHUB_REPOSITORY"]
+          discussion_url = f"https://github.com/{repository}/discussions/{number}"
+
+          def compact(value, limit):
+              return html.escape(" ".join(value.split())[:limit], quote=False)
+
+          title = compact(discussion["title"], 200)
+          category = compact(discussion["category"]["name"], 80)
+          author = compact(discussion["user"]["login"], 40)
+          payload = {
+              "text": (
+                  f"{os.environ['PRIME_BOT_MENTION']} Please investigate and verify this discussion. "
+                  "Reproduce or test in a Prime sandbox if needed, then reply in this thread "
+                  "with your findings and next steps."
+              ),
+              "attachments": [{
+                  "color": "#24292f",
+                  "fallback": f"Discussion #{number}: {title} — {discussion_url}",
+                  "title": f"#{number} · {title}",
+                  "title_link": discussion_url,
+                  "footer": f"{repository} · {category} · {author}",
+              }],
+              "unfurl_links": False,
+              "unfurl_media": False,
+          }
+
+          connection = http.client.HTTPSConnection("hooks.slack.com", timeout=20)
+          try:
+              connection.request(
+                  "POST", webhook.path,
+                  body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                  headers={"Content-Type": "application/json; charset=utf-8"},
+              )
+              response = connection.getresponse()
+              if response.status != 200 or response.read(1024).strip() != b"ok":
+                  raise SystemExit(f"Slack rejected the notification (HTTP {response.status}).")
+          except OSError:
+              raise SystemExit("Slack delivery failed. Check the channel before rerunning to avoid duplicate mentions.") from None
+          finally:
+              connection.close()
+          print(f"Posted discussion #{number} to Slack.")
+          PY
