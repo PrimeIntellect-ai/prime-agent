@@ -2,27 +2,40 @@ name: Discussion notifications
 
 on:
   discussion:
-    types: [created]
+    types: [labeled]
 
 permissions: {}
 
 jobs:
   notify:
-    if: github.repository == 'PrimeIntellect-ai/prime-agent'
+    # Applying discussion labels requires repository triage access.
+    if: >-
+      github.repository == 'PrimeIntellect-ai/prime-agent' &&
+      github.event.label.name == 'prime-triage'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Ask Prime to investigate the discussion
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DISCUSSION_WEBHOOK_URL }}
-          PRIME_BOT_MENTION: "<@U0BT0M2HB88>"
+          PRIME_SLACK_USER_ID: ${{ vars.PRIME_SLACK_USER_ID }}
         run: |
           python3 - <<'PY'
           import html
           import http.client
           import json
           import os
+          import re
           from urllib.parse import urlsplit
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
+              event = json.load(event_file)
+          if event.get("action") != "labeled" or event.get("label", {}).get("name") != "prime-triage":
+              raise SystemExit("Expected a discussion explicitly selected for triage.")
+
+          prime_user_id = os.environ.get("PRIME_SLACK_USER_ID", "")
+          if not re.fullmatch(r"[UW][A-Z0-9]+", prime_user_id):
+              raise SystemExit("Configure the PRIME_SLACK_USER_ID repository variable.")
 
           webhook = urlsplit(os.environ.get("SLACK_WEBHOOK_URL", ""))
           if (
@@ -33,11 +46,6 @@ jobs:
               or webhook.fragment
           ):
               raise SystemExit("Configure SLACK_DISCUSSION_WEBHOOK_URL with a Slack incoming webhook URL.")
-
-          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
-              event = json.load(event_file)
-          if event.get("action") != "created":
-              raise SystemExit("Expected a newly created discussion.")
 
           discussion = event["discussion"]
           number = discussion["number"]
@@ -54,7 +62,7 @@ jobs:
           author = compact(discussion["user"]["login"], 40)
           payload = {
               "text": (
-                  f"{os.environ['PRIME_BOT_MENTION']} Please investigate and verify this discussion. "
+                  f"<@{prime_user_id}> Please investigate and verify this discussion. "
                   "Reproduce or test in a Prime sandbox if needed, then reply in this thread "
                   "with your findings and next steps."
               ),
