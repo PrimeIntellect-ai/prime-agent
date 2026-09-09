@@ -5,6 +5,7 @@ import type { AgentAutonomousStatus } from "../src/core/autonomous.js";
 import {
 	createCompactionOutcomeMessage,
 	createCustomMessage,
+	createHarnessDigestMessage,
 	createRefinementOutcomeMessage,
 	createSessionSlashCommandResultMessage,
 } from "../src/core/messages.js";
@@ -233,6 +234,16 @@ describe("runPrintMode", () => {
 		expect(selectHeadlessTerminalResult([assistant, failed, malformed])).toEqual({
 			primary: assistant,
 			compactionOutcomes: [failed],
+		});
+	});
+
+	it("selects the saved assistant output past a resume-injected harness digest", () => {
+		const assistant = createAssistantMessage({ text: "final answer" });
+		const digest = createHarnessDigestMessage("# Continual Harness State\n\nmemory: 0");
+
+		expect(selectHeadlessTerminalResult([assistant, digest])).toEqual({
+			primary: assistant,
+			compactionOutcomes: [],
 		});
 	});
 

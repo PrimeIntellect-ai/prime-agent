@@ -429,6 +429,23 @@ function compactText(text: string, maxLength: number): string {
 	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+/** Notice body in digest notation: trigger line plus applied edits as `action kind [scope:id] title: content`; rollbacks print via their rollback summaries. */
+export function formatRefinementNoticeBody(result: RefinementResult): string {
+	const lines = [compactText(result.summary, DEFAULT_OVERVIEW_CONTENT_LIMIT)];
+	for (const edit of result.appliedEdits) {
+		if (!edit.applied) continue;
+		const entry = edit.after ?? edit.before;
+		const scope = entry?.scope ?? result.scope ?? "local";
+		lines.push(
+			`- ${edit.action} ${edit.kind} [${scope}:${edit.id}] ${entry?.title ?? edit.id}: ${compactText(
+				entry?.content ?? "",
+				DEFAULT_OVERVIEW_CONTENT_LIMIT,
+			)}`,
+		);
+	}
+	return lines.join("\n");
+}
+
 export function formatHarnessStateForPrompt(
 	state: HarnessState,
 	options: {

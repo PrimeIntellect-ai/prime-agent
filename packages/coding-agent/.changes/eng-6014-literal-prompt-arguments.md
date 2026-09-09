@@ -1,0 +1,1 @@
+- Fixed prompt templates altering literal dollar sequences and expanding placeholders inside user arguments.

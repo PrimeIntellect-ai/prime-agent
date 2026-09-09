@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.9.4] - 2026-09-08
+
+- A Python kernel that dies after a successful startup is restarted on the next use instead of every call being handed the dead kernel forever, and skill-MCP tools advertise their real input schemas again under mcp>=2 (the SDK renamed the field to input_schema).
+- Moved the semantic-edge ledger's append and replay IO onto the shared event-log substrate. One behavior unified across both ledgers: an unterminated final line is an uncommitted append — skipped on read and truncated before the next append, never newline-completed.
+- Made every durable JSON/JSONL state write crash-safe through one shared atomic-write owner (temp file + rename, Windows rename retry): auth.json is no longer written in place (an interrupted write can no longer log you out everywhere), the auth migration writes its destination before destroying its sources, racing first-time settings writers no longer silently discard each other, and the kernel bootstrap lock can no longer be stolen mid-reclaim. Session files now repair crash damage (torn tails, zero-filled records) at open instead of silently losing the next message, and a session lease whose owner file is momentarily unreadable is no longer treated as stale and destroyed.
+- Fixed unbounded session-journal growth from derived bookkeeping: child usage attribution now flushes one entry per child turn instead of one per model request, and idle status sweeps no longer persist fabricated fallback verdicts, duplicate statuses, or retry failed summary generations (including paid model calls) every 25 seconds on unchanged content.
+- Fixed session-list refreshes re-reading entire session files on every change: metadata scans now resume from the last scanned byte offset, stop at the file size seen at scan start, and concurrent readers of the same session share one scan.
+- Fixed daemon request latency on large agent trees: the passive-subagent topology is derived once and memoized, with every consumer (session list, snapshots, cron recovery, agent messaging, passivation) reading the cached walk until the spawn ledger, residency, or a child session file changes.
+- Seven small correctness fixes: compaction keeps only the final turn when the budget is crossed inside trailing tool results (instead of silently keeping everything); a retry whose scheduled continue cannot run ends the retry instead of leaving the session stuck retrying; saved subagent sessions with a lost parent edge still display as subagents; tail truncation rescues an oversized final line even when output ends with a newline; a failed output-spill stream degrades to the in-memory tail instead of crashing the process; piped stdin and a CLI instruction are joined with a blank line instead of glued together; and frontmatter parses behind a UTF-8 BOM.
+- Prevented session export and daemon-client startup from repairing or rewriting transcripts owned by another process.
+- Enforced the retained session-scan usage cache limit for oversized transcripts.
+- The WebP EXIF chunk scan reads chunk sizes as unsigned, so a crafted or corrupt image can no longer hang the process in an infinite scan loop.
+- Fixed chunked session-snapshot transfers so the transfer id names the exact materialized snapshot cut, and a mismatched or restarted transfer now fails only that transfer (clients resync) instead of bouncing the whole worker channel.
+- Fixed zombie processes being treated as live owners by the daemon supervisor ownership registry, session leases, supervisor launch locks, `daemon ps` process stops, and update-restart liveness checks; all process liveness probes now share the zombie-aware helper.
+- Fixed daemon sessions bricking behind a terminal failed worker state: attach, create, and retry now re-run recovery for a failed worker whose process is verified alive, and a known-but-still-recovering session answers with a structured retryable error instead of "Unknown active session".
+- The zai provider default model now points at glm-5.3; the previous default was removed from the catalog and silently fell back to a template model.
+- Removed error-message matching from stale-auth decisions; only structured authentication failures mark credentials stale.
+- Added recovery from stale authentication through validated explicit model selection, while preserving cached private-model access only for the selected Prime team.
+- Changed auto-retry to honor provider Retry-After and usage-limit reset delays, capped by `retry.provider.maxRetryDelayMs`; longer requested waits fail immediately with an informative error instead of sleeping invisibly inside provider SDKs.
+- Removed the `retry.provider.maxRetries` setting; provider SDKs no longer retry internally, so `retry.maxRetries` is the single retry knob.
+- Changed structured `invalid_request`/`refusal` provider failures to fail immediately instead of being retried once.
+- Added the shared retry policy to side questions, compaction and branch summarization, and refinement calls, which run outside the session auto-retry loop and would otherwise make exactly one attempt.
+- Fixed the Python kernel bootstrap on native Windows: the venv python now resolves under `Scripts\python.exe` (uv layout). ([Discussion #1401](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1401), [Discussion #1969](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1969))
+- Fixed `~/` and `~\` path expansion on Windows, including mixed-separator paths like `C:\Users\u/rest`. ([Discussion #1442](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1442), [Discussion #1469](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1469))
+- Fixed daemon worker handshakes timing out on slow machines: per-attempt hello/auth waits now consume the remaining connect budget instead of restarting a fixed 1s clock on every retry. ([Discussion #1622](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1622), [Discussion #1678](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1678))
+- Fixed console windows flashing on Windows: all background spawns now run with hidden windows. ([Discussion #1461](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1461))
+- Fixed bash resolution picking WSL's System32 `bash.exe` over a per-user Git Bash on PATH. ([Discussion #1437](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1437))
+- Fixed the built-in Herdr reporter never connecting on Windows by dialing the socket inside the named-pipe namespace. ([Discussion #1399](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1399))
+- Fixed Windows worker startup deadlines, session lease contention, and UTF-8 Python execution.
+- Fixed deleted subagents returning in saved display state and duplicate cleanup failure notices.
+- Fixed the agents view blocking Enter with "Waiting for the selected session to load" while the remembered selection was still loading; opening the visible row now always works, and entering a subagents view no longer arms that wait at all.
+- Changed the agents view to show the model label on every session row, not only on subagent rows.
+- Added steering Shell messages when background kernel `bash()` process groups finish so agents can inspect results at the next safe turn boundary without interrupting running tools.
+- Kept sessions resident while background shell process groups run and completion delivery is pending.
+- Simplified the agents view with total cost and age, one column header, and collapsed inactive sessions while keeping the logo, startup metadata, and search.
+- Kept a running-subagent count beneath collapsed agents while their subagents are working.
+- Highlighted `@path` file references and `--flags` in the editor, queued message previews, and sent user messages, plus the bare `--` end-of-options separator in recognized slash commands.
+- Added live refreshes for public and authorized private Prime Inference models while retaining bundled and cached fallbacks.
+- Added `rlm.create_session(...)` so daemon-backed root agents can start separate top-level sessions.
+- Preserved active same-provider credentials when creating a sibling session without storing them in daemon descriptors.
+- Fixed daemon session workers crashing when a hosted extension touched `ctx.ui.theme` (theme was never initialized in the worker process); workers now initialize the settings theme headlessly at startup, without a theme file watcher.
+- Fixed assistant Markdown file links to open relative to the session's working directory, including Windows drive paths ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).
+
 ## [0.9.3] - 2026-09-06
 
 - Fixed ChatGPT OAuth model discovery hiding GPT-6 Astra by advertising Codex CLI 0.153.4 instead of 0.147.0.
