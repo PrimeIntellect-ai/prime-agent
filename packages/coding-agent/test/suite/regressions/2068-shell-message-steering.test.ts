@@ -157,6 +157,11 @@ describe("#2068 shell message steering", () => {
 			// pids are reused across handles, so another command must not withdraw this notice.
 			await readShellResult(harness, "other command");
 			expect(harness.session.getSteeringMessages()).toHaveLength(1);
+			// pid reuse can queue an identical key twice; one read withdraws one notice.
+			await completeShell(harness);
+			expect(harness.session.getSteeringMessages()).toHaveLength(2);
+			await readShellResult(harness);
+			expect(harness.session.getSteeringMessages()).toHaveLength(1);
 			await readShellResult(harness);
 			expect(harness.session.getSteeringMessages()).toEqual([]);
 		} finally {

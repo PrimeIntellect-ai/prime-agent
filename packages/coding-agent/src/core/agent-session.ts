@@ -4914,11 +4914,17 @@ export class AgentSession {
 	 * Delivered notices are no longer clearable, which makes this a no-op.
 	 */
 	private _withdrawAsyncBashCompletionNotice(details: { pid: number; command: string }): void {
-		const withdrawn = this._cancelSessionActions(
-			(action) => this._isAsyncBashCompletionActionFor(action, details),
+		// One read withdraws one notice: pid reuse can queue an identical key twice,
+		// and the read belongs to the older handle, which is the earlier notice.
+		const notice = this._actionStore
+			.clearableActions()
+			.find((action) => this._isAsyncBashCompletionActionFor(action, details));
+		if (!notice) return;
+		this._cancelSessionActions(
+			(action) => action === notice,
 			new Error("Background command completion notice withdrawn: the kernel read the result first."),
 		);
-		if (withdrawn.length > 0) this._emitQueueUpdate();
+		this._emitQueueUpdate();
 	}
 
 	private _isAsyncBashCompletionActionFor(
