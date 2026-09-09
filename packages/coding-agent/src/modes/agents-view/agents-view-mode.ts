@@ -2872,10 +2872,15 @@ function formatTableCell(value: string, width: number): string {
 }
 
 // Model ids can embed a provider path ("moonshotai/kimi-k2"); the column shows
-// the bare model name. The actions panel keeps the full provider/id selector.
+// the bare model name plus the thinking level ("kimi-k2:high") when one is
+// active — "off" reads as noise, so it and absent levels render bare. The
+// actions panel keeps the full provider/id · level form.
 function formatSessionModel(summary: SessionSummary): string {
 	const id = summary.model?.id;
-	return id ? id.slice(id.lastIndexOf("/") + 1) || id : "-";
+	if (!id) return "-";
+	const bare = id.slice(id.lastIndexOf("/") + 1) || id;
+	const level = summary.thinkingLevel;
+	return level && level !== "off" ? `${bare}:${level}` : bare;
 }
 
 function formatSessionDuration(summary: SessionSummary): string {
