@@ -236,7 +236,9 @@ Exact artifact files are created only when their features are used. Non-persiste
 
 The REPL runtime process executes model-generated Python and `bash()` commands with the worker's OS permissions. The process boundary isolates protocol and lifecycle concerns; it is not a security sandbox. Installed Python packages, skills, and extensions are trusted code. Use an external sandbox or restricted execution environment when the workspace or generated code is untrusted.
 
-Provider credentials are resolved by the TypeScript host. The bounded model catalog crosses into Python as metadata; the full auth store does not.
+Provider credentials are resolved by the TypeScript host. The bounded model catalog crosses into Python as metadata; the full auth store does not. The kernel process is spawned with an allowlisted environment rather than the host's full environment: shell and locale essentials, `RLM_*`, `PRIME_AGENT_*`, Python/uv/pip/git variables, and whatever the session injects (subagent depth, bash shell, the websearch key). Provider API keys and other credential-shaped variables are dropped; `kernel.envPassthrough` admits extra names. `bash()` children inherit the kernel environment.
+
+Kernel state snapshots (`kernel-state.dill`) are owner-only files. The host sends the snapshot request digests of the credential values it saw at spawn, and the runtime skips any top-level `str`/`bytes` name holding one of them (reported in `skipped`). `kernel.stateSnapshots: false` or `--no-kernel-snapshots` disables snapshots for a session.
 
 ## Failure Modes
 

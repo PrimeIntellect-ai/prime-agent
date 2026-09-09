@@ -9,6 +9,7 @@ import { v4 as uuid } from "uuid";
 import { spawnHidden } from "../../utils/child-process.js";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
 import { ensureKernelPython } from "./bootstrap.js";
+import { buildKernelEnv, collectCredentialDigests, droppedCredentialEnvNames } from "./kernel-env.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
 	ATTACHMENT_DISPLAY_MIME,
@@ -155,6 +156,7 @@ export class ReplKernelManager {
 		| "python"
 		| "cwd"
 		| "env"
+		| "hostEnvPassthrough"
 		| "sessionId"
 		| "hostHandlers"
 		| "pythonSkills"
@@ -163,6 +165,8 @@ export class ReplKernelManager {
 		| "stderrLogPath"
 	>;
 	private readonly handledHostRequestIds = new Set<string>();
+	/** SHA-256 digests of credential values seen at spawn; the runtime skips names holding them when snapshotting. */
+	private credentialDigests: string[] = [];
 	private child?: ChildProcess;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
 	private kernelStderr = "";
@@ -213,6 +217,7 @@ export class ReplKernelManager {
 			python: options.python,
 			cwd: options.cwd,
 			env: options.env,
+			hostEnvPassthrough: options.hostEnvPassthrough,
 			sessionId: options.sessionId,
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
@@ -312,16 +317,29 @@ export class ReplKernelManager {
 			throw new Error("Kernel was disposed during startup");
 		}
 
-		const child = spawnHidden(python, ["-m", "rlm.repl"], {
-			cwd: this.options.cwd,
-			// bash.py journals its process groups under this pid so the host can
-			// reap them if the runtime dies without running its shutdown hook.
-			env: {
-				...process.env,
+		// The kernel runs model code: it gets an allowlisted host environment (no
+		// provider credentials) plus what the session injects. Credential values
+		// present on the host are remembered as digests so a snapshot can refuse to
+		// persist a name that holds one of them.
+		const kernelEnv = buildKernelEnv(
+			process.env,
+			{
 				...this.options.env,
 				...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}),
+				// bash.py journals its process groups under this pid so the host can
+				// reap them if the runtime dies without running its shutdown hook.
 				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
 			},
+			{ passthrough: this.options.hostEnvPassthrough },
+		);
+		this.credentialDigests = collectCredentialDigests({ ...process.env, ...this.options.env });
+		const withheld = droppedCredentialEnvNames(process.env, { passthrough: this.options.hostEnvPassthrough });
+		if (withheld.length > 0) {
+			this.appendKernelDiagnostic(`host credentials withheld from the kernel environment: ${withheld.join(", ")}`);
+		}
+		const child = spawnHidden(python, ["-m", "rlm.repl"], {
+			cwd: this.options.cwd,
+			env: kernelEnv,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.child = child;
@@ -1496,6 +1514,7 @@ export class ReplKernelManager {
 					max_bytes: cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
 					max_variable_bytes: cfg.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 					prune_oversized: options.pruneOversized ?? false,
+					redact_sha256: this.credentialDigests,
 				},
 				"",
 				{ internal: true },

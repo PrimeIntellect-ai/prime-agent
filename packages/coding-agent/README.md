@@ -569,6 +569,7 @@ Use `prime-agent model list [search]` to list available models.
 | `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
+| `--no-kernel-snapshots` | Do not persist or revive Python kernel state for this session |
 
 Use `prime-agent session export <file> [output]` to export a saved session to HTML.
 

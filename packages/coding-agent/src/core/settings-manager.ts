@@ -173,6 +173,14 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	kernel?: KernelSettings;
+}
+
+export interface KernelSettings {
+	/** Persist the Python kernel namespace to the session artifact dir and revive it on resume. Default: true. */
+	stateSnapshots?: boolean;
+	/** Extra host environment variable names (exact or `PREFIX*`) the kernel may inherit beyond the built-in allowlist. */
+	envPassthrough?: string[];
 }
 
 export interface AgentTracesSettings {
@@ -990,6 +998,15 @@ export class SettingsManager {
 
 	getShellCommandPrefix(): string | undefined {
 		return this.settings.shellCommandPrefix;
+	}
+
+	getKernelStateSnapshots(): boolean {
+		return this.settings.kernel?.stateSnapshots ?? true;
+	}
+
+	getKernelEnvPassthrough(): string[] {
+		const raw = this.settings.kernel?.envPassthrough;
+		return Array.isArray(raw) ? raw.filter((name): name is string => typeof name === "string" && !!name.trim()) : [];
 	}
 
 	setShellCommandPrefix(prefix: string | undefined): void {

@@ -372,6 +372,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		sessionStartEvent: options.sessionStartEvent,
 		prewarmIpythonKernel: options.prewarmIpythonKernel,
+		kernelStateSnapshots: options.kernelStateSnapshots,
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,

@@ -145,6 +145,24 @@ describe("IpythonKernelProvisioner", () => {
 		}
 	});
 
+	it("stateSnapshots: false never asks the kernel to snapshot or restore (ENG-5342)", async () => {
+		const marker = join(tempDir, "snapshot-flushed");
+		const snapshotDir = join(tempDir, "snapshots");
+		mkdirSync(snapshotDir, { recursive: true });
+		const python = writeFakeReplRuntime(marker);
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir, stateSnapshots: false });
+		try {
+			await expect(provisioner.ensure()).rejects.toThrow(/Failed to initialize rlm runtime/);
+			// The teardown flushes a final snapshot only when one is configured.
+			expect(existsSync(marker)).toBe(false);
+			expect(existsSync(join(snapshotDir, "kernel-state.dill"))).toBe(false);
+			// The stderr log still lives in the artifact dir.
+			expect(existsSync(join(snapshotDir, "kernel-stderr.log"))).toBe(true);
+		} finally {
+			await provisioner.dispose();
+		}
+	});
+
 	it("memoizes concurrent ensure() calls into one startup", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });

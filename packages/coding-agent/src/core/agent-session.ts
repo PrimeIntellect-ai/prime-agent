@@ -489,6 +489,8 @@ export interface AgentSessionConfig {
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	autonomous?: AgentAutonomousConfig;
 	prewarmIpythonKernel?: boolean;
+	/** Override for the kernel.stateSnapshots setting; false disables kernel-state.dill for this session. */
+	kernelStateSnapshots?: boolean;
 	autoRefineReviewer?: AutoRefineReviewer;
 	/**
 	 * When true, auto-refine runs synchronously between turns at the
@@ -1242,6 +1244,7 @@ export class AgentSession {
 	/** True once the runtime has been built once; later builds are in-process rebuilds (/reload). */
 	private _ipythonRuntimeBuilt = false;
 	private readonly _prewarmIpythonKernel: boolean;
+	private readonly _kernelStateSnapshotsOverride: boolean | undefined;
 	private _rlmDepth: number;
 	private readonly _configuredRlmMaxDepth: number | undefined;
 	private _rlmMaxDepth: number;
@@ -1355,6 +1358,7 @@ export class AgentSession {
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
+		this._kernelStateSnapshotsOverride = config.kernelStateSnapshots;
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
 		this._rlmSessionDir = config.rlmSessionDir;
@@ -9427,18 +9431,21 @@ export class AgentSession {
 			// reload can't restore from a snapshot the old kernel is still writing.
 			const previousDispose = this._ipythonKernelProvisioner?.dispose();
 			this._ipythonKernelSnapshotDir = this.sessionManager.getSessionArtifactDir();
+			const stateSnapshots = this._kernelStateSnapshotsEnabled();
 			// Only surface the "revived from your previous session" notice on the first
 			// build (a genuine resume). A later rebuild (/reload) restores state silently
 			// for continuity — the conversation is unchanged, so there's nothing to flag.
 			const notifyRestore = !this._ipythonRuntimeBuilt;
 			this._ipythonKernelProvisioner = new IpythonKernelProvisioner(this._cwd, {
 				env: this._rlmKernelEnv(),
+				hostEnvPassthrough: this.settingsManager.getKernelEnvPassthrough(),
 				commandPrefix: this.settingsManager.getShellCommandPrefix(),
 				shellPath: this.settingsManager.getShellPath(),
 				sessionId: this.sessionId,
 				hostHandlers: this._createKernelHostHandlers(),
 				pythonSkills,
 				snapshotDir: this._ipythonKernelSnapshotDir,
+				stateSnapshots,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
 			});
@@ -9512,7 +9519,9 @@ export class AgentSession {
 		// came back before the first turn, rather than a turn later when the kernel
 		// would otherwise lazily start on first use.
 		const hasSnapshot =
-			!!this._ipythonKernelSnapshotDir && existsSync(snapshotPathIn(this._ipythonKernelSnapshotDir));
+			this._kernelStateSnapshotsEnabled() &&
+			!!this._ipythonKernelSnapshotDir &&
+			existsSync(snapshotPathIn(this._ipythonKernelSnapshotDir));
 		if ((this._prewarmIpythonKernel || hasSnapshot) && this.getActiveToolNames().includes("ipython")) {
 			this._ipythonKernelProvisioner?.prewarm();
 		}
@@ -9713,6 +9722,11 @@ export class AgentSession {
 		}
 	}
 
+	/** CLI override first, then the kernel.stateSnapshots setting (default on). */
+	private _kernelStateSnapshotsEnabled(): boolean {
+		return this._kernelStateSnapshotsOverride ?? this.settingsManager.getKernelStateSnapshots();
+	}
+
 	private _rlmKernelEnv(): Record<string, string> {
 		// Kernel env is provisioning-time only: RLM_MAX_DEPTH may be stale in an already-running kernel;
 		// the TypeScript-side spawn check remains authoritative.
@@ -9738,12 +9752,16 @@ export class AgentSession {
 			env.PRIME_AGENT_CODING_AGENT_DIR = this._agentDir;
 		}
 
-		if (process.env[SERPER_ENV_VAR]?.trim()) {
-			return;
-		}
 		// Inject only when a websearch skill (bundled or custom) is actually loaded,
 		// so the key isn't exposed to kernels that can't use it.
 		if (!this._resourceLoader.getSkills().skills.some((skill) => skill.name === WEBSEARCH_SKILL_NAME)) {
+			return;
+		}
+		// The kernel no longer inherits the host env wholesale, so a host-provided
+		// key must be handed over explicitly; it still wins over the stored credential.
+		const fromHost = process.env[SERPER_ENV_VAR]?.trim();
+		if (fromHost) {
+			env[SERPER_ENV_VAR] = fromHost;
 			return;
 		}
 		const cred = this._modelRegistry.authStorage.get(SERPER_CREDENTIAL_ID);
