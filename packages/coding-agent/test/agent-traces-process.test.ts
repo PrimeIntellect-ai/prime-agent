@@ -9,7 +9,7 @@ import { AgentTraceDeliveryQueue, stopAgentTraceUploads, uploadAgentTraceFile } 
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
-it("runs bundled workers and shares ownership, pacing and crash recovery across processes", async () => {
+it("runs bundled workers and shares ownership, pacing, crash recovery and rejected-key recovery across processes", async () => {
 	const root = await mkdtemp(join(tmpdir(), "trace-process-"));
 	const agentDir = join(root, "agent"),
 		sends = join(root, "sends.jsonl");
@@ -31,12 +31,12 @@ Date.now = () => Number(process.env.TRACE_TEST_NOW);
 process.on("message", () => {});
 const queue = new AgentTraceDeliveryQueue({
  agentDir: ${JSON.stringify(agentDir)}, configPath: ${JSON.stringify(join(root, "absent-config.json"))},
- authStorage: AuthStorage.inMemory({ "prime-agent-traces": { type: "api_key", key: "synthetic-process-key" } }),
+ authStorage: AuthStorage.inMemory({ "prime-agent-traces": { type: "api_key", key: process.env.TRACE_TEST_KEY } }),
  settingsManager: SettingsManager.inMemory(),
  fetchFn: async (url, init) => {
   appendFileSync(${JSON.stringify(sends)}, JSON.stringify({ url, bytes: init.body.byteLength, at: Date.now(), pid: process.pid }) + "\\n");
   process.send("request");
-  return new Promise(resolve => process.once("message", () => resolve(new Response("", { status: 200 }))));
+  return new Promise(resolve => process.once("message", () => resolve(new Response("", { status: Number(process.env.TRACE_TEST_STATUS) }))));
  },
 });
 await queue.runOnce();
@@ -54,7 +54,7 @@ process.send("done", () => process.disconnect());
 			logLevel: "silent",
 			banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
 		});
-		for (const name of ["one", "two"]) {
+		const enqueue = async (name: string) => {
 			const sessionFile = join(root, `${name}.jsonl`);
 			writeFileSync(
 				sessionFile,
@@ -69,8 +69,9 @@ process.send("done", () => process.disconnect());
 					requireEnabled: false,
 				}),
 			).toMatchObject({ status: "queued" });
-		}
-		const launch = (when: number) => {
+		};
+		for (const name of ["one", "two"]) await enqueue(name);
+		const launch = (when: number, key = "synthetic-process-key", status = 200) => {
 			const child = fork(bundle, [], {
 				execArgv: [],
 				cwd: root,
@@ -78,6 +79,8 @@ process.send("done", () => process.disconnect());
 				env: {
 					...process.env,
 					TRACE_TEST_NOW: String(when),
+					TRACE_TEST_KEY: key,
+					TRACE_TEST_STATUS: String(status),
 					PRIME_AGENT_TRACES_API_KEY: "",
 					PRIME_API_KEY: "",
 					PRIME_AGENT_TRACES_BASE_URL: "https://synthetic.invalid",
@@ -117,13 +120,32 @@ process.send("done", () => process.disconnect());
 		});
 		replacement.child.send("release");
 		expect(await replacement.exited, replacement.errors()).toEqual({ code: 0, signal: null });
+		await enqueue("three");
+		const rejected = launch(now + 120_000, "synthetic-process-key", 401);
+		await vi.waitFor(() => expect(rejected.messages, rejected.errors()).toContain("request"), { timeout: 5000 });
+		rejected.child.send("release");
+		expect(await rejected.exited, rejected.errors()).toEqual({ code: 0, signal: null });
+		const paused = launch(now + 180_000);
+		expect(await paused.exited, paused.errors()).toEqual({ code: 0, signal: null });
+		expect(paused.messages).not.toContain("request");
+		const rotated = launch(now + 180_000, "replacement-process-key");
+		await vi.waitFor(() => expect(rotated.messages, rotated.errors()).toContain("request"), { timeout: 5000 });
+		rotated.child.send("release");
+		expect(await rotated.exited, rotated.errors()).toEqual({ code: 0, signal: null });
 		const requests = readFileSync(sends, "utf8")
 			.trim()
 			.split("\n")
 			.map((line) => JSON.parse(line) as { at: number; url: string; bytes: number });
-		expect(requests).toHaveLength(3);
-		expect(requests.map((request) => request.at)).toEqual([now, now + 12_100, now + 60_000]);
+		expect(requests).toHaveLength(5);
+		expect(requests.map((request) => request.at)).toEqual([
+			now,
+			now + 12_100,
+			now + 60_000,
+			now + 120_000,
+			now + 180_000,
+		]);
 		expect(requests[1]!.url).toBe(requests[2]!.url);
+		expect(requests[3]!.url).toBe(requests[4]!.url);
 		expect(requests.every((request) => request.bytes > 0)).toBe(true);
 	} finally {
 		for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");

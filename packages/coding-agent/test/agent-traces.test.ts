@@ -425,6 +425,31 @@ describe("durable background trace delivery", () => {
 		await run();
 		expect(job(path).state).toBe("delivered");
 	});
+	it("stores distinct salted credential fingerprints for independent agent directories", async () => {
+		const path = file();
+		const fingerprints: string[] = [];
+		const salts: string[] = [];
+		fetchFn.mockImplementation(async () => new Response("", { status: 401 }));
+		for (const scopedAgentDir of [agentDir, join(root, "other-agent")]) {
+			const scopedOptions = { ...options, agentDir: scopedAgentDir };
+			try {
+				await uploadAgentTraceFile({ ...scopedOptions, sessionFile: path, requireEnabled: false });
+				await new AgentTraceDeliveryQueue(scopedOptions).runOnce();
+				const saved = readFileSync(join(scopedAgentDir, "agent-traces-outbox", ".delivery-state"), "utf8");
+				const state = JSON.parse(saved) as { credentialSalt: string; invalidCredential: string };
+				expect(state.credentialSalt).toMatch(/^[a-f0-9]{64}$/);
+				expect(state.invalidCredential).toMatch(/^[a-f0-9]{64}$/);
+				expect(saved).not.toContain("synthetic-key");
+				salts.push(state.credentialSalt);
+				fingerprints.push(state.invalidCredential);
+			} finally {
+				stopAgentTraceUploads(scopedAgentDir);
+			}
+		}
+		expect(salts[0]).not.toBe(salts[1]);
+		expect(fingerprints[0]).not.toBe(fingerprints[1]);
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+	});
 	it("pauses permanent HTTP failures until the automatic file or endpoint changes", async () => {
 		const path = file();
 		await queue(path);

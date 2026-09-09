@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { type Dirent, existsSync, linkSync, mkdirSync, type Stats, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -379,6 +379,7 @@ interface TraceBatch {
 interface DeliveryCoordinator {
 	activeJob?: string;
 	nextRequestAt?: number;
+	credentialSalt?: string;
 	invalidCredential?: string;
 	endpointFingerprint?: string;
 }
@@ -452,6 +453,14 @@ function validEntry(value: TraceJob | TraceBatch): boolean {
 
 function digest(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
+}
+function fingerprintCredential(apiKey: string, salt: string): Promise<string> {
+	return new Promise((resolve, reject) => {
+		scrypt(apiKey, salt, 32, (error, key) => {
+			if (error) reject(error);
+			else resolve(key.toString("hex"));
+		});
+	});
 }
 function outboxDir(agentDir = getAgentDir()): string {
 	return join(agentDir, "agent-traces-outbox");
@@ -900,7 +909,13 @@ export class AgentTraceDeliveryQueue {
 			signal: controller.signal,
 		}).catch(() => undefined);
 		if (controller.signal.aborted) return false;
-		const fingerprint = credential ? digest(credential.apiKey) : undefined;
+		let fingerprint: string | undefined;
+		if (credential) {
+			// Persist the salt with the shared rate state so replacement owners recognize rejected keys.
+			coordinator.credentialSalt ??= randomBytes(32).toString("hex");
+			fingerprint = await fingerprintCredential(credential.apiKey, coordinator.credentialSalt);
+		}
+		if (controller.signal.aborted) return false;
 		if (
 			!credential ||
 			(coordinator.invalidCredential === fingerprint && coordinator.endpointFingerprint === endpointFingerprint)
