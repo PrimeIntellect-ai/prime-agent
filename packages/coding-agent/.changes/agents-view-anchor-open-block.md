@@ -1,1 +1,0 @@
-- Fixed the agents view blocking Enter with "Waiting for the selected session to load" while the remembered selection was still loading; opening the visible row now always works, and entering a subagents view no longer arms that wait at all.
