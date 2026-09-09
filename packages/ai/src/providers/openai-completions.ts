@@ -1121,6 +1121,8 @@ function parseChunkUsage(
 		prompt_cache_hit_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 		cost?: number;
+		is_byok?: boolean;
+		cost_details?: { upstream_inference_cost?: number };
 	},
 	model: Model<"openai-completions">,
 	cacheWriteCost?: number,
@@ -1149,23 +1151,51 @@ function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage, cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost });
-	// OpenRouter reports the actually billed cost (credits == USD) in usage.cost,
-	// already priced by the endpoint and service tier that served the request
+	// OpenRouter reports billing truth in usage, already priced by the endpoint
+	// and service tier that served the request
 	// (https://openrouter.ai/docs/api-reference/overview). Trust it over the
 	// catalog-rate estimate, scaling the component breakdown to match.
-	if (model.provider === "openrouter" && typeof rawUsage.cost === "number" && rawUsage.cost > 0) {
+	const reportedCost = model.provider === "openrouter" ? openRouterReportedCost(rawUsage) : undefined;
+	if (reportedCost !== undefined) {
 		if (usage.cost.total > 0) {
-			const scale = rawUsage.cost / usage.cost.total;
+			const scale = reportedCost / usage.cost.total;
 			usage.cost.input *= scale;
 			usage.cost.output *= scale;
 			usage.cost.cacheRead *= scale;
 			usage.cost.cacheWrite *= scale;
+		} else if (usage.totalTokens > 0) {
+			// No catalog rates to apportion by: attribute by token counts instead.
+			usage.cost.input = (reportedCost * usage.input) / usage.totalTokens;
+			usage.cost.output = (reportedCost * usage.output) / usage.totalTokens;
+			usage.cost.cacheRead = (reportedCost * usage.cacheRead) / usage.totalTokens;
+			usage.cost.cacheWrite = (reportedCost * usage.cacheWrite) / usage.totalTokens;
 		} else {
-			usage.cost.input = rawUsage.cost;
+			usage.cost.input = reportedCost;
 		}
-		usage.cost.total = rawUsage.cost;
+		usage.cost.total = reportedCost;
 	}
 	return usage;
+}
+
+/**
+ * The user's real spend for an OpenRouter request, or undefined to keep the
+ * catalog estimate. usage.cost only carries what OpenRouter charged the
+ * account's credits: for BYOK requests that is just OpenRouter's fee, so real
+ * spend is the upstream provider's bill plus that fee. A cost of 0 can mean
+ * not-billed-via-credits (e.g. :free endpoints) rather than free, so it keeps
+ * the catalog estimate.
+ */
+function openRouterReportedCost(rawUsage: {
+	cost?: number;
+	is_byok?: boolean;
+	cost_details?: { upstream_inference_cost?: number };
+}): number | undefined {
+	const credits = typeof rawUsage.cost === "number" && rawUsage.cost > 0 ? rawUsage.cost : undefined;
+	if (rawUsage.is_byok === true) {
+		const upstream = rawUsage.cost_details?.upstream_inference_cost;
+		return typeof upstream === "number" && upstream > 0 ? upstream + (credits ?? 0) : undefined;
+	}
+	return credits;
 }
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {

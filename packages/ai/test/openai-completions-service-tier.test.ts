@@ -10,6 +10,7 @@ const mockState = vi.hoisted(() => ({
 	lastParams: undefined as CapturedCompletionsPayload | undefined,
 	responseServiceTier: undefined as ServiceTier | undefined,
 	responseCost: undefined as number | undefined,
+	responseByok: undefined as { upstreamCost?: number } | undefined,
 }));
 
 vi.mock("openai", () => {
@@ -28,6 +29,15 @@ vi.mock("openai", () => {
 									prompt_tokens: 100,
 									completion_tokens: 50,
 									...(mockState.responseCost !== undefined ? { cost: mockState.responseCost } : {}),
+									...(mockState.responseByok !== undefined
+										? {
+												is_byok: true,
+												cost_details:
+													mockState.responseByok.upstreamCost !== undefined
+														? { upstream_inference_cost: mockState.responseByok.upstreamCost }
+														: {},
+											}
+										: {}),
 								},
 							};
 						},
@@ -84,6 +94,7 @@ describe("openai-completions service tier", () => {
 		mockState.lastParams = undefined;
 		mockState.responseServiceTier = undefined;
 		mockState.responseCost = undefined;
+		mockState.responseByok = undefined;
 	});
 
 	it("forwards service_tier for OpenRouter requests", async () => {
@@ -107,6 +118,30 @@ describe("openai-completions service tier", () => {
 		// The component breakdown scales with the reported total.
 		expect(message.usage.cost.input).toBeCloseTo(0.0006, 10);
 		expect(message.usage.cost.output).toBeCloseTo(0.0003, 10);
+	});
+
+	it("records BYOK spend from the upstream bill plus OpenRouter's fee", async () => {
+		mockState.responseCost = 0.95;
+		mockState.responseByok = { upstreamCost: 19 };
+		const message = await run(createModel());
+
+		expect(message.usage.cost.total).toBeCloseTo(19.95, 10);
+	});
+
+	it("keeps catalog rates for a BYOK response without an upstream cost", async () => {
+		mockState.responseCost = 0;
+		mockState.responseByok = {};
+		const message = await run(createModel());
+
+		expect(message.usage.cost.total).toBeCloseTo(0.00015, 10);
+	});
+
+	it("keeps catalog rates when OpenRouter reports a cost of 0", async () => {
+		// 0 can mean not-billed-via-credits rather than free.
+		mockState.responseCost = 0;
+		const message = await run(createModel());
+
+		expect(message.usage.cost.total).toBeCloseTo(0.00015, 10);
 	});
 
 	it("keeps unmultiplied catalog rates for a gateway tier echo without reported cost", async () => {
