@@ -32,25 +32,36 @@ export type {
 	RpcSessionState,
 } from "./rpc-types.js";
 
-interface RpcModeConnectionOptions {
+export interface RpcModeLifecycleOptions {
+	onReady?: () => Promise<void>;
+}
+
+interface RpcModeConnectionOptions extends RpcModeLifecycleOptions {
 	bindHeadlessExtensions?: (options: {
 		uiContext: ReturnType<typeof createRpcExtensionUiBridge>["uiContext"];
 		shutdownHandler: () => void;
 	}) => Promise<void>;
 }
 
-export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runRpcMode(
+	runtimeHost: AgentSessionRuntime,
+	options: RpcModeLifecycleOptions = {},
+): Promise<never> {
 	const connection = new InProcessAgentConnection(runtimeHost);
 	const run = () =>
 		runRpcModeWithConnectionInternal(connection, {
+			...options,
 			bindHeadlessExtensions: (options) => connection.bindHeadlessExtensions(options),
 		});
 	const context = runtimeHost.services?.telemetryErrorContext;
 	return context ? withTelemetryErrorContext({ ...context, executionMode: "rpc" }, run) : run();
 }
 
-export async function runRpcModeWithConnection(connection: AgentConnection): Promise<never> {
-	return runRpcModeWithConnectionInternal(connection);
+export async function runRpcModeWithConnection(
+	connection: AgentConnection,
+	options: RpcModeLifecycleOptions = {},
+): Promise<never> {
+	return runRpcModeWithConnectionInternal(connection, options);
 }
 
 async function runRpcModeWithConnectionInternal(
@@ -87,6 +98,7 @@ async function runRpcModeWithConnectionInternal(
 
 	let shutdownRequested = false;
 	let shuttingDown = false;
+	let ready: Promise<void> | undefined;
 	let detachInput = () => {};
 	let inputEnded = false;
 	let promptResponsePending = false;
@@ -214,6 +226,7 @@ async function runRpcModeWithConnectionInternal(
 		process.stdin.pause();
 		await Promise.allSettled([...observations.keys()].map((activeSessionId) => stopObservation(activeSessionId)));
 		await connection.dispose();
+		await ready;
 		process.exit(exitCode);
 	}
 
@@ -570,6 +583,11 @@ async function runRpcModeWithConnectionInternal(
 			process.stdin.off("end", onInputEnd);
 		};
 	})();
+	try {
+		ready = options.onReady?.().catch(() => {});
+	} catch {
+		// Optional readiness reporting must not change RPC behavior.
+	}
 
 	return new Promise(() => {});
 }

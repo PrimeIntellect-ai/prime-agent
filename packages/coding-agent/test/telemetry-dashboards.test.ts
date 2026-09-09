@@ -6,6 +6,7 @@ import {
 	type ExistingInsight,
 	publishTelemetryDashboards,
 	readDashboardBundle,
+	readinessQuery,
 	readTelemetryContract,
 	type TelemetryContract,
 	telemetryAlertPayload,
@@ -84,8 +85,15 @@ function fakeApi(target: DashboardBundle, options: ApiOptions = {}) {
 			const query = body?.query as { query?: string } | undefined;
 			if (query?.query?.includes("AS observed_events")) {
 				const required = [...new Set(target.insights.flatMap((definition) => definition.requires ?? []))];
+				const revisions = [...query.query.matchAll(/AS revision_(\d+)_events/g)].map((match) => Number(match[1]));
 				return respond({
-					results: options.observed ? required.map((event) => [event, 3, options.revision === 1 ? 0 : 3]) : [],
+					results: options.observed
+						? required.map((event) => [
+								event,
+								3,
+								...revisions.map((revision) => ((options.revision ?? 3) >= revision ? 3 : 0)),
+							])
+						: [],
 				});
 			}
 			if (options.queryError && newSql.has(query?.query)) return respond({ error: "Synthetic invalid query" });
@@ -115,7 +123,7 @@ function fakeApi(target: DashboardBundle, options: ApiOptions = {}) {
 
 describe("reviewed telemetry dashboard definitions", () => {
 	it("uses the deployed contract and exactly the reviewed historical correction IDs", () => {
-		expect(validateDashboardBundle(bundle, contract)).toEqual({ corrections: 7, insights: 27 });
+		expect(validateDashboardBundle(bundle, contract)).toEqual({ corrections: 7, insights: 30 });
 		expect(bundle.corrections.map((definition) => definition.id)).toEqual([
 			5381784, 5381785, 5381786, 5381787, 5381788, 5381818, 5381833,
 		]);
@@ -246,6 +254,34 @@ describe("reviewed telemetry dashboard definitions", () => {
 		expect(context).toContain("successful_model_call_count IS NULL) AS missing_inference_success_measurement_runs");
 		expect(context).not.toContain("coalesce(properties.successful_model_call_count");
 	});
+
+	it("separates package completion from observed runtime readiness after installation stage deduplication", () => {
+		for (const key of ["installation-outcomes", "installation-stages", "installation-versions"]) {
+			expect(insight(key).requires).toEqual(["agent installation stage"]);
+			expect(insight(key).min_schema_revision).toBe(3);
+			expect(sql(key)).toContain("properties.schema_revision >= 3");
+			expect(sql(key)).toContain("GROUP BY distinct_id, installation_attempt_id, stage");
+			expect(sql(key)).toContain("tuple(timestamp, properties.outcome != 'started')");
+			expect(sql(key)).toContain("installation_action, installation_source, install_method");
+		}
+		expect(sql("installation-outcomes")).toContain("GROUP BY distinct_id, installation_attempt_id");
+		expect(sql("installation-outcomes")).toContain("stage = 'package_install' AND outcome = 'success'");
+		expect(sql("installation-outcomes")).toContain("stage = 'ready' AND outcome = 'success'");
+		expect(sql("installation-outcomes")).toContain("pending_or_missing_completion");
+		expect(sql("installation-outcomes")).toContain("installed_without_observed_readiness");
+		expect(sql("installation-stages")).toContain("stage, outcome, reason");
+		expect(sql("installation-stages")).toContain("missing_duration_stages");
+		expect(sql("installation-stages")).toContain(
+			"tupleElement(argMax(tuple(if(properties.outcome = 'started', NULL, toFloat(properties.duration_ms)))",
+		);
+		expect(sql("installation-stages")).toContain("observed_session_restore_failures");
+		expect(sql("installation-versions")).toContain("pending_or_missing_readiness");
+		expect(sql("installation-versions")).toContain("requested_version != 'unknown' AND runtime_version != 'unknown'");
+		expect(sql("installation-versions")).toContain(
+			"countIf(readiness_reports > 0 AND requested_version != 'unknown' AND runtime_version != 'unknown' AND (reported_version_mismatch > 0 OR requested_version != runtime_version)) AS observed_target_version_mismatches",
+		);
+		expect(sql("installation-versions")).toContain("readiness_without_version_comparison");
+	});
 });
 
 describe("dashboard publication safety", () => {
@@ -309,6 +345,39 @@ describe("dashboard publication safety", () => {
 			expect(pending).toContain(definition.key);
 		expect(result.creates?.some((entry) => entry.key === "run-outcomes")).toBe(true);
 		expect(api.writes()).toEqual([]);
+	});
+	it("requires revision 3 installation data without delaying existing revision 2 views", async () => {
+		const api = fakeApi(bundle, { observed: true, revision: 2 });
+		const result = await publishTelemetryDashboards({
+			bundle,
+			contract,
+			mode: "preflight",
+			token: "synthetic-token",
+			fetcher: api.fetcher,
+		});
+		expect(readinessQuery(bundle)).toContain("properties.schema_revision >= 2) AS revision_2_events");
+		expect(readinessQuery(bundle)).toContain("properties.schema_revision >= 3) AS revision_3_events");
+		expect(result.pending).toEqual(
+			bundle.insights
+				.filter((definition) => definition.min_schema_revision === 3)
+				.map((definition) => ({ key: definition.key, reason: "required_v2_events_not_observed" })),
+		);
+		expect(result.creates).toHaveLength(27);
+		expect(result.creates?.some((entry) => entry.key === "error-causes")).toBe(true);
+		expect(api.writes()).toEqual([]);
+	});
+	it("rejects missing, invalid, and future per-view revision gates", () => {
+		for (const revision of [0, -1, 2.5, 4]) {
+			const changed = structuredClone(bundle);
+			changed.insights.find((definition) => definition.key === "installation-outcomes")!.min_schema_revision =
+				revision;
+			expect(() => validateDashboardBundle(changed, contract)).toThrow("schema revision publication gate");
+		}
+		const changed = structuredClone(bundle);
+		changed.insights.find((definition) => definition.key === "installation-outcomes")!.query!.source.query = sql(
+			"installation-outcomes",
+		).replace("properties.schema_revision >= 3", "properties.schema_revision >= 2");
+		expect(() => validateDashboardBundle(changed, contract)).toThrow("schema revision publication gate");
 	});
 	it("prepares disabled native alerts without subscribers and validates their sample queries before writes", async () => {
 		const api = fakeApi(bundle, { observed: true });

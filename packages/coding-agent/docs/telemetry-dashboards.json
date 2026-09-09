@@ -25,14 +25,16 @@
     "UI and worker timing origins remain separate. No duration is formed by subtracting timestamps from different processes.",
     "Context differences compare coarse categories only; they cannot identify a different key, team, or custom endpoint within the same category.",
     "A recovered tool count means a later success by that same tool in the same run; it does not prove that the original task was fixed.",
-    "Alert defaults are proposed starting thresholds with minimum samples, not learned production baselines. Publication creates disabled alerts for review."
+    "Alert defaults are proposed starting thresholds with minimum samples, not learned production baselines. Publication creates disabled alerts for review.",
+    "Revision-3 installation/update views deduplicate by installation/installation_attempt_id/stage, then by attempt. Install and update actions and shell/CLI/interactive sources stay separate. Package installation success is distinct from actual runtime readiness; missing completion/readiness stays unknown. Earlier telemetry revisions cannot reconstruct these outcomes."
   ],
   "sources": [
     "https://posthog.com/docs/sql/aggregations",
     "https://posthog.com/docs/sql",
     "https://posthog.com/docs/api/insights",
     "https://posthog.com/docs/api/alerts",
-    "https://github.com/PostHog/posthog/blob/master/services/mcp/tests/unit/__snapshots__/tool-schemas/alert-create.json"
+    "https://github.com/PostHog/posthog/blob/master/services/mcp/tests/unit/__snapshots__/tool-schemas/alert-create.json",
+    "https://posthog.com/docs/sql/clickhouse-functions"
   ],
   "corrections": [
     {
@@ -603,6 +605,57 @@
         "column": "alert_value",
         "calculation_interval": "hourly"
       }
+    },
+    {
+      "key": "installation-outcomes",
+      "name": "Prime Agent telemetry: installation and update completion and runtime readiness",
+      "description": "One observed attempt per installation/installation_attempt_id after stage deduplication, separated by install/update action and shell/CLI/interactive source. Package installation, overall completion, and actual runtime readiness are separate observations. Missing completion/readiness is unknown; a completed installer or updater does not prove the new runtime launched.",
+      "requires": [
+        "agent installation stage"
+      ],
+      "min_schema_revision": 3,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH stages AS (\n SELECT distinct_id, properties.installation_attempt_id AS installation_attempt_id, properties.stage AS stage,\n min(timestamp) AS first_observed_at,\n argMin(properties.installation_action, timestamp) AS installation_action,\n argMin(properties.installation_source, timestamp) AS installation_source,\n argMin(properties.install_method, timestamp) AS install_method,\n argMax(properties.outcome, tuple(timestamp, properties.outcome != 'started')) AS outcome,\n argMax(coalesce(properties.reason, 'unknown'), tuple(timestamp, properties.outcome != 'started')) AS reason,\n tupleElement(argMax(tuple(if(properties.outcome = 'started', NULL, toFloat(properties.duration_ms))), tuple(timestamp, properties.outcome != 'started')), 1) AS duration_ms,\n argMax(properties.from_version, timestamp) AS from_version,\n argMax(properties.target_version, timestamp) AS target_version,\n argMax(properties.observed_version, timestamp) AS observed_version,\n argMax(toFloat(properties.session_restore_total), timestamp) AS session_restore_total,\n argMax(toFloat(properties.session_restore_failed), timestamp) AS session_restore_failed\n FROM events WHERE event = 'agent installation stage' AND properties.telemetry_schema_version = 2\n AND properties.schema_revision >= 3 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test')\n AND timestamp >= now() - INTERVAL 90 DAY AND properties.installation_attempt_id IS NOT NULL\n GROUP BY distinct_id, installation_attempt_id, stage\n), attempts AS (\n SELECT distinct_id, installation_attempt_id, min(first_observed_at) AS first_observed_at,\n argMin(installation_action, first_observed_at) AS installation_action,\n argMin(installation_source, first_observed_at) AS installation_source,\n argMin(install_method, first_observed_at) AS install_method,\n countIf(stage = 'started') AS starts,\n countIf(stage = 'completed' AND outcome != 'started') AS completions,\n argMaxIf(outcome, first_observed_at, stage = 'completed' AND outcome != 'started') AS completion_outcome,\n countIf(stage = 'package_install' AND outcome = 'success') AS package_installed,\n countIf(stage = 'ready' AND outcome != 'started') AS readiness_reports,\n countIf(stage = 'ready' AND outcome = 'success') AS runtime_ready,\n countIf(stage = 'ready' AND reason = 'version_mismatch') AS reported_version_mismatch,\n argMax(from_version, first_observed_at) AS from_version,\n argMax(target_version, first_observed_at) AS target_version,\n argMaxIf(observed_version, first_observed_at, stage = 'ready') AS observed_version\n FROM stages GROUP BY distinct_id, installation_attempt_id\n)\nSELECT toDate(first_observed_at) AS day, installation_action, installation_source, install_method,\n count() AS observed_attempts, count(DISTINCT distinct_id) AS installation_ids,\n countIf(starts > 0) AS observed_starts,\n countIf(package_installed > 0) AS package_install_succeeded,\n countIf(completion_outcome = 'success') AS completed_successfully,\n countIf(completion_outcome = 'failed') AS failed_attempts,\n countIf(completion_outcome = 'cancelled') AS cancelled_attempts,\n countIf(completion_outcome = 'skipped') AS skipped_attempts,\n countIf(completion_outcome = 'unavailable') AS unavailable_attempts,\n countIf(starts > 0 AND completions = 0) AS pending_or_missing_completion,\n countIf(starts = 0 AND completions > 0) AS completion_without_observed_start,\n countIf(runtime_ready > 0) AS observed_runtime_ready,\n countIf(package_installed > 0 AND readiness_reports = 0) AS installed_without_observed_readiness,\n countIf(readiness_reports > 0 AND runtime_ready = 0) AS observed_readiness_not_successful,\n 100.0 * countIf(package_installed > 0 AND runtime_ready > 0) / nullIf(countIf(package_installed > 0), 0) AS observed_readiness_after_package_install_pct\nFROM attempts GROUP BY day, installation_action, installation_source, install_method\nORDER BY day ASC, observed_attempts DESC LIMIT 500"
+        },
+        "display": "ActionsTable"
+      }
+    },
+    {
+      "key": "installation-stages",
+      "name": "Prime Agent telemetry: installation and update stage outcomes and timing",
+      "description": "One latest observation per installation/attempt/stage. Download, verification, package installation, daemon restart, session restore and relaunch failures remain distinct. Started-only stages are unfinished or missing telemetry, not failures or measured latency. Stage durations cover that stage. When measured in one process, completed duration covers the command and must not be added to stage durations; inherited interactive-child totals remain null. Missing latest timing remains null. Session restore counts remain absent when unmeasured.",
+      "requires": [
+        "agent installation stage"
+      ],
+      "min_schema_revision": 3,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH stages AS (\n SELECT distinct_id, properties.installation_attempt_id AS installation_attempt_id, properties.stage AS stage,\n min(timestamp) AS first_observed_at,\n argMin(properties.installation_action, timestamp) AS installation_action,\n argMin(properties.installation_source, timestamp) AS installation_source,\n argMin(properties.install_method, timestamp) AS install_method,\n argMax(properties.outcome, tuple(timestamp, properties.outcome != 'started')) AS outcome,\n argMax(coalesce(properties.reason, 'unknown'), tuple(timestamp, properties.outcome != 'started')) AS reason,\n tupleElement(argMax(tuple(if(properties.outcome = 'started', NULL, toFloat(properties.duration_ms))), tuple(timestamp, properties.outcome != 'started')), 1) AS duration_ms,\n argMax(properties.from_version, timestamp) AS from_version,\n argMax(properties.target_version, timestamp) AS target_version,\n argMax(properties.observed_version, timestamp) AS observed_version,\n argMax(toFloat(properties.session_restore_total), timestamp) AS session_restore_total,\n argMax(toFloat(properties.session_restore_failed), timestamp) AS session_restore_failed\n FROM events WHERE event = 'agent installation stage' AND properties.telemetry_schema_version = 2\n AND properties.schema_revision >= 3 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test')\n AND timestamp >= now() - INTERVAL 90 DAY AND properties.installation_attempt_id IS NOT NULL\n GROUP BY distinct_id, installation_attempt_id, stage\n)\nSELECT installation_action, installation_source, install_method, stage, outcome, reason,\n count() AS observed_attempt_stages, count(DISTINCT distinct_id) AS installation_ids,\n countIf(duration_ms IS NOT NULL) AS measured_stages,\n countIf(duration_ms IS NULL) AS missing_duration_stages,\n 100.0 * countIf(duration_ms IS NOT NULL) / nullIf(count(), 0) AS duration_coverage_pct,\n if(countIf(duration_ms IS NOT NULL) = 0, NULL, quantile(0.50)(duration_ms)) AS p50_observed_duration_ms,\n if(countIf(duration_ms IS NOT NULL) = 0, NULL, quantile(0.95)(duration_ms)) AS p95_observed_duration_ms,\n if(countIf(duration_ms IS NOT NULL) = 0, NULL, quantile(0.99)(duration_ms)) AS p99_observed_duration_ms,\n countIf(stage = 'session_restore' AND session_restore_total IS NOT NULL) AS measured_session_restore_attempts,\n if(countIf(stage = 'session_restore' AND session_restore_total IS NOT NULL) = 0, NULL, sumIf(session_restore_total, stage = 'session_restore')) AS observed_sessions_to_restore,\n if(countIf(stage = 'session_restore' AND session_restore_failed IS NOT NULL) = 0, NULL, sumIf(session_restore_failed, stage = 'session_restore')) AS observed_session_restore_failures\nFROM stages GROUP BY installation_action, installation_source, install_method, stage, outcome, reason\nORDER BY observed_attempt_stages DESC LIMIT 500"
+        },
+        "display": "ActionsTable"
+      }
+    },
+    {
+      "key": "installation-versions",
+      "name": "Prime Agent telemetry: installation and update requested and running versions",
+      "description": "Compares previous, requested, and actually observed runtime versions for each distinct installation/attempt. Package installation alone does not establish runtime version. Missing readiness remains pending or unknown; invalid/custom version labels are unknown and never reported as mismatches.",
+      "requires": [
+        "agent installation stage"
+      ],
+      "min_schema_revision": 3,
+      "query": {
+        "kind": "DataVisualizationNode",
+        "source": {
+          "kind": "HogQLQuery",
+          "query": "WITH stages AS (\n SELECT distinct_id, properties.installation_attempt_id AS installation_attempt_id, properties.stage AS stage,\n min(timestamp) AS first_observed_at,\n argMin(properties.installation_action, timestamp) AS installation_action,\n argMin(properties.installation_source, timestamp) AS installation_source,\n argMin(properties.install_method, timestamp) AS install_method,\n argMax(properties.outcome, tuple(timestamp, properties.outcome != 'started')) AS outcome,\n argMax(coalesce(properties.reason, 'unknown'), tuple(timestamp, properties.outcome != 'started')) AS reason,\n tupleElement(argMax(tuple(if(properties.outcome = 'started', NULL, toFloat(properties.duration_ms))), tuple(timestamp, properties.outcome != 'started')), 1) AS duration_ms,\n argMax(properties.from_version, timestamp) AS from_version,\n argMax(properties.target_version, timestamp) AS target_version,\n argMax(properties.observed_version, timestamp) AS observed_version,\n argMax(toFloat(properties.session_restore_total), timestamp) AS session_restore_total,\n argMax(toFloat(properties.session_restore_failed), timestamp) AS session_restore_failed\n FROM events WHERE event = 'agent installation stage' AND properties.telemetry_schema_version = 2\n AND properties.schema_revision >= 3 AND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test')\n AND timestamp >= now() - INTERVAL 90 DAY AND properties.installation_attempt_id IS NOT NULL\n GROUP BY distinct_id, installation_attempt_id, stage\n), attempts AS (\n SELECT distinct_id, installation_attempt_id, min(first_observed_at) AS first_observed_at,\n argMin(installation_action, first_observed_at) AS installation_action,\n argMin(installation_source, first_observed_at) AS installation_source,\n argMin(install_method, first_observed_at) AS install_method,\n countIf(stage = 'started') AS starts,\n countIf(stage = 'completed' AND outcome != 'started') AS completions,\n argMaxIf(outcome, first_observed_at, stage = 'completed' AND outcome != 'started') AS completion_outcome,\n countIf(stage = 'package_install' AND outcome = 'success') AS package_installed,\n countIf(stage = 'ready' AND outcome != 'started') AS readiness_reports,\n countIf(stage = 'ready' AND outcome = 'success') AS runtime_ready,\n countIf(stage = 'ready' AND reason = 'version_mismatch') AS reported_version_mismatch,\n argMax(from_version, first_observed_at) AS from_version,\n argMax(target_version, first_observed_at) AS target_version,\n argMaxIf(observed_version, first_observed_at, stage = 'ready') AS observed_version\n FROM stages GROUP BY distinct_id, installation_attempt_id\n), versions AS (\n SELECT *, coalesce(nullIf(nullIf(from_version, '0.0.0'), ''), 'unknown') AS previous_version,\n coalesce(nullIf(nullIf(target_version, '0.0.0'), ''), 'unknown') AS requested_version,\n coalesce(nullIf(nullIf(observed_version, '0.0.0'), ''), 'unknown') AS runtime_version\n FROM attempts\n)\nSELECT installation_action, installation_source, install_method, previous_version, requested_version, runtime_version,\n count() AS observed_attempts, countIf(package_installed > 0) AS package_install_succeeded,\n countIf(runtime_ready > 0) AS observed_runtime_ready,\n countIf(readiness_reports = 0) AS pending_or_missing_readiness,\n countIf(readiness_reports > 0 AND requested_version != 'unknown' AND runtime_version != 'unknown' AND requested_version = runtime_version) AS observed_target_version_matches,\n countIf(readiness_reports > 0 AND requested_version != 'unknown' AND runtime_version != 'unknown' AND (reported_version_mismatch > 0 OR requested_version != runtime_version)) AS observed_target_version_mismatches,\n countIf(readiness_reports > 0 AND (requested_version = 'unknown' OR runtime_version = 'unknown')) AS readiness_without_version_comparison\nFROM versions GROUP BY installation_action, installation_source, install_method, previous_version, requested_version, runtime_version\nORDER BY observed_attempts DESC LIMIT 500"
+        },
+        "display": "ActionsTable"
+      }
     }
   ],
   "required_events": [
@@ -615,7 +668,8 @@
     "onboarding stage",
     "agent feature outcome",
     "agent started",
-    "agent input stage"
+    "agent input stage",
+    "agent installation stage"
   ],
-  "contract_schema_revision": 2
+  "contract_schema_revision": 3
 }

@@ -57,7 +57,7 @@ export function validateDashboardBundle(bundle, contract) {
 				throw new Error(`Missing v2 publication gate: ${definition.key}`);
 			}
 			for (const event of definition.requires) if (!contract.events[event]) throw new Error(`Unknown contract event: ${event}`);
-			if (definition.min_schema_revision !== undefined && (definition.min_schema_revision !== bundle.contract_schema_revision || !sql.includes(`properties.schema_revision >= ${definition.min_schema_revision}`))) {
+			if (definition.min_schema_revision !== undefined && (!Number.isSafeInteger(definition.min_schema_revision) || definition.min_schema_revision < 1 || definition.min_schema_revision > bundle.contract_schema_revision || !sql.includes(`properties.schema_revision >= ${definition.min_schema_revision}`))) {
 				throw new Error(`Missing schema revision publication gate: ${definition.key}`);
 			}
 		}
@@ -93,9 +93,14 @@ function sqlQuery(query) {
 	return query.kind === "DataVisualizationNode" ? query.source : query;
 }
 
+function requiredRevisions(bundle) {
+	return [...new Set(bundle.insights.map((insight) => insight.min_schema_revision).filter((revision) => revision !== undefined))].sort((a, b) => a - b);
+}
+
 export function readinessQuery(bundle) {
 	const events = [...new Set(bundle.insights.flatMap((insight) => insight.requires))];
-	return `SELECT event, count() AS observed_events, countIf(properties.schema_revision >= ${bundle.contract_schema_revision}) AS current_revision_events FROM events\nWHERE properties.telemetry_schema_version = 2\nAND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test')\nAND timestamp >= now() - INTERVAL 7 DAY\nAND event IN (${events.map((event) => `'${event.replaceAll("'", "''")}'`).join(", ")})\nGROUP BY event LIMIT 100`;
+	const revisions = requiredRevisions(bundle).map((revision) => `, countIf(properties.schema_revision >= ${revision}) AS revision_${revision}_events`).join("");
+	return `SELECT event, count() AS observed_events${revisions} FROM events\nWHERE properties.telemetry_schema_version = 2\nAND coalesce(properties.workload_origin, 'unknown') NOT IN ('internal', 'test')\nAND timestamp >= now() - INTERVAL 7 DAY\nAND event IN (${events.map((event) => `'${event.replaceAll("'", "''")}'`).join(", ")})\nGROUP BY event LIMIT 100`;
 }
 
 export function telemetryAlertPayload(definition, insightId) {
@@ -151,7 +156,8 @@ export async function publishTelemetryDashboards({ bundle, contract, mode = "che
 	let observedV2Events = 0;
 	if (!legacyOnly) {
 		const rows = await execute({ kind: "HogQLQuery", query: readinessQuery(bundle) });
-		const observed = new Map(rows.map((row) => [row[0], { total: Number(row[1]), current: Number(row[2] ?? 0) }]));
+		const revisions = requiredRevisions(bundle);
+		const observed = new Map(rows.map((row) => [row[0], { total: Number(row[1]), revisions: new Map(revisions.map((revision, index) => [revision, Number(row[index + 2] ?? 0)])) }]));
 		observedV2Events = [...observed.values()].reduce((total, count) => total + (Number.isFinite(count.total) ? count.total : 0), 0);
 		const existingInsights = [];
 		let next = `${prefix}insights/?search=${encodeURIComponent("Prime Agent telemetry:")}&limit=100`;
@@ -164,7 +170,7 @@ export async function publishTelemetryDashboards({ bundle, contract, mode = "che
 			next = page.next;
 		}
 		for (const definition of bundle.insights) {
-			if (definition.requires.some((event) => !((definition.min_schema_revision ? observed.get(event)?.current : observed.get(event)?.total) > 0))) {
+			if (definition.requires.some((event) => !((definition.min_schema_revision ? observed.get(event)?.revisions.get(definition.min_schema_revision) : observed.get(event)?.total) > 0))) {
 				pending.push({ key: definition.key, reason: "required_v2_events_not_observed" });
 				continue;
 			}

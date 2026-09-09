@@ -138,6 +138,12 @@ import { beginTelemetryAuthentication, type TelemetryAuthenticationAttempt } fro
 import { captureTelemetryError } from "../../core/telemetry-errors.js";
 import { getTelemetryExecutionContext } from "../../core/telemetry-execution-context.js";
 import {
+	beginInstallationTelemetry,
+	INSTALLATION_TELEMETRY_CONTEXT_ENV,
+	installationTelemetryEnvironment,
+	observeInstalledRuntimeReady,
+} from "../../core/telemetry-installation.js";
+import {
 	type TelemetryFeatureAttempt,
 	TelemetryJourneys,
 	type TelemetryOnboardingAttempt,
@@ -960,6 +966,7 @@ export class InteractiveMode {
 	private readonly startHint = getRandomStartHint();
 	private isInitialized = false;
 	private journeyTelemetry?: TelemetryJourneys;
+	private installationReady?: Promise<void>;
 	private pendingInputStatus?: TelemetryUiInputAttempt;
 	private inputStatusRendered = false;
 	private inputStatusFrameAt?: number;
@@ -1676,6 +1683,13 @@ export class InteractiveMode {
 			this.options.startupKind ?? (this.options.returnToAgentsView ? "warm_attach" : "cold"),
 			"elapsed_including_user_wait",
 		);
+		this.installationReady = observeInstalledRuntimeReady({
+			agentDir: getAgentDir(),
+			cwd: this.getCurrentCwd(),
+			settingsManager: this.settingsManager,
+			readyKind: "interactive",
+			executionMode: "interactive",
+		});
 	}
 
 	private updateTerminalTitle(): void {
@@ -7168,6 +7182,7 @@ export class InteractiveMode {
 		if (resumeHint) {
 			console.log(resumeHint);
 		}
+		await this.installationReady;
 		process.exit(0);
 	}
 
@@ -7179,6 +7194,7 @@ export class InteractiveMode {
 	 */
 	async teardownSessionUi(options: { preserveAltScreen?: boolean } = {}): Promise<void> {
 		await this.ui.terminal.drainInput(1000).catch(() => undefined);
+		await this.installationReady;
 		this.releasePromptStashSession();
 		this.stop({ preserveAltScreen: options.preserveAltScreen });
 		stopThemeWatcher();
@@ -9312,6 +9328,14 @@ export class InteractiveMode {
 		const updateArgs = parseCommandArgs(args);
 		const includesSelf = updateArgsIncludeSelf(updateArgs);
 		const updateCwd = this.getCurrentCwd();
+		const installation = includesSelf
+			? beginInstallationTelemetry({
+					agentDir: getAgentDir(),
+					settingsManager: this.settingsManager,
+					source: "interactive",
+					cwd: updateCwd,
+				})
+			: undefined;
 		const daemonSocketPath = resolveInteractiveUpdateDaemonSocketPath(
 			updateArgs,
 			resolveDaemonUpdateRestartSocketPath(this.options.daemonSocketPath),
@@ -9321,7 +9345,13 @@ export class InteractiveMode {
 		await this.ui.terminal.drainInput(1000).catch(() => undefined);
 		this.ui.stop();
 
-		const updateEnv = includesSelf ? { ...process.env, [SELF_UPDATE_INTERACTIVE_CHILD_ENV]: "1" } : process.env;
+		const updateEnv = includesSelf
+			? {
+					...process.env,
+					...installationTelemetryEnvironment(installation),
+					[SELF_UPDATE_INTERACTIVE_CHILD_ENV]: "1",
+				}
+			: process.env;
 		const updateResult = spawnSync(
 			process.execPath,
 			[...process.execArgv, entrypoint, "update", ...updateChildArgs],
@@ -9336,8 +9366,11 @@ export class InteractiveMode {
 			includesSelf && !updateResult.error && updateExitCode === SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE;
 
 		if (includesSelf && !selfUpdateNotAttempted) {
+			installation?.refreshInstalledContext();
 			const relaunchArgs = buildUpdateRelaunchArgs(process.argv.slice(2), this.connectionState?.sessionFile);
 			if (updateResult.error) {
+				installation?.fail("package_install", updateResult.error, "install_failed");
+				installation?.finish("failed", "install_failed");
 				console.error(`Update failed: ${updateResult.error.message}`);
 				console.error(`Relaunching ${APP_NAME}...`);
 			} else if (updateExitCode !== 0) {
@@ -9357,12 +9390,14 @@ export class InteractiveMode {
 			}
 			if (!updateResult.error && updateExitCode === 0) {
 				try {
+					installation?.stage("daemon_restart", "started");
 					const status = await launchDaemonUpdateRestartCoordinator({
 						socketPath: daemonSocketPath,
 						agentDir: getAgentDir(),
 						cwd: updateCwd,
 						originActiveSessionId: this.connectionState?.activeSessionId,
 					});
+					installation?.restartResult(status);
 					const report = buildDaemonUpdateRestartReport(status);
 					for (const message of report.info) {
 						console.log(message);
@@ -9371,12 +9406,22 @@ export class InteractiveMode {
 						console.error(`Warning: ${warning}`);
 					}
 				} catch (error: unknown) {
+					installation?.fail("daemon_restart", error, "daemon_restart_failed");
 					console.error(
 						`Warning: updated, but could not coordinate the daemon restart (${error instanceof Error ? error.message : String(error)}).`,
 					);
 				}
 			}
 			const relaunch = createCliSubprocessLaunchSpec(relaunchArgs);
+			installation?.stage("relaunch", "started");
+			await this.installationReady;
+			await installation?.flush();
+			installation?.dispose();
+			const relaunchEnvironment = {
+				...process.env,
+				...installationTelemetryEnvironment(installation),
+				[INSTALLATION_TELEMETRY_CONTEXT_ENV]: undefined,
+			};
 			const updateProcess = process as NodeJS.Process & { execve?: UpdateRelaunchExecve };
 			try {
 				if (
@@ -9385,7 +9430,7 @@ export class InteractiveMode {
 						nodeVersion: process.versions.node,
 						cwd: updateCwd,
 						previousCwd: process.cwd(),
-						environment: process.env,
+						environment: relaunchEnvironment,
 						chdir: (directory) => process.chdir(directory),
 						execve: updateProcess.execve,
 					})
@@ -9393,6 +9438,8 @@ export class InteractiveMode {
 					return;
 				}
 			} catch (error: unknown) {
+				installation?.fail("relaunch", error, "relaunch_failed");
+				await installation?.flush();
 				console.error(
 					`Could not replace the current ${APP_NAME} process (${error instanceof Error ? error.message : String(error)}). Falling back to a child relaunch.`,
 				);
@@ -9400,15 +9447,19 @@ export class InteractiveMode {
 			const relaunchResult = spawnSync(relaunch.command, relaunch.args, {
 				stdio: "inherit",
 				cwd: updateCwd,
-				env: process.env,
+				env: relaunchEnvironment,
 			});
 			if (relaunchResult.error) {
+				installation?.fail("relaunch", relaunchResult.error, "relaunch_failed");
+				await installation?.flush();
 				console.error(`Failed to relaunch ${APP_NAME}: ${relaunchResult.error.message}`);
 				process.exit(1);
 			}
 			process.exit(relaunchResult.status ?? (relaunchResult.signal ? 1 : 0));
 		}
 
+		await installation?.flush();
+		installation?.dispose();
 		this.ui.start();
 		if (this.fullscreenEnabled) {
 			this.applyFullscreen(true);

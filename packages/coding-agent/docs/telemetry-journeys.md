@@ -1,6 +1,34 @@
-# Onboarding, feature outcomes, and startup timing
+# Installation, onboarding, feature outcomes, and startup timing
 
 These events add detail without changing the existing `onboarding completed` or `agent command used` meanings. The older onboarding event still means that a model has configured credentials. It does not prove that an inference request will succeed.
+
+## Installation and update observations
+
+`agent installation stage` requires telemetry schema version 2, revision 3. A random `installation_attempt_id` links stages within an observed shell installer, CLI update, or interactive `/update` attempt. A child updater retains its parent's attempt/source context. `installation_action=install` identifies a shell-installer attempt, which can include reinstalling existing software; it is not proof of a first-ever installation. `installation_action=update` identifies built-in update activity. Direct package-manager installs/updates are not observed by these hooks.
+
+| Stage | What was observed |
+| --- | --- |
+| `started` | A telemetry-enabled installation/update attempt began. |
+| `requirements` | The installer checked required tools/platform support. |
+| `release_lookup` | A release lookup ran, failed, or found the installed version already current. |
+| `download` | An installer download completed or failed. |
+| `verification` | The downloaded package passed or failed the installer's existing checks. |
+| `package_install` | The package installation command completed or failed; this does not establish runtime readiness. |
+| `completed` | The installer/updater command succeeded, failed, was canceled, was skipped, or was unavailable. Later restart/readiness observations remain separate. |
+| `daemon_restart` | The post-update daemon restart completed, failed, or was skipped. |
+| `session_restore` | Session restoration was observed, with bounded total and failed-session counts when available. Failed counts include sessions recreated with incomplete queued work. Older restart results that cannot establish complete restoration remain unavailable. |
+| `relaunch` | The interactive process attempted to start the new program. |
+| `ready` | A fresh runtime initialized after package installation; `ready_kind` distinguishes interactive and headless readiness. The agents view qualifies after daemon roster attachment and UI setup. Running `--version` alone does not count. A known requested/running-version mismatch is reported separately. |
+
+Each measured stage duration starts at that stage's initiation. When a command attempt begins and completes in the same process, its `completed` duration covers that attempt; do not add it to stage durations. An interactive updater child inherits an attempt ID but cannot inherit the parent's monotonic clock, so its total duration remains null while locally measured stage durations are retained. Shell stages and later runtime-ready observations also omit precise timing with `duration_ms=null`. Missing stages can mean they were not applicable, not reached, or not reported. A successful package operation must not be interpreted as successful daemon restart, session restoration, launch, or model access.
+
+Successful package installation can retain a private marker in `telemetry-installations/` for a later ready observation. It contains only sanitized attempt/version context plus the originating working directory used locally to re-check project consent; that directory never enters telemetry. At most 16 markers survive for seven days. A process that was already running when installation finished leaves the marker for a newer process. A ready observation consumes its marker and re-checks current and originating-project opt-outs, including saved settings again before delivery. Disabling telemetry clears this state; expired, invalid, opted-out, and unavailable observations are not replayed. This is bounded startup correlation, not a disk queue of error reports. Readiness delivery starts in the background, with controlled exit waiting only for its bounded flush; it does not delay UI or headless startup.
+
+Only numeric release versions and approved prerelease forms are retained. Custom labels map to the existing unknown version and are excluded from mismatch calculations. Reasons, stages, sources, and outcomes are finite categories. No command arguments, package-manager output, download URLs, repository paths, credentials, or prompt content are included. The existing content-safe error reporter supplies an optional independent `error_id` for failures it observes; an installation stage itself does not create a native error exception.
+
+Count distinct installation/attempt/stage combinations before aggregating attempts. Keep install/update and shell/CLI/interactive sources separate. Missing command completion or runtime readiness is pending or unknown, not an inferred failed installation. Download-request analytics remain aggregate script requests and do not join these client identities.
+
+Installation/update observations use a separate delivery client that re-checks consent during capture and delivery. Their final flush is best effort and bounded; remaining in-memory reports are discarded afterward. Ready markers are consumed when readiness is observed even if delivery fails, so they do not create a durable retry queue. Missing delivery remains unknown coverage. The existing general telemetry retry policy is unchanged.
 
 ## Onboarding observations
 

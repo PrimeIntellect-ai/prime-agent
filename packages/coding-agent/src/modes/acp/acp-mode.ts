@@ -104,6 +104,7 @@ function sameCwd(left: string, right: string): boolean {
 }
 
 export interface AcpModeOptions {
+	onReady?: () => Promise<void>;
 	/** Bind headless extensions once the connection is live (in-process mode). */
 	bindHeadlessExtensions?: () => Promise<void>;
 	/**
@@ -470,11 +471,12 @@ async function turnFailure(connection: AgentConnection, boundary: TurnBoundary):
 	return undefined;
 }
 
-export async function runAcpMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runAcpMode(runtimeHost: AgentSessionRuntime, options: AcpModeOptions = {}): Promise<never> {
 	const connection = new InProcessAgentConnection(runtimeHost);
 	const run = () =>
 		runAcpModeWithConnection(connection, {
-			bindHeadlessExtensions: () => connection.bindHeadlessExtensions({}),
+			...options,
+			bindHeadlessExtensions: options.bindHeadlessExtensions ?? (() => connection.bindHeadlessExtensions({})),
 		});
 	const context = runtimeHost.services?.telemetryErrorContext;
 	return context ? withTelemetryErrorContext({ ...context, executionMode: "acp" }, run) : run();
@@ -1136,6 +1138,12 @@ export async function runAcpModeWithConnection(
 			}
 		})
 		.connect(stream);
+	let ready: Promise<void> | undefined;
+	try {
+		ready = options.onReady?.().catch(() => {});
+	} catch {
+		// Optional readiness reporting must not change ACP behavior.
+	}
 
 	// Exit when the client disconnects (stdin EOF or a closed transport). Blocking
 	// forever would leave an orphaned agent per run, which matters most for a
@@ -1150,6 +1158,7 @@ export async function runAcpModeWithConnection(
 	closedInputPauseKey = undefined;
 	await clearAcpMcpServers().catch(reportAcpCleanupError);
 	await connection.dispose().catch(reportAcpCleanupError);
+	await ready;
 	// Only the real stdio entrypoint owns the process; a caller-supplied transport
 	// (tests, embedding) must never have its host exited from under it.
 	if (options.stream) return undefined as never;

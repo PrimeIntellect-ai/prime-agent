@@ -19,6 +19,7 @@ import { latestAutonomousGateAttempt, selectHeadlessTerminalResult } from "./hea
  * Options for print mode.
  */
 export interface PrintModeOptions {
+	onReady?: () => Promise<void>;
 	/** Output mode: "text" for final response only, "json" for all events */
 	mode: "text" | "json";
 	/** Array of additional prompts to send after initialMessage */
@@ -67,6 +68,7 @@ async function runPrintModeWithConnectionInternal(
 	const { mode, messages = [], initialMessage, initialImages } = options;
 	let exitCode = 0;
 	let disposed = false;
+	let ready: Promise<void> | undefined;
 	let unsubscribe: (() => void) | undefined;
 	const signalCleanupHandlers: Array<() => void> = [];
 
@@ -74,7 +76,7 @@ async function runPrintModeWithConnectionInternal(
 		if (disposed) return;
 		disposed = true;
 		unsubscribe?.();
-		await connection.dispose();
+		await connection.dispose().finally(() => ready);
 	};
 
 	for (const signal of [
@@ -110,6 +112,11 @@ async function runPrintModeWithConnectionInternal(
 			}
 		});
 		await bindHeadlessExtensions?.();
+		try {
+			ready = options.onReady?.().catch(() => {});
+		} catch {
+			// Optional readiness reporting must not change prompt execution.
+		}
 
 		if (initialMessage) {
 			await connection.promptAndWait(initialMessage, { images: initialImages });

@@ -81,6 +81,7 @@ import {
 	initializeTelemetryErrorReporting,
 	reportTelemetryError,
 } from "./core/telemetry-errors.js";
+import { observeInstalledRuntimeReady } from "./core/telemetry-installation.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
@@ -1717,16 +1718,44 @@ export async function main(args: string[], options?: MainOptions) {
 
 		printTimings();
 		if (appMode === "rpc") {
-			return await runRpcModeWithConnection(connection);
+			const onReady = () =>
+				observeInstalledRuntimeReady({
+					agentDir,
+					settingsManager: telemetrySettingsManager,
+					cwd,
+					readyKind: "headless",
+					executionMode: appMode,
+				});
+			return await runRpcModeWithConnection(connection, { onReady });
 		}
 		if (appMode === "acp") {
-			return await runAcpModeWithConnection(connection);
+			const onReady = () =>
+				observeInstalledRuntimeReady({
+					agentDir,
+					settingsManager: telemetrySettingsManager,
+					cwd,
+					readyKind: "headless",
+					executionMode: appMode,
+				});
+			return await runAcpModeWithConnection(connection, { onReady });
 		}
+		const onReady =
+			appMode === "print" || appMode === "json"
+				? () =>
+						observeInstalledRuntimeReady({
+							agentDir,
+							settingsManager: telemetrySettingsManager,
+							cwd,
+							readyKind: "headless",
+							executionMode: appMode,
+						})
+				: undefined;
 		const exitCode = await runPrintModeWithConnection(connection, {
 			mode: toPrintOutputMode(appMode),
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			onReady,
 		});
 		stopThemeWatcher();
 		restoreStdout();
@@ -1800,10 +1829,26 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime);
+		const onReady = () =>
+			observeInstalledRuntimeReady({
+				agentDir,
+				cwd,
+				settingsManager,
+				readyKind: "headless",
+				executionMode: appMode,
+			});
+		await runRpcMode(runtime, { onReady });
 	} else if (appMode === "acp") {
 		printTimings();
-		await runAcpMode(runtime);
+		const onReady = () =>
+			observeInstalledRuntimeReady({
+				agentDir,
+				cwd,
+				settingsManager,
+				readyKind: "headless",
+				executionMode: appMode,
+			});
+		await runAcpMode(runtime, { onReady });
 	} else if (appMode === "interactive") {
 		if (explicitAgentsView || parsed.resume === true) {
 			console.error(chalk.yellow("Warning: the agents view needs the daemon; opening a normal chat instead"));
@@ -1853,11 +1898,23 @@ export async function main(args: string[], options?: MainOptions) {
 		await interactiveMode.run();
 	} else {
 		printTimings();
+		const onReady =
+			appMode === "print" || appMode === "json"
+				? () =>
+						observeInstalledRuntimeReady({
+							agentDir,
+							cwd,
+							settingsManager,
+							readyKind: "headless",
+							executionMode: appMode,
+						})
+				: undefined;
 		const exitCode = await runPrintMode(runtime, {
 			mode: toPrintOutputMode(appMode),
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			onReady,
 		});
 		stopThemeWatcher();
 		restoreStdout();

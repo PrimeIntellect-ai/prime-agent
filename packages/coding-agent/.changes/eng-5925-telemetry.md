@@ -2,3 +2,4 @@
 - Fixed queued telemetry and unfinished analytics surviving a settings opt-out, and added bounded retries with collector version negotiation.
 - Fixed credential recovery advice for billing, quota, permission, and provider availability failures.
 - Added daemon and pre-run failure observations, scoped recovery, input queue and preparation timings, actual worker request context, and version-aware dashboard and alert definitions.
+- Added installation and update outcome reporting for download, verification, package installation, restart and runtime readiness, with existing opt-outs and separate dashboard coverage for missing outcomes.

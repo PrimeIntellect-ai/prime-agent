@@ -33,6 +33,15 @@ const reviewedError = {
 	error_code_group: "ETIMEDOUT",
 	error_event_kind: "occurrence",
 };
+const installationStage = {
+	...base,
+	installation_attempt_id: runId,
+	installation_action: "update",
+	installation_source: "interactive",
+	stage: "package_install",
+	outcome: "success",
+	schema_revision: 3,
+};
 function ids(): () => string {
 	let id = 0;
 	return () => `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`;
@@ -171,9 +180,96 @@ describe("shared telemetry contract and privacy", () => {
 		});
 		expect(JSON.stringify(input)).not.toContain("private");
 	});
+	it("accepts installation outcomes without allowing command output or private version labels", () => {
+		const properties = sanitizeTelemetryProperties("agent installation stage", {
+			...installationStage,
+			from_version: "0.9.1",
+			target_version: "0.9.2-private_canary",
+			observed_version: "https://private_canary.test/release",
+			reason: "private_canary",
+			duration_ms: null,
+			exit_code: 1,
+			error_message: "private_canary",
+			stderr: "private_canary",
+			command: "private_canary",
+			download_url: "private_canary",
+		});
+		expect(properties).toMatchObject({
+			installation_attempt_id: runId,
+			from_version: "0.9.1",
+			target_version: "0.0.0",
+			observed_version: "0.0.0",
+			reason: "unknown",
+			duration_ms: null,
+			exit_code: 1,
+		});
+		expect(JSON.stringify(properties)).not.toContain("private_canary");
+		for (const field of ["installation_action", "installation_source", "stage", "outcome"]) {
+			expect(
+				sanitizeTelemetryProperties("agent installation stage", {
+					...installationStage,
+					[field]: "private_canary",
+				}),
+			).toBeUndefined();
+		}
+	});
 });
 
 describe("version negotiation, retry and consent", () => {
+	it.each([undefined, 1, 2, "3", 3])(
+		"sends installation outcomes only after a revision 3 collector is discovered: %j",
+		async (revision) => {
+			const batches: TelemetryBatch[] = [];
+			const client = new TelemetryClient({
+				agentDir: directory(),
+				randomId: ids(),
+				fetch: async (_url, init) => {
+					if (init?.method === "GET") return Response.json({ schema_versions: [1, 2], schema_revision: revision });
+					const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
+					batches.push(batch);
+					return accepted(batch);
+				},
+			});
+			client.capture("agent installation stage", installationStage);
+			client.capture("agent started", base);
+			await client.flush();
+			expect(batches).toHaveLength(1);
+			expect(batches[0].events.map((event) => event.name)).toEqual(
+				revision === 3 ? ["agent installation stage", "agent started"] : ["agent started"],
+			);
+			expect(batches[0].schema_version).toBe(2);
+		},
+	);
+	it("retains unsupported installation stages until collector revision 3 is discovered", async () => {
+		let revision = 2;
+		let now = Date.now();
+		const batches: TelemetryBatch[] = [];
+		const client = new TelemetryClient({
+			agentDir: directory(),
+			randomId: ids(),
+			now: () => now,
+			fetch: async (_url, init) => {
+				if (init?.method === "GET") return Response.json({ schema_versions: [1, 2], schema_revision: revision });
+				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
+				batches.push(batch);
+				return accepted(batch);
+			},
+		});
+		client.capture("agent installation stage", installationStage);
+		client.capture("agent started", base);
+		await client.flush();
+		expect(batches.flatMap((batch) => batch.events.map((event) => event.name))).toEqual(["agent started"]);
+		revision = 3;
+		now += 60_001;
+		await client.flush();
+		expect(batches[1].events).toHaveLength(1);
+		expect(batches[1].events[0]).toMatchObject({
+			name: "agent installation stage",
+			properties: { installation_attempt_id: runId, installation_source: "interactive", stage: "package_install" },
+		});
+		await client.flush();
+		expect(batches).toHaveLength(2);
+	});
 	it.each([
 		{ original_error_messages: true, error_message_policy_revision: 1, expected: true },
 		{ original_error_messages: false, error_message_policy_revision: 1, expected: false },

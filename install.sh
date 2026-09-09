@@ -57,6 +57,220 @@ prime_agent_screen_status=
 prime_agent_screen_detail=
 prime_agent_screen_question=
 prime_agent_animation_frame=0
+prime_agent_telemetry_state=
+prime_agent_telemetry_disabled=0
+prime_agent_telemetry_target_version=
+prime_agent_telemetry_stage=started
+prime_agent_telemetry_reason=unknown
+prime_agent_telemetry_outcome=
+
+# Standalone published installers cannot import the installed telemetry client.
+# Buffer only approved fields after consent, then share one bounded upload at exit.
+prime_agent_telemetry_node() {
+	node - "$@" <<'PRIME_AGENT_TELEMETRY_JS'
+const { randomUUID } = require("node:crypto");
+const { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } = require("node:fs");
+const { arch, homedir, platform, tmpdir } = require("node:os");
+const { dirname, isAbsolute, join, resolve } = require("node:path");
+const [mode, statePath, stage, outcome, reason, rawExitCode, rawTargetVersion] = process.argv.slice(2);
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const semver = /^\d{1,5}\.\d{1,5}\.\d{1,5}(?:-(?:alpha|beta|rc|dev|canary)(?:\.\d{1,5})?)?$/;
+const overrideDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+const agentDir = overrideDir ? (overrideDir === "~" ? homedir() : overrideDir.startsWith("~/") ? join(homedir(), overrideDir.slice(2)) : resolve(overrideDir)) : join(homedir(), ".prime", "agent");
+const settingsPaths = [join(agentDir, "settings.json"), join(process.cwd(), ".prime", "agent", "settings.json")];
+const stages = ["started", "requirements", "release_lookup", "download", "verification", "package_install", "completed"];
+const outcomes = ["started", "success", "failed", "cancelled", "skipped", "unavailable"];
+const reasons = ["declined", "requirements_unavailable", "release_lookup_failed", "download_failed", "verification_failed", "install_failed", "interrupted", "unknown"];
+function readJson(path, limit = 65536) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) throw new Error("Invalid telemetry file");
+    return JSON.parse(readFileSync(fd, "utf8"));
+  } finally { closeSync(fd); }
+}
+function boolean(value) {
+  const normalized = value?.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+}
+function consent() {
+  if (boolean(process.env.DO_NOT_TRACK) === true || boolean(process.env.PI_OFFLINE) === true || boolean(process.env.PRIME_AGENT_TELEMETRY) === false) return false;
+  try {
+    const enabled = settingsPaths.map((path) => {
+      let settings;
+      try { settings = readJson(path); } catch (error) { if (error.code === "ENOENT") return true; throw error; }
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("Invalid settings");
+      const telemetry = settings.telemetry;
+      if (telemetry === undefined) return true;
+      if (typeof telemetry === "boolean") return telemetry;
+      if (!telemetry || typeof telemetry !== "object" || Array.isArray(telemetry)) throw new Error("Invalid telemetry setting");
+      if (telemetry.enabled === undefined) return true;
+      if (typeof telemetry.enabled !== "boolean") throw new Error("Invalid telemetry setting");
+      return telemetry.enabled;
+    });
+    return boolean(process.env.PRIME_AGENT_TELEMETRY) === true || enabled.every(Boolean);
+  } catch { return false; }
+}
+function privateDirectory(path) {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  if (!lstatSync(path).isDirectory()) throw new Error("Invalid telemetry directory");
+}
+function writeJson(path, value, exclusive = false) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK | (exclusive ? constants.O_EXCL : constants.O_TRUNC), 0o600);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error("Invalid telemetry file");
+    writeFileSync(fd, JSON.stringify(value));
+  } finally { closeSync(fd); }
+}
+function installationId() {
+  const path = join(agentDir, "telemetry.json");
+  try {
+    const state = readJson(path);
+    if (state.version !== 1 || !uuid.test(state.installationId)) throw new Error("Invalid installation identity");
+    return state.installationId;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    privateDirectory(agentDir);
+    const id = randomUUID();
+    try { writeJson(path, { version: 1, installationId: id }, true); }
+    catch (writeError) { if (writeError.code !== "EEXIST") throw writeError; return installationId(); }
+    return id;
+  }
+}
+function markerPath(state) { return join(agentDir, "telemetry-installations", `${state.attemptId}.json`); }
+function pruneMarkers(directory) {
+  const now = Date.now();
+  const pending = [];
+  for (const name of readdirSync(directory)) {
+    const id = name.endsWith(".json") ? name.slice(0, -5) : "";
+    if (!uuid.test(id)) continue;
+    const path = join(directory, name);
+    try {
+      const marker = readJson(path, 16384);
+      const properties = marker.properties;
+      if (marker.version !== 1 || !properties || typeof properties !== "object" || Array.isArray(properties) ||
+          properties.installation_attempt_id !== id || !["install", "update"].includes(properties.installation_action) ||
+          !["shell_installer", "cli", "interactive"].includes(properties.installation_source) ||
+          !Number.isFinite(marker.createdAt) || marker.createdAt > now + 60000 || now - marker.createdAt > 7 * 24 * 60 * 60 * 1000 ||
+          typeof marker.cwd !== "string" || marker.cwd.length > 4096 || !isAbsolute(marker.cwd) ||
+          typeof marker.completeOnReady !== "boolean") throw new Error("Invalid installation telemetry marker");
+      pending.push({ path, createdAt: marker.createdAt });
+    } catch {
+      try { unlinkSync(path); } catch (error) { if (error.code !== "ENOENT" && error.code !== "EISDIR" && error.code !== "EPERM") throw error; }
+    }
+  }
+  pending.sort((left, right) => left.createdAt - right.createdAt);
+  while (pending.length >= 16) unlinkSync(pending.shift().path);
+}
+function discard(state) {
+  if (state && uuid.test(state.attemptId)) {
+    try { rmSync(markerPath(state), { force: true }); } catch {}
+  }
+  if (statePath) {
+    try { rmSync(statePath, { force: true }); rmdirSync(dirname(statePath)); } catch {}
+  }
+}
+async function main() {
+  if (mode === "begin") {
+    if (!consent()) { process.exitCode = 2; return; }
+    const id = installationId();
+    const dir = mkdtempSync(join(tmpdir(), "prime-agent-install-telemetry-"));
+    const path = join(dir, "events.json");
+    writeJson(path, { installationId: id, attemptId: randomUUID(), events: [] }, true);
+    process.stdout.write(path);
+    return;
+  }
+  const state = readJson(statePath);
+  if (!uuid.test(state.installationId) || !uuid.test(state.attemptId) || !Array.isArray(state.events)) throw new Error("Invalid installer telemetry");
+  if (!consent()) { discard(state); process.exitCode = 2; return; }
+  if (mode === "event") {
+    if (!stages.includes(stage) || !outcomes.includes(outcome) || state.events.length >= 20) return;
+    const targetVersion = semver.test(rawTargetVersion) ? rawTargetVersion : undefined;
+    const properties = {
+      version: targetVersion ?? "0.0.0", os_family: platform(), architecture: arch(), install_method: "npm", execution_mode: "unknown", schema_revision: 3,
+      installation_attempt_id: state.attemptId, installation_action: "install", installation_source: "shell_installer", stage, outcome, duration_ms: null,
+      ...(targetVersion ? { target_version: targetVersion } : {}),
+      ...(reasons.includes(reason) ? { reason } : {}),
+      ...(rawExitCode && /^\d{1,3}$/.test(rawExitCode) && Number(rawExitCode) <= 255 ? { exit_code: Number(rawExitCode) } : {}),
+    };
+    state.events.push({ id: randomUUID(), name: "agent installation stage", timestamp: new Date().toISOString(), properties });
+    writeJson(statePath, state);
+    if (stage === "package_install" && outcome === "success" && consent()) {
+      try {
+        const directory = join(agentDir, "telemetry-installations");
+        privateDirectory(directory);
+        pruneMarkers(directory);
+        writeJson(markerPath(state), { version: 1, createdAt: Date.now(), cwd: process.cwd(), properties: { installation_attempt_id: state.attemptId, installation_action: "install", installation_source: "shell_installer", ...(targetVersion ? { target_version: targetVersion } : {}) }, completeOnReady: false }, true);
+      } catch {}
+    }
+    return;
+  }
+  if (mode !== "finish") return;
+  rmSync(statePath, { force: true });
+  try { rmdirSync(dirname(statePath)); } catch {}
+  const timeout = setTimeout(() => process.exit(0), 1500);
+  const controller = new AbortController();
+  const consentTimer = setInterval(() => { if (!consent()) { discard(state); controller.abort(); } }, 50);
+  try {
+    const endpoint = new URL(process.env.PRIME_AGENT_TELEMETRY_ENDPOINT || "https://api.primeintellect.ai/api/v1/agent-analytics/events");
+    if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || !/\/events\/?$/.test(endpoint.pathname)) return;
+    const capabilitiesUrl = new URL(endpoint);
+    capabilitiesUrl.pathname = capabilitiesUrl.pathname.replace(/\/events\/?$/, "/capabilities");
+    const options = { signal: controller.signal, redirect: "error", credentials: "omit" };
+    const capabilitiesResponse = await fetch(capabilitiesUrl, options);
+    if (!capabilitiesResponse.ok) return;
+    const text = await capabilitiesResponse.text();
+    if (text.length > 16384) return;
+    const capabilities = JSON.parse(text);
+    if (!Array.isArray(capabilities.schema_versions) || !capabilities.schema_versions.includes(2) || !Number.isInteger(capabilities.schema_revision) || capabilities.schema_revision < 3) return;
+    if (!consent()) { discard(state); return; }
+    await fetch(endpoint, { ...options, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ schema_version: 2, installation_id: state.installationId, events: state.events }) });
+  } catch {} finally { if (!consent()) discard(state); clearInterval(consentTimer); clearTimeout(timeout); }
+}
+main().catch(() => { process.exitCode = 2; });
+PRIME_AGENT_TELEMETRY_JS
+}
+
+prime_agent_telemetry_environment_opt_out() {
+	prime_agent_telemetry_env_value=$(printf '%s' "${PRIME_AGENT_TELEMETRY:-}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+	case "$prime_agent_telemetry_env_value" in 0|false|no|off) return 0 ;; esac
+	for prime_agent_telemetry_env_value in "${DO_NOT_TRACK:-}" "${PI_OFFLINE:-}"; do
+		prime_agent_telemetry_env_value=$(printf '%s' "$prime_agent_telemetry_env_value" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+		case "$prime_agent_telemetry_env_value" in 1|true|yes|on) return 0 ;; esac
+	done
+	return 1
+}
+
+prime_agent_telemetry_begin() {
+	if [ "$prime_agent_package" != prime-agent ] || prime_agent_telemetry_environment_opt_out; then
+		prime_agent_telemetry_disabled=1
+	fi
+	if [ "$prime_agent_telemetry_disabled" = 1 ] || [ -n "$prime_agent_telemetry_state" ] || ! command -v node >/dev/null 2>&1; then
+		return 0
+	fi
+	if prime_agent_telemetry_state=$(prime_agent_telemetry_node begin 2>/dev/null); then
+		prime_agent_telemetry_record started started
+	else
+		prime_agent_telemetry_disabled=1
+	fi
+}
+
+prime_agent_telemetry_record() {
+	if [ "$prime_agent_telemetry_disabled" = 1 ] || [ -z "$prime_agent_telemetry_state" ]; then
+		return 0
+	fi
+	if ! prime_agent_telemetry_node event "$prime_agent_telemetry_state" "$1" "$2" "${3:-}" "${4:-}" "$prime_agent_telemetry_target_version" >/dev/null 2>&1; then
+		prime_agent_telemetry_disabled=1
+	fi
+}
+
+prime_agent_telemetry_finish() {
+	if [ "$prime_agent_telemetry_disabled" = 1 ] || [ -z "$prime_agent_telemetry_state" ]; then
+		return 0
+	fi
+	prime_agent_telemetry_node finish "$prime_agent_telemetry_state" >/dev/null 2>&1 || :
+}
 
 main() {
 	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
@@ -66,6 +280,7 @@ main() {
 	fi
 
 	prime_agent_install_traps
+	prime_agent_telemetry_begin
 	prime_agent_init_screen
 	if [ "$prime_agent_screen_enabled" = 1 ]; then
 		prime_agent_screen "Installing Prime Agent" "" "" ""
@@ -73,6 +288,9 @@ main() {
 		printf '\n\033[1m  Installing Prime Agent\033[0m\n\033[2m  npm global install\033[0m\n\n'
 	fi
 
+	prime_agent_telemetry_stage=requirements
+	prime_agent_telemetry_reason=requirements_unavailable
+	prime_agent_telemetry_record requirements started
 	start_preflight_checks
 
 	if finish_preflight_checks; then
@@ -86,6 +304,7 @@ main() {
 			exit "$check_status"
 		fi
 
+		prime_agent_telemetry_begin
 		start_preflight_checks
 		if finish_preflight_checks; then
 			check_status=0
@@ -98,7 +317,13 @@ main() {
 		fi
 	fi
 
+	prime_agent_telemetry_record requirements success
+	prime_agent_telemetry_stage=release_lookup
+	prime_agent_telemetry_reason=release_lookup_failed
+	prime_agent_telemetry_record release_lookup started
 	version="$(resolve_prime_agent_version "$@")"
+	prime_agent_telemetry_target_version="$version"
+	prime_agent_telemetry_record release_lookup success
 	tarball_name="$prime_agent_package-$version.tgz"
 	tarball_url="$prime_agent_base_url/releases/v$version/$tarball_name"
 
@@ -109,8 +334,17 @@ main() {
 	prime_agent_download_dir="$download_dir"
 	tarball_path="$download_dir/$tarball_name"
 
+	prime_agent_telemetry_stage=download
+	prime_agent_telemetry_reason=download_failed
+	prime_agent_telemetry_record download started
 	download_prime_agent_package "$version" "$tarball_url" "$tarball_path"
+	prime_agent_telemetry_stage=package_install
+	prime_agent_telemetry_reason=install_failed
+	prime_agent_telemetry_record package_install started
 	install_prime_agent_package "$tarball_path"
+	prime_agent_telemetry_record package_install success
+	prime_agent_telemetry_stage=completed
+	prime_agent_telemetry_reason=unknown
 	rm -rf "$download_dir"
 	prime_agent_download_dir=
 
@@ -161,15 +395,31 @@ prime_agent_install_traps() {
 }
 
 prime_agent_cleanup() {
-	status=$?
+	prime_agent_cleanup_status=$?
+	if [ -n "$prime_agent_telemetry_outcome" ]; then
+		prime_agent_telemetry_record "$prime_agent_telemetry_stage" "$prime_agent_telemetry_outcome" "$prime_agent_telemetry_reason" "$prime_agent_cleanup_status"
+		if [ "$prime_agent_telemetry_stage" != completed ]; then
+			prime_agent_telemetry_record completed "$prime_agent_telemetry_outcome" "$prime_agent_telemetry_reason" "$prime_agent_cleanup_status"
+		fi
+	elif [ "$prime_agent_cleanup_status" -ne 0 ]; then
+		prime_agent_telemetry_record "$prime_agent_telemetry_stage" failed "$prime_agent_telemetry_reason" "$prime_agent_cleanup_status"
+		if [ "$prime_agent_telemetry_stage" != completed ]; then
+			prime_agent_telemetry_record completed failed "$prime_agent_telemetry_reason" "$prime_agent_cleanup_status"
+		fi
+	else
+		prime_agent_telemetry_record completed success "" 0
+	fi
+	prime_agent_telemetry_finish
 	if [ -n "${prime_agent_download_dir:-}" ] && [ -d "$prime_agent_download_dir" ]; then
 		rm -rf "$prime_agent_download_dir"
 	fi
 	prime_agent_restore_terminal
-	return "$status"
+	return "$prime_agent_cleanup_status"
 }
 
 prime_agent_signal_cleanup() {
+	prime_agent_telemetry_outcome=cancelled
+	prime_agent_telemetry_reason=interrupted
 	prime_agent_restore_terminal
 	exit "$1"
 }
@@ -1012,6 +1262,8 @@ install_node_npm_interactive() {
 	if [ "$prompt_status" -eq 2 ]; then
 		printf 'No terminal detected; install Node.js 20.6.0 or newer and npm, then run this installer again.\n'
 	else
+		prime_agent_telemetry_outcome=cancelled
+		prime_agent_telemetry_reason=declined
 		printf '\nInstall Node.js 20.6.0 or newer and npm, then run this installer again.\n'
 	fi
 	return 1
@@ -1477,7 +1729,12 @@ download_prime_agent_package() {
 		"Fetching the verified package." \
 		curl -fsSL "$tarball_url" -o "$tarball_path"
 
+	prime_agent_telemetry_record download success
+	prime_agent_telemetry_stage=verification
+	prime_agent_telemetry_reason=verification_failed
+	prime_agent_telemetry_record verification started
 	verify_prime_agent_package_checksum "$checksums_path" "$tarball_path"
+	prime_agent_telemetry_record verification success
 }
 
 verify_prime_agent_package_checksum() {
@@ -1544,6 +1801,9 @@ confirm_install() {
 		return 0
 	fi
 
+	prime_agent_telemetry_outcome=cancelled
+	prime_agent_telemetry_reason=declined
+	prime_agent_telemetry_stage=completed
 	if [ "$prime_agent_screen_enabled" = 1 ]; then
 		prime_agent_screen "Installation cancelled" "" "No changes were made." ""
 		exit 0

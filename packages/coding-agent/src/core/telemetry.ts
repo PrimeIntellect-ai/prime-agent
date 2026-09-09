@@ -46,6 +46,7 @@ import {
 } from "./telemetry-execution-context.js";
 import { clearTelemetryInputs, subscribeTelemetryInputs } from "./telemetry-input.js";
 import { type ObservedTelemetryInput, TelemetryInputTracker } from "./telemetry-input-tracker.js";
+import { clearInstallationTelemetryState } from "./telemetry-installation-state.js";
 import {
 	clearOnboardingTelemetryContext,
 	getCurrentOnboardingTelemetryContext,
@@ -72,7 +73,8 @@ export type TelemetryEventName =
 	| "onboarding stage"
 	| "agent feature outcome"
 	| "agent startup stage"
-	| "agent input stage";
+	| "agent input stage"
+	| "agent installation stage";
 
 export type TelemetryExecutionMode = AgentExecutionMode | "unknown";
 export type TelemetryOnboardingOutcome = "success" | "error" | "aborted";
@@ -369,6 +371,7 @@ export class TelemetryClient implements TelemetrySink {
 	private discovery?: Promise<void>;
 	private nextDiscoveryAt = 0;
 	private supportsV2 = false;
+	private supportsInstallationOutcomes = false;
 	private supportsOriginalErrorMessages = false;
 	private disabled = false;
 	private queueGeneration = 0;
@@ -415,6 +418,7 @@ export class TelemetryClient implements TelemetrySink {
 	clearPending(): void {
 		this.clear();
 		this.supportsV2 = false;
+		this.supportsInstallationOutcomes = false;
 		this.supportsOriginalErrorMessages = false;
 		this.nextDiscoveryAt = 0;
 	}
@@ -499,6 +503,7 @@ export class TelemetryClient implements TelemetrySink {
 		if (this.discovery || this.now() < this.nextDiscoveryAt || !this.enabled()) return;
 		this.nextDiscoveryAt = this.now() + 60_000;
 		this.supportsOriginalErrorMessages = false;
+		this.supportsInstallationOutcomes = false;
 		this.discovery = (async () => {
 			try {
 				const url = new URL(this.endpoint);
@@ -515,6 +520,14 @@ export class TelemetryClient implements TelemetrySink {
 					"schema_versions" in body &&
 					Array.isArray(body.schema_versions) &&
 					body.schema_versions.includes(2);
+				this.supportsInstallationOutcomes =
+					this.supportsV2 &&
+					typeof body === "object" &&
+					body !== null &&
+					"schema_revision" in body &&
+					typeof body.schema_revision === "number" &&
+					Number.isInteger(body.schema_revision) &&
+					body.schema_revision >= 3;
 				this.supportsOriginalErrorMessages =
 					this.supportsV2 &&
 					typeof body === "object" &&
@@ -570,10 +583,11 @@ export class TelemetryClient implements TelemetrySink {
 		const deadline = performance.now() + timeoutMs;
 		if (this.discovery) {
 			let timer: ReturnType<typeof setTimeout> | undefined;
+			const needsInstallationSupport = this.queue.some((entry) => entry.event.name === "agent installation stage");
 			await Promise.race([
 				this.discovery,
 				new Promise<void>((resolve) => {
-					timer = setTimeout(resolve, Math.min(250, timeoutMs / 2));
+					timer = setTimeout(resolve, needsInstallationSupport ? timeoutMs : Math.min(250, timeoutMs / 2));
 					timer.unref?.();
 				}),
 			]);
@@ -599,7 +613,11 @@ export class TelemetryClient implements TelemetrySink {
 			const version2 = this.supportsV2;
 			const entries = pending
 				.splice(0, this.batchSize)
-				.filter((entry) => version2 || isLegacyTelemetryEvent(entry.event.name));
+				.filter((entry) =>
+					entry.event.name === "agent installation stage"
+						? version2 && this.supportsInstallationOutcomes
+						: version2 || isLegacyTelemetryEvent(entry.event.name),
+				);
 			if (!entries.length) continue;
 			const events = entries.flatMap(({ event }) => {
 				const properties = sanitizeTelemetryProperties(event.name, event.properties, !version2);
@@ -631,6 +649,7 @@ export class TelemetryClient implements TelemetrySink {
 			if (!this.enabled() || generation !== this.queueGeneration) return;
 			if (version2 && response && [400, 404, 422].includes(response.status)) {
 				this.supportsV2 = false;
+				this.supportsInstallationOutcomes = false;
 				this.supportsOriginalErrorMessages = false;
 				this.nextDiscoveryAt = this.now() + 60_000;
 				this.delivery.retries += entries.length;
@@ -714,6 +733,7 @@ function telemetryClient(options: InstallAgentTelemetryOptions): TelemetrySink {
 			if (!isTelemetryEnabled(options.settingsManager)) {
 				activeClient.clearPending();
 				clearOnboardingTelemetryContext(options.agentDir);
+				clearInstallationTelemetryState(options.agentDir);
 			}
 		});
 	}
@@ -743,6 +763,13 @@ export async function flushTelemetry(
 	} catch {
 		/* Controlled shutdown is bounded and must preserve its original result. */
 	}
+}
+
+export function clearPendingTelemetry(
+	options: Pick<CaptureTelemetryEventOptions, "agentDir" | "settingsManager" | "sink">,
+): void {
+	const sink = options.sink ?? telemetryClients.get(options.settingsManager)?.get(options.agentDir);
+	if (sink instanceof TelemetryClient) sink.clearPending();
 }
 
 export function captureTelemetryEvent(options: CaptureTelemetryEventOptions): void {
