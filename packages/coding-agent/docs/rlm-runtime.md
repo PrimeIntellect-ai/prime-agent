@@ -42,7 +42,7 @@ sequenceDiagram
     participant P as Model provider
 
     M->>H: Python tool call
-    H->>K: execute await rlm.spawn("inspect the API")
+    H->>K: execute await rlm.spawn("inspect the API", name="api-reviewer")
     K->>H: host_request · rlm.run
     H->>H: check depth and resolve model
     H->>H: admit child task and update registry
