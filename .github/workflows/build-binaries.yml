@@ -118,8 +118,6 @@ jobs:
   standalone:
     needs: release-context
     uses: ./.github/workflows/standalone-binaries.yml
-    with:
-      ref: ${{ needs.release-context.outputs.build_ref }}
 
   build:
     runs-on: ubuntu-latest

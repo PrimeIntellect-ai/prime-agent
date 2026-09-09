@@ -19,7 +19,7 @@ const bun = process.env.BUN_BINARY || "bun";
 const bunVersion = execFileSync(bun, ["--version"], { encoding: "utf8" }).trim();
 if (bunVersion !== "1.4.0") throw new Error(`Binary compilation requires Bun 1.4.0; found ${bunVersion}`);
 
-// Keep the committed model catalog and Node/TypeScript declaration build unchanged.
+// Emit workspace JavaScript and declarations using the committed model catalog.
 for (const name of ["tui", "ai", "agent", "coding-agent"]) {
 	execFileSync(join(root, "node_modules/.bin/tsgo"), ["-p", `packages/${name}/tsconfig.build.json`], {
 		cwd: root,

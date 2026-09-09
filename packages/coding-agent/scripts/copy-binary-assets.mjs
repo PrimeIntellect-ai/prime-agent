@@ -30,7 +30,7 @@ export const binaryAssets = [
 	"photon_rs_bg.wasm",
 ];
 
-export function includeBinaryAsset(source) {
+function includeBinaryAsset(source) {
 	return !source
 		.split(/[\\/]/)
 		.some((part) => excluded.has(part) || part.endsWith(".pyc") || part.endsWith(".egg-info"));
