@@ -55,6 +55,7 @@ import {
 	isLegacyTelemetryEvent,
 	isTelemetryUuid,
 	sanitizeTelemetryProperties,
+	TELEMETRY_ERROR_MESSAGE_PROPERTIES,
 	type TelemetryProperties,
 } from "./telemetry-schema.js";
 
@@ -161,6 +162,8 @@ interface ActiveRun {
 	firstModelEventMs?: number;
 	visibleTtftMs?: number;
 	currentTurnStartedAt?: number;
+	currentModelRequestObserved: boolean;
+	successfulModelCallCount: number;
 	modelLatencyMs: number;
 	maxModelLatencyMs: number;
 	turnCount: number;
@@ -366,6 +369,7 @@ export class TelemetryClient implements TelemetrySink {
 	private discovery?: Promise<void>;
 	private nextDiscoveryAt = 0;
 	private supportsV2 = false;
+	private supportsOriginalErrorMessages = false;
 	private disabled = false;
 	private queueGeneration = 0;
 	private readonly requests = new Set<AbortController>();
@@ -411,6 +415,7 @@ export class TelemetryClient implements TelemetrySink {
 	clearPending(): void {
 		this.clear();
 		this.supportsV2 = false;
+		this.supportsOriginalErrorMessages = false;
 		this.nextDiscoveryAt = 0;
 	}
 
@@ -493,6 +498,7 @@ export class TelemetryClient implements TelemetrySink {
 	private discover(): void {
 		if (this.discovery || this.now() < this.nextDiscoveryAt || !this.enabled()) return;
 		this.nextDiscoveryAt = this.now() + 60_000;
+		this.supportsOriginalErrorMessages = false;
 		this.discovery = (async () => {
 			try {
 				const url = new URL(this.endpoint);
@@ -509,6 +515,14 @@ export class TelemetryClient implements TelemetrySink {
 					"schema_versions" in body &&
 					Array.isArray(body.schema_versions) &&
 					body.schema_versions.includes(2);
+				this.supportsOriginalErrorMessages =
+					this.supportsV2 &&
+					typeof body === "object" &&
+					body !== null &&
+					"original_error_messages" in body &&
+					body.original_error_messages === true &&
+					"error_message_policy_revision" in body &&
+					body.error_message_policy_revision === TELEMETRY_CONTRACT.error_message_policy_revision;
 			} catch {
 				// Discovery is optional; unavailable collectors retain legacy telemetry.
 			} finally {
@@ -589,6 +603,8 @@ export class TelemetryClient implements TelemetrySink {
 			if (!entries.length) continue;
 			const events = entries.flatMap(({ event }) => {
 				const properties = sanitizeTelemetryProperties(event.name, event.properties, !version2);
+				if (properties && !this.supportsOriginalErrorMessages)
+					for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES) delete properties[key];
 				return properties ? [{ ...event, properties }] : [];
 			});
 			if (!events.length) continue;
@@ -615,6 +631,7 @@ export class TelemetryClient implements TelemetrySink {
 			if (!this.enabled() || generation !== this.queueGeneration) return;
 			if (version2 && response && [400, 404, 422].includes(response.status)) {
 				this.supportsV2 = false;
+				this.supportsOriginalErrorMessages = false;
 				this.nextDiscoveryAt = this.now() + 60_000;
 				this.delivery.retries += entries.length;
 				return;
@@ -671,11 +688,7 @@ function baseProperties(executionMode: TelemetryExecutionMode): TelemetryPropert
 		build_channel: VERSION.includes("-") ? "prerelease" : "release",
 		workload_origin: ["internal", "test"].includes(process.env.PRIME_AGENT_TELEMETRY_ORIGIN ?? "")
 			? (process.env.PRIME_AGENT_TELEMETRY_ORIGIN ?? "unknown")
-			: executionMode === "interactive"
-				? "interactive"
-				: executionMode === "unknown"
-					? "unknown"
-					: "automated",
+			: "unknown",
 	};
 }
 
@@ -843,6 +856,8 @@ function createActiveRun(now: () => number, id: string, index: number): ActiveRu
 		index,
 		startedAt: now(),
 		agentEnded: false,
+		currentModelRequestObserved: false,
+		successfulModelCallCount: 0,
 		modelLatencyMs: 0,
 		maxModelLatencyMs: 0,
 		turnCount: 0,
@@ -893,6 +908,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		usage: newUsageTotals(),
 	};
 	let activeRun: ActiveRun | undefined;
+	let standaloneCompaction: { startedAt: number; providerCategory: string } | undefined;
 	let nextRunIndex = 0;
 	let turnActionActive = false;
 	let disposed = false;
@@ -921,7 +937,9 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 				? {
 						onboarding_id: onboarding.onboardingId,
 						client_session_id: onboarding.clientSessionId,
-						elapsed_since_onboarding_ms: Math.max(0, Date.now() - onboarding.startedAt),
+						...(!input?.onboardingId || input.onboardingId === onboarding.onboardingId
+							? { elapsed_since_onboarding_ms: Math.max(0, Date.now() - onboarding.startedAt) }
+							: {}),
 					}
 				: {}),
 			...(input
@@ -978,6 +996,17 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 			timing_origin: "worker_run",
 			...extra,
 		});
+	};
+	const finishStandaloneCompaction = (outcome: string): void => {
+		if (!standaloneCompaction) return;
+		capture("agent timing", {
+			provider_category: standaloneCompaction.providerCategory,
+			stage: "compaction",
+			duration_ms: Math.max(0, now() - standaloneCompaction.startedAt),
+			outcome,
+			timing_origin: "worker_action",
+		});
+		standaloneCompaction = undefined;
 	};
 	const reportError = (
 		error: unknown,
@@ -1081,6 +1110,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 			model_latency_ms: run.modelLatencyMs,
 			max_model_latency_ms: run.maxModelLatencyMs,
 			model_call_count: run.usage.modelCallCount,
+			successful_model_call_count: run.successfulModelCallCount,
 			turn_count: run.turnCount,
 			tool_call_count: run.toolCallCount,
 			tool_error_count: run.toolErrorCount,
@@ -1132,6 +1162,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 	const refreshConsent = (): boolean => {
 		if (!isTelemetryEnabled(options.settingsManager)) {
 			activeRun = undefined;
+			standaloneCompaction = undefined;
 			turnActionActive = false;
 			goals.clear();
 			childFailures.clear();
@@ -1188,6 +1219,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 			if (!refreshConsent() || !activeRun) return;
 			activeRun.executionContext = context;
 			activeRun.contextSource = "request";
+			activeRun.currentModelRequestObserved = activeRun.currentTurnStartedAt !== undefined;
 			if (activeRun.firstProviderDispatchAt === undefined) {
 				activeRun.firstProviderDispatchAt = now();
 				timing("provider_dispatch", now() - activeRun.startedAt, "success");
@@ -1236,6 +1268,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 				case "turn_start":
 					if (activeRun) {
 						activeRun.currentTurnStartedAt = now();
+						activeRun.currentModelRequestObserved = false;
 						activeRun.firstTurnStartedAt ??= activeRun.currentTurnStartedAt;
 						activeRun.lastStreamEventAt = undefined;
 						activeRun.turnCount++;
@@ -1310,6 +1343,9 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 					}
 					const message = assistantMessage(event);
 					if (!activeRun || !message) break;
+					if (activeRun.currentModelRequestObserved && ["stop", "length", "toolUse"].includes(message.stopReason))
+						activeRun.successfulModelCallCount++;
+					activeRun.currentModelRequestObserved = false;
 					activeRun.lastAssistant = message;
 					const usage = message.usage;
 					const valid = [
@@ -1405,9 +1441,16 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 					break;
 				case "compaction_start":
 					if (activeRun) activeRun.compactionStartedAt = now();
+					else
+						standaloneCompaction = {
+							startedAt: now(),
+							providerCategory: telemetryProviderCategory(session.model?.provider),
+						};
 					break;
 				case "compaction_end":
-					if (activeRun) {
+					if (standaloneCompaction)
+						finishStandaloneCompaction(event.aborted ? "cancelled" : event.errorMessage ? "error" : "success");
+					else if (activeRun) {
 						if (event.result && !event.aborted) activeRun.compactionCount++;
 						if (activeRun.compactionStartedAt !== undefined) {
 							const duration = Math.max(0, now() - activeRun.compactionStartedAt);
@@ -1481,8 +1524,10 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		unsubscribeContext();
 		inputs.clear();
 		if (!refreshConsent()) return;
-		const interrupted = activeRun !== undefined && (!activeRun.agentEnded || turnActionActive);
+		const interrupted =
+			standaloneCompaction !== undefined || (activeRun !== undefined && (!activeRun.agentEnded || turnActionActive));
 		finalizeRun(true);
+		if (standaloneCompaction) finishStandaloneCompaction("shutdown_interrupted");
 		sessionContexts.delete(session);
 		capture("agent session ended", {
 			terminal_outcome: interrupted ? "shutdown_interrupted" : "success",

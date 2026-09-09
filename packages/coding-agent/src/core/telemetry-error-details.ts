@@ -1,5 +1,15 @@
+import {
+	findTelemetrySafeErrorMessageId,
+	getTelemetrySafeErrorMessage,
+	getTelemetrySafeErrorMessageSource,
+	TELEMETRY_SAFE_ERROR_CODES,
+	TELEMETRY_SAFE_ERROR_MESSAGES,
+	TELEMETRY_SAFE_ERROR_SIGNALS,
+	TELEMETRY_SYSTEM_ERROR_MESSAGE_IDS,
+	type TelemetrySafeErrorMessageId,
+} from "./telemetry-error-policy.js";
+
 export const MAX_TELEMETRY_ERROR_MESSAGE = 4_096;
-const MAX_INSPECTED_MESSAGE = 1_000_000;
 const REDACTED = "[REDACTED]";
 
 export const TELEMETRY_ERROR_TYPES = [
@@ -35,17 +45,6 @@ function read(value: unknown, key: string): unknown {
 	}
 }
 
-function boundedText(value: string, maximum: number): { text: string; length: number; truncated: boolean } {
-	let length = 0;
-	let end = 0;
-	for (const character of value) {
-		if (length === maximum) return { text: value.slice(0, end), length, truncated: true };
-		end += character.length;
-		length++;
-	}
-	return { text: value, length, truncated: false };
-}
-
 export function redactTelemetryCredentials(value: string): string {
 	return value
 		.replace(/\u001b(?:\][^\u0007\u001b]*(?:\u0007|\u001b\\|$)|\[[0-?]*[ -/]*[@-~])/g, "")
@@ -72,26 +71,43 @@ export function redactTelemetryCredentials(value: string): string {
 		.replace(/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g, REDACTED);
 }
 
-export function sanitizeTelemetryErrorMessage(value: string) {
-	const inspected = boundedText(value, MAX_INSPECTED_MESSAGE);
-	const redacted = redactTelemetryCredentials(inspected.text);
-	const output = boundedText(redacted, MAX_TELEMETRY_ERROR_MESSAGE);
+export function sanitizeTelemetryErrorMessage(value: unknown, messageId?: unknown) {
+	if (typeof value !== "string" || value.length > MAX_TELEMETRY_ERROR_MESSAGE) return undefined;
+	const message = getTelemetrySafeErrorMessage(messageId);
+	if (message === undefined || message !== value || redactTelemetryCredentials(message) !== message) return undefined;
 	return {
-		error_message: output.text,
-		error_message_length: inspected.length,
-		error_message_length_lower_bound: inspected.truncated,
-		error_message_truncated: inspected.truncated || output.truncated,
-		error_message_redacted: redacted !== inspected.text,
+		error_message: message,
+		error_message_id: messageId as TelemetrySafeErrorMessageId,
+		error_message_source: getTelemetrySafeErrorMessageSource(messageId as TelemetrySafeErrorMessageId),
+		error_message_length: [...message].length,
+		error_message_length_lower_bound: false,
+		error_message_truncated: false,
+		error_message_redacted: false,
 	};
 }
 
+const safeCodes = new Set<string>(TELEMETRY_SAFE_ERROR_CODES);
+const safeSignals = new Set<string>(TELEMETRY_SAFE_ERROR_SIGNALS);
+
+function numericCode(value: number): string {
+	if (!Number.isInteger(value)) return "unknown";
+	if (value >= 400 && value <= 599) return `http_${value}`;
+	if (value === -32700 || (value >= -32603 && value <= -32600) || (value >= -32099 && value <= -32000))
+		return `code_${value}`;
+	return "unknown";
+}
+
 export function sanitizeTelemetryErrorCode(value: unknown): string {
-	if (typeof value === "number" && Number.isSafeInteger(value) && Math.abs(value) <= 1_000_000) return `code_${value}`;
-	if (typeof value === "string" && /^-?\d{1,7}$/.test(value) && Math.abs(Number(value)) <= 1_000_000)
-		return `code_${Number(value)}`;
-	if (typeof value !== "string" || value.length > 80 || !/^[A-Za-z][A-Za-z0-9_.:-]*$/.test(value)) return "unknown";
-	if (redactTelemetryCredentials(value) !== value || /[A-Za-z0-9]{32,}/.test(value)) return "unknown";
-	return value;
+	if (typeof value === "number") return numericCode(value);
+	if (typeof value !== "string" || value.length > 80) return "unknown";
+	if (safeCodes.has(value)) return value;
+	if (safeCodes.has(value.toLowerCase())) return value.toLowerCase();
+	if (/^-?\d{1,6}$/.test(value)) return numericCode(Number(value));
+	if (/^http_[45]\d{2}$/.test(value)) return value;
+	if (/^code_-\d{5}$/.test(value)) return numericCode(Number(value.slice(5)));
+	if (/^process_exit_(?:0|[1-9]\d{0,2})$/.test(value) && Number(value.slice(13)) <= 255) return value;
+	if (value.startsWith("signal_") && safeSignals.has(value.slice(7))) return value;
+	return "unknown";
 }
 
 function errorNodes(error: unknown): unknown[] {
@@ -101,7 +117,7 @@ function errorNodes(error: unknown): unknown[] {
 		const node = nodes[index];
 		if (!node || typeof node !== "object" || seen.has(node)) continue;
 		seen.add(node);
-		for (const key of ["cause", "info", "error"]) {
+		for (const key of ["cause", "info", "error", "$metadata", "response"]) {
 			const nested = read(node, key);
 			if (nested && typeof nested === "object" && !nodes.includes(nested)) nodes.push(nested);
 		}
@@ -115,27 +131,15 @@ function errorNodes(error: unknown): unknown[] {
 }
 
 export function telemetryOriginalErrorDetails(error: unknown): Record<string, string | number | boolean | null> {
-	const messages: string[] = [];
-	const seen = new Set<unknown>();
-	let cause = error;
-	for (let index = 0; index < 5 && cause && !seen.has(cause); index++) {
-		seen.add(cause);
-		const message = typeof cause === "string" ? cause : (read(cause, "errorMessage") ?? read(cause, "message"));
-		if (typeof message === "string") {
-			const bounded = boundedText(message, MAX_INSPECTED_MESSAGE + 1).text;
-			if (!messages.includes(bounded)) messages.push(bounded);
-		}
-		cause = read(cause, "cause");
-	}
+	const message = typeof error === "string" ? error : (read(error, "errorMessage") ?? read(error, "message"));
+	let messageDetails =
+		typeof message === "string"
+			? sanitizeTelemetryErrorMessage(message, findTelemetrySafeErrorMessageId(message))
+			: undefined;
 	let code = "unknown";
 	let type: string = "unknown";
 	let fallbackCode = "unknown";
 	for (const node of errorNodes(error)) {
-		if (!messages.length) {
-			const nestedMessage = read(node, "message");
-			if (typeof nestedMessage === "string")
-				messages.push(boundedText(nestedMessage, MAX_INSPECTED_MESSAGE + 1).text);
-		}
 		const candidate = sanitizeTelemetryErrorCode(read(node, "code") ?? read(node, "providerErrorType"));
 		if (candidate !== "unknown") {
 			if (["authentication_error", "api_error", "server_error", "error"].includes(candidate))
@@ -149,19 +153,23 @@ export function telemetryOriginalErrorDetails(error: unknown): Record<string, st
 		if (
 			code === "unknown" &&
 			typeof exitCode === "number" &&
-			Number.isSafeInteger(exitCode) &&
-			Math.abs(exitCode) <= 1_000_000
+			Number.isInteger(exitCode) &&
+			exitCode >= 0 &&
+			exitCode <= 255
 		)
 			code = `process_exit_${exitCode}`;
 		const signal = read(node, "signal");
-		if (code === "unknown" && typeof signal === "string" && /^SIG[A-Z0-9]{1,12}$/.test(signal))
-			code = `signal_${signal}`;
+		if (code === "unknown" && typeof signal === "string" && safeSignals.has(signal)) code = `signal_${signal}`;
+	}
+	if (code === "unknown") code = fallbackCode;
+	if (!messageDetails && Object.hasOwn(TELEMETRY_SYSTEM_ERROR_MESSAGE_IDS, code)) {
+		const id = TELEMETRY_SYSTEM_ERROR_MESSAGE_IDS[code as keyof typeof TELEMETRY_SYSTEM_ERROR_MESSAGE_IDS];
+		messageDetails = sanitizeTelemetryErrorMessage(TELEMETRY_SAFE_ERROR_MESSAGES[id], id);
 	}
 	return {
-		error_code_group: code === "unknown" ? fallbackCode : code,
+		error_code_group: code,
 		error_type: type,
 		error_event_kind: "occurrence",
-		...(messages.length ? sanitizeTelemetryErrorMessage(messages.join("\nCaused by: ")) : {}),
-		...(cause && !seen.has(cause) ? { error_message_truncated: true, error_message_length_lower_bound: true } : {}),
+		...messageDetails,
 	};
 }

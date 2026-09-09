@@ -1,4 +1,8 @@
-import type { TelemetryErrorComponent, TelemetryErrorRecoveryAction } from "./telemetry-error-classification.js";
+import type {
+	TelemetryErrorComponent,
+	TelemetryErrorOperation,
+	TelemetryErrorRecoveryAction,
+} from "./telemetry-error-classification.js";
 import type { TelemetryProperties } from "./telemetry-schema.js";
 
 export interface TelemetryRecoveryScope {
@@ -6,9 +10,11 @@ export interface TelemetryRecoveryScope {
 	clientSessionId?: string;
 	runId?: string;
 	providerCategory?: string;
+	providerIdentity?: string;
 	targetProviderCategory?: string;
 	retryBackoffMs?: number;
 	components?: readonly TelemetryErrorComponent[];
+	operations?: readonly TelemetryErrorOperation[];
 }
 
 interface RecoveryOptions {
@@ -23,10 +29,21 @@ interface PendingError {
 	at: number;
 	group: string;
 	targetProvider?: string;
+	providerIdentity?: string;
 }
 
 const COUNTER_LIMIT = 1_000_000;
 const DAY_MS = 86_400_000;
+
+function boundedProviderIdentity(value: unknown): string | undefined {
+	return typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 128 &&
+		value !== "unknown" &&
+		value !== "custom"
+		? value
+		: undefined;
+}
 
 /** Tracks observed sequences only; a later success does not establish what caused recovery. */
 export class TelemetryErrorRecoveryTracker {
@@ -73,7 +90,10 @@ export class TelemetryErrorRecoveryTracker {
 		}
 	}
 
-	recordFailure(properties: TelemetryProperties): TelemetryProperties | undefined {
+	recordFailure(
+		properties: TelemetryProperties,
+		identity: { provider?: string } = {},
+	): TelemetryProperties | undefined {
 		if (!this.enabled()) return undefined;
 		this.prune();
 		const id = properties.error_id;
@@ -103,14 +123,24 @@ export class TelemetryErrorRecoveryTracker {
 		);
 		this.counts.set(group, count);
 		const report = { ...properties, consecutive_failure_count: count, error_event_kind: "occurrence" };
-		this.pending.set(id, { properties: report, at: this.now(), group });
+		this.pending.set(id, {
+			properties: report,
+			at: this.now(),
+			group,
+			providerIdentity: boundedProviderIdentity(identity.provider),
+		});
 		this.prune();
 		return report;
 	}
 
 	private matches(error: PendingError, scope: TelemetryRecoveryScope, requireRun: boolean): boolean {
 		const properties = error.properties;
+		if (scope.providerIdentity !== undefined) {
+			const provider = boundedProviderIdentity(scope.providerIdentity);
+			if (!provider || provider !== error.providerIdentity) return false;
+		}
 		if (scope.components && !scope.components.some((component) => component === properties.component)) return false;
+		if (scope.operations && !scope.operations.some((operation) => operation === properties.operation)) return false;
 		// Worker session identity takes precedence over long-lived client/onboarding metadata.
 		if (scope.sessionId) {
 			if (properties.session_id !== scope.sessionId) return false;

@@ -11,7 +11,8 @@ import {
 } from "../src/core/telemetry.js";
 import { TELEMETRY_CONTRACT } from "../src/core/telemetry-contract.js";
 import { TELEMETRY_ERROR_MESSAGES } from "../src/core/telemetry-error-classification.js";
-import { sanitizeTelemetryProperties } from "../src/core/telemetry-schema.js";
+import { TELEMETRY_SAFE_ERROR_MESSAGES } from "../src/core/telemetry-error-policy.js";
+import { sanitizeTelemetryProperties, TELEMETRY_ERROR_MESSAGE_PROPERTIES } from "../src/core/telemetry-schema.js";
 
 const base = {
 	session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -25,6 +26,13 @@ const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const runId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const errorId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const error = { ...base, session_id: sessionId, run_id: runId, error_id: errorId, error_subtype: "credential_invalid" };
+const reviewedError = {
+	...error,
+	error_message: TELEMETRY_SAFE_ERROR_MESSAGES.prime_request_timeout,
+	error_message_id: "prime_request_timeout",
+	error_code_group: "ETIMEDOUT",
+	error_event_kind: "occurrence",
+};
 function ids(): () => string {
 	let id = 0;
 	return () => `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`;
@@ -99,23 +107,44 @@ describe("shared telemetry contract and privacy", () => {
 			"http_status",
 		);
 	});
-	it("redacts original messages independently and preserves flags through repeated sanitization", () => {
+	it("binds original messages to reviewed text and reconstructs their provenance independently", () => {
 		const safe = sanitizeTelemetryProperties("agent error", {
-			...error,
-			error_message: 'Worker failed: token="synthetic-secret"',
-			error_code_group: "DAEMON_START_FAILED",
-			error_message_length: 8_000,
-			error_message_truncated: true,
-			error_event_kind: "occurrence",
-		});
-		expect(safe).toMatchObject({
-			error_message: 'Worker failed: token="[REDACTED]"',
-			error_code_group: "DAEMON_START_FAILED",
+			...reviewedError,
+			error_message_source: "system_template",
 			error_message_length: 8_000,
 			error_message_truncated: true,
 			error_message_redacted: true,
 		});
+		expect(safe).toMatchObject({
+			error_message: reviewedError.error_message,
+			error_message_id: "prime_request_timeout",
+			error_message_source: "reviewed_literal",
+			error_code_group: "ETIMEDOUT",
+			error_message_length: reviewedError.error_message.length,
+			error_message_truncated: false,
+			error_message_redacted: false,
+		});
 		expect(sanitizeTelemetryProperties("agent error", safe ?? {})).toEqual(safe);
+	});
+	it.each([
+		{ error_message_id: undefined },
+		{ error_message_id: "unreviewed_error" },
+		{ error_message: "private_prompt_canary", error_message_source: "reviewed_literal" },
+		{ error_message: `${reviewedError.error_message}: private_prompt_canary` },
+		{ error_message: 'Worker failed: token="synthetic-secret" prompt="private_prompt_canary"' },
+		{ error_message: null },
+		{ error_message: { message: "private_prompt_canary" } },
+	])("omits untrusted text and all related metadata: %j", (override) => {
+		const safe = sanitizeTelemetryProperties("agent error", {
+			...reviewedError,
+			error_message_length: 1_000,
+			error_message_truncated: true,
+			error_message_redacted: true,
+			...override,
+		});
+		for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES) expect(safe).not.toHaveProperty(key);
+		expect(safe).toMatchObject({ error_code_group: "ETIMEDOUT", error_subtype: "credential_invalid" });
+		expect(JSON.stringify(safe)).not.toContain("private_prompt_canary");
 	});
 	it("accepts scoped input timings but rejects unrelated prompt and connection data", () => {
 		const input = sanitizeTelemetryProperties("agent input stage", {
@@ -145,6 +174,97 @@ describe("shared telemetry contract and privacy", () => {
 });
 
 describe("version negotiation, retry and consent", () => {
+	it.each([
+		{ original_error_messages: true, error_message_policy_revision: 1, expected: true },
+		{ original_error_messages: false, error_message_policy_revision: 1, expected: false },
+		{ original_error_messages: true, error_message_policy_revision: 2, expected: false },
+		{ original_error_messages: true, expected: false },
+		{ expected: false },
+	])("negotiates the exact original-message policy: %j", async ({ expected, ...support }) => {
+		const batches: TelemetryBatch[] = [];
+		const client = new TelemetryClient({
+			agentDir: directory(),
+			randomId: ids(),
+			fetch: async (_url, init) => {
+				if (init?.method === "GET") return Response.json({ schema_versions: [1, 2], ...support });
+				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
+				batches.push(batch);
+				return accepted(batch);
+			},
+		});
+		client.capture("agent error", reviewedError);
+		client.capture("agent error", {
+			...reviewedError,
+			error_message: "private_prompt_canary sk-syntheticsecret",
+			error_code_group: "private_prompt_canary",
+		});
+		await client.flush();
+		expect(batches).toHaveLength(1);
+		expect(batches[0].schema_version).toBe(2);
+		const [first, second] = batches[0].events;
+		expect(first.properties).toMatchObject({ error_code_group: "ETIMEDOUT", error_event_kind: "occurrence" });
+		if (expected) expect(first.properties.error_message).toBe(reviewedError.error_message);
+		else for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES) expect(first.properties).not.toHaveProperty(key);
+		for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES) expect(second.properties).not.toHaveProperty(key);
+		expect(second.properties.error_code_group).toBe("unknown");
+		expect(JSON.stringify(batches)).not.toContain("private_prompt_canary");
+		expect(JSON.stringify(batches)).not.toContain("sk-syntheticsecret");
+	});
+	it("does not create identity, discover capabilities, or send errors when opted out", async () => {
+		const agentDir = directory();
+		const fetch = vi.fn();
+		const client = new TelemetryClient({ agentDir, isEnabled: () => false, fetch });
+		client.capture("agent error", reviewedError);
+		await client.flush();
+		expect(fetch).not.toHaveBeenCalled();
+		expect(existsSync(join(agentDir, "telemetry.json"))).toBe(false);
+	});
+	it.each(["unavailable", "malformed", "oversized", "mismatched", "network_error"])(
+		"expires a previously accepted message policy when discovery becomes %s",
+		async (failure) => {
+			let now = Date.now();
+			let discoveries = 0;
+			const batches: TelemetryBatch[] = [];
+			const client = new TelemetryClient({
+				agentDir: directory(),
+				now: () => now,
+				fetch: async (_url, init) => {
+					if (init?.method === "GET") {
+						if (++discoveries === 1)
+							return Response.json({
+								schema_versions: [1, 2],
+								original_error_messages: true,
+								error_message_policy_revision: 1,
+							});
+						if (failure === "unavailable") return new Response(null, { status: 404 });
+						if (failure === "malformed") return new Response("not JSON");
+						if (failure === "oversized") return new Response("x".repeat(4_097));
+						if (failure === "network_error") throw new Error("Synthetic discovery failure");
+						return Response.json({
+							schema_versions: [1, 2],
+							original_error_messages: true,
+							error_message_policy_revision: 2,
+						});
+					}
+					const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
+					batches.push(batch);
+					return accepted(batch);
+				},
+			});
+			client.capture("agent error", reviewedError);
+			await client.flush();
+			expect(batches[0].events[0].properties.error_message).toBe(reviewedError.error_message);
+			now += 60_001;
+			client.capture("agent error", reviewedError);
+			await client.flush();
+			expect(discoveries).toBe(2);
+			expect(batches).toHaveLength(2);
+			expect(batches[1].schema_version).toBe(2);
+			expect(batches[1].events[0].properties.error_code_group).toBe("ETIMEDOUT");
+			for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES)
+				expect(batches[1].events[0].properties).not.toHaveProperty(key);
+		},
+	);
 	it("isolates malformed direct sink payloads before identity creation", () => {
 		const agentDir = directory();
 		const client = new TelemetryClient({ agentDir });

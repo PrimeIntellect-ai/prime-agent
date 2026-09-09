@@ -4,6 +4,16 @@ import { sanitizeTelemetryErrorCode, sanitizeTelemetryErrorMessage } from "./tel
 export type TelemetryPrimitive = string | number | boolean | null;
 export type TelemetryProperties = Record<string, TelemetryPrimitive>;
 
+export const TELEMETRY_ERROR_MESSAGE_PROPERTIES = [
+	"error_message",
+	"error_message_id",
+	"error_message_source",
+	"error_message_length",
+	"error_message_length_lower_bound",
+	"error_message_truncated",
+	"error_message_redacted",
+] as const;
+
 export function isTelemetryUuid(value: unknown): value is string {
 	return (
 		typeof value === "string" &&
@@ -15,7 +25,7 @@ function sanitizeValue(value: unknown, rule: TelemetryPropertyRule): TelemetryPr
 	if (value === null && rule.nullable) return null;
 	switch (rule.kind) {
 		case "error_message":
-			return typeof value === "string" ? sanitizeTelemetryErrorMessage(value).error_message : undefined;
+			return undefined;
 		case "error_code":
 			return sanitizeTelemetryErrorCode(value);
 		case "enum":
@@ -61,17 +71,11 @@ export function sanitizeTelemetryProperties(
 	if (event.required.some((key) => !(key in result))) return undefined;
 	if (name === "agent error" && typeof result.error_subtype === "string") {
 		result.diagnostic_message = TELEMETRY_CONTRACT.diagnostic_messages[result.error_subtype];
-		const descriptor = Object.getOwnPropertyDescriptor(properties, "error_message");
-		if (descriptor && "value" in descriptor && typeof descriptor.value === "string") {
-			const details = sanitizeTelemetryErrorMessage(descriptor.value);
-			result.error_message_length = Math.max(Number(result.error_message_length) || 0, details.error_message_length);
-			for (const flag of [
-				"error_message_redacted",
-				"error_message_truncated",
-				"error_message_length_lower_bound",
-			] as const)
-				result[flag] = result[flag] === true || details[flag];
-		}
+		for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES) delete result[key];
+		const message = Object.getOwnPropertyDescriptor(properties, "error_message");
+		const messageId = Object.getOwnPropertyDescriptor(properties, "error_message_id");
+		if (message && "value" in message && messageId && "value" in messageId)
+			Object.assign(result, sanitizeTelemetryErrorMessage(message.value, messageId.value));
 	}
 	if (legacy && result.install_method === "homebrew") result.install_method = "unknown";
 	return result;

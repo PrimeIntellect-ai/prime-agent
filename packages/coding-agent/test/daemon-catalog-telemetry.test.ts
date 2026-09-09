@@ -53,9 +53,12 @@ describe("daemon catalog startup telemetry", () => {
 
 	it("reports bootstrap failures with effective settings and a bounded flush before rethrowing", async () => {
 		const createSettings = vi.spyOn(SettingsManager, "create");
-		const failure = Object.assign(new Error("Catalog pipe failed. Authorization: Bearer catalog-secret"), {
-			code: "EPIPE",
-		});
+		const failure = Object.assign(
+			new Error("Catalog pipe failed: PROMPT_CANARY. Authorization: Bearer catalog-secret"),
+			{
+				code: "EPIPE",
+			},
+		);
 		await expect(failStartup(failure)).rejects.toBe(failure);
 		expect(createSettings).toHaveBeenCalledWith(cwd, agentDir);
 		expect(capture).toHaveBeenCalledTimes(1);
@@ -66,11 +69,13 @@ describe("daemon catalog startup telemetry", () => {
 				operation: "startup",
 				stage: "startup",
 				error_code_group: "EPIPE",
-				error_message: "Catalog pipe failed. Authorization: [REDACTED]",
-				error_message_redacted: true,
+				error_message: "The connection was closed while writing.",
+				error_message_id: "system_broken_pipe",
+				error_message_source: "system_template",
 			}),
 		);
 		expect(JSON.stringify(capture.mock.calls)).not.toContain("catalog-secret");
+		expect(JSON.stringify(capture.mock.calls)).not.toContain("PROMPT_CANARY");
 		expect(flush).toHaveBeenCalledWith({ timeoutMs: 1_500 });
 		expect(
 			reportTelemetryError({ error: new Error("later failure"), component: "daemon", operation: "execute" }),

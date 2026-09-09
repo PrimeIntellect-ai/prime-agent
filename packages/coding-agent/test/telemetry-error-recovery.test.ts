@@ -146,6 +146,51 @@ describe("scoped error recovery sequences", () => {
 		expect(tracker.finishRun({ sessionId: "session-a", runId: "run-b", outcome: "success" })).toEqual([]);
 	});
 
+	it("keeps unrelated authentication operations out of validated-login recovery", () => {
+		const tracker = new TelemetryErrorRecoveryTracker({ isEnabled: () => true });
+		for (const operation of ["login", "validate", "refresh", "logout", "discover"])
+			tracker.recordFailure(failure(operation, { component: "authentication", operation }));
+		const scope = { sessionId: "session-a", operations: ["login", "validate", "refresh"] as const };
+		expect(tracker.noteRecoveryAction("credentials_updated", scope).map((error) => error.error_id)).toEqual([
+			"login",
+			"validate",
+			"refresh",
+		]);
+		expect(tracker.finishErrors(["login", "logout", "discover"], scope).map((error) => error.error_id)).toEqual([
+			"login",
+		]);
+	});
+
+	it.each([
+		["prime-inference", "prime-agent-traces", "prime"],
+		["openai", "openai-codex", "openai"],
+	])("separates %s from %s even when analytics groups both as %s", (first, second, category) => {
+		const tracker = new TelemetryErrorRecoveryTracker({ isEnabled: () => true });
+		const properties = { component: "authentication", operation: "validate", provider_category: category };
+		const original = tracker.recordFailure(failure("first", properties), { provider: first });
+		tracker.recordFailure(failure("second", properties), { provider: second });
+		tracker.recordFailure(failure("unidentified", properties));
+		const scope = { sessionId: "session-a", providerCategory: category, providerIdentity: first };
+		expect(tracker.noteRecoveryAction("credentials_updated", scope).map((error) => error.error_id)).toEqual([
+			"first",
+		]);
+		const recovered = tracker.finishErrors(["first", "second", "unidentified"], scope);
+		expect(recovered.map((error) => error.error_id)).toEqual(["first"]);
+		for (const event of [original, ...recovered]) {
+			expect(event).not.toHaveProperty("providerIdentity");
+			expect(event).not.toHaveProperty("provider");
+		}
+		expect(JSON.stringify(recovered)).not.toContain(second);
+	});
+
+	it.each(["", "unknown", "custom", "x".repeat(129)])("rejects an invalid local recovery identity", (provider) => {
+		const tracker = new TelemetryErrorRecoveryTracker({ isEnabled: () => true });
+		tracker.recordFailure(failure("one"), { provider });
+		const scope = { sessionId: "session-a", providerIdentity: provider };
+		expect(tracker.noteRecoveryAction("credentials_updated", scope)).toEqual([]);
+		expect(tracker.finishErrors(["one"], scope)).toEqual([]);
+	});
+
 	it("bounds retained errors and expires old failures", () => {
 		let now = 10;
 		const tracker = new TelemetryErrorRecoveryTracker({

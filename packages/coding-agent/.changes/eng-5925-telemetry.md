@@ -1,4 +1,4 @@
-- Added more detailed, credential-redacted error reports grouped by stable codes, run lifecycle measurements, setup stages, feature outcomes, and optional `/feedback` choices while retaining existing telemetry opt-outs.
+- Added more detailed error reports grouped by stable codes, reviewed Prime Agent messages without prompt content, run lifecycle measurements, setup stages, feature outcomes, and optional `/feedback` choices while retaining existing telemetry opt-outs.
 - Fixed queued telemetry and unfinished analytics surviving a settings opt-out, and added bounded retries with collector version negotiation.
 - Fixed credential recovery advice for billing, quota, permission, and provider availability failures.
 - Added daemon and pre-run failure observations, scoped recovery, input queue and preparation timings, actual worker request context, and version-aware dashboard and alert definitions.

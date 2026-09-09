@@ -110,6 +110,7 @@ export interface ProviderAuthFlowsHost {
 	): (result: AuthenticationResult) => void;
 	onAuthObservation?(observation: AuthFlowObservation): void;
 	onAuthError?(error: unknown, providerId: string, operation: "login" | "logout" | "discover"): void;
+	runWithAuthTelemetry?(run: () => Promise<AuthenticationResult>): Promise<AuthenticationResult>;
 }
 
 export interface AuthFlowObservation {
@@ -150,11 +151,13 @@ export class ProviderAuthFlows {
 			}
 			return result;
 		};
-		return run().then(complete, (error: unknown) => {
-			this.reportAuthError(error, providerId, "login");
-			complete({ status: "failed" });
-			throw error;
-		});
+		const execute = () =>
+			run().then(complete, (error: unknown) => {
+				this.reportAuthError(error, providerId, "login");
+				complete({ status: "failed" });
+				throw error;
+			});
+		return this.host.runWithAuthTelemetry ? this.host.runWithAuthTelemetry(execute) : execute();
 	}
 
 	private observeAuth(observation: AuthFlowObservation): void {

@@ -1,3 +1,10 @@
+import {
+	TELEMETRY_ERROR_MESSAGE_POLICY_REVISION,
+	TELEMETRY_SAFE_ERROR_CODES,
+	TELEMETRY_SAFE_ERROR_MESSAGES,
+	TELEMETRY_SAFE_ERROR_SIGNALS,
+} from "./telemetry-error-policy.js";
+
 export interface TelemetryPropertyRule {
 	kind: string;
 	values?: readonly string[];
@@ -17,11 +24,19 @@ export interface TelemetryEventRule {
 export const TELEMETRY_CONTRACT: {
 	schema_version: number;
 	schema_revision: number;
+	error_message_policy_revision: number;
+	safe_error_messages: Readonly<Record<string, string>>;
+	safe_error_codes: readonly string[];
+	safe_error_signals: readonly string[];
 	diagnostic_messages: Readonly<Record<string, string>>;
 	events: Readonly<Record<string, TelemetryEventRule>>;
 } = {
 	schema_version: 2,
 	schema_revision: 2,
+	error_message_policy_revision: TELEMETRY_ERROR_MESSAGE_POLICY_REVISION,
+	safe_error_messages: TELEMETRY_SAFE_ERROR_MESSAGES,
+	safe_error_codes: TELEMETRY_SAFE_ERROR_CODES,
+	safe_error_signals: TELEMETRY_SAFE_ERROR_SIGNALS,
 	events: {
 		"agent started": {
 			legacy: true,
@@ -635,6 +650,11 @@ export const TELEMETRY_CONTRACT: {
 					nullable: true,
 				},
 				model_call_count: {
+					kind: "number",
+					max: 1000000,
+					integer: true,
+				},
+				successful_model_call_count: {
 					kind: "number",
 					max: 1000000,
 					integer: true,
@@ -1844,6 +1864,14 @@ export const TELEMETRY_CONTRACT: {
 				error_message: {
 					kind: "error_message",
 					maxLength: 4096,
+				},
+				error_message_id: {
+					kind: "enum",
+					values: Object.keys(TELEMETRY_SAFE_ERROR_MESSAGES),
+				},
+				error_message_source: {
+					kind: "enum",
+					values: ["reviewed_literal", "system_template"],
 				},
 				error_message_length: {
 					kind: "number",

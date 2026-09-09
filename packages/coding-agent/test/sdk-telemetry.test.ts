@@ -48,6 +48,7 @@ it("captures actual SDK request context and dispatch for a normal faux-provider 
 			provider_category: "custom",
 			endpoint_category: "custom",
 			terminal_outcome: "success",
+			successful_model_call_count: 1,
 		});
 		expect(
 			events.filter((event) => event.name === "agent timing" && event.properties.stage === "provider_dispatch"),

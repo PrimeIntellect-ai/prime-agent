@@ -134,6 +134,7 @@ import {
 	isTelemetryEnabled,
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
+import { beginTelemetryAuthentication, type TelemetryAuthenticationAttempt } from "../../core/telemetry-auth.js";
 import { captureTelemetryError } from "../../core/telemetry-errors.js";
 import { getTelemetryExecutionContext } from "../../core/telemetry-execution-context.js";
 import {
@@ -9082,6 +9083,7 @@ export class InteractiveMode {
 
 	private createAuthFlows(initialLoginFeature?: TelemetryFeatureAttempt): ProviderAuthFlows {
 		let pendingLoginFeature = initialLoginFeature;
+		let currentAuthentication: TelemetryAuthenticationAttempt | undefined;
 		return new ProviderAuthFlows({
 			ui: this.ui,
 			modelRegistry: this.modelRegistry,
@@ -9090,6 +9092,16 @@ export class InteractiveMode {
 			onAuthenticationStarted: (providerId, method) => {
 				const feature = pendingLoginFeature ?? this.journeyTelemetry?.beginFeature("login");
 				pendingLoginFeature = undefined;
+				const authentication = this.journeyTelemetry
+					? beginTelemetryAuthentication({
+							agentDir: getAgentDir(),
+							settingsManager: this.settingsManager,
+							executionMode: "interactive",
+							clientSessionId: this.journeyTelemetry.clientSessionId,
+							provider: providerId,
+						})
+					: undefined;
+				currentAuthentication = authentication;
 				this.onboardingTelemetry?.stage(
 					"provider_selection",
 					this.getCurrentModel()?.provider && this.getCurrentModel()?.provider !== providerId
@@ -9098,14 +9110,23 @@ export class InteractiveMode {
 					{ provider: providerId, acquisitionMethod: method },
 				);
 				return (result) => {
-					if (result.status === "success") this.journeyTelemetry?.noteRecoveryAction("credentials_updated");
-					feature?.finish(
-						result.status === "success" ? "completed" : result.status === "cancelled" ? "canceled" : "failed",
-					);
+					const outcome =
+						result.status === "success" ? "completed" : result.status === "cancelled" ? "canceled" : "failed";
+					if (authentication?.finish(outcome)) this.journeyTelemetry?.noteRecoveryAction("credentials_updated");
+					if (currentAuthentication === authentication) currentAuthentication = undefined;
+					feature?.finish(outcome);
 				};
 			},
+			runWithAuthTelemetry: (run) => currentAuthentication?.run(run) ?? run(),
 			onAuthObservation: (observation) => {
 				if (observation.stage === "credential_validation") this.onboardingValidationObserved = true;
+				if (
+					observation.stage === "credential_validation" &&
+					(observation.outcome === "completed" || observation.outcome === "failed") &&
+					observation.validationScope !== "unchecked" &&
+					observation.validationScope !== "configuration"
+				)
+					currentAuthentication?.validation(observation.outcome);
 				const authStatus = this.modelRegistry.getProviderAuthStatus(observation.providerId);
 				this.onboardingTelemetry?.stage(observation.stage, observation.outcome, {
 					provider: observation.providerId,
@@ -9127,17 +9148,23 @@ export class InteractiveMode {
 						observation.durationMs,
 					);
 			},
-			onAuthError: (error, provider, operation) =>
+			onAuthError: (error, provider, operation) => {
+				if (currentAuthentication) {
+					currentAuthentication.reportError(error, operation);
+					return;
+				}
 				captureTelemetryError({
 					agentDir: getAgentDir(),
 					settingsManager: this.settingsManager,
 					executionMode: "interactive",
+					clientSessionId: this.journeyTelemetry?.clientSessionId,
 					error,
 					provider,
 					component: "authentication",
 					operation,
 					stage: "authentication",
-				}),
+				});
+			},
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();

@@ -233,6 +233,19 @@ describe("reviewed telemetry dashboard definitions", () => {
 		expect(sql("tool-reliability")).toContain("recovered_count");
 		expect(sql("feature-outcomes")).toContain("countIf(starts > 0 AND terminal_outcome = 'completed')");
 	});
+
+	it("separates observed inference success from whole-run outcomes and missing older measurements", () => {
+		const context = sql("execution-context");
+		expect(context).toContain("GROUP BY distinct_id, run_id");
+		expect(context).toContain("argMax(toFloat(properties.successful_model_call_count), timestamp)");
+		expect(context).toContain("countIf(terminal_outcome = 'success') AS successful_whole_runs");
+		expect(context).toContain("countIf(successful_model_call_count > 0) AS runs_with_successful_inference");
+		expect(context).toContain(
+			"countIf(terminal_outcome = 'error' AND successful_model_call_count > 0) AS failed_runs_after_successful_inference",
+		);
+		expect(context).toContain("successful_model_call_count IS NULL) AS missing_inference_success_measurement_runs");
+		expect(context).not.toContain("coalesce(properties.successful_model_call_count");
+	});
 });
 
 describe("dashboard publication safety", () => {

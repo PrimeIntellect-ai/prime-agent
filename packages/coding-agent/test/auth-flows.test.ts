@@ -7,6 +7,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
+import type { TelemetryProperties } from "../src/core/telemetry.js";
+import { reportTelemetryError, withTelemetryErrorContext } from "../src/core/telemetry-errors.js";
 import {
 	type AuthFlowObservation,
 	ProviderAuthFlows,
@@ -113,6 +116,7 @@ describe("ProviderAuthFlows", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 	});
 
 	it("preserves the Prime CLI team when login reuses the existing Prime CLI key", async () => {
@@ -336,5 +340,39 @@ describe("ProviderAuthFlows", () => {
 		await expect(
 			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
 		).resolves.toMatchObject({ status: "success" });
+	});
+
+	it("wraps source and host error observations in the same UI authentication scope", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+		vi.stubEnv("PI_OFFLINE", "0");
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "");
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const reports: TelemetryProperties[] = [];
+		const error = new Error("Provider authentication failed");
+		const report = () =>
+			reportTelemetryError({ error, component: "authentication", operation: "login", provider: "openai" });
+		host.runWithAuthTelemetry = (run) =>
+			withTelemetryErrorContext(
+				{
+					agentDir: tempDir,
+					settingsManager: SettingsManager.inMemory(),
+					clientSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					sink: { capture: (_name, properties) => reports.push(properties), flush: async () => {} },
+				},
+				run,
+			);
+		host.onAuthError = report;
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("private-api-key");
+		vi.spyOn(authStorage, "set").mockImplementation(() => {
+			report();
+			throw error;
+		});
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
+		).resolves.toEqual({ status: "failed" });
+		expect(reports).toHaveLength(1);
+		expect(reports[0].client_session_id).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+		expect(JSON.stringify(reports)).not.toContain("private-api-key");
 	});
 });

@@ -210,7 +210,7 @@ export async function createAgentSessionServices(
 		diagnostics.push({
 			type: "info",
 			message:
-				"Prime Agent sends pseudonymous usage, timing, and error reports by default, including error categories, codes, available status codes, and original error messages with credentials redacted (up to 4,096 characters). Error messages may contain contextual details such as file paths. Reports do not separately upload logs, stacks, prompts, responses, tool content, credentials, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
+				"Prime Agent sends pseudonymous usage, timing, and error reports to Prime Intellect via PostHog by default. Error reports include codes, reviewed Prime Agent messages, and fixed system diagnostics. Prompts, responses, tool content, credentials, paths, logs, and stacks are excluded. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
 		});
 		settingsManager.setTelemetryNoticeShown(true);
 	}

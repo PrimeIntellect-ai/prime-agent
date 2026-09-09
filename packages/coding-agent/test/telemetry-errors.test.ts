@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { formatStreamFailureMessage, Type, validateToolArguments } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage, type AuthStorageBackend } from "../src/core/auth-storage.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
@@ -17,6 +18,7 @@ import {
 	type TelemetryErrorContext,
 	withTelemetryErrorContext,
 } from "../src/core/telemetry-errors.js";
+import { deserializeDaemonError } from "../src/modes/daemon/daemon-errors.js";
 
 const SECRET = "private-content-key-path-request-canary";
 const SESSION_ID = "10000000-0000-4000-8000-000000000001";
@@ -75,19 +77,87 @@ describe("application error reporting", () => {
 				error_subtype: "insufficient_balance",
 				http_status: 402,
 				diagnostic_message: "The provider reported insufficient balance.",
-				error_message: SECRET,
 				error_code_group: "insufficient_funds",
 				error_event_kind: "occurrence",
 			},
 		});
-		expect(
-			JSON.stringify(
-				sink.events.map(({ properties }) => {
-					const { error_message: _message, error_code_group: _code, ...safe } = properties;
-					return safe;
-				}),
-			),
-		).not.toContain(SECRET);
+		expect(sink.events[0].properties.error_message).toBeUndefined();
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+	});
+
+	it("omits echoed prompts from provider, tool-validation, and daemon messages at the serialized capture boundary", () => {
+		const providerError = Object.assign(new Error(SECRET), {
+			status: 401,
+			error: { type: "invalid_api_key", message: `Rejected input: ${SECRET}` },
+		});
+		const providerMessage = formatStreamFailureMessage(providerError);
+		expect(providerMessage).toContain(SECRET);
+		captureTelemetryError({
+			...context,
+			error: { errorMessage: providerMessage, status: 401, code: "invalid_api_key" },
+			component: "provider",
+			operation: "request",
+		});
+		let toolError: unknown;
+		try {
+			validateToolArguments(
+				{ name: "synthetic", description: "Synthetic test", parameters: Type.Object({ count: Type.Number() }) },
+				{ type: "toolCall", id: "synthetic", name: "synthetic", arguments: { count: SECRET } },
+			);
+		} catch (error) {
+			toolError = error;
+		}
+		expect(toolError).toBeInstanceOf(Error);
+		expect((toolError as Error).message).toContain(SECRET);
+		captureTelemetryError({ ...context, error: toolError, component: "tools", operation: "execute" });
+		const daemonError = deserializeDaemonError({
+			type: "response",
+			command: "prompt",
+			success: false,
+			error: SECRET,
+		});
+		captureTelemetryError({ ...context, error: daemonError, component: "daemon", operation: "request" });
+		expect(sink.events).toHaveLength(3);
+		expect(sink.events.map((event) => event.properties.component)).toEqual(["provider", "tools", "daemon"]);
+		for (const event of sink.events) expect(event.properties.error_message).toBeUndefined();
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+	});
+
+	it("preserves exact Prime literals and independently describes operating-system errors", () => {
+		captureTelemetryError({
+			...context,
+			error: new Error("Prime login challenge expired", { cause: new Error(SECRET) }),
+			component: "authentication",
+			operation: "login",
+		});
+		captureTelemetryError({
+			...context,
+			error: Object.assign(new Error(`ENOENT: open ${SECRET}`), { code: "ENOENT", path: SECRET }),
+			component: "session",
+			operation: "load",
+		});
+		expect(sink.events[0].properties).toMatchObject({
+			error_message: "Prime login challenge expired",
+			error_message_id: "prime_challenge_expired",
+			error_message_source: "reviewed_literal",
+		});
+		expect(sink.events[1].properties).toMatchObject({
+			error_message: "A required file or directory was not found.",
+			error_message_id: "system_file_missing",
+			error_message_source: "system_template",
+		});
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
+	});
+
+	it("inherits the current UI client scope without deduplicating another client's failure", () => {
+		const error = new Error("Prime login challenge expired");
+		const report = () => reportTelemetryError({ error, component: "authentication", operation: "validate" });
+		withTelemetryErrorContext({ ...context, clientSessionId: SESSION_ID }, () => {
+			report();
+			report();
+		});
+		withTelemetryErrorContext({ ...context, clientSessionId: RUN_ID }, report);
+		expect(sink.events.map((event) => event.properties.client_session_id)).toEqual([SESSION_ID, RUN_ID]);
 	});
 
 	it.each(["PI_OFFLINE", "DO_NOT_TRACK", "PRIME_AGENT_TELEMETRY"])(
@@ -182,14 +252,7 @@ describe("application error reporting", () => {
 			error_code: "unknown",
 			consecutive_failure_count: 1_000_000,
 		});
-		expect(
-			JSON.stringify(
-				sink.events.map(({ properties }) => {
-					const { error_message: _message, error_code_group: _code, ...safe } = properties;
-					return safe;
-				}),
-			),
-		).not.toContain(SECRET);
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
 	});
 
 	it("does not throw or recursively report a sink failure", () => {
@@ -286,14 +349,7 @@ describe("application error reporting", () => {
 			operation: "load",
 			error_code: "EACCES",
 		});
-		expect(
-			JSON.stringify(
-				sink.events.map(({ properties }) => {
-					const { error_message: _message, error_code_group: _code, ...safe } = properties;
-					return safe;
-				}),
-			),
-		).not.toContain(SECRET);
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
 	});
 
 	it("installs a monitor without taking over uncaught exception behavior", () => {
@@ -382,14 +438,7 @@ describe("application error reporting", () => {
 			operation: "login",
 			error_code: "ECONNRESET",
 		});
-		expect(
-			JSON.stringify(
-				sink.events.map(({ properties }) => {
-					const { error_message: _message, error_code_group: _code, ...safe } = properties;
-					return safe;
-				}),
-			),
-		).not.toContain(SECRET);
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
 	});
 
 	it("observes daemon failures while excluding provider logs and ordinary notices", () => {
@@ -408,14 +457,7 @@ describe("application error reporting", () => {
 		});
 		expect(sink.events).toHaveLength(1);
 		expect(sink.events[0].properties).toMatchObject({ component: "daemon", error_subtype: "unknown" });
-		expect(
-			JSON.stringify(
-				sink.events.map(({ properties }) => {
-					const { error_message: _message, error_code_group: _code, ...safe } = properties;
-					return safe;
-				}),
-			),
-		).not.toContain(SECRET);
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
 	});
 
 	it("requires scoped consent for daemon logs even when global reporting is enabled", () => {
@@ -438,13 +480,6 @@ describe("application error reporting", () => {
 		withTelemetryErrorContext(context, report);
 		expect(sink.events).toHaveLength(1);
 		expect(sink.events[0].properties).toMatchObject({ component: "daemon" });
-		expect(
-			JSON.stringify(
-				sink.events.map(({ properties }) => {
-					const { error_message: _message, error_code_group: _code, ...safe } = properties;
-					return safe;
-				}),
-			),
-		).not.toContain(SECRET);
+		expect(JSON.stringify(sink.events)).not.toContain(SECRET);
 	});
 });

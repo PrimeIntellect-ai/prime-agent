@@ -1,9 +1,10 @@
 import { lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.js";
+import type { ModelRegistry } from "../src/core/model-registry.js";
 import type { SessionAction } from "../src/core/session-action-store.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import {
@@ -19,6 +20,7 @@ import {
 	type TelemetrySink,
 	telemetryAuthCategory,
 } from "../src/core/telemetry.js";
+import { observeTelemetryRequestContext } from "../src/core/telemetry-execution-context.js";
 import { observeTelemetryAction, observeTelemetryInput } from "../src/core/telemetry-input.js";
 import { saveOnboardingTelemetryContext } from "../src/core/telemetry-journey-state.js";
 
@@ -111,6 +113,14 @@ class FakeAgentSession {
 	async disposeAsync(): Promise<void> {
 		await this.disposeCallback?.();
 	}
+}
+
+function observeModelRequest(session: FakeAgentSession): void {
+	const registry = { authStorage: { get: () => undefined } } as unknown as ModelRegistry;
+	observeTelemetryRequestContext(session, registry, getModel("openai", "gpt-5"), {
+		ok: true,
+		authSource: "runtime",
+	});
 }
 
 afterEach(() => {
@@ -291,6 +301,42 @@ describe("telemetry controls", () => {
 describe("agent telemetry aggregation", () => {
 	beforeEach(() => {
 		vi.stubEnv("DO_NOT_TRACK", "0");
+	});
+
+	it.each(["interactive", "rpc", "print", "unknown"] as const)(
+		"does not infer workload origin from %s execution",
+		(executionMode) => {
+			vi.stubEnv("PRIME_AGENT_TELEMETRY_ORIGIN", "");
+			const sink = new FakeTelemetrySink();
+			installAgentTelemetry(new FakeAgentSession() as unknown as AgentSession, {
+				agentDir: "/not-used",
+				settingsManager: SettingsManager.inMemory(),
+				...(executionMode === "unknown" ? {} : { executionMode }),
+				sink,
+			});
+			expect(sink.events.find((event) => event.name === "agent started")?.properties).toMatchObject({
+				execution_mode: executionMode,
+				workload_origin: "unknown",
+			});
+		},
+	);
+	it.each([
+		["internal", "internal"],
+		["test", "test"],
+		["private-workload-name", "unknown"],
+	])("reports only an explicitly approved origin for %s", (origin, expectedOrigin) => {
+		vi.stubEnv("PRIME_AGENT_TELEMETRY_ORIGIN", origin);
+		const sink = new FakeTelemetrySink();
+		installAgentTelemetry(new FakeAgentSession() as unknown as AgentSession, {
+			agentDir: "/not-used",
+			settingsManager: SettingsManager.inMemory(),
+			executionMode: "interactive",
+			sink,
+		});
+		expect(sink.events.find((event) => event.name === "agent started")?.properties.workload_origin).toBe(
+			expectedOrigin,
+		);
+		expect(JSON.stringify(sink.events)).not.toContain("private-workload-name");
 	});
 
 	it("captures only allowlisted built-in command names", async () => {
@@ -609,6 +655,8 @@ describe("run lifecycle observations", () => {
 					actions: { queuedCount: 0, steering: [], followUps: [], active: { kind: "turn", phase: "running" } },
 				});
 				session.emit({ type: "agent_start" });
+				session.emit({ type: "turn_start" });
+				observeModelRequest(session);
 				session.emit({ type: "message_end", message: assistantMessage() });
 				session.emit({ type: "agent_end", messages: [] });
 				action.lifecycle =
@@ -619,6 +667,7 @@ describe("run lifecycle observations", () => {
 			expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
 				input_id: inputId,
 				terminal_outcome: state === "failed" ? "error" : "cancelled",
+				successful_model_call_count: 1,
 			});
 			expect(
 				sink.events
@@ -627,6 +676,47 @@ describe("run lifecycle observations", () => {
 			).toBe(false);
 		},
 	);
+	it.each(["stop", "length", "toolUse", "error", "aborted"] as const)(
+		"counts observed successful inference separately for %s responses",
+		(stopReason) => {
+			const { session, sink } = setup();
+			session.emit({ type: "agent_start" });
+			session.emit({ type: "turn_start" });
+			observeModelRequest(session);
+			session.emit({ type: "message_end", message: assistantMessage({ stopReason }) });
+			session.emit({ type: "agent_end", messages: [] });
+			expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+				successful_model_call_count: ["stop", "length", "toolUse"].includes(stopReason) ? 1 : 0,
+			});
+		},
+	);
+	it("consumes each request observation without counting later synthetic assistant messages", () => {
+		const { session, sink } = setup();
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "turn_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "turn_start" });
+		observeModelRequest(session);
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "turn_start" });
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		expect(
+			sink.events.find((event) => event.name === "agent run completed")?.properties.successful_model_call_count,
+		).toBe(1);
+	});
+	it("does not infer successful model access from a run without a model call", () => {
+		const { session, sink } = setup();
+		session.emit({ type: "agent_start" });
+		session.emit({ type: "agent_end", messages: [] });
+		expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+			model_call_count: 0,
+			successful_model_call_count: 0,
+			terminal_outcome: "unknown",
+		});
+	});
 	it("installs one observer and pairs one run terminal with its start", async () => {
 		const { sink, session, options } = setup();
 		installAgentTelemetry(session as unknown as AgentSession, options);
@@ -646,6 +736,84 @@ describe("run lifecycle observations", () => {
 			terminal_outcome: "success",
 		});
 		expect(sink.events.filter((event) => event.name === "agent session ended")).toHaveLength(1);
+	});
+	it.each(["success", "error", "cancelled"] as const)(
+		"measures standalone compaction %s without creating a run",
+		(outcome) => {
+			const { sink, session, advance } = setup();
+			session.emit({ type: "compaction_start", reason: "manual", customInstructions: "private instructions" });
+			advance(75);
+			session.emit({
+				type: "compaction_end",
+				reason: "manual",
+				result:
+					outcome === "success"
+						? { summary: "private summary", firstKeptEntryId: "private-entry", tokensBefore: 100 }
+						: undefined,
+				aborted: outcome === "cancelled",
+				willRetry: false,
+				...(outcome === "error" ? { errorMessage: "Compaction failed" } : {}),
+			});
+			const timing = sink.events.find((event) => event.name === "agent timing");
+			expect(timing?.properties).toMatchObject({
+				stage: "compaction",
+				timing_origin: "worker_action",
+				duration_ms: 75,
+				outcome,
+				session_id: expect.any(String),
+			});
+			expect(timing?.properties).not.toHaveProperty("run_id");
+			expect(sink.events.some((event) => event.name === "agent run started")).toBe(false);
+			for (const content of ["private instructions", "private summary", "private-entry"])
+				expect(JSON.stringify(sink.events)).not.toContain(content);
+		},
+	);
+	it("does not attach an earlier standalone compaction to a later run", () => {
+		const { sink, session, advance } = setup();
+		session.emit({ type: "compaction_start", reason: "threshold" });
+		advance(10);
+		session.emit({ type: "agent_start" });
+		advance(15);
+		session.emit({ type: "compaction_end", reason: "threshold", aborted: true, willRetry: false, result: undefined });
+		const timing = sink.events.find(
+			(event) => event.name === "agent timing" && event.properties.stage === "compaction",
+		);
+		expect(timing?.properties).toMatchObject({ timing_origin: "worker_action", duration_ms: 25 });
+		expect(timing?.properties).not.toHaveProperty("run_id");
+		session.emit({ type: "message_end", message: assistantMessage() });
+		session.emit({ type: "agent_end", messages: [] });
+		expect(sink.events.find((event) => event.name === "agent run completed")?.properties).toMatchObject({
+			compaction_count: 0,
+			compaction_duration_ms: 0,
+		});
+	});
+	it("records interrupted standalone compaction time during controlled shutdown", async () => {
+		const { sink, session, advance } = setup();
+		session.emit({ type: "compaction_start", reason: "threshold" });
+		advance(40);
+		await session.disposeAsync();
+		expect(sink.events.find((event) => event.name === "agent timing")?.properties).toMatchObject({
+			stage: "compaction",
+			timing_origin: "worker_action",
+			duration_ms: 40,
+			outcome: "shutdown_interrupted",
+		});
+		expect(sink.events.find((event) => event.name === "agent session ended")?.properties.terminal_outcome).toBe(
+			"shutdown_interrupted",
+		);
+	});
+	it("does not replay standalone compaction timing after consent is withdrawn", () => {
+		const { sink, session, options, advance } = setup();
+		session.emit({ type: "compaction_start", reason: "manual" });
+		advance(10);
+		options.settingsManager.setTelemetryEnabled(false);
+		options.settingsManager.setTelemetryEnabled(true);
+		session.emit({ type: "compaction_end", reason: "manual", aborted: true, willRetry: false, result: undefined });
+		expect(sink.events.some((event) => event.name === "agent timing")).toBe(false);
+		session.emit({ type: "compaction_start", reason: "manual" });
+		advance(15);
+		session.emit({ type: "compaction_end", reason: "manual", aborted: true, willRetry: false, result: undefined });
+		expect(sink.events.find((event) => event.name === "agent timing")?.properties.duration_ms).toBe(15);
 	});
 	it("keeps missing completion distinct from a crash or a successful earlier turn", async () => {
 		const { sink, session } = setup();
@@ -673,7 +841,7 @@ describe("run lifecycle observations", () => {
 			type: "message_end",
 			message: assistantMessage({
 				stopReason: "error",
-				errorMessage: "private provider output",
+				errorMessage: "Provider server error",
 				diagnostics: [{ type: "provider_stream_failure", timestamp: 0, details: { status: 503 } }],
 			}),
 		});
@@ -683,7 +851,7 @@ describe("run lifecycle observations", () => {
 			attempt: 1,
 			maxAttempts: 3,
 			delayMs: 100,
-			errorMessage: "private provider output",
+			errorMessage: "Provider server error",
 		});
 		advance(40);
 		session.emit({ type: "agent_start" });
@@ -702,13 +870,16 @@ describe("run lifecycle observations", () => {
 		});
 		expect(JSON.stringify(sink.events)).not.toContain("private tool output");
 		expect(JSON.stringify(sink.events)).not.toContain("private.custom");
-		expect(errors[0].properties.error_message).toBe("private provider output");
+		expect(errors[0].properties).toMatchObject({
+			error_message: "Provider server error",
+			error_message_id: "provider_server_error",
+		});
 		expect(
 			sink.events.find((event) => event.name === "agent timing" && event.properties.stage === "time_to_error")
 				?.properties.provider_category,
 		).toBe("openai");
 		expect(JSON.stringify(sink.events.filter((event) => event.name !== "agent error"))).not.toContain(
-			"private provider output",
+			"Provider server error",
 		);
 	});
 	it("keeps cancellation during retry backoff separate from the preceding error", () => {
@@ -929,4 +1100,57 @@ describe("run lifecycle observations", () => {
 		});
 		expect(starts[1].properties.elapsed_since_onboarding_ms).toBeGreaterThanOrEqual(1000);
 	});
+
+	it.each([false, true])(
+		"uses setup elapsed time only from the input's own attempt (persisted attempt replaced: %s)",
+		async (replacePersistedAttempt) => {
+			const { sink, session, options } = setup();
+			const input = {
+				inputId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+				onboardingId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+				clientSessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+			};
+			const onboarding = {
+				onboardingId: input.onboardingId,
+				clientSessionId: input.clientSessionId,
+				startedAt: Date.now() - 1000,
+			};
+			saveOnboardingTelemetryContext(options.agentDir, onboarding);
+			await observeTelemetryInput(session, input, async () => {
+				const action: SessionAction = {
+					id: "local-action",
+					source: "interactive",
+					delivery: "when_run_idle",
+					wake: "immediate",
+					payload: { kind: "turn", records: [], text: "private prompt" },
+					lifecycle: { state: "queued" },
+				};
+				observeTelemetryAction(session, action);
+				if (replacePersistedAttempt)
+					saveOnboardingTelemetryContext(options.agentDir, {
+						...onboarding,
+						onboardingId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+						clientSessionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+					});
+				action.lifecycle = { state: "committing" };
+				observeTelemetryAction(session, action, "preparing");
+				session.emit({ type: "agent_start" });
+				session.emit({ type: "message_end", message: assistantMessage() });
+				session.emit({ type: "agent_end", messages: [] });
+			});
+			const events = sink.events.filter((event) =>
+				["agent run started", "agent run completed"].includes(event.name),
+			);
+			expect(events).toHaveLength(2);
+			for (const event of events) {
+				expect(event.properties).toMatchObject({
+					input_id: input.inputId,
+					onboarding_id: input.onboardingId,
+					client_session_id: input.clientSessionId,
+				});
+				if (replacePersistedAttempt) expect(event.properties).not.toHaveProperty("elapsed_since_onboarding_ms");
+				else expect(event.properties.elapsed_since_onboarding_ms).toBeGreaterThanOrEqual(1000);
+			}
+		},
+	);
 });
