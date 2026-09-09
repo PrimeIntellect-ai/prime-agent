@@ -48,6 +48,12 @@ export function mergeHarnessStateChanges(
 		}
 	}
 	if (isDeepStrictEqual(baseline.refinements, proposed.refinements.slice(0, baseline.refinements.length))) {
+		if (
+			proposed.refinements.length > baseline.refinements.length &&
+			!isDeepStrictEqual(baseline.refinements, latest.refinements.slice(0, baseline.refinements.length))
+		) {
+			throw new Error("Harness refinement history changed before save. Reload and retry.");
+		}
 		merged.refinements.push(...structuredClone(proposed.refinements.slice(baseline.refinements.length)));
 	} else {
 		if (!isDeepStrictEqual(baseline.refinements, latest.refinements)) {

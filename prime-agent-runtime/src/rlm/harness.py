@@ -70,6 +70,8 @@ def _merge_harness_changes(baseline: dict, proposed: dict, latest: dict) -> dict
     events = proposed["refinements"]
     baseline_events = baseline["refinements"]
     if events[:len(baseline_events)] == baseline_events:
+        if len(events) > len(baseline_events) and latest["refinements"][:len(baseline_events)] != baseline_events:
+            raise RuntimeError("Harness refinement history changed before save. Reload and retry.")
         merged["refinements"].extend(deepcopy(events[len(baseline_events):]))
     else:
         if baseline_events != latest["refinements"]:
@@ -793,7 +795,7 @@ class HarnessState:
             return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
         self._ensure_local_writable()
         self._sync_from_disk()
-        event_id = id or f"refine_{len(self.refinements) + 1:04d}"
+        event_id = id or f"refine_{uuid4().hex}"
         normalized_changes = [changes] if isinstance(changes, str) else list(changes)
         event = RefinementEvent(
             id=event_id,

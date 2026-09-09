@@ -67,6 +67,8 @@ elif action == "schema":
     state._sync_from_disk()
     state.schema = 3
     state.save()
+elif action == "refine":
+    state.record_refinement(entry_id, [entry_id])
 else:
     state.create_memory(entry_id, entry_id, id=entry_id)
 print("accepted", flush=True)
@@ -223,6 +225,88 @@ describe("concurrent harness memory persistence", () => {
 			expect(state.refinements.some((event) => event.id === "host-migration")).toBe(true);
 		} finally {
 			await python.cleanup();
+		}
+	});
+
+	it("assigns distinct default IDs to concurrent Python refinements", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const dir = join(harness.tempDir, "harness");
+		mkdirSync(dir);
+		const writers = [pythonWriter(dir, "one", true, "refine"), pythonWriter(dir, "two", true, "refine")];
+		try {
+			await Promise.all(writers.map((writer) => writer.waitReady()));
+			for (const writer of writers) writer.release();
+			for (const result of await Promise.all(writers.map((writer) => writer.done))) expect(result.code).toBe(0);
+			const events = loadHarnessState(dir).refinements;
+			expect(events.map((event) => event.trigger).sort()).toEqual(["one", "two"]);
+			expect(new Set(events.map((event) => event.id)).size).toBe(2);
+		} finally {
+			await Promise.all(writers.map((writer) => writer.cleanup()));
+		}
+	});
+
+	it.each([
+		["Python", "reset"],
+		["Python", "rewrite"],
+		["host", "reset"],
+		["host", "rewrite"],
+	])("rejects an appended %s refinement after an accepted history %s", async (writer, change) => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const dir = join(harness.tempDir, "harness");
+		createHostMemory(dir, "seed-entry");
+		const stale = loadHarnessState(dir, "local");
+		applyRefinementProposal(stale, proposal("pending-entry"), { id: "pending-event", scope: "local" });
+		const python = writer === "Python" ? pythonWriter(dir, "pending-event", true, "refine") : undefined;
+		try {
+			await python?.waitReady();
+			const current = loadHarnessState(dir, "local");
+			if (change === "reset") current.refinements = [];
+			else current.refinements[0].outcome = "accepted replacement";
+			saveHarnessState(dir, current);
+			if (python) {
+				python.release();
+				const result = await python.done;
+				expect(result.code).toBe(1);
+				expect(result.stderr).toContain("Harness refinement history changed before save");
+			} else {
+				expect(() => saveHarnessState(dir, stale)).toThrow("Harness refinement history changed before save");
+			}
+			const state = loadHarnessState(dir);
+			expect(state.refinements).toEqual(current.refinements);
+			expect(Object.keys(state.entries.memory)).toEqual(["seed-entry"]);
+			expect(existsSync(`${getHarnessStatePath(dir)}.lock`)).toBe(false);
+		} finally {
+			await python?.cleanup();
+		}
+	});
+
+	it.each(["Python", "host"])("preserves a history reset during an unrelated %s memory save", async (writer) => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const dir = join(harness.tempDir, "harness");
+		createHostMemory(dir, "seed-entry");
+		const stale = loadHarnessState(dir, "local");
+		stale.entries.memory["seed-entry"].content = "updated memory";
+		const python = writer === "Python" ? pythonWriter(dir, "python-entry", true) : undefined;
+		try {
+			await python?.waitReady();
+			const current = loadHarnessState(dir, "local");
+			current.refinements = [];
+			saveHarnessState(dir, current);
+			if (python) {
+				python.release();
+				expect((await python.done).code).toBe(0);
+			} else {
+				saveHarnessState(dir, stale);
+			}
+			const state = loadHarnessState(dir);
+			expect(state.refinements).toEqual([]);
+			if (python) expect(state.entries.memory["python-entry"].content).toBe("python-entry");
+			else expect(state.entries.memory["seed-entry"].content).toBe("updated memory");
+		} finally {
+			await python?.cleanup();
 		}
 	});
 
