@@ -18,7 +18,8 @@ describe("early sandbox process dispatch", () => {
 		expect(normalSource).toContain('import { APP_NAME } from "../config.js";');
 		expect(normalSource).toContain("restoreSandboxEnv();");
 		expect(normalSource).toContain('await import("./register-bedrock.js");');
-		expect(normalSource).toContain('await import("../cli.js");');
+		expect(normalSource).toContain('const { runCli } = await import("../cli-main.js");');
+		expect(normalSource).toContain("await runCli();");
 	});
 
 	test("internal routes fail closed with one empty-output code when protected runtime files are absent", () => {

@@ -6,14 +6,13 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 const bundleDir = join(process.cwd(), "dist", "bundle");
 const bundleEntry = join(bundleDir, "cli.js");
-const distEntry = join(process.cwd(), "dist", "cli.js");
 const bundleScript = join(process.cwd(), "scripts", "bundle.mjs");
 const bun = process.execPath;
 const helpers = [
 	{
 		name: "hosted-session-store-posix-helper.py",
-		size: 159255,
-		digest: "3107f2126945a6664875d07c66578ee93fabb097364222b353c40f440918558c",
+		size: 198891,
+		digest: "904b3998dafd0ce87a579a58280a54c27184a167b4034ca22bef4bfb1d616816",
 	},
 	{
 		name: "ws-posix-helper.py",
@@ -23,17 +22,12 @@ const helpers = [
 ] as const;
 
 beforeAll(() => {
-	if (!existsSync(distEntry)) {
-		for (const packageDir of ["../tui", "../ai", "../agent", "."]) {
-			execFileSync(bun, ["--bun", "tsgo", "-p", "tsconfig.build.json"], {
-				cwd: join(process.cwd(), packageDir),
-			});
-		}
+	for (const packageDir of ["../tui", "../ai", "../agent", "."]) {
+		execFileSync(bun, ["--bun", "tsgo", "-p", "tsconfig.build.json"], {
+			cwd: join(process.cwd(), packageDir),
+		});
 	}
-	const unbundledHelperDir = join(process.cwd(), "dist", "modes", "daemon", "sandbox");
-	if (helpers.some((helper) => !existsSync(join(unbundledHelperDir, helper.name)))) {
-		execFileSync(bun, [join(process.cwd(), "scripts", "copy-assets.ts"), "package"], { cwd: process.cwd() });
-	}
+	execFileSync(bun, [join(process.cwd(), "scripts", "copy-assets.ts"), "package"], { cwd: process.cwd() });
 	if (existsSync(bundleDir)) {
 		rmSync(bundleDir, { recursive: true, force: true });
 	}
@@ -84,7 +78,7 @@ describe("bun-bundle build output", () => {
 
 describe("bun-bundle entry content", () => {
 	it("preserves shebang", () => {
-		expect(readEntry().startsWith("#!/usr/bin/env node")).toBe(true);
+		expect(readEntry().startsWith("#!/usr/bin/env bun")).toBe(true);
 	});
 
 	it("injects require polyfill banner (createRequire)", () => {

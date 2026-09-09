@@ -6173,14 +6173,36 @@ export class AgentDaemon {
 					const resolved = this.resolveAgentFamilySessionName(options.fromState, targetSelector, error);
 					targetState = await this.getOrHydrateBoundSessionState(resolved.activeSessionId);
 				} else {
-					const residentSubagent = this.findResidentRlmSubagent(targetSelector);
-					if (residentSubagent) {
+					const initialResidentMatches = [...this.sessions.values()].filter(
+						(state) =>
+							state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === targetSelector,
+					);
+					if (initialResidentMatches.length > 1) {
+						throw new Error(`Session selector "${targetSelector}" is ambiguous`);
+					}
+					const reservedResident = initialResidentMatches[0];
+					if (reservedResident) {
 						if (options.origin === "agent" && options.fromState) {
-							this.assertAgentFamilyReachable(options.fromState, residentSubagent);
+							this.assertAgentFamilyReachable(options.fromState, reservedResident);
 						}
-						targetState = await this.waitForHydratingChild(residentSubagent, targetSelector);
-					} else {
-						const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector);
+						reservedResident.pendingAttaches++;
+					}
+					try {
+						const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector, true);
+						const residentMatches = [...this.sessions.values()].filter(
+							(state) =>
+								state.runtime.metadata.kind === "subagent" &&
+								state.runtime.metadata.rlmChildId === targetSelector,
+						);
+						const residentChild = residentMatches[0];
+						if (
+							residentMatches.length > 1 ||
+							(residentChild &&
+								passiveSubagent &&
+								this.findSessionBySessionFile(passiveSubagent.entry.sessionFile) !== residentChild)
+						) {
+							throw new Error(`Session selector "${targetSelector}" is ambiguous`);
+						}
 						if (passiveSubagent) {
 							if (options.origin === "agent" && options.fromState) {
 								assertAgentFamilyReach(
@@ -6189,18 +6211,20 @@ export class AgentDaemon {
 								);
 							}
 							targetState = await this.hydratePassiveRlmSubagent(passiveSubagent);
-						} else {
-							const hydratingChild = this.findResidentRlmSubagent(targetSelector);
-							if (hydratingChild) {
-								targetState = await this.waitForHydratingChild(hydratingChild, targetSelector);
-							} else if (this.options.worker && options.fromState) {
-								// The supervisor can resolve and wake a saved worker even when it is no longer
-								// present in this worker's resident peer snapshot.
-								return this.sendRemoteAgentSessionMessage(options.fromState, targetSelector, message);
-							} else {
-								throw error;
+						} else if (residentChild) {
+							if (options.origin === "agent" && options.fromState) {
+								this.assertAgentFamilyReachable(options.fromState, residentChild);
 							}
+							targetState = await this.waitForHydratingChild(residentChild, targetSelector);
+						} else if (this.options.worker && options.fromState) {
+							// The supervisor can resolve and wake a saved worker even when it is no longer
+							// present in this worker's resident peer snapshot.
+							return this.sendRemoteAgentSessionMessage(options.fromState, targetSelector, message);
+						} else {
+							throw error;
 						}
+					} finally {
+						if (reservedResident) reservedResident.pendingAttaches--;
 					}
 				}
 			}
