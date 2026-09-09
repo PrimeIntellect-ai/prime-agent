@@ -151,6 +151,19 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.js";
 export { DefaultPackageManager } from "./core/package-manager.js";
+export {
+	applyProjectSkillTrust,
+	createInMemoryProjectSkillTrustStore,
+	createProjectSkillTrustStore,
+	getProjectPythonSkills,
+	isProjectPythonSkill,
+	PROJECT_SKILL_TRUST_COMMAND,
+	PROJECT_SKILL_TRUST_FILE,
+	type ProjectSkillTrustChoice,
+	type ProjectSkillTrustDecision,
+	type ProjectSkillTrustStatus,
+	type ProjectSkillTrustStore,
+} from "./core/project-skill-trust.js";
 export type {
 	HarnessState,
 	RefinementEdit,

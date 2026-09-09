@@ -167,6 +167,16 @@ help(web_search)
 
 Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.prime/agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Prime Agent rebuilds the kernel venv so dependency changes are picked up.
 
+### Project Skill Trust
+
+A project Python skill (`.prime/agent/skills/<name>/pyproject.toml` inside the repository you open, or a Python skill added by the project's `.prime/agent/settings.json`) is code from that repository. Installing it runs its build backend and importing it runs its module code in the kernel, so Prime Agent does neither until you trust the project:
+
+- Interactive sessions ask once at startup: **Trust and install**, **Not now** (ask again next session), or **Never for this project**.
+- Sessions without a UI (`-p`/`--json`, ACP, RLM subagents) never prompt; an undecided or denied project stays untrusted.
+- Until trusted, the skill is still listed and its `SKILL.md` can be read, but it is exposed as a markdown skill: no `python_import`, nothing installed, nothing imported.
+- `/trust-project-skills on|off|reset|status` changes the decision later and reloads. Decisions are stored per canonical project path in `~/.prime/agent/project-skill-trust.json`.
+- Trusted project skills are installed into a per-project kernel venv (`~/.prime/agent/kernel-venv-projects/<name>-<hash>`) instead of the shared `kernel-venv`, so project packages and their dependencies never persist into sessions in other projects. User-level skills (`~/.prime/agent/skills`) and built-in skills keep using the shared venv.
+
 If you set `PRIME_AGENT_KERNEL_PYTHON`, Prime Agent does not install packages into that environment. The Python must already have a current `prime-agent-runtime` and the default runtime packages installed. Missing Python skill imports are disabled with a warning and calling the skill raises a `RuntimeError`.
 
 ### Optional CLI Command

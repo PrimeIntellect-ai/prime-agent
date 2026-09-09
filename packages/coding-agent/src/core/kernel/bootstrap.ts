@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
+import { constants, existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -101,6 +101,12 @@ export type KernelBootstrapProgressHandler = (message: string) => void;
 export interface EnsureKernelPythonOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	onProgress?: KernelBootstrapProgressHandler;
+	/**
+	 * Project the kernel runs in. When any project-scoped Python skill is requested
+	 * the kernel gets a per-project venv keyed by this path, so project code never
+	 * lands in the shared user venv. Defaults to process.cwd().
+	 */
+	projectDir?: string;
 }
 
 interface BootstrapPythonSkill {
@@ -357,12 +363,13 @@ function formatPythonSkillInstallArgs(skill: BootstrapPythonSkill): string[] {
 	return ["--editable", skill.packagePath];
 }
 
-function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): string {
+function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[], projectDir: string | undefined): string {
 	return [
 		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
 		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
 		process.env.HOME ?? "",
 		process.env.XDG_DATA_HOME ?? "",
+		projectDir ?? "",
 		JSON.stringify(pythonSkills),
 	].join("\0");
 }
@@ -371,6 +378,40 @@ export function getKernelVenvDir(): string {
 	const override = process.env.PRIME_AGENT_KERNEL_VENV;
 	if (override) return path.resolve(expandHome(override));
 	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
+}
+
+function hasProjectScopedSkills(pythonSkills: readonly KernelPythonSkill[] | undefined): boolean {
+	return (pythonSkills ?? []).some((skill) => skill.scope === "project");
+}
+
+function canonicalProjectDir(projectDir: string): string {
+	const resolved = path.resolve(projectDir);
+	try {
+		return realpathSync(resolved);
+	} catch {
+		return resolved;
+	}
+}
+
+function projectKernelVenvDirFor(baseVenv: string, projectDir: string): string {
+	const canonical = canonicalProjectDir(projectDir);
+	const slug =
+		path
+			.basename(canonical)
+			.replace(/[^A-Za-z0-9._-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 32) || "project";
+	const digest = createHash("sha256").update(canonical).digest("hex").slice(0, 12);
+	return path.join(path.dirname(baseVenv), `${path.basename(baseVenv)}-projects`, `${slug}-${digest}`);
+}
+
+/**
+ * Kernel venv used when a project's own Python skills are installed. Sibling of the
+ * shared venv (`<venv>-projects/<name>-<hash>`), one per canonical project path, so
+ * project packages and their dependencies never persist into the shared venv.
+ */
+export function getProjectKernelVenvDir(projectDir: string, baseVenv: string = getKernelVenvDir()): string {
+	return projectKernelVenvDirFor(baseVenv, projectDir);
 }
 
 function getXdgKernelVenvDir(): string {
@@ -884,6 +925,7 @@ function formatBootstrapFailure(error: unknown): Error {
 async function ensureKernelPythonUncached(
 	options: EnsureKernelPythonOptions,
 	pythonSkills: readonly BootstrapPythonSkill[],
+	projectDir: string | undefined,
 ): Promise<string> {
 	const override = process.env.PRIME_AGENT_KERNEL_PYTHON;
 	if (override) {
@@ -918,7 +960,8 @@ async function ensureKernelPythonUncached(
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
-	const venv = await resolveWritableKernelVenvDir();
+	const sharedVenv = await resolveWritableKernelVenvDir();
+	const venv = projectDir === undefined ? sharedVenv : projectKernelVenvDirFor(sharedVenv, projectDir);
 	const python = kernelVenvPython(venv);
 	const runtimeIdentity = await resolveRuntimeIdentity();
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
@@ -951,10 +994,14 @@ async function ensureKernelPythonUncached(
 
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
 	const pythonSkills = normalizePythonSkills(options.pythonSkills);
-	const key = ensureKernelPythonKey(pythonSkills);
+	// Only sessions that actually install project code leave the shared venv.
+	const projectDir = hasProjectScopedSkills(options.pythonSkills)
+		? canonicalProjectDir(options.projectDir ?? process.cwd())
+		: undefined;
+	const key = ensureKernelPythonKey(pythonSkills, projectDir);
 	if (inFlightEnsureKernelPython?.key === key) return inFlightEnsureKernelPython.promise;
 
-	const promise = ensureKernelPythonUncached(options, pythonSkills).finally(() => {
+	const promise = ensureKernelPythonUncached(options, pythonSkills, projectDir).finally(() => {
 		if (inFlightEnsureKernelPython?.promise === promise) inFlightEnsureKernelPython = null;
 	});
 	inFlightEnsureKernelPython = { key, promise };

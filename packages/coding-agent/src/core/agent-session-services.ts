@@ -10,9 +10,11 @@ import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
+import { createProjectSkillTrustExtension } from "./extensions/builtin/project-skill-trust.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
+import { createProjectSkillTrustStore, type ProjectSkillTrustStore } from "./project-skill-trust.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
 import type { SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
@@ -42,6 +44,8 @@ export interface CreateAgentSessionServicesOptions {
 	 */
 	noBuiltinHerdrReporter?: boolean;
 	telemetryDisabled?: true;
+	/** Trust store for project Python skills. Default: file store in agentDir. */
+	projectSkillTrust?: ProjectSkillTrustStore;
 }
 
 export interface AgentSessionCreationOptions {
@@ -89,6 +93,7 @@ export interface AgentSessionServices {
 	modelRegistry: ModelRegistry;
 	resourceLoader: ResourceLoader;
 	mcpManager: McpManager;
+	projectSkillTrust: ProjectSkillTrustStore;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
 
@@ -167,9 +172,16 @@ export async function createAgentSessionServices(
 	// noExtensions is a full opt-out: it disables the built-in reporter too,
 	// not just discovered extension files.
 	const skipHerdrReporter = options.noBuiltinHerdrReporter || options.resourceLoaderOptions?.noExtensions;
-	const builtinExtensionFactories = skipHerdrReporter
-		? []
-		: [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())];
+	const projectSkillTrust = options.projectSkillTrust ?? createProjectSkillTrustStore(agentDir);
+	const builtinExtensionFactories = [
+		// Always available: it is the only way to change a persisted project skill
+		// trust decision from inside a session, including under --no-extensions.
+		createProjectSkillTrustExtension({
+			store: projectSkillTrust,
+			getSkills: () => resourceLoader.getSkills().skills,
+		}),
+		...(skipHerdrReporter ? [] : [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())]),
+	];
 	const resourceLoader: DefaultResourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		extensionFactories: [...builtinExtensionFactories, ...userExtensionFactories],
@@ -216,6 +228,7 @@ export async function createAgentSessionServices(
 		modelRegistry,
 		resourceLoader,
 		mcpManager,
+		projectSkillTrust,
 		diagnostics,
 	};
 }
@@ -239,6 +252,7 @@ export async function createAgentSessionFromServices(
 		modelRegistry: options.services.modelRegistry,
 		resourceLoader: options.services.resourceLoader,
 		mcpManager: options.services.mcpManager,
+		projectSkillTrust: options.services.projectSkillTrust,
 		sessionManager: options.sessionManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,

@@ -7,7 +7,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import { canonicalizePath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
+import { createSyntheticSourceInfo, type SourceInfo, type SourceScope } from "./source-info.js";
 
 const log = getLogger("coding-agent.skills");
 
@@ -108,6 +108,8 @@ export type Skill = MarkdownSkill | PythonSkill;
 
 export interface PythonSkillRuntimeInfo extends SkillPythonMetadata {
 	name: string;
+	/** Where the skill came from; project-scoped skills install into a per-project kernel venv. */
+	scope?: SourceScope;
 }
 
 export interface LoadSkillsResult {
@@ -261,6 +263,7 @@ export function getPythonSkillRuntimeInfo(skills: readonly Skill[]): PythonSkill
 			importName: skill.python.importName,
 			packagePath: skill.python.packagePath,
 			pyprojectPath: skill.python.pyprojectPath,
+			scope: skill.sourceInfo.scope,
 		}));
 }
 

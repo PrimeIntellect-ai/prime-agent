@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import {
 	DEFAULT_RLM_EXTRA_UV_ARGS,
 	ensureKernelPython,
 	getKernelVenvDir,
+	getProjectKernelVenvDir,
 	type KernelPythonSkill,
 	kernelVenvPython,
 	resolveRuntimeIdentity,
@@ -241,6 +242,64 @@ describe("kernel bootstrap", () => {
 				pyprojectHash: pyprojectHash(pythonSkill.pyprojectPath),
 			},
 		]);
+	});
+
+	it("installs project-scoped Python skills into a per-project venv, never the shared venv", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const projectDir = join(tempDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		const projectSkill: KernelPythonSkill = { ...createPythonSkill("marker-skill"), scope: "project" };
+		const userSkill: KernelPythonSkill = { ...createPythonSkill("web-search"), scope: "user" };
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		const projectVenv = getProjectKernelVenvDir(projectDir, venv);
+		expect(projectVenv.startsWith(`${venv}-projects/`)).toBe(true);
+		expect(projectVenv).not.toBe(venv);
+		await expect(ensureKernelPython({ pythonSkills: [userSkill, projectSkill], projectDir })).resolves.toBe(
+			join(projectVenv, "bin", "python"),
+		);
+
+		const log = readFileSync(logPath, "utf8");
+		expect(log).toContain(`venv ${projectVenv} --python 3.11 --seed`);
+		expect(log).not.toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(log).toContain(`--python ${join(projectVenv, "bin", "python")} --editable ${projectSkill.packagePath}`);
+		expect(log).not.toContain(`--python ${join(venv, "bin", "python")}`);
+		expect(existsSync(venv)).toBe(false);
+		const version = JSON.parse(readFileSync(join(projectVenv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
+			"marker_skill",
+			"web_search",
+		]);
+	});
+
+	it("keeps user-scoped Python skills in the shared venv", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const projectDir = join(tempDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		const userSkill: KernelPythonSkill = { ...createPythonSkill("web-search"), scope: "user" };
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [userSkill], projectDir })).resolves.toBe(
+			join(venv, "bin", "python"),
+		);
+
+		const log = readFileSync(logPath, "utf8");
+		expect(log).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(`${venv}-projects`)).toBe(false);
+	});
+
+	it("derives one stable project venv per canonical project path", () => {
+		const venv = join(tempDir, "kernel-venv");
+		const projectA = join(tempDir, "project-a");
+		const projectB = join(tempDir, "project-b");
+		mkdirSync(projectA, { recursive: true });
+		mkdirSync(projectB, { recursive: true });
+
+		expect(getProjectKernelVenvDir(projectA, venv)).toBe(getProjectKernelVenvDir(join(projectA, "."), venv));
+		expect(getProjectKernelVenvDir(projectA, venv)).not.toBe(getProjectKernelVenvDir(projectB, venv));
+		expect(getProjectKernelVenvDir(projectA, venv)).toMatch(/kernel-venv-projects\/project-a-[0-9a-f]{12}$/);
 	});
 
 	it("installs sibling Python skill dependencies with dependent editable packages", async () => {

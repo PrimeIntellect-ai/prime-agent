@@ -153,4 +153,6 @@ This keeps credentials, provider execution, transcript writes, worker routing, a
 
 The Python kernel runs model-generated Python and project commands with the worker's operating-system permissions. It is a durable control environment, not a security sandbox. Review third-party Python skills and use an external sandbox or restricted environment for untrusted repositories and instructions.
 
+Python skills shipped inside the opened repository are not installed or imported until you trust the project (see [Project Skill Trust](skills.md#project-skill-trust)); once trusted they live in a per-project kernel venv rather than the shared one.
+
 For implementation details, see [RLM Runtime Architecture](rlm-runtime.md).
