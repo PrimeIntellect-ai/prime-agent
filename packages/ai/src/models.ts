@@ -1,5 +1,5 @@
 import { MODELS } from "./models.generated.js";
-import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.js";
+import type { Api, KnownProvider, Model, ModelThinkingLevel, ServiceTier, Usage } from "./types.js";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
@@ -35,14 +35,43 @@ export function getModels<TProvider extends KnownProvider>(
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
 }
 
-export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
+/**
+ * Whether a model's provider accepts (and honors) a requested service tier.
+ * This is the single eligibility truth shared by tier UI gating and request
+ * building; keep it in sync with the per-provider service_tier forwarding.
+ */
+export function supportsServiceTier<TApi extends Api>(model: Model<TApi>, tier: ServiceTier): boolean {
+	if (tier === null || tier === "default") return true;
+	// OpenRouter accepts top-level service_tier (flex|priority) for every model,
+	// routes to matching tier endpoints where they exist, and bills by the tier
+	// that actually served the request:
+	// https://openrouter.ai/docs/guides/features/service-tiers
+	if (model.provider === "openrouter" && model.api === "openai-completions") {
+		return tier === "flex" || tier === "priority";
+	}
+	const openaiResponses = model.provider === "openai" && model.api === "openai-responses";
+	const codexResponses = model.provider === "openai-codex" && model.api === "openai-codex-responses";
+	if (!openaiResponses && !codexResponses) return false;
+	// "auto" defers the tier choice to OpenAI and is valid for every model there.
+	if (tier === "auto") return true;
 	const eligibleId =
 		model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-");
-	return (
-		eligibleId &&
-		((model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
-			(model.provider === "openai" && model.api === "openai-responses"))
-	);
+	if (tier === "priority") return eligibleId;
+	// Flex processing is an API-key feature; the ChatGPT (Codex OAuth) backend has no flex tier.
+	return tier === "flex" && eligibleId && openaiResponses;
+}
+
+/** Clamp a requested tier to "default" when the model does not support it. */
+export function clampServiceTier<TApi extends Api>(
+	model: Model<TApi> | null | undefined,
+	tier: ServiceTier,
+): ServiceTier {
+	if (tier === null || tier === "default") return tier;
+	return model && supportsServiceTier(model, tier) ? tier : "default";
+}
+
+export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
+	return supportsServiceTier(model, "priority");
 }
 
 export interface CostOverrides {

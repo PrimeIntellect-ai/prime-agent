@@ -39,6 +39,7 @@ import { recordStreamFailure } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { withOpenCodeHeaders } from "./opencode-headers.js";
+import { applyServiceTierPricing } from "./service-tier-pricing.js";
 import { buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -305,12 +306,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				return block;
 			};
 
+			let responseServiceTier: ChatCompletionChunk["service_tier"] | undefined;
 			for await (const chunk of openaiStream) {
 				if (!chunk || typeof chunk !== "object") continue;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
 				output.responseId ||= chunk.id;
+				if (typeof chunk.service_tier === "string") {
+					responseServiceTier = chunk.service_tier;
+				}
 				if (typeof chunk.model === "string" && chunk.model.length > 0 && chunk.model !== model.id) {
 					output.responseModel ||= chunk.model;
 				}
@@ -456,6 +461,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					}
 				}
 			}
+
+			// Like the responses path: price by the tier that served the request,
+			// falling back to the requested tier when the provider does not echo one.
+			applyServiceTierPricing(output.usage, responseServiceTier ?? params.service_tier, model.id);
 
 			for (const block of blocks) {
 				finishBlock(block);
@@ -677,6 +686,14 @@ function buildParams(
 		if (offValue !== null) {
 			(params as any).reasoning_effort = offValue ?? "none";
 		}
+	}
+
+	// OpenAI and OpenRouter accept a top-level service_tier (OpenRouter: flex and
+	// priority, https://openrouter.ai/docs/guides/features/service-tiers). Prime
+	// Inference tolerates but ignores the field (probed 2026-09-01), so it is not
+	// forwarded; other OpenAI-compatible gateways may reject unknown fields.
+	if (options?.serviceTier != null && (model.provider === "openai" || model.provider === "openrouter")) {
+		params.service_tier = options.serviceTier;
 	}
 
 	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {

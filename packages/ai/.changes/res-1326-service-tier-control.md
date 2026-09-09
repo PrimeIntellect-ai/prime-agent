@@ -1,0 +1,1 @@
+- Added `supportsServiceTier`/`clampServiceTier` as the single service-tier eligibility predicate, service_tier forwarding on the OpenAI-completions path for OpenAI and OpenRouter, and shared service-tier pricing that also adjusts completions-path costs by the tier that served the request ([RES-1326](https://linear.app/primeintellect/issue/RES-1326)).
