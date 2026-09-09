@@ -760,6 +760,8 @@ describe("AgentsViewMode", () => {
 			activeSessionId: "spender",
 			sessionId: "spender-session",
 			sessionName: "spender",
+			// Provider path deliberately mismatches the catalog provider: only the id's
+			// embedded path matters to the column stripper.
 			model: { ...getModel("openai", "gpt-4o"), id: "moonshotai/gpt-5.6-sol" },
 			created,
 			summary: "Analyzing runtime composition",
