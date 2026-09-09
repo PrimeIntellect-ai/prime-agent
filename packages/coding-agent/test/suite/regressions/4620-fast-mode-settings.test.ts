@@ -67,6 +67,23 @@ describe("ENG-4620 fast mode settings", () => {
 		expect(harness.settingsManager.getDefaultServiceTier()).toBe("priority");
 	});
 
+	it("keeps a requested tier as the preference while the current model cannot honor it", async () => {
+		harness = await createHarness({
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }, { id: "gpt-4-turbo" }],
+		});
+
+		await harness.session.setModel(harness.getModel("gpt-4-turbo")!);
+		harness.session.setServiceTier("flex");
+
+		expect(harness.session.serviceTier).toBe("default");
+		expect(harness.settingsManager.getDefaultServiceTier()).toBe("default");
+
+		await harness.session.setModel(harness.getModel("gpt-5.5")!);
+		expect(harness.session.serviceTier).toBe("flex");
+	});
+
 	it("persists a flex tier session entry and restores it on resume", async () => {
 		harness = await createHarness({
 			api: "openai-responses",

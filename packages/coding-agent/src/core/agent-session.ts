@@ -7401,18 +7401,21 @@ export class AgentSession {
 
 	setServiceTier(serviceTier: ServiceTier): void {
 		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
-		const preferenceChanged = effectiveServiceTier !== this._serviceTierPreference;
+		const preferenceChanged = serviceTier !== this._serviceTierPreference;
 		const effectiveTierChanged = effectiveServiceTier !== this.agent.state.serviceTier;
 		if (!preferenceChanged && !effectiveTierChanged) {
 			return;
 		}
-		this._serviceTierPreference = effectiveServiceTier;
+		// The preference and the session entry keep the REQUESTED tier (only the
+		// active state clamps), so switching to or resuming on a capable model
+		// re-activates it instead of a clamped "default" shadowing it.
+		this._serviceTierPreference = serviceTier;
 		if (preferenceChanged) {
-			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			// Persist only when the model honors the REQUESTED tier; a clamped-to-default
+			this.sessionManager.appendServiceTierChange(serviceTier);
+			// Persist only when the model honors the requested tier; a clamped-to-default
 			// request must not stomp the user's saved default.
 			if (this.model && supportsServiceTier(this.model, serviceTier)) {
-				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
+				this.settingsManager.setDefaultServiceTier(serviceTier);
 			}
 		}
 		if (effectiveTierChanged) {

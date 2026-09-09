@@ -417,9 +417,7 @@ describe("InteractiveMode /effort", () => {
 			fastInteractiveModePrototype.handleFastCommand.call(context);
 
 			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
-			expect(context.showStatus).toHaveBeenCalledWith(
-				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication",
-			);
+			expect(context.showStatus).toHaveBeenCalledWith("Current model does not support fast mode (priority tier)");
 		});
 
 		it("shows Fast mode beside the model and effort level", () => {

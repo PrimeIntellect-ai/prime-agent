@@ -99,14 +99,17 @@ describe("SettingsSelectorComponent", () => {
 		expect(onIdleEvictionMinutesChange).toHaveBeenCalledWith(180);
 	});
 
-	test("cycles the default service tier row and reports the new tier", () => {
+	test("selects a default service tier through the submenu and reports it once", () => {
 		const onDefaultServiceTierChange = vi.fn();
 		const component = new SettingsSelectorComponent(config, { ...callbacks, onDefaultServiceTierChange });
 		const list = component.getSettingsList();
 		for (const character of "service") list.handleInput(character);
 
-		list.handleInput("\r");
+		list.handleInput("\r"); // open the submenu
+		list.handleInput("\x1b[B"); // default -> flex
+		list.handleInput("\r"); // commit
 
+		expect(onDefaultServiceTierChange).toHaveBeenCalledTimes(1);
 		expect(onDefaultServiceTierChange).toHaveBeenCalledWith("flex");
 	});
 

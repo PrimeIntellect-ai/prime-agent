@@ -307,7 +307,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			};
 
 			let responseServiceTier: ChatCompletionChunk["service_tier"] | undefined;
-			let responseUpstreamProvider: string | undefined;
 			for await (const chunk of openaiStream) {
 				if (!chunk || typeof chunk !== "object") continue;
 
@@ -316,11 +315,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				output.responseId ||= chunk.id;
 				if (typeof chunk.service_tier === "string") {
 					responseServiceTier = chunk.service_tier;
-				}
-				// OpenRouter chunks name the upstream that served the request (e.g. "OpenAI").
-				const chunkProvider = (chunk as { provider?: unknown }).provider;
-				if (typeof chunkProvider === "string") {
-					responseUpstreamProvider = chunkProvider;
 				}
 				if (typeof chunk.model === "string" && chunk.model.length > 0 && chunk.model !== model.id) {
 					output.responseModel ||= chunk.model;
@@ -468,12 +462,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 			}
 
-			// Like the responses path: price by the tier that served the request,
-			// falling back to the requested tier when the provider does not echo one.
-			// The multiplier table is OpenAI's; OpenRouter bills tier requests at the
-			// serving provider's own rate, so apply it only when OpenAI served.
-			if (model.provider !== "openrouter" || responseUpstreamProvider?.toLowerCase() === "openai") {
-				applyServiceTierPricing(output.usage, responseServiceTier ?? params.service_tier, model.id);
+			// The multiplier table is authoritative only for OpenAI's own rates, and
+			// providers may serve a tier request off-tier, so multiply only when this
+			// is OpenAI's surface AND it echoed the tier that actually served. OpenRouter
+			// costs come from its reported usage.cost instead (see parseChunkUsage).
+			if (model.provider === "openai") {
+				applyServiceTierPricing(output.usage, responseServiceTier, model.id);
 			}
 
 			for (const block of blocks) {
@@ -1126,6 +1120,7 @@ function parseChunkUsage(
 		completion_tokens?: number;
 		prompt_cache_hit_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+		cost?: number;
 	},
 	model: Model<"openai-completions">,
 	cacheWriteCost?: number,
@@ -1154,6 +1149,22 @@ function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage, cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost });
+	// OpenRouter reports the actually billed cost (credits == USD) in usage.cost,
+	// already priced by the endpoint and service tier that served the request
+	// (https://openrouter.ai/docs/api-reference/overview). Trust it over the
+	// catalog-rate estimate, scaling the component breakdown to match.
+	if (model.provider === "openrouter" && typeof rawUsage.cost === "number" && rawUsage.cost > 0) {
+		if (usage.cost.total > 0) {
+			const scale = rawUsage.cost / usage.cost.total;
+			usage.cost.input *= scale;
+			usage.cost.output *= scale;
+			usage.cost.cacheRead *= scale;
+			usage.cost.cacheWrite *= scale;
+		} else {
+			usage.cost.input = rawUsage.cost;
+		}
+		usage.cost.total = rawUsage.cost;
+	}
 	return usage;
 }
 

@@ -20,6 +20,13 @@ const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	maxPrimaryColumnWidth: 32,
 };
 
+const SERVICE_TIER_OPTIONS: SelectItem[] = [
+	{ value: "default", label: "default", description: "Standard processing" },
+	{ value: "flex", label: "flex", description: "Cheaper, slower, may hit capacity limits" },
+	{ value: "priority", label: "priority", description: "Faster, more expensive (fast mode)" },
+	{ value: "auto", label: "auto", description: "Provider picks the tier" },
+];
+
 const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
 	minimal: "Very brief reasoning",
@@ -244,7 +251,15 @@ export class SettingsSelectorComponent extends Container {
 				label: "Default service tier",
 				description: "Service tier for new sessions; applies to the current session when the model supports it",
 				currentValue: config.defaultServiceTier,
-				values: ["default", "flex", "priority", "auto"],
+				submenu: (currentValue, done) =>
+					new SelectSubmenu(
+						"Default Service Tier",
+						"Service tier for new sessions; applies to the current session when the model supports it",
+						SERVICE_TIER_OPTIONS,
+						currentValue,
+						(value) => done(value),
+						() => done(),
+					),
 			},
 			{
 				id: "hide-thinking",

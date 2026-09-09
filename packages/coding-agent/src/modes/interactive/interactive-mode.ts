@@ -1371,7 +1371,6 @@ export class InteractiveMode {
 		if (tierCommand) {
 			tierCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
 				this.getServiceTierCompletions(prefix);
-			tierCommand.argumentHint = `[${this.getAvailableServiceTiers().join("|")}]`;
 		}
 
 		const heartbeatCommand = slashCommands.find((command) => command.name === "heartbeat");
@@ -8053,8 +8052,7 @@ export class InteractiveMode {
 	}
 
 	private handleFastCommand(): void {
-		const unavailableMessage =
-			"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
+		const unavailableMessage = "Current model does not support fast mode (priority tier)";
 		if (!this.currentModelSupportsFastMode()) {
 			this.showStatus(unavailableMessage);
 			return;
