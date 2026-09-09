@@ -404,6 +404,7 @@ describe("#502 unified session view regressions", () => {
 			renameTarget: mode === "rename" ? { identity: "target" } : undefined,
 			actionModeSearchQuery: "needle",
 			editor: { getText: () => "action editor text" },
+			getSearchQuery: privateMethod<(this: unknown) => string>("getSearchQuery"),
 			scopedRecords: [
 				{ identity: "match", identityAliases: [], section: "idle", searchableText: "needle session" },
 				{ identity: "other", identityAliases: [], section: "idle", searchableText: "other session" },

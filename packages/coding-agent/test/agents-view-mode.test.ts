@@ -951,6 +951,21 @@ describe("AgentsViewMode", () => {
 			invoke("reconcileCatalogs", view);
 			const headers = lines().filter((line) => /^(Running|Idle|Inactive) \(\d+\)/.test(line));
 			expect(headers).toEqual(["Running (0)", "Idle (1)", "Inactive (0)"]);
+			// A filter that empties some sections hides those and keeps the rest.
+			Reflect.set(view, "lastListedSummaries", [
+				summary({ sessionName: "only-idle" }),
+				summary({
+					id: "busy",
+					activeSessionId: "busy",
+					sessionId: "busy-session",
+					sessionName: "busy",
+					activity: "working",
+					isStreaming: true,
+				}),
+			]);
+			invoke("reconcileCatalogs", view);
+			invoke("setSearchQuery", view, "only-idle");
+			expect(lines().filter((line) => /^(Running|Idle|Inactive) \(/.test(line))).toEqual(["Idle (1)"]);
 			// A filter that empties every section keeps the current search behavior.
 			invoke("setSearchQuery", view, "no-such-session");
 			expect(lines().filter((line) => /^(Running|Idle|Inactive) \(/.test(line))).toEqual([]);
