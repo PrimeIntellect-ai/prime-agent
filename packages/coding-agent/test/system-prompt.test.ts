@@ -44,7 +44,7 @@ describe("buildRlmPrompt", () => {
 		});
 
 		expect(prompt).toContain("Installed Python skill modules (pre-imported): `websearch`.");
-		expect(prompt).toContain("A callable `rlm` is already in your global namespace");
+		expect(prompt).toContain("An `rlm` object is already in your global namespace");
 		expect(prompt).toContain("persistent Python REPL");
 		expect(prompt).toContain("Python is the orchestration language");
 	});
@@ -337,7 +337,7 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("Call contract: read each installed Python skill's SKILL.md");
 		expect(prompt).toContain("Continual harness skill entries are Python REPL skills");
 		expect(prompt).toContain("Spawn a continual harness subagent spec by composing a concise task prompt");
-		expect(prompt).toContain("handle = await rlm('sub-task')");
+		expect(prompt).toContain("handle = await rlm.spawn('sub-task')");
 		expect(prompt).toContain("admission returns immediately");
 		expect(prompt).toContain("never the child's answer");
 		expect(prompt).toContain("receiver_role='parent'");
@@ -430,7 +430,7 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("You are a general purpose agent that uses code to solve tasks.");
 		expect(prompt).toContain("Working directory: /repo");
 		expect(prompt).toContain("Conversation log: /repo/.pi/sessions/session.jsonl");
-		expect(prompt).toContain("await rlm('sub-task')");
+		expect(prompt).toContain("await rlm.spawn('sub-task')");
 		expect(prompt).toContain("returns at admission, not completion");
 		expect(prompt).toContain("Results arrive only through an available messaging capability or files");
 		expect(prompt).toContain("recover direct child handles");
