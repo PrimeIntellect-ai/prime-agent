@@ -9,3 +9,4 @@
 - Folded the USD per million tokens unit into the model detail header line and left clear whitespace at the end of the detail block.
 - Rounded model picker token prices to at most three decimals, showing sub-$0.001 rates as <0.001 instead of a misleading $0.
 - Centered the models picker effort cluster near the row midpoint with font-covered circle glyphs; fills render light gray and reserve the saturated purple for the highlighted row.
+- Removed the explanatory title and subtitle lines from the model, provider, and MCP pickers; the search row now leads each picker.

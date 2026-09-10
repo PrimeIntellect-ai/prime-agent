@@ -65,8 +65,8 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			{
 				getRows,
 				inline: true,
-				title: "Providers",
-				subtitle: "Connect with a subscription or API key.",
+				title: "",
+				subtitle: "",
 				searchPlaceholder: "Search providers",
 			},
 		);
@@ -97,8 +97,8 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			{
 				getRows,
 				inline: true,
-				title: "MCP Connections",
-				subtitle: "Connect MCP integrations and service credentials.",
+				title: "",
+				subtitle: "",
 				searchPlaceholder: "Search MCP connections",
 				emptyMessage: "No MCP connections. Use /mcp add to configure a server.",
 			},

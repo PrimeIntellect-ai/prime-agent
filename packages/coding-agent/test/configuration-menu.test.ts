@@ -90,22 +90,21 @@ describe("ConfigurationMenuComponent", () => {
 		const menu = await createMenu({ requestRender, onSelectProvider: selectProvider });
 
 		let output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("Providers");
+		expect(output).toContain("Search providers");
 		expect(output).toContain("Anthropic");
-		expect(output).not.toContain("Models");
-		expect(output).not.toContain("MCP Connections");
+		expect(output).not.toContain("Faux One");
 		expect(output).not.toContain("Serper (web search)");
 
 		const models = await createMenu({ initialTab: "models" });
 		output = stripAnsi(models.render(120).join("\n"));
-		expect(output).toContain("Models");
+		expect(output).toContain("Search models");
 		expect(output).toContain("Faux One");
-		expect(output).not.toContain("Providers");
-		expect(output).not.toContain("MCP Connections");
+		expect(output).not.toContain("Anthropic");
+		expect(output).not.toContain("Serper (web search)");
 
 		const mcp = await createMenu({ initialTab: "mcp-connections" });
 		output = stripAnsi(mcp.render(120).join("\n"));
-		expect(output).toContain("MCP Connections");
+		expect(output).toContain("Search MCP connections");
 		expect(output).toContain("Serper (web search)");
 		expect(output).not.toContain("Anthropic");
 
@@ -116,6 +115,31 @@ describe("ConfigurationMenuComponent", () => {
 		expect(requestRender).toHaveBeenCalled();
 		menu.handleInput("\r");
 		expect(selectProvider).toHaveBeenCalledWith(expect.objectContaining({ id: "anthropic" }));
+	});
+
+	it("renders no explanatory header above the picker search rows", async () => {
+		const menu = await createMenu({ initialTab: "models" });
+		const lines = stripAnsi(menu.render(120).join("\n")).split("\n");
+		const output = lines.join("\n");
+		expect(output).not.toContain("Models");
+		expect(output).not.toContain("All models across supported providers.");
+		expect(output).not.toContain("Providers");
+		expect(output).not.toContain("Connect with a subscription or API key.");
+		expect(output).not.toContain("MCP Connections");
+		expect(output).not.toContain("Connect MCP integrations and service credentials.");
+		// The search row is the first content; nothing renders above it.
+		expect(lines[0]).toContain("─");
+		expect(output).toContain("Search models");
+
+		const providers = await createMenu({ initialTab: "providers" });
+		const providerLines = stripAnsi(providers.render(120).join("\n")).split("\n");
+		expect(providerLines[0]).toContain("─");
+		expect(providerLines.join("\n")).toContain("Search providers");
+
+		const mcp = await createMenu({ initialTab: "mcp-connections" });
+		const mcpLines = stripAnsi(mcp.render(120).join("\n")).split("\n");
+		expect(mcpLines[0]).toContain("─");
+		expect(mcpLines.join("\n")).toContain("Search MCP connections");
 	});
 
 	it("keeps Tab and Shift+Tab inside the picker without switching bodies", async () => {
@@ -208,13 +232,13 @@ describe("ConfigurationMenuComponent", () => {
 		}
 	});
 
-	it("keeps the picker title visible across supported themes", async () => {
+	it("keeps picker content visible across supported themes", async () => {
 		const menu = await createMenu();
 
 		for (const themeName of ["dark", "light", "prime"] as const) {
 			initTheme(themeName);
 			const rendered = menu.render(120).join("\n");
-			expect(stripAnsi(rendered)).toContain("Providers");
+			expect(stripAnsi(rendered)).toContain("Anthropic");
 			expect(rendered).not.toBe(stripAnsi(rendered));
 		}
 	});
