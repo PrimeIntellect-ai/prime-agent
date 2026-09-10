@@ -853,7 +853,7 @@ describe("AgentsViewMode", () => {
 			expect(lines[1]).toBe("");
 			expect(lines[2]).toBe("Running (1)");
 			expect(lines).toContain("Idle (1)");
-			expect(lines).toContain("Inactive (0)");
+			expect(lines).not.toContain("Inactive (0)");
 			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
 			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
 			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
@@ -865,13 +865,13 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("keeps all status categories when empty and after a search returns no matches", () => {
+	it("omits empty status categories and keeps feedback when no sessions match", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		const finish = vi.fn();
 		Reflect.set(view, "finish", finish);
 		const render = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
-		const expectEmptyGroups = (message: string) => {
-			expect(render().slice(1)).toEqual(["", "Running (0)", "", "Idle (0)", "", "Inactive (0)", "", message]);
+		const expectEmptyList = (message: string) => {
+			expect(render()).toEqual([message]);
 			expect(Reflect.get(view, "rows")).toEqual([]);
 			invoke("moveSelection", view, 1);
 			invoke("openSelected", view);
@@ -879,14 +879,14 @@ describe("AgentsViewMode", () => {
 		};
 		try {
 			invoke("reconcileCatalogs", view);
-			expectEmptyGroups("No sessions yet.");
+			expectEmptyList("No sessions yet.");
 			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "Review changes" })]);
 			invoke("reconcileCatalogs", view);
-			expect(render()).toContain("Running (0)");
+			expect(render()).not.toContain("Running (0)");
 			expect(render()).toContain("Idle (1)");
-			expect(render()).toContain("Inactive (0)");
+			expect(render()).not.toContain("Inactive (0)");
 			invoke("setSearchQuery", view, "unmatched-session");
-			expectEmptyGroups("No sessions match your search.");
+			expectEmptyList("No sessions match your search.");
 			invoke("setSearchQuery", view, "");
 			invoke("moveSelection", view, 1);
 			invoke("openSelected", view);
