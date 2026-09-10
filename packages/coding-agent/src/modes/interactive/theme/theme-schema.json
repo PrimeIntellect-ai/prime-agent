@@ -60,6 +60,7 @@
 				"toolPanelBg",
 				"toolTitle",
 				"toolOutput",
+				"mdBody",
 				"mdHeading",
 				"mdLink",
 				"mdLinkUrl",
@@ -191,6 +192,10 @@
 				"toolOutput": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool execution box output text color"
+				},
+				"mdBody": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Markdown body text (assistant output)"
 				},
 				"mdHeading": {
 					"$ref": "#/$defs/colorValue",

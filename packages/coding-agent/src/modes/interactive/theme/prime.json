@@ -53,6 +53,7 @@
 		"toolPanelBg": "surface",
 		"toolTitle": "",
 		"toolOutput": "muted",
+		"mdBody": "#e4e4e7",
 		"mdHeading": "primarySoft",
 		"mdLink": "info",
 		"mdLinkUrl": "dim",

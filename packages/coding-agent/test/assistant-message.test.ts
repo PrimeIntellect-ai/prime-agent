@@ -320,3 +320,40 @@ describe("AssistantMessageComponent streaming identity", () => {
 		}
 	});
 });
+
+describe("AssistantMessageComponent body text color", () => {
+	test("renders assistant body text in the softened mdBody color", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: "Plain answer." }]),
+		);
+		const raw = component.render(120).join("\n");
+
+		expect(stripAnsi(raw)).toContain("Plain answer.");
+		expect(raw).toContain(theme.getFgAnsi("mdBody"));
+	});
+
+	test("keeps heading and inline code colors on top of mdBody", () => {
+		initTheme("dark");
+
+		const message = createAssistantMessage([{ type: "text", text: "## Title\n\nBody with `code`." }]);
+		const raw = new AssistantMessageComponent(message).render(120).join("\n");
+
+		expect(raw).toContain(theme.getFgAnsi("mdHeading"));
+		expect(raw).toContain(theme.getFgAnsi("mdCode"));
+		expect(raw).toContain(theme.getFgAnsi("mdBody"));
+	});
+
+	test("keeps thinking text on thinkingText instead of mdBody", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		const message = createAssistantMessage([{ type: "thinking", thinking: "Quiet reasoning." }]);
+		const raw = new AssistantMessageComponent(message, false).render(120).join("\n");
+
+		expect(stripAnsi(raw)).toContain("Quiet reasoning.");
+		expect(raw).toContain(theme.getFgAnsi("thinkingText"));
+		expect(raw).not.toContain(theme.getFgAnsi("mdBody"));
+	});
+});
