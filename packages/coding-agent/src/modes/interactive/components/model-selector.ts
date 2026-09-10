@@ -142,6 +142,7 @@ const EFFORT_NAME_COLUMN_MIN = 12;
 interface EffortLayout {
 	nameColumn: number;
 	squareSlots: number;
+	gap: number;
 	showLabel: boolean;
 	showCluster: boolean;
 }
@@ -424,7 +425,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private getEffortLayout(startIndex: number, endIndex: number): EffortLayout {
-		const empty: EffortLayout = { nameColumn: 0, squareSlots: 0, showLabel: false, showCluster: false };
+		const empty: EffortLayout = {
+			nameColumn: 0,
+			squareSlots: 0,
+			gap: 0,
+			showLabel: false,
+			showCluster: false,
+		};
 		const reasoningItems: ModelItem[] = [];
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i];
@@ -446,7 +453,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 		const available = Math.max(1, width - 2 - maxTrailingWidth - 2);
 
-		const nameColumn = Math.min(
+		const maxNameColumn = Math.min(
 			Math.max(...reasoningItems.map((item) => visibleWidth(item.model.name))),
 			EFFORT_NAME_COLUMN_MAX,
 		);
@@ -455,23 +462,32 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		);
 		const clusterWidth = squareSlots * 2 - 1;
 		const labelWidth = Math.max(...reasoningItems.map((item) => visibleWidth(this.getEffort(item) ?? "")));
-		// Space, arrow slot, and space on each side of the squares cluster, plus
-		// the space before the label. Shrink the name column before dropping the
-		// label or the cluster so rows stay aligned at every width.
+		// Arrow slots and the spaces around the squares and label. The ladder
+		// keeps one of those columns as the gap after the name cell, shrinks the
+		// name column next, and only then drops the label or the whole cluster,
+		// so rows stay aligned at every width.
 		const arrowsAndGaps = 6;
-		if (nameColumn + clusterWidth + labelWidth + arrowsAndGaps <= available) {
-			return { nameColumn, squareSlots, showLabel: true, showCluster: true };
+		// Sit the cluster near the row's horizontal center, clamped between the
+		// name column and the trailing zone.
+		const place = (nameColumn: number, showLabel: boolean): EffortLayout => {
+			const span = clusterWidth + (showLabel ? labelWidth + 5 : 4);
+			const desired = Math.floor(width / 2 - span / 2) - 2 - nameColumn;
+			const gap = Math.max(1, Math.min(desired, available - nameColumn - span));
+			return { nameColumn, squareSlots, gap, showLabel, showCluster: true };
+		};
+		if (maxNameColumn + clusterWidth + labelWidth + arrowsAndGaps <= available) {
+			return place(maxNameColumn, true);
 		}
 		const labelNameColumn = available - clusterWidth - labelWidth - arrowsAndGaps;
 		if (labelNameColumn >= EFFORT_NAME_COLUMN_MIN) {
-			return { nameColumn: labelNameColumn, squareSlots, showLabel: true, showCluster: true };
+			return place(Math.min(maxNameColumn, labelNameColumn), true);
 		}
-		if (nameColumn + clusterWidth + arrowsAndGaps <= available) {
-			return { nameColumn, squareSlots, showLabel: false, showCluster: true };
+		if (maxNameColumn + clusterWidth + arrowsAndGaps <= available) {
+			return place(maxNameColumn, false);
 		}
 		const clusterNameColumn = available - clusterWidth - arrowsAndGaps;
 		if (clusterNameColumn >= EFFORT_NAME_COLUMN_MIN) {
-			return { nameColumn: clusterNameColumn, squareSlots, showLabel: false, showCluster: true };
+			return place(Math.min(maxNameColumn, clusterNameColumn), false);
 		}
 		return empty;
 	}
@@ -480,12 +496,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		levels: ModelThinkingLevel[],
 		effort: ModelThinkingLevel | undefined,
 		squareSlots: number,
+		selected: boolean,
 	): string {
 		const onLevels = levels.filter((level) => level !== "off");
 		if (onLevels.length === 0) return "";
-		const filledColor = theme.getEffortSquareColor();
+		const filledColor = selected ? theme.getEffortSquareColor() : (glyph: string) => theme.fg("muted", glyph);
 		const filled = effort === undefined || effort === "off" ? 0 : onLevels.indexOf(effort) + 1;
-		const squares = onLevels.map((_, index) => (index < filled ? filledColor("▓") : theme.fg("dim", "░")));
+		const squares = onLevels.map((_, index) => (index < filled ? filledColor("●") : theme.fg("dim", "○")));
 		const spaced = squares.join(" ");
 		return spaced + " ".repeat(Math.max(0, squareSlots * 2 - 1 - visibleWidth(spaced)));
 	}
@@ -586,7 +603,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Show visible slice of filtered models
 		const effortLayout = this.inline
 			? this.getEffortLayout(startIndex, endIndex)
-			: { nameColumn: 0, squareSlots: 0, showLabel: false, showCluster: false };
+			: { nameColumn: 0, squareSlots: 0, gap: 0, showLabel: false, showCluster: false };
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i];
@@ -607,12 +624,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				const effort = this.getEffort(item);
 				if (levels.length > 0 && effort !== undefined) {
 					const nameCell = truncateToWidth(item.model.name, effortLayout.nameColumn, "…", true);
+					const gap = " ".repeat(effortLayout.gap);
 					const leftArrow = isSelected ? theme.fg("dim", "←") : " ";
 					const rightArrow = isSelected ? theme.fg("dim", "→") : " ";
-					const squares = this.renderEffortSquares(levels, effort, effortLayout.squareSlots);
+					const squares = this.renderEffortSquares(levels, effort, effortLayout.squareSlots, isSelected);
 					primary = effortLayout.showLabel
-						? `${nameCell} ${leftArrow} ${squares} ${rightArrow} ${theme.fg("muted", effort)}`
-						: `${nameCell} ${leftArrow} ${squares} ${rightArrow}`;
+						? `${nameCell}${gap}${leftArrow} ${squares} ${rightArrow} ${theme.fg("muted", effort)}`
+						: `${nameCell}${gap}${leftArrow} ${squares} ${rightArrow}`;
 				}
 			}
 
