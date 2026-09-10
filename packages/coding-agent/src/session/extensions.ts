@@ -17,6 +17,7 @@ import {
 import { emitSessionShutdownEvent } from "../core/extensions/runner.js";
 import type { McpManager } from "../core/mcp/mcp-manager.js";
 import type { ModelRegistry } from "../core/model-registry.js";
+import type { PromptTemplate } from "../core/prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "../core/resource-loader.js";
 import type { SessionManager } from "../core/session-manager.js";
 import type { SlashCommandInfo } from "../core/slash-commands.js";
@@ -32,6 +33,8 @@ export interface SessionExtensionsHost {
 	sessionManager: SessionManager;
 	resourceLoader: ResourceLoader;
 	modelRegistry: ModelRegistry;
+	getModelRegistry(): ModelRegistry;
+	getPromptTemplates(): ReadonlyArray<PromptTemplate>;
 	getAgentMessageController(): AgentSessionMessageController | undefined;
 	refreshCurrentModel(): void;
 	sendCustomMessage(...args: Parameters<ExtensionActions["sendMessage"]>): Promise<void>;
@@ -178,7 +181,7 @@ export class SessionExtensions {
 				sourceInfo: command.sourceInfo,
 			}));
 
-			const templates: SlashCommandInfo[] = this.host.resourceLoader.getPrompts().prompts.map((template) => ({
+			const templates: SlashCommandInfo[] = this.host.getPromptTemplates().map((template) => ({
 				name: template.name,
 				description: template.description,
 				source: "prompt",
@@ -238,7 +241,7 @@ export class SessionExtensions {
 				refreshTools: () => this.host.refreshTools(),
 				getCommands,
 				setModel: async (model) => {
-					if (!this.host.modelRegistry.hasConfiguredAuth(model)) return false;
+					if (!this.host.getModelRegistry().hasConfiguredAuth(model)) return false;
 					await this.host.setModel(model);
 					return true;
 				},

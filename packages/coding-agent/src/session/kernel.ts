@@ -73,12 +73,13 @@ export class SessionKernel {
 		if ((this.prewarm || hasSnapshot) && activeToolNames.includes("ipython")) this.provisioner?.prewarm();
 		this.built = true;
 	}
-	async dispose(snapshot: boolean): Promise<void> {
+	async dispose(snapshot: boolean, afterKernel?: () => Promise<void> | undefined): Promise<void> {
 		try {
 			await this.provisioner?.dispose({ snapshot });
 		} catch {
 			/* Failed startup already cleaned up. */
 		}
+		if (afterKernel) await afterKernel();
 	}
 	async syncAfterCompaction(): Promise<void> {
 		const provisioner = this.provisioner;
