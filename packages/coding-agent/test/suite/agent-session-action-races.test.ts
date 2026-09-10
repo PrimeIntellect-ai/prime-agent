@@ -8,8 +8,12 @@ import { createDeferred } from "./scheduling.js";
 type ActionKind = "turn" | "command";
 
 interface CommitFenceInternals {
+	_refinement: {
+		_refineInFlight?: Promise<void>;
+	};
+
 	_actionStore: ActionStore<SessionAction>;
-	_refineInFlight?: Promise<void>;
+
 	_scheduleSessionInputPump(): void;
 	_acquireDirectTurnAdmissionFence(signal?: AbortSignal): Promise<{ release(): void }>;
 	_acquireSessionActionCommitFence(signal?: AbortSignal): Promise<{ release(): void }>;
@@ -246,9 +250,10 @@ describe("AgentSession action commit-fence races", () => {
 
 		const refineGate = createDeferred();
 		const refineInFlight = refineGate.promise.finally(() => {
-			if (internals._refineInFlight === refineInFlight) internals._refineInFlight = undefined;
+			if (internals._refinement._refineInFlight === refineInFlight)
+				internals._refinement._refineInFlight = undefined;
 		});
-		internals._refineInFlight = refineInFlight;
+		internals._refinement._refineInFlight = refineInFlight;
 		heldFence.release();
 		await yieldToEventLoop();
 

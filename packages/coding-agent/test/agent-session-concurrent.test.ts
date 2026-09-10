@@ -21,6 +21,7 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { BuildSystemPromptOptions } from "../src/core/system-prompt.js";
+import type { SessionRefinement } from "../src/session/refinement.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -155,9 +156,9 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 		let drainStarted = false;
 		const internals = session as unknown as {
-			_drainPendingRefinementForDisposal: () => Promise<void>;
+			_refinement: SessionRefinement;
 		};
-		vi.spyOn(internals, "_drainPendingRefinementForDisposal").mockImplementation(async () => {
+		vi.spyOn(internals._refinement, "_drainPendingRefinementForDisposal").mockImplementation(async () => {
 			drainStarted = true;
 			await drainGate;
 		});

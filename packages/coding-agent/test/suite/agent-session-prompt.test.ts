@@ -575,17 +575,25 @@ stale extension instructions`,
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as {
+			_refinement: {
+				_refineInFlight?: Promise<void>;
+				_refineAbortController?: AbortController;
+				_execution: {
+					_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+					_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
+				};
+			};
+
 			_baseSystemPrompt: string;
-			_refineInFlight?: Promise<void>;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
 		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockImplementation(async () => {
+		vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({
+			id: "race-plan",
+			proposal: { edits: [] },
+		});
+		vi.spyOn(internals._refinement._execution, "_applyRefine").mockImplementation(async () => {
 			internals._baseSystemPrompt = "refined $& base";
 			harness.session.agent.state.systemPrompt = "refined $& base";
-			internals._refineAbortController = undefined;
+			internals._refinement._refineAbortController = undefined;
 			return {
 				id: "refine_race",
 				summary: "refined",
@@ -607,7 +615,7 @@ stale extension instructions`,
 		const promptPromise = harness.session.prompt("normal prompt");
 		await hookStarted;
 		await harness.session.refine({ instructions: "complete while the extension hook is suspended" });
-		expect(internals._refineInFlight).toBeUndefined();
+		expect(internals._refinement._refineInFlight).toBeUndefined();
 		releaseHook();
 		await promptPromise;
 
@@ -640,16 +648,24 @@ stale extension instructions`,
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as {
+			_refinement: {
+				_refineAbortController?: AbortController;
+				_execution: {
+					_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+					_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
+				};
+			};
+
 			_baseSystemPrompt: string;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
 		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockImplementation(async () => {
+		vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({
+			id: "race-plan",
+			proposal: { edits: [] },
+		});
+		vi.spyOn(internals._refinement._execution, "_applyRefine").mockImplementation(async () => {
 			internals._baseSystemPrompt = "refined base";
 			harness.session.agent.state.systemPrompt = "refined base";
-			internals._refineAbortController = undefined;
+			internals._refinement._refineAbortController = undefined;
 			return {
 				id: "refine_independent",
 				summary: "refined",
@@ -709,11 +725,17 @@ stale injected extension instructions`,
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as {
+			_refinement: {
+				_refineInFlight?: Promise<void>;
+				_refineAbortController?: AbortController;
+				_execution: {
+					_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+					_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
+				};
+			};
+
 			_baseSystemPrompt: string;
-			_refineInFlight?: Promise<void>;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
+
 			_promptInjectedMessage(
 				text: string,
 				message: {
@@ -726,11 +748,14 @@ stale injected extension instructions`,
 				},
 			): Promise<void>;
 		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockImplementation(async () => {
+		vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({
+			id: "race-plan",
+			proposal: { edits: [] },
+		});
+		vi.spyOn(internals._refinement._execution, "_applyRefine").mockImplementation(async () => {
 			internals._baseSystemPrompt = "refined injected base";
 			harness.session.agent.state.systemPrompt = "refined injected base";
-			internals._refineAbortController = undefined;
+			internals._refinement._refineAbortController = undefined;
 			return {
 				id: "refine_race",
 				summary: "refined",
@@ -759,7 +784,7 @@ stale injected extension instructions`,
 		});
 		await hookStarted;
 		await harness.session.refine({ instructions: "complete while the injected hook is suspended" });
-		expect(internals._refineInFlight).toBeUndefined();
+		expect(internals._refinement._refineInFlight).toBeUndefined();
 		releaseHook();
 		await injectedPrompt;
 
@@ -809,7 +834,10 @@ stale injected extension instructions`,
 
 	it("preserves an empty extension system prompt across an injected refine handoff wait", async () => {
 		let sessionInternals: {
-			_refineInFlight?: Promise<void>;
+			_refinement: {
+				_refineInFlight?: Promise<void>;
+			};
+
 			_promptInjectedMessage(
 				text: string,
 				message: {
@@ -828,11 +856,11 @@ stale injected extension instructions`,
 				(pi) => {
 					pi.on("before_agent_start", async () => {
 						let releaseRefine: (() => void) | undefined;
-						sessionInternals._refineInFlight = new Promise<void>((resolve) => {
+						sessionInternals._refinement._refineInFlight = new Promise<void>((resolve) => {
 							releaseRefine = resolve;
 						});
 						setTimeout(() => {
-							sessionInternals._refineInFlight = undefined;
+							sessionInternals._refinement._refineInFlight = undefined;
 							releaseRefine?.();
 						}, 0);
 						return { systemPrompt: "" };
@@ -863,18 +891,18 @@ stale injected extension instructions`,
 	});
 
 	it("preserves an extension system prompt across a refine handoff wait", async () => {
-		let sessionInternals: { _refineInFlight?: Promise<void> };
+		let sessionInternals: { _refinement: { _refineInFlight?: Promise<void> } };
 		const harness = await createHarness({
 			systemPrompt: "base prompt",
 			extensionFactories: [
 				(pi) => {
 					pi.on("before_agent_start", async (event) => {
 						let releaseRefine: (() => void) | undefined;
-						sessionInternals._refineInFlight = new Promise<void>((resolve) => {
+						sessionInternals._refinement._refineInFlight = new Promise<void>((resolve) => {
 							releaseRefine = resolve;
 						});
 						setTimeout(() => {
-							sessionInternals._refineInFlight = undefined;
+							sessionInternals._refinement._refineInFlight = undefined;
 							releaseRefine?.();
 						}, 0);
 						return {
@@ -887,7 +915,7 @@ extension instructions`,
 			],
 		});
 		harnesses.push(harness);
-		sessionInternals = harness.session as unknown as { _refineInFlight?: Promise<void> };
+		sessionInternals = harness.session as unknown as { _refinement: { _refineInFlight?: Promise<void> } };
 		let providerSystemPrompt = "";
 		harness.setResponses([
 			(context) => {
@@ -908,11 +936,16 @@ extension instructions`,
 		// The post-wait guard must detect the base change and discard the
 		// stale extension prompt, using the refined base instead.
 		let sessionInternals: {
+			_refinement: {
+				_refineInFlight?: Promise<void>;
+				_refineAbortController?: AbortController;
+				_execution: {
+					_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+					_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
+				};
+			};
+
 			_baseSystemPrompt: string;
-			_refineInFlight?: Promise<void>;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
 		};
 		let releaseRefine: (() => void) | undefined;
 		const harness = await createHarness({
@@ -922,7 +955,7 @@ extension instructions`,
 				(pi) => {
 					pi.on("before_agent_start", async (event) => {
 						// Set up _refineInFlight so the post-hook wait triggers.
-						sessionInternals._refineInFlight = new Promise<void>((resolve) => {
+						sessionInternals._refinement._refineInFlight = new Promise<void>((resolve) => {
 							releaseRefine = resolve;
 						});
 						return {
@@ -936,11 +969,14 @@ stale post-hook extension instructions`,
 		});
 		harnesses.push(harness);
 		sessionInternals = harness.session as unknown as typeof sessionInternals;
-		vi.spyOn(sessionInternals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(sessionInternals, "_applyRefine").mockImplementation(async () => {
+		vi.spyOn(sessionInternals._refinement._execution, "_planRefine").mockResolvedValue({
+			id: "race-plan",
+			proposal: { edits: [] },
+		});
+		vi.spyOn(sessionInternals._refinement._execution, "_applyRefine").mockImplementation(async () => {
 			sessionInternals._baseSystemPrompt = "refined post-hook base";
 			harness.session.agent.state.systemPrompt = "refined post-hook base";
-			sessionInternals._refineAbortController = undefined;
+			sessionInternals._refinement._refineAbortController = undefined;
 			return {
 				id: "refine_post_hook",
 				summary: "refined",
@@ -962,12 +998,12 @@ stale post-hook extension instructions`,
 		// extension prompt. The prompt path enters _waitForRefineIdle.
 		// Wait for the hook to fire and set _refineInFlight.
 		await vi.waitFor(() => {
-			expect(sessionInternals._refineInFlight).toBeDefined();
+			expect(sessionInternals._refinement._refineInFlight).toBeDefined();
 		});
 		// Complete the refine during the wait: change the base and resolve.
 		sessionInternals._baseSystemPrompt = "refined post-hook base";
 		releaseRefine?.();
-		sessionInternals._refineInFlight = undefined;
+		sessionInternals._refinement._refineInFlight = undefined;
 		await promptPromise;
 
 		expect(providerSystemPrompt).toContain("refined post-hook base");
@@ -1063,9 +1099,11 @@ stale post-hook extension instructions`,
 			releaseRefine = resolve;
 		});
 		const sessionInternals = harness.session as unknown as {
-			_refineInFlight?: Promise<void>;
+			_refinement: {
+				_refineInFlight?: Promise<void>;
+			};
 		};
-		sessionInternals._refineInFlight = refineGate;
+		sessionInternals._refinement._refineInFlight = refineGate;
 
 		const accepted = harness.session.acceptAgentMessagePrompt(
 			"Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: agentmsg_handoff_reject\n\nagent text",
@@ -1083,7 +1121,7 @@ stale post-hook extension instructions`,
 			},
 		});
 		expect(harness.session.isBashRunning).toBe(true);
-		sessionInternals._refineInFlight = undefined;
+		sessionInternals._refinement._refineInFlight = undefined;
 		releaseRefine?.();
 
 		try {
