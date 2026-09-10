@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
+import { emptyGoalState } from "../src/core/goals.js";
+import { GoalController } from "../src/core/session/goals/controller.js";
 
 type Harness = {
-	_goalState: { status: string; objective?: string; continuationsUsed: number };
+	_goals: GoalController;
 	_goalContinuationAwaitsRlmWork: boolean;
 	_disposed: boolean;
 	_disposing: boolean;
@@ -11,7 +13,6 @@ type Harness = {
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
 	_stopGoalContinuationForTerminalMessage: () => boolean;
 	_ensureGoalRuntimeActive: () => void;
-	_setGoalState: (goal: unknown) => void;
 	_createPreparedTurnAction: ReturnType<typeof vi.fn>;
 	_admitSessionInput: ReturnType<typeof vi.fn>;
 };
@@ -25,8 +26,10 @@ const maybeResume = Reflect.get(AgentSession.prototype, "_maybeResumeGoalContinu
 ) => void;
 
 function harness(overrides: Partial<Harness> = {}): Harness {
+	const goals = new GoalController({ load: emptyGoalState, save: () => {} }, () => {});
+	goals.start("ship it", undefined);
 	return {
-		_goalState: { status: "active", objective: "ship it", continuationsUsed: 0 },
+		_goals: goals,
 		_goalContinuationAwaitsRlmWork: false,
 		_disposed: false,
 		_disposing: false,
@@ -35,9 +38,6 @@ function harness(overrides: Partial<Harness> = {}): Harness {
 		_hasUnsettledRlmQuiescenceWork: () => false,
 		_stopGoalContinuationForTerminalMessage: () => false,
 		_ensureGoalRuntimeActive: () => {},
-		_setGoalState: function (this: Harness, goal: unknown) {
-			this._goalState = goal as Harness["_goalState"];
-		},
 		_createPreparedTurnAction: vi.fn((schedule: string, _text: string, _images: unknown, options: unknown) => ({
 			schedule,
 			options,
@@ -54,7 +54,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		const mode = harness({ _hasUnsettledRlmQuiescenceWork: () => true });
 		await expect(getGoalContinuation.call(mode, context)).resolves.toEqual([]);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
-		expect(mode._goalState.continuationsUsed).toBe(0);
+		expect(mode._goals.state.continuationsUsed).toBe(0);
 	});
 
 	it("continues normally when no descendant work is pending", async () => {
@@ -62,7 +62,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		const messages = await getGoalContinuation.call(mode, context);
 		expect(messages).toHaveLength(1);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(false);
-		expect(mode._goalState.continuationsUsed).toBe(1);
+		expect(mode._goals.state.continuationsUsed).toBe(1);
 	});
 
 	it("resumes a deferred continuation exactly once, unqueued, idle-waking, and counted", () => {
@@ -73,7 +73,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		const [action, options] = mode._admitSessionInput.mock.calls[0]!;
 		expect((action as { options: { resumeIfIdle: boolean } }).options.resumeIfIdle).toBe(true);
 		expect(options).toBeUndefined();
-		expect(mode._goalState.continuationsUsed).toBe(1);
+		expect(mode._goals.state.continuationsUsed).toBe(1);
 	});
 
 	it("keeps the deferral while admission is paused and retries after release", () => {
@@ -107,7 +107,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		});
 		maybeResume.call(mode);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
-		expect(mode._goalState.continuationsUsed).toBe(0);
+		expect(mode._goals.state.continuationsUsed).toBe(0);
 	});
 
 	it("stays deferred while work remains and drops the deferral for inactive goals", () => {
@@ -117,7 +117,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		expect(busy._goalContinuationAwaitsRlmWork).toBe(true);
 
 		const inactive = harness({ _goalContinuationAwaitsRlmWork: true });
-		inactive._goalState = { status: "paused", objective: "ship it", continuationsUsed: 0 };
+		inactive._goals.pause();
 		maybeResume.call(inactive);
 		expect(inactive._admitSessionInput).not.toHaveBeenCalled();
 		expect(inactive._goalContinuationAwaitsRlmWork).toBe(false);
