@@ -234,16 +234,30 @@ describe("AgentSession autonomous mode", () => {
 		});
 	});
 
-	it("keeps unspecified limits and appends repeated gates", async () => {
+	it("bounds the run only by the named budget flags", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
-		await harness.session.prompt('/autonomous on --max-continuations 4 --gate "npm run lint" --gate "npm test"');
+		await harness.session.prompt("/autonomous on --max-tokens 100,000");
+
+		// Only the named budget limit applies; the unnamed ones stop cutting the run short.
+		expect(harness.session.getAutonomousStatus().limits).toEqual({
+			maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTokens: 100_000,
+			timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
+		});
+	});
+
+	it("keeps defaults when no budget flags are named and appends repeated gates", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt('/autonomous on --gate "npm run lint" --gate "npm test"');
 
 		const status = harness.session.getAutonomousStatus();
-		expect(status.limits).toMatchObject({
-			maxContinuations: 4,
-			// Unspecified limits keep their defaults.
+		expect(status.limits).toEqual({
+			maxContinuations: 3,
 			maxTurns: 12,
 			maxTokens: 80_000,
 			timeoutMs: 1_800_000,

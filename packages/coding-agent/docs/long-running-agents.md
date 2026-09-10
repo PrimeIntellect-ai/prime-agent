@@ -228,8 +228,10 @@ The slash-command flags (`--max-continuations`, `--max-turns`, `--max-tokens`,
 or `_` as digit separators (`--max-tokens 100,000,000,000`). The four budget
 limits also accept `unlimited` to remove that cap; without gates, an unlimited
 run only stops on an error or a manual abort, so pair unlimited budgets with a
-quality gate. Flags only change the limits they name; unspecified limits keep
-the configured or default values, and repeating `--gate` appends another gate.
+quality gate. Named budget flags define the whole budget: any limit you do
+not name becomes unlimited, so `/autonomous on --max-tokens 100,000` runs
+until that token budget is spent. With no budget flags at all, the configured
+or default limits still apply. Repeating `--gate` appends another gate.
 
 Autonomous mode supports limits for continuations, assistant turns, tokens, and wall-clock duration. Gate commands run before the session may finish; a failed gate returns its bounded output to the agent for another attempt. Prime Agent avoids rerunning the same failed gate when the workspace has not changed.
 
