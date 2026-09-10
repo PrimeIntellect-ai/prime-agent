@@ -2,3 +2,4 @@
 - Changed the agents list to separate the splash from search, bold the shared column headings, mute populated status groups, and omit the global scope label.
 
 - Added a clearer session details view with usage, contextual actions, keyboard browsing, and scrolling.
+- Simplified idle and inactive rows to one small status circle distinguished by color, keeping the animated mark for running rows.
