@@ -4053,6 +4053,9 @@ export class InteractiveMode {
 				if (!customEditor.onExtensionShortcut) {
 					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
 				}
+				if ("getTopRightLabel" in customEditor && !customEditor.getTopRightLabel) {
+					customEditor.getTopRightLabel = (maxWidth: number) => this.defaultEditor.getTopRightLabel?.(maxWidth);
+				}
 				// Copy action handlers (clear, suspend, model switching, etc.)
 				for (const [action, handler] of this.defaultEditor.actionHandlers) {
 					(customEditor.actionHandlers as Map<string, () => void>).set(action, handler);
@@ -4194,6 +4197,7 @@ export class InteractiveMode {
 
 	private setupKeyHandlers(): void {
 		this.defaultEditor.getHeaderLine = () => this.getQueueSelectionHeader();
+		this.defaultEditor.getTopRightLabel = (maxWidth) => this.getPromptEffortLabel(maxWidth);
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
@@ -6142,8 +6146,14 @@ export class InteractiveMode {
 		if (!model) {
 			return "—";
 		}
-		const parts = [model.name];
-		if (model.reasoning) {
+		const name = model.name.trim().replace(/\s+\(internal\)$/i, "");
+		const providerPrefix = `${model.provider}/`;
+		const compactName = name.startsWith(providerPrefix)
+			? name.slice(providerPrefix.length)
+			: name.replace(/^internal\//, "");
+		const parts = [compactName || model.name];
+		// Editors supplied by extensions may not support the top-right label.
+		if (!("getTopRightLabel" in this.editor) && model.reasoning) {
 			const level = this.connectionState?.thinkingLevel ?? "off";
 			if (level !== "off") {
 				parts.push(level);
@@ -6155,11 +6165,19 @@ export class InteractiveMode {
 		return parts.join(" • ");
 	}
 
+	private getPromptEffortLabel(maxWidth: number): string | undefined {
+		if (!this.getCurrentModel()?.reasoning) return undefined;
+		const level = this.connectionState?.thinkingLevel ?? "off";
+		const label = `${level} · /effort`;
+		if (visibleWidth(label) <= maxWidth) return theme.fg("dim", label);
+		return visibleWidth(level) <= maxWidth ? theme.fg("dim", level) : undefined;
+	}
+
 	private getAgentsViewTrayHint(): string | undefined {
 		if (!this.options.returnToAgentsView) {
 			return undefined;
 		}
-		return keyHint("app.agents.back", "agents/resume");
+		return keyHint("app.agents.back", "manage");
 	}
 
 	private getTrayContextLabel(): string | undefined {

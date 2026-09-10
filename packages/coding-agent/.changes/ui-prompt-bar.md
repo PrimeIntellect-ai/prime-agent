@@ -1,0 +1,1 @@
+- Moved reasoning effort to the top right of the prompt bar, shortened model labels, and renamed the session navigation hint to manage.

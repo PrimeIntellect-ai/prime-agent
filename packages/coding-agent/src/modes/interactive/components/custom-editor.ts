@@ -24,7 +24,6 @@ export interface CustomEditorOptions extends EditorOptions {
 export class CustomEditor extends Editor {
 	private keybindings: KeybindingsManager;
 	private defaultPromptPrefix: string;
-	private readonly configuredPaddingX: number;
 	private placeholder: string | undefined;
 	private readonly placeholderColor: (text: string) => string;
 	private readonly isArgumentCommand: (name: string) => boolean;
@@ -39,6 +38,8 @@ export class CustomEditor extends Editor {
 	public onAgentsBack?: () => boolean;
 	/** When set, the returned line is rendered inside the top of the editor box. */
 	public getHeaderLine?: () => string | undefined;
+	/** A compact label in the top right; the callback can shorten it to fit. */
+	public getTopRightLabel: ((maxWidth: number) => string | undefined) | undefined = undefined;
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
 
@@ -47,7 +48,6 @@ export class CustomEditor extends Editor {
 		super(tui, theme, { ...options, promptPrefix });
 		this.keybindings = keybindings;
 		this.defaultPromptPrefix = promptPrefix;
-		this.configuredPaddingX = options?.paddingX ?? 0;
 		this.placeholder = options?.placeholder;
 		this.placeholderColor = options?.placeholderColor ?? ((text) => text);
 		this.isArgumentCommand = options?.isArgumentCommand ?? (() => false);
@@ -158,6 +158,15 @@ export class CustomEditor extends Editor {
 				this.renderHeaderContentLine("", width),
 				...lines.slice(1),
 			];
+		}
+		const paddingX = this.getEffectivePaddingX(width);
+		const maxLabelWidth = Math.max(0, Math.floor((width - paddingX * 2) / 2));
+		const topRightLabel = this.getTopRightLabel?.(maxLabelWidth);
+		if (topRightLabel && lines.length > 0 && visibleWidth(topRightLabel) <= maxLabelWidth) {
+			const leftWidth = width - paddingX - visibleWidth(topRightLabel) - 1;
+			const left = truncateToWidth(lines[0]!, Math.max(0, leftWidth), "");
+			const gap = " ".repeat(Math.max(1, width - paddingX - visibleWidth(left) - visibleWidth(topRightLabel)));
+			lines[0] = this.applyBackground(`${left}${gap}${topRightLabel}${" ".repeat(paddingX)}`);
 		}
 		return lines;
 	}
@@ -284,7 +293,7 @@ export class CustomEditor extends Editor {
 
 	private getEffectivePaddingX(width: number): number {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
-		const configuredPaddingX = Math.min(this.configuredPaddingX, maxPadding);
+		const configuredPaddingX = Math.min(this.getPaddingX(), maxPadding);
 		return this.backgroundColor !== undefined
 			? Math.min(Math.max(configuredPaddingX, 2), maxPadding)
 			: configuredPaddingX;
@@ -295,13 +304,17 @@ export class CustomEditor extends Editor {
 		const contentWidth = Math.max(1, width - paddingX * 2);
 		const line = `${" ".repeat(paddingX)}${truncateToWidth(content, contentWidth)}`;
 		const padded = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+		return this.applyBackground(padded);
+	}
+
+	private applyBackground(line: string): string {
 		const backgroundColor = this.backgroundColor;
 		if (!backgroundColor) {
-			return padded;
+			return line;
 		}
 		// Truncation may inject full ANSI resets; wrap each segment so the
 		// background survives past them instead of falling back to the terminal's.
-		return padded
+		return line
 			.split("\x1b[0m")
 			.map((segment) => backgroundColor(segment))
 			.join("\x1b[0m");
