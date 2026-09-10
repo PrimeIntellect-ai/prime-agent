@@ -1,5 +1,5 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
-import { Container, type Focusable, getKeybindings, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { Container, type Focusable, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { AuthStorage } from "../../../core/auth-storage.js";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import { theme } from "../theme/theme.js";
@@ -28,11 +28,12 @@ export interface ConfigurationMenuOptions {
 	configuredProviders: ReadonlySet<string>;
 	recentModels?: ReadonlyArray<string>;
 	initialModelSearch?: string;
+	thinkingLevel?: ModelThinkingLevel;
 	getRows?: () => number;
 	requestRender: () => void;
 	onSelectProvider: (provider: AuthSelectorProvider) => void;
 	onSelectMcpConnection: (provider: AuthSelectorProvider) => void;
-	onSelectModel: (model: Model<Api>) => void;
+	onSelectModel: (model: Model<Api>, thinkingLevel?: ModelThinkingLevel) => void;
 	onCancel: () => void;
 }
 
@@ -83,6 +84,7 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 				getRows,
 				inline: true,
 				recentModels: options.recentModels,
+				thinkingLevel: options.thinkingLevel,
 			},
 		);
 		const mcpConnections = new OAuthSelectorComponent(
@@ -123,9 +125,12 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		const selectKey = keyText("tui.select.confirm", { primaryOnly: true });
 		const closeKey = keyText("tui.select.cancel", { primaryOnly: true });
 		const navigate = `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })}`;
+		const effort = `${keyText("tui.editor.cursorLeft", { primaryOnly: true })}/${keyText("tui.editor.cursorRight", { primaryOnly: true })}`;
 		const hint =
 			width >= 70
-				? `${navigate} navigate · ${selectKey} select · ${closeKey} close`
+				? this.activeTab === "models"
+					? `${navigate} model · ${effort} effort · ${selectKey} select · ${closeKey} close`
+					: `${navigate} navigate · ${selectKey} select · ${closeKey} close`
 				: `${selectKey} select · ${closeKey} close`;
 		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${hint}`), width, "", true)];
 	}
@@ -163,14 +168,6 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 	}
 
 	handleInput(keyData: string): void {
-		const kb = getKeybindings();
-		if (
-			this.activeTab === "models" &&
-			(kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.editor.cursorRight"))
-		) {
-			this.activeBody.getSearchInput().handleInput(keyData);
-			return;
-		}
 		this.activeBody.handleInput(keyData);
 	}
 

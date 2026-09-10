@@ -451,6 +451,134 @@ describe("ModelSelectorComponent", () => {
 		}
 	});
 
+	it("renders effort squares for the preselected level and adjusts with left/right", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+				thinkingLevel: "low",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const row = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+
+		expect(row()).toContain("▓▓░░");
+
+		selector.handleInput("\x1b[C");
+		expect(row()).toContain("▓▓▓░");
+
+		selector.handleInput("\x1b[D");
+		selector.handleInput("\x1b[D");
+		selector.handleInput("\x1b[D");
+		expect(row()).toContain("░░░░");
+
+		selector.handleInput("\x1b[D");
+		expect(row()).toContain("▓▓▓▓");
+	});
+
+	it("shows no effort squares for models without reasoning support", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One", reasoning: false };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+				thinkingLevel: "high",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const renderRow = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+
+		expect(renderRow()).toBeDefined();
+		expect(renderRow()).not.toContain("▓");
+		expect(renderRow()).not.toContain("░");
+
+		selector.handleInput("\x1b[C");
+		expect(renderRow()).not.toContain("▓");
+	});
+
+	it("applies the selected model and effort level together on confirm", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		let selectedId: string | undefined;
+		let selectedLevel: string | undefined;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			(selected, thinkingLevel) => {
+				selectedId = selected.id;
+				selectedLevel = thinkingLevel;
+			},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const row = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+		expect(row()).toContain("░░░░");
+
+		selector.handleInput("\x1b[C");
+		expect(row()).toContain("▓░░░");
+
+		selector.handleInput("\r");
+		expect(selectedId).toBe("beta-one");
+		expect(selectedLevel).toBe("minimal");
+	});
+
 	it("uses current model, recency, and alphabetical order for equivalent matches", async () => {
 		const harness = await createHarness({
 			models: [

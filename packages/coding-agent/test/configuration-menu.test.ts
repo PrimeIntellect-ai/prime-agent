@@ -120,7 +120,8 @@ describe("ConfigurationMenuComponent", () => {
 		const menu = await createMenu({ initialTab: "models" });
 		menu.focused = true;
 		const lines = stripAnsi(menu.render(120).join("\n")).split("\n");
-		expect(lines.some((line) => line.includes("↑/↓ navigate"))).toBe(true);
+		expect(lines.some((line) => line.includes("↑/↓ model"))).toBe(true);
+		expect(lines.some((line) => line.includes("←/→ effort"))).toBe(true);
 		expect(lines.some((line) => line.includes("Esc close"))).toBe(true);
 		expect(lines.some((line) => line.includes("tabs"))).toBe(false);
 
