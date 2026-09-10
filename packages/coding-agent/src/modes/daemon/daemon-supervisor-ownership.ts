@@ -590,6 +590,71 @@ export async function isDaemonShutdownAdmissionActive(): Promise<boolean> {
 	return withDaemonSupervisorRegistryGuard(registryDir, () => readActiveShutdownAdmission(registryDir) !== undefined);
 }
 
+function requireMatchingDaemonSupervisorOwner(
+	socketPath: string,
+	hello: DaemonSupervisorHelloIdentity,
+	registryDir: string,
+	legacyRegistryDir: string | undefined,
+): DaemonSupervisorOwnerRecord {
+	const normalizedSocketPath = normalizeSocketPath(socketPath);
+	const owners = listOwnerDirectories(registryDir).flatMap((directory) => {
+		const owner = readOwnerRecordForScope(directory, (scope) => scope.socketPath === normalizedSocketPath);
+		return owner ? [owner] : [];
+	});
+	let matchingOwners = owners.filter((owner) => owner.socketPath === normalizedSocketPath);
+	if (matchingOwners.length === 0 && legacyRegistryDir) {
+		// Stale legacy leftovers are expected; keep only records matching the
+		// identity the caller already holds.
+		matchingOwners = readLegacyOwnersForSocket(legacyRegistryDir, normalizedSocketPath).filter(
+			(owner) => owner.token === hello.supervisorOwnerToken && owner.pid === hello.supervisorPid,
+		);
+	}
+	if (matchingOwners.length === 0) {
+		throw new Error(`Daemon supervisor owner does not match ${socketPath}`);
+	}
+	if (matchingOwners.length > 1) {
+		throw new Error(`Multiple daemon supervisor owners match ${socketPath}`);
+	}
+	const owner = matchingOwners[0];
+	if (!owner) {
+		throw new Error(`Daemon supervisor owner disappeared for ${socketPath}`);
+	}
+	const helloSocketPath = hello.supervisorSocketPath;
+	if (
+		!Number.isInteger(hello.supervisorPid) ||
+		hello.supervisorPid !== owner.pid ||
+		hello.supervisorGeneration !== owner.generation ||
+		hello.supervisorOwnerToken !== owner.token ||
+		typeof helloSocketPath !== "string" ||
+		normalizeSocketPath(helloSocketPath) !== owner.socketPath ||
+		typeof owner.processStartId !== "string" ||
+		hello.supervisorProcessStartId !== owner.processStartId
+	) {
+		throw new Error(`Daemon supervisor hello does not match its durable owner for ${socketPath}`);
+	}
+	const observedProcessStartId = getProcessStartId(owner.pid);
+	if (observedProcessStartId !== owner.processStartId) {
+		throw new Error(`Daemon supervisor process identity changed for ${socketPath}`);
+	}
+	return owner;
+}
+
+export async function assertDaemonUpdateRestartOwner(
+	socketPath: string,
+	hello: DaemonSupervisorHelloIdentity,
+	agentDir: string,
+	registryDir?: string,
+	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
+): Promise<void> {
+	const effectiveRegistryDir = registryDir ?? defaultDaemonSupervisorRegistryDir();
+	return withDaemonSupervisorRegistryGuard(effectiveRegistryDir, () => {
+		const owner = requireMatchingDaemonSupervisorOwner(socketPath, hello, effectiveRegistryDir, legacyRegistryDir);
+		if (canonicalizeFilesystemPath(owner.agentDir) !== canonicalizeFilesystemPath(agentDir)) {
+			throw new Error(`Daemon supervisor agent directory does not match ${agentDir} for ${socketPath}`);
+		}
+	});
+}
+
 export async function persistDaemonStartupFenceFromOwner(
 	socketPath: string,
 	hello: DaemonSupervisorHelloIdentity,
@@ -601,47 +666,8 @@ export async function persistDaemonStartupFenceFromOwner(
 	const fenceDirectory = resolve(registryDir, "startup-fences");
 	mkdirSync(fenceDirectory, { recursive: true, mode: 0o700 });
 	const path = startupFencePath(fenceDirectory, socketPath);
-	const normalizedSocketPath = normalizeSocketPath(socketPath);
 	return withDaemonSupervisorRegistryGuard(registryDir, () => {
-		const owners = listOwnerDirectories(registryDir).flatMap((directory) => {
-			const owner = readOwnerRecordForScope(directory, (scope) => scope.socketPath === normalizedSocketPath);
-			return owner ? [owner] : [];
-		});
-		let matchingOwners = owners.filter((owner) => owner.socketPath === normalizedSocketPath);
-		if (matchingOwners.length === 0 && legacyRegistryDir) {
-			// Stale legacy leftovers are expected; keep only records matching the
-			// identity the caller already holds.
-			matchingOwners = readLegacyOwnersForSocket(legacyRegistryDir, normalizedSocketPath).filter(
-				(owner) => owner.token === hello.supervisorOwnerToken && owner.pid === hello.supervisorPid,
-			);
-		}
-		if (matchingOwners.length === 0) {
-			throw new Error(`Daemon supervisor owner does not match ${socketPath}`);
-		}
-		if (matchingOwners.length > 1) {
-			throw new Error(`Multiple daemon supervisor owners match ${socketPath}`);
-		}
-		const owner = matchingOwners[0];
-		if (!owner) {
-			throw new Error(`Daemon supervisor owner disappeared for ${socketPath}`);
-		}
-		const helloSocketPath = hello.supervisorSocketPath;
-		if (
-			!Number.isInteger(hello.supervisorPid) ||
-			hello.supervisorPid !== owner.pid ||
-			hello.supervisorGeneration !== owner.generation ||
-			hello.supervisorOwnerToken !== owner.token ||
-			typeof helloSocketPath !== "string" ||
-			normalizeSocketPath(helloSocketPath) !== owner.socketPath ||
-			typeof owner.processStartId !== "string" ||
-			hello.supervisorProcessStartId !== owner.processStartId
-		) {
-			throw new Error(`Daemon supervisor hello does not match its durable owner for ${socketPath}`);
-		}
-		const observedProcessStartId = getProcessStartId(owner.pid);
-		if (observedProcessStartId !== owner.processStartId) {
-			throw new Error(`Daemon supervisor process identity changed for ${socketPath}`);
-		}
+		const owner = requireMatchingDaemonSupervisorOwner(socketPath, hello, registryDir, legacyRegistryDir);
 		const record: DaemonStartupFenceRecord = {
 			version: OWNER_VERSION,
 			token: randomUUID(),

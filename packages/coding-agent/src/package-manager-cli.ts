@@ -60,6 +60,7 @@ import {
 import { defaultDaemonSocketPath, normalizeSocketPath } from "./modes/daemon/daemon-socket.js";
 import {
 	acquireDaemonShutdownAdmission,
+	assertDaemonUpdateRestartOwner,
 	persistDaemonStartupFenceFromOwner,
 	waitForDaemonStartupFence,
 } from "./modes/daemon/daemon-supervisor-ownership.js";
@@ -852,9 +853,15 @@ async function prepareConnectedDaemonUpdateRestart(
 	agentDir: string,
 	hello: DaemonHello | undefined,
 ): Promise<DaemonUpdateRestartManifest> {
+	const connectedHello = hello ?? client.hello ?? (await client.waitForHello());
+	let fixedOwnerIdentity: FixedDaemonSupervisorOwnerIdentity | undefined;
+	if (hasFixedDaemonSupervisorOwnerIdentity(connectedHello)) {
+		fixedOwnerIdentity = connectedHello;
+		// Preparation stops session workers, so validate ownership before sending it.
+		await assertDaemonUpdateRestartOwner(socketPath, fixedOwnerIdentity, agentDir);
+	}
 	const pendingManifest = tryReadPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
 	let startedAt: number | undefined;
-	let fixedOwnerIdentity: FixedDaemonSupervisorOwnerIdentity | undefined;
 	let fencePersistenceStarted = false;
 	const persistPreparedRestartFence = async () => {
 		const currentHello = client.hello;
@@ -868,9 +875,6 @@ async function prepareConnectedDaemonUpdateRestart(
 		await persistDaemonStartupFenceFromOwner(socketPath, fixedOwnerIdentity);
 	};
 	try {
-		if (hasFixedDaemonSupervisorOwnerIdentity(hello)) {
-			fixedOwnerIdentity = hello;
-		}
 		if (pendingManifest && pendingManifest.sessions.length > 0) {
 			const listResponse = await client.request({ type: "list" }, 30000);
 			if (listResponse.success && !responseHasActiveDaemonSessions(listResponse.data)) {
@@ -906,7 +910,6 @@ export async function prepareDaemonUpdateRestart(
 	socketPath: string,
 	agentDir: string,
 ): Promise<DaemonUpdateRestartManifest> {
-	const pendingManifest = tryReadPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
 	const client = new DaemonClient(socketPath);
 	let connected = false;
 	try {
@@ -915,8 +918,11 @@ export async function prepareDaemonUpdateRestart(
 		const hello = await client.waitForHello(2000).catch(() => undefined);
 		return await prepareConnectedDaemonUpdateRestart(client, socketPath, agentDir, hello);
 	} catch (error) {
-		if (!connected && pendingManifest && pendingManifest.sessions.length > 0) {
-			return pendingManifest;
+		if (!connected) {
+			const pendingManifest = tryReadPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
+			if (pendingManifest && pendingManifest.sessions.length > 0) {
+				return pendingManifest;
+			}
 		}
 		throw error;
 	} finally {

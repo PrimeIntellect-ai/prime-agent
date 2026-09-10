@@ -1,0 +1,1 @@
+- Fixed updates from a different home or agent directory stopping another daemon's sessions before rejecting the restart.

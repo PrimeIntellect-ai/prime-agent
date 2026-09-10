@@ -224,6 +224,9 @@ vi.mock("../src/modes/daemon/daemon-socket.js", async (importOriginal) => ({
 }));
 
 vi.mock("../src/modes/daemon/daemon-supervisor-ownership.js", () => ({
+	assertDaemonUpdateRestartOwner: vi.fn(async () => {
+		mockState.calls.push("validate-daemon-update-owner");
+	}),
 	acquireDaemonShutdownAdmission: vi.fn(async () => {
 		mockState.calls.push("acquire-daemon-shutdown-admission");
 		return {
@@ -890,6 +893,7 @@ describe("self-update daemon restart", () => {
 			const fenceIndex = mockState.calls.indexOf("persist-daemon-startup-fence");
 			const prepareIndex = mockState.calls.indexOf("daemon-request:prepare_update_restart");
 			const admissionIndex = mockState.calls.indexOf("acquire-daemon-shutdown-admission");
+			const validateOwnerIndex = mockState.calls.indexOf("validate-daemon-update-owner");
 			const shutdownIndex = mockState.calls.indexOf("shutdown-daemon");
 			const startupFenceIndex = mockState.calls.indexOf("wait-daemon-startup-fence");
 			const releaseAdmissionIndex = mockState.calls.indexOf("release-daemon-shutdown-admission");
@@ -897,7 +901,8 @@ describe("self-update daemon restart", () => {
 			expect(spawnIndex).toBeGreaterThanOrEqual(0);
 			expect(launchIndex).toBeGreaterThan(spawnIndex);
 			expect(admissionIndex).toBeGreaterThan(launchIndex);
-			expect(prepareIndex).toBeGreaterThan(admissionIndex);
+			expect(validateOwnerIndex).toBeGreaterThan(admissionIndex);
+			expect(prepareIndex).toBeGreaterThan(validateOwnerIndex);
 			expect(fenceIndex).toBeGreaterThan(prepareIndex);
 			expect(shutdownIndex).toBeGreaterThan(fenceIndex);
 			expect(startupFenceIndex).toBeGreaterThan(shutdownIndex);
@@ -939,7 +944,9 @@ describe("self-update daemon restart", () => {
 
 		const prepareIndex = mockState.calls.indexOf("daemon-request:prepare_update_restart");
 		const fenceIndex = mockState.calls.indexOf("persist-daemon-startup-fence");
-		expect(prepareIndex).toBeGreaterThanOrEqual(0);
+		const validateOwnerIndex = mockState.calls.indexOf("validate-daemon-update-owner");
+		expect(validateOwnerIndex).toBeGreaterThanOrEqual(0);
+		expect(prepareIndex).toBeGreaterThan(validateOwnerIndex);
 		expect(fenceIndex).toBeGreaterThan(prepareIndex);
 	});
 
