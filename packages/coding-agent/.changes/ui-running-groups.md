@@ -1,0 +1,1 @@
+- Added running tool-call groups: consecutive shell commands and Python cells between assistant replies collapse into a "Running two shell commands · one Python cell" block with the dim command previews nested underneath, growing in place as new calls arrive and restarting after each reply.
