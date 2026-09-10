@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
+import { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
 import type { SessionCompaction } from "../../src/session/compaction.js";
 import type { SessionContinuation } from "../../src/session/continuation.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
@@ -101,21 +102,17 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
-		const pruneOversizedVariables = vi.fn(async () => ["large_text"]);
-		const listNamespaceNames = vi.fn(async () => ["small_value"]);
-		const internals = harness.session as unknown as { _ipythonKernelProvisioner?: unknown };
-		const previousProvisioner = internals._ipythonKernelProvisioner;
-		internals._ipythonKernelProvisioner = {
-			hasRunningKernel: true,
-			pruneOversizedVariables,
-			listNamespaceNames,
-		};
-		let result!: Awaited<ReturnType<typeof harness.session.compact>>;
-		try {
-			result = await harness.session.compact();
-		} finally {
-			internals._ipythonKernelProvisioner = previousProvisioner;
-		}
+		const hasRunningKernel = vi
+			.spyOn(IpythonKernelProvisioner.prototype, "hasRunningKernel", "get")
+			.mockReturnValue(true);
+		const pruneOversizedVariables = vi
+			.spyOn(IpythonKernelProvisioner.prototype, "pruneOversizedVariables")
+			.mockResolvedValue(["large_text"]);
+		const listNamespaceNames = vi
+			.spyOn(IpythonKernelProvisioner.prototype, "listNamespaceNames")
+			.mockResolvedValue(["small_value"]);
+		const result = await harness.session.compact();
+		hasRunningKernel.mockRestore();
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 
 		expect(pruneOversizedVariables).toHaveBeenCalledOnce();

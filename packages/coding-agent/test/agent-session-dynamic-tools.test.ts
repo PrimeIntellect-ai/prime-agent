@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -65,7 +65,13 @@ describe("AgentSession dynamic tool registration", () => {
 
 		expect(session.getAllTools().map((tool) => tool.name)).not.toContain("dynamic_tool");
 
+		const getActiveTools = vi.spyOn(session, "getActiveToolNames");
+		const setActiveTools = vi.spyOn(session, "setActiveToolsByName");
 		await session.bindExtensions({});
+		expect(getActiveTools).toHaveBeenCalled();
+		expect(setActiveTools).toHaveBeenCalled();
+		expect(getActiveTools.mock.contexts.every((receiver) => receiver === session)).toBe(true);
+		expect(setActiveTools.mock.contexts.every((receiver) => receiver === session)).toBe(true);
 
 		const allTools = session.getAllTools();
 		const dynamicTool = allTools.find((tool) => tool.name === "dynamic_tool");

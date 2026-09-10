@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import {
 	Agent,
@@ -29,7 +28,6 @@ import {
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	modelsAreEqual,
-	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
 import { parseGoalSlashCommand } from "../goals/commands.js";
@@ -51,8 +49,12 @@ import {
 	performSessionCompaction,
 } from "../session/compaction-execution.js";
 import { type ContinuationToken, SessionContinuation } from "../session/continuation.js";
+import { type ExtensionBindings, installExtensionToolHooks, SessionExtensions } from "../session/extensions.js";
 import { SessionInputDispatcher } from "../session/input-dispatcher.js";
 import { SessionInputScheduler } from "../session/input-scheduler.js";
+import { SessionKernel } from "../session/kernel.js";
+import { KernelEnvironment } from "../session/kernel-environment.js";
+import { createSessionKernelHostHandlers } from "../session/kernel-host-handlers.js";
 import {
 	buildPromptContent,
 	cloneCustomMessage,
@@ -78,6 +80,7 @@ import {
 } from "../session/prepared-actions.js";
 import { type AutoRefineReviewer, SessionRefinement } from "../session/refinement.js";
 import { SessionRetry, type SessionRetryEvent } from "../session/retry.js";
+import { SessionTools } from "../session/tools.js";
 import { createTurnExecutionPolicy, type TurnExecutionPolicy, TurnPreparer } from "../session/turn-preparation.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { waitForPromiseOrAbort } from "../utils/wait-for-abort.js";
@@ -90,11 +93,9 @@ import {
 	type AgentSessionMessageController,
 	type AgentSessionMessageListResult,
 	type AgentSessionMessageReceipt,
-	agentFamilyMemberName,
 	assertAgentMessageQueueCapacity,
 	assertAgentSessionNameAvailable,
 	assertDirectAgentMessageTarget,
-	createAgentMessageHostHandlers,
 	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	formatAgentSessionNameUnavailable,
 	isAgentSessionMessage,
@@ -109,7 +110,6 @@ import {
 	type AgentObserveController,
 	type AgentObserveListResult,
 	type AgentObserveRecentMessagesResult,
-	createAgentObserveHostHandlers,
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
 	ORCHESTRATION_HEARTBEAT_SKILL_NAME,
@@ -159,31 +159,25 @@ import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
-import {
-	type ContextUsage,
-	type ExtensionCommandContextActions,
-	type ExtensionErrorListener,
+import type {
+	ContextUsage,
 	ExtensionRunner,
-	type ExtensionUIContext,
-	type InputSource,
-	type MessageEndEvent,
-	type MessageStartEvent,
-	type MessageUpdateEvent,
-	type ReplacedSessionContext,
-	type SessionBeforeTreeResult,
-	type SessionStartEvent,
-	type ShutdownHandler,
-	type ToolDefinition,
-	type ToolExecutionEndEvent,
-	type ToolExecutionStartEvent,
-	type ToolExecutionUpdateEvent,
-	type ToolInfo,
-	type TreePreparation,
-	type TurnEndEvent,
-	type TurnStartEvent,
-	wrapRegisteredTools,
+	InputSource,
+	MessageEndEvent,
+	MessageStartEvent,
+	MessageUpdateEvent,
+	ReplacedSessionContext,
+	SessionBeforeTreeResult,
+	SessionStartEvent,
+	ToolDefinition,
+	ToolExecutionEndEvent,
+	ToolExecutionStartEvent,
+	ToolExecutionUpdateEvent,
+	ToolInfo,
+	TreePreparation,
+	TurnEndEvent,
+	TurnStartEvent,
 } from "./extensions/index.js";
-import { emitSessionShutdownEvent } from "./extensions/runner.js";
 import {
 	createGoalContextMessage,
 	GOAL_CONTEXT_CUSTOM_TYPE,
@@ -196,9 +190,9 @@ import {
 	validateGoalObjective,
 } from "./goals.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
-import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
+import type { AsyncBashCompletionDetails } from "./messages.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
@@ -215,7 +209,6 @@ import {
 	type HarnessDigestDetails,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
-	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
 	type RefinementSource,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
@@ -225,25 +218,11 @@ import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./prompt-templates.js";
 import { providerRetryPolicy } from "./provider-retry.js";
-import {
-	formatHarnessStateForPrompt,
-	getGlobalHarnessStateDir,
-	getLocalHarnessStateDir,
-	REFINE_SKILL_NAME,
-	type RefinementResult,
-} from "./refinement/index.js";
-import { resolveConfigValue } from "./resolve-config-value.js";
-import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import { formatHarnessStateForPrompt, REFINE_SKILL_NAME, type RefinementResult } from "./refinement/index.js";
+import type { ResourceLoader } from "./resource-loader.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
-	createAsyncBashCompletionHostHandler,
-	createAsyncBashConsumedHostHandler,
 	createDefaultRlmSubagentSessionName,
-	createRlmCreateSessionHostHandler,
-	createRlmDeleteSubagentHostHandler,
-	createRlmFindModelsHostHandler,
-	createRlmListSubagentsHostHandler,
-	createRlmRunHostHandler,
 	findRlmModelMatches,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
@@ -294,15 +273,10 @@ import {
 	parseSessionSlashCommand,
 	parseSlashCommand,
 	type SessionSlashCommand,
-	type SlashCommandInfo,
 } from "./slash-commands.js";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import type { BuildSystemPromptOptions } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
-import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
-import { createAllToolDefinitions } from "./tools/index.js";
-import { IpythonKernelProvisioner } from "./tools/ipython.js";
-import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import type { IpythonKernelProvisioner } from "./tools/ipython.js";
 import {
 	addAssistantUsage,
 	cloneUsage,
@@ -311,7 +285,6 @@ import {
 	sessionUsageSummaryFrom,
 	subtractAssistantUsage,
 } from "./usage.js";
-import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
 
 export type { GoalState, GoalStatus } from "./goals.js";
 export type { SessionStats } from "./session-stats.js";
@@ -451,12 +424,7 @@ export interface AgentSessionConfig {
 	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
-export interface ExtensionBindings {
-	uiContext?: ExtensionUIContext;
-	commandContextActions?: ExtensionCommandContextActions;
-	shutdownHandler?: ShutdownHandler;
-	onError?: ExtensionErrorListener;
-}
+export type { ExtensionBindings } from "../session/extensions.js";
 
 export type { AutoRefineReviewer, AutoRefineReviewRequest } from "../session/refinement.js";
 export interface PromptOptions {
@@ -623,11 +591,6 @@ interface ModelSelectOptions {
 	waitForExtensions?: boolean;
 }
 
-interface ToolDefinitionEntry {
-	definition: ToolDefinition;
-	sourceInfo: SourceInfo;
-}
-
 type AutonomousSlashCommand = { kind: "status" } | { kind: "on"; config?: AgentAutonomousConfig } | { kind: "off" };
 
 import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
@@ -694,7 +657,6 @@ interface RlmSubagentModelSelection {
 	model: Model<Api>;
 }
 
-const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 
 function noopRlmChildAbort(): void {}
@@ -883,6 +845,37 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 }
 
 export class AgentSession {
+	private readonly _tools: SessionTools;
+	private readonly _extensions: SessionExtensions;
+	private readonly _kernel: SessionKernel;
+	private readonly _kernelEnvironment: KernelEnvironment;
+	private get _extensionRunner(): ExtensionRunner {
+		return this._extensions.runner;
+	}
+	private get _ipythonKernelProvisioner(): IpythonKernelProvisioner | undefined {
+		return this._kernel.provisioner;
+	}
+	private get _rlmSessionDir(): string | undefined {
+		return this._kernelEnvironment.sessionDir;
+	}
+	private get _allowedToolNames(): ReadonlySet<string> | undefined {
+		return this._tools.allowedToolNames;
+	}
+	private get _customTools(): ToolDefinition[] {
+		return this._tools.customTools;
+	}
+	private get _toolRegistry(): ReadonlyMap<string, AgentTool> {
+		return this._tools.registry;
+	}
+	private get _baseSystemPrompt(): string {
+		return this._tools.baseSystemPrompt;
+	}
+	private set _baseSystemPrompt(prompt: string) {
+		this._tools.baseSystemPrompt = prompt;
+	}
+	private get _baseSystemPromptOptions(): BuildSystemPromptOptions {
+		return this._tools.baseSystemPromptOptions;
+	}
 	private readonly _refinement: SessionRefinement;
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1068,35 +1061,21 @@ export class AgentSession {
 		recordBashResult: (command, result, options) => this.recordBashResult(command, result, options),
 	});
 
-	private _extensionRunner!: ExtensionRunner;
-	private _execEnvProvider?: () => Record<string, string | undefined> | undefined;
 	private _turnIndex = 0;
 	private _modelSelectEmitQueue: Promise<void> = Promise.resolve();
 	private _modelSelectEmitQueueIdle = true;
 	private _modelSelectEmitContext = new AsyncLocalStorage<boolean>();
 
 	private _resourceLoader: ResourceLoader;
-	private _customTools: ToolDefinition[];
-	private _acpMcpTools: ToolDefinition[] = [];
-	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _agentDir?: string;
-	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
-	private _allowedToolNames?: Set<string>;
 	private _includeGoals: boolean;
 	private _includeCompactSkill: boolean;
 	private _rlmHeartbeatController?: AgentRlmHeartbeatController;
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
 	private _mcpManager?: McpManager;
-	private _baseToolsOverride?: Record<string, AgentTool>;
-	private _sessionStartEvent: SessionStartEvent;
-	private _extensionUIContext?: ExtensionUIContext;
-	private _extensionCommandContextActions?: ExtensionCommandContextActions;
-	private _extensionShutdownHandler?: ShutdownHandler;
-	private _extensionErrorListener?: ExtensionErrorListener;
-	private _extensionErrorUnsubscriber?: () => void;
 	private _disposed = false;
 	private readonly _disposeCallbacks = new Set<() => void | Promise<void>>();
 	private _disposeCallbacksPromise?: Promise<void>;
@@ -1104,17 +1083,10 @@ export class AgentSession {
 	// re-populate the retained map after it's been cleared.
 	private _disposing = false;
 	private _disposeAsyncPromise?: Promise<void>;
-	private _ipythonKernelProvisioner?: IpythonKernelProvisioner;
-	/** Artifact dir backing the current provisioner's kernel snapshot, if any. */
-	private _ipythonKernelSnapshotDir?: string;
-	/** True once the runtime has been built once; later builds are in-process rebuilds (/reload). */
-	private _ipythonRuntimeBuilt = false;
-	private readonly _prewarmIpythonKernel: boolean;
 	private _rlmDepth: number;
 	private readonly _configuredRlmMaxDepth: number | undefined;
 	private _rlmMaxDepth: number;
 	private _rlmMaxDepthSource: RlmMaxDepthSource;
-	private _rlmSessionDir?: string;
 	private readonly _semanticEdges: SemanticEdgeRecorder;
 	private _rlmParentNodeId?: string;
 	private _rlmParentAgent?: string;
@@ -1152,13 +1124,6 @@ export class AgentSession {
 
 	private _modelRegistry: ModelRegistry;
 
-	private _toolRegistry: Map<string, AgentTool> = new Map();
-	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
-	private _toolPromptSnippets: Map<string, string> = new Map();
-	private _toolPromptGuidelines: Map<string, string[]> = new Map();
-
-	private _baseSystemPrompt = "";
-	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private readonly _continuation = new SessionContinuation({
 		waitForAgentIdle: () => this.agent.waitForIdle(),
 		waitForRetry: () => this.waitForRetry(),
@@ -1233,21 +1198,16 @@ export class AgentSession {
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
-		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir;
 		this._modelRegistry = config.modelRegistry;
-		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
-		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._includeGoals = config.includeGoals ?? true;
 		this._includeCompactSkill = config.includeCompactSkill ?? this.settingsManager.getCompactionAgentCallable();
 		this._rlmHeartbeatController = config.rlmHeartbeatController;
 		this._agentMessageController = config.agentMessageController;
 		this._agentObserveController = config.agentObserveController;
 		this._mcpManager = config.mcpManager;
-		this._baseToolsOverride = config.baseToolsOverride;
-		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		const headerRlmDepth = this.sessionManager.getHeader()?.rlmDepth;
 		this._rlmDepth =
 			config.rlmDepth ??
@@ -1259,11 +1219,109 @@ export class AgentSession {
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
-		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 
-		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
+		this._kernelEnvironment = new KernelEnvironment(
+			{
+				agentDir: this._agentDir,
+				authStorage: this._modelRegistry.authStorage,
+				resourceLoader: this._resourceLoader,
+				getDepth: () => this._rlmDepth,
+				getMaxDepth: () => this._rlmMaxDepth,
+				getArtifactDir: () => this.sessionManager.getSessionArtifactDir(),
+				getLocalHarnessStateDir: () => this._refinement._localHarnessStateDir(),
+			},
+			config.rlmSessionDir,
+		);
+		this._kernel = new SessionKernel(
+			{
+				cwd: this._cwd,
+				getArtifactDir: () => this.sessionManager.getSessionArtifactDir(),
+				getSessionId: () => this.sessionId,
+				getEnv: () => this._rlmKernelEnv(),
+				getShellCommandPrefix: () => this.settingsManager.getShellCommandPrefix(),
+				getShellPath: () => this.settingsManager.getShellPath(),
+				createHostHandlers: () => this._createKernelHostHandlers(),
+				recordLateSentAgentMessage: (id, message) => this._recordLateIpythonSentAgentMessage(id, message),
+				getMessages: () => this.agent.state.messages,
+				appendCustomMessageEntry: (...args) => this.sessionManager.appendCustomMessageEntry(...args),
+				emit: (event) => this._emit(event),
+				sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
+			},
+			(config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0,
+		);
+		this._tools = new SessionTools(
+			{
+				cwd: this._cwd,
+				resourceLoader: this._resourceLoader,
+				getExtensionRunner: () => this._extensionRunner,
+				getSessionFile: () => this.sessionManager.getSessionFile(),
+				getModelVisibleSkills: () => this._modelVisibleSkills(),
+				getDepth: () => this._rlmDepth,
+				getMaxDepth: () => this._rlmMaxDepth,
+				getParentAgent: () => this._rlmParentAgent,
+				getMcpManager: () => this._mcpManager,
+				getProvisioner: () => this._kernel.provisioner,
+				getActiveToolNames: () => this.getActiveToolNames(),
+				setActiveToolsByName: (names) => this.setActiveToolsByName(names),
+				getActiveTools: () => this.agent.state.tools,
+				setActiveTools: (tools) => {
+					this.agent.state.tools = tools;
+				},
+				setSystemPrompt: (prompt) => {
+					this.agent.state.systemPrompt = prompt;
+				},
+				isStreaming: () => this.isStreaming,
+				rebuildRuntime: (options) => this._buildRuntime(options),
+				acquireInputPause: () => this.acquireSessionInputPause(),
+				waitForAgentIdle: () => this.agent.waitForIdle(),
+				getEventQueue: () => this._agentEventQueue,
+			},
+			{
+				customTools: config.customTools,
+				allowedToolNames: config.allowedToolNames,
+				baseToolsOverride: config.baseToolsOverride,
+			},
+		);
+		this._extensions = new SessionExtensions(
+			{
+				cwd: this._cwd,
+				sessionManager: this.sessionManager,
+				resourceLoader: this._resourceLoader,
+				modelRegistry: this._modelRegistry,
+				getAgentMessageController: () => this._agentMessageController,
+				refreshCurrentModel: () => this._refreshCurrentModelFromRegistry(),
+				sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
+				sendUserMessage: (content, options) => this.sendUserMessage(content, options),
+				setSessionName: (name) => this.setSessionName(name),
+				getActiveToolNames: () => this.getActiveToolNames(),
+				getAllTools: () => this.getAllTools(),
+				setActiveToolsByName: (names) => this.setActiveToolsByName(names),
+				refreshTools: () => this._refreshToolRegistry(),
+				setModel: (model) => this.setModel(model),
+				getThinkingLevel: () => this.thinkingLevel,
+				setThinkingLevel: (level) => this.setThinkingLevel(level),
+				getModel: () => this.model,
+				isStreaming: () => this.isStreaming,
+				getSignal: () => this.agent.signal,
+				abort: () => this.abort(),
+				getQueuedActionCount: () => this.queuedActionCount,
+				getContextUsage: () => this.getContextUsage(),
+				compact: (instructions) => this.compact(instructions),
+				getSystemPrompt: () => this.systemPrompt,
+				rebuildSystemPrompt: () => {
+					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+					this.agent.state.systemPrompt = this._baseSystemPrompt;
+				},
+				reloadSettings: () => this.settingsManager.reload(),
+				getMcpManager: () => this._mcpManager,
+				rebuildRuntime: (options) => this._buildRuntime(options),
+			},
+			config.sessionStartEvent ?? { type: "session_start", reason: "startup" },
+			config.extensionRunnerRef,
+		);
+
 		this._semanticEdges = new SemanticEdgeRecorder({
 			ledgerPath: semanticEdgeLedgerPath({
 				rlmSessionDir: this._rlmSessionDir,
@@ -1336,89 +1394,11 @@ export class AgentSession {
 	}
 
 	replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): void {
-		if (this.isStreaming) throw new Error("Cannot replace ACP MCP servers while the agent is running");
-		if (!this._mcpManager) {
-			if (servers.length > 0) throw new Error("MCP is unavailable in this session");
-			return;
-		}
-		if (servers.length > 0 && !this._ipythonKernelProvisioner) {
-			throw new Error("ACP MCP servers require the built-in cpython tool");
-		}
-		this._assertAcpMcpToolNamesAvailable(acpMcpToolNames(servers));
-		if (!this._mcpManager.replaceAcpServers(servers, ownerId)) return;
-		this._rebuildRuntimeForAcpMcpServers();
+		this._tools.replaceAcpMcpServers(servers, ownerId);
 	}
 
 	async releaseAcpMcpServers(ownerId: string, serverNames: readonly string[]): Promise<void> {
-		if (!this._mcpManager?.canReleaseAcpServers(ownerId)) return;
-		if (this._mcpManager.replaceAcpServers([], ownerId)) {
-			const removedToolNames = new Set(this._acpMcpTools.map((tool) => tool.name));
-			const activeToolNames = this.getActiveToolNames().filter((name) => !removedToolNames.has(name));
-			for (const name of removedToolNames) this._allowedToolNames?.delete(name);
-			this._acpMcpTools = [];
-			this._refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
-			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-			this.agent.state.systemPrompt = this._baseSystemPrompt;
-		}
-		const names = [...new Set(serverNames)];
-		if (names.length === 0) return;
-
-		const inputPause = this.acquireSessionInputPause();
-		try {
-			// Do not rebuild or kill the notebook. Wait for the current turn, then ask
-			// the kernel-owned MCP registry to close only these cached transports.
-			await this.agent.waitForIdle();
-			await this._agentEventQueue;
-			const manager = this._ipythonKernelProvisioner?.manager;
-			if (!manager?.isRunning) return;
-			const code = [
-				"import importlib as _prime_importlib",
-				'_prime_mcp = _prime_importlib.import_module("rlm.mcp")',
-				`_prime_mcp_names = ${JSON.stringify(names)}`,
-				"_prime_mcp_errors = []",
-				"for _prime_mcp_name in _prime_mcp_names:",
-				"    try:",
-				"        await _prime_mcp.reload(_prime_mcp_name)",
-				"    except BaseException as _prime_mcp_error:",
-				"        _prime_mcp_errors.append(_prime_mcp_error)",
-				"if _prime_mcp_errors:",
-				"    raise _prime_mcp_errors[0]",
-				"del _prime_mcp, _prime_importlib, _prime_mcp_names, _prime_mcp_errors, _prime_mcp_name",
-			].join("\n");
-			const result = await manager.execute(code);
-			if (result.status !== "ok") {
-				throw new Error(`Failed to close ACP MCP kernel transports: ${result.stderr || "kernel error"}`);
-			}
-		} finally {
-			inputPause.release();
-		}
-	}
-
-	private _assertAcpMcpToolNamesAvailable(names: readonly string[]): void {
-		const occupiedNames = new Set([
-			...this._baseToolDefinitions.keys(),
-			...this._customTools.map((tool) => tool.name),
-			...this._extensionRunner.getAllRegisteredTools().map((tool) => tool.definition.name),
-		]);
-		for (const name of names) {
-			if (occupiedNames.has(name)) {
-				throw new Error(`ACP MCP tool name conflicts with an existing tool: ${name}`);
-			}
-		}
-	}
-
-	private _rebuildRuntimeForAcpMcpServers(): void {
-		const previousToolNames = new Set(this._acpMcpTools.map((tool) => tool.name));
-		const nextToolNames = acpMcpToolNames(this._mcpManager?.getAcpServers() ?? []);
-		this._assertAcpMcpToolNamesAvailable(nextToolNames);
-		const activeToolNames = this.getActiveToolNames().filter((name) => !previousToolNames.has(name));
-		activeToolNames.push(...nextToolNames);
-		this._buildRuntime({
-			activeToolNames,
-			includeAllExtensionTools: true,
-		});
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		return this._tools.releaseAcpMcpServers(ownerId, serverNames);
 	}
 
 	get modelRegistry(): ModelRegistry {
@@ -1460,55 +1440,11 @@ export class AgentSession {
 	 * happens here instead of in wrappers.
 	 */
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = async ({ toolCall, args }) => {
-			const runner = this._extensionRunner;
-			if (!runner.hasHandlers("tool_call")) {
-				return undefined;
-			}
-
-			await this._agentEventQueue;
-
-			try {
-				return await runner.emitToolCall({
-					type: "tool_call",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-				});
-			} catch (err) {
-				if (err instanceof Error) {
-					throw err;
-				}
-				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
-			}
-		};
-
-		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
-			const runner = this._extensionRunner;
-			if (!runner.hasHandlers("tool_result")) {
-				return undefined;
-			}
-
-			const hookResult = await runner.emitToolResult({
-				type: "tool_result",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				input: args as Record<string, unknown>,
-				content: result.content,
-				details: result.details,
-				isError,
-			});
-
-			if (!hookResult) {
-				return undefined;
-			}
-
-			return {
-				content: hookResult.content,
-				details: hookResult.details,
-				isError: hookResult.isError ?? isError,
-			};
-		};
+		installExtensionToolHooks(
+			this.agent,
+			() => this._extensionRunner,
+			() => this._agentEventQueue,
+		);
 	}
 
 	private _installAgentContinuationHook(): void {
@@ -3101,11 +3037,7 @@ export class AgentSession {
 		this._rlmChildSessions.clear();
 		this._rlmChildCleanupFailures.clear();
 		this._deletedRlmChildIds.clear();
-		try {
-			await this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot });
-		} catch {
-			// a failed kernel startup already cleaned up after itself
-		}
+		await this._kernel.dispose(kernelSnapshot);
 		this.dispose();
 		await this._disposeCallbacksPromise;
 	}
@@ -3216,41 +3148,19 @@ export class AgentSession {
 	}
 
 	getActiveToolNames(): string[] {
-		return this.agent.state.tools.map((t) => t.name);
+		return this._tools.getActiveToolNames();
 	}
 
 	getAllTools(): ToolInfo[] {
-		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
-			name: definition.name,
-			description: definition.description,
-			parameters: definition.parameters,
-			sourceInfo,
-		}));
+		return this._tools.getAllTools();
 	}
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
-		return this._toolDefinitions.get(name)?.definition;
+		return this._tools.getToolDefinition(name);
 	}
 
 	setActiveToolsByName(toolNames: string[]): void {
-		const tools: AgentTool[] = [];
-		const validToolNames: string[] = [];
-		const seenToolNames = new Set<string>();
-		for (const name of toolNames) {
-			if (seenToolNames.has(name)) {
-				continue;
-			}
-			const tool = this._toolRegistry.get(name);
-			if (tool) {
-				seenToolNames.add(name);
-				tools.push(tool);
-				validToolNames.push(name);
-			}
-		}
-		this.agent.state.tools = tools;
-
-		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		this._tools.setActiveToolsByName(toolNames);
 	}
 
 	get isCompacting(): boolean {
@@ -3358,79 +3268,12 @@ export class AgentSession {
 		return this._resourceLoader.getPrompts().prompts;
 	}
 
-	private _normalizePromptSnippet(text: string | undefined): string | undefined {
-		if (!text) return undefined;
-		const oneLine = text
-			.replace(/[\r\n]+/g, " ")
-			.replace(/\s+/g, " ")
-			.trim();
-		return oneLine.length > 0 ? oneLine : undefined;
-	}
-
-	private _normalizePromptGuidelines(guidelines: string[] | undefined): string[] {
-		if (!guidelines || guidelines.length === 0) {
-			return [];
-		}
-
-		const unique = new Set<string>();
-		for (const guideline of guidelines) {
-			const normalized = guideline.trim();
-			if (normalized.length > 0) {
-				unique.add(normalized);
-			}
-		}
-		return Array.from(unique);
-	}
-
 	private _rebuildSystemPrompt(toolNames: string[]): string {
-		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
-		const toolSnippets: Record<string, string> = {};
-		const promptGuidelines: string[] = [];
-		for (const name of validToolNames) {
-			const snippet = this._toolPromptSnippets.get(name);
-			if (snippet) {
-				toolSnippets[name] = snippet;
-			}
-
-			const toolGuidelines = this._toolPromptGuidelines.get(name);
-			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines);
-			}
-		}
-
-		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
-		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
-		const loadedSkills = this._modelVisibleSkills();
-		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
-
-		this._baseSystemPromptOptions = {
-			cwd: this._cwd,
-			skills: loadedSkills,
-			contextFiles: loadedContextFiles,
-			customPrompt: loaderSystemPrompt,
-			appendSystemPrompt,
-			messagesPath: this.sessionManager.getSessionFile(),
-			selectedTools: validToolNames,
-			toolSnippets,
-			promptGuidelines,
-			allowRecursion: this._rlmDepth < this._rlmMaxDepth,
-			rlmDepth: this._rlmDepth,
-			rlmParentAgent: this._rlmParentAgent,
-			genericMcpServers: this._mcpManager?.getEnabledPersistentGenericServers(),
-		};
-		return buildSystemPrompt(this._baseSystemPromptOptions);
+		return this._tools.rebuildSystemPrompt(toolNames);
 	}
 
 	private _refreshExtensionSystemPrompt(extensionPrompt: string, baseSnapshot: string): string {
-		if (this._baseSystemPrompt === baseSnapshot) {
-			return extensionPrompt;
-		}
-		if (!extensionPrompt.includes(baseSnapshot)) {
-			return extensionPrompt;
-		}
-		return extensionPrompt.replace(baseSnapshot, () => this._baseSystemPrompt);
+		return this._tools.refreshExtensionSystemPrompt(extensionPrompt, baseSnapshot);
 	}
 
 	private _finishSubmissionNormalization(
@@ -5937,80 +5780,8 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
-	private async _syncKernelStateAfterCompaction(): Promise<void> {
-		const provisioner = this._ipythonKernelProvisioner;
-		if (!provisioner?.hasRunningKernel) return;
-		const pruned = await provisioner.pruneOversizedVariables().catch(() => null);
-		const abort = new AbortController();
-		const timer = setTimeout(() => abort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
-		if (typeof timer === "object" && "unref" in timer) timer.unref();
-		let names: string[] | null;
-		try {
-			names = await provisioner.listNamespaceNames(abort.signal).catch(() => null);
-		} finally {
-			clearTimeout(timer);
-		}
-		if (names === null && !provisioner.hasRunningKernel) return;
-		const detail =
-			names === null
-				? ""
-				: names.length > 0
-					? ` These names are still defined: ${names.join(", ")}.`
-					: " You have not defined any names yet.";
-		const prunedDetail =
-			pruned && pruned.length > 0
-				? ` Variables above the per-variable snapshot limit were removed: ${pruned.join(", ")}.`
-				: "";
-		const content = [
-			"[python-state]",
-			"",
-			`Your Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.${prunedDetail}${detail}`,
-		].join("\n");
-		const message = {
-			role: "custom" as const,
-			customType: "ipython_state",
-			content,
-			display: false,
-			timestamp: Date.now(),
-		} satisfies CustomMessage;
-		const messages = this.agent.state.messages;
-		const last = messages[messages.length - 1];
-		const insertBeforeError = last?.role === "assistant" && (last as AssistantMessage).stopReason === "error";
-		if (insertBeforeError) {
-			messages.splice(messages.length - 1, 0, message);
-		} else {
-			messages.push(message);
-		}
-		this.sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, undefined);
-		this._emit({ type: "message_start", message });
-		this._emit({ type: "message_end", message });
-	}
-
-	private _onIpythonStateRestored(result: RestoreResult): void {
-		const lines = ["[python-state-restored]", ""];
-		if (result.restored.length > 0) {
-			lines.push(
-				`Your Python kernel state was revived from your previous session. These names are available again: ${result.restored.join(", ")}.`,
-			);
-		} else {
-			lines.push(
-				"Your previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.",
-			);
-		}
-		if (result.failed.length > 0) {
-			lines.push(
-				`These could not be restored and must be recreated if needed: ${result.failed.map((f) => f.name).join(", ")}.`,
-			);
-		}
-		void this.sendCustomMessage(
-			{
-				customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
-				content: lines.join("\n"),
-				display: true,
-				details: { restored: result.restored.length > 0 },
-			},
-			{ deliverAs: "nextTurn" },
-		).catch(() => {});
+	private _syncKernelStateAfterCompaction(): Promise<void> {
+		return this._kernel.syncAfterCompaction();
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
@@ -6203,96 +5974,11 @@ export class AgentSession {
 	 * the daemon) can update the underlying value per attach without rebinding.
 	 */
 	setExecEnvProvider(provider: (() => Record<string, string | undefined> | undefined) | undefined): void {
-		this._execEnvProvider = provider;
-		const extensions = this._resourceLoader.getExtensions();
-		extensions.runtime.getExecEnv = provider;
+		this._extensions.setExecEnvProvider(provider);
 	}
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
-		if (bindings.uiContext !== undefined) {
-			this._extensionUIContext = bindings.uiContext;
-		}
-		if (bindings.commandContextActions !== undefined) {
-			this._extensionCommandContextActions = bindings.commandContextActions;
-		}
-		if (bindings.shutdownHandler !== undefined) {
-			this._extensionShutdownHandler = bindings.shutdownHandler;
-		}
-		if (bindings.onError !== undefined) {
-			this._extensionErrorListener = bindings.onError;
-		}
-
-		this._applyExtensionBindings(this._extensionRunner);
-		await this._extensionRunner.emit(this._sessionStartEvent);
-		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
-	}
-
-	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
-		if (!this._extensionRunner.hasHandlers("resources_discover")) {
-			return;
-		}
-
-		const { skillPaths, promptPaths, themePaths } = await this._extensionRunner.emitResourcesDiscover(
-			this._cwd,
-			reason,
-		);
-
-		if (skillPaths.length === 0 && promptPaths.length === 0 && themePaths.length === 0) {
-			return;
-		}
-
-		const extensionPaths: ResourceExtensionPaths = {
-			skillPaths: this.buildExtensionResourcePaths(skillPaths),
-			promptPaths: this.buildExtensionResourcePaths(promptPaths),
-			themePaths: this.buildExtensionResourcePaths(themePaths),
-		};
-
-		this._resourceLoader.extendResources(extensionPaths);
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
-	}
-
-	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
-		path: string;
-		metadata: {
-			source: string;
-			scope: "temporary";
-			origin: "top-level";
-			baseDir?: string;
-		};
-	}> {
-		return entries.map((entry) => {
-			const source = this.getExtensionSourceLabel(entry.extensionPath);
-			const baseDir = entry.extensionPath.startsWith("<") ? undefined : dirname(entry.extensionPath);
-			return {
-				path: entry.path,
-				metadata: {
-					source,
-					scope: "temporary",
-					origin: "top-level",
-					baseDir,
-				},
-			};
-		});
-	}
-
-	private getExtensionSourceLabel(extensionPath: string): string {
-		if (extensionPath.startsWith("<")) {
-			return `extension:${extensionPath.replace(/[<>]/g, "")}`;
-		}
-		const base = basename(extensionPath);
-		const name = base.replace(/\.(ts|js)$/, "");
-		return `extension:${name}`;
-	}
-
-	private _applyExtensionBindings(runner: ExtensionRunner): void {
-		runner.setUIContext(this._extensionUIContext);
-		runner.bindCommandContext(this._extensionCommandContextActions);
-
-		this._extensionErrorUnsubscriber?.();
-		this._extensionErrorUnsubscriber = this._extensionErrorListener
-			? runner.onError(this._extensionErrorListener)
-			: undefined;
+		return this._extensions.bindExtensions(bindings);
 	}
 
 	private _refreshCurrentModelFromRegistry(): void {
@@ -6309,214 +5995,8 @@ export class AgentSession {
 		this.agent.state.model = refreshedModel;
 	}
 
-	private _bindExtensionCore(runner: ExtensionRunner): void {
-		const getCommands = (): SlashCommandInfo[] => {
-			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
-				name: command.invocationName,
-				description: command.description,
-				source: "extension",
-				sourceInfo: command.sourceInfo,
-			}));
-
-			const templates: SlashCommandInfo[] = this.promptTemplates.map((template) => ({
-				name: template.name,
-				description: template.description,
-				source: "prompt",
-				sourceInfo: template.sourceInfo,
-			}));
-
-			const skills: SlashCommandInfo[] = this._resourceLoader.getSkills().skills.map((skill) => ({
-				name: `skill:${skill.name}`,
-				description: skill.description,
-				source: "skill",
-				sourceInfo: skill.sourceInfo,
-			}));
-
-			return [...extensionCommands, ...templates, ...skills];
-		};
-
-		runner.bindCore(
-			{
-				sendMessage: (message, options) => {
-					this.sendCustomMessage(message, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				sendUserMessage: (content, options) => {
-					this.sendUserMessage(content, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_user_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				appendEntry: (customType, data) => {
-					this.sessionManager.appendCustomEntry(customType, data);
-				},
-				setSessionName: async (name) => {
-					if (this._agentMessageController?.setSessionName) {
-						await this._agentMessageController.setSessionName(name);
-						return;
-					}
-					this.setSessionName(name);
-				},
-				getSessionName: () => {
-					return this.sessionManager.getSessionName();
-				},
-				setLabel: (entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
-				},
-				getActiveTools: () => this.getActiveToolNames(),
-				getAllTools: () => this.getAllTools(),
-				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
-				refreshTools: () => this._refreshToolRegistry(),
-				getCommands,
-				setModel: async (model) => {
-					if (!this.modelRegistry.hasConfiguredAuth(model)) return false;
-					await this.setModel(model);
-					return true;
-				},
-				getThinkingLevel: () => this.thinkingLevel,
-				setThinkingLevel: (level) => this.setThinkingLevel(level),
-			},
-			{
-				getModel: () => this.model,
-				isIdle: () => !this.isStreaming,
-				getSignal: () => this.agent.signal,
-				abort: () => this.abort(),
-				hasPendingMessages: () => this.queuedActionCount > 0,
-				shutdown: () => {
-					this._extensionShutdownHandler?.();
-				},
-				getContextUsage: () => this.getContextUsage(),
-				compact: (options) => {
-					void (async () => {
-						try {
-							const result = await this.compact(options?.customInstructions);
-							options?.onComplete?.(result);
-						} catch (error) {
-							const err = error instanceof Error ? error : new Error(String(error));
-							options?.onError?.(err);
-						}
-					})();
-				},
-				getSystemPrompt: () => this.systemPrompt,
-			},
-			{
-				registerProvider: (name, config) => {
-					this._modelRegistry.registerProvider(name, config);
-					this._refreshCurrentModelFromRegistry();
-				},
-				unregisterProvider: (name) => {
-					this._modelRegistry.unregisterProvider(name);
-					this._refreshCurrentModelFromRegistry();
-				},
-			},
-		);
-	}
-
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
-		const previousRegistryNames = new Set(this._toolRegistry.keys());
-		const previousActiveToolNames = this.getActiveToolNames();
-		const allowedToolNames = this._allowedToolNames;
-		const registeredTools = this._extensionRunner.getAllRegisteredTools();
-		const sdkToolEntry = (definition: ToolDefinition) => ({
-			definition,
-			sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, {
-				source: "sdk" as const,
-			}),
-		});
-		const allCustomTools = [
-			...registeredTools,
-			...this._customTools.map(sdkToolEntry),
-			...this._acpMcpTools.map(sdkToolEntry),
-		];
-		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
-		const allowedCustomTools = allCustomTools.filter((tool) => isAllowedTool(tool.definition.name));
-		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
-			Array.from(this._baseToolDefinitions.entries())
-				.filter(([name]) => isAllowedTool(name))
-				.map(([name, definition]) => [
-					name,
-					{
-						definition,
-						sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, {
-							source: "builtin",
-						}),
-					},
-				]),
-		);
-		for (const tool of allowedCustomTools) {
-			definitionRegistry.set(tool.definition.name, {
-				definition: tool.definition,
-				sourceInfo: tool.sourceInfo,
-			});
-		}
-		this._toolDefinitions = definitionRegistry;
-		this._toolPromptSnippets = new Map(
-			Array.from(definitionRegistry.values())
-				.map(({ definition }) => {
-					const snippet = this._normalizePromptSnippet(definition.promptSnippet);
-					return snippet ? ([definition.name, snippet] as const) : undefined;
-				})
-				.filter((entry): entry is readonly [string, string] => entry !== undefined),
-		);
-		this._toolPromptGuidelines = new Map(
-			Array.from(definitionRegistry.values())
-				.map(({ definition }) => {
-					const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
-					return guidelines.length > 0 ? ([definition.name, guidelines] as const) : undefined;
-				})
-				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
-		);
-		const runner = this._extensionRunner;
-		const wrappedExtensionTools = wrapRegisteredTools(allowedCustomTools, runner);
-		// Resolve the runner at call time so a rebuild/reload rebinds built-in tools to the
-		// live runner instead of wedging them on the invalidated one's stale-ctx guard.
-		const wrappedBuiltInTools = wrapRegisteredTools(
-			Array.from(this._baseToolDefinitions.values())
-				.filter((definition) => isAllowedTool(definition.name))
-				.map((definition) => ({
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
-				})),
-			() => this._extensionRunner,
-		);
-
-		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
-		for (const tool of wrappedExtensionTools as AgentTool[]) {
-			toolRegistry.set(tool.name, tool);
-		}
-		this._toolRegistry = toolRegistry;
-
-		const nextActiveToolNames = (
-			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
-		).filter((name) => isAllowedTool(name));
-
-		if (allowedToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (allowedToolNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-				}
-			}
-		} else if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) {
-				nextActiveToolNames.push(tool.name);
-			}
-		} else if (!options?.activeToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (!previousRegistryNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-				}
-			}
-		}
-
-		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+		this._tools.refreshToolRegistry(options);
 	}
 
 	private _buildRuntime(options: {
@@ -6525,113 +6005,16 @@ export class AgentSession {
 		includeAllExtensionTools?: boolean;
 	}): void {
 		const pythonSkills = getPythonSkillRuntimeInfo(this._modelVisibleSkills());
-		let configuredBaseToolDefinitions: Record<string, ToolDefinition>;
-		if (this._baseToolsOverride) {
-			configuredBaseToolDefinitions = Object.fromEntries(
-				Object.entries(this._baseToolsOverride).map(([name, tool]) => [
-					name,
-					createToolDefinitionFromAgentTool(tool),
-				]),
-			);
-		} else {
-			// Rebuilding (e.g. /reload) replaces the provisioner; drop the previous
-			// kernel so the session never holds two live kernels. Gate the new kernel's
-			// startup on the old one's dispose (which flushes a final snapshot), so a
-			// reload can't restore from a snapshot the old kernel is still writing.
-			const previousDispose = this._ipythonKernelProvisioner?.dispose();
-			this._ipythonKernelSnapshotDir = this.sessionManager.getSessionArtifactDir();
-			// Only surface the "revived from your previous session" notice on the first
-			// build (a genuine resume). A later rebuild (/reload) restores state silently
-			// for continuity — the conversation is unchanged, so there's nothing to flag.
-			const notifyRestore = !this._ipythonRuntimeBuilt;
-			this._ipythonKernelProvisioner = new IpythonKernelProvisioner(this._cwd, {
-				env: this._rlmKernelEnv(),
-				commandPrefix: this.settingsManager.getShellCommandPrefix(),
-				shellPath: this.settingsManager.getShellPath(),
-				sessionId: this.sessionId,
-				hostHandlers: this._createKernelHostHandlers(),
-				pythonSkills,
-				snapshotDir: this._ipythonKernelSnapshotDir,
-				readyGate: previousDispose,
-				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
-			});
-			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
-				ipython: {
-					provisioner: this._ipythonKernelProvisioner,
-					commandPrefix: this.settingsManager.getShellCommandPrefix(),
-					shellPath: this.settingsManager.getShellPath(),
-					onLateSentAgentMessage: (toolCallId, message) =>
-						this._recordLateIpythonSentAgentMessage(toolCallId, message),
-				},
-			});
-		}
-
-		this._baseToolDefinitions = new Map(
-			Object.entries(configuredBaseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
-		);
-
-		const extensionsResult = this._resourceLoader.getExtensions();
-		if (options.flagValues) {
-			for (const [name, value] of options.flagValues) {
-				extensionsResult.runtime.flagValues.set(name, value);
-			}
-		}
-		// Re-apply on (re)build so the provider survives /reload. Guarded: the
-		// runtime object can be shared across sessions from one ResourceLoader
-		// (RLM children), so a provider-less session must not wipe the owner's.
-		if (this._execEnvProvider) {
-			extensionsResult.runtime.getExecEnv = this._execEnvProvider;
-		}
-
-		this._extensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			this._cwd,
-			this.sessionManager,
-			this._modelRegistry,
-		);
-		if (this._extensionRunnerRef) {
-			this._extensionRunnerRef.current = this._extensionRunner;
-		}
-		this._bindExtensionCore(this._extensionRunner);
-		this._applyExtensionBindings(this._extensionRunner);
-
-		const previousAcpMcpToolNames = new Set(this._acpMcpTools.map((tool) => tool.name));
-		const acpServers = this._mcpManager?.getAcpServers() ?? [];
-		if (acpServers.length > 0 && !this._ipythonKernelProvisioner) {
-			throw new Error("ACP MCP servers require the built-in cpython tool");
-		}
-		const acpMcpTools = this._ipythonKernelProvisioner
-			? createAcpMcpToolDefinitions(acpServers, this._ipythonKernelProvisioner)
-			: [];
-		this._assertAcpMcpToolNamesAvailable(acpMcpTools.map((tool) => tool.name));
-		for (const name of previousAcpMcpToolNames) this._allowedToolNames?.delete(name);
-		for (const tool of acpMcpTools) this._allowedToolNames?.add(tool.name);
-		this._acpMcpTools = acpMcpTools;
-
-		const defaultActiveToolNames = this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : ["ipython"];
-		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
-		if (this._goals.state.status === "active" && this._includeGoals) {
-			// An active goal needs ipython so the model can reach the goal skill.
-			baseActiveToolNames.push("ipython");
-		}
+		this._tools.setBaseDefinitions(this._tools.buildBaseOverrides() ?? this._kernel.build(pythonSkills));
+		this._extensions.build(options.flagValues);
+		this._tools.updateAcpDefinitions();
+		const baseActiveToolNames = [...(options.activeToolNames ?? this._tools.defaultActiveToolNames)];
+		if (this._goals.state.status === "active" && this._includeGoals) baseActiveToolNames.push("ipython");
 		this._refreshToolRegistry({
 			activeToolNames: [...new Set(baseActiveToolNames)],
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
-
-		// Prewarm when configured, or whenever we're resuming a session that already
-		// has a kernel snapshot — so its state is revived and the model is told what
-		// came back before the first turn, rather than a turn later when the kernel
-		// would otherwise lazily start on first use.
-		const hasSnapshot =
-			!!this._ipythonKernelSnapshotDir && existsSync(snapshotPathIn(this._ipythonKernelSnapshotDir));
-		if ((this._prewarmIpythonKernel || hasSnapshot) && this.getActiveToolNames().includes("ipython")) {
-			this._ipythonKernelProvisioner?.prewarm();
-		}
-
-		// Subsequent builds are in-process rebuilds (/reload), not a fresh resume.
-		this._ipythonRuntimeBuilt = true;
+		this._kernel.finishBuild(this.getActiveToolNames());
 	}
 
 	/**
@@ -6662,239 +6045,71 @@ export class AgentSession {
 	}
 
 	private _createKernelHostHandlers(): HostRequestHandlers {
-		const handlers: HostRequestHandlers = {
-			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
-				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
-			})),
-			"rlm.create_session": createRlmCreateSessionHostHandler(async ({ prompt, kwargs }) => ({
-				...(await this.createRlmSession(prompt, kwargs)),
-			})),
-			"bash.completed": createAsyncBashCompletionHostHandler(async (details) => {
-				const message = createAsyncBashCompletionMessage(details);
-				const disposeSignal = this._commitFence.disposeSignal;
-				while (true) {
-					let admissionCommitted = false;
-					try {
-						await this._promptInjectedMessage(message.content, message, {
-							streamingBehavior: "steer",
-							queueIfBusy: true,
-							resumeIfIdle: true,
-							returnAfterAccepted: true,
-							suppressAutonomousContinuation: true,
-							admissionCommitted: () => {
-								admissionCommitted = true;
-							},
-						});
-						return;
-					} catch (error) {
-						if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
-						while (this._inputScheduler.admissionPaused && !disposeSignal.aborted) {
-							await this._waitForSessionActivityChange(disposeSignal);
-						}
-					}
+		return createSessionKernelHostHandlers({
+			runChild: (prompt, kwargs, code) => this.runRlmChild(prompt, kwargs, code),
+			createSession: (prompt, kwargs) => this.createRlmSession(prompt, kwargs),
+			findModels: (query, limit) => this.findRlmModels(query, limit),
+			listSubagents: () => this.listRlmSubagents(),
+			deleteSubagent: (target) => this.deleteRlmSubagent(target),
+			handleBashCompletion: (details) => this._handleKernelBashCompletion(details),
+			withdrawBashCompletion: (details) => this._withdrawAsyncBashCompletionNotice(details),
+			getModel: () => this.model,
+			includeGoals: this._includeGoals,
+			includeCompactSkill: this._includeCompactSkill,
+			isRefineAllowed: () => this._refinement._autoRefineAllowedForSession(),
+			hasHeartbeatController: () => !!this._rlmHeartbeatController,
+			getModelVisibleSkills: () => this._modelVisibleSkills(),
+			getAgentMessageController: () => this._agentMessageController,
+			hasObserveController: () => !!this._agentObserveController,
+			getMcpManager: () => this._mcpManager,
+			getDepth: () => this._rlmDepth,
+			awaitChildPublication: (selector) => this._awaitPendingRlmChildPublication(selector),
+			recordParentReply: () => {
+				this._repliedToParentSinceTask = true;
+				this._parentReplyCount += 1;
+			},
+			handleGoal: (type, payload) => this.handleGoalHostRequest(type, payload),
+			handleCompact: (type, payload) => this.handleCompactHostRequest(type, payload),
+			handleRefine: (type, payload) => this.handleRefineHostRequest(type, payload),
+			handleHeartbeat: (type, payload) => this.handleRlmHeartbeatHostRequest(type, payload),
+			handleMessage: (type, payload) => this.handleAgentMessageHostRequest(type, payload),
+			handleObserve: (type, payload) => this.handleAgentObserveHostRequest(type, payload),
+		});
+	}
+
+	private async _handleKernelBashCompletion(details: AsyncBashCompletionDetails): Promise<void> {
+		const message = createAsyncBashCompletionMessage(details);
+		const disposeSignal = this._commitFence.disposeSignal;
+		while (true) {
+			let admissionCommitted = false;
+			try {
+				await this._promptInjectedMessage(message.content, message, {
+					streamingBehavior: "steer",
+					queueIfBusy: true,
+					resumeIfIdle: true,
+					returnAfterAccepted: true,
+					suppressAutonomousContinuation: true,
+					admissionCommitted: () => {
+						admissionCommitted = true;
+					},
+				});
+				return;
+			} catch (error) {
+				if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
+				while (this._inputScheduler.admissionPaused && !disposeSignal.aborted) {
+					await this._waitForSessionActivityChange(disposeSignal);
 				}
-			}),
-			"bash.consumed": createAsyncBashConsumedHostHandler((details) => {
-				this._withdrawAsyncBashCompletionNotice(details);
-			}),
-			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
-			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
-			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
-			"model.info": async () => ({
-				id: this.model?.id ?? null,
-				provider: this.model?.provider ?? null,
-				input: this.model?.input ?? [],
-			}),
-		};
-		if (this._includeGoals) {
-			for (const type of ["goal.get", "goal.create", "goal.complete"]) {
-				handlers[type] = async (payload) => this.handleGoalHostRequest(type, payload);
 			}
 		}
-		if (this._includeCompactSkill) {
-			for (const type of ["compact.run", "compact.status"]) {
-				handlers[type] = async (payload) => this.handleCompactHostRequest(type, payload);
-			}
-		}
-		if (this._refinement._autoRefineAllowedForSession()) {
-			for (const type of ["refine.run", "refine.status"]) {
-				handlers[type] = async (payload) => this.handleRefineHostRequest(type, payload);
-			}
-		}
-		if (this._rlmHeartbeatController) {
-			for (const type of [
-				"rlm_heartbeat.list",
-				"rlm_heartbeat.create",
-				"rlm_heartbeat.update",
-				"rlm_heartbeat.delete",
-			]) {
-				handlers[type] = async (payload) => this.handleRlmHeartbeatHostRequest(type, payload);
-			}
-		}
-		const visibleKernelSkillNames = new Set(
-			this._modelVisibleSkills()
-				.filter((skill) => !skill.disableModelInvocation)
-				.map((skill) => skill.name),
-		);
-		const messageController = this._agentMessageController;
-		if (messageController && visibleKernelSkillNames.has(AGENT_MESSAGE_SKILL_NAME)) {
-			Object.assign(
-				handlers,
-				createAgentMessageHostHandlers({
-					family: async () => {
-						if (!messageController.family)
-							throw new Error("agent family roster is not available in this session");
-						return messageController.family();
-					},
-					awaitPendingChildPublication: (selector) => this._awaitPendingRlmChildPublication(selector),
-					sendAgentMessage: async (input) => {
-						const receipt = (await this.handleAgentMessageHostRequest("agent_message.send", {
-							target: input.target,
-							message: input.message,
-						})) as AgentSessionMessageReceipt;
-						if (this._rlmDepth > 0) {
-							let addressedParent = input.receiverRole === "parent";
-							if (input.receiverRole === undefined && messageController.family) {
-								try {
-									addressedParent = (await messageController.family()).some(
-										(member) =>
-											member.relationship === "parent" &&
-											(member.entry.id === input.target ||
-												agentFamilyMemberName(member.entry) === input.target),
-									);
-								} catch {
-									addressedParent = false;
-								}
-							}
-							if (addressedParent) {
-								this._repliedToParentSinceTask = true;
-								this._parentReplyCount += 1;
-							}
-						}
-						return receipt;
-					},
-				}),
-			);
-		}
-		if (this._agentObserveController) {
-			Object.assign(
-				handlers,
-				createAgentObserveHostHandlers({
-					listAgents: () => this.handleAgentObserveHostRequest("agent_observe.list") as AgentObserveListResult,
-					getAgent: (target) =>
-						this.handleAgentObserveHostRequest("agent_observe.get", {
-							target,
-						}) as AgentObserveAgentSnapshot,
-					recentMessages: (input) =>
-						this.handleAgentObserveHostRequest("agent_observe.recent", {
-							target: input.target,
-							limit: input.limit,
-							max_chars: input.maxChars,
-						}) as AgentObserveRecentMessagesResult,
-				}),
-			);
-		}
-		if (this._mcpManager) {
-			Object.assign(handlers, this._mcpManager.hostHandlers());
-		}
-		return handlers;
 	}
 
 	async reload(): Promise<void> {
-		const previousFlagValues = this._extensionRunner.getFlagValues();
-		await emitSessionShutdownEvent(this._extensionRunner, {
-			type: "session_shutdown",
-			reason: "reload",
-		});
-		await this.settingsManager.reload();
-		// Re-read auth.json: a login saved by the client process (daemon mode) must be
-		// visible here so MCP skill gating sees the new credentials.
-		this._modelRegistry.authStorage.reload();
-		resetApiProviders();
-		this._mcpManager?.refresh();
-		await this._resourceLoader.reload();
-		this._buildRuntime({
-			activeToolNames: this.getActiveToolNames(),
-			flagValues: previousFlagValues,
-			includeAllExtensionTools: true,
-		});
-
-		const hasBindings =
-			this._extensionUIContext ||
-			this._extensionCommandContextActions ||
-			this._extensionShutdownHandler ||
-			this._extensionErrorListener;
-		if (hasBindings) {
-			await this._extensionRunner.emit({
-				type: "session_start",
-				reason: "reload",
-			});
-			await this.extendResourcesFromExtensions("reload");
-		}
-	}
-
-	private _rlmKernelEnv(): Record<string, string> {
-		// Kernel env is provisioning-time only: RLM_MAX_DEPTH may be stale in an already-running kernel;
-		// the TypeScript-side spawn check remains authoritative.
-		const env: Record<string, string> = {
-			RLM_DEPTH: String(this._rlmDepth),
-			RLM_MAX_DEPTH: String(this._rlmMaxDepth),
-			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
-		};
-		const rlmSessionDir = this._ensureRlmSessionDir();
-		if (rlmSessionDir) {
-			env.RLM_SESSION_DIR = rlmSessionDir;
-			// Keep kernel writes and host reads (system prompt, review, /refine) on
-			// the same local harness path. Subagents prefer their own artifact dir;
-			// ephemeral sessions fall back to the RLM session dir once it exists.
-			env.RLM_HARNESS_STATE_DIR =
-				this._refinement._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
-		}
-		this._addWebsearchKeyEnv(env);
-		return env;
-	}
-
-	private _addWebsearchKeyEnv(env: Record<string, string>): void {
-		if (this._agentDir) {
-			env.PRIME_AGENT_CODING_AGENT_DIR = this._agentDir;
-		}
-
-		if (process.env[SERPER_ENV_VAR]?.trim()) {
-			return;
-		}
-		// Inject only when a websearch skill (bundled or custom) is actually loaded,
-		// so the key isn't exposed to kernels that can't use it.
-		if (!this._resourceLoader.getSkills().skills.some((skill) => skill.name === WEBSEARCH_SKILL_NAME)) {
-			return;
-		}
-		const cred = this._modelRegistry.authStorage.get(SERPER_CREDENTIAL_ID);
-		if (cred?.type !== "api_key") {
-			return;
-		}
-		const resolved = resolveConfigValue(cred.key)?.trim();
-		if (resolved) {
-			env[SERPER_ENV_VAR] = resolved;
-		}
+		return this._extensions.reload();
 	}
 
 	// Undefined when there's no persistent artifact dir (e.g. the viewer client):
 	// don't mkdtemp here, since this runs on every kernel build but a viewer never
 	// does RLM work. The temp dir is created lazily in _createChildRlmSessionDir.
-	private _ensureRlmSessionDir(): string | undefined {
-		if (this._rlmSessionDir) {
-			mkdirSync(this._rlmSessionDir, { recursive: true });
-			return this._rlmSessionDir;
-		}
-
-		const sessionArtifactDir = this.sessionManager.getSessionArtifactDir();
-		if (sessionArtifactDir) {
-			mkdirSync(sessionArtifactDir, { recursive: true });
-			this._rlmSessionDir = sessionArtifactDir;
-			return sessionArtifactDir;
-		}
-
-		return undefined;
-	}
 
 	private _createChildRlmSessionDir(): string {
 		const parentDir = this._ensureRlmSessionDir() ?? this._createEphemeralRlmSessionDir();
@@ -6913,9 +6128,14 @@ export class AgentSession {
 		throw new Error("Unable to create unique RLM child session directory");
 	}
 
+	private _rlmKernelEnv(): Record<string, string> {
+		return this._kernelEnvironment.buildEnv();
+	}
+	private _ensureRlmSessionDir(): string | undefined {
+		return this._kernelEnvironment.ensureSessionDir();
+	}
 	private _createEphemeralRlmSessionDir(): string {
-		this._rlmSessionDir = mkdtempSync(join(tmpdir(), "prime-agent-rlm-"));
-		return this._rlmSessionDir;
+		return this._kernelEnvironment.createEphemeralSessionDir();
 	}
 
 	_contextTokensForCurrentMessages(): number | undefined {
