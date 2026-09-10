@@ -252,6 +252,10 @@ class ReportTests(unittest.TestCase):
 
 class FakeGitHub(GitHub):
     def __init__(self):
+        self.repository = "PrimeIntellect-ai/prime-agent"
+        self.base_repository = self.head_repository = self.repository
+        self.base_ref = "main"
+        self.base_sha = self.main_sha = SHA
         self.head = HEAD
         self.state = "open"
         self.attempt = 1
@@ -264,13 +268,91 @@ class FakeGitHub(GitHub):
             self.writes.append((method, path, body))
             return {}
         if path == "pulls/42":
-            return {"state": self.state, "head": {"sha": self.head}}
+            return {
+                "state": self.state,
+                "base": {
+                    "ref": self.base_ref,
+                    "sha": self.base_sha,
+                    "repo": {"full_name": self.base_repository},
+                },
+                "head": {"sha": self.head, "repo": {"full_name": self.head_repository}},
+                "user": {"login": "kevin"},
+            }
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": self.main_sha}}
         if path == "actions/runs/100":
             return {"run_attempt": self.attempt, "run_number": 10}
         raise AssertionError(path)
 
     def pages(self, path, key=None):
         yield self.runs if key else self.comments
+
+
+class ResolverTests(unittest.TestCase):
+    def test_open_prs_use_current_main_and_exact_head_with_the_trusted_harness(self):
+        config = Config.load()
+        for base_ref in ("main", "refactor/stack-parent"):
+            for head_repository in ("PrimeIntellect-ai/prime-agent", "contributor/prime-agent"):
+                with self.subTest(base_ref=base_ref, head_repository=head_repository):
+                    github = FakeGitHub()
+                    github.base_ref = base_ref
+                    github.base_sha = "d" * 40
+                    github.head_repository = head_repository
+                    report, author = github.resolve(42, "c" * 40, 100, 2, config)
+                    self.assertEqual(report.repository, github.repository)
+                    self.assertEqual(report.head_repository, head_repository)
+                    self.assertEqual((report.pr, report.run_id, report.attempt), (42, 100, 2))
+                    self.assertEqual((report.base_sha, report.main.sha), (SHA, SHA))
+                    self.assertEqual((report.head_sha, report.pr_head.sha), (HEAD, HEAD))
+                    self.assertEqual(report.harness_sha, "c" * 40)
+                    self.assertEqual(report.config, config)
+                    self.assertEqual(author, "kevin")
+                    self.assertEqual(github.writes, [])
+
+    def test_closed_and_foreign_repository_prs_are_rejected_for_any_target(self):
+        for base_ref in ("main", "refactor/stack-parent"):
+            for case in ("closed", "foreign"):
+                with self.subTest(base_ref=base_ref, case=case):
+                    github = FakeGitHub()
+                    github.base_ref = base_ref
+                    if case == "closed":
+                        github.state = "closed"
+                        error = "requires an open PR"
+                    else:
+                        github.base_repository = "other/prime-agent"
+                        error = "belongs to another repository"
+                    with self.assertRaisesRegex(ValueError, error):
+                        github.resolve(42, "c" * 40, 100, 1, Config.load())
+
+    def test_stacked_request_pins_the_workflow_sha_not_pr_base_or_head_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event, output = root / "event.json", root / "output.txt"
+            github = FakeGitHub()
+            github.base_ref = "refactor/stack-parent"
+            github.base_sha = "d" * 40
+            pull = github.request("GET", "pulls/42") | {"number": 42}
+            event.write_text(json.dumps({"pull_request": pull}))
+            with (
+                patch("cli.GitHub", return_value=github),
+                patch.object(sys, "argv", ["cli.py", "resolve", "--results", directory]),
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_EVENT_PATH": str(event),
+                        "GITHUB_OUTPUT": str(output),
+                        "GITHUB_EVENT_NAME": "pull_request_target",
+                        "GITHUB_SHA": "c" * 40,
+                        "GITHUB_RUN_ID": "100",
+                        "GITHUB_RUN_ATTEMPT": "1",
+                    },
+                ),
+            ):
+                main()
+            report = load_report(root / "report.json")
+            self.assertEqual((report.harness_sha, report.base_sha, report.head_sha), ("c" * 40, SHA, HEAD))
+            self.assertEqual(output.read_text(), f"pr=42\nauthor=kevin\nharness={'c' * 40}\nneeded=true\n")
+            self.assertEqual(github.writes, [])
 
 
 class PublishingTests(unittest.TestCase):
@@ -304,6 +386,7 @@ class PublishingTests(unittest.TestCase):
         for case in ("head", "new_run", "attempt", "closed"):
             with self.subTest(case=case):
                 github = FakeGitHub()
+                github.base_ref = "refactor/stack-parent"
                 if case == "head":
                     github.head = SHA
                 elif case == "new_run":
@@ -481,6 +564,7 @@ class LifecycleTests(unittest.TestCase):
             "path": ".github/workflows/benchmarks.yml",
             "repository": {"full_name": "PrimeIntellect-ai/prime-agent"},
             "head_repository": {"full_name": "contributor/prime-agent"},
+            "head_branch": "refactor/stack-child",
             "head_sha": HEAD,
             "id": 100,
             "run_attempt": 1,

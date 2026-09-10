@@ -3,7 +3,6 @@ run-name: 'Prime Agent benchmarks · PR #${{ github.event.pull_request.number ||
 
 on:
   pull_request_target:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
@@ -34,6 +33,7 @@ jobs:
       allowed: ${{ steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true' }}
       harness: ${{ steps.resolve.outputs.harness }}
     steps:
+      # pull_request_target supplies the default-branch SHA, including for stacked PRs.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
