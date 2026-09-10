@@ -33,7 +33,7 @@ Use the same ownership rule for the next extraction: move a responsibility's fie
 
 `session/input-scheduler.ts` owns the serialized pump, its preparation epoch, pause leases, and abort/restart suspension. It receives two callbacks: whether the session has work eligible for scheduling, and the operation that runs that work. The scheduler exposes read-only state and named operations; callers cannot change its pause sets or scheduling flags.
 
-The existing `ActionStore` in `core/session-action-store.ts` owns queued actions, their transitions, and delivery/completion tickets. `AgentSession` still prepares and dispatches those actions, serializes transcript commits, and coordinates goals, child agents, and compaction. These responsibilities can move separately without making the scheduler depend on the session's storage, kernel, or extension APIs.
+The existing `ActionStore` in `core/session-action-store.ts` owns queued actions, their transitions, and delivery/completion tickets. `session/input-dispatcher.ts` selects and batches those actions, reconciles durable delivery after dispatch, rolls undelivered work back, and settles completion or failure. `AgentSession` supplies turn execution and session-command operations and coordinates goals, child agents, and compaction. The dispatcher shares the existing `ActionStore`; it does not create a second queue or copy the transcript.
 
 Preserve these distinctions when extending the scheduler:
 
@@ -54,7 +54,7 @@ Preserve these distinctions when extending the scheduler:
 
 The abortable promise helper moved unchanged to `utils/wait-for-abort.ts`, shared by commit acquisition and existing session checkpoint waits.
 
-Action preparation and dispatch still need a separate owner that preserves their delivery, rollback, and cross-feature ordering rules.
+The input dispatcher preserves selection and settlement ordering. Batches include only adjacent compatible turns, and preselected turns remain separate. A changed preparation epoch rolls undelivered input back without replaying durable prefix messages. Cancelled actions capturing late messages remain owned until event processing releases them. Checkpoint notifications and queue events retain their distinct positions in these transitions.
 
 ## Session shell commands
 

@@ -45,6 +45,7 @@ import {
 	type SessionBashEvent,
 } from "../session/bash.js";
 import { SessionCommitFence, type SessionCommitLease } from "../session/commit-fence.js";
+import { SessionInputDispatcher } from "../session/input-dispatcher.js";
 import { SessionInputScheduler } from "../session/input-scheduler.js";
 import {
 	buildPromptContent,
@@ -70,12 +71,7 @@ import {
 	visibleSessionActionProjection,
 } from "../session/prepared-actions.js";
 import { SessionRetry, type SessionRetryEvent } from "../session/retry.js";
-import {
-	createTurnExecutionPolicy,
-	type TurnExecutionPolicy,
-	TurnPreparer,
-	turnExecutionPoliciesEqual,
-} from "../session/turn-preparation.js";
+import { createTurnExecutionPolicy, type TurnExecutionPolicy, TurnPreparer } from "../session/turn-preparation.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { waitForPromiseOrAbort } from "../utils/wait-for-abort.js";
 import {
@@ -1000,7 +996,30 @@ export class AgentSession {
 	private readonly _actionStore = new ActionStore<QueuedSessionAction>();
 	private readonly _inputScheduler = new SessionInputScheduler({
 		canSchedule: () => !this._disposed && !this._disposing && this._hasSelectableSessionInput(),
-		run: (epoch) => this._pumpSessionInputs(epoch),
+		run: (epoch) => this._inputDispatcher.run(epoch),
+	});
+	private readonly _inputDispatcher = new SessionInputDispatcher(this._actionStore, {
+		isDisposed: () => this._disposed || this._disposing,
+		getEpoch: () => this._inputScheduler.epoch,
+		getActivity: () => this._runtimeActivity(),
+		isBusy: () => this._isBusyForSessionInput("pump"),
+		isHandoffDeferred: (epoch) => this._isSessionInputHandoffDeferred(epoch),
+		getDeliveryMode: (delivery) => (delivery === "next_turn_boundary" ? this.steeringMode : this.followUpMode),
+		waitForAgentIdle: () => this.agent.waitForIdle(),
+		hasCancelledDispatchCapture: () => this._hasCancelledDispatchCapture(),
+		getEventQueue: () => this._agentEventQueue,
+		waitForRefinement: () => this._waitForRefineIdle(),
+		getTranscript: () => this.agent.state.messages,
+		startTurns: (actions, epoch) => this._startPreparedTurnActions(actions, epoch),
+		executeCommand: (action, epoch) => this._executeSelectedSessionCommand(action, epoch),
+		settleAgentMessage: (id, leg, error) => this._settleAgentMessage(id, leg, error),
+		releaseTurn: (id) => {
+			this._durableRlmTerminalNoticeActionIds.delete(id);
+		},
+		notifyCheckpoints: () => this._notifySessionInputCheckpointChange(),
+		emitQueueUpdate: () => this._emitQueueUpdate(),
+		surfaceError: (error) => this._surfaceSessionInputError(error),
+		schedule: () => this._scheduleSessionInputPump(),
 	});
 	private _sessionInputArrivalEpoch = 0;
 	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
@@ -5184,10 +5203,7 @@ export class AgentSession {
 	}
 
 	private _hasSelectableSessionInput(): boolean {
-		return (
-			this._actionStore.queuedActions().length > 0 ||
-			this._actionStore.activeActions().some((action) => action.lifecycle.state === "selected")
-		);
+		return this._inputDispatcher.hasSelectableInput();
 	}
 
 	get hasPendingSessionWork(): boolean {
@@ -5208,160 +5224,6 @@ export class AgentSession {
 
 	private _scheduleSessionInputPump(): void {
 		this._inputScheduler.schedule();
-	}
-
-	private async _pumpSessionInputs(epoch: number): Promise<void> {
-		let blocked = false;
-		try {
-			while (!this._disposed && !this._disposing && this._hasSelectableSessionInput()) {
-				await this.agent.waitForIdle();
-				const preselected = this._actionStore
-					.activeActions()
-					.find((action) => action.lifecycle.state === "selected");
-				if (epoch !== this._inputScheduler.epoch) {
-					if (preselected) {
-						this._actionStore.rollback(preselected);
-						this._notifySessionInputCheckpointChange();
-						this._emitQueueUpdate();
-					}
-					return;
-				}
-				if (!this._hasCancelledDispatchCapture()) await this._agentEventQueue;
-				if (!preselected || preselected.payload.kind === "session_command") await this._waitForRefineIdle();
-				const activity = this._runtimeActivity();
-				const canSelectPreselectedTurn =
-					preselected?.payload.kind === "turn" && canSelectSessionAction({ ...activity, refinementApply: false });
-				if (
-					this._isSessionInputHandoffDeferred(epoch) ||
-					(!canSelectPreselectedTurn && !canSelectSessionAction(activity))
-				) {
-					blocked = true;
-					this._notifySessionInputCheckpointChange();
-					return;
-				}
-				const first = preselected ?? this._actionStore.selectFirst();
-				if (!first) return;
-				if (first.payload.kind === "session_command") {
-					await this._executeSelectedSessionCommand(first, epoch);
-					return;
-				}
-
-				const mode = first.delivery === "next_turn_boundary" ? this.steeringMode : this.followUpMode;
-				const actions: QueuedSessionAction[] = [first];
-				while (!preselected && mode === "all") {
-					const next = this._actionStore.queuedActions(first.delivery)[0];
-					if (
-						!next ||
-						next.payload.kind !== "turn" ||
-						!turnExecutionPoliciesEqual(first.payload.executionPolicy, next.payload.executionPolicy)
-					) {
-						break;
-					}
-					this._actionStore.selectFirst();
-					actions.push(next);
-				}
-				if (epoch !== this._inputScheduler.epoch) {
-					for (const action of actions) this._actionStore.rollback(action);
-					return;
-				}
-				for (const action of actions) transitionSessionAction(action, { state: "preparing" });
-				this._notifySessionInputCheckpointChange();
-				this._emitQueueUpdate();
-				try {
-					await this._startPreparedTurnActions(actions, epoch);
-					for (const action of actions) {
-						if (action.lifecycle.state === "committing") {
-							const primary = primaryDeliveryRecord(action);
-							if (this.agent.state.messages.includes(primary.message)) {
-								primary.durable = true;
-								transitionSessionAction(action, {
-									state: "running",
-									execution: "agent_turn",
-								});
-							}
-						}
-						if (action.lifecycle.state === "running") {
-							transitionSessionAction(action, { state: "completed" });
-							this._actionStore.ticketFor(action).settleCompleted();
-							this._settleAgentMessage(action.agentMessageId, "completion");
-						}
-					}
-				} catch (error) {
-					const transcript = this.agent.state.messages;
-					const delivered = new Set(transcript);
-					const undelivered: QueuedSessionAction[] = [];
-					for (const action of actions) {
-						if (action.payload.kind !== "turn" || action.lifecycle.state === "cancelled") continue;
-						for (const record of action.payload.records) record.durable ||= delivered.has(record.message);
-						action.payload.records = action.payload.records.filter((record) => {
-							if (record.role === "prefix") return !record.durable;
-							if (record.role === "next_turn") return record.durable;
-							return true;
-						});
-						if (!primaryDeliveryRecord(action).durable) undelivered.push(action);
-					}
-					if (this._isDeferredSessionInputError(error, epoch)) {
-						for (const action of undelivered) {
-							if (action.lifecycle.state === "committing") {
-								this._actionStore.rollback(action, {
-									dispatchSettled: true,
-									transcript,
-								});
-							} else if (action.lifecycle.state === "preparing" || action.lifecycle.state === "selected") {
-								this._actionStore.rollback(action);
-							}
-						}
-						if (undelivered.length > 0) this._emitQueueUpdate();
-						blocked = epoch !== this._inputScheduler.epoch || this._isBusyForSessionInput("pump");
-						if (blocked) return;
-						continue;
-					}
-					const terminalError = this._asError(error);
-					for (const action of actions) {
-						if (action.lifecycle.state === "cancelled") continue;
-						if (action.lifecycle.state !== "completed" && action.lifecycle.state !== "failed") {
-							transitionSessionAction(action, {
-								state: "failed",
-								error: terminalError,
-							});
-						}
-						const ticket = this._actionStore.ticketFor(action);
-						if (undelivered.includes(action)) {
-							ticket.rejectDelivered(terminalError);
-							this._settleAgentMessage(action.agentMessageId, "delivery", terminalError);
-						}
-						this._settleAgentMessage(action.agentMessageId, "completion", terminalError);
-						ticket.settleCompleted(terminalError);
-					}
-					if (actions.some((action) => action.payload.kind !== "turn" || action.payload.queueVisible)) {
-						this._surfaceSessionInputError(error);
-					}
-				} finally {
-					for (const action of actions) {
-						const retainedCancelledDispatch =
-							action.lifecycle.state === "cancelled" &&
-							action.payload.kind === "turn" &&
-							action.payload.captureRunMessages !== undefined;
-						if (
-							!retainedCancelledDispatch &&
-							(action.lifecycle.state === "completed" ||
-								action.lifecycle.state === "failed" ||
-								action.lifecycle.state === "cancelled")
-						) {
-							this._durableRlmTerminalNoticeActionIds.delete(action.id);
-							this._actionStore.releaseTerminal(action);
-						}
-					}
-					this._notifySessionInputCheckpointChange();
-					this._emitQueueUpdate();
-				}
-				if (epoch !== this._inputScheduler.epoch || blocked) return;
-			}
-		} finally {
-			if (!blocked && epoch === this._inputScheduler.epoch && this._hasSelectableSessionInput()) {
-				this._scheduleSessionInputPump();
-			}
-		}
 	}
 
 	private async _executeSelectedSessionCommand(action: QueuedSessionAction, epoch: number): Promise<void> {
@@ -5436,16 +5298,6 @@ export class AgentSession {
 
 	private _asError(error: unknown): Error {
 		return error instanceof Error ? error : new Error(String(error));
-	}
-
-	private _isDeferredSessionInputError(error: unknown, epoch: number): boolean {
-		if (error instanceof DeferredSessionInputError) return true;
-		if (epoch !== this._inputScheduler.epoch) return true;
-		if (this._isBusyForSessionInput("pump")) {
-			this._surfaceSessionInputError(error);
-			return true;
-		}
-		return false;
 	}
 
 	private _surfaceSessionInputError(error: unknown): void {
