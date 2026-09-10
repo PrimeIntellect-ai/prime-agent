@@ -29,7 +29,37 @@ def render(svg_path: Path, width: int, threshold: int, style: str) -> str:
     import cairosvg
     from PIL import Image
 
-    if style == "braille":
+    if style == "quadrants":
+        # Quadrant block characters encode a solid 2x2 grid. Halving the SVG's
+        # raster height compensates for terminal cells being roughly twice as tall
+        # as they are wide while retaining twice the horizontal edge resolution.
+        png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=width * 2)
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        bg = Image.new("RGBA", img.size, (0, 0, 0, 255))
+        bg.paste(img, (0, 0), img)
+        img = bg.convert("L").resize((width * 2, max(2, round(img.size[1] / 2))), Image.LANCZOS)
+        w, h = img.size
+        padded_h = h + (-h % 2)
+        if padded_h != h:
+            padded = Image.new("L", (w, padded_h), 0)
+            padded.paste(img, (0, 0))
+            img = padded
+            h = padded_h
+        px = img.load()
+        glyphs = (" ", "▘", "▝", "▀", "▖", "▌", "▞", "▛", "▗", "▚", "▐", "▜", "▄", "▙", "▟", "█")
+        rows = []
+        for y in range(0, h, 2):
+            row = ""
+            for x in range(0, w, 2):
+                mask = (
+                    (1 if px[x, y] > threshold else 0)
+                    | (2 if px[x + 1, y] > threshold else 0)
+                    | (4 if px[x, y + 1] > threshold else 0)
+                    | (8 if px[x + 1, y + 1] > threshold else 0)
+                )
+                row += glyphs[mask]
+            rows.append(row.rstrip())
+    elif style == "braille":
         # A Braille cell is a 2x4 dot grid. With terminal cells roughly twice as tall as
         # they are wide, rendering directly at 2 pixels per output column preserves the
         # SVG's proportions while providing four times the vertical detail of ASCII.
@@ -130,9 +160,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--style",
-        choices=("blocks", "dots", "braille"),
+        choices=("blocks", "dots", "braille", "quadrants"),
         default="blocks",
-        help="blocks = half-block ▀▄█; dots = square matrix; braille = 2x4 dot cells (default: blocks)",
+        help="blocks = half-block; dots = square matrix; braille = 2x4 dots; quadrants = solid 2x2 cells",
     )
     args = parser.parse_args()
 
