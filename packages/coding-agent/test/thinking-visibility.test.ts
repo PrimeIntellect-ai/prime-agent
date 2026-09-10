@@ -39,34 +39,42 @@ describe("thinking visibility toggle", () => {
 			chatContainer,
 			ui: { requestRender: vi.fn() },
 			hideThinkingBlock: true,
-			revealedThinkingComponent: undefined,
+			revealedThinkingComponents: [],
 			showStatus: vi.fn(),
 		};
 		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 		return fakeThis;
 	}
 
-	test("reveals the most recent thinking component and hides it again", () => {
-		const withThinking = new AssistantMessageComponent(
+	test("reveals every thinking block in the conversation and hides them again", () => {
+		const first = new AssistantMessageComponent(
 			createAssistantMessage([{ type: "thinking", thinking: "Trace one." }]),
+			true,
+		);
+		const second = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: "Trace two." }]),
 			true,
 		);
 		const textOnly = new AssistantMessageComponent(createAssistantMessage([{ type: "text", text: "Answer." }]));
 		const chatContainer = new Container();
 		chatContainer.addChild(textOnly);
-		chatContainer.addChild(withThinking);
+		chatContainer.addChild(first);
+		chatContainer.addChild(second);
 		const fakeThis = createFakeThis(chatContainer);
 
 		(InteractiveMode.prototype as any).toggleThinkingBlockVisibility.call(fakeThis);
-		expect(fakeThis.revealedThinkingComponent).toBe(withThinking);
-		expect(fakeThis.showStatus).toHaveBeenCalledWith("Thinking: shown");
-		expect(stripAnsi(withThinking.render(80).join("\n"))).toContain("Thinking: (Ctrl+T to hide)");
+		expect(fakeThis.revealedThinkingComponents).toEqual([first, second]);
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Thinking: shown (2 blocks)");
+		expect(stripAnsi(first.render(80).join("\n"))).toContain("Thinking: (Ctrl+T to hide)");
+		expect(stripAnsi(first.render(80).join("\n"))).toContain("Trace one.");
+		expect(stripAnsi(second.render(80).join("\n"))).toContain("Trace two.");
 
 		(InteractiveMode.prototype as any).toggleThinkingBlockVisibility.call(fakeThis);
-		expect(fakeThis.revealedThinkingComponent).toBeUndefined();
+		expect(fakeThis.revealedThinkingComponents).toEqual([]);
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Thinking: hidden");
 		expect(fakeThis.ui.requestRender).toHaveBeenCalled();
-		expect(withThinking.render(80)).toEqual([]);
+		expect(first.render(80)).toEqual([]);
+		expect(second.render(80)).toEqual([]);
 	});
 
 	test("reports when there is no thinking to show", () => {
