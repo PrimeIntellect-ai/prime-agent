@@ -363,6 +363,7 @@ prime-agent --tools ipython -p "Review the code"
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of bootstrapping `~/.prime/agent/kernel-venv` |
+| `PRIME_AGENT_RUNTIME_SOURCE` | Install `prime-agent-runtime` into the kernel venv from this source checkout instead of the copy bundled with Prime Agent |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
 The remaining `PI_*` variables are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.prime/agent` configuration path.

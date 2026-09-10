@@ -14,7 +14,9 @@ import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 9;
 const PYTHON_VERSION = "3.11";
-const RUNTIME_REQUIREMENT = "prime-agent-runtime";
+const RUNTIME_PACKAGE_NAME = "prime-agent-runtime";
+// Bounded tail of a failed helper command's stderr kept for its error message.
+const RUN_STDERR_TAIL_CHARS = 8_000;
 // Serializes the kernel's user namespace so it can be revived across session
 // resume. Internal-only; intentionally not surfaced to the model as an import.
 const STATE_SNAPSHOT_REQUIREMENT = "dill";
@@ -361,6 +363,7 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 	return [
 		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
 		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
+		process.env.PRIME_AGENT_RUNTIME_SOURCE ?? "",
 		process.env.HOME ?? "",
 		process.env.XDG_DATA_HOME ?? "",
 		JSON.stringify(pythonSkills),
@@ -411,19 +414,28 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
 		// CPython must read UTF-8 .pth files even under a Windows legacy code page.
 		const env = { ...process.env, ...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}) };
 		const batch = isBatchShim(command) ? buildBatchShimInvocation(command, args, env) : undefined;
+		// stderr is captured rather than discarded so a failing uv/python invocation
+		// reports its actual complaint instead of a bare exit code.
 		const child = spawnHidden(batch ? (process.env.ComSpec ?? "cmd.exe") : command, batch?.args ?? args, {
 			env: batch?.env ?? env,
-			stdio: options.stdio ?? "ignore",
+			stdio: options.stdio === "inherit" ? "inherit" : ["ignore", "ignore", "pipe"],
 			...(batch ? { windowsVerbatimArguments: true } : {}),
 		});
+		let stderrTail = "";
+		child.stderr?.setEncoding("utf8");
+		child.stderr?.on("data", (chunk: string) => {
+			stderrTail = (stderrTail + chunk).slice(-RUN_STDERR_TAIL_CHARS);
+		});
 		child.on("error", reject);
-		child.on("exit", (code, signal) => {
+		// "close" rather than "exit": the captured stderr is complete once stdio has closed.
+		child.on("close", (code, signal) => {
 			if (code === 0) {
 				resolve();
 				return;
 			}
 			const reason = signal ? `signal ${signal}` : `exit code ${code}`;
-			reject(new Error(`${command} ${args.join(" ")} failed with ${reason}`));
+			const detail = stderrTail.trim();
+			reject(new Error(`${command} ${args.join(" ")} failed with ${reason}${detail ? `\n${detail}` : ""}`));
 		});
 	});
 }
@@ -685,6 +697,10 @@ async function writeBootstrapVersion(
 }
 
 function runtimeCandidateDirs(): string[] {
+	// An explicit override is the only candidate: it names a prime-agent-runtime
+	// checkout to install instead of the copy that ships with this prime-agent.
+	const override = process.env.PRIME_AGENT_RUNTIME_SOURCE;
+	if (override) return [path.resolve(expandHome(override))];
 	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 	// dist/prime-agent-runtime is listed first deliberately: it is the only path stable
 	// across every shipped layout (dist/, dist/bundle/, bun), where import.meta.url-relative
@@ -707,19 +723,37 @@ async function resolveRuntimeSourceDir(): Promise<string | null> {
 	return null;
 }
 
-// Identity of the runtime to be installed. For a local source checkout this is a
-// content hash of every rlm/*.py file plus pyproject.toml, so any runtime code or
-// dependency change invalidates an existing venv automatically. Falls back to the
-// bare package name when the runtime resolves to a registry install (no local source).
-export async function resolveRuntimeIdentity(): Promise<string> {
+// The runtime is always installed from a local source directory: prime-agent-runtime
+// is not published to a package index, so there is no registry fallback. When no
+// candidate exists, the install this process runs from has been deleted or moved out
+// from under it (or PRIME_AGENT_RUNTIME_SOURCE is wrong). The only safe move is to
+// fail before touching the shared kernel venv, which other live kernels depend on.
+async function requireRuntimeSourceDir(): Promise<string> {
 	const sourceDir = await resolveRuntimeSourceDir();
-	if (!sourceDir) return RUNTIME_REQUIREMENT;
-	return hashRuntimeSource(sourceDir);
+	if (sourceDir) return sourceDir;
+	throw missingRuntimeSourceError(runtimeCandidateDirs());
 }
 
-// Throws if the local source can't be read. A failure here must surface rather than
-// fall back to RUNTIME_REQUIREMENT: that constant is the registry-install identity, and
-// recording it for a local checkout would permanently mask later source changes.
+function missingRuntimeSourceError(candidates: string[]): Error {
+	return new Error(
+		`Failed to set up the Python kernel runtime: the ${RUNTIME_PACKAGE_NAME} source that ships with this prime-agent install is missing ` +
+			`(looked in: ${candidates.join(", ")}). ` +
+			"The install this process was started from was probably deleted, moved, or replaced while prime-agent was running. " +
+			"The existing kernel venv was left untouched. Restart prime-agent from an intact install, " +
+			`point PRIME_AGENT_RUNTIME_SOURCE at a ${RUNTIME_PACKAGE_NAME} checkout, ` +
+			`or set PRIME_AGENT_KERNEL_PYTHON to a Python with a current ${RUNTIME_PACKAGE_NAME} and default Python packages installed.`,
+	);
+}
+
+// Identity of the runtime to be installed: a content hash of every rlm/*.py file plus
+// pyproject.toml, so any runtime code or dependency change invalidates an existing venv
+// automatically. Throws when no runtime source is available (see requireRuntimeSourceDir).
+export async function resolveRuntimeIdentity(): Promise<string> {
+	return hashRuntimeSource(await requireRuntimeSourceDir());
+}
+
+// Throws if the local source can't be read. A failure here must surface: recording a
+// placeholder identity for a checkout would permanently mask later source changes.
 async function hashRuntimeSource(sourceDir: string): Promise<string> {
 	const rlmDir = path.join(sourceDir, "src", "rlm");
 	const files: string[] = [path.join(sourceDir, "pyproject.toml")];
@@ -752,15 +786,14 @@ export function kernelVenvPython(venv: string, platform: NodeJS.Platform = proce
 
 async function bootstrapVenv(
 	venv: string,
+	runtimeSourceDir: string,
+	runtimeIdentity: string,
 	pythonSkills: readonly BootstrapPythonSkill[],
 	options: EnsureKernelPythonOptions,
 ): Promise<void> {
 	await mkdir(path.dirname(venv), { recursive: true });
 	const uv = await ensureUv(options);
 	const python = kernelVenvPython(venv);
-	const sourceDir = await resolveRuntimeSourceDir();
-	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
-	const runtimeIdentity = await resolveRuntimeIdentity();
 
 	await run(uv, ["python", "install", PYTHON_VERSION]);
 	await run(uv, ["venv", venv, "--python", PYTHON_VERSION, "--seed"]);
@@ -769,7 +802,7 @@ async function bootstrapVenv(
 		"install",
 		"--python",
 		python,
-		runtimeRequirement,
+		runtimeSourceDir,
 		STATE_SNAPSHOT_REQUIREMENT,
 		...DEFAULT_RLM_EXTRA_UV_ARGS,
 	]);
@@ -919,9 +952,12 @@ async function ensureKernelPythonUncached(
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
+	// Resolve the runtime source before looking at the venv: with no source there is
+	// nothing to (re)install, so a stale-looking venv must not be torn down.
+	const runtimeSourceDir = await requireRuntimeSourceDir();
+	const runtimeIdentity = await hashRuntimeSource(runtimeSourceDir);
 	const venv = await resolveWritableKernelVenvDir();
 	const python = kernelVenvPython(venv);
-	const runtimeIdentity = await resolveRuntimeIdentity();
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 
 	const releaseLock = await acquireBootstrapLock(venv);
@@ -939,7 +975,7 @@ async function ensureKernelPythonUncached(
 			await rm(venv, { recursive: true, force: true });
 		}
 
-		await bootstrapVenv(venv, pythonSkills, options);
+		await bootstrapVenv(venv, runtimeSourceDir, runtimeIdentity, pythonSkills, options);
 	} catch (error) {
 		throw formatBootstrapFailure(error);
 	} finally {

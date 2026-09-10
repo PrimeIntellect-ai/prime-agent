@@ -237,6 +237,7 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 | Failure | Behavior |
 |---|---|
 | Managed runtime is missing | Kernel bootstrap rebuilds it; a custom `PRIME_AGENT_KERNEL_PYTHON` without a current `prime-agent-runtime` is rejected at kernel startup. |
+| Bundled runtime source is missing | Kernel bootstrap fails immediately, names the paths it searched, and leaves the existing venv untouched. This happens when the Prime Agent install a running process started from is deleted or moved (for example a removed worktree); restart from an intact install or set `PRIME_AGENT_RUNTIME_SOURCE`. |
 | Depth limit reached | The host rejects the spawn request; the error reply raises in Python. |
 | Unsupported options | Host rejects the request. |
 | Requested model unavailable | Spawn fails instead of substituting another model. |
