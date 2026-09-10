@@ -69,6 +69,7 @@ import {
 	type SessionInputSchedule,
 	visibleSessionActionProjection,
 } from "../session/prepared-actions.js";
+import { SessionRetry, type SessionRetryEvent } from "../session/retry.js";
 import {
 	createTurnExecutionPolicy,
 	type TurnExecutionPolicy,
@@ -76,7 +77,6 @@ import {
 	turnExecutionPoliciesEqual,
 } from "../session/turn-preparation.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
-import { sleep } from "../utils/sleep.js";
 import { waitForPromiseOrAbort } from "../utils/wait-for-abort.js";
 import {
 	AGENT_MESSAGE_CUSTOM_TYPE,
@@ -118,7 +118,6 @@ import {
 	formatNoModelSelectedMessage,
 	isLikelyAuthenticationError,
 } from "./auth-guidance.js";
-import type { AuthSourceToken } from "./auth-storage.js";
 import {
 	type AgentAutonomousConfig,
 	type AgentAutonomousStatus,
@@ -231,15 +230,7 @@ import {
 import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./prompt-templates.js";
-import {
-	isAgentLifecycleFailure,
-	isFauxProviderQueueExhausted,
-	isPermanentProviderFailureKind,
-	providerRetryDelay,
-	providerRetryPolicy,
-	providerStreamFailureKind,
-	providerStreamFailureRetryAfterMs,
-} from "./provider-retry.js";
+import { providerRetryPolicy } from "./provider-retry.js";
 import {
 	type AutoRefineReason,
 	type AutoRefineReview,
@@ -409,24 +400,7 @@ export type AgentSessionEvent =
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
 	  }
-	| {
-			type: "auto_retry_start";
-			attempt: number;
-			maxAttempts: number;
-			delayMs: number;
-			errorMessage: string;
-	  }
-	| {
-			type: "auto_retry_end";
-			success: boolean;
-			attempt: number;
-			finalError?: string;
-	  }
-	| {
-			type: "auth_stale";
-			provider: string;
-			sourceTokens?: readonly AuthSourceToken[];
-	  }
+	| SessionRetryEvent
 	| { type: "rlm_child_update"; child: RlmChildAgentSnapshot }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
@@ -1062,13 +1036,34 @@ export class AgentSession {
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 	private _branchSummaryOperation: Promise<void> | undefined = undefined;
 
-	private _retryAbortController: AbortController | undefined = undefined;
-	private _retryAttempt = 0;
-	/** Bumped by every retry resolution; stale scheduled-continue callbacks check it before touching retry state. */
-	private _retryGeneration = 0;
-	private _retryPromise: Promise<void> | undefined = undefined;
-	private _retryResolve: (() => void) | undefined = undefined;
-	private _retryAuthFailureSources: AuthSourceToken[] = [];
+	private readonly _retry = new SessionRetry({
+		getRetrySettings: () => this.settingsManager.getRetrySettings(),
+		getMaxRetryDelayMs: () => this.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
+		getContextWindow: () => this.model?.contextWindow ?? 0,
+		getAuthSource: (provider) => this._modelRegistry.getCurrentProviderAuthSourceToken(provider),
+		markAuthSourceStale: (token) => this._modelRegistry.markProviderAuthSourceStale(token),
+		markAuthStale: (provider) => this._modelRegistry.markProviderAuthStale(provider),
+		hasPayloadHooks: () => this._extensionRunner.hasHandlers("before_provider_request"),
+		prepareTurnRetry: () => this._semanticEdges.prepareTurnRetry(),
+		clearTurnRetry: () => this._semanticEdges.clearTurnRetry(),
+		removeLastAssistant: () => {
+			const messages = this.agent.state.messages;
+			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+				this.agent.state.messages = messages.slice(0, -1);
+			}
+		},
+		continue: () => this.agent.continue(),
+		waitForIdle: () => this.agent.waitForIdle(),
+		cancelCompaction: () => {
+			this._autoCompactionAbortController?.abort();
+			this._cancelPostCompactionContinue();
+		},
+		emit: (event) => this._emit(event),
+		onResolved: () => {
+			this._notifySessionInputCheckpointChange();
+			this._scheduleSessionInputPump();
+		},
+	});
 	private _agentMessageClearEpoch = 0;
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
@@ -3194,7 +3189,7 @@ export class AgentSession {
 	}
 
 	private _handleAgentEvent = (event: AgentEvent): void => {
-		this._createRetryPromiseForAgentEnd(event);
+		this._retry.observeAgentEnd(event);
 		if (event.type === "message_start" || event.type === "message_end") {
 			for (const action of this._actionStore.ownedActions()) {
 				if (
@@ -3257,30 +3252,6 @@ export class AgentSession {
 		this._agentEventQueue.catch(() => {});
 	};
 
-	private _createRetryPromiseForAgentEnd(event: AgentEvent): void {
-		if (event.type !== "agent_end" || this._retryPromise) {
-			return;
-		}
-
-		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
-			return;
-		}
-
-		const lastAssistant = this._findLastAssistantInMessages(event.messages);
-		const concreteAuthFailure = lastAssistant ? this._isConcreteProviderAuthFailure(lastAssistant) : false;
-		if (!lastAssistant || (!this._isRetryableError(lastAssistant) && !concreteAuthFailure)) {
-			return;
-		}
-		if (concreteAuthFailure) {
-			this._captureRetryAuthFailureSource(lastAssistant);
-		}
-
-		this._retryPromise = new Promise((resolve) => {
-			this._retryResolve = resolve;
-		});
-	}
-
 	private _findLastAssistantInMessages(messages: AgentMessage[]): AssistantMessage | undefined {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
@@ -3341,7 +3312,7 @@ export class AgentSession {
 				this._lastAssistantMessage = undefined;
 				for (const action of cleared) this._actionStore.releaseTerminal(action);
 				this._notifySessionInputCheckpointChange();
-				this._resolveRetry();
+				this._retry.resolve();
 			}
 		}
 
@@ -3398,21 +3369,7 @@ export class AgentSession {
 				if (assistantMsg.stopReason !== "error") {
 					this._overflowRecovery = "idle";
 				}
-				if (this._isConcreteProviderAuthFailure(assistantMsg)) {
-					this._captureRetryAuthFailureSource(assistantMsg);
-				}
-
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
-					this._emit({
-						type: "auto_retry_end",
-						success: true,
-						attempt: this._retryAttempt,
-					});
-					this._retryAttempt = 0;
-					this._retryAuthFailureSources = [];
-				}
+				this._retry.observeAssistantEnd(assistantMsg);
 				if (this._goals.accountAssistantMessage(assistantMsg)) {
 					const message = createGoalContextMessage(this._goals.state, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
@@ -3431,33 +3388,22 @@ export class AgentSession {
 		if (event.type === "agent_end") {
 			const msg =
 				this._lastAssistantMessage ??
-				(this._retryPromise ? this._findLastAssistantInMessages(event.messages) : undefined);
+				(this._retry.isRetrying ? this._findLastAssistantInMessages(event.messages) : undefined);
 			this._lastAssistantMessage = undefined;
 			if (!msg) {
-				this._resolveRetry();
+				this._retry.resolve();
 				return;
 			}
 
-			const concreteAuthFailure = this._isConcreteProviderAuthFailure(msg);
-			const retryConcreteAuthFailure =
-				concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
-			if (this._isRetryableError(msg) || retryConcreteAuthFailure) {
-				if (retryConcreteAuthFailure) {
-					this._captureRetryAuthFailureSource(msg);
-				}
-				const didRetry = await this._handleRetryableError(msg, {
-					markAuthStaleOnFailure: retryConcreteAuthFailure,
-					authSourceTokens: retryConcreteAuthFailure ? this._retryAuthFailureSources : undefined,
-				});
-				if (didRetry) return; // Retry was initiated, don't proceed to compaction
-			}
+			const retry = this._retry.retryError(msg);
+			if (retry && (await retry)) return;
 
 			const compactionWillRetry = await this._checkCompaction(msg);
-			if (compactionWillRetry && this._retryAttempt > 0) {
+			if (compactionWillRetry && this._retry.attempt > 0) {
 				return;
 			}
-			this._finishActiveRetryWithFailure(msg);
-			this._resolveRetry();
+			this._retry.finishActiveRetryWithFailure(msg);
+			this._retry.resolve();
 			if (!compactionWillRetry) {
 				this._finishGoalForTerminalAssistantMessage(msg);
 				// In serialized mode, agent-callable refine.run is serviced
@@ -3469,18 +3415,6 @@ export class AgentSession {
 					}
 				}
 			}
-		}
-	}
-
-	private _resolveRetry(): void {
-		this._retryGeneration += 1;
-		this._semanticEdges.clearTurnRetry();
-		if (this._retryResolve) {
-			this._retryResolve();
-			this._retryResolve = undefined;
-			this._retryPromise = undefined;
-			this._notifySessionInputCheckpointChange();
-			this._scheduleSessionInputPump();
 		}
 	}
 
@@ -3944,7 +3878,7 @@ export class AgentSession {
 	}
 
 	get retryAttempt(): number {
-		return this._retryAttempt;
+		return this._retry.attempt;
 	}
 
 	getActiveToolNames(): string[] {
@@ -10703,275 +10637,16 @@ export class AgentSession {
 		return this._startRlmChildRun(prompt, kwargs, spawnCode);
 	}
 
-	private _isRetryableError(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error" || !message.errorMessage) return false;
-
-		const contextWindow = this.model?.contextWindow ?? 0;
-		if (isContextOverflow(message, contextWindow)) return false;
-
-		if (this._isFauxProviderQueueExhausted(message)) {
-			return false;
-		}
-
-		if (this._isAgentLifecycleFailure(message)) {
-			return false;
-		}
-
-		if (this._isStructuredPermanentProviderRetryExhausted(message)) {
-			return false;
-		}
-
-		return true;
-	}
-
-	private _isFauxProviderQueueExhausted(message: AssistantMessage): boolean {
-		return isFauxProviderQueueExhausted(message);
-	}
-
-	private _isAgentLifecycleFailure(message: AssistantMessage): boolean {
-		return isAgentLifecycleFailure(message);
-	}
-
-	private _getProviderStreamFailureKind(message: AssistantMessage): string | undefined {
-		return providerStreamFailureKind(message);
-	}
-
-	private _isStructuredPermanentProviderRetryExhausted(message: AssistantMessage): boolean {
-		return isPermanentProviderFailureKind(this._getProviderStreamFailureKind(message), this._retryAttempt);
-	}
-
-	private _isConcreteProviderAuthFailure(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error" || !message.errorMessage) return false;
-		// Only the provider's structured classification counts as an auth failure.
-		return this._getProviderStreamFailureKind(message) === "auth";
-	}
-
-	private _captureRetryAuthFailureSource(message: AssistantMessage): AuthSourceToken | undefined {
-		const token = this._modelRegistry.getCurrentProviderAuthSourceToken(message.provider);
-		if (!token) {
-			return undefined;
-		}
-		if (
-			!this._retryAuthFailureSources.some(
-				(existing) =>
-					existing.provider === token.provider &&
-					existing.source === token.source &&
-					existing.identityFingerprint === token.identityFingerprint &&
-					existing.valueFingerprint === token.valueFingerprint,
-			)
-		) {
-			this._retryAuthFailureSources.push(token);
-		}
-		return token;
-	}
-
-	private _markProviderAuthStale(message: AssistantMessage, authSourceTokens?: readonly AuthSourceToken[]): boolean {
-		if (authSourceTokens && authSourceTokens.length > 0) {
-			let marked = false;
-			for (const token of authSourceTokens) {
-				marked = this._modelRegistry.markProviderAuthSourceStale(token) || marked;
-			}
-			if (marked) {
-				this._emit({
-					type: "auth_stale",
-					provider: message.provider,
-					sourceTokens: authSourceTokens,
-				});
-			}
-			return marked;
-		}
-		const marked = this._modelRegistry.markProviderAuthStale(message.provider);
-		if (marked) {
-			this._emit({ type: "auth_stale", provider: message.provider });
-		}
-		return marked;
-	}
-
-	private _markProviderAuthStaleForRetryFailure(
-		message: AssistantMessage,
-		options?: {
-			markAuthStaleOnFailure?: boolean;
-			authSourceTokens?: readonly AuthSourceToken[];
-		},
-	): boolean {
-		const authSourceTokens =
-			this._retryAuthFailureSources.length > 0 ? this._retryAuthFailureSources : options?.authSourceTokens;
-		if ((authSourceTokens?.length ?? 0) > 0 || options?.markAuthStaleOnFailure) {
-			const marked = this._markProviderAuthStale(message, authSourceTokens);
-			if (marked && message.errorMessage) {
-				message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
-			}
-			return marked;
-		}
-		return false;
-	}
-
-	private _finishActiveRetryWithFailure(message: AssistantMessage): void {
-		if (this._retryAttempt === 0) {
-			return;
-		}
-		this._markProviderAuthStaleForRetryFailure(message);
-		this._emit({
-			type: "auto_retry_end",
-			success: false,
-			attempt: this._retryAttempt,
-			finalError: message.errorMessage,
-		});
-		this._retryAttempt = 0;
-		this._retryAuthFailureSources = [];
-	}
-
-	private async _handleRetryableError(
-		message: AssistantMessage,
-		options?: {
-			markAuthStaleOnFailure?: boolean;
-			authSourceTokens?: readonly AuthSourceToken[];
-		},
-	): Promise<boolean> {
-		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
-			this._markProviderAuthStaleForRetryFailure(message, options);
-			this._retryAuthFailureSources = [];
-			this._resolveRetry();
-			return false;
-		}
-
-		if (!this._retryPromise) {
-			this._retryPromise = new Promise((resolve) => {
-				this._retryResolve = resolve;
-			});
-		}
-
-		this._retryAttempt++;
-
-		if (this._retryAttempt > settings.maxRetries) {
-			this._markProviderAuthStaleForRetryFailure(message, options);
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this._retryAttempt - 1,
-				finalError: message.errorMessage,
-			});
-			this._retryAttempt = 0;
-			this._retryAuthFailureSources = [];
-			this._resolveRetry(); // Resolve so waitForRetry() completes
-			return false;
-		}
-
-		// Server-requested waits are honored, capped by retry.provider.maxRetryDelayMs (0 disables).
-		const maxRetryDelayMs = this.settingsManager.getProviderRetrySettings().maxRetryDelayMs;
-		const delay = providerRetryDelay(this._retryAttempt, providerStreamFailureRetryAfterMs(message), {
-			baseDelayMs: settings.baseDelayMs,
-			maxRetryDelayMs,
-		});
-		if (delay.kind === "exceeds-cap") {
-			this._markProviderAuthStaleForRetryFailure(message, options);
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this._retryAttempt - 1,
-				finalError: `Provider requested a ${Math.ceil(delay.retryAfterMs / 1000)}s wait before retrying (above retry.provider.maxRetryDelayMs=${maxRetryDelayMs}ms): ${message.errorMessage || "unknown error"}`,
-			});
-			this._retryAttempt = 0;
-			this._retryAuthFailureSources = [];
-			this._resolveRetry();
-			return false;
-		}
-
-		const delayMs = delay.delayMs;
-		// Park now: the retry re-issues the failed call and must reuse its Idempotency-Key.
-		// Payload hooks mutate the wire body after the hash point, so reuse is forfeited.
-		if (!this._extensionRunner.hasHandlers("before_provider_request")) {
-			this._semanticEdges.prepareTurnRetry();
-		}
-
-		this._emit({
-			type: "auto_retry_start",
-			attempt: this._retryAttempt,
-			maxAttempts: settings.maxRetries,
-			delayMs,
-			errorMessage: message.errorMessage || "Unknown error",
-		});
-
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
-		}
-
-		this._retryAbortController = new AbortController();
-		try {
-			await sleep(delayMs, this._retryAbortController.signal);
-		} catch {
-			const attempt = this._retryAttempt;
-			this._markProviderAuthStaleForRetryFailure(message, options);
-			this._retryAttempt = 0;
-			this._retryAbortController = undefined;
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
-			this._resolveRetry();
-			this._retryAuthFailureSources = [];
-			return false;
-		}
-		this._retryAbortController = undefined;
-
-		const retryGeneration = this._retryGeneration;
-		setTimeout(() => {
-			this.agent.continue().catch((error: unknown) => {
-				// A continue that never starts must still resolve the retry (else isRetrying
-				// sticks forever) — unless a newer retry owns the state by now.
-				if (this._retryGeneration !== retryGeneration || !this.isRetrying) return;
-				this._markProviderAuthStaleForRetryFailure(message, options);
-				const attempt = this._retryAttempt;
-				this._retryAttempt = 0;
-				this._retryAuthFailureSources = [];
-				this._emit({
-					type: "auto_retry_end",
-					success: false,
-					attempt,
-					finalError: error instanceof Error ? error.message : String(error),
-				});
-				this._resolveRetry();
-			});
-		}, 0);
-
-		return true;
-	}
-
 	abortRetry(): void {
-		if (this._retryAbortController) {
-			this._retryAbortController.abort();
-			return;
-		}
-		if (this._retryAttempt > 0) {
-			this._autoCompactionAbortController?.abort();
-			this._cancelPostCompactionContinue();
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this._retryAttempt,
-				finalError: "Retry cancelled",
-			});
-			this._retryAttempt = 0;
-		}
-		this._retryAuthFailureSources = [];
-		this._resolveRetry();
+		this._retry.abortRetry();
 	}
 
-	private async waitForRetry(): Promise<void> {
-		if (!this._retryPromise) {
-			return;
-		}
-
-		await this._retryPromise;
-		await this.agent.waitForIdle();
+	private waitForRetry(): Promise<void> {
+		return this._retry.waitForRetry();
 	}
 
 	get isRetrying(): boolean {
-		return this._retryPromise !== undefined;
+		return this._retry.isRetrying;
 	}
 
 	get hasAcceptedPromptInFlight(): boolean {
@@ -11625,10 +11300,8 @@ export class AgentSession {
 		return text.trim() || undefined;
 	}
 
-	// =========================================================================
-	// Extension System
-	// =========================================================================
-
+	// ==================================================================	// Extension System
+	// ==================================================================
 	createReplacedSessionContext(): ReplacedSessionContext {
 		const context = Object.defineProperties(
 			{},
