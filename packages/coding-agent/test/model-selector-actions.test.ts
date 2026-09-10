@@ -530,22 +530,22 @@ describe("ModelSelectorComponent", () => {
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
 
-		expect(row()).toContain("← ◼ ◼ ◻ ◻ → low");
+		expect(row()).toContain("← ■ ■ □ □ → low");
 		// The cluster sits near the row's horizontal center, clear of the name.
-		expect(row()?.search(/[◼◻]/)).toBe(32);
+		expect(row()?.search(/[■□]/)).toBe(32);
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("◼ ◼ ◼ ◻");
+		expect(row()).toContain("■ ■ ■ □");
 		expect(row()).toContain("medium");
 
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("◻ ◻ ◻ ◻");
+		expect(row()).toContain("□ □ □ □");
 		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("◼ ◼ ◼ ◼");
+		expect(row()).toContain("■ ■ ■ ■");
 		expect(row()).toContain("high");
 	});
 
@@ -581,13 +581,13 @@ describe("ModelSelectorComponent", () => {
 				.find((line) => line.includes("Beta One"));
 
 		expect(renderRow()).toBeDefined();
-		expect(renderRow()).not.toContain("◼");
-		expect(renderRow()).not.toContain("◻");
+		expect(renderRow()).not.toContain("■");
+		expect(renderRow()).not.toContain("□");
 		expect(renderRow()).not.toContain("←");
 		expect(renderRow()).not.toContain("→");
 
 		selector.handleInput("\x1b[C");
-		expect(renderRow()).not.toContain("◼");
+		expect(renderRow()).not.toContain("■");
 	});
 
 	it("applies the selected model and effort level together on confirm", async () => {
@@ -624,11 +624,11 @@ describe("ModelSelectorComponent", () => {
 			stripAnsi(selector.render(80).join("\n"))
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
-		expect(row()).toContain("◻ ◻ ◻ ◻");
+		expect(row()).toContain("□ □ □ □");
 		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("◼ ◻ ◻ ◻");
+		expect(row()).toContain("■ □ □ □");
 
 		selector.handleInput("\r");
 		expect(selectedId).toBe("beta-one");
@@ -668,22 +668,22 @@ describe("ModelSelectorComponent", () => {
 		const longRow = lines.find((line) => line.includes("A Considerably Longer"));
 		expect(shortRow).toBeDefined();
 		expect(longRow).toBeDefined();
-		expect(shortRow?.search(/[◼◻]/)).toBe(longRow?.search(/[◼◻]/));
+		expect(shortRow?.search(/[■□]/)).toBe(longRow?.search(/[■□]/));
 		expect(shortRow?.indexOf(" low")).toBe(longRow?.indexOf(" low"));
 		expect(shortRow).toContain("←");
 		expect(shortRow).toContain("→");
 		expect(longRow).not.toContain("←");
 		expect(longRow).not.toContain("→");
-		expect(longRow).toContain("◼ ◼ ◻ ◻");
+		expect(longRow).toContain("■ ■ □ □");
 
 		// Purple fills are reserved for the highlighted row; other rows fill light gray.
 		const shortRaw = rawLines.find((line) => line.includes("GLM 5.3"));
 		const longRaw = rawLines.find((line) => line.includes("A Considerably Longer"));
-		expect(shortRaw).toContain(theme.getEffortSquareColor()("◼"));
-		expect(shortRaw).toContain(theme.fg("dim", "◻"));
-		expect(longRaw).not.toContain(theme.getEffortSquareColor()("◼"));
-		expect(longRaw).toContain(theme.fg("muted", "◼"));
-		expect(longRaw).toContain(theme.fg("dim", "◻"));
+		expect(shortRaw).toContain(theme.getEffortSquareColor()("■"));
+		expect(shortRaw).toContain(theme.fg("dim", "□"));
+		expect(longRaw).not.toContain(theme.getEffortSquareColor()("■"));
+		expect(longRaw).toContain(theme.fg("muted", "■"));
+		expect(longRaw).toContain(theme.fg("dim", "□"));
 	});
 
 	it("keeps the effort cluster width stable across level changes", async () => {
@@ -728,7 +728,7 @@ describe("ModelSelectorComponent", () => {
 		const medium = row();
 		// Cluster start, arrow, and label cell all stay in place; only the
 		// square fills change.
-		expect(medium?.search(/[◼◻]/)).toBe(before?.search(/[◼◻]/));
+		expect(medium?.search(/[■□]/)).toBe(before?.search(/[■□]/));
 		expect(medium?.indexOf("→")).toBe(labelStart);
 		expect(labelCell(medium ?? "")).toBe("medium ");
 
@@ -740,7 +740,7 @@ describe("ModelSelectorComponent", () => {
 
 		selector.handleInput("\x1b[C");
 		const longest = row();
-		expect(longest?.search(/[◼◻]/)).toBe(before?.search(/[◼◻]/));
+		expect(longest?.search(/[■□]/)).toBe(before?.search(/[■□]/));
 		expect(labelCell(longest ?? "")).toBe("minimal");
 	});
 
