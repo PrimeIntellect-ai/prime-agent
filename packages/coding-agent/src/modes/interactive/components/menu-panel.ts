@@ -354,6 +354,11 @@ interface MenuRowOptions {
 	primary: string;
 	secondary?: string;
 	meta?: string;
+	/**
+	 * Inline-only segments rendered right-aligned; the last segment sits flush against the
+	 * row's right edge. Earlier segments drop first when the row is too narrow.
+	 */
+	trailing?: ReadonlyArray<string>;
 	selected: boolean;
 	inline?: boolean;
 }
@@ -382,18 +387,21 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 
 	renderContent(width: number): string[] {
 		if (this.options.inline) {
-			const innerWidth = Math.max(1, width - 3);
-			const secondary = width >= 60 ? this.options.secondary : undefined;
-			const details = [secondary, this.options.meta].filter(Boolean).join(" · ");
-			const meta = truncateToWidth(theme.fg("muted", details), Math.floor(innerWidth / 2), "…");
-			const primaryWidth = Math.max(1, innerWidth - visibleWidth(meta) - (meta ? 2 : 0));
+			// Trailing rows run flush to the right edge; legacy rows keep a one-column margin.
+			const hasTrailing = this.options.trailing !== undefined;
+			const innerWidth = Math.max(1, hasTrailing ? width - 2 : width - 3);
+			const trailing = this.getInlineTrailing(width, innerWidth);
+			const trailingWidth = visibleWidth(trailing);
+			const gap = trailingWidth > 0 ? 2 : 0;
+			const primaryWidth = Math.max(1, innerWidth - trailingWidth - gap);
 			const primary = truncateToWidth(
 				theme.fg(this.selected ? "accent" : "text", this.options.primary),
 				primaryWidth,
 				"…",
 				true,
 			);
-			const content = `${this.selected ? "›" : " "} ${primary}${meta ? `  ${meta}` : ""}`;
+			const filler = " ".repeat(Math.max(0, innerWidth - visibleWidth(primary) - trailingWidth));
+			const content = `${this.selected ? "›" : " "} ${primary}${filler}${trailing}`;
 			return [
 				paddedBackgroundLine(content, width, 0, this.selected ? theme.getSelectionBackgroundColor() : undefined),
 			];
@@ -430,6 +438,21 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 	private rowLine(text: string, width: number, selected: boolean): string {
 		const background = selected ? theme.getSelectionBackgroundColor() : theme.getEditorBackgroundColor();
 		return paddedBackgroundLine(text, width, ROW_PADDING_X, background);
+	}
+
+	private getInlineTrailing(width: number, innerWidth: number): string {
+		if (this.options.trailing === undefined) {
+			const secondary = width >= 60 ? this.options.secondary : undefined;
+			const details = [secondary, this.options.meta].filter(Boolean).join(" · ");
+			return details ? truncateToWidth(theme.fg("muted", details), Math.floor(innerWidth / 2), "…") : "";
+		}
+		const budget = Math.max(1, innerWidth - 5);
+		let segments = this.options.trailing.filter((segment) => segment.length > 0);
+		while (segments.length > 1 && visibleWidth(segments.join(" · ")) > budget) {
+			segments = segments.slice(1);
+		}
+		if (segments.length === 0) return "";
+		return truncateToWidth(theme.fg("muted", segments.join(" · ")), budget, "…");
 	}
 }
 
