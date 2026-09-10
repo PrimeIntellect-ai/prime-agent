@@ -104,7 +104,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 		if (width < 2) return lines;
 		const safeWidth = width;
 		const inner = safeWidth - 2;
-		const label = theme.fg("accent", "[1msubagents[22m");
+		const label = theme.fg("accent", "subagents");
 		const top = truncateToWidth(
 			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 3 - visibleWidth(label)))}╮`)}`,
 			safeWidth,
