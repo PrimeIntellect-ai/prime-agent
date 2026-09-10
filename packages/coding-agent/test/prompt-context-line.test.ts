@@ -11,36 +11,38 @@ describe("PromptContextLine", () => {
 	});
 
 	it.each(["dark", "light"])(
-		"shares one plain row between recap and model/effort/context with one blank line above the context row in the %s theme",
+		"shares one plain row between recap and detail status with one blank line above the context row in the %s theme",
 		(name) => {
 			initTheme(name);
 			const line = new PromptContextLine(
 				() => "Updated the prompt layout",
-				() => theme.fg("dim", "GLM 5.3 · high · 175k (44%)"),
+				() => theme.fg("dim", "Showing overview (Ctrl+O to expand)"),
 			);
 			const rows = line.render(80);
 
 			expect(rows).toHaveLength(2);
-			expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: Updated the prompt layout\s{2,}GLM 5.3 · high · 175k \(44%\) $/);
+			expect(stripAnsi(rows[1]!)).toMatch(
+				/^ Recap: Updated the prompt layout\s{2,}Showing overview \(Ctrl\+O to expand\) $/,
+			);
 			expect(rows[0]).toBe("");
 			expect(visibleWidth(rows[1]!)).toBe(80);
 			expect(rows[1]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		},
 	);
 
-	it("keeps model, effort, and context usage aligned right above the prompt", () => {
+	it("keeps detail status aligned right above the prompt", () => {
 		const line = new PromptContextLine(
 			() => undefined,
-			() => "GLM 5.3 · high · 175k (44%)",
+			() => "Showing overview (Ctrl+O to expand)",
 		);
 
 		const rows = line.render(40);
 		expect(rows).toHaveLength(2);
-		expect(stripAnsi(rows[1]!)).toBe(`${"GLM 5.3 · high · 175k (44%)".padStart(39)} `);
+		expect(stripAnsi(rows[1]!)).toBe(`${"Showing overview (Ctrl+O to expand)".padStart(39)} `);
 		expect(rows[0]).toBe("");
 	});
 
-	it("uses the full row for recap when the model is unavailable", () => {
+	it("uses the full row for recap when the status is unavailable", () => {
 		const line = new PromptContextLine(
 			() => "Updated files\n  and checked the result",
 			() => undefined,
@@ -53,10 +55,10 @@ describe("PromptContextLine", () => {
 		expect(rows[0]).toBe("");
 	});
 
-	it("keeps long Unicode recaps and model/effort within narrow terminal widths", () => {
+	it("keeps long Unicode recaps and detail status within narrow terminal widths", () => {
 		const line = new PromptContextLine(
 			() => "Updated 界面 files and checked the résumé with a long recap",
-			() => theme.fg("dim", "GLM 5.3 · xhigh"),
+			() => theme.fg("dim", "Showing details"),
 		);
 
 		for (const width of [1, 2, 3, 4, 8, 16, 24, 40, 80, 120]) {
@@ -64,21 +66,21 @@ describe("PromptContextLine", () => {
 			const plain = stripAnsi(rows[1]!);
 			expect(rows).toHaveLength(2);
 			expect(visibleWidth(rows[1]!)).toBe(width);
-			expect(plain).toContain("G");
+			expect(plain).toContain("S");
 			expect(rows[0]).toBe("");
 			if (width >= 40) {
-				expect(plain).toMatch(/^ Recap: .+ {2,}GLM 5.3 · xhigh $/);
+				expect(plain).toMatch(/^ Recap: .+ {2,}Showing details $/);
 			}
 		}
 	});
 
-	it("fits context usage beside the model while preserving the recap and narrow widths", () => {
+	it("fits detail status beside recap while preserving the recap and narrow widths", () => {
 		const line = new PromptContextLine(
 			() => "Updated the interface",
-			() => theme.fg("dim", "GLM 5.3 Fast · high · 175k (44%)"),
+			() => theme.fg("dim", "Showing all output (Ctrl+O to collapse)"),
 		);
 		expect(stripAnsi(line.render(100)[1]!)).toMatch(
-			/^ Recap: Updated the interface\s{2,}GLM 5.3 Fast · high · 175k \(44%\) $/,
+			/^ Recap: Updated the interface\s{2,}Showing all output \(Ctrl\+O to collapse\) $/,
 		);
 		for (const width of [1, 2, 3, 8, 24, 40, 80]) {
 			const rows = line.render(width);
@@ -88,8 +90,8 @@ describe("PromptContextLine", () => {
 		}
 	});
 
-	it("reserves the full model, effort, and context label before ellipsizing the recap", () => {
-		const metadata = "GLM 5.3 Fast · high · 175k (44%)";
+	it("reserves the full detail status before ellipsizing the recap", () => {
+		const metadata = "Showing all output (Ctrl+O to collapse)";
 		const line = new PromptContextLine(
 			() => "Updated the interface and verified all of the layout changes",
 			(maxWidth) => {
@@ -98,13 +100,13 @@ describe("PromptContextLine", () => {
 			},
 		);
 
-		const rows = line.render(48);
+		const rows = line.render(56);
 		expect(rows[0]).toBe("");
-		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: .+… {2}GLM 5.3 Fast · high · 175k \(44%\) $/);
-		expect(visibleWidth(rows[1]!)).toBe(48);
+		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: .+… {2}Showing all output \(Ctrl\+O to collapse\) $/);
+		expect(visibleWidth(rows[1]!)).toBe(56);
 	});
 
-	it("does not reserve a row when neither recap nor model is available", () => {
+	it("does not reserve a row when neither recap nor status is available", () => {
 		const line = new PromptContextLine(
 			() => "  ",
 			() => undefined,
