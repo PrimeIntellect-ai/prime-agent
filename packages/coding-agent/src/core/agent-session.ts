@@ -1219,6 +1219,7 @@ export class AgentSession {
 				getCompactionOperation: () => this._compaction.operation,
 				getBranchSummaryOperation: () => this._branchSummaryOperation,
 				waitForAgentIdle: () => this.agent.waitForIdle(),
+				dispatchRefine: (options, internal) => this.refine(options, internal),
 				disconnect: () => this._disconnectFromAgent(),
 				reconnect: () => this._reconnectToAgent(),
 				emit: (event) => this._emit(event),

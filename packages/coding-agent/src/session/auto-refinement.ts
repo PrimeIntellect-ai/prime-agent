@@ -348,10 +348,18 @@ export class AutoRefinement {
 		}
 	}
 
-	async _reviewAutoRefine(context: AutoRefineReviewRequest, signal?: AbortSignal): Promise<AutoRefineReview> {
+	_reviewAutoRefine(context: AutoRefineReviewRequest, signal?: AbortSignal): Promise<AutoRefineReview> {
 		if (this._autoRefineReviewer) {
-			return this._autoRefineReviewer(context, signal);
+			return this._reviewWithCustomReviewer(this._autoRefineReviewer, context, signal);
 		}
 		return this._host.review(context, signal);
+	}
+
+	private async _reviewWithCustomReviewer(
+		reviewer: AutoRefineReviewer,
+		context: AutoRefineReviewRequest,
+		signal?: AbortSignal,
+	): Promise<AutoRefineReview> {
+		return reviewer.call(this, context, signal);
 	}
 }

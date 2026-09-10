@@ -33,6 +33,10 @@ export interface SessionRefinementHost {
 	getCompactionOperation(): Promise<void> | undefined;
 	getBranchSummaryOperation(): Promise<void> | undefined;
 	waitForAgentIdle(): Promise<void>;
+	dispatchRefine(
+		options: { instructions?: string; global?: boolean },
+		internal: { source: "self" } | { trigger: "auto" },
+	): Promise<RefinementResult>;
 	disconnect(): void;
 	reconnect(): void;
 	emit(event: SessionRefinementEvent): void;
@@ -106,7 +110,7 @@ export class SessionRefinement {
 				getModel: () => _host.getModel(),
 				isContinuationScheduled: () => _host.isContinuationScheduled(),
 				cancelContinuation: () => _host.cancelContinuation(),
-				refine: (options, internal) => this.refine(options, internal),
+				refine: (options, internal) => _host.dispatchRefine(options, internal),
 				runSerialized: (options, source) => this._runSerializedRefine(options, source),
 				emitFailure: (error) => this._emitRefineFailed(error),
 				review: (context, signal) => this._execution.review(context, signal),
@@ -774,7 +778,7 @@ export class SessionRefinement {
 		const pending = this._pendingRequestedRefine;
 		if (!pending) return false;
 		this._pendingRequestedRefine = undefined;
-		void this.refine(pending, { source: "self" }).catch((error) => this._emitRefineFailed(error));
+		void this._host.dispatchRefine(pending, { source: "self" }).catch((error) => this._emitRefineFailed(error));
 		return true;
 	}
 
