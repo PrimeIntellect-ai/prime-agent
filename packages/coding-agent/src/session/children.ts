@@ -67,6 +67,9 @@ export interface SessionChildrenHost {
 	getChildOwner(child: AgentSession): SessionChildren;
 	getParentReplyCount(child: AgentSession): number;
 	getChildSessionDir(child: AgentSession): string | undefined;
+	listRlmSubagents(): Promise<RlmListSubagentsResult>;
+	deleteRlmSubagent(target: string): Promise<RlmDeleteSubagentResult>;
+	registerRlmChildSession(childId: string, session: AgentSession): boolean;
 	resolveModel(reference: string | undefined, target?: string): Promise<{ model: Model<Api> }>;
 	createSessionDir(): string;
 	createRuntimeOptions(request: ChildRuntimeRequest): CreateRlmSubagentRuntimeOptions;
@@ -189,7 +192,7 @@ export class SessionChildren {
 	}
 
 	private async _resolveDirectRlmSubagent(target: string): Promise<RlmSubagentRegistryEntry> {
-		const candidates = [...(await this.listRlmSubagents()).subagents, ...this._rlmChildCleanupFailures.values()];
+		const candidates = [...(await this.host.listRlmSubagents()).subagents, ...this._rlmChildCleanupFailures.values()];
 		const matches = candidates.filter((entry) => this._rlmSubagentMatchesTarget(entry, target));
 		if (matches.length === 0) {
 			throw new Error(`No direct RLM subagent matches "${target}" in the current parent session`);
@@ -213,7 +216,7 @@ export class SessionChildren {
 				return "running";
 			}
 			const subagent = [
-				...(await owner.listRlmSubagents()).subagents,
+				...(await owner.host.listRlmSubagents()).subagents,
 				...owner._rlmChildCleanupFailures.values(),
 			].find((entry) => entry.rlm_child_id === childId);
 			if (!subagent) continue;
@@ -285,7 +288,7 @@ export class SessionChildren {
 		}
 
 		const directMatches = [
-			...(await this.listRlmSubagents()).subagents,
+			...(await this.host.listRlmSubagents()).subagents,
 			...this._rlmChildCleanupFailures.values(),
 		].filter((entry) => this._rlmSubagentMatchesTarget(entry, target));
 		const directChildIds = new Set(directMatches.map((subagent) => subagent.rlm_child_id));
@@ -785,7 +788,7 @@ export class SessionChildren {
 		const childIds = [...this._rlmChildCleanupFailures.keys()].filter(
 			(childId) => !this._activeRlmChildRuns.get(childId)?.detachedDeletion,
 		);
-		await Promise.allSettled(childIds.map((childId) => this.deleteRlmSubagent(childId)));
+		await Promise.allSettled(childIds.map((childId) => this.host.deleteRlmSubagent(childId)));
 	}
 
 	async run(prompt: string, kwargs: Record<string, unknown> = {}, spawnCode?: string): Promise<RlmSpawnHandle> {
@@ -844,7 +847,7 @@ export class SessionChildren {
 				},
 				isCurrentRun: (run) => this._activeRlmChildRuns.get(run.id) === run,
 				snapshotForRun: (run) => this._rlmChildSnapshotForRun(run),
-				registerSession: (id, child) => this.registerRlmChildSession(id, child),
+				registerSession: (id, child) => this.host.registerRlmChildSession(id, child),
 				currentActiveSessionId: () => this._currentActiveSessionId(),
 				getRuntimeHost: () => this._subagentRuntimeHost,
 				recordDeleted: (id) => {
@@ -949,7 +952,7 @@ export class SessionChildren {
 			thinkingLevel,
 		});
 	}
-	async disposeAsync(): Promise<void> {
+	async disposeAsync(afterChildren: () => Promise<void>): Promise<void> {
 		for (const run of [...this._activeRlmChildRuns.values()]) {
 			const childSession = run.session;
 			if (!childSession) continue;
@@ -978,6 +981,7 @@ export class SessionChildren {
 		this._rlmChildSessions.clear();
 		this._rlmChildCleanupFailures.clear();
 		this._deletedRlmChildIds.clear();
+		return afterChildren();
 	}
 	dispose(): void {
 		this.cancelActiveRuns("Parent session disposed");

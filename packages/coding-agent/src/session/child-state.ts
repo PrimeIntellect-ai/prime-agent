@@ -33,16 +33,17 @@ function isPersistedRlmMaxDepthState(value: unknown): value is PersistedRlmMaxDe
 export interface SessionChildStateHost {
 	sessionManager: Pick<SessionManager, "getHeader" | "getBranch" | "appendCustomEntryWithRollback">;
 	settingsManager: Pick<SettingsManager, "getRlmMaxDepth" | "setRlmMaxDepth" | "flush" | "drainErrors">;
+	getRlmMaxDepthStatus(): RlmMaxDepthStatus;
 	refreshPrompt(preserveExtensionPrompt: boolean): void;
 	emitRecap(recap: string | undefined): void;
 }
 export class SessionChildState {
 	readonly depth: number;
 	private readonly configuredMaxDepth: number | undefined;
-	maxDepth: number;
-	private maxDepthSource: RlmMaxDepthSource;
-	repliedSinceTask: boolean | undefined;
-	replyCount = 0;
+	private _maxDepth: number;
+	private _maxDepthSource: RlmMaxDepthSource;
+	private _repliedSinceTask: boolean | undefined;
+	private _replyCount = 0;
 	private recap: string | undefined;
 	constructor(
 		private readonly host: SessionChildStateHost,
@@ -57,22 +58,31 @@ export class SessionChildState {
 			throw new Error("rlmMaxDepth must be a non-negative integer");
 		}
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
-		this.maxDepth = resolvedRlmMaxDepth.maxDepth;
-		this.maxDepthSource = resolvedRlmMaxDepth.source;
+		this._maxDepth = resolvedRlmMaxDepth.maxDepth;
+		this._maxDepthSource = resolvedRlmMaxDepth.source;
+	}
+	get maxDepth(): number {
+		return this._maxDepth;
+	}
+	get repliedSinceTask(): boolean | undefined {
+		return this._repliedSinceTask;
+	}
+	get replyCount(): number {
+		return this._replyCount;
 	}
 	initializeParentReply(): void {
 		// Resumed transcripts do not prove whether the child already replied.
-		this.repliedSinceTask =
+		this._repliedSinceTask =
 			this.depth > 0 && this.host.sessionManager.getBranch().some((entry) => entry.type === "message")
 				? undefined
 				: false;
 	}
 	recordReply(): void {
-		this.repliedSinceTask = true;
-		this.replyCount += 1;
+		this._repliedSinceTask = true;
+		this._replyCount += 1;
 	}
 	resetReply(): void {
-		this.repliedSinceTask = false;
+		this._repliedSinceTask = false;
 	}
 	getCurrentRecap(): string | undefined {
 		return this.recap;
@@ -83,10 +93,10 @@ export class SessionChildState {
 		this.host.emitRecap(recap);
 	}
 	reloadFromBranch(): void {
-		const previousMaxDepth = this.maxDepth;
+		const previousMaxDepth = this._maxDepth;
 		const resolved = this._resolveRlmMaxDepth();
-		this.maxDepth = resolved.maxDepth;
-		this.maxDepthSource = resolved.source;
+		this._maxDepth = resolved.maxDepth;
+		this._maxDepthSource = resolved.source;
 		if (resolved.maxDepth !== previousMaxDepth) this.host.refreshPrompt(false);
 	}
 	private _loadPersistedRlmMaxDepthState(): PersistedRlmMaxDepthState | undefined {
@@ -126,7 +136,7 @@ export class SessionChildState {
 	}
 
 	getRlmMaxDepthStatus(): RlmMaxDepthStatus {
-		return { maxDepth: this.maxDepth, source: this.maxDepthSource };
+		return { maxDepth: this._maxDepth, source: this._maxDepthSource };
 	}
 	async setRlmMaxDepth(maxDepth: number, options: { global?: boolean } = {}): Promise<SetRlmMaxDepthResult> {
 		if (!isNonNegativeInteger(maxDepth)) {
@@ -134,8 +144,8 @@ export class SessionChildState {
 		}
 
 		this.host.sessionManager.appendCustomEntryWithRollback(RLM_MAX_DEPTH_STATE_CUSTOM_TYPE, { maxDepth });
-		this.maxDepth = maxDepth;
-		this.maxDepthSource = "chat";
+		this._maxDepth = maxDepth;
+		this._maxDepthSource = "chat";
 		this.host.refreshPrompt(true);
 
 		let globalError: string | undefined;
@@ -152,7 +162,7 @@ export class SessionChildState {
 		}
 
 		return {
-			...this.getRlmMaxDepthStatus(),
+			...this.host.getRlmMaxDepthStatus(),
 			globalSaved: options.global === true && globalError === undefined,
 			...(globalError ? { globalError } : {}),
 		};

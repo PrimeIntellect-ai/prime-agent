@@ -132,7 +132,7 @@ interface InspectableRlmChildren {
 interface InspectableRlmSession {
 	_disposing: boolean;
 	_children: InspectableRlmChildren;
-	_childState: { repliedSinceTask: boolean | undefined };
+	_childState: { recordReply(): void };
 	_createKernelHostHandlers(): HostRequestHandlers;
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
@@ -1206,7 +1206,7 @@ describe("AgentSession rlm recursion", () => {
 		parent.setSessionName("parent");
 		const child = createSession({ depth: 1 });
 		child.setSessionName("worker");
-		(child as unknown as InspectableRlmSession)._childState.repliedSinceTask = true;
+		(child as unknown as InspectableRlmSession)._childState.recordReply();
 
 		const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
 			defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
@@ -1275,7 +1275,7 @@ describe("AgentSession rlm recursion", () => {
 
 	it("resets replied state when a parent message is accepted", async () => {
 		const child = createSession({ depth: 1 });
-		(child as unknown as InspectableRlmSession)._childState.repliedSinceTask = true;
+		(child as unknown as InspectableRlmSession)._childState.recordReply();
 		const message = createAgentSessionMessage({
 			id: "agentmsg-parent-task",
 			source: "agent_message",
@@ -1291,7 +1291,7 @@ describe("AgentSession rlm recursion", () => {
 
 	it("resets replied state when a parent follow-up is queued", async () => {
 		const child = createSession({ depth: 1 });
-		(child as unknown as InspectableRlmSession)._childState.repliedSinceTask = true;
+		(child as unknown as InspectableRlmSession)._childState.recordReply();
 		const message = createAgentSessionMessage({
 			id: "agentmsg-parent-follow-up",
 			source: "agent_message",
