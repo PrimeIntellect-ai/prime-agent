@@ -1,4 +1,10 @@
-import { type Model, modelsAreEqual } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	getSupportedThinkingLevels,
+	type Model,
+	type ModelThinkingLevel,
+	modelsAreEqual,
+} from "@earendil-works/pi-ai";
 import {
 	type Component,
 	Container,
@@ -116,6 +122,7 @@ export interface ModelSelectorOptions {
 	getRows?: () => number;
 	recentModels?: ReadonlyArray<string>;
 	inline?: boolean;
+	thinkingLevel?: ModelThinkingLevel;
 }
 
 type ModelScope = "all" | "scoped";
@@ -153,13 +160,15 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private searchQuery = "";
 	private currentModel?: Model<any>;
 	private modelRegistry: ModelRegistry;
-	private onSelectCallback: (model: Model<any>) => void;
+	private onSelectCallback: (model: Model<any>, thinkingLevel?: ModelThinkingLevel) => void;
 	private onCancelCallback: () => void;
 	private availableModels?: ReadonlyArray<Model<any>>;
 	private configuredProviders?: ReadonlySet<string>;
 	private recentRank: Map<string, number>;
 	private errorMessage?: string;
 	private configuredAuth = new Map<string, boolean>();
+	private readonly effortLevels = new Map<string, ModelThinkingLevel>();
+	private initialThinkingLevel?: ModelThinkingLevel;
 	private readonly inline: boolean;
 	private renderWidth = 80;
 	private tui: TUI;
@@ -185,7 +194,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		currentModel: Model<any> | undefined,
 		modelRegistry: ModelRegistry,
 		scopedModels: ReadonlyArray<ScopedModelItem>,
-		onSelect: (model: Model<any>) => void,
+		onSelect: (model: Model<any>, thinkingLevel?: ModelThinkingLevel) => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
 		options: ModelSelectorOptions = {},
@@ -202,6 +211,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.onCancelCallback = onCancel;
 		this.availableModels = options.availableModels;
 		this.configuredProviders = options.configuredProviders;
+		this.initialThinkingLevel = options.thinkingLevel;
 		this.recentRank = new Map((options.recentModels ?? []).map((key, i) => [key, i]));
 		this.viewport = { getRows: options.getRows };
 		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => 2)) : () => (this.inline ? 1 : 0);
@@ -366,6 +376,43 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		return item.provider === PRIME_INFERENCE_PROVIDER_ID && this.isProviderConfigured(item);
 	}
 
+	private getSelectableLevels(item: ModelItem): ModelThinkingLevel[] {
+		const levels = getSupportedThinkingLevels(item.model);
+		if (levels.length === 1 && levels[0] === "off") return [];
+		return levels;
+	}
+
+	private getEffort(item: ModelItem): ModelThinkingLevel | undefined {
+		const levels = this.getSelectableLevels(item);
+		if (levels.length === 0) return undefined;
+		const key = this.getModelKey(item);
+		const stored = this.effortLevels.get(key);
+		if (stored !== undefined && levels.includes(stored)) return stored;
+		const initial = this.initialThinkingLevel ?? "off";
+		const level = levels.includes(initial) ? initial : clampThinkingLevel(item.model, initial);
+		const resolved = levels.includes(level) ? level : levels[0]!;
+		this.effortLevels.set(key, resolved);
+		return resolved;
+	}
+
+	private adjustEffort(item: ModelItem, direction: number): boolean {
+		const levels = this.getSelectableLevels(item);
+		if (levels.length === 0) return false;
+		const current = this.getEffort(item) ?? levels[0]!;
+		const index = levels.indexOf(current);
+		const next = levels[(index + direction + levels.length) % levels.length]!;
+		this.effortLevels.set(this.getModelKey(item), next);
+		return true;
+	}
+
+	private renderEffortSquares(levels: ModelThinkingLevel[], effort: ModelThinkingLevel | undefined): string {
+		const onLevels = levels.filter((level) => level !== "off");
+		if (onLevels.length === 0) return "";
+		const filled = effort === undefined || effort === "off" ? 0 : onLevels.indexOf(effort) + 1;
+		const filledCount = Math.max(0, Math.min(onLevels.length, filled));
+		return theme.fg("accent", "▓".repeat(filledCount)) + theme.fg("dim", "░".repeat(onLevels.length - filledCount));
+	}
+
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
 		sorted.sort((a, b) => {
@@ -476,10 +523,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (isCurrent) inlineSegments.push("current");
 			if (!isConfigured) inlineSegments.push("require sign in");
 			inlineSegments.push(item.provider);
+			const levels = this.getSelectableLevels(item);
+			const effort = this.getEffort(item);
+			const squares = this.renderEffortSquares(levels, effort);
 
 			this.listContainer.addChild(
 				new MenuRow({
-					primary: this.inline ? item.model.name : item.id,
+					primary: this.inline ? `${item.model.name}${squares ? ` ${squares}` : ""}` : item.id,
 					secondary: this.inline ? undefined : item.provider,
 					meta: this.inline ? undefined : meta,
 					trailing: this.inline ? inlineSegments : undefined,
@@ -530,6 +580,16 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			}
 			return;
 		}
+		// Left/right - adjust the highlighted model's effort level, wrapping like up/down
+		if (kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.editor.cursorRight")) {
+			const direction = kb.matches(keyData, "tui.editor.cursorLeft") ? -1 : 1;
+			const selected = this.filteredModels[this.selectedIndex];
+			if (selected && this.adjustEffort(selected, direction)) {
+				this.updateList();
+				this.tui.requestRender();
+			}
+			return;
+		}
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			const selectableCount = this.getSelectableCount();
@@ -567,14 +627,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	private handleSelect(model: Model<any>): void {
-		this.onSelectCallback(model);
-	}
-
 	private handleConfirm(): void {
 		const selectedModel = this.filteredModels[this.selectedIndex];
 		if (selectedModel) {
-			this.handleSelect(selectedModel.model);
+			this.onSelectCallback(selectedModel.model, this.getEffort(selectedModel));
 			return;
 		}
 	}

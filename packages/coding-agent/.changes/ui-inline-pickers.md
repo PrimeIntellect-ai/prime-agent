@@ -2,3 +2,4 @@
 - Added selected-model catalog prices for input, cached input, and output per million tokens.
 - Split the configuration menu into separate single-purpose pickers and dropped the tab bar and tab navigation; each command opens only its own picker.
 - Changed model rows to right-align the provider label with a require sign in hint beside it, and to list signed-in providers first with Prime Inference pinned on top when signed in.
+- Added per-model effort squares to the models picker; left/right adjusts the highlighted model's reasoning level and Enter applies the model and effort together.

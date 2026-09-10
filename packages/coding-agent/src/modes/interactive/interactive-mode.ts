@@ -8223,11 +8223,12 @@ export class InteractiveMode {
 				configuredProviders: this.connectionConfiguredProviders,
 				recentModels: this.settingsManager.getRecentModels(),
 				initialModelSearch,
+				thinkingLevel: this.connectionState?.thinkingLevel,
 				getRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 				requestRender: () => this.ui.requestRender(),
 				onSelectProvider: (provider) => authenticate(provider, "providers"),
 				onSelectMcpConnection: (provider) => authenticate(provider, "mcp-connections"),
-				onSelectModel: (model) => {
+				onSelectModel: (model, thinkingLevel) => {
 					if (settled || busy) return;
 					busy = true;
 					void (async () => {
@@ -8245,6 +8246,9 @@ export class InteractiveMode {
 							if (!ready) return;
 							conceal();
 							await this.completeModelSelection(model);
+							if (thinkingLevel !== undefined) {
+								this.applyThinkingLevel(thinkingLevel);
+							}
 							completed = true;
 						} catch (error) {
 							show();
