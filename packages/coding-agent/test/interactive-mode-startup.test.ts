@@ -409,6 +409,18 @@ describe("InteractiveMode startup hints", () => {
 		expect(overrideLabel()).toBeUndefined();
 	});
 
+	it("never shows a depth label for root sessions and keeps it for subagent sessions", () => {
+		const root = createMode();
+		Object.assign(root.options, { sessionDepth: 0, sessionHasChildren: true });
+		const subagent = createMode(1);
+		Object.assign(subagent.options, { sessionDepth: 1 });
+		const getLabel = (mode: ReturnType<typeof createMode>) =>
+			stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+
+		expect(getLabel(root)).toBe("test-model  ? for shortcuts");
+		expect(getLabel(subagent)).toBe("depth 1  test-model");
+	});
+
 	it("keeps the question-mark shortcut guide compact", () => {
 		const guide = Reflect.get(InteractiveMode.prototype, "getShortcutGuide").call(createMode());
 

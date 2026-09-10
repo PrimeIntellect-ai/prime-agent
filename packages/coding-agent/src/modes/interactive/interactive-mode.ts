@@ -1192,6 +1192,7 @@ export class InteractiveMode {
 			() => this.getTrayLocationLabel(),
 			() => this.getTrayContextLabel(),
 			() => this.getTrayOverrideLabel(),
+			() => this.isInlinePickerOpen(),
 		);
 		this.subagentSummaryLine.setOpenable(this.options.returnToAgentsView === true);
 		this.subagentSummaryLine.onOpen = () => void this.openScopedAgentsView();
@@ -6129,8 +6130,11 @@ export class InteractiveMode {
 	private getTrayLocationLabel(): string | undefined {
 		if (this.isInlinePickerOpen()) return undefined;
 		const modelLabel = this.getModelTrayLabel();
+		const sessionDepth = this.options.sessionDepth;
 		const hasChildren = this.options.sessionHasChildren === true || (this.subagentSnapshots?.size ?? 0) > 0;
-		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
+		// Depth is subagent-session context: a root session (depth 0) never shows
+		// a depth label, even while its children run.
+		const depthLabel = sessionDepth ? formatAgentDepthLabel(sessionDepth, hasChildren) : undefined;
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
 		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
