@@ -507,7 +507,6 @@ describe("AgentSession compaction characterization", () => {
 			_schedulePostCompactionContinue(): void;
 			_cancelPostCompactionContinue(): void;
 			_sessionInputCheckpointWaiters: Set<() => void>;
-			_sessionInputPumpSuspended: boolean;
 		};
 		// A queued follow-up held back by a pause, then a pump suspension (the
 		// requestAbort teardown state): the queue stays populated but undispatchable.
@@ -516,7 +515,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(session.queuedActionCount).toBe(1);
 		session.requestAbort();
 		pause.release();
-		expect(internals._sessionInputPumpSuspended).toBe(true);
+		expect(session.isQueuedWorkSuspended).toBe(true);
 		expect(session.queuedActionCount).toBe(1);
 
 		// The runner passes its pre-dispatch guards (no pauses, agent idle) and

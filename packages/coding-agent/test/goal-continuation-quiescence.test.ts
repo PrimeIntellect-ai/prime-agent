@@ -2,14 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { emptyGoalState } from "../src/core/goals.js";
 import { GoalController } from "../src/goals/controller.js";
+import { SessionInputScheduler } from "../src/session/input-scheduler.js";
 
 type Harness = {
 	_goals: GoalController;
 	_goalContinuationAwaitsRlmWork: boolean;
 	_disposed: boolean;
 	_disposing: boolean;
-	_sessionInputAdmissionPauses: Set<symbol>;
-	_sessionInputPumpSuspended: boolean;
+	_inputScheduler: SessionInputScheduler;
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
 	_stopGoalContinuationForTerminalMessage: () => boolean;
 	_ensureGoalRuntimeActive: () => void;
@@ -33,8 +33,7 @@ function harness(overrides: Partial<Harness> = {}): Harness {
 		_goalContinuationAwaitsRlmWork: false,
 		_disposed: false,
 		_disposing: false,
-		_sessionInputAdmissionPauses: new Set(),
-		_sessionInputPumpSuspended: false,
+		_inputScheduler: new SessionInputScheduler({ canSchedule: () => false, run: async () => {} }),
 		_hasUnsettledRlmQuiescenceWork: () => false,
 		_stopGoalContinuationForTerminalMessage: () => false,
 		_ensureGoalRuntimeActive: () => {},
@@ -79,20 +78,21 @@ describe("goal continuation vs unsettled subagent work", () => {
 	it("keeps the deferral while admission is paused and retries after release", () => {
 		const paused = harness({
 			_goalContinuationAwaitsRlmWork: true,
-			_sessionInputAdmissionPauses: new Set([Symbol("pause")]),
 		});
+		const pause = paused._inputScheduler.acquireAdmissionPause(() => {});
 		maybeResume.call(paused);
 		expect(paused._admitSessionInput).not.toHaveBeenCalled();
 		expect(paused._goalContinuationAwaitsRlmWork).toBe(true);
 
-		paused._sessionInputAdmissionPauses.clear();
+		pause.release();
 		maybeResume.call(paused);
 		expect(paused._admitSessionInput).toHaveBeenCalledTimes(1);
 		expect(paused._goalContinuationAwaitsRlmWork).toBe(false);
 	});
 
 	it("keeps the deferral while the pump is suspended after an abort", () => {
-		const mode = harness({ _goalContinuationAwaitsRlmWork: true, _sessionInputPumpSuspended: true });
+		const mode = harness({ _goalContinuationAwaitsRlmWork: true });
+		mode._inputScheduler.suspend("abort");
 		maybeResume.call(mode);
 		expect(mode._admitSessionInput).not.toHaveBeenCalled();
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
