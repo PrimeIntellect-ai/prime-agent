@@ -87,7 +87,7 @@ export function buildConversationComponents(
 					message,
 					options.hideThinkingBlock ?? false,
 					options.markdownTheme,
-					options.hiddenThinkingLabel ?? "Thinking:",
+					options.hiddenThinkingLabel ?? "Thinking...",
 					{
 						cwd: options.cwd,
 						expanded,

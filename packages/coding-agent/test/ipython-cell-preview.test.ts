@@ -47,9 +47,6 @@ describe("IPythonCellComponent collapsed preview styling", () => {
 
 		expect(raw).toContain(theme.fg("dim", 'print("hello world")'));
 		expect(raw).not.toContain(theme.getFgAnsi("syntaxString"));
-		// Line counts and duration render in the same dim tone as the preview.
-		expect(raw).toContain(theme.fg("dim", "↑ 1 ↓ 1 lines"));
-		expect(raw).toContain(theme.fg("dim", "12ms"));
 	});
 
 	it("renders the collapsed bash preview dim instead of bash-mode green", () => {

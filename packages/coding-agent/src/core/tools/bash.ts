@@ -177,7 +177,7 @@ function formatDuration(ms: number): string {
 function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
 	const command = str(args?.command);
 	const timeout = args?.timeout as number | undefined;
-	const timeoutSuffix = timeout ? theme.fg("dim", ` (timeout ${timeout}s)`) : "";
+	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 	let commandDisplay: string;
 	if (command === null) {
 		commandDisplay = invalidArgText(theme);
@@ -188,7 +188,7 @@ function formatBashCall(args: { command?: string; timeout?: number } | undefined
 	} else {
 		commandDisplay = theme.fg("toolOutput", "...");
 	}
-	return theme.fg("dim", `$ ${commandDisplay}`) + timeoutSuffix;
+	return theme.fg("toolTitle", `$ ${commandDisplay}`) + timeoutSuffix;
 }
 
 function rebuildBashResultRenderComponent(
@@ -228,8 +228,8 @@ function rebuildBashResultRenderComponent(
 					}
 					if (state.cachedSkipped && state.cachedSkipped > 0) {
 						const hint = showExpandHint
-							? `${theme.fg("dim", `... ${state.cachedSkipped} earlier lines`)} ${expandCollapseHint("app.tools.expand", false)}`
-							: theme.fg("dim", `... (${state.cachedSkipped} earlier lines)`);
+							? `${theme.fg("muted", `... ${state.cachedSkipped} earlier lines`)} ${expandCollapseHint("app.tools.expand", false)}`
+							: theme.fg("muted", `... (${state.cachedSkipped} earlier lines)`);
 						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
 					}
 					return ["", ...(state.cachedLines ?? [])];
@@ -265,7 +265,7 @@ function rebuildBashResultRenderComponent(
 	if (startedAt !== undefined) {
 		const label = options.isPartial ? "Elapsed" : "Took";
 		const endTime = endedAt ?? Date.now();
-		component.addChild(new Text(`\n${theme.fg("dim", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
+		component.addChild(new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
 	}
 }
 

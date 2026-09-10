@@ -63,10 +63,11 @@ class CollapsedThinkingRow implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const fixedWidth = visibleWidth(` ${this.label} ${this.hint}`);
+		const separator = theme.fg("dim", " · ");
+		const fixedWidth = visibleWidth(` ${this.label}${separator} ${this.hint}`);
 		const recapWidth = Math.max(8, safeWidth - fixedWidth);
-		const recap = theme.fg("dim", truncateToWidth(this.recap, recapWidth));
-		return [truncateToWidth(` ${this.label} ${recap} ${this.hint}`, safeWidth, "")];
+		const recap = theme.fg("thinkingText", truncateToWidth(this.recap, recapWidth));
+		return [truncateToWidth(` ${this.label}${separator}${recap} ${this.hint}`, safeWidth, "")];
 	}
 
 	invalidate(): void {}
@@ -83,11 +84,7 @@ export function thinkingRecap(thinking: string, fallback: string, maxWidth = 120
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0);
 	const lastHeader = [...lines].reverse().find((line) => /^\*\*[^*]+\*\*:?$/.test(line) || /^#{1,6}\s+\S/.test(line));
-	const source = lastHeader ?? lines[0];
-	if (source === undefined) {
-		// The fallback label is returned verbatim; the colon strip below is for trace text.
-		return truncateToWidth(fallback, Math.max(20, maxWidth));
-	}
+	const source = lastHeader ?? lines[0] ?? fallback;
 	const plain = source
 		.replace(/^#{1,6}\s+/, "")
 		.replace(/\*\*([^*]+)\*\*/g, "$1")
@@ -140,7 +137,7 @@ export class AssistantMessageComponent extends Container {
 		message?: AssistantMessage,
 		hideThinkingBlock = false,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		hiddenThinkingLabel = "Thinking:",
+		hiddenThinkingLabel = "Thinking...",
 		options: AssistantMessageComponentOptions = {},
 	) {
 		super();

@@ -18,9 +18,9 @@ function collapseText(text: string): string {
 
 /** `◆ <label> · <participant>[ · <preview>]` summary line shared by received and sent agent-message UI. */
 export function agentMessageSummaryLine(label: string, participant: string, preview?: string): string {
-	const parts = [`${theme.fg("accent", "◆")} ${theme.fg("muted", label)}`, theme.fg("dim", participant)];
+	const parts = [`${theme.fg("accent", "◆")} ${theme.fg("muted", label)}`, theme.fg("muted", participant)];
 	if (preview) {
-		parts.push(theme.fg("dim", preview));
+		parts.push(theme.fg("muted", preview));
 	}
 	return parts.join(theme.fg("dim", " · "));
 }

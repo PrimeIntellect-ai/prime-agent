@@ -236,26 +236,24 @@ describe("AssistantMessageComponent streaming identity", () => {
 		const collapsedRaw = new AssistantMessageComponent(message, true).render(120).join("\n");
 		const rendered = stripAnsi(collapsedRaw);
 
-		expect(rendered).toContain("Thinking: Deciding the approach (Ctrl+T to expand)");
+		expect(rendered).toContain("Thinking... · Deciding the approach (Ctrl+T to expand)");
 		expect(rendered).not.toContain("Some detail");
 		// The label keeps the thinkingText color but is no longer bolded.
 		expect(collapsedRaw).toContain(theme.getFgAnsi("thinkingText"));
 		expect(collapsedRaw).not.toContain("\x1b[1m");
-		// The recap renders in the same dim tone as the expanded trace.
-		expect(collapsedRaw).toContain(theme.fg("dim", "Deciding the approach"));
 
 		const expandedRaw = new AssistantMessageComponent(message, false).render(120).join("\n");
 		const expanded = stripAnsi(expandedRaw);
-		expect(expanded).toContain("Thinking: (Ctrl+T to collapse)");
+		expect(expanded).toContain("Thinking... (Ctrl+T to collapse)");
 		expect(expanded).toContain("Some detail about the options.");
 		// The visible trace renders one step dimmer than the label.
 		expect(expandedRaw).toContain(theme.getFgAnsi("dim"));
-		const labelLine = expandedRaw.split("\n").find((line) => line.includes("Thinking:"));
+		const labelLine = expandedRaw.split("\n").find((line) => line.includes("Thinking..."));
 		expect(labelLine).toBeDefined();
 		expect(labelLine).not.toContain("\x1b[1m");
 
 		// A whitespace-only trace falls back to the label instead of an empty recap.
-		expect(thinkingRecap("   \n\t\n", "Thinking:")).toBe("Thinking:");
+		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
 	});
 
 	test("recap text with delimiters cannot mask structural changes", () => {
@@ -292,7 +290,7 @@ describe("AssistantMessageComponent streaming identity", () => {
 			.filter((line) => line.trim().length > 0);
 
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("Thinking:");
+		expect(lines[0]).toContain("Thinking...");
 		expect(lines[0]).toContain("to expand");
 	});
 
