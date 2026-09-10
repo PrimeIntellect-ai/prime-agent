@@ -11,7 +11,7 @@ import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { parseIpythonBashCell } from "../../../core/tools/ipython-cell-code.js";
 import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../theme/working-icon.js";
-import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } from "./agent-message.js";
+import { agentMessageBodyLines, agentMessageSummaryLine } from "./agent-message.js";
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
 import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
@@ -38,7 +38,6 @@ export interface IPythonCellState {
 	isPartial?: boolean;
 	isError?: boolean;
 	expanded?: boolean;
-	agentMessagesExpanded?: boolean;
 	editDiffsExpanded?: boolean;
 	showExpandHint?: boolean;
 	executionStarted?: boolean;
@@ -430,7 +429,9 @@ export class IPythonCellComponent implements Component {
 
 		const duration = formatDuration(details.durationMs);
 		if (duration) {
-			parts.push(theme.fg("dim", this.state.backgroundShell ? `cell ${duration}` : duration));
+			parts.push(
+				theme.fg("dim", this.state.backgroundShell || this.state.shellCompletion ? `cell ${duration}` : duration),
+			);
 		}
 
 		const errorName = !this.state.isPartial ? (details.error?.ename ?? details.errorEname) : undefined;
@@ -489,8 +490,8 @@ export class IPythonCellComponent implements Component {
 
 	private statusKind(details: IpythonDetails): "error" | "aborted" | "running" | "queued" | "done" {
 		const status = details.status;
-		if (this.state.backgroundShell && !this.state.isPartial) {
-			const exitCode = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell.exitCode;
+		if ((this.state.backgroundShell || this.state.shellCompletion) && !this.state.isPartial) {
+			const exitCode = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell?.exitCode;
 			return exitCode === undefined ? "running" : exitCode === 0 ? "done" : "error";
 		}
 		if (this.state.isError || status === "error") {
@@ -664,29 +665,14 @@ export class IPythonCellComponent implements Component {
 		}
 	}
 
-	// Summary line per message; expanding shows the message text in a `╰─` gutter
-	// instead of the collapsed preview, matching received agent-message UI.
 	private renderSentAgentMessages(lines: string[], width: number, messages: readonly SentAgentMessageDisplay[]): void {
+		if (!this.state.expanded) return;
 		for (const message of messages) {
 			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
-			if (this.state.agentMessagesExpanded) {
-				this.addBlank(lines, width);
-				this.addPlain(
-					lines,
-					truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"),
-				);
-				for (const bodyLine of agentMessageBodyLines(message.message, width)) {
-					lines.push(bodyLine);
-				}
-				continue;
-			}
-			const prefixWidth = visibleWidth(`◆ ${label} · ${recipient} · `);
-			const preview = agentMessagePreview(prefixWidth, message.message);
-			this.addPlain(
-				lines,
-				truncateToWidth(agentMessageSummaryLine(label, recipient, preview), Math.max(1, width - 1), "…"),
-			);
+			this.addBlank(lines, width);
+			this.addPlain(lines, truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"));
+			lines.push(...agentMessageBodyLines(message.message, width));
 		}
 	}
 

@@ -10,17 +10,14 @@ import { initTheme } from "../src/modes/interactive/theme/theme.js";
 interface DetailMode {
 	toolOutputExpanded: boolean;
 	editDiffsExpanded: boolean;
-	agentMessagesExpanded: boolean;
 	getTrayContextLabel(): string | undefined;
 	toggleToolOutputExpansion(): void;
-	toggleAgentMessageExpansion(): void;
 	setToolsExpanded(expanded: boolean): void;
 }
 function createMode(): DetailMode {
 	return Object.assign(Object.create(InteractiveMode.prototype), {
 		toolOutputExpanded: false,
 		editDiffsExpanded: false,
-		agentMessagesExpanded: false,
 		applyChatExpansion: vi.fn(),
 		getTrayGoalLabel: () => undefined,
 		getTrayHeartbeatLabel: () => undefined,
@@ -66,11 +63,9 @@ describe("conversation detail status", () => {
 		expect(formatConversationDetailStatus(true, true)).toBe("Showing all output");
 	});
 
-	it("reflects extension expansion setters while independent agent-message toggles leave detail status unchanged", () => {
+	it("reflects extension expansion setters", () => {
 		const mode = createMode();
 		mode.setToolsExpanded(true);
-		expect(mode.getTrayContextLabel()).toBe("Showing all output (Ctrl+O to collapse)");
-		mode.toggleAgentMessageExpansion();
 		expect(mode.getTrayContextLabel()).toBe("Showing all output (Ctrl+O to collapse)");
 		mode.setToolsExpanded(false);
 		expect(mode.getTrayContextLabel()).toBe("Showing overview (Ctrl+O to expand)");

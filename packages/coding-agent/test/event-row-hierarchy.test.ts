@@ -44,7 +44,7 @@ describe("conversation event row hierarchy", () => {
 		};
 	}
 
-	it("dims the participant and preview after the agent message label", () => {
+	it("dims the participant and preserves the expanded agent message body", () => {
 		const message: AgentSessionMessage = {
 			role: "custom",
 			customType: "agent_message",
@@ -59,11 +59,13 @@ describe("conversation event row hierarchy", () => {
 			timestamp: 123,
 		};
 
-		const raw = new AgentMessageComponent(message, undefined, {}).render(100).join("\n");
+		const component = new AgentMessageComponent(message);
+		component.setExpanded(true);
+		const raw = component.render(100).join("\n");
 
 		expect(raw).toContain(theme.fg("muted", "Agent message received"));
 		expect(raw).toContain(theme.fg("dim", "from parent Planner"));
-		expect(raw).toContain(theme.fg("dim", "Review shard seven."));
+		expect(raw).toContain(theme.fg("customMessageText", "Review shard seven."));
 	});
 
 	it("dims the bash tool command on the call row", () => {

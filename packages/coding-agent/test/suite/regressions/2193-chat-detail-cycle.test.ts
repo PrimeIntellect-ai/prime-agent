@@ -5,6 +5,7 @@ import { type Container, setKeybindings, type TUI } from "@earendil-works/pi-tui
 import stripAnsi from "strip-ansi";
 import { Type } from "typebox";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import type { AgentConnection, AgentConnectionSessionEvent } from "../../../src/modes/agent-connection/index.js";
@@ -40,7 +41,6 @@ type ModeControls = {
 	chatContainer: Container;
 	defaultEditor: CustomEditor;
 	ui: TUI;
-	agentMessagesExpanded: boolean;
 	setupKeyHandlers(): void;
 	renderSessionContext(
 		context: ReturnType<SessionManager["buildSessionContext"]>,
@@ -90,6 +90,8 @@ function assertMode(mode: ModeControls, detail: "overview" | "details" | "all"):
 	expect(text.includes("PRIVATE_THINKING")).toBe(detail !== "overview");
 	expect(text.includes("NEW_FILE_CONTENT")).toBe(detail !== "overview");
 	expect(text.includes("FULL_TOOL_OUTPUT")).toBe(detail === "all");
+	expect(text.includes("AGENT_MESSAGE_BODY")).toBe(detail === "all");
+	expect(text.includes("Agent message received")).toBe(detail === "all");
 }
 describe("conversation detail cycle", () => {
 	test("cycles a reopened saved chat without changing messages or JSONL", async () => {
@@ -107,6 +109,17 @@ describe("conversation detail cycle", () => {
 			fauxAssistantMessage("Done."),
 		]);
 		await harness.session.prompt("Show the fixture");
+		await harness.session.sendCustomMessage(
+			createAgentSessionMessage({
+				id: "detail-agent",
+				source: "agent_message",
+				target: { activeSessionId: "parent", sessionId: "parent" },
+				message: "AGENT_MESSAGE_BODY",
+				from: { activeSessionId: "child", sessionId: "child" },
+				fromRelationship: "child",
+			}),
+			{ triggerTurn: false },
+		);
 		const sessionFile = harness.sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted fixture");
 		const savedTrace = readFileSync(sessionFile, "utf8");
@@ -119,9 +132,8 @@ describe("conversation detail cycle", () => {
 		assertMode(mode, "details");
 		cycle(mode);
 		assertMode(mode, "all");
-		expect(mode.agentMessagesExpanded).toBe(true);
 		mode.defaultEditor.handleInput("\x10");
-		expect(mode.agentMessagesExpanded).toBe(false);
+		assertMode(mode, "all");
 		await mode.renderSessionContext(context, { clearChat: true });
 		assertMode(mode, "all");
 		cycle(mode);
@@ -175,6 +187,35 @@ describe("conversation detail cycle", () => {
 		cycle(mode);
 		expect(render(mode)).toContain("LATER_THINKING");
 	});
+	test("applies all-output-only agent messages to newly arriving live events", async () => {
+		harness = await createHarness();
+		const mode = createMode(harness);
+		const message = createAgentSessionMessage({
+			id: "live-agent",
+			source: "agent_message",
+			message: "LIVE_AGENT_BODY",
+			from: { activeSessionId: "child", sessionId: "child" },
+			target: { activeSessionId: "parent", sessionId: "parent" },
+			fromRelationship: "child",
+		});
+		await mode.handleEvent({ type: "message_start", message });
+		expect(render(mode)).not.toContain("LIVE_AGENT_BODY");
+		expect(render(mode)).not.toContain("Agent message received");
+		cycle(mode);
+		expect(render(mode)).not.toContain("Agent message received");
+		cycle(mode);
+		expect(render(mode)).toContain("LIVE_AGENT_BODY");
+		await mode.handleEvent({
+			type: "message_start",
+			message: { ...message, details: { ...message.details, id: "later-agent", message: "LATER_AGENT_BODY" } },
+		});
+		expect(render(mode)).toContain("LATER_AGENT_BODY");
+		mode.defaultEditor.handleInput("\x10");
+		expect(render(mode)).toContain("LATER_AGENT_BODY");
+		cycle(mode);
+		expect(render(mode)).not.toContain("Agent message received");
+	});
+
 	test("cycles finished side-pane and pending main-chat bash output", async () => {
 		harness = await createHarness();
 		const mode = createMode(harness);

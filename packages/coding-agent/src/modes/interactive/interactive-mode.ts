@@ -346,19 +346,6 @@ function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
 }
 
-interface AgentMessagesExpandable {
-	setAgentMessagesExpanded(expanded: boolean): void;
-}
-
-function hasAgentMessagesExpansion(obj: unknown): obj is AgentMessagesExpandable {
-	return (
-		typeof obj === "object" &&
-		obj !== null &&
-		"setAgentMessagesExpanded" in obj &&
-		typeof (obj as AgentMessagesExpandable).setAgentMessagesExpanded === "function"
-	);
-}
-
 interface EditDiffsExpandable {
 	setEditDiffsExpanded(expanded: boolean): void;
 }
@@ -1043,7 +1030,6 @@ export class InteractiveMode {
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
-	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
 
 	private hideThinkingBlock = true;
@@ -1454,7 +1440,6 @@ export class InteractiveMode {
 						rawKeyHint("/effort", "to set thinking level"),
 						hint("app.model.select", "to select model"),
 						hint("app.tools.expand", "to cycle conversation detail"),
-						hint("app.messages.expand", "to expand agent messages"),
 						hint("app.subagents.focus", "to inspect subagents"),
 						hint("app.editor.external", "for external editor"),
 						hint("app.prompt.stash", "to stash prompt"),
@@ -3079,7 +3064,6 @@ export class InteractiveMode {
 				this.getCurrentCwd(),
 			);
 			component.setExpanded(this.toolOutputExpanded);
-			component.setAgentMessagesExpanded(this.getAgentMessagesExpanded());
 			component.setEditDiffsExpanded(this.editDiffsExpanded);
 			if (this.startedToolCalls.has(latestToolCall.id)) {
 				component.markExecutionStarted();
@@ -4218,7 +4202,6 @@ export class InteractiveMode {
 		};
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
-		this.defaultEditor.onAction("app.messages.expand", () => this.toggleAgentMessageExpansion());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
 			void this.showHeartbeatManager();
@@ -5836,9 +5819,7 @@ export class InteractiveMode {
 			this.hiddenThinkingLabel,
 			{
 				expanded: this.toolOutputExpanded,
-				precededByToolActivity:
-					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
-					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+				precededByToolActivity: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
 				mermaidTransform: this.mermaidMarkdownTransform,
 				cwd: this.getCurrentCwd(),
 			},
@@ -6090,10 +6071,6 @@ export class InteractiveMode {
 	private handleSubagentSummaryChatAction(data: string): void {
 		if (this.keybindings.matches(data, "app.tools.expand")) {
 			this.toggleToolOutputExpansion();
-			return;
-		}
-		if (this.keybindings.matches(data, "app.messages.expand")) {
-			this.toggleAgentMessageExpansion();
 			return;
 		}
 		this.focusEditor();
@@ -6404,7 +6381,7 @@ export class InteractiveMode {
 				if (message.display) {
 					const component = this.createDisplayedCustomMessageComponent(message);
 					if (isExpandable(component)) {
-						component.setExpanded(this.expansionStateFor(component));
+						component.setExpanded(this.toolOutputExpanded);
 					}
 					if (hasEditDiffsExpansion(component)) {
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
@@ -6488,9 +6465,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					{
 						expanded: this.toolOutputExpanded,
-						precededByToolActivity:
-							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
-							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+						precededByToolActivity: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
 						mermaidTransform: this.mermaidMarkdownTransform,
 						cwd: this.getCurrentCwd(),
 					},
@@ -6614,7 +6589,6 @@ export class InteractiveMode {
 							this.getCurrentCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						component.setAgentMessagesExpanded(this.getAgentMessagesExpanded());
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
 						selectLatestToolExpandHint(this.chatContainer.children, component);
 						this.chatContainer.addChild(component);
@@ -7346,11 +7320,6 @@ export class InteractiveMode {
 		this.setChatDetail(this.toolOutputExpanded ? "overview" : this.editDiffsExpanded ? "all" : "details");
 	}
 
-	private toggleAgentMessageExpansion(): void {
-		this.agentMessagesExpanded = !this.agentMessagesExpanded;
-		this.applyChatExpansion();
-	}
-
 	private setToolsExpanded(expanded: boolean): void {
 		this.setChatDetail(expanded ? "all" : "overview");
 	}
@@ -7358,19 +7327,9 @@ export class InteractiveMode {
 	/** Presentation only: never rewrite messages, settings, or the session trace. */
 	private setChatDetail(detail: "overview" | "details" | "all"): void {
 		this.toolOutputExpanded = detail === "all";
-		this.agentMessagesExpanded = detail === "all";
 		this.editDiffsExpanded = detail !== "overview";
 		this.hideThinkingBlock = detail === "overview";
 		this.applyChatExpansion();
-	}
-
-	private getAgentMessagesExpanded(): boolean {
-		return this.agentMessagesExpanded;
-	}
-
-	/** Expansion state for a chat component: agent messages toggle separately from tools. */
-	private expansionStateFor(component: unknown): boolean {
-		return component instanceof AgentMessageComponent ? this.getAgentMessagesExpanded() : this.toolOutputExpanded;
 	}
 
 	private applyChatExpansion(): void {
@@ -7388,10 +7347,7 @@ export class InteractiveMode {
 				child.setHideThinkingBlock(this.hideThinkingBlock);
 			}
 			if (isExpandable(child)) {
-				child.setExpanded(this.expansionStateFor(child));
-			}
-			if (hasAgentMessagesExpansion(child)) {
-				child.setAgentMessagesExpanded(this.getAgentMessagesExpanded());
+				child.setExpanded(this.toolOutputExpanded);
 			}
 			if (hasEditDiffsExpansion(child)) {
 				child.setEditDiffsExpanded(this.editDiffsExpanded);
@@ -9835,7 +9791,6 @@ export class InteractiveMode {
 		const shortcutsKey = this.getAppKeyDisplay("app.shortcuts");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
-		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const promptStash = this.getAppKeyDisplay("app.prompt.stash");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
@@ -9848,7 +9803,7 @@ export class InteractiveMode {
 
 **Controls**
 \`${selectModel}\` select model · \`/effort\` set reasoning · \`${expandTools}\` overview → thinking + diffs → all output
-\`${expandMessages}\` agent messages · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
+\`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
 \`${pasteImage}\` paste image
 
 **Help**
@@ -9886,7 +9841,6 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 		const exit = this.getAppKeyDisplay("app.exit");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
-		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
 		const focusSubagents = this.getAppKeyDisplay("app.subagents.focus");
 		const manageHeartbeats = this.getAppKeyDisplay("app.heartbeats.open");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
@@ -9934,7 +9888,6 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shortcutsKey ? `| \`${shortcutsKey}\` | Show quick shortcuts |\n` : ""}| \`${exit}\` | Exit (when editor is empty) |
 | \`${selectModel}\` | Open model selector |
 | \`${expandTools}\` | Cycle overview → thinking + diffs → all output |
-| \`${expandMessages}\` | Toggle agent message expansion |
 | \`${focusSubagents}\` | Focus the subagent summary / open the scoped agents view |
 | \`${manageHeartbeats}\` | Manage heartbeats |
 | \`${externalEditor}\` | Edit message in external editor |
