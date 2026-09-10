@@ -113,11 +113,11 @@ describe("InteractiveMode startup hints", () => {
 		}
 	});
 
-	it("places the fresh-chat shortcut hint after the model", () => {
+	it("places the fresh-chat shortcut hint in the tray", () => {
 		const mode = createMode();
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model  ? for shortcuts");
+		expect(stripAnsi(label)).toBe("? for shortcuts");
 	});
 
 	it("shows current effort in a compact prompt label and hides it for non-reasoning models", () => {
@@ -136,21 +136,6 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(getLabel(40)!)).toBe("xhigh effort");
 		mode.connectionState.model.reasoning = false;
 		expect(getLabel(40)).toBeUndefined();
-	});
-
-	it.each([
-		["GLM 5.3 Fast (internal)", "GLM 5.3 Fast"],
-		["internal/glm-5.3-fast", "glm-5.3-fast"],
-		["test-provider/test-model", "test-model"],
-		["Qwen/Qwen3-Next-80B-A3B-Instruct", "Qwen/Qwen3-Next-80B-A3B-Instruct"],
-		["custom/fine-tune (thinking)", "custom/fine-tune (thinking)"],
-	])("shortens the prompt model name %s without changing model identity", (name, expected) => {
-		const mode = createMode();
-		mode.connectionState.model.name = name;
-		const before = { ...mode.connectionState.model };
-
-		expect(Reflect.get(InteractiveMode.prototype, "getModelTrayLabel").call(mode)).toBe(expected);
-		expect(mode.connectionState.model).toEqual(before);
 	});
 
 	it("refreshes effort above the prompt without rebuilding the recap", () => {
@@ -215,13 +200,6 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
 	});
 
-	it("uses the configured keybinding in the manage hint", () => {
-		setKeybindings(new KeybindingsManager({ "app.agents.back": "ctrl+g" }));
-		const label = Reflect.get(InteractiveMode.prototype, "getAgentsViewTrayHint").call(createMode(0, true));
-
-		expect(stripAnsi(label)).toBe("Ctrl+G manage");
-	});
-
 	it("keeps fresh-chat guidance hidden when a mid-turn snapshot still has no committed messages", () => {
 		const mode = createMode();
 		const patchConnectionState = (patch: Record<string, unknown>) => Object.assign(mode.connectionState, patch);
@@ -234,7 +212,7 @@ describe("InteractiveMode startup hints", () => {
 			InteractiveMode.prototype,
 			"updateConnectionStateFromEvent",
 		) as (event: unknown) => void;
-		const getLabel = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+		const getLabel = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode) ?? "");
 		const message = { role: "user", content: "hello", timestamp: 1 };
 
 		updateConnectionStateFromEvent.call(mode, { type: "agent_start" });
@@ -366,15 +344,15 @@ describe("InteractiveMode startup hints", () => {
 		expect(shutdown).not.toHaveBeenCalled();
 	});
 
-	it("keeps the manage hint while typing", () => {
+	it("keeps the tray quiet while typing", () => {
 		let editorText = "";
 		const mode = createMode(0, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("← manage  test-model  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("← manage  test-model");
+		expect(getLabel()).toBeUndefined();
 	});
 
 	it("hides the fresh-chat shortcut hint while the prompt has text", () => {
@@ -382,23 +360,23 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, false, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("test-model");
+		expect(getLabel()).toBeUndefined();
 
 		editorText = " ";
-		expect(stripAnsi(getLabel())).toBe("test-model");
+		expect(getLabel()).toBeUndefined();
 
 		editorText = "";
-		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
 	});
 
 	it("hides the tray shortcut guidance for chats with history", () => {
 		const mode = createMode(1);
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model");
+		expect(label).toBeUndefined();
 	});
 
 	it("keeps the question-mark shortcut guide compact", () => {
