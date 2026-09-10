@@ -665,7 +665,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private deleteConfirmTimer: ReturnType<typeof setTimeout> | undefined;
 	private workingIconFrame = 0;
 	private rows: AgentsViewRow[] = [];
-	private allRows: AgentsViewRow[] = [];
 	private showActions = false;
 	private lastListedSummaries: SessionSummary[] = [];
 	private lastVisibleSummaries: SessionSummary[] = [];
@@ -1314,7 +1313,7 @@ export class AgentsViewMode implements Component, Focusable {
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
 	private rebuildRows(): void {
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
-		this.allRows = buildAgentsViewRows(
+		this.rows = buildAgentsViewRows(
 			this.getFilteredRecords(),
 			this.expandedSubagentParents,
 			this.programShownParents,
@@ -1322,7 +1321,6 @@ export class AgentsViewMode implements Component, Focusable {
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
 		);
-		this.rows = this.allRows;
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
 		if (index >= 0) {
@@ -1470,7 +1468,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 	/** Whether any subagent under the given agent identity carries spawn code. */
 	private targetHasSpawnCode(target: string): boolean {
-		for (const row of this.allRows) {
+		for (const row of this.rows) {
 			if (row.parentIdentity !== target) {
 				continue;
 			}
@@ -2185,7 +2183,7 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		this.scopedRecords = scopeToSessionSubtree(this.unifiedRecords, this.scopeKey, this.unifiedIndex);
-		this.allRows = buildAgentsViewRows(
+		this.rows = buildAgentsViewRows(
 			this.getFilteredRecords(),
 			this.expandedSubagentParents,
 			this.programShownParents,
@@ -2193,7 +2191,6 @@ export class AgentsViewMode implements Component, Focusable {
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
 		);
-		this.rows = this.allRows;
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
 		this.ui.requestRender();
@@ -2486,7 +2483,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private getAgentCountsText(): string {
-		const counts = countRowsBySection(this.allRows);
+		const counts = countRowsBySection(this.rows);
 		return `${counts.running} running, ${counts.idle} idle, ${counts.inactive} inactive`;
 	}
 
@@ -2495,7 +2492,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.showActions) return this.renderActions(width).slice(0, maxRows);
 		const layout = buildCompactAgentsViewLayout(this.rows, width);
 		const displayItems: DisplayItem[] = [];
-		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
+		const counts = countRowsBySection(this.rows);
 		for (const section of ["running", "idle", "inactive"] as const) {
 			if (counts[section] === 0) continue;
 			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
