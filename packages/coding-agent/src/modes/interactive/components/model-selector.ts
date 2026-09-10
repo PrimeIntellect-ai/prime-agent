@@ -808,8 +808,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private renderInlineModelDetails(item: ModelItem, width: number): string[] {
-		const price = (value: number | undefined) =>
-			value !== undefined && Number.isFinite(value) && value >= 0 ? `$${value}` : "—";
+		const price = (value: number | undefined) => {
+			if (value === undefined || !Number.isFinite(value) || value < 0) return "—";
+			if (value === 0) return "$0";
+			const rounded = Math.round(value * 1000) / 1000;
+			return rounded === 0 ? "<0.001" : `$${rounded}`;
+		};
 		const entries = [
 			["Input", price(item.model.cost?.input)],
 			["Cached input", price(item.model.cost?.cacheRead)],
