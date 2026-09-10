@@ -223,7 +223,8 @@ describe("ConfigurationMenuComponent", () => {
 			cost: { input: 0.45, cacheRead: 0.1125, output: 2.75, cacheWrite: 3 },
 		});
 		for (const width of [120, 48]) {
-			const output = stripAnsi(menu.render(width).join("\n"));
+			const lines = stripAnsi(menu.render(width).join("\n")).split("\n");
+			const output = lines.join("\n");
 			expect(output).toContain("Input");
 			expect(output).toContain("Cached input");
 			expect(output).toContain("Output");
@@ -231,7 +232,12 @@ describe("ConfigurationMenuComponent", () => {
 			expect(output).toContain("$0.1125");
 			expect(output).toContain("$2.75");
 			expect(output).not.toContain("$3");
-			expect(output).toContain("USD / 1M tokens");
+			// The unit rides on the provider/model line; the block ends with clear whitespace.
+			const headerLine = lines.find((line) => line.includes("USD / 1M tokens"));
+			expect(headerLine).toContain("faux/faux-1 · USD / 1M tokens");
+			const lastPriceRow = lines.findIndex((line) => line.includes("$2.75"));
+			expect(lastPriceRow).toBeGreaterThan(0);
+			expect(lines[lastPriceRow + 1]?.trim()).toBe("");
 		}
 	});
 

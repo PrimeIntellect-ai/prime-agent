@@ -6,3 +6,4 @@
 - Fixed the models picker search to keep signed-in providers above unsigned matches, with Prime Inference pinned on top of the signed-in group.
 - Softened the selected row highlight in menu pickers: the selection background blends toward the editor surface and the selected label renders bold instead of accent-colored.
 - Refined the effort squares: clusters align across rows with arrow hints on the highlighted row, spaced squares in a stronger purple, and the selected level labeled beside them.
+- Folded the USD per million tokens unit into the model detail header line and left clear whitespace at the end of the detail block.
