@@ -74,7 +74,6 @@ type SerializedInternals = {
 	_handleAgentEvent(event: { type: string; messages?: unknown[] }): void;
 	_agentEventQueue: Promise<void>;
 
-	_branchSummaryOperation?: Promise<void> | undefined;
 	requestAbort(): void;
 	abortCompaction(): void;
 	abortBranchSummary(): void;
@@ -1245,14 +1244,33 @@ describe("Serialized refine review-fix regressions", () => {
 	});
 
 	it("public refine waits for active branch summary without aborting it", async () => {
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		const internals = harness.session as unknown as SerializedInternals;
 		let releaseBranchSummary: () => void = () => {};
-		const branchSummaryOperation = new Promise<void>((resolve) => {
+		const branchSummaryGate = new Promise<void>((resolve) => {
 			releaseBranchSummary = resolve;
 		});
-		internals._branchSummaryOperation = branchSummaryOperation;
+		let summaryStarted: () => void = () => {};
+		const summaryReady = new Promise<void>((resolve) => {
+			summaryStarted = resolve;
+		});
+		const harness = await createHarness({
+			persistSession: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_tree", async () => {
+						summaryStarted();
+						await branchSummaryGate;
+						return { cancel: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SerializedInternals;
+		const target = harness.sessionManager.appendMessage({ role: "user", content: "branch target", timestamp: 1 });
+		harness.sessionManager.appendMessage(fauxAssistantMessage("answer"));
+		const navigation = harness.session.navigateTree(target);
+		await summaryReady;
+		expect(harness.session.isCompacting).toBe(true);
 		vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({
 			id: "public-plan",
 			proposal: { edits: [] },
@@ -1260,19 +1278,17 @@ describe("Serialized refine review-fix regressions", () => {
 		const applyRefine = vi
 			.spyOn(internals._refinement._execution, "_applyRefine")
 			.mockResolvedValue(emptyRefinementResult());
-		const abortBranchSummary = vi.spyOn(internals, "abortBranchSummary");
-
+		const abortBranchSummary = vi.spyOn(harness.session, "abortBranchSummary");
 		const refinePromise = harness.session.refine({ instructions: "public" });
 		await vi.waitFor(() => expect(internals._refinement._refineInFlight).toBeDefined());
-
 		expect(abortBranchSummary).not.toHaveBeenCalled();
 		expect(applyRefine).not.toHaveBeenCalled();
 		expect(internals._refinement._refineAbortController?.signal.aborted).toBe(false);
 		releaseBranchSummary();
+		await expect(navigation).resolves.toEqual({ cancelled: true });
 		await refinePromise;
-
 		expect(applyRefine).toHaveBeenCalledOnce();
-		internals._branchSummaryOperation = undefined;
+		expect(harness.session.isCompacting).toBe(false);
 		internals._refinement._refineAbortController = undefined;
 	});
 

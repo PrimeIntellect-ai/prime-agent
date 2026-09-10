@@ -1,7 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import type {
 	Agent,
 	AgentContext,
@@ -20,20 +18,12 @@ import type {
 	Model,
 	ServiceTier,
 	TextContent,
-	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai";
-import {
-	clampThinkingLevel,
-	cleanupSessionResources,
-	getSupportedThinkingLevels,
-	modelsAreEqual,
-	supportsFastMode,
-} from "@earendil-works/pi-ai";
+import { clampThinkingLevel, cleanupSessionResources, supportsFastMode } from "@earendil-works/pi-ai";
 import { parseGoalSlashCommand } from "../goals/commands.js";
 import { GoalController } from "../goals/controller.js";
 import { createGoalPersistence } from "../goals/persistence.js";
-import { theme } from "../modes/interactive/theme/theme.js";
 import {
 	type ExecuteBashOptions,
 	type RunUserBashOptions,
@@ -58,13 +48,18 @@ import {
 	CompactionSkippedError,
 	performSessionCompaction,
 } from "../session/compaction-execution.js";
+import { type ContextViewChild, SessionContextView } from "../session/context-view.js";
 import { type ContinuationToken, SessionContinuation } from "../session/continuation.js";
+import { SessionExport } from "../session/export.js";
 import { type ExtensionBindings, installExtensionToolHooks, SessionExtensions } from "../session/extensions.js";
+import { SessionHarnessContext } from "../session/harness-context.js";
+import { SessionHistoryNavigation } from "../session/history-navigation.js";
 import { SessionInputDispatcher } from "../session/input-dispatcher.js";
 import { SessionInputScheduler } from "../session/input-scheduler.js";
 import { SessionKernel } from "../session/kernel.js";
 import { KernelEnvironment } from "../session/kernel-environment.js";
 import { createSessionKernelHostHandlers } from "../session/kernel-host-handlers.js";
+import { SessionModelSelection } from "../session/model-selection.js";
 import {
 	buildPromptContent,
 	cloneCustomMessage,
@@ -145,40 +140,24 @@ import {
 	COMPACT_SKILL_NAME,
 	type CompactionResult,
 	calculateContextTokens,
-	collectEntriesForBranchSummary,
-	estimateContextTokens,
-	generateBranchSummary,
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.js";
-import {
-	type ContextTreeNode,
-	type ContextWindowResolver,
-	computeOwnAndTotalUsage,
-	loadContextTreeChildFromDisk,
-	loadContextTreeChildrenFromDisk,
-} from "./context-tree.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
-import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
-import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
-import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
 import type {
-	ContextUsage,
 	ExtensionRunner,
 	InputSource,
 	MessageEndEvent,
 	MessageStartEvent,
 	MessageUpdateEvent,
 	ReplacedSessionContext,
-	SessionBeforeTreeResult,
 	SessionStartEvent,
 	ToolDefinition,
 	ToolExecutionEndEvent,
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 	ToolInfo,
-	TreePreparation,
 	TurnEndEvent,
 	TurnStartEvent,
 } from "./extensions/index.js";
@@ -207,7 +186,6 @@ import {
 	createSessionSlashCommandMessage,
 	createSessionSlashCommandResultMessage,
 	HARNESS_DIGEST_CUSTOM_TYPE,
-	type HarnessDigestDetails,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	isSessionSlashCommandMessage,
@@ -219,7 +197,7 @@ import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./prompt-templates.js";
 import { providerRetryPolicy } from "./provider-retry.js";
-import { formatHarnessStateForPrompt, REFINE_SKILL_NAME, type RefinementResult } from "./refinement/index.js";
+import { REFINE_SKILL_NAME, type RefinementResult } from "./refinement/index.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
@@ -248,14 +226,7 @@ import {
 	type SessionActionSnapshot,
 	transitionSessionAction,
 } from "./session-action-store.js";
-import type { BranchSummaryEntry, SessionContext, SessionEntry } from "./session-manager.js";
-import {
-	CURRENT_SESSION_VERSION,
-	getLatestCompactionEntry,
-	type SessionHeader,
-	type SessionManager,
-} from "./session-manager.js";
-import type { SessionStats } from "./session-stats.js";
+import { getLatestCompactionEntry, type SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 import {
@@ -265,9 +236,7 @@ import {
 	type SessionSlashCommand,
 } from "./slash-commands.js";
 import type { BuildSystemPromptOptions } from "./system-prompt.js";
-import { THINKING_LEVELS } from "./thinking-levels.js";
 import type { IpythonKernelProvisioner } from "./tools/ipython.js";
-import { emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 
 export type { RlmChildAgentActivity, RlmChildAgentSnapshot, RlmChildAgentStatus } from "../session/child-types.js";
 export { compactRlmText, rlmChildLabel } from "../session/child-types.js";
@@ -538,16 +507,7 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
-export interface ModelCycleResult {
-	model: Model<any>;
-	thinkingLevel: ThinkingLevel;
-	serviceTier: ServiceTier;
-	isScoped: boolean;
-}
-
-interface ModelSelectOptions {
-	waitForExtensions?: boolean;
-}
+export type { ModelCycleResult } from "../session/model-selection.js";
 
 type AutonomousSlashCommand = { kind: "status" } | { kind: "on"; config?: AgentAutonomousConfig } | { kind: "off" };
 
@@ -752,12 +712,12 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
-	private _serviceTierPreference: ServiceTier;
-
-	private _scopedModels: Array<{
-		model: Model<any>;
-		thinkingLevel?: ThinkingLevel;
-	}>;
+	private readonly _export: SessionExport;
+	private readonly _contextView: SessionContextView;
+	private readonly _modelSelection: SessionModelSelection;
+	private get _scopedModels() {
+		return this._modelSelection.scopedModels;
+	}
 
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
@@ -854,7 +814,7 @@ export class AgentSession {
 		clearGoalContinuation: (message) => this._clearQueuedGoalContinuationAfterCancelledThresholdCompaction(message),
 		getSessionStore: () => this.sessionManager,
 		retainUnpersistedOutcome: (message) => {
-			this._unpersistedOutcomes.push(message);
+			this._harnessContext.retainOutcome(message);
 		},
 		emit: (event) => this._emit(event),
 		notifyCheckpoints: () => this._notifySessionInputCheckpointChange(),
@@ -877,8 +837,10 @@ export class AgentSession {
 		reapDeletedChildren: () => this._reapDeletedRlmSubagentRuntimesAfterCompaction(),
 	};
 
-	private _branchSummaryAbortController: AbortController | undefined = undefined;
-	private _branchSummaryOperation: Promise<void> | undefined = undefined;
+	private get _branchSummaryOperation(): Promise<void> | undefined {
+		return this._history.operation;
+	}
+	private readonly _history: SessionHistoryNavigation;
 
 	private readonly _retry = new SessionRetry({
 		getRetrySettings: () => this.settingsManager.getRetrySettings(),
@@ -911,10 +873,14 @@ export class AgentSession {
 	private _agentMessageClearEpoch = 0;
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
-	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
-	private readonly _unpersistedOutcomes: CustomMessage[] = [];
 	/** Fresh/empty contexts defer digest injection to the first committed turn so untouched sessions stay empty. */
-	private _harnessDigestPending = false;
+	private readonly _harnessContext: SessionHarnessContext;
+	private get _harnessDigestPending(): boolean {
+		return this._harnessContext.digestPending;
+	}
+	private set _harnessDigestPending(pending: boolean) {
+		this._harnessContext.digestPending = pending;
+	}
 
 	private readonly _bash = new SessionBash({
 		getCwd: () => this.sessionManager.getCwd(),
@@ -934,9 +900,6 @@ export class AgentSession {
 	});
 
 	private _turnIndex = 0;
-	private _modelSelectEmitQueue: Promise<void> = Promise.resolve();
-	private _modelSelectEmitQueueIdle = true;
-	private _modelSelectEmitContext = new AsyncLocalStorage<boolean>();
 
 	private _resourceLoader: ResourceLoader;
 	private _cwd: string;
@@ -997,6 +960,55 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
+		this._harnessContext = new SessionHarnessContext({
+			sessionManager: this.sessionManager,
+			getMessages: () => this.messages,
+			getActiveToolNames: () => this.getActiveToolNames(),
+			getVisibleSkills: () => this._modelVisibleSkills(),
+			loadHarnessState: () => this._refinement._loadMergedHarnessState(),
+			applyLateSentMessages: (message) => this._applyLateIpythonSentAgentMessages(message),
+		});
+		this._export = new SessionExport({
+			sessionManager: this.sessionManager,
+			getState: () => this.state,
+			getTheme: () => this.settingsManager.getTheme(),
+			getToolDefinition: (name) => this.getToolDefinition(name),
+		});
+		this._contextView = new SessionContextView({
+			sessionManager: this.sessionManager,
+			getMessages: () => this.messages,
+			getModel: () => this.model,
+			findModel: (provider, modelId) => this._modelRegistry.find(provider, modelId),
+			subtractUnindexedChildUsage: (ownUsage, entries) => this._childUsage.subtractUnindexed(ownUsage, entries),
+			getRlmSessionDir: () => this._rlmSessionDirForReading(),
+			getLiveChildren: () => this._contextViewChildren(),
+		});
+
+		this._history = new SessionHistoryNavigation({
+			getRetryPolicy: () => providerRetryPolicy(this.settingsManager),
+			sessionManager: this.sessionManager,
+			settingsManager: this.settingsManager,
+			getModel: () => this.model,
+			getExtensions: () => this._extensionRunner,
+			getRequiredAuth: (model) => this._getRequiredRequestAuth(model),
+			acquireQueuedWorkPause: () => this.acquireQueuedWorkPause(),
+			acquireCommitFence: () => this._acquireSessionActionCommitFence(),
+			runWithCommitFence: (lease, run) => this._commitFence.run(lease, run),
+			waitForAgentIdle: () => this.agent.waitForIdle(),
+			getEventQueue: () => this._agentEventQueue,
+			invalidateRefinement: () => this._refinement._invalidatePendingAutoRefineForBranchChange(),
+			rebuildBranchContext: () => {
+				this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+				this._mergeUnpersistedOutcomes(this.agent.state.messages);
+				this._restoreLateIpythonSentAgentMessages();
+				this._ensureHarnessDigestContext();
+				this._goals.reload();
+				this._reloadRlmMaxDepthFromBranch();
+				this._invalidateQueuedPromptPreparation();
+			},
+			notifyCheckpoints: () => this._notifySessionInputCheckpointChange(),
+		});
+
 		this._refinement = new SessionRefinement(
 			{
 				sessionManager: this.sessionManager,
@@ -1021,7 +1033,7 @@ export class AgentSession {
 				disconnect: () => this._disconnectFromAgent(),
 				reconnect: () => this._reconnectToAgent(),
 				emit: (event) => this._emit(event),
-				retainUnpersistedOutcome: (message) => this._unpersistedOutcomes.push(message),
+				retainUnpersistedOutcome: (message) => this._harnessContext.retainOutcome(message),
 				notifyCheckpoints: () => this._notifySessionInputCheckpointChange(),
 				scheduleInputPump: () => this._scheduleSessionInputPump(),
 				isContinuationScheduled: () => this._continuation.isScheduled,
@@ -1032,8 +1044,18 @@ export class AgentSession {
 				autoRefineReviewer: config.autoRefineReviewer?.bind(this),
 			},
 		);
-		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
-		this._scopedModels = config.scopedModels ?? [];
+		this._modelSelection = new SessionModelSelection(
+			{
+				getState: () => this.agent.state,
+				getRegistry: () => this._modelRegistry,
+				getExtensions: () => this._extensionRunner,
+				sessionManager: this.sessionManager,
+				settingsManager: this.settingsManager,
+				emit: (event) => this._emit(event),
+			},
+			config.serviceTierPreference ?? config.agent.state.serviceTier,
+			config.scopedModels ?? [],
+		);
 		this._resourceLoader = config.resourceLoader;
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir;
@@ -1249,26 +1271,10 @@ export class AgentSession {
 		this._children.setRuntimeHost(host);
 	}
 
-	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
-		apiKey: string;
-		headers?: Record<string, string>;
-	}> {
-		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
-		if (!result.ok) {
-			if (result.error.startsWith("No API key found")) {
-				throw new Error(formatNoApiKeyFoundMessage(model.provider));
-			}
-			throw new Error(result.error);
-		}
-		if (result.apiKey) {
-			return { apiKey: result.apiKey, headers: result.headers };
-		}
-
-		const isOAuth = this._modelRegistry.isUsingOAuth(model);
-		if (isOAuth) {
-			throw new Error(formatAuthenticationFailedMessage(model.provider));
-		}
-		throw new Error(formatNoApiKeyFoundMessage(model.provider));
+	private _getRequiredRequestAuth(
+		...args: Parameters<SessionModelSelection["getRequiredRequestAuth"]>
+	): ReturnType<SessionModelSelection["getRequiredRequestAuth"]> {
+		return this._modelSelection.getRequiredRequestAuth(...args);
 	}
 
 	/**
@@ -2924,30 +2930,23 @@ export class AgentSession {
 	}
 
 	get isCompacting(): boolean {
-		return this._compaction.isRunning || this._branchSummaryAbortController !== undefined;
+		return this._compaction.isRunning || this._history.isSummarizing;
 	}
 
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
 	}
 
-	buildSessionContext(): SessionContext {
-		const context = this.sessionManager.buildSessionContext();
-		for (const message of context.messages) {
-			this._applyLateIpythonSentAgentMessages(message);
-		}
-		this._mergeUnpersistedOutcomes(context.messages);
-		return context;
+	buildSessionContext(
+		...args: Parameters<SessionHarnessContext["buildSessionContext"]>
+	): ReturnType<SessionHarnessContext["buildSessionContext"]> {
+		return this._harnessContext.buildSessionContext(...args);
 	}
 
-	private _mergeUnpersistedOutcomes(messages: AgentMessage[]): void {
-		for (const outcome of this._unpersistedOutcomes) {
-			let insertAt = messages.length;
-			while (insertAt > 0 && messages[insertAt - 1]!.timestamp > outcome.timestamp) {
-				insertAt -= 1;
-			}
-			messages.splice(insertAt, 0, outcome);
-		}
+	private _mergeUnpersistedOutcomes(
+		...args: Parameters<SessionHarnessContext["mergeUnpersistedOutcomes"]>
+	): ReturnType<SessionHarnessContext["mergeUnpersistedOutcomes"]> {
+		return this._harnessContext.mergeUnpersistedOutcomes(...args);
 	}
 
 	get steeringMode(): "all" | "one-at-a-time" {
@@ -3021,7 +3020,7 @@ export class AgentSession {
 	}
 
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
-		this._scopedModels = scopedModels;
+		this._modelSelection.setScopedModels(scopedModels);
 	}
 
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
@@ -5253,288 +5252,50 @@ export class AgentSession {
 		}
 	}
 
-	private async _emitModelSelect(
-		nextModel: Model<any>,
-		previousModel: Model<any> | undefined,
-		source: "set" | "cycle" | "restore",
-	): Promise<void> {
-		if (modelsAreEqual(previousModel, nextModel)) return;
-		await this._extensionRunner.emit({
-			type: "model_select",
-			model: nextModel,
-			previousModel,
-			source,
-		});
+	setModel(...args: Parameters<SessionModelSelection["setModel"]>): ReturnType<SessionModelSelection["setModel"]> {
+		return this._modelSelection.setModel(...args);
 	}
 
-	private _queueModelSelectEmit(
-		nextModel: Model<any>,
-		previousModel: Model<any> | undefined,
-		source: "set" | "cycle" | "restore",
-	): Promise<void> {
-		const emit = () =>
-			this._modelSelectEmitContext.run(true, () => this._emitModelSelect(nextModel, previousModel, source));
-		this._modelSelectEmitQueueIdle = false;
-		const promise = this._modelSelectEmitQueue.then(emit, emit);
-		const queued = promise.catch(() => {});
-		this._modelSelectEmitQueue = queued;
-		void queued.finally(() => {
-			if (this._modelSelectEmitQueue === queued) {
-				this._modelSelectEmitQueueIdle = true;
-			}
-		});
-		return promise;
+	private _pendingModelSelectEmit(
+		...args: Parameters<SessionModelSelection["pendingModelSelectEmit"]>
+	): ReturnType<SessionModelSelection["pendingModelSelectEmit"]> {
+		return this._modelSelection.pendingModelSelectEmit(...args);
 	}
 
-	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
-		// Explicit selection recovers from a stale-auth lockout, but only a fully
-		// validated switch commits the clear (single owner): failed selections never unlock.
-		const staleOnly =
-			!this._modelRegistry.hasConfiguredAuth(model) &&
-			this._modelRegistry.getProviderAuthStatus(model.provider).source === "stale";
-		if (!staleOnly && !this._modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
-		if (!(await this._modelRegistry.canUseModel(model, { assumeAuthConfigured: staleOnly }))) {
-			throw new Error(`Model "${model.provider}/${model.id}" is not available for the current Prime team.`);
-		}
-		if (staleOnly) {
-			this._modelRegistry.clearProviderAuthStale(model.provider);
-			if (!this._modelRegistry.hasConfiguredAuth(model)) {
-				throw new Error(`No API key for ${model.provider}/${model.id}`);
-			}
-		}
-
-		const previousModel = this.model;
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		const serviceTier = this._getServiceTierForModelSwitch();
-		this.agent.state.model = model;
-		this.sessionManager.appendModelChange(model.provider, model.id);
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
-
-		this.setThinkingLevel(thinkingLevel);
-		this._clampServiceTierForModel(serviceTier);
-
-		const emitPromise = this._queueModelSelectEmit(model, previousModel, "set");
-		if (this._shouldWaitForModelSelectEmit(options)) {
-			await emitPromise;
-		} else {
-			this._trackModelSelectEmitError(emitPromise);
-		}
+	cycleModel(
+		...args: Parameters<SessionModelSelection["cycleModel"]>
+	): ReturnType<SessionModelSelection["cycleModel"]> {
+		return this._modelSelection.cycleModel(...args);
 	}
 
-	private _trackModelSelectEmitError(emitPromise: Promise<void>): void {
-		void emitPromise.catch((error) => {
-			this._extensionRunner.emitError({
-				extensionPath: "<internal>",
-				event: "model_select",
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-		});
+	setThinkingLevel(
+		...args: Parameters<SessionModelSelection["setThinkingLevel"]>
+	): ReturnType<SessionModelSelection["setThinkingLevel"]> {
+		return this._modelSelection.setThinkingLevel(...args);
 	}
 
-	private _shouldWaitForModelSelectEmit(options: ModelSelectOptions): boolean {
-		return options.waitForExtensions !== false && !this._modelSelectEmitContext.getStore();
+	setServiceTier(
+		...args: Parameters<SessionModelSelection["setServiceTier"]>
+	): ReturnType<SessionModelSelection["setServiceTier"]> {
+		return this._modelSelection.setServiceTier(...args);
 	}
 
-	private _pendingModelSelectEmit(): Promise<void> | undefined {
-		if (!this._modelSelectEmitContext.getStore() && !this._modelSelectEmitQueueIdle) {
-			return this._modelSelectEmitQueue;
-		}
-		return undefined;
+	cycleThinkingLevel(
+		...args: Parameters<SessionModelSelection["cycleThinkingLevel"]>
+	): ReturnType<SessionModelSelection["cycleThinkingLevel"]> {
+		return this._modelSelection.cycleThinkingLevel(...args);
 	}
 
-	async cycleModel(
-		direction: "forward" | "backward" = "forward",
-		options: ModelSelectOptions = {},
-	): Promise<ModelCycleResult | undefined> {
-		if (this._scopedModels.length > 0) {
-			return this._cycleScopedModel(direction, options);
-		}
-		return this._cycleAvailableModel(direction, options);
+	getAvailableThinkingLevels(
+		...args: Parameters<SessionModelSelection["getAvailableThinkingLevels"]>
+	): ReturnType<SessionModelSelection["getAvailableThinkingLevels"]> {
+		return this._modelSelection.getAvailableThinkingLevels(...args);
 	}
 
-	private async _cycleScopedModel(
-		direction: "forward" | "backward",
-		options: ModelSelectOptions,
-	): Promise<ModelCycleResult | undefined> {
-		const availableModels = await this._modelRegistry.refreshAvailableModels();
-		const scopedModels = this._scopedModels.filter((scoped) =>
-			availableModels.some((model) => modelsAreEqual(model, scoped.model)),
-		);
-		if (scopedModels.length <= 1) return undefined;
-
-		const currentModel = this.model;
-		let currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = scopedModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const next = scopedModels[nextIndex];
-		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
-		const serviceTier = this._getServiceTierForModelSwitch();
-
-		this.agent.state.model = next.model;
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
-		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
-
-		this.setThinkingLevel(thinkingLevel);
-		this._clampServiceTierForModel(serviceTier);
-
-		const emitPromise = this._queueModelSelectEmit(next.model, currentModel, "cycle");
-		if (this._shouldWaitForModelSelectEmit(options)) {
-			await emitPromise;
-		} else {
-			this._trackModelSelectEmitError(emitPromise);
-		}
-
-		return {
-			model: next.model,
-			thinkingLevel: this.thinkingLevel,
-			serviceTier: this.serviceTier,
-			isScoped: true,
-		};
-	}
-
-	private async _cycleAvailableModel(
-		direction: "forward" | "backward",
-		options: ModelSelectOptions,
-	): Promise<ModelCycleResult | undefined> {
-		const availableModels = await this._modelRegistry.refreshAvailableModels();
-		if (availableModels.length <= 1) return undefined;
-
-		const currentModel = this.model;
-		let currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = availableModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const nextModel = availableModels[nextIndex];
-
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		const serviceTier = this._getServiceTierForModelSwitch();
-		this.agent.state.model = nextModel;
-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
-		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
-
-		this.setThinkingLevel(thinkingLevel);
-		this._clampServiceTierForModel(serviceTier);
-
-		const emitPromise = this._queueModelSelectEmit(nextModel, currentModel, "cycle");
-		if (this._shouldWaitForModelSelectEmit(options)) {
-			await emitPromise;
-		} else {
-			this._trackModelSelectEmitError(emitPromise);
-		}
-
-		return {
-			model: nextModel,
-			thinkingLevel: this.thinkingLevel,
-			serviceTier: this.serviceTier,
-			isScoped: false,
-		};
-	}
-
-	setThinkingLevel(level: ThinkingLevel): void {
-		const availableLevels = this.getAvailableThinkingLevels();
-		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
-
-		const previousLevel = this.agent.state.thinkingLevel;
-		const isChanging = effectiveLevel !== previousLevel;
-
-		this.agent.state.thinkingLevel = effectiveLevel;
-
-		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (this.supportsThinking() || effectiveLevel !== "off") {
-				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
-			}
-			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
-			void this._extensionRunner.emit({
-				type: "thinking_level_select",
-				level: effectiveLevel,
-				previousLevel,
-			});
-		}
-	}
-
-	setServiceTier(serviceTier: ServiceTier): void {
-		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
-		const preferenceChanged = effectiveServiceTier !== this._serviceTierPreference;
-		const effectiveTierChanged = effectiveServiceTier !== this.agent.state.serviceTier;
-		if (!preferenceChanged && !effectiveTierChanged) {
-			return;
-		}
-		this._serviceTierPreference = effectiveServiceTier;
-		if (preferenceChanged) {
-			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			if (this.model && supportsFastMode(this.model)) {
-				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
-			}
-		}
-		if (effectiveTierChanged) {
-			this.agent.state.serviceTier = effectiveServiceTier;
-			this._emit({
-				type: "service_tier_changed",
-				serviceTier: effectiveServiceTier,
-			});
-		}
-	}
-
-	private _getEffectiveServiceTier(serviceTier: ServiceTier): ServiceTier {
-		return serviceTier === "priority" && (!this.model || !supportsFastMode(this.model)) ? "default" : serviceTier;
-	}
-
-	private _getServiceTierForModelSwitch(): ServiceTier {
-		return this._serviceTierPreference;
-	}
-
-	private _clampServiceTierForModel(serviceTier: ServiceTier = this.serviceTier): void {
-		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
-		if (effectiveServiceTier === this.agent.state.serviceTier) {
-			return;
-		}
-		this.agent.state.serviceTier = effectiveServiceTier;
-		this._emit({
-			type: "service_tier_changed",
-			serviceTier: effectiveServiceTier,
-		});
-	}
-
-	cycleThinkingLevel(): ThinkingLevel | undefined {
-		if (!this.supportsThinking()) return undefined;
-
-		const levels = this.getAvailableThinkingLevels();
-		const currentIndex = levels.indexOf(this.thinkingLevel);
-		const nextIndex = (currentIndex + 1) % levels.length;
-		const nextLevel = levels[nextIndex];
-
-		this.setThinkingLevel(nextLevel);
-		return nextLevel;
-	}
-
-	getAvailableThinkingLevels(): ThinkingLevel[] {
-		if (!this.model) return THINKING_LEVELS;
-		return getSupportedThinkingLevels(this.model) as ThinkingLevel[];
-	}
-
-	supportsThinking(): boolean {
-		return !!this.model?.reasoning;
-	}
-
-	private _getThinkingLevelForModelSwitch(explicitLevel?: ThinkingLevel): ThinkingLevel {
-		if (explicitLevel !== undefined) {
-			return explicitLevel;
-		}
-		if (!this.supportsThinking()) {
-			return this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
-		}
-		return this.thinkingLevel;
-	}
-
-	private _clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {
-		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
+	supportsThinking(
+		...args: Parameters<SessionModelSelection["supportsThinking"]>
+	): ReturnType<SessionModelSelection["supportsThinking"]> {
+		return this._modelSelection.supportsThinking(...args);
 	}
 
 	private _syncKernelStateAfterCompaction(): Promise<void> {
@@ -5609,62 +5370,23 @@ export class AgentSession {
 	}
 
 	/** The compact harness digest delivered at cold context boundaries (session start, resume, compaction head). */
-	private _harnessDigest(): string {
-		const tools = this.getActiveToolNames();
-		const hasIpython = tools.includes("ipython");
-		const visibleSkills = this._modelVisibleSkills().filter((skill) => !skill.disableModelInvocation);
-		const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
-		return formatHarnessStateForPrompt(this._refinement._loadMergedHarnessState(), {
-			includeIpythonExamples: hasIpython,
-			includeShellExamples: tools.includes("bash"),
-			includeRefineExamples: hasIpython && hasRefineSkill,
-		});
+	private _harnessDigest(
+		...args: Parameters<SessionHarnessContext["harnessDigest"]>
+	): ReturnType<SessionHarnessContext["harnessDigest"]> {
+		return this._harnessContext.harnessDigest(...args);
 	}
 
 	/** Cold-boundary digest delivery: empty contexts defer to the first committed turn (untouched sessions must stay empty); non-empty contexts append only when the newest in-context digest mismatches disk. */
-	private _ensureHarnessDigestContext(): void {
-		if (this.agent.state.messages.length === 0) {
-			this._harnessDigestPending = true;
-			return;
-		}
-		this._harnessDigestPending = false;
-		this._appendHarnessDigestIfStale();
+	private _ensureHarnessDigestContext(
+		...args: Parameters<SessionHarnessContext["ensureHarnessDigestContext"]>
+	): ReturnType<SessionHarnessContext["ensureHarnessDigestContext"]> {
+		return this._harnessContext.ensureHarnessDigestContext(...args);
 	}
 
-	private _appendHarnessDigestIfStale(): void {
-		const digest = this._harnessDigest();
-		if (this._latestContextHarnessDigest() === digest) return;
-		const message = createHarnessDigestMessage(digest);
-		try {
-			this.sessionManager.appendCustomMessageEntryWithRollback(
-				message.customType,
-				message.content,
-				message.display,
-				message.details,
-			);
-		} catch {
-			// Unpersisted session: context-only injection.
-		}
-		this.agent.state.messages.push(message);
-	}
-
-	private _latestContextHarnessDigest(): string | undefined {
-		// Retained pre-compaction messages follow the compaction head, so recency is by timestamp, not position.
-		let latest: { timestamp: number; digest: string } | undefined;
-		for (const message of this.agent.state.messages) {
-			let digest: string | undefined;
-			if (message.role === "custom" && message.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
-				digest = (message.details as HarnessDigestDetails | undefined)?.digest;
-			} else if (message.role === "compactionSummary") {
-				digest = message.harnessDigest;
-			} else {
-				continue;
-			}
-			if (digest !== undefined && (!latest || message.timestamp >= latest.timestamp)) {
-				latest = { timestamp: message.timestamp, digest };
-			}
-		}
-		return latest?.digest;
+	private _latestContextHarnessDigest(
+		...args: Parameters<SessionHarnessContext["latestContextHarnessDigest"]>
+	): ReturnType<SessionHarnessContext["latestContextHarnessDigest"]> {
+		return this._harnessContext.latestContextHarnessDigest(...args);
 	}
 
 	/**
@@ -5682,8 +5404,10 @@ export class AgentSession {
 		return this._refinement.refine(options, internal);
 	}
 
-	abortBranchSummary(): void {
-		this._branchSummaryAbortController?.abort();
+	abortBranchSummary(
+		...args: Parameters<SessionHistoryNavigation["abortBranchSummary"]>
+	): ReturnType<SessionHistoryNavigation["abortBranchSummary"]> {
+		return this._history.abortBranchSummary(...args);
 	}
 
 	/**
@@ -5735,18 +5459,10 @@ export class AgentSession {
 		return this._extensions.bindExtensions(bindings);
 	}
 
-	private _refreshCurrentModelFromRegistry(): void {
-		const currentModel = this.model;
-		if (!currentModel) {
-			return;
-		}
-
-		const refreshedModel = this._modelRegistry.find(currentModel.provider, currentModel.id);
-		if (!refreshedModel || refreshedModel === currentModel) {
-			return;
-		}
-
-		this.agent.state.model = refreshedModel;
+	private _refreshCurrentModelFromRegistry(
+		...args: Parameters<SessionModelSelection["refreshCurrentModelFromRegistry"]>
+	): ReturnType<SessionModelSelection["refreshCurrentModelFromRegistry"]> {
+		return this._modelSelection.refreshCurrentModelFromRegistry(...args);
 	}
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
@@ -6184,414 +5900,60 @@ export class AgentSession {
 	 * @param options.label Label to attach to the branch summary entry
 	 * @returns Result with editorText (if user message) and cancelled status
 	 */
-	private _branchNavigationQueue: Promise<void> = Promise.resolve();
 
-	async navigateTree(
-		targetId: string,
-		options: {
-			summarize?: boolean;
-			customInstructions?: string;
-			replaceInstructions?: boolean;
-			label?: string;
-		} = {},
-	): Promise<{
-		editorText?: string;
-		cancelled: boolean;
-		aborted?: boolean;
-		summaryEntry?: BranchSummaryEntry;
-	}> {
-		const previous = this._branchNavigationQueue;
-		let release = () => {};
-		this._branchNavigationQueue = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		await previous;
-		try {
-			return await this._navigateTree(targetId, options);
-		} finally {
-			release();
-		}
+	navigateTree(
+		...args: Parameters<SessionHistoryNavigation["navigateTree"]>
+	): ReturnType<SessionHistoryNavigation["navigateTree"]> {
+		return this._history.navigateTree(...args);
 	}
 
-	private async _navigateTree(
-		targetId: string,
-		options: {
-			summarize?: boolean;
-			customInstructions?: string;
-			replaceInstructions?: boolean;
-			label?: string;
-		} = {},
-	): Promise<{
-		editorText?: string;
-		cancelled: boolean;
-		aborted?: boolean;
-		summaryEntry?: BranchSummaryEntry;
-	}> {
-		if (options.summarize && !this.model) {
-			throw new Error("No model available for summarization");
-		}
-
-		const targetEntry = this.sessionManager.getEntry(targetId);
-		if (!targetEntry) {
-			throw new Error(`Entry ${targetId} not found`);
-		}
-
-		const queuedWorkPause = this.acquireQueuedWorkPause();
-		let commitFence: { owner: symbol; release(): void } | undefined;
-		try {
-			// Branch navigation and turn dispatch mutate the same transcript leaf.
-			commitFence = await this._acquireSessionActionCommitFence();
-			return await this._commitFence.run(commitFence, async () => {
-				await this.agent.waitForIdle();
-				await this._agentEventQueue;
-				return this._navigateTreeUnderPause(targetId, targetEntry, options);
-			});
-		} finally {
-			queuedWorkPause.release();
-			commitFence?.release();
-		}
+	getUserMessagesForForking(
+		...args: Parameters<SessionHistoryNavigation["getUserMessagesForForking"]>
+	): ReturnType<SessionHistoryNavigation["getUserMessagesForForking"]> {
+		return this._history.getUserMessagesForForking(...args);
 	}
 
-	private async _navigateTreeUnderPause(
-		targetId: string,
-		targetEntry: NonNullable<ReturnType<SessionManager["getEntry"]>>,
-		options: {
-			summarize?: boolean;
-			customInstructions?: string;
-			replaceInstructions?: boolean;
-			label?: string;
-		},
-	): Promise<{
-		editorText?: string;
-		cancelled: boolean;
-		aborted?: boolean;
-		summaryEntry?: BranchSummaryEntry;
-	}> {
-		const oldLeafId = this.sessionManager.getLeafId();
-
-		// No-op if already at target after admitted work has settled.
-		if (targetId === oldLeafId) {
-			return { cancelled: false };
-		}
-
-		// Do not switch branches while /refine has detached event handling and is
-		// about to persist harness/session entries for the current branch.
-		await this._refinement._invalidatePendingAutoRefineForBranchChange();
-
-		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
-			oldLeafId,
-			targetId,
-		);
-
-		let customInstructions = options.customInstructions;
-		let replaceInstructions = options.replaceInstructions;
-		let label = options.label;
-
-		const preparation: TreePreparation = {
-			targetId,
-			oldLeafId,
-			commonAncestorId,
-			entriesToSummarize,
-			userWantsSummary: options.summarize ?? false,
-			customInstructions,
-			replaceInstructions,
-			label,
-		};
-
-		this._branchSummaryAbortController = new AbortController();
-		let resolveBranchSummaryOperation: () => void = () => {};
-		const branchSummaryOperation = new Promise<void>((resolve) => {
-			resolveBranchSummaryOperation = resolve;
-		});
-		this._branchSummaryOperation = branchSummaryOperation;
-
-		try {
-			let extensionSummary: { summary: string; details?: unknown } | undefined;
-			let fromExtension = false;
-
-			if (this._extensionRunner.hasHandlers("session_before_tree")) {
-				const result = (await this._extensionRunner.emit({
-					type: "session_before_tree",
-					preparation,
-					signal: this._branchSummaryAbortController.signal,
-				})) as SessionBeforeTreeResult | undefined;
-
-				if (result?.cancel) {
-					return { cancelled: true };
-				}
-
-				if (result?.summary && options.summarize) {
-					extensionSummary = result.summary;
-					fromExtension = true;
-				}
-
-				if (result?.customInstructions !== undefined) {
-					customInstructions = result.customInstructions;
-				}
-				if (result?.replaceInstructions !== undefined) {
-					replaceInstructions = result.replaceInstructions;
-				}
-				if (result?.label !== undefined) {
-					label = result.label;
-				}
-			}
-
-			let summaryText: string | undefined;
-			let summaryDetails: unknown;
-			let summaryUsage: Usage | undefined;
-			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-				const model = this.model!;
-				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
-				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
-					model,
-					apiKey,
-					headers,
-					signal: this._branchSummaryAbortController.signal,
-					customInstructions,
-					replaceInstructions,
-					reserveTokens: branchSummarySettings.reserveTokens,
-					retry: providerRetryPolicy(this.settingsManager),
-				});
-				if (result.aborted) {
-					return { cancelled: true, aborted: true };
-				}
-				if (result.error) {
-					throw new Error(result.error);
-				}
-				summaryText = result.summary;
-				summaryUsage = result.usage;
-				summaryDetails = {
-					readFiles: result.readFiles || [],
-					modifiedFiles: result.modifiedFiles || [],
-				};
-			} else if (extensionSummary) {
-				summaryText = extensionSummary.summary;
-				summaryDetails = extensionSummary.details;
-			}
-
-			let newLeafId: string | null;
-			let editorText: string | undefined;
-
-			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				newLeafId = targetEntry.parentId;
-				editorText = this._extractUserMessageText(targetEntry.message.content);
-			} else if (targetEntry.type === "custom_message") {
-				newLeafId = targetEntry.parentId;
-				editorText =
-					typeof targetEntry.content === "string"
-						? targetEntry.content
-						: targetEntry.content
-								.filter((c): c is { type: "text"; text: string } => c.type === "text")
-								.map((c) => c.text)
-								.join("");
-			} else {
-				newLeafId = targetId;
-			}
-
-			let summaryEntry: BranchSummaryEntry | undefined;
-			if (summaryText) {
-				const summaryId = this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-					summaryUsage,
-				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-
-				if (label) {
-					this.sessionManager.appendLabelChange(summaryId, label);
-				}
-			} else if (newLeafId === null) {
-				this.sessionManager.resetLeaf();
-			} else {
-				this.sessionManager.branch(newLeafId);
-			}
-
-			if (label && !summaryText) {
-				this.sessionManager.appendLabelChange(targetId, label);
-			}
-
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-			this._mergeUnpersistedOutcomes(this.agent.state.messages);
-			this._restoreLateIpythonSentAgentMessages();
-			// Context rebuild = cold boundary: refresh the digest like resume.
-			this._ensureHarnessDigestContext();
-			this._goals.reload();
-			this._reloadRlmMaxDepthFromBranch();
-			this._invalidateQueuedPromptPreparation();
-
-			await this._extensionRunner.emit({
-				type: "session_tree",
-				newLeafId: this.sessionManager.getLeafId(),
-				oldLeafId,
-				summaryEntry,
-				fromExtension: summaryText ? fromExtension : undefined,
-			});
-
-			return { editorText, cancelled: false, summaryEntry };
-		} finally {
-			this._branchSummaryAbortController = undefined;
-			if (this._branchSummaryOperation === branchSummaryOperation) {
-				this._branchSummaryOperation = undefined;
-			}
-			resolveBranchSummaryOperation();
-			this._notifySessionInputCheckpointChange();
-		}
+	getSessionStats(
+		...args: Parameters<SessionContextView["getSessionStats"]>
+	): ReturnType<SessionContextView["getSessionStats"]> {
+		return this._contextView.getSessionStats(...args);
 	}
 
-	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
-		const result: Array<{ entryId: string; text: string }> = [];
-
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			if (entry.message.role !== "user") continue;
-
-			const text = this._extractUserMessageText(entry.message.content);
-			if (text) {
-				result.push({ entryId: entry.id, text });
-			}
-		}
-
-		return result;
-	}
-
-	private _extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
-		if (typeof content === "string") return content;
-		if (Array.isArray(content)) {
-			return content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("");
-		}
-		return "";
-	}
-
-	getSessionStats(): SessionStats {
-		const state = this.state;
-		const userMessages = state.messages.filter((m) => m.role === "user").length;
-		const assistantMessages = state.messages.filter((m) => m.role === "assistant").length;
-		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
-
-		let toolCalls = 0;
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-
-		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistantMsg = message as AssistantMessage;
-				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalCost += assistantMsg.usage.cost.total;
-			}
-		}
-
-		return {
-			sessionFile: this.sessionFile,
-			sessionId: this.sessionId,
-			userMessages,
-			assistantMessages,
-			toolCalls,
-			toolResults,
-			totalMessages: state.messages.length,
-			tokens: {
-				input: totalInput,
-				output: totalOutput,
-				cacheRead: totalCacheRead,
-				cacheWrite: totalCacheWrite,
-				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
-			},
-			cost: totalCost,
-			contextUsage: this.getContextUsage(),
-		};
-	}
-
-	getContextUsage(): ContextUsage | undefined {
-		const model = this.model;
-		if (!model) return undefined;
-
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return undefined;
-
-		// After compaction, the last assistant usage reflects pre-compaction context size.
-		// We can only trust usage from an assistant that responded after the latest compaction.
-		// If no such assistant exists, context token count is unknown until the next LLM response.
-		const branchEntries = this.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
-
-		if (latestCompaction) {
-			// Check if there's a valid assistant usage after the compaction boundary
-			const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
-			let hasPostCompactionUsage = false;
-			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
-				const entry = branchEntries[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-						}
-						break;
-					}
-				}
-			}
-
-			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
-			}
-		}
-
-		const estimate = estimateContextTokens(this.messages);
-		const percent = (estimate.tokens / contextWindow) * 100;
-
-		return {
-			tokens: estimate.tokens,
-			contextWindow,
-			percent,
-		};
+	getContextUsage(
+		...args: Parameters<SessionContextView["getContextUsage"]>
+	): ReturnType<SessionContextView["getContextUsage"]> {
+		return this._contextView.getContextUsage(...args);
 	}
 
 	private _rlmSessionDirForReading(): string | undefined {
 		return this._rlmSessionDir ?? this.sessionManager.getSessionArtifactDir();
 	}
 
-	private _contextWindowResolver(): ContextWindowResolver {
-		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
-	}
-
-	private _subtractUnindexedChildUsage(ownUsage: Usage, entries: SessionEntry[]): void {
-		this._childUsage.subtractUnindexed(ownUsage, entries);
+	private *_contextViewChildren(): Generator<ContextViewChild> {
+		for (const run of this._children.getActiveRuns()) {
+			yield {
+				id: run.id,
+				get label() {
+					return rlmChildLabel(run.prompt);
+				},
+				get status() {
+					return run.status;
+				},
+				sessionDir: run.sessionDir,
+				getContextTree: run.session ? () => run.session!.getContextTree() : undefined,
+			};
+		}
 	}
 
 	private _invalidateOwnUsage(): void {
-		this._ownUsageMemo = undefined;
+		this._contextView.invalidateOwnUsage();
 	}
-	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
 
 	// Whole-file own spend, identical to the catalog scan so rows never shift at passivation.
-	getOwnUsageSummary(): SessionUsageSummary | undefined {
-		const entries = this.sessionManager.getEntries();
-		const tailId = entries.at(-1)?.id;
-		const memo = this._ownUsageMemo;
-		if (memo && memo.count === entries.length && memo.tailId === tailId) {
-			return memo.usage;
-		}
-		const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
-		this._subtractUnindexedChildUsage(ownUsage, entries);
-		const usage = sessionUsageSummaryFrom(ownUsage);
-		this._ownUsageMemo = { count: entries.length, tailId, usage };
-		return usage;
+	getOwnUsageSummary(
+		...args: Parameters<SessionContextView["getOwnUsageSummary"]>
+	): ReturnType<SessionContextView["getOwnUsageSummary"]> {
+		return this._contextView.getOwnUsageSummary(...args);
 	}
 
 	/**
@@ -6600,42 +5962,10 @@ export class AgentSession {
 	 * from their live sessions; completed children from their persisted session
 	 * dirs, so the tree survives child disposal and session resume.
 	 */
-	getContextTree(): ContextTreeNode {
-		const resolveContextWindow = this._contextWindowResolver();
-		const branch = this.sessionManager.getBranch();
-		const { ownUsage, totalUsage } = computeOwnAndTotalUsage(branch, this.sessionManager.getEntries());
-		this._subtractUnindexedChildUsage(ownUsage, branch);
-
-		const children: ContextTreeNode[] = [];
-		const liveIds = new Set<string>();
-		for (const run of this._children.getActiveRuns()) {
-			liveIds.add(run.id);
-			const node =
-				run.session?.getContextTree() ?? loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow);
-			children.push({
-				...(node ?? {
-					ownUsage: emptyUsage(),
-					totalUsage: emptyUsage(),
-					children: [],
-				}),
-				id: run.id,
-				label: rlmChildLabel(run.prompt),
-				status: run.status,
-			});
-		}
-		children.push(...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, liveIds));
-
-		const model = this.model;
-		return {
-			id: "root",
-			label: this.sessionName ?? "main agent",
-			status: "active",
-			model: model ? { provider: model.provider, id: model.id } : undefined,
-			ownUsage,
-			totalUsage,
-			contextUsage: this.getContextUsage(),
-			children,
-		};
+	getContextTree(
+		...args: Parameters<SessionContextView["getContextTree"]>
+	): ReturnType<SessionContextView["getContextTree"]> {
+		return this._contextView.getContextTree(...args);
 	}
 
 	/**
@@ -6643,20 +5973,8 @@ export class AgentSession {
 	 * @param outputPath Optional output path (defaults to session directory)
 	 * @returns Path to exported file
 	 */
-	async exportToHtml(outputPath?: string): Promise<string> {
-		const themeName = this.settingsManager.getTheme();
-
-		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
-			getToolDefinition: (name) => this.getToolDefinition(name),
-			theme,
-			cwd: this.sessionManager.getCwd(),
-		});
-
-		return await exportSessionToHtml(this.sessionManager, this.state, {
-			outputPath,
-			themeName,
-			toolRenderer,
-		});
+	exportToHtml(...args: Parameters<SessionExport["exportToHtml"]>): ReturnType<SessionExport["exportToHtml"]> {
+		return this._export.exportToHtml(...args);
 	}
 
 	/**
@@ -6665,34 +5983,8 @@ export class AgentSession {
 	 * @param outputPath Target file path. If omitted, generates a timestamped file in cwd.
 	 * @returns The resolved output file path.
 	 */
-	exportToJsonl(outputPath?: string): string {
-		const filePath = resolve(outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
-		const dir = dirname(filePath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: this.sessionManager.getSessionId(),
-			timestamp: new Date().toISOString(),
-			cwd: this.sessionManager.getCwd(),
-		};
-
-		const branchEntries = this.sessionManager.getBranch();
-		const lines = [JSON.stringify(header)];
-
-		// Re-chain parentIds to form a linear sequence
-		let prevId: string | null = null;
-		for (const entry of branchEntries) {
-			const linear = { ...entry, parentId: prevId };
-			lines.push(JSON.stringify(linear));
-			prevId = entry.id;
-		}
-
-		writeFileSync(filePath, `${lines.join("\n")}\n`);
-		return filePath;
+	exportToJsonl(...args: Parameters<SessionExport["exportToJsonl"]>): ReturnType<SessionExport["exportToJsonl"]> {
+		return this._export.exportToJsonl(...args);
 	}
 
 	/**
@@ -6700,28 +5992,10 @@ export class AgentSession {
 	 * Useful for /copy command.
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
-	getLastAssistantText(): string | undefined {
-		const lastAssistant = this.messages
-			.slice()
-			.reverse()
-			.find((m) => {
-				if (m.role !== "assistant") return false;
-				const msg = m as AssistantMessage;
-				// Skip aborted messages with no content
-				if (msg.stopReason === "aborted" && msg.content.length === 0) return false;
-				return true;
-			});
-
-		if (!lastAssistant) return undefined;
-
-		let text = "";
-		for (const content of (lastAssistant as AssistantMessage).content) {
-			if (content.type === "text") {
-				text += content.text;
-			}
-		}
-
-		return text.trim() || undefined;
+	getLastAssistantText(
+		...args: Parameters<SessionContextView["getLastAssistantText"]>
+	): ReturnType<SessionContextView["getLastAssistantText"]> {
+		return this._contextView.getLastAssistantText(...args);
 	}
 
 	// ==================================================================	// Extension System
