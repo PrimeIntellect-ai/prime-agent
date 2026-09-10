@@ -12,6 +12,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.js";
+import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.js";
 import { theme } from "../theme/theme.js";
 import { keyHint } from "./keybinding-hints.js";
 import {
@@ -361,11 +362,17 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		return configured;
 	}
 
+	private isPinnedProvider(item: ModelItem): boolean {
+		return item.provider === PRIME_INFERENCE_PROVIDER_ID && this.isProviderConfigured(item);
+	}
+
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
 		sorted.sort((a, b) => {
 			const configuredDiff = Number(this.isProviderConfigured(b)) - Number(this.isProviderConfigured(a));
 			if (configuredDiff !== 0) return configuredDiff;
+			const pinnedDiff = Number(this.isPinnedProvider(b)) - Number(this.isPinnedProvider(a));
+			if (pinnedDiff !== 0) return pinnedDiff;
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent !== bIsCurrent) return aIsCurrent ? -1 : 1;
@@ -416,6 +423,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					a.quality - b.quality ||
 					a.score - b.score ||
 					Number(this.isProviderConfigured(b.item)) - Number(this.isProviderConfigured(a.item)) ||
+					Number(this.isPinnedProvider(b.item)) - Number(this.isPinnedProvider(a.item)) ||
 					Number(modelsAreEqual(this.currentModel, b.item.model)) -
 						Number(modelsAreEqual(this.currentModel, a.item.model)) ||
 					this.recentRankOf(a.item) - this.recentRankOf(b.item) ||
@@ -463,13 +471,18 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				? isCurrent
 					? theme.fg("success", "current")
 					: undefined
-				: theme.fg("warning", isCurrent ? "current · sign in" : "sign in");
+				: theme.fg("warning", isCurrent ? "current · require sign in" : "require sign in");
+			const inlineSegments: string[] = [];
+			if (isCurrent) inlineSegments.push("current");
+			if (!isConfigured) inlineSegments.push("require sign in");
+			inlineSegments.push(item.provider);
 
 			this.listContainer.addChild(
 				new MenuRow({
 					primary: this.inline ? item.model.name : item.id,
-					secondary: item.provider,
-					meta: this.inline ? (isCurrent ? "current" : isConfigured ? undefined : "sign in") : meta,
+					secondary: this.inline ? undefined : item.provider,
+					meta: this.inline ? undefined : meta,
+					trailing: this.inline ? inlineSegments : undefined,
 					selected: isSelected,
 					inline: this.inline,
 				}),

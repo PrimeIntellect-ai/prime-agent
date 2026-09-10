@@ -331,6 +331,126 @@ describe("ModelSelectorComponent", () => {
 		expect(prefixRow).toBeLessThan(fuzzyRow);
 	});
 
+	it("right-aligns the provider with the require sign in hint to its left", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const configured = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const unconfigured = { ...base, provider: "unsigned-zeta", id: "zeta-one", name: "Zeta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [configured, unconfigured],
+				configuredProviders: new Set([configured.provider]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const configuredRow = lines.find((line) => line.includes("Beta One"));
+		const unconfiguredRow = lines.find((line) => line.includes("Zeta One"));
+		expect(configuredRow).toBeDefined();
+		expect(unconfiguredRow).toBeDefined();
+		expect(configuredRow?.endsWith("signed-in-beta")).toBe(true);
+		expect(unconfiguredRow?.endsWith("unsigned-zeta")).toBe(true);
+		expect(unconfiguredRow).toContain("require sign in · unsigned-zeta");
+		expect(configuredRow).not.toContain("require sign in");
+	});
+
+	it("pins signed-in Prime Inference models above other signed-in providers", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const prime = { ...base, provider: "prime-inference", id: "glm-5-3", name: "GLM 5.3" };
+		const signedIn = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const unsigned = { ...base, provider: "unsigned-zeta", id: "zeta-one", name: "Zeta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [unsigned, signedIn, prime],
+				configuredProviders: new Set([prime.provider, signedIn.provider]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const primeRow = lines.findIndex((line) => line.includes("GLM 5.3"));
+		const signedInRow = lines.findIndex((line) => line.includes("Beta One"));
+		const unsignedRow = lines.findIndex((line) => line.includes("Zeta One"));
+		expect(primeRow).toBeGreaterThanOrEqual(0);
+		expect(primeRow).toBeLessThan(signedInRow);
+		expect(signedInRow).toBeLessThan(unsignedRow);
+	});
+
+	it("keeps Prime Inference models ordered with the rest when it is not signed in", async () => {
+		const previousPrimeKey = process.env.PRIME_API_KEY;
+		delete process.env.PRIME_API_KEY;
+		try {
+			const harness = await createHarness({
+				models: [{ id: "base", name: "Base", reasoning: true }],
+			});
+			harnesses.push(harness);
+
+			const base = harness.getModel("base")!;
+			const prime = { ...base, provider: "prime-inference", id: "glm-5-3", name: "GLM 5.3" };
+			const signedIn = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+			const unsigned = { ...base, provider: "a-unsigned", id: "alpha-one", name: "Alpha One" };
+			const selector = new ModelSelectorComponent(
+				createFakeTui(),
+				undefined,
+				harness.session.modelRegistry,
+				[],
+				() => {},
+				() => {},
+				undefined,
+				{
+					availableModels: [prime, signedIn, unsigned],
+					configuredProviders: new Set([signedIn.provider]),
+					inline: true,
+				},
+			);
+
+			await waitForAsyncRender();
+
+			const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+			const primeRow = lines.findIndex((line) => line.includes("GLM 5.3"));
+			const signedInRow = lines.findIndex((line) => line.includes("Beta One"));
+			const unsignedRow = lines.findIndex((line) => line.includes("Alpha One"));
+			expect(signedInRow).toBeGreaterThanOrEqual(0);
+			expect(signedInRow).toBeLessThan(unsignedRow);
+			expect(unsignedRow).toBeLessThan(primeRow);
+			expect(lines.findIndex((line) => line.includes("require sign in · prime-inference"))).toBe(primeRow);
+		} finally {
+			if (previousPrimeKey === undefined) {
+				delete process.env.PRIME_API_KEY;
+			} else {
+				process.env.PRIME_API_KEY = previousPrimeKey;
+			}
+		}
+	});
+
 	it("uses current model, recency, and alphabetical order for equivalent matches", async () => {
 		const harness = await createHarness({
 			models: [
