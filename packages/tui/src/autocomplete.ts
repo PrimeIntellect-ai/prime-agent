@@ -396,12 +396,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const command = this.commands.find(
 			(command) => ("name" in command ? command.name : command.value) === item.value,
 		);
-		const isSlashCommand =
-			slashContext?.kind === "name" &&
-			slashContext.prefix === prefix &&
-			command !== undefined;
+		const isSlashCommand = slashContext?.kind === "name" && slashContext.prefix === prefix && command !== undefined;
 		if (isSlashCommand) {
-			const takesArgument = command !== undefined && "takesArgument" in command ? command.takesArgument === true : false;
+			const takesArgument =
+				command !== undefined && "takesArgument" in command ? command.takesArgument === true : false;
 			const hasSeparatorAfterCursor = /^[ \t]/.test(adjustedAfterCursor);
 			// Argument commands complete into the parameter position; commands without
 			// arguments complete bare so a following submit runs them as typed.
