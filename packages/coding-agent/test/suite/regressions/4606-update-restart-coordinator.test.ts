@@ -432,6 +432,7 @@ describe("ENG-4606 update restart coordinator", () => {
 			expect.objectContaining({
 				role: "custom",
 				customType: "prime-agent.update_complete",
+				content: expect.stringMatching(/^\[update-complete\]\n\nPrime Agent updated to v/),
 				display: true,
 			}),
 		);

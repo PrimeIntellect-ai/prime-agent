@@ -1,6 +1,6 @@
 ---
 name: agent-message
-description: Message an agent's parent, siblings, or direct children through the daemon. Use the family roster to discover reachable agents and send direct text without spoofing sender identity.
+description: Message an agent's parent, siblings, or direct children through the daemon. Discover reachable agents with agent_observe.list_agents, then send direct text without spoofing sender identity.
 ---
 
 # Agent Message
@@ -26,14 +26,14 @@ if child is not None:
 
 ## API
 
-- `await agent_message.list_agents()` — returns `current` (`name`, `id`, `depth`)
-  and family-scoped `entries` (`relationship`, `name`, `id`, `depth`, `status`)
-  for the current agent's parent, siblings, and children. It includes inactive
-  family members and sorts parent, siblings by name, then children by name; it
-  does not expose a global daemon session list.
+- `await agent_observe.list_agents()` (agent-observe skill) is the roster: it
+  lists the parent, siblings, and children this skill can reach, active or not,
+  with the `relationship` and `sessionName` that `send` takes as
+  `receiver_role` and `receiver_name`.
 - `await agent_message.send(message, receiver_role="parent" | "sibling" | "child", receiver_name=None)` — sends one direct
-  text message to an active session. Sending to an idle completed subagent
-  starts an ordinary follow-up turn in that same child session and context.
+  text message to one family member. Sending to an inactive or idle completed
+  subagent wakes it and starts an ordinary follow-up turn in that same session
+  and context.
   The child remains available only until its parent session closes. The daemon
   resolves `receiver_role` within the current agent family; `receiver_name` is
   required for siblings and children and omitted for the unique parent.

@@ -8,7 +8,7 @@ import {
 import { createAsyncBashCompletionHostHandler } from "../src/core/rlm-runtime.js";
 
 describe("async bash completion", () => {
-	it("creates a model-visible instruction to inspect the saved handle", () => {
+	it("creates a bracket-grammar completion notice without a standing handle hint", () => {
 		const message = createAsyncBashCompletionMessage({
 			pid: 42,
 			command: "npm test",
@@ -16,9 +16,7 @@ describe("async bash completion", () => {
 		});
 
 		expect(message.customType).toBe(ASYNC_BASH_COMPLETION_CUSTOM_TYPE);
-		expect(message.content).toContain("pid 42, exit code 1");
-		expect(message.content).toContain("npm test");
-		expect(message.content).toContain(".poll(), .output(), or .tail()");
+		expect(message.content).toBe('[bash-done pid:42 exit:1]\n\nCommand: "npm test"');
 		expect(convertToLlm([message])).toEqual([
 			{
 				role: "user",

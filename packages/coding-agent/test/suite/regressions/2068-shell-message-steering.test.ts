@@ -93,8 +93,7 @@ describe("#2068 shell message steering", () => {
 		expect(harness.eventsOfType("agent_end")[0]!.messages.filter((message) => message.role === "assistant")).toEqual([
 			expect.objectContaining({ stopReason: "toolUse" }),
 		]);
-		expect(consumed.text).toContain("Shell message received.\nSource: bash");
-		expect(consumed.text).toContain("pid 42, exit code 0");
+		expect(consumed.text).toBe('[bash-done pid:42 exit:0]\n\nCommand: "npm test"');
 		expect(shellMessages(harness)).toHaveLength(1);
 		expect(harness.eventsOfType("agent_start")).toHaveLength(2);
 		expect(harness.eventsOfType("agent_end")).toHaveLength(2);
@@ -135,8 +134,8 @@ describe("#2068 shell message steering", () => {
 		expect(render()).toContain("◆ Shell message received · pid 42 · exit 0");
 		expect(render()).not.toMatch(/Follow-up:|Steering:|Agent message received/);
 		component.setExpanded(true);
-		expect(render()).toContain("Source: bash");
+		expect(render()).toContain("[bash-done pid:42 exit:0]");
 		expect(render()).toContain("npm test");
-		expect(render()).toContain("Inspect the saved BashHandle");
+		expect(render()).not.toContain("Inspect the saved BashHandle");
 	});
 });

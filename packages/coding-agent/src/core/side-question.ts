@@ -6,6 +6,7 @@ import {
 	type ProviderRetryPolicy,
 } from "./provider-retry.js";
 import { unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
+import { getAuxiliaryThinkingLevel } from "./thinking-levels.js";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -90,7 +91,7 @@ export function startSideQuestion(
 			model,
 			systemPrompt: parent.state.systemPrompt,
 			messages: [...structuredClone(parent.state.messages), ...previousTurnMessages],
-			thinkingLevel: "off",
+			thinkingLevel: getAuxiliaryThinkingLevel(model, parent.state.thinkingLevel),
 			serviceTier: parent.state.serviceTier,
 			tools: [],
 		},
