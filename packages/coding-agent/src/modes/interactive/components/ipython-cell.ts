@@ -666,13 +666,12 @@ export class IPythonCellComponent implements Component {
 	}
 
 	private renderSentAgentMessages(lines: string[], width: number, messages: readonly SentAgentMessageDisplay[]): void {
-		if (!this.state.expanded) return;
 		for (const message of messages) {
 			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
-			this.addBlank(lines, width);
+			if (this.state.expanded) this.addBlank(lines, width);
 			this.addPlain(lines, truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"));
-			lines.push(...agentMessageBodyLines(message.message, width));
+			if (this.state.expanded) lines.push(...agentMessageBodyLines(message.message, width));
 		}
 	}
 
