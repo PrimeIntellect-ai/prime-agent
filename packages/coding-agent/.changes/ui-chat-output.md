@@ -1,0 +1,1 @@
+- Changed assistant message body text to a new softer `mdBody` theme color, easing the wall of bright default-foreground text while headings, links, and code keep their styling.
