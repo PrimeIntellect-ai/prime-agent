@@ -1098,7 +1098,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("keeps search to a quiet single row and reports scope without technical header fields", () => {
+	it("keeps search to a quiet single row and reports nested depth in three metadata lines", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		try {
 			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "Review changes" })]);
@@ -1115,6 +1115,9 @@ describe("AgentsViewMode", () => {
 			expect(globalLines[searchIndex + 2]).toMatch(/Session\s+Model/);
 			expect(globalLines.join("\n")).not.toContain("All sessions");
 			expect(globalLines.join("\n")).not.toContain("back ·");
+			expect(globalLines.filter((line) => /prime agent|agents \d|cwd /.test(line))).toHaveLength(3);
+			expect(globalLines.join("\n")).toContain("cwd /tmp");
+			expect(globalLines.join("\n")).not.toMatch(/depth\s+|model\s+/);
 			for (let height = 1; height <= 6; height += 1) {
 				const shortLines = (invoke("renderContent", view, 80, height) as string[]).map(stripAnsi);
 				expect(shortLines.length).toBeLessThanOrEqual(height);
@@ -1122,9 +1125,17 @@ describe("AgentsViewMode", () => {
 				if (height > 1) expect(shortLines.join("\n")).toContain("Review changes");
 			}
 			Reflect.set(view, "scopeRootSummary", summary({ sessionName: "Fix authentication", rlmDepth: 3 }));
-			const lines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
-			expect(lines).toContain("← back · Fix authentication › subagents");
-			expect(lines).not.toMatch(/scope\s+|depth\s+3/);
+			for (const width of [40, 100]) {
+				const lines = (invoke("renderContent", view, width, 40) as string[]).map(stripAnsi);
+				expect(lines.filter((line) => /prime agent|agents \d|depth /.test(line))).toHaveLength(3);
+				expect(lines.join("\n")).toContain("depth 4");
+				expect(lines.join("\n")).not.toMatch(/scope\s+|cwd\s+|model\s+/);
+				if (width === 100) expect(lines.join("\n")).toContain("← back · Fix authentication › subagents");
+			}
+			Reflect.set(view, "scopeRootSummary", undefined);
+			const restored = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
+			expect(restored).toContain("cwd /tmp");
+			expect(restored).not.toContain("depth ");
 		} finally {
 			stopThemeWatcher();
 		}

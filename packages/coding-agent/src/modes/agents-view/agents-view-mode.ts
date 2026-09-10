@@ -840,18 +840,16 @@ export class AgentsViewMode implements Component, Focusable {
 				this.editor.invalidate();
 			},
 		};
-		this.splash = new BrandSplashHeader(
-			VERSION,
-			() => this.getSplashModelId(),
-			() => this.getSplashCwd(),
-			undefined,
-			{
-				topPadding: true,
-				getExtraMetadata: () => {
-					return [{ label: "agents", value: this.getAgentCountsText() }];
-				},
+		this.splash = new BrandSplashHeader(VERSION, () => this.getSplashCwd(), undefined, {
+			topPadding: true,
+			getExtraMetadata: () => {
+				const root = this.scopeRootSummary;
+				return [
+					{ label: "agents", value: this.getAgentCountsText() },
+					...(root ? [{ label: "depth", value: String(getAgentsViewDepth(root)) }] : []),
+				];
 			},
-		);
+		});
 	}
 
 	async run(): Promise<AgentsViewRunResult> {
@@ -2692,11 +2690,8 @@ export class AgentsViewMode implements Component, Focusable {
 		return Math.max(0, rows - dockHeight);
 	}
 
-	private getSplashModelId(): string | undefined {
-		return this.rows[this.selectedIndex]?.summary.model?.id ?? this.options.startupModelId;
-	}
-
-	private getSplashCwd(): string {
+	private getSplashCwd(): string | undefined {
+		if (this.scopeRootSummary) return undefined;
 		return this.rows[this.selectedIndex]?.summary.cwd ?? this.options.uiServices.getInitialCwd();
 	}
 

@@ -135,7 +135,7 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
-import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
+import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -446,25 +446,22 @@ export interface BrandSplashMetadataLine {
 export interface BrandSplashHeaderOptions {
 	logo?: string;
 	topPadding?: boolean;
+	getModelId?: () => string | undefined;
 	getExtraMetadata?: () => readonly BrandSplashMetadataLine[];
-	getHideStartHint?: () => boolean;
-	getStartHint?: () => string;
 }
 
 export class BrandSplashHeader implements Component {
 	private readonly logoRaw: string[];
 	private readonly logoCanvasWidth: number;
-	private readonly gutter = 4;
-	private readonly labelWidth = 9;
+	private readonly gutter = 3;
 
 	constructor(
 		private readonly version: string,
-		private readonly getModelId: () => string | undefined,
-		private readonly getCwd: () => string,
+		private readonly getCwd: () => string | undefined,
 		private readonly verboseInstructions?: string,
 		private readonly options: BrandSplashHeaderOptions = {},
 	) {
-		this.logoRaw = (options.logo ?? PRIME_BUTTERFLY_LOGO).split("\n");
+		this.logoRaw = (options.logo ?? PRIME_COMPACT_BUTTERFLY_LOGO).split("\n");
 		this.logoCanvasWidth = this.logoRaw.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 	}
 
@@ -476,41 +473,50 @@ export class BrandSplashHeader implements Component {
 		const safeWidth = Math.max(1, width);
 		const paddingX = safeWidth > 1 ? 1 : 0;
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
-		const metaWidth = contentWidth - this.logoCanvasWidth - this.gutter;
-		const showMeta = metaWidth >= this.labelWidth + 8;
-		const valueWidth = Math.max(1, metaWidth - this.labelWidth);
-		const labelled = (label: string, value: string) => {
-			const displayValue =
-				label === "cwd" ? truncatePathMiddle(value, valueWidth) : truncateToWidth(value, valueWidth);
-			return theme.fg("dim", label.padEnd(this.labelWidth)) + theme.fg("muted", displayValue);
-		};
+		const showLogo = this.logoCanvasWidth > 0 && contentWidth - this.logoCanvasWidth - this.gutter >= 24;
+		const metaWidth = showLogo ? contentWidth - this.logoCanvasWidth - this.gutter : contentWidth;
 		const extraMetadata = this.options.getExtraMetadata?.() ?? [];
-		const hideStartHint = this.options.getHideStartHint?.() ?? false;
-		const startHint = this.options.getStartHint?.() ?? "type to search sessions";
-		const metaLines = showMeta
-			? [
-					labelled("version", `v${this.version}`),
-					labelled("model", this.getModelId() ?? "—"),
-					labelled("cwd", formatSplashCwd(this.getCwd())),
-					...extraMetadata.map((line) => labelled(line.label, line.value)),
-					...(hideStartHint ? [] : ["", theme.fg("dim", startHint)]),
-				]
-			: [];
-		const metaStart = Math.max(0, Math.floor((this.logoRaw.length - metaLines.length) / 2));
+		const version = theme.fg("muted", `v${this.version}`);
+		const titleText = "prime agent";
+		const title = theme.fg("text", titleText);
+		const modelLabel = "model ";
+		const cwdLabel = "cwd ";
+		const cwd = this.getCwd();
+		const metaLines = [
+			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
+			...(this.options.getModelId
+				? [
+						`${theme.fg("dim", modelLabel)}${theme.fg(
+							"muted",
+							truncateToWidth(
+								this.options.getModelId() ?? "—",
+								Math.max(1, metaWidth - visibleWidth(modelLabel)),
+							),
+						)}`,
+					]
+				: []),
+			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
+			...(cwd === undefined
+				? []
+				: [
+						`${theme.fg("dim", cwdLabel)}${theme.fg("muted", truncatePathMiddle(formatSplashCwd(cwd), Math.max(1, metaWidth - visibleWidth(cwdLabel))))}`,
+					]),
+		];
 		const lines = this.options.topPadding ? [""] : [];
-		lines.push(
-			...this.logoRaw.map((line, index) => {
-				const colored = theme.fg("text", line);
-				const meta = index >= metaStart && index < metaStart + metaLines.length ? metaLines[index - metaStart] : "";
-				const padding = showMeta
-					? " ".repeat(Math.max(0, this.logoCanvasWidth - visibleWidth(line) + this.gutter))
-					: "";
-				const content = truncateToWidth(colored + padding + meta, contentWidth, "");
-				return (
-					" ".repeat(paddingX) + content + " ".repeat(Math.max(0, safeWidth - paddingX - visibleWidth(content)))
-				);
-			}),
-		);
+		const rowCount = Math.max(showLogo ? this.logoRaw.length : 0, metaLines.length);
+		const metaStartIndex = showLogo ? Math.floor((rowCount - metaLines.length) / 2) : 0;
+		for (let index = 0; index < rowCount; index++) {
+			const logoLine = showLogo ? (this.logoRaw[index] ?? "") : "";
+			const logo = showLogo
+				? theme.fg("text", logoLine) + " ".repeat(this.logoCanvasWidth - visibleWidth(logoLine) + this.gutter)
+				: "";
+			const metaIndex = index - metaStartIndex;
+			const metaLine = metaIndex >= 0 && metaIndex < metaLines.length ? metaLines[metaIndex] : "";
+			const content = truncateToWidth(logo + metaLine, contentWidth);
+			lines.push(
+				" ".repeat(paddingX) + content + " ".repeat(Math.max(0, safeWidth - paddingX - visibleWidth(content))),
+			);
+		}
 
 		if (this.verboseInstructions) {
 			lines.push(" ".repeat(safeWidth));
@@ -1432,12 +1438,12 @@ export class InteractiveMode {
 
 		this.ui.addChild(this.headerContainer);
 
-		// Brand splash: side-panel layout with structured runtime metadata on the right.
+		// Compact butterfly beside runtime metadata.
 		// The model/cwd are read through live getters, so they fill in once the
 		// connection state loads (rebindCurrentSession below). Onboarding, when
 		// required, renders as a full-screen overlay on top of this header.
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			// Verbose: include the full keybinding cheatsheet under the brand mark.
+			// Verbose: include the full keybinding cheatsheet below the header.
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 			const verboseInstructions = this.options.verbose
 				? [
@@ -1463,17 +1469,10 @@ export class InteractiveMode {
 						rawKeyHint("drop files", "to attach"),
 					].join("\n")
 				: undefined;
-			this.builtInHeader = new BrandSplashHeader(
-				this.version,
-				() => this.getCurrentModelId(),
-				() => this.getCurrentCwd(),
-				verboseInstructions,
-				{
-					topPadding: true,
-					getHideStartHint: () => !this.isNewChat(),
-					getStartHint: () => this.startHint,
-				},
-			);
+			this.builtInHeader = new BrandSplashHeader(this.version, () => this.getCurrentCwd(), verboseInstructions, {
+				topPadding: true,
+				getModelId: () => this.getCurrentModelId(),
+			});
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
 		} else {

@@ -1,4 +1,4 @@
-import { Container, setKeybindings } from "@earendil-works/pi-tui";
+import { Container, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -35,36 +35,97 @@ describe("InteractiveMode startup hints", () => {
 		return mode;
 	}
 
-	it("keeps a blank row above the shared splash and limits its metadata", () => {
-		const header = new BrandSplashHeader(
-			"0.0.0",
-			() => "test-model",
-			() => "/tmp/project",
-			undefined,
-			{
-				topPadding: true,
-				getStartHint: () => 'Try "refactor @<filepath>"',
-			},
-		);
+	it("shows a compact butterfly beside metadata without a repeated input hint", () => {
+		const header = new BrandSplashHeader("0.0.0", () => "/tmp/project", undefined, {
+			topPadding: true,
+			getExtraMetadata: () => [{ label: "agents", value: "2 running" }],
+		});
 
 		const lines = header.render(120);
 		const output = stripAnsi(lines.join("\n"));
 
 		expect(lines[0]).toBe("");
-		expect(output).toContain("version  v0.0.0");
-		expect(output).toContain("model    test-model");
-		expect(output).toContain("cwd      /tmp/project");
-		expect(output).toContain('Try "refactor @<filepath>"');
-		expect(output).not.toContain("input");
-		expect(output).not.toContain("files");
-		expect(output).not.toContain("help");
+		expect(lines.length).toBeLessThanOrEqual(8);
+		expect(output).toContain("prime agent v0.0.0");
+		expect(output).toMatch(/[▗▙▛▜]/u);
+		expect(stripAnsi(lines[4])).toContain("agents 2 running");
+		expect(stripAnsi(lines[5])).toContain("cwd /tmp/project");
+		expect(output).not.toContain("model ");
+		expect(output).not.toContain("Try ");
+		expect(output).not.toContain("type to search sessions");
 
-		const unpadded = new BrandSplashHeader(
-			"0.0.0",
-			() => "test-model",
-			() => "/tmp/project",
-		);
+		const unpadded = new BrandSplashHeader("0.0.0", () => "/tmp/project");
 		expect(unpadded.render(120)[0]).not.toBe("");
+	});
+
+	it("renders the model line in the chat splash without effort metadata", () => {
+		let modelId: string | undefined = "first-model";
+		const header = new BrandSplashHeader("0.0.0", () => "/tmp/project", undefined, {
+			topPadding: true,
+			getModelId: () => modelId,
+		});
+
+		const lines = header.render(120);
+		const output = stripAnsi(lines.join("\n"));
+
+		expect(output).toContain("prime agent v0.0.0");
+		expect(stripAnsi(lines[3])).toContain("prime agent v0.0.0");
+		expect(stripAnsi(lines[4])).toContain("model first-model");
+		expect(stripAnsi(lines[5])).toContain("cwd /tmp/project");
+		expect(output).not.toContain("•");
+
+		modelId = "second-model";
+		const updated = stripAnsi(header.render(120).join("\n"));
+		expect(updated).toContain("model second-model");
+		expect(updated).not.toContain("first-model");
+
+		modelId = undefined;
+		expect(stripAnsi(header.render(120).join("\n"))).toContain("model —");
+	});
+
+	it("keeps metadata visible in narrow terminals and bounds every rendered row", () => {
+		const header = new BrandSplashHeader("0.0.0", () => "/tmp/project");
+
+		for (const width of [1, 2, 12, 14, 20, 24, 39, 40, 50, 51, 80]) {
+			const lines = header.render(width);
+			const output = stripAnsi(lines.join("\n"));
+			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+			if (width < 51) {
+				expect(output).not.toMatch(/[▗▙▛▜]/u);
+				if (width >= 14) expect(output).toContain("prime agent");
+			} else {
+				expect(output).toMatch(/[▗▙▛▜]/u);
+				expect(output).toContain("agent v0.0.0");
+			}
+			if (width >= 14) {
+				expect(output).toContain("v0.0.0");
+			}
+			if (width >= 18) {
+				expect(output).toContain("cwd /tmp/project");
+			}
+		}
+	});
+
+	it("renders live agents metadata, custom marks, and verbose instructions", () => {
+		let cwd = "/tmp/first";
+		const header = new BrandSplashHeader("0.0.0", () => cwd, "custom shortcut instructions", {
+			logo: "<>\n><",
+			getExtraMetadata: () => [
+				{ label: "agents", value: "2 running" },
+				{ label: "scope", value: "current project" },
+			],
+		});
+
+		const initial = stripAnsi(header.render(80).join("\n"));
+		expect(initial).toContain("<>");
+		expect(initial).toContain("prime agent v0.0.0");
+		expect(initial).toContain("agents 2 running");
+		expect(initial).toContain("scope current project");
+		expect(initial).toContain("custom shortcut instructions");
+
+		cwd = "/tmp/second";
+		const updated = stripAnsi(header.render(80).join("\n"));
+		expect(updated).toContain("/tmp/second");
 	});
 
 	it("randomly selects from five concise filepath prompts", () => {
