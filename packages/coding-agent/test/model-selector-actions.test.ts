@@ -6,7 +6,7 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { buildPrimeInferenceModels } from "../src/core/prime-inference-model-catalog.js";
 import { ModelSelectorComponent } from "../src/modes/interactive/components/model-selector.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 
 function createFakeTui(): TUI {
@@ -530,20 +530,22 @@ describe("ModelSelectorComponent", () => {
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
 
-		expect(row()).toContain("← ▓ ▓ ░ ░ → low");
+		expect(row()).toContain("← ● ● ○ ○ → low");
+		// The cluster sits near the row's horizontal center, clear of the name.
+		expect(row()?.search(/[●○]/)).toBe(34);
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("▓ ▓ ▓ ░");
+		expect(row()).toContain("● ● ● ○");
 		expect(row()).toContain("medium");
 
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("░ ░ ░ ░");
+		expect(row()).toContain("○ ○ ○ ○");
 		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("▓ ▓ ▓ ▓");
+		expect(row()).toContain("● ● ● ●");
 		expect(row()).toContain("high");
 	});
 
@@ -579,13 +581,13 @@ describe("ModelSelectorComponent", () => {
 				.find((line) => line.includes("Beta One"));
 
 		expect(renderRow()).toBeDefined();
-		expect(renderRow()).not.toContain("▓");
-		expect(renderRow()).not.toContain("░");
+		expect(renderRow()).not.toContain("●");
+		expect(renderRow()).not.toContain("○");
 		expect(renderRow()).not.toContain("←");
 		expect(renderRow()).not.toContain("→");
 
 		selector.handleInput("\x1b[C");
-		expect(renderRow()).not.toContain("▓");
+		expect(renderRow()).not.toContain("●");
 	});
 
 	it("applies the selected model and effort level together on confirm", async () => {
@@ -622,11 +624,11 @@ describe("ModelSelectorComponent", () => {
 			stripAnsi(selector.render(80).join("\n"))
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
-		expect(row()).toContain("░ ░ ░ ░");
+		expect(row()).toContain("○ ○ ○ ○");
 		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("▓ ░ ░ ░");
+		expect(row()).toContain("● ○ ○ ○");
 
 		selector.handleInput("\r");
 		expect(selectedId).toBe("beta-one");
@@ -660,18 +662,28 @@ describe("ModelSelectorComponent", () => {
 
 		await waitForAsyncRender();
 
-		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const rawLines = selector.render(80).join("\n").split("\n");
+		const lines = rawLines.map((line) => stripAnsi(line));
 		const shortRow = lines.find((line) => line.includes("GLM 5.3"));
 		const longRow = lines.find((line) => line.includes("A Considerably Longer"));
 		expect(shortRow).toBeDefined();
 		expect(longRow).toBeDefined();
-		expect(shortRow?.search(/[▓░]/)).toBe(longRow?.search(/[▓░]/));
+		expect(shortRow?.search(/[●○]/)).toBe(longRow?.search(/[●○]/));
 		expect(shortRow?.indexOf(" low")).toBe(longRow?.indexOf(" low"));
 		expect(shortRow).toContain("←");
 		expect(shortRow).toContain("→");
 		expect(longRow).not.toContain("←");
 		expect(longRow).not.toContain("→");
-		expect(longRow).toContain("▓ ▓ ░ ░");
+		expect(longRow).toContain("● ● ○ ○");
+
+		// Purple fills are reserved for the highlighted row; other rows fill light gray.
+		const shortRaw = rawLines.find((line) => line.includes("GLM 5.3"));
+		const longRaw = rawLines.find((line) => line.includes("A Considerably Longer"));
+		expect(shortRaw).toContain(theme.getEffortSquareColor()("●"));
+		expect(shortRaw).toContain(theme.fg("dim", "○"));
+		expect(longRaw).not.toContain(theme.getEffortSquareColor()("●"));
+		expect(longRaw).toContain(theme.fg("muted", "●"));
+		expect(longRaw).toContain(theme.fg("dim", "○"));
 	});
 
 	it("uses current model, recency, and alphabetical order for equivalent matches", async () => {
