@@ -6,7 +6,6 @@ import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildConversationComponents } from "../../../src/modes/interactive/components/conversation-components.js";
 import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.js";
-import { ToolRunGroupComponent } from "../../../src/modes/interactive/components/tool-run-group.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
@@ -57,12 +56,8 @@ describe("ENG-4583 latest tool expand hint", () => {
 			toolOptions: {},
 			getToolDefinition: () => undefined,
 		});
-		const tools = components.flatMap((component): ToolExecutionComponent[] =>
-			component instanceof ToolRunGroupComponent
-				? [...component.getToolComponents()]
-				: component instanceof ToolExecutionComponent
-					? [component]
-					: [],
+		const tools = components.filter(
+			(component): component is ToolExecutionComponent => component instanceof ToolExecutionComponent,
 		);
 		const latest = tools.at(-1);
 
