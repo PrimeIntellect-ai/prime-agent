@@ -79,28 +79,41 @@ describe("CustomEditor", () => {
 		expect(editor.getText()).toBe("/");
 	});
 
-	it("inserts a newline for a raw \\n byte instead of firing the ctrl+j edit-diff action", () => {
+	it("inserts a newline for a raw \\n byte instead of firing the conversation detail action", () => {
 		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		const toggleEditDiffs = vi.fn();
-		editor.onAction("app.edits.expand", toggleEditDiffs);
+		const cycleDetail = vi.fn();
+		editor.onAction("app.tools.expand", cycleDetail);
 
 		editor.handleInput("a");
 		editor.handleInput("\n");
 		editor.handleInput("b");
 
-		expect(toggleEditDiffs).not.toHaveBeenCalled();
+		expect(cycleDetail).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("a\nb");
 	});
 
-	it("still fires the edit-diff action for kitty CSI-u ctrl+j", () => {
+	it("fires the conversation detail action for kitty CSI-u Ctrl+O", () => {
 		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		const toggleEditDiffs = vi.fn();
-		editor.onAction("app.edits.expand", toggleEditDiffs);
+		const cycleDetail = vi.fn();
+		editor.onAction("app.tools.expand", cycleDetail);
 
-		editor.handleInput("\x1b[106;5u");
+		editor.handleInput("\x1b[111;5u");
 
-		expect(toggleEditDiffs).toHaveBeenCalledOnce();
+		expect(cycleDetail).toHaveBeenCalledOnce();
 		expect(editor.getText()).toBe("");
+	});
+
+	it("uses the configured conversation detail binding and releases the old default", () => {
+		const keybindings = new KeybindingsManager({ "app.tools.expand": "ctrl+e" });
+		const editor = new CustomEditor(fakeTui, editorTheme, keybindings);
+		const cycleDetail = vi.fn();
+		editor.onAction("app.tools.expand", cycleDetail);
+		editor.handleInput("\x0f");
+		expect(cycleDetail).not.toHaveBeenCalled();
+		editor.handleInput("\x05");
+		expect(cycleDetail).toHaveBeenCalledOnce();
+		expect(keybindings.getEffectiveConfig()).not.toHaveProperty("app.edits.expand");
+		expect(keybindings.getEffectiveConfig()).not.toHaveProperty("app.thinking.toggle");
 	});
 
 	it("routes Escape through its handler while dismissing autocomplete", async () => {

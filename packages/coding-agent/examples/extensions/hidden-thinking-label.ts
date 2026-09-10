@@ -2,16 +2,16 @@
  * Hidden Thinking Label Extension
  *
  * Demonstrates `ctx.ui.setHiddenThinkingLabel()` for customizing the label shown
- * when thinking blocks are hidden.
+ * above visible thinking blocks.
  *
  * Usage:
  *   pi --extension examples/extensions/hidden-thinking-label.ts
  *
  * Test:
  *   1. Load this extension
- *   2. Hide thinking blocks with Ctrl+T
+ *   2. Press Ctrl+O once to show thinking and file diffs
  *   3. Ask for something that produces reasoning output
- *   4. The collapsed thinking block label will show the custom text
+ *   4. The thinking block label will show the custom text
  *
  * Commands:
  *   /thinking-label <text>   Set a custom hidden thinking label

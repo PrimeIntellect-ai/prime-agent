@@ -1,2 +1,7 @@
 - Changed assistant message body text to a new dimmed `mdBody` theme color, easing the wall of bright default-foreground text while headings, links, and code keep their styling.
 - Changed prime-theme inline code to a darker neutral (#c8c8cd) so it stays distinct from the dimmed body text.
+- Added a three-stage Ctrl+O cycle for overview, thinking and file diffs, and all output, replacing the separate Ctrl+J and Ctrl+T conversation shortcuts without changing saved traces.
+- Changed thinking rows to stay hidden in overview and appear in a dim tone under a quiet "Thinking:" label in the other detail modes, including newly streamed thinking.
+- Changed collapsed tool-call previews to render plain and dim instead of green or syntax-highlighted code, with dim line counts and durations, while expanded blocks keep full highlighting.
+- Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
+- Changed the conversation row hierarchy: event-row trailing detail (agent-message participant and previews, tool command previews, line counts, durations) renders dim while leading labels keep their colors.

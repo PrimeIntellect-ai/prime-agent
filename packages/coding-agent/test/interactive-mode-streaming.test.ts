@@ -67,7 +67,7 @@ type HandleSubagentSummaryChatAction = (
 		editor: { handleInput(data: string): void };
 		focusEditor(): void;
 		toggleToolOutputExpansion(): void;
-		toggleThinkingBlockVisibility(): void;
+		toggleAgentMessageExpansion(): void;
 	},
 	data: string,
 ) => void;
@@ -324,7 +324,7 @@ describe("InteractiveMode streaming events", () => {
 			editor: { handleInput: vi.fn() },
 			focusEditor: vi.fn(),
 			toggleToolOutputExpansion: vi.fn(),
-			toggleThinkingBlockVisibility: vi.fn(),
+			toggleAgentMessageExpansion: vi.fn(),
 		};
 
 		handleSubagentSummaryChatAction.call(fakeThis, "x");
@@ -332,24 +332,27 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.focusEditor).toHaveBeenCalledOnce();
 		expect(fakeThis.editor.handleInput).toHaveBeenCalledWith("x");
 		expect(fakeThis.toggleToolOutputExpansion).not.toHaveBeenCalled();
-		expect(fakeThis.toggleThinkingBlockVisibility).not.toHaveBeenCalled();
+		expect(fakeThis.toggleAgentMessageExpansion).not.toHaveBeenCalled();
 	});
 
-	test("keeps focused subagent summary shortcuts in the chat surface", () => {
+	test.each([
+		["app.tools.expand", "\x0f", "toggleToolOutputExpansion"],
+		["app.messages.expand", "\x10", "toggleAgentMessageExpansion"],
+	] as const)("keeps focused subagent summary %s shortcut in the chat surface", (action, key, method) => {
 		const handleSubagentSummaryChatAction = (
 			InteractiveMode.prototype as unknown as { handleSubagentSummaryChatAction: HandleSubagentSummaryChatAction }
 		).handleSubagentSummaryChatAction;
 		const fakeThis = {
-			keybindings: { matches: vi.fn((_data: string, action: string) => action === "app.tools.expand") },
+			keybindings: { matches: vi.fn((_data: string, candidate: string) => candidate === action) },
 			editor: { handleInput: vi.fn() },
 			focusEditor: vi.fn(),
 			toggleToolOutputExpansion: vi.fn(),
-			toggleThinkingBlockVisibility: vi.fn(),
+			toggleAgentMessageExpansion: vi.fn(),
 		};
 
-		handleSubagentSummaryChatAction.call(fakeThis, "\x0f");
+		handleSubagentSummaryChatAction.call(fakeThis, key);
 
-		expect(fakeThis.toggleToolOutputExpansion).toHaveBeenCalledOnce();
+		expect(fakeThis[method]).toHaveBeenCalledOnce();
 		expect(fakeThis.focusEditor).not.toHaveBeenCalled();
 		expect(fakeThis.editor.handleInput).not.toHaveBeenCalled();
 	});

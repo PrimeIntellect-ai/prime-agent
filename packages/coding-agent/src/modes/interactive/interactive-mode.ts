@@ -1040,9 +1040,7 @@ export class InteractiveMode {
 	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
 
-	private hideThinkingBlock = false;
-	/** Transiently revealed thinking blocks (Ctrl+T shows all and hides them again; never persisted). */
-	private revealedThinkingComponents: AssistantMessageComponent[] = [];
+	private hideThinkingBlock = true;
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -1202,8 +1200,6 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.settingsManager.getCompactionEnabled());
 		this.setGoalAnnouncementBaseline(emptyGoalState());
-
-		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 
 		setRegisteredThemes(this.uiServices.getThemes());
 		initTheme(this.settingsManager.getTheme(), true);
@@ -1451,10 +1447,8 @@ export class InteractiveMode {
 						keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
 						rawKeyHint("/effort", "to set thinking level"),
 						hint("app.model.select", "to select model"),
-						hint("app.tools.expand", "to expand tools"),
+						hint("app.tools.expand", "to cycle conversation detail"),
 						hint("app.messages.expand", "to expand agent messages"),
-						hint("app.edits.expand", "to expand edit diffs"),
-						hint("app.thinking.toggle", "to show thinking"),
 						hint("app.subagents.focus", "to inspect subagents"),
 						hint("app.editor.external", "for external editor"),
 						hint("app.prompt.stash", "to stash prompt"),
@@ -2562,7 +2556,6 @@ export class InteractiveMode {
 			this.connectionState?.autoCompactionEnabled ?? this.settingsManager.getCompactionEnabled(),
 		);
 		this.footerDataProvider.setCwd(this.getCurrentCwd());
-		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -3080,7 +3073,7 @@ export class InteractiveMode {
 				this.getCurrentCwd(),
 			);
 			component.setExpanded(this.toolOutputExpanded);
-			component.setAgentMessagesExpanded(this.agentMessagesExpanded);
+			component.setAgentMessagesExpanded(this.getAgentMessagesExpanded());
 			component.setEditDiffsExpanded(this.editDiffsExpanded);
 			if (this.startedToolCalls.has(latestToolCall.id)) {
 				component.markExecutionStarted();
@@ -4215,8 +4208,6 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.messages.expand", () => this.toggleAgentMessageExpansion());
-		this.defaultEditor.onAction("app.edits.expand", () => this.toggleEditDiffExpansion());
-		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
 			void this.showHeartbeatManager();
@@ -4545,6 +4536,7 @@ export class InteractiveMode {
 			this.sideQuestionComponent.addTurn(event);
 		} else {
 			this.sideQuestionComponent = new SideQuestionComponent(event, this.settingsManager.getEditorPaddingX());
+			this.sideQuestionComponent.setExpanded(this.toolOutputExpanded);
 			this.sideQuestionContainer.addChild(new Spacer(1));
 			this.sideQuestionContainer.addChild(this.sideQuestionComponent);
 		}
@@ -5487,6 +5479,7 @@ export class InteractiveMode {
 				const component = new BashExecutionComponent(event.command, this.ui, event.excludeFromContext, {
 					suppressLeadingSpace: this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				});
+				component.setExpanded(this.toolOutputExpanded);
 				if (ownSideBash && this.sideQuestionComponent) {
 					// Same component as the main thread, mounted inside the pane.
 					this.sideQuestionComponent.addBash(component);
@@ -6092,15 +6085,6 @@ export class InteractiveMode {
 			this.toggleAgentMessageExpansion();
 			return;
 		}
-		// A raw "\n" is a newline for the editor, not ctrl+j.
-		if (data !== "\n" && this.keybindings.matches(data, "app.edits.expand")) {
-			this.toggleEditDiffExpansion();
-			return;
-		}
-		if (this.keybindings.matches(data, "app.thinking.toggle")) {
-			this.toggleThinkingBlockVisibility();
-			return;
-		}
 		this.focusEditor();
 		this.editor.handleInput(data);
 	}
@@ -6381,6 +6365,7 @@ export class InteractiveMode {
 				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext, {
 					suppressLeadingSpace: this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				});
+				component.setExpanded(this.toolOutputExpanded);
 				if (message.output) {
 					component.appendOutput(message.output);
 				}
@@ -6607,7 +6592,7 @@ export class InteractiveMode {
 							this.getCurrentCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						component.setAgentMessagesExpanded(this.agentMessagesExpanded);
+						component.setAgentMessagesExpanded(this.getAgentMessagesExpanded());
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
 						selectLatestToolExpandHint(this.chatContainer.children, component);
 						this.chatContainer.addChild(component);
@@ -7335,7 +7320,7 @@ export class InteractiveMode {
 	}
 
 	private toggleToolOutputExpansion(): void {
-		this.setToolsExpanded(!this.toolOutputExpanded);
+		this.setChatDetail(this.toolOutputExpanded ? "overview" : this.editDiffsExpanded ? "all" : "details");
 	}
 
 	private toggleAgentMessageExpansion(): void {
@@ -7343,19 +7328,26 @@ export class InteractiveMode {
 		this.applyChatExpansion();
 	}
 
-	private toggleEditDiffExpansion(): void {
-		this.editDiffsExpanded = !this.editDiffsExpanded;
+	private setToolsExpanded(expanded: boolean): void {
+		this.setChatDetail(expanded ? "all" : "overview");
+	}
+
+	/** Presentation only: never rewrite messages, settings, or the session trace. */
+	private setChatDetail(detail: "overview" | "details" | "all"): void {
+		this.toolOutputExpanded = detail === "all";
+		this.agentMessagesExpanded = detail === "all";
+		this.editDiffsExpanded = detail !== "overview";
+		this.hideThinkingBlock = detail === "overview";
 		this.applyChatExpansion();
 	}
 
-	private setToolsExpanded(expanded: boolean): void {
-		this.toolOutputExpanded = expanded;
-		this.applyChatExpansion();
+	private getAgentMessagesExpanded(): boolean {
+		return this.agentMessagesExpanded;
 	}
 
 	/** Expansion state for a chat component: agent messages toggle separately from tools. */
 	private expansionStateFor(component: unknown): boolean {
-		return component instanceof AgentMessageComponent ? this.agentMessagesExpanded : this.toolOutputExpanded;
+		return component instanceof AgentMessageComponent ? this.getAgentMessagesExpanded() : this.toolOutputExpanded;
 	}
 
 	private applyChatExpansion(): void {
@@ -7363,12 +7355,20 @@ export class InteractiveMode {
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(this.toolOutputExpanded);
 		}
-		for (const child of this.chatContainer.children) {
+		for (const child of new Set([
+			...this.chatContainer.children,
+			...this.pendingBashComponents,
+			this.activeBashComponent,
+			this.sideQuestionComponent,
+		])) {
+			if (child instanceof AssistantMessageComponent) {
+				child.setHideThinkingBlock(this.hideThinkingBlock);
+			}
 			if (isExpandable(child)) {
 				child.setExpanded(this.expansionStateFor(child));
 			}
 			if (hasAgentMessagesExpansion(child)) {
-				child.setAgentMessagesExpanded(this.agentMessagesExpanded);
+				child.setAgentMessagesExpanded(this.getAgentMessagesExpanded());
 			}
 			if (hasEditDiffsExpansion(child)) {
 				child.setEditDiffsExpanded(this.editDiffsExpanded);
@@ -7383,35 +7383,6 @@ export class InteractiveMode {
 		} else {
 			this.ui.requestRenderPreservingViewport();
 		}
-	}
-
-	private toggleThinkingBlockVisibility(): void {
-		// Thinking rows are hidden by default; the toggle transiently reveals every
-		// thinking block in the conversation and hides them again. It never touches
-		// the persisted setting, and blocks that appear after a reveal stay hidden
-		// until the toggle is pressed again.
-		if (this.revealedThinkingComponents.length > 0) {
-			for (const component of this.revealedThinkingComponents) {
-				component.setHideThinkingBlock(this.hideThinkingBlock);
-			}
-			this.revealedThinkingComponents = [];
-			this.showStatus("Thinking: hidden");
-		} else {
-			const targets = this.chatContainer.children.filter(
-				(child): child is AssistantMessageComponent =>
-					child instanceof AssistantMessageComponent && child.hasThinkingContent(),
-			);
-			if (targets.length === 0) {
-				this.showStatus("No thinking to show yet");
-				return;
-			}
-			for (const component of targets) {
-				component.setHideThinkingBlock(false);
-			}
-			this.revealedThinkingComponents = targets;
-			this.showStatus(`Thinking: shown (${targets.length} blocks)`);
-		}
-		this.ui.requestRender();
 	}
 
 	private openExternalEditor(): void {
@@ -7592,7 +7563,6 @@ export class InteractiveMode {
 					availableThinkingLevels: state.availableThinkingLevels,
 					currentTheme: this.settingsManager.getTheme() || "prime",
 					availableThemes: getAvailableThemes(),
-					hideThinkingBlock: this.hideThinkingBlock,
 					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
@@ -7680,18 +7650,6 @@ export class InteractiveMode {
 							this.ui.invalidate();
 							this.ui.requestRender();
 						}
-					},
-					onHideThinkingBlockChange: (hidden) => {
-						this.hideThinkingBlock = hidden;
-						this.settingsManager.setHideThinkingBlock(hidden);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
-							}
-						}
-						void this.rebuildChatFromMessages().catch((error) => {
-							this.showError(error instanceof Error ? error.message : String(error));
-						});
 					},
 					onMermaidRenderingModeChange: (mode) => {
 						this.settingsManager.setMermaidRenderingMode(mode);
@@ -8972,7 +8930,6 @@ export class InteractiveMode {
 				activeHeader.setExpanded(this.toolOutputExpanded);
 			}
 			setRegisteredThemes(this.uiServices.getThemes());
-			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 			const themeName = this.settingsManager.getTheme();
 			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
 			if (!themeResult.success) {
@@ -9856,8 +9813,6 @@ export class InteractiveMode {
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
-		const expandEdits = this.getAppKeyDisplay("app.edits.expand");
-		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const promptStash = this.getAppKeyDisplay("app.prompt.stash");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
@@ -9869,8 +9824,8 @@ export class InteractiveMode {
 \`${clearInput}\` interrupt · press twice to rewind or clear the prompt
 
 **Controls**
-\`${selectModel}\` select model · \`/effort\` set reasoning · \`${expandTools}\` tool output
-\`${expandMessages}\` agent messages · \`${expandEdits}\` edit diffs · \`${toggleThinking}\` thinking blocks · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
+\`${selectModel}\` select model · \`/effort\` set reasoning · \`${expandTools}\` overview → thinking + diffs → all output
+\`${expandMessages}\` agent messages · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
 \`${pasteImage}\` paste image
 
 **Help**
@@ -9909,8 +9864,6 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
-		const expandEdits = this.getAppKeyDisplay("app.edits.expand");
-		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const focusSubagents = this.getAppKeyDisplay("app.subagents.focus");
 		const manageHeartbeats = this.getAppKeyDisplay("app.heartbeats.open");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
@@ -9957,10 +9910,8 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 | \`${clear}\` | Interrupt current operation (first) / exit (second) |
 ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shortcutsKey ? `| \`${shortcutsKey}\` | Show quick shortcuts |\n` : ""}| \`${exit}\` | Exit (when editor is empty) |
 | \`${selectModel}\` | Open model selector |
-| \`${expandTools}\` | Toggle tool output expansion |
+| \`${expandTools}\` | Cycle overview → thinking + diffs → all output |
 | \`${expandMessages}\` | Toggle agent message expansion |
-| \`${expandEdits}\` | Toggle edit diff expansion |
-| \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${focusSubagents}\` | Focus the subagent summary / open the scoped agents view |
 | \`${manageHeartbeats}\` | Manage heartbeats |
 | \`${externalEditor}\` | Edit message in external editor |

@@ -66,9 +66,10 @@ export function keyHint(keybinding: Keybinding, description: string, options: Ke
 	return theme.fg("dim", keyText(keybinding, options)) + theme.fg("muted", ` ${description}`);
 }
 
-/** Canonical bracketed expand/collapse hint, e.g. `(Ctrl+O to expand)`, fully dim. */
+/** Conversation detail cycles in three stages; other controls toggle expansion. */
 export function expandCollapseHint(keybinding: Keybinding, expanded: boolean): string {
-	return theme.fg("dim", `(${keyText(keybinding)} ${expanded ? "to collapse" : "to expand"})`);
+	const action = keybinding === "app.tools.expand" ? "cycle detail" : expanded ? "to collapse" : "to expand";
+	return theme.fg("dim", `(${keyText(keybinding)} ${action})`);
 }
 
 export function rawKeyHint(key: string, description: string): string {

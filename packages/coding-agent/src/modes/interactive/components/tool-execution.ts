@@ -10,6 +10,7 @@ import type { AgentConnectionToolDefinition } from "../../agent-connection/index
 import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 import { ToolPanel } from "./tool-panel.js";
 
 export interface ToolExecutionOptions {
@@ -213,7 +214,7 @@ export class ToolExecutionComponent extends Container {
 		if (!output) {
 			return undefined;
 		}
-		return new Text(theme.fg("toolOutput", output), 0, 0);
+		return new Text(theme.fg("toolOutput", this.formatFallbackPreview(output)), 0, 0);
 	}
 
 	updateArgs(args: any): void {
@@ -505,15 +506,22 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	private formatFallbackPreview(text: string): string {
+		if (this.expanded) return text;
+		const lines = text.split("\n");
+		if (lines.length <= 3) return text;
+		return `${lines.slice(0, 3).join("\n")}\n${theme.fg("dim", `… ${lines.length - 3} more lines`)}${this.showExpandHint ? ` ${expandCollapseHint("app.tools.expand", false)}` : ""}`;
+	}
+
 	private formatToolExecution(): string {
 		const parts: string[] = [];
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
-			parts.push(content);
+			parts.push(this.formatFallbackPreview(content));
 		}
 		const output = this.getTextOutput();
 		if (output) {
-			parts.push(output);
+			parts.push(this.formatFallbackPreview(output));
 		}
 		return parts.join("\n\n");
 	}

@@ -125,15 +125,15 @@ describe("IPythonCellComponent diff rendering", () => {
 
 		const hidden = renderCell({ ...state, editDiffsExpanded: false }).split("\n");
 		const hiddenSummary = hidden.find((l) => l.includes("╰─ a.ts"));
-		expect(hiddenSummary).toMatch(/^ {4}╰─ a\.ts \+1 -1 · .*to expand\)$/);
+		expect(hiddenSummary).toMatch(/^ {4}╰─ a\.ts \+1 -1 · .*cycle detail\)$/);
 
 		const notLatest = renderCell({ ...state, editDiffsExpanded: false, showExpandHint: false }).split("\n");
-		expect(notLatest.find((l) => l.includes("╰─ a.ts"))).toMatch(/to expand\)$/);
+		expect(notLatest.find((l) => l.includes("╰─ a.ts"))).toMatch(/cycle detail\)$/);
 		expect(hidden.some((l) => /1 - .*x/.test(l))).toBe(false);
 
 		const shown = renderCell({ ...state, editDiffsExpanded: true }).split("\n");
 		const summary = shown.find((l) => l.includes("╰─ a.ts"));
-		expect(summary).toMatch(/^ {4}╰─ a\.ts \+1 -1 · .*to collapse\)$/);
+		expect(summary).toMatch(/^ {4}╰─ a\.ts \+1 -1 · .*cycle detail\)$/);
 		const textColumn = (summary ?? "").indexOf("a.ts");
 		const removed = shown.find((l) => /1 - .*x/.test(l));
 		const added = shown.find((l) => /1 \+ .*X/.test(l));
@@ -233,7 +233,7 @@ describe("IPythonCellComponent diff rendering", () => {
 		expect(summary).toMatch(/\+1 -1 · /);
 	});
 
-	it("advertises the collapse key once per cell when diffs are expanded", () => {
+	it("advertises the detail cycle key once per cell when diffs are expanded", () => {
 		const lines = new IPythonCellComponent({
 			code: "await edit(...)",
 			details: {
@@ -249,7 +249,7 @@ describe("IPythonCellComponent diff rendering", () => {
 			editDiffsExpanded: true,
 		}).render(120);
 		const plain = lines.map(stripAnsi);
-		const hinted = plain.filter((line) => line.includes("to collapse") && /[+]\d+ -\d+/.test(line));
+		const hinted = plain.filter((line) => line.includes("cycle detail") && /[+]\d+ -\d+/.test(line));
 		expect(hinted).toHaveLength(1);
 		expect(hinted[0]).toContain("b.ts");
 	});
@@ -311,7 +311,7 @@ describe("IPythonCellComponent diff rendering", () => {
 			expanded: true,
 			editDiffsExpanded: true,
 		}).split("\n");
-		expect(out[0]).toContain("to collapse");
+		expect(out[0]).toContain("cycle detail");
 		expect(out[1].trim()).toBe("");
 		expect(out[2]).toContain("await edit(...)");
 		expect(out.findIndex((line) => line.includes("a.ts"))).toBeGreaterThan(2);
@@ -326,7 +326,7 @@ describe("IPythonCellComponent diff rendering", () => {
 			expanded: false,
 		});
 		expect(collapsed).toContain("╰─ big.py +1 -1");
-		expect(collapsed).toContain("to expand");
+		expect(collapsed).toContain("cycle detail");
 		expect(collapsed).not.toContain("old");
 		expect(collapsed).not.toContain("NEW");
 	});
@@ -360,7 +360,7 @@ describe("IPythonCellComponent diff rendering", () => {
 			expanded: false,
 		});
 		expect(collapsed.split("\n")).toHaveLength(1);
-		expect(collapsed).toContain("to expand");
+		expect(collapsed).toContain("cycle detail");
 		expect(collapsed).not.toContain("world");
 	});
 
@@ -385,7 +385,7 @@ describe("IPythonCellComponent diff rendering", () => {
 		expect((out.match(/⋮/g) ?? []).length).toBe(2);
 	});
 
-	it("keeps the top line stable when expanded — only the hint flips, no header line, no layout shift", () => {
+	it("keeps the top line and detail hint stable when expanded", () => {
 		const state = {
 			code: "print(55)",
 			content: [{ type: "text", text: "55" }],
@@ -396,10 +396,9 @@ describe("IPythonCellComponent diff rendering", () => {
 		const collapsed = new IPythonCellComponent({ ...state, expanded: false }).render(80);
 		const expanded = new IPythonCellComponent({ ...state, expanded: true }).render(80);
 
-		expect(stripAnsi(collapsed[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · \(.*to expand\)$/);
-		expect(stripAnsi(expanded[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · \(.*to collapse\)$/);
-		const upToHint = (line: string) => stripAnsi(line).replace(/· \([^·]*to (expand|collapse)\)$/, "");
-		expect(upToHint(expanded[0])).toBe(upToHint(collapsed[0]));
+		expect(stripAnsi(collapsed[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · \(.*cycle detail\)$/);
+		expect(stripAnsi(expanded[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · \(.*cycle detail\)$/);
+		expect(stripAnsi(expanded[0])).toBe(stripAnsi(collapsed[0]));
 
 		const stripped = expanded.map(stripAnsi);
 		expect(stripped.filter((l) => /python · done/.test(l)).length).toBe(0);
