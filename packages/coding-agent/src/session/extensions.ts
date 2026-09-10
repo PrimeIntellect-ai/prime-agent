@@ -35,6 +35,7 @@ export interface SessionExtensionsHost {
 	modelRegistry: ModelRegistry;
 	getModelRegistry(): ModelRegistry;
 	getPromptTemplates(): ReadonlyArray<PromptTemplate>;
+	bindShutdownHandler(handler: ShutdownHandler | undefined): ShutdownHandler | undefined;
 	getAgentMessageController(): AgentSessionMessageController | undefined;
 	refreshCurrentModel(): void;
 	sendCustomMessage(...args: Parameters<ExtensionActions["sendMessage"]>): Promise<void>;
@@ -94,7 +95,7 @@ export class SessionExtensions {
 			this._extensionCommandContextActions = bindings.commandContextActions;
 		}
 		if (bindings.shutdownHandler !== undefined) {
-			this._extensionShutdownHandler = bindings.shutdownHandler;
+			this._extensionShutdownHandler = this.host.bindShutdownHandler(bindings.shutdownHandler);
 		}
 		if (bindings.onError !== undefined) {
 			this._extensionErrorListener = bindings.onError;

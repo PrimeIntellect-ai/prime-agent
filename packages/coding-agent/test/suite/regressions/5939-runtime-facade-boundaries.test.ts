@@ -75,6 +75,64 @@ describe("ENG-5939 runtime facade boundaries", () => {
 		expect(auth.mock.contexts).toEqual([registry]);
 	});
 
+	it("rejects accessor failures asynchronously without reading later bindings", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const failure = new Error("binding getter failed");
+		const onError = vi.fn();
+		let binding: Promise<void> | undefined;
+		expect(() => {
+			binding = harness.session.bindExtensions({
+				get shutdownHandler(): never {
+					throw failure;
+				},
+				get onError() {
+					onError();
+					return undefined;
+				},
+			});
+		}).not.toThrow();
+		await expect(binding).rejects.toBe(failure);
+		expect(onError).not.toHaveBeenCalled();
+	});
+
+	it("keeps original accessor order and earlier binding updates when a later getter fails", async () => {
+		let shutdown = () => {};
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						shutdown = () => ctx.shutdown();
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const previous = vi.fn();
+		await harness.session.bindExtensions({ shutdownHandler: previous });
+		const reads: string[] = [];
+		const current = vi.fn(function (this: AgentSession) {
+			expect(this).toBe(harness.session);
+		});
+		const failure = new Error("later binding getter failed");
+		await expect(
+			harness.session.bindExtensions({
+				get shutdownHandler() {
+					reads.push("shutdown");
+					return current;
+				},
+				get onError(): never {
+					reads.push("onError");
+					throw failure;
+				},
+			}),
+		).rejects.toBe(failure);
+		expect(reads).toEqual(["shutdown", "shutdown", "onError"]);
+		shutdown();
+		expect(previous).not.toHaveBeenCalled();
+		expect(current).toHaveBeenCalledOnce();
+	});
+
 	it("settles a no-op ACP release before work queued by its caller", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
