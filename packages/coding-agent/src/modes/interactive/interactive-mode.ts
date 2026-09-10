@@ -1030,6 +1030,8 @@ export class InteractiveMode {
 	private editDiffsExpanded = false;
 
 	private hideThinkingBlock = false;
+	/** Transiently revealed thinking block (Ctrl+T toggles it; never persisted). */
+	private revealedThinkingComponent: AssistantMessageComponent | undefined;
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -1443,7 +1445,7 @@ export class InteractiveMode {
 						hint("app.tools.expand", "to expand tools"),
 						hint("app.messages.expand", "to expand agent messages"),
 						hint("app.edits.expand", "to expand edit diffs"),
-						hint("app.thinking.toggle", "to expand thinking"),
+						hint("app.thinking.toggle", "to show thinking"),
 						hint("app.subagents.focus", "to inspect subagents"),
 						hint("app.editor.external", "for external editor"),
 						hint("app.prompt.stash", "to stash prompt"),
@@ -7383,24 +7385,33 @@ export class InteractiveMode {
 	}
 
 	private toggleThinkingBlockVisibility(): void {
-		this.hideThinkingBlock = !this.hideThinkingBlock;
-		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
-
-		void (async () => {
-			// Rebuild chat from session messages
-			await this.rebuildChatFromMessages();
-
-			// If streaming, re-add the streaming component with updated visibility and re-render
-			if (this.streamingComponent && this.streamingMessage) {
-				this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-				this.streamingComponent.updateContent(this.streamingMessage);
-				this.chatContainer.addChild(this.streamingComponent);
+		// Thinking rows are hidden by default; the toggle transiently reveals the
+		// most recent thinking block (label + trace) and hides it again. It never
+		// touches the persisted setting.
+		if (this.revealedThinkingComponent) {
+			this.revealedThinkingComponent.setHideThinkingBlock(this.hideThinkingBlock);
+			this.revealedThinkingComponent = undefined;
+			this.showStatus("Thinking: hidden");
+		} else {
+			const target = this.findLatestThinkingComponent();
+			if (!target) {
+				this.showStatus("No thinking to show yet");
+				return;
 			}
+			target.setHideThinkingBlock(false);
+			this.revealedThinkingComponent = target;
+			this.showStatus("Thinking: shown");
+		}
+		this.ui.requestRender();
+	}
 
-			this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
-		})().catch((error) => {
-			this.showError(error instanceof Error ? error.message : String(error));
-		});
+	private findLatestThinkingComponent(): AssistantMessageComponent | undefined {
+		for (const child of [...this.chatContainer.children].reverse()) {
+			if (child instanceof AssistantMessageComponent && child.hasThinkingContent()) {
+				return child;
+			}
+		}
+		return undefined;
 	}
 
 	private openExternalEditor(): void {
