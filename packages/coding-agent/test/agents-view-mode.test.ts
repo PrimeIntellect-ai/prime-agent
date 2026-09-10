@@ -910,12 +910,15 @@ describe("AgentsViewMode", () => {
 			expect(output).toContain("Running (1)");
 			expect(output).toContain("Idle (1)");
 			expect(output).toContain("Inactive (1)");
-			const runningRow = rendered.find((line) => stripAnsi(line).includes("busy"));
-			const idleRow = rendered.find((line) => stripAnsi(line).includes("idle"));
-			const inactiveRow = rendered.find((line) => stripAnsi(line).includes("archived session"));
+			const runningRow = rendered.find((line) => stripAnsi(line).includes("busy"))!;
+			const idleRow = rendered.find((line) => stripAnsi(line).includes("idle"))!;
+			const inactiveRow = rendered.find((line) => stripAnsi(line).includes("archived session"))!;
 			expect(runningRow).toContain(theme.bold("◇"));
-			expect(idleRow).toContain(theme.fg("warning", "•"));
-			expect(inactiveRow).toContain(theme.fg("dim", "•"));
+			expect(idleRow).toContain(theme.bold(theme.fg("warning", "•")));
+			expect(inactiveRow).toContain(theme.bold(theme.fg("dim", "•")));
+			expect(stripAnsi(runningRow)).toMatch(/◇ busy/u);
+			expect(stripAnsi(idleRow)).toMatch(/• idle/u);
+			expect(stripAnsi(inactiveRow)).toMatch(/• archived session/u);
 			expect(output).not.toContain("●");
 			expect(output).not.toContain("✓");
 		} finally {

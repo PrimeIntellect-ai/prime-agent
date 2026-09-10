@@ -2615,10 +2615,10 @@ export class AgentsViewMode implements Component, Focusable {
 			return markRow(formatTableCell(theme.fg("error", title), width));
 		}
 		const icon = this.formatRowIcon(row.section, this.getRowIcon(row.section));
-		const expand = row.descendantCount > 0 ? (this.expandedSubagentParents.has(row.identity) ? "▾" : "▸") : " ";
+		const expand = row.descendantCount > 0 ? (this.expandedSubagentParents.has(row.identity) ? "▾ " : "▸ ") : " ";
 		const badge = formatHeartbeatBadge(row.heartbeat);
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
-		const title = `${"  ".repeat(row.depth)}${icon}${expand} ${heartbeat}${styleRowTitle(row)}`;
+		const title = `${"  ".repeat(row.depth)}${icon}${expand}${heartbeat}${styleRowTitle(row)}`;
 		const status =
 			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
 				? row.statusLabel
@@ -2831,9 +2831,9 @@ export class AgentsViewMode implements Component, Focusable {
 			case "running":
 				return theme.bold(icon);
 			case "idle":
-				return theme.fg("warning", icon);
+				return theme.bold(theme.fg("warning", icon));
 			case "inactive":
-				return theme.fg("dim", icon);
+				return theme.bold(theme.fg("dim", icon));
 			default: {
 				const _exhaustive: never = section;
 				return _exhaustive;
