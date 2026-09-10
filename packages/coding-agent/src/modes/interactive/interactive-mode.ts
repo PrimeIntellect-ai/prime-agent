@@ -6112,11 +6112,7 @@ export class InteractiveMode {
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		const detailHint =
-			!this.ui.hasOverlay() && keyText("app.tools.expand", { primaryOnly: true })
-				? keyHint("app.tools.expand", "detail", { primaryOnly: true })
-				: undefined;
-		return [agentsHint, depthLabel, modelLabel, detailHint, shortcutsHint]
+		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
 			.filter((label): label is string => label !== undefined)
 			.join("  ");
 	}

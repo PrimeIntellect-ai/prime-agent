@@ -11,7 +11,7 @@ describe("keybinding hint formatting", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("leaves conversation detail hints to the prompt for both expansion states", () => {
+	it("omits inline conversation detail hints for both expansion states", () => {
 		for (const expanded of [false, true]) {
 			expect(expandCollapseHint("app.tools.expand", expanded)).toBe("");
 		}

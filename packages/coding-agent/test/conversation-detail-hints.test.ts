@@ -13,7 +13,7 @@ describe("conversation detail hints", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("keeps notifications readable and expandable without repeating the prompt hint", () => {
+	it("keeps notifications readable and expandable without inline detail hints", () => {
 		const cards = [
 			{
 				component: new CompactionSummaryMessageComponent({

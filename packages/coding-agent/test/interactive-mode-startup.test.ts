@@ -82,7 +82,7 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode();
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model • high  Ctrl+O detail  ? for shortcuts");
+		expect(stripAnsi(label)).toBe("test-model • high  ? for shortcuts");
 	});
 
 	it("keeps fresh-chat guidance hidden when a mid-turn snapshot still has no committed messages", () => {
@@ -234,10 +234,10 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high  Ctrl+O detail  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high  Ctrl+O detail");
+		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high");
 	});
 
 	it("hides the fresh-chat shortcut hint while the prompt has text", () => {
@@ -245,32 +245,33 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, false, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("test-model • high  Ctrl+O detail  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("test-model • high  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("test-model • high  Ctrl+O detail");
+		expect(stripAnsi(getLabel())).toBe("test-model • high");
 
 		editorText = " ";
-		expect(stripAnsi(getLabel())).toBe("test-model • high  Ctrl+O detail");
+		expect(stripAnsi(getLabel())).toBe("test-model • high");
 
 		editorText = "";
-		expect(stripAnsi(getLabel())).toBe("test-model • high  Ctrl+O detail  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("test-model • high  ? for shortcuts");
 	});
 
 	it("hides the tray shortcut guidance for chats with history", () => {
 		const mode = createMode(1);
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model • high  Ctrl+O detail");
+		expect(stripAnsi(label)).toBe("test-model • high");
 	});
 
-	it("shows one detail hint while typing and uses the configured primary binding", () => {
+	it("keeps remapped conversation detail shortcuts out of the footer while typing", () => {
 		setKeybindings(new KeybindingsManager({ "app.tools.expand": ["ctrl+e", "ctrl+g"] }));
 		const mode = createMode(2, false, () => "draft prompt");
 		const label = stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
 
-		expect(label).toBe("test-model • high  Ctrl+E detail");
-		expect(label.match(/ detail/g)).toHaveLength(1);
+		expect(label).toBe("test-model • high");
+		expect(label).not.toContain("detail");
+		expect(label).not.toContain("Ctrl+E");
 		expect(label).not.toContain("Ctrl+O");
 		expect(label).not.toContain("Ctrl+G");
 	});
@@ -283,7 +284,7 @@ describe("InteractiveMode startup hints", () => {
 		expect(label).not.toContain("detail");
 	});
 
-	it("hides the detail hint while an overlay owns the input", () => {
+	it("keeps the footer free of detail shortcuts while an overlay owns the input", () => {
 		const mode = createMode(1);
 		mode.ui.hasOverlay = () => true;
 		const label = stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));

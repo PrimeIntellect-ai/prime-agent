@@ -66,7 +66,7 @@ export function keyHint(keybinding: Keybinding, description: string, options: Ke
 	return theme.fg("dim", keyText(keybinding, options)) + theme.fg("muted", ` ${description}`);
 }
 
-/** Conversation detail has one hint near the prompt; other controls keep inline hints. */
+/** Conversation detail is documented in shortcut help; other controls keep inline hints. */
 export function expandCollapseHint(keybinding: Keybinding, expanded: boolean): string {
 	if (keybinding === "app.tools.expand") return "";
 	const action = expanded ? "to collapse" : "to expand";
