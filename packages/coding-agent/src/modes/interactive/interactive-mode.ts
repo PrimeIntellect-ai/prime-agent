@@ -456,7 +456,6 @@ export class BrandSplashHeader implements Component {
 
 	constructor(
 		private readonly version: string,
-		private readonly getModelId: () => string | undefined,
 		private readonly getCwd: () => string,
 		private readonly verboseInstructions?: string,
 		private readonly options: BrandSplashHeaderOptions = {},
@@ -481,18 +480,20 @@ export class BrandSplashHeader implements Component {
 		const title = theme.fg("text", titleText);
 		const metaLines = [
 			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
-			theme.fg("muted", truncateToWidth(this.getModelId() ?? "—", metaWidth)),
 			theme.fg("dim", truncatePathMiddle(formatSplashCwd(this.getCwd()), metaWidth)),
 			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
 		];
 		const lines = this.options.topPadding ? [""] : [];
 		const rowCount = Math.max(showLogo ? this.logoRaw.length : 0, metaLines.length);
+		const metaStartIndex = showLogo ? Math.floor((rowCount - metaLines.length) / 2) : 0;
 		for (let index = 0; index < rowCount; index++) {
 			const logoLine = showLogo ? (this.logoRaw[index] ?? "") : "";
 			const logo = showLogo
 				? theme.fg("text", logoLine) + " ".repeat(this.logoCanvasWidth - visibleWidth(logoLine) + this.gutter)
 				: "";
-			const content = truncateToWidth(logo + (metaLines[index] ?? ""), contentWidth);
+			const metaIndex = index - metaStartIndex;
+			const metaLine = metaIndex >= 0 && metaIndex < metaLines.length ? metaLines[metaIndex] : "";
+			const content = truncateToWidth(logo + metaLine, contentWidth);
 			lines.push(
 				" ".repeat(paddingX) + content + " ".repeat(Math.max(0, safeWidth - paddingX - visibleWidth(content))),
 			);
@@ -1449,15 +1450,9 @@ export class InteractiveMode {
 						rawKeyHint("drop files", "to attach"),
 					].join("\n")
 				: undefined;
-			this.builtInHeader = new BrandSplashHeader(
-				this.version,
-				() => this.getCurrentModelId(),
-				() => this.getCurrentCwd(),
-				verboseInstructions,
-				{
-					topPadding: true,
-				},
-			);
+			this.builtInHeader = new BrandSplashHeader(this.version, () => this.getCurrentCwd(), verboseInstructions, {
+				topPadding: true,
+			});
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
 		} else {
@@ -2764,10 +2759,6 @@ export class InteractiveMode {
 
 	private getCurrentModel(): AgentConnectionModel | undefined {
 		return this.connectionState?.model;
-	}
-
-	private getCurrentModelId(): string | undefined {
-		return this.getCurrentModel()?.id;
 	}
 
 	private isAgentStreaming(): boolean {
