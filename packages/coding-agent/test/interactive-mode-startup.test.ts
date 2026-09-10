@@ -1,6 +1,7 @@
-import { Container, setKeybindings } from "@earendil-works/pi-tui";
+import { Container, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { APP_TITLE } from "../src/config.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import {
 	BrandSplashHeader,
@@ -35,7 +36,7 @@ describe("InteractiveMode startup hints", () => {
 		return mode;
 	}
 
-	it("keeps a blank row above the shared splash and limits its metadata", () => {
+	it("keeps the shared splash compact without repeating the input hint", () => {
 		const header = new BrandSplashHeader(
 			"0.0.0",
 			() => "test-model",
@@ -43,7 +44,6 @@ describe("InteractiveMode startup hints", () => {
 			undefined,
 			{
 				topPadding: true,
-				getStartHint: () => 'Try "refactor @<filepath>"',
 			},
 		);
 
@@ -51,13 +51,12 @@ describe("InteractiveMode startup hints", () => {
 		const output = stripAnsi(lines.join("\n"));
 
 		expect(lines[0]).toBe("");
-		expect(output).toContain("version  v0.0.0");
-		expect(output).toContain("model    test-model");
-		expect(output).toContain("cwd      /tmp/project");
-		expect(output).toContain('Try "refactor @<filepath>"');
-		expect(output).not.toContain("input");
-		expect(output).not.toContain("files");
-		expect(output).not.toContain("help");
+		expect(lines.length).toBeLessThanOrEqual(5);
+		expect(output).toContain(`${APP_TITLE} v0.0.0`);
+		expect(output).toContain("test-model");
+		expect(output).toContain("/tmp/project");
+		expect(output).not.toContain("Try ");
+		expect(output).not.toContain("type to search sessions");
 
 		const unpadded = new BrandSplashHeader(
 			"0.0.0",
@@ -65,6 +64,56 @@ describe("InteractiveMode startup hints", () => {
 			() => "/tmp/project",
 		);
 		expect(unpadded.render(120)[0]).not.toBe("");
+	});
+
+	it("keeps metadata visible in narrow terminals and bounds every rendered row", () => {
+		const header = new BrandSplashHeader(
+			"0.0.0",
+			() => "test-model",
+			() => "/tmp/project",
+		);
+
+		for (const width of [1, 2, 12, 24, 39, 40, 80]) {
+			const lines = header.render(width);
+			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+			if (width >= 24) {
+				const output = stripAnsi(lines.join("\n"));
+				expect(output).toContain("v0.0.0");
+				expect(output).toContain("test-model");
+				expect(output).toContain("/tmp/project");
+			}
+		}
+	});
+
+	it("renders live metadata and extra rows even when the custom mark is shorter", () => {
+		let model = "first-model";
+		let cwd = "/tmp/first";
+		const header = new BrandSplashHeader(
+			"0.0.0",
+			() => model,
+			() => cwd,
+			"custom shortcut instructions",
+			{
+				logo: "<>\n><",
+				getExtraMetadata: () => [
+					{ label: "agents", value: "2 running" },
+					{ label: "scope", value: "current project" },
+				],
+			},
+		);
+
+		const initial = stripAnsi(header.render(80).join("\n"));
+		expect(initial).toContain("<>");
+		expect(initial).toContain("agents 2 running");
+		expect(initial).toContain("scope current project");
+		expect(initial).toContain("custom shortcut instructions");
+
+		model = "second-model";
+		cwd = "/tmp/second";
+		const updated = stripAnsi(header.render(80).join("\n"));
+		expect(updated).toContain("second-model");
+		expect(updated).toContain("/tmp/second");
+		expect(updated).not.toContain("first-model");
 	});
 
 	it("randomly selects from five concise filepath prompts", () => {
