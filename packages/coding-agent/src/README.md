@@ -108,6 +108,42 @@ Preserve these boundaries when changing context behavior:
 - A cancelled continuation settles its own waiters. Late results cannot clear a replacement operation or consume its messages. The commit lease is released before awaiting a continued agent turn, and checkpoint waiters are removed when cancellation wins.
 - Public session methods delegate without additional asynchronous wrappers. Optional waits retain their original positions, and dependency callbacks read current runtime state when invoked.
 
+## Child agent lifecycle
+
+| File | Responsibility |
+| --- | --- |
+| `session/children.ts` | Child registry, admission, publication, deletion retries, cancellation, quiescence, retention, and cleanup. |
+| `session/child-run.ts` | Detached child execution, publication barriers, terminal state, and event attribution. |
+| `session/child-runtime.ts` | Inline child construction and child-specific directory creation. |
+| `session/child-state.ts` | Depth and maximum-depth settings, parent replies, and recap state. |
+| `session/child-usage.ts` | Child usage attribution, origin batches, flush timers, and retry bookkeeping. |
+| `session/child-projection.ts` | Read-only child list and snapshot projections. |
+| `session/child-types.ts` | Child contracts and shared child data helpers. |
+
+The registry owns child identity and lifecycle transitions. Execution and usage components operate on the same child records; they do not create competing copies of run state. Child state exposes read-only properties and named mutations. Runtime hosts, inherited depth, model selection, and event queues are read through live operations supplied by the session.
+
+- Reserve and publish children in the original order. A late completion cannot replace a newer run or clear another run's cancellation state.
+- Retain deletion reservations, retryable cleanup state, and descendant quiescence until their existing completion conditions hold. Parent continuation still waits for the appropriate child work.
+- Flush child usage once at the existing parent event boundary. Origin batches and timers have one cleanup owner.
+- Complete child cleanup before kernel teardown. The session supplies the following teardown operation so an empty child set does not add a scheduling delay before kernel disposal begins.
+- Keep calls that previously passed through public session methods live, including descendant receivers, registration, deletion, and maximum-depth status after settings updates.
+
+The root kernel directory belongs to `session/kernel-environment.ts`. Child directory construction receives a lazy operation for that directory rather than keeping a second root-directory field. The existing child runtime-options factory retains its public parent-session contract at the facade; child owners receive only the operations they use.
+
+## Tools, extensions, and kernel resources
+
+| File | Responsibility |
+| --- | --- |
+| `session/tools.ts` | Tool definitions and active selection, allowlists, prompt contributions, and ACP tool updates. |
+| `session/extensions.ts` | Extension runner bindings, resource reload, and extension lifecycle. |
+| `session/kernel.ts` | Kernel construction, snapshot restoration, prewarming, and disposal. |
+| `session/kernel-environment.ts` | Kernel provisioning environment and root or ephemeral session directories. |
+| `session/kernel-host-handlers.ts` | Typed host-handler composition from live session operations. |
+
+The session coordinates these owners with children, models, and input admission. A kernel replacement uses the previous kernel's disposal promise as its readiness gate. First-build restoration notices and snapshot-directory ownership stay with the kernel owner. Host handlers read the current runtime when invoked, including after replacement.
+
+ACP resource cleanup retains its input pause until queued work and cleanup finish, and releases the pause on failure. Extension bindings preserve public session dispatch and callback receivers, including shutdown and partial rebinding. Pure facade delegates do not add asynchronous wrappers around already asynchronous owner operations.
+
 ## Validation
 
 Controller tests live in `test/goals/`. Session integration coverage remains in `test/suite/agent-session-goal.test.ts`, `test/suite/agent-session-compaction-continuation.test.ts`, and `test/goal-continuation-quiescence.test.ts`.
@@ -117,5 +153,7 @@ Scheduler and commit-fence tests live in `test/session/`. Existing queue, action
 Shell-owner tests also live in `test/session/`. Session bash/persistence, prompt, queue, and side-question regression suites retain end-to-end coverage of scheduling and transcript behavior using the faux provider and controlled shell operations.
 
 Compaction and continuation owner tests in `test/session/` exercise lifecycle and cancellation boundaries. Compaction, refinement, serialized refinement, queue, concurrency, and semantic-edge suites cover their integration with session persistence, goals, and disposal. `test/suite/session-refinement-owner.test.ts` checks the refinement owner boundary using the shared faux-provider harness.
+
+Child usage and recursion suites cover accounting, cancellation, publication, and cleanup. Kernel, environment, and tool tests in `test/session/` cover resource ownership and replacement. The child/runtime facade regressions in `test/suite/regressions/` preserve public dispatch, callback receivers, and teardown ordering. Real Python background-bash cases require the configured runtime environment; record missing-environment skips explicitly.
 
 Run the focused files from the coding-agent package root with the repository's prescribed Vitest command, then run `npm run check` from the repository root. Use faux providers for session tests.
