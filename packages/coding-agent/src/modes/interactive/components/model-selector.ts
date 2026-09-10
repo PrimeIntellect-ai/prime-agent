@@ -465,7 +465,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const squareSlots = Math.max(
 			...reasoningItems.map((item) => this.getSelectableLevels(item).filter((level) => level !== "off").length),
 		);
-		const clusterWidth = squareSlots * 2 - 1;
+		const clusterWidth = squareSlots;
 		// Fixed label cell sized to the longest supported level name, so changing
 		// the selected level never changes the cluster span or its centered gap.
 		const labelWidth = Math.max(
@@ -512,8 +512,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const filledColor = selected ? theme.getEffortSquareColor() : (glyph: string) => theme.fg("muted", glyph);
 		const filled = effort === undefined || effort === "off" ? 0 : onLevels.indexOf(effort) + 1;
 		const squares = onLevels.map((_, index) => (index < filled ? filledColor("■") : theme.fg("dim", "□")));
-		const spaced = squares.join(" ");
-		return spaced + " ".repeat(Math.max(0, squareSlots * 2 - 1 - visibleWidth(spaced)));
+		// The glyphs carry their own cell padding, so render them edge to edge.
+		const marks = squares.join("");
+		return marks + " ".repeat(Math.max(0, squareSlots - visibleWidth(marks)));
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
