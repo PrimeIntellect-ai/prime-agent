@@ -2578,14 +2578,14 @@ export class AgentsViewMode implements Component, Focusable {
 				);
 			}
 			if (item.type === "heading") {
-				return theme.bold(truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
+				return theme.fg("muted", truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
 			}
 			return this.renderRow(item.row, width, layout);
 		});
 		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
 		if (showTrailingEllipsis) lines.push(theme.fg("dim", "  ..."));
 		if (headerRows > 1) lines.unshift("");
-		if (headerRows > 0) lines.unshift(theme.fg("muted", layout.legend));
+		if (headerRows > 0) lines.unshift(theme.bold(layout.legend));
 		return lines;
 	}
 
