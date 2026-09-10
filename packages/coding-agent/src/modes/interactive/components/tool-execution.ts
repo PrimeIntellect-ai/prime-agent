@@ -205,7 +205,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private createCallFallback(): Component {
-		return new Text(theme.fg("toolTitle", this.toolName), 0, 0);
+		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
 	}
 
 	private createResultFallback(): Component | undefined {

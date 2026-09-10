@@ -128,7 +128,7 @@ export function formatContextTree(root: ContextTreeNode, width: number): string 
 	);
 
 	const lines: string[] = [];
-	lines.push("Context");
+	lines.push(theme.bold("Context"));
 	lines.push("");
 	if (root.model) {
 		lines.push(`${theme.fg("dim", "Model:")} ${root.model.provider}/${root.model.id}`);
@@ -165,7 +165,7 @@ export function formatContextTree(root: ContextTreeNode, width: number): string 
 	);
 
 	lines.push("");
-	lines.push("Tokens");
+	lines.push(theme.bold("Tokens"));
 	lines.push(`${theme.fg("dim", "Input:")} ${totals.input.toLocaleString()}`);
 	lines.push(`${theme.fg("dim", "Output:")} ${totals.output.toLocaleString()}`);
 	if (totals.cacheRead > 0) {
@@ -178,14 +178,14 @@ export function formatContextTree(root: ContextTreeNode, width: number): string 
 
 	if (totals.cost.total > 0) {
 		lines.push("");
-		lines.push("Cost");
+		lines.push(theme.bold("Cost"));
 		lines.push(`${theme.fg("dim", "Total:")} $${totals.cost.total.toFixed(4)}`);
 	}
 
 	const rootContext = root.contextUsage;
 	if (rootContext) {
 		lines.push("");
-		lines.push("Context");
+		lines.push(theme.bold("Context"));
 		if (rootContext.tokens === null || rootContext.percent === null) {
 			lines.push(`${theme.fg("dim", "Current:")} unknown after compaction`);
 		} else {

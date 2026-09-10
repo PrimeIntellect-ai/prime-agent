@@ -41,7 +41,7 @@ export class BashExecutionComponent extends Container {
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
 
-		const header = new Text(theme.fg(colorKey, `$ ${command}`), 1, 0);
+		const header = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
 		this.contentContainer.addChild(header);
 
 		this.loader = new Loader(
@@ -127,7 +127,7 @@ export class BashExecutionComponent extends Container {
 
 		this.contentContainer.clear();
 
-		const header = new Text(theme.fg("bashMode", `$ ${this.command}`), 1, 0);
+		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 1, 0);
 		this.contentContainer.addChild(header);
 
 		if (availableLines.length > 0) {

@@ -57,7 +57,7 @@ class PrimeLoginHeader implements Component {
 		return [
 			...logoLines,
 			centeredLine("", safeWidth),
-			centeredLine(theme.fg("text", "Login to Prime Inference"), safeWidth),
+			centeredLine(theme.bold(theme.fg("text", "Login to Prime Inference")), safeWidth),
 			centeredLine(
 				theme.fg("muted", "Connect your Prime Intellect account to enable Prime Inference models."),
 				safeWidth,
@@ -332,7 +332,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	}
 
 	private addSectionTitle(text: string): void {
-		this.contentContainer.addChild(new Text(theme.fg("text", text), 0, 0));
+		this.contentContainer.addChild(new Text(theme.bold(theme.fg("text", text)), 0, 0));
 	}
 
 	private addLabel(text: string): void {

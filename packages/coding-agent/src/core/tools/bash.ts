@@ -188,7 +188,7 @@ function formatBashCall(args: { command?: string; timeout?: number } | undefined
 	} else {
 		commandDisplay = theme.fg("toolOutput", "...");
 	}
-	return theme.fg("toolTitle", `$ ${commandDisplay}`) + timeoutSuffix;
+	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
 }
 
 function rebuildBashResultRenderComponent(

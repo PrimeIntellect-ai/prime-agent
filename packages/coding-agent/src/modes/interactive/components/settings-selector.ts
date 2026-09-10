@@ -142,7 +142,7 @@ class SelectSubmenu extends Container {
 	) {
 		super();
 
-		this.addChild(new Text(theme.fg("accent", title), 0, 0));
+		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
 
 		if (description) {
 			this.addChild(new Spacer(1));
