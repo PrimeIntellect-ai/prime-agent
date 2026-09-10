@@ -268,7 +268,7 @@ import {
 import type { BuildSystemPromptOptions } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import type { IpythonKernelProvisioner } from "./tools/ipython.js";
-import { emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom, subtractAssistantUsage } from "./usage.js";
+import { emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 
 export type { RlmChildAgentActivity, RlmChildAgentSnapshot, RlmChildAgentStatus } from "../session/child-types.js";
 export { compactRlmText, rlmChildLabel } from "../session/child-types.js";
@@ -6572,18 +6572,11 @@ export class AgentSession {
 	}
 
 	private _subtractUnindexedChildUsage(ownUsage: Usage, entries: SessionEntry[]): void {
-		for (const entry of entries) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const unindexed = this._getUnindexedChildUsage(entry.message);
-			if (unindexed) subtractAssistantUsage(ownUsage, unindexed);
-		}
+		this._childUsage.subtractUnindexed(ownUsage, entries);
 	}
 
 	private _invalidateOwnUsage(): void {
 		this._ownUsageMemo = undefined;
-	}
-	private _getUnindexedChildUsage(message: AssistantMessage): Usage | undefined {
-		return this._childUsage.getUnindexed(message);
 	}
 	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
 
