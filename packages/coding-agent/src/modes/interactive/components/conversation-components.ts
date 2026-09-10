@@ -32,7 +32,6 @@ import {
 	type ToolExecutionDefinition,
 	type ToolExecutionOptions,
 } from "./tool-execution.js";
-import { ToolRunGroupComponent, ToolRunGrouper } from "./tool-run-group.js";
 import { UserMessageComponent } from "./user-message.js";
 
 export interface ConversationComponentsOptions {
@@ -49,20 +48,10 @@ export interface ConversationComponentsOptions {
 	isRecognizedSlashCommand?: (name: string) => boolean;
 }
 
-/** True when the component renders tool activity (a tool row or a run group). */
-function isToolActivityComponent(component: Component | undefined): boolean {
-	return (
-		component instanceof ToolExecutionComponent ||
-		component instanceof ToolRunGroupComponent ||
-		component instanceof AgentMessageComponent
-	);
-}
-
 export function isCompactAgentMessageNeighbor(component: Component | undefined): boolean {
 	return (
 		component instanceof AgentMessageComponent ||
 		component instanceof ToolExecutionComponent ||
-		component instanceof ToolRunGroupComponent ||
 		component instanceof IPythonCellComponent ||
 		component instanceof BashExecutionComponent
 	);
@@ -87,9 +76,6 @@ export function buildConversationComponents(
 ): Component[] {
 	const components: Component[] = [];
 	const pendingTools = new Map<string, ToolExecutionComponent>();
-	const grouper = new ToolRunGrouper((component) => {
-		components.push(component);
-	});
 	const expanded = options.toolsExpanded ?? false;
 	const agentMessagesExpanded = options.agentMessagesExpanded ?? false;
 	const editDiffsExpanded = options.editDiffsExpanded ?? false;
@@ -105,15 +91,13 @@ export function buildConversationComponents(
 					{
 						cwd: options.cwd,
 						expanded,
-						precededByToolActivity: isToolActivityComponent(components.at(-1)),
+						precededByToolActivity:
+							components.at(-1) instanceof ToolExecutionComponent ||
+							components.at(-1) instanceof AgentMessageComponent,
 					},
 				),
 			);
 			for (const content of message.content) {
-				if (content.type === "text" && content.text.trim().length > 0) {
-					grouper.noteAssistantText();
-					continue;
-				}
 				if (content.type !== "toolCall") {
 					continue;
 				}
@@ -132,7 +116,7 @@ export function buildConversationComponents(
 				tool.markExecutionStarted();
 				tool.setArgsComplete();
 				selectLatestToolExpandHint(components, tool);
-				grouper.mountToolExecution(tool);
+				components.push(tool);
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
 					tool.updateResult({
 						content: [{ type: "text", text: message.errorMessage || "Operation aborted" }],
@@ -141,10 +125,6 @@ export function buildConversationComponents(
 				} else {
 					pendingTools.set(content.id, tool);
 				}
-			}
-			// A turn-ending reply closes the open run segment.
-			if (message.stopReason !== "toolUse") {
-				grouper.close();
 			}
 		} else if (message.role === "toolResult") {
 			pendingTools.get(message.toolCallId)?.updateResult(message);
@@ -155,7 +135,6 @@ export function buildConversationComponents(
 				message.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE)
 		) {
 			if (!message.display) continue;
-			grouper.noteConversationRow();
 			if (isSessionSlashCommandMessage(message)) {
 				components.push(new SlashCommandMessageComponent(message.content));
 			} else if (isSessionSlashCommandResultMessage(message)) {
@@ -165,7 +144,6 @@ export function buildConversationComponents(
 			}
 		} else if (message.role === "custom" && message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) {
 			if (!message.display) continue;
-			grouper.noteConversationRow();
 			components.push(
 				isCompactionOutcomeMessage(message)
 					? new CompactionOutcomeMessageComponent(message)
@@ -173,26 +151,22 @@ export function buildConversationComponents(
 			);
 		} else if (message.role === "custom" && message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE) {
 			if (!message.display) continue;
-			grouper.noteConversationRow();
 			const component = isRefinementOutcomeMessage(message)
 				? new RefinementOutcomeMessageComponent(message)
 				: new MalformedRefinementOutcomeMessageComponent();
 			component.setExpanded(expanded);
 			components.push(component);
 		} else if (isAgentSessionMessage(message) && message.display) {
-			grouper.noteConversationRow();
 			const component = new AgentMessageComponent(message, options.markdownTheme, {
 				suppressLeadingSpace: isCompactAgentMessageNeighbor(components.at(-1)),
 			});
 			component.setExpanded(agentMessagesExpanded);
 			components.push(component);
 		} else if (isInjectedPromptMessage(message) && message.display) {
-			grouper.noteConversationRow();
 			const component = new InjectedPromptMessageComponent(message, options.markdownTheme);
 			component.setExpanded(expanded);
 			components.push(component);
 		} else if (message.role === "user") {
-			grouper.noteConversationRow();
 			const text = readUserText(message.content);
 			const hasContent =
 				typeof message.content === "string" ? message.content.length > 0 : message.content.length > 0;

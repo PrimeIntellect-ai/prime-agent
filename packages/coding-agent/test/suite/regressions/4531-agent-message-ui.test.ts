@@ -21,7 +21,6 @@ import {
 	isCompactAgentMessageNeighbor,
 } from "../../../src/modes/interactive/components/conversation-components.js";
 import { IPythonCellComponent } from "../../../src/modes/interactive/components/ipython-cell.js";
-import { ToolRunGrouper } from "../../../src/modes/interactive/components/tool-run-group.js";
 import { formatQueuedMessagePreview, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
@@ -386,7 +385,6 @@ describe("ENG-4531 agent message UI", () => {
 		const chatContainer = new Container();
 		const mode = {
 			chatContainer,
-			toolRunGrouper: new ToolRunGrouper((component) => chatContainer.addChild(component)),
 			toolOutputExpanded: false,
 			getCurrentCwd: () => "/tmp",
 			getMarkdownThemeWithSettings: () => undefined,

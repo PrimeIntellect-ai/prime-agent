@@ -239,7 +239,6 @@ import {
 	ToolExecutionComponent,
 	type ToolExecutionDefinition,
 } from "./components/tool-execution.js";
-import { ToolRunGroupComponent, ToolRunGrouper } from "./components/tool-run-group.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
@@ -1025,7 +1024,6 @@ export class InteractiveMode {
 	private fastModeToggleQueue: Promise<void> = Promise.resolve();
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
-	private readonly toolRunGrouper = new ToolRunGrouper((component) => this.chatContainer.addChild(component));
 	private ipythonToolComponents = new Map<string, ToolExecutionComponent>();
 	private lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	private pendingToolCreations = new Set<string>();
@@ -2944,7 +2942,6 @@ export class InteractiveMode {
 		this.pendingTools.clear();
 		this.pendingToolCreations.clear();
 		this.startedToolCalls.clear();
-		this.toolRunGrouper.close();
 	}
 
 	private async renderCurrentSessionState(): Promise<void> {
@@ -3039,24 +3036,6 @@ export class InteractiveMode {
 		}
 	}
 
-	/**
-	 * Feed the streaming message's content blocks through the run-group
-	 * derivation: tool calls nest into the open group or open a new one the
-	 * moment they start streaming. Thinking blocks never break the run; a
-	 * non-empty text block ends the open segment so following cells start a
-	 * fresh group, and a turn-ending message closes the segment (message_end)
-	 * so live and reloaded transcripts group identically.
-	 */
-	private async feedRunGroupingFromStreamingMessage(message: AssistantMessage): Promise<void> {
-		for (const content of message.content) {
-			if (content.type === "text" && content.text.trim().length > 0) {
-				this.toolRunGrouper.noteAssistantText();
-			} else if (content.type === "toolCall") {
-				await this.getOrCreatePendingToolComponent(content);
-			}
-		}
-	}
-
 	private async getOrCreatePendingToolComponent(
 		toolCall: PendingToolCallRenderInput,
 	): Promise<ToolExecutionComponent | undefined> {
@@ -3102,7 +3081,7 @@ export class InteractiveMode {
 				component.markExecutionStarted();
 			}
 			selectLatestToolExpandHint(this.chatContainer.children, component);
-			this.toolRunGrouper.mountToolExecution(component);
+			this.chatContainer.addChild(component);
 			this.pendingTools.set(latestToolCall.id, component);
 			this.registerIpythonToolComponent(latestToolCall.name, latestToolCall.id, component);
 			return component;
@@ -5507,16 +5486,11 @@ export class InteractiveMode {
 					// Same component as the main thread, mounted inside the pane.
 					this.sideQuestionComponent.addBash(component);
 					this.sideQuestionBashComponent = component;
+				} else if (this.isAgentStreaming()) {
+					this.pendingMessagesContainer.addChild(component);
+					this.pendingBashComponents.push(component);
 				} else {
-					// The block lands in this window's chat (now or when flushed), so
-					// the open run segment ends for live and reloaded views alike.
-					this.toolRunGrouper.noteConversationRow();
-					if (this.isAgentStreaming()) {
-						this.pendingMessagesContainer.addChild(component);
-						this.pendingBashComponents.push(component);
-					} else {
-						this.chatContainer.addChild(component);
-					}
+					this.chatContainer.addChild(component);
 				}
 				this.activeBashComponent = component;
 				this.ui.requestRender();
@@ -5604,7 +5578,12 @@ export class InteractiveMode {
 				if (event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage, true);
-					await this.feedRunGroupingFromStreamingMessage(this.streamingMessage);
+
+					for (const content of this.streamingMessage.content) {
+						if (content.type === "toolCall") {
+							await this.getOrCreatePendingToolComponent(content);
+						}
+					}
 					this.ui.requestRender();
 				}
 				break;
@@ -5850,7 +5829,6 @@ export class InteractiveMode {
 				expanded: this.toolOutputExpanded,
 				precededByToolActivity:
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
-					this.chatContainer.children.at(-1) instanceof ToolRunGroupComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				mermaidTransform: this.mermaidMarkdownTransform,
 				cwd: this.getCurrentCwd(),
@@ -6417,7 +6395,6 @@ export class InteractiveMode {
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
-				this.toolRunGrouper.noteConversationRow();
 				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext, {
 					suppressLeadingSpace: this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				});
@@ -6435,7 +6412,6 @@ export class InteractiveMode {
 			}
 			case "custom": {
 				if (message.display) {
-					this.toolRunGrouper.noteConversationRow();
 					const component = this.createDisplayedCustomMessageComponent(message);
 					if (isExpandable(component)) {
 						component.setExpanded(this.expansionStateFor(component));
@@ -6451,7 +6427,6 @@ export class InteractiveMode {
 				break;
 			}
 			case "compactionSummary": {
-				this.toolRunGrouper.noteConversationRow();
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
@@ -6459,7 +6434,6 @@ export class InteractiveMode {
 				break;
 			}
 			case "branchSummary": {
-				this.toolRunGrouper.noteConversationRow();
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
@@ -6467,7 +6441,6 @@ export class InteractiveMode {
 				break;
 			}
 			case "user": {
-				this.toolRunGrouper.noteConversationRow();
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
 					const heartbeatMessage = this.createLegacyHeartbeatPromptMessage(message, textContent);
@@ -6527,7 +6500,6 @@ export class InteractiveMode {
 						expanded: this.toolOutputExpanded,
 						precededByToolActivity:
 							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
-							this.chatContainer.children.at(-1) instanceof ToolRunGroupComponent ||
 							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 						mermaidTransform: this.mermaidMarkdownTransform,
 						cwd: this.getCurrentCwd(),
@@ -6636,57 +6608,46 @@ export class InteractiveMode {
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.addMessageToChat(message);
-				// Walk content blocks in order so run groups derive from the
-				// persisted sequence exactly like the streaming path.
+				// Render tool call components
 				for (const content of message.content) {
-					if (content.type === "text" && content.text.trim().length > 0) {
-						this.toolRunGrouper.noteAssistantText();
-						continue;
-					}
-					if (content.type !== "toolCall") {
-						continue;
-					}
-					const component = new ToolExecutionComponent(
-						content.name,
-						content.id,
-						content.arguments,
-						{
-							showImages: this.settingsManager.getShowImages(),
-							includeImageDimensions: false,
-						},
-						this.getCachedToolDefinition(content.name),
-						this.ui,
-						this.getCurrentCwd(),
-					);
-					component.setExpanded(this.toolOutputExpanded);
-					component.setAgentMessagesExpanded(this.agentMessagesExpanded);
-					component.setEditDiffsExpanded(this.editDiffsExpanded);
-					selectLatestToolExpandHint(this.chatContainer.children, component);
-					this.toolRunGrouper.mountToolExecution(component);
-					this.registerIpythonToolComponent(content.name, content.id, component);
+					if (content.type === "toolCall") {
+						const component = new ToolExecutionComponent(
+							content.name,
+							content.id,
+							content.arguments,
+							{
+								showImages: this.settingsManager.getShowImages(),
+								includeImageDimensions: false,
+							},
+							this.getCachedToolDefinition(content.name),
+							this.ui,
+							this.getCurrentCwd(),
+						);
+						component.setExpanded(this.toolOutputExpanded);
+						component.setAgentMessagesExpanded(this.agentMessagesExpanded);
+						component.setEditDiffsExpanded(this.editDiffsExpanded);
+						selectLatestToolExpandHint(this.chatContainer.children, component);
+						this.chatContainer.addChild(component);
+						this.registerIpythonToolComponent(content.name, content.id, component);
 
-					if (message.stopReason === "aborted" || message.stopReason === "error") {
-						let errorMessage: string;
-						if (message.stopReason === "aborted") {
-							const retryAttempt = this.getRetryAttempt();
-							errorMessage =
-								retryAttempt > 0
-									? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-									: message.errorMessage && message.errorMessage !== "Request was aborted"
-										? message.errorMessage
-										: "Operation aborted";
+						if (message.stopReason === "aborted" || message.stopReason === "error") {
+							let errorMessage: string;
+							if (message.stopReason === "aborted") {
+								const retryAttempt = this.getRetryAttempt();
+								errorMessage =
+									retryAttempt > 0
+										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+										: message.errorMessage && message.errorMessage !== "Request was aborted"
+											? message.errorMessage
+											: "Operation aborted";
+							} else {
+								errorMessage = message.errorMessage || "Error";
+							}
+							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 						} else {
-							errorMessage = message.errorMessage || "Error";
+							renderedPendingTools.set(content.id, component);
 						}
-						component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-					} else {
-						renderedPendingTools.set(content.id, component);
 					}
-				}
-				// A turn-ending reply closes the open run segment, matching the
-				// streaming path's message_end close.
-				if (message.stopReason !== "toolUse") {
-					this.toolRunGrouper.close();
 				}
 			} else if (message.role === "toolResult") {
 				// Match tool results to pending tool components
@@ -6738,9 +6699,9 @@ export class InteractiveMode {
 			for (const content of message.content) {
 				if (content.type === "toolCall") {
 					this.startedToolCalls.add(content.id);
+					await this.getOrCreatePendingToolComponent(content);
 				}
 			}
-			await this.feedRunGroupingFromStreamingMessage(message);
 		}
 	}
 
@@ -7675,9 +7636,6 @@ export class InteractiveMode {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
 							if (child instanceof ToolExecutionComponent) {
-								child.setShowImages(enabled);
-							}
-							if (child instanceof ToolRunGroupComponent) {
 								child.setShowImages(enabled);
 							}
 						}
