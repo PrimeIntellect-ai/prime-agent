@@ -3042,13 +3042,16 @@ export class InteractiveMode {
 	/**
 	 * Feed the streaming message's content blocks through the run-group
 	 * derivation: tool calls nest into the open group or open a new one the
-	 * moment they start streaming. Text and thinking blocks never break the
-	 * run; only a turn-ending message closes the segment (message_end), so live
-	 * and reloaded transcripts group identically.
+	 * moment they start streaming. Thinking blocks never break the run; a
+	 * non-empty text block ends the open segment so following cells start a
+	 * fresh group, and a turn-ending message closes the segment (message_end)
+	 * so live and reloaded transcripts group identically.
 	 */
 	private async feedRunGroupingFromStreamingMessage(message: AssistantMessage): Promise<void> {
 		for (const content of message.content) {
-			if (content.type === "toolCall") {
+			if (content.type === "text" && content.text.trim().length > 0) {
+				this.toolRunGrouper.noteAssistantText();
+			} else if (content.type === "toolCall") {
 				await this.getOrCreatePendingToolComponent(content);
 			}
 		}
@@ -6636,6 +6639,10 @@ export class InteractiveMode {
 				// Walk content blocks in order so run groups derive from the
 				// persisted sequence exactly like the streaming path.
 				for (const content of message.content) {
+					if (content.type === "text" && content.text.trim().length > 0) {
+						this.toolRunGrouper.noteAssistantText();
+						continue;
+					}
 					if (content.type !== "toolCall") {
 						continue;
 					}
@@ -6677,7 +6684,7 @@ export class InteractiveMode {
 					}
 				}
 				// A turn-ending reply closes the open run segment, matching the
-				// streaming path's message_end close; mid-run notes never do.
+				// streaming path's message_end close.
 				if (message.stopReason !== "toolUse") {
 					this.toolRunGrouper.close();
 				}
