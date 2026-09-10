@@ -1,1 +1,2 @@
 - Moved reasoning effort above the prompt bar beside the recap, shortened model labels, and renamed the session navigation hint to manage.
+- Rendered the effort label as plain text like "high effort" without the separator and slash-command reference.
