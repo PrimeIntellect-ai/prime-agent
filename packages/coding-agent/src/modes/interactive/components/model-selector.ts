@@ -502,7 +502,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		if (onLevels.length === 0) return "";
 		const filledColor = selected ? theme.getEffortSquareColor() : (glyph: string) => theme.fg("muted", glyph);
 		const filled = effort === undefined || effort === "off" ? 0 : onLevels.indexOf(effort) + 1;
-		const squares = onLevels.map((_, index) => (index < filled ? filledColor("●") : theme.fg("dim", "○")));
+		const squares = onLevels.map((_, index) => (index < filled ? filledColor("■") : theme.fg("dim", "□")));
 		const spaced = squares.join(" ");
 		return spaced + " ".repeat(Math.max(0, squareSlots * 2 - 1 - visibleWidth(spaced)));
 	}
