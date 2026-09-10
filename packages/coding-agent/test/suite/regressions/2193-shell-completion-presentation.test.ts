@@ -145,7 +145,7 @@ describe("#2193 shell completion presentation", () => {
 		for (const line of notice.content.split("\n").filter(Boolean)) expect(render([event])).toContain(line);
 		expect(launch.hasRunningBackgroundShell()).toBe(true);
 	});
-	it("keeps duplicate candidates, reused PIDs, and assignment-only launches unmatched", () => {
+	it("keeps duplicate candidates and reused PIDs unmatched", () => {
 		const first = tool("first");
 		first.updateResult(result);
 		const second = tool("second");
@@ -156,12 +156,106 @@ describe("#2193 shell completion presentation", () => {
 		expect(render([createShellCompletionComponent(completion(0, 42, "different command"), [first])!])).toContain(
 			"Background shell command finished",
 		);
-		const hidden = tool("hidden", "job = bash('printf done')");
-		hidden.updateResult({ ...result, details: { status: "ok" } });
-		expect(render([createShellCompletionComponent(completion(), [hidden])!])).toContain(
-			"Background shell command finished",
-		);
 	});
+	it.each([0, 9])("matches unique assignment-only launches by their full command for exit %i", (exitCode) => {
+		const source = "h = bash('printf done')";
+		const assignedResult = {
+			...result,
+			details: { status: "ok", durationMs: 13 },
+			content: [{ type: "text" as const, text: "" }],
+		};
+		const launch = tool("assigned", source);
+		launch.markExecutionStarted();
+		launch.setArgsComplete();
+		const event = liveCompletion(completion(exitCode), [launch]);
+		launch.updateResult(assignedResult);
+		expect(render([event])).toBe("");
+		expect(render([launch])).toContain(exitCode ? "✗" : "✓");
+		expect(render([launch])).toContain("cell 13ms");
+		if (exitCode) expect(render([launch])).toContain("exit 9");
+		const messages: AgentMessage[] = [
+			fauxAssistantMessage(fauxToolCall("ipython", { code: source }, { id: "assigned" }), { stopReason: "toolUse" }),
+			{ role: "toolResult", toolCallId: "assigned", toolName: "ipython", ...assignedResult, timestamp: 1 },
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "await h" }, { id: "await" }), { stopReason: "toolUse" }),
+			{
+				role: "toolResult",
+				toolCallId: "await",
+				toolName: "ipython",
+				content: [{ type: "text", text: "BashResult" }],
+				details: { status: "ok", result: `BashResult(exit_code=${exitCode}, output='done', duration=0.1)` },
+				isError: false,
+				timestamp: 2,
+			},
+			completion(exitCode),
+		];
+		const serialized = JSON.stringify(messages);
+		const replay = buildConversationComponents(messages, options);
+		expect(render(replay)).not.toContain("Background shell command");
+		expect(render([replay[1]!])).toBe(render([launch]));
+		expand(replay);
+		expand([launch, event]);
+		expect(render([replay[1]!])).toBe(render([launch]));
+		expect(render([launch])).toContain("Source: bash");
+		expect(JSON.stringify(messages)).toBe(serialized);
+	});
+	it("keeps ambiguous, failed, complex, or mismatched assignment launches standalone", () => {
+		const assigned = (id: string, source = "h = bash('printf done')", isError = false) => {
+			const entry = tool(id, source);
+			entry.updateResult({ content: [], details: { status: isError ? "error" : "ok" }, isError });
+			return entry;
+		};
+		const knownOtherPid = tool("known");
+		knownOtherPid.updateResult({
+			...result,
+			details: { ...result.details, result: result.details.result.replace("pid=42", "pid=41") },
+		});
+		for (const previous of [
+			[assigned("a"), assigned("b")],
+			[assigned("a"), knownOtherPid],
+			[assigned("a", "h = bash('printf done')", true)],
+			[assigned("a", "h = bash('printf done')\nother_work()")],
+			[assigned("a", "h = bash(prefix + 'printf done')")],
+			[assigned("a", "h = bash('printf done suffix')")],
+			[assigned("a", "await h")],
+		])
+			expect(render([createShellCompletionComponent(completion(), previous)!])).toContain(
+				"Background shell command finished",
+			);
+	});
+	it.each([true, false])(
+		"keeps following tool rows adjacent to attached=%s completions during live rendering and replay",
+		(matched) => {
+			const launch = tool();
+			launch.updateResult(result);
+			const notice = completion(0, matched ? 42 : 99);
+			const event = liveCompletion(notice, [launch]);
+			const next = fauxAssistantMessage(fauxToolCall("ipython", { code: "await h" }, { id: "next" }), {
+				stopReason: "toolUse",
+			});
+			const chatContainer = new Container();
+			chatContainer.addChild(event);
+			const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+				chatContainer,
+				hideThinkingBlock: true,
+				toolOutputExpanded: false,
+				getMarkdownThemeWithSettings: () => undefined,
+				getCurrentCwd: () => "/tmp",
+			});
+			Reflect.get(InteractiveMode.prototype, "startAssistantStreamingMessage").call(mode, next);
+			expect(chatContainer.children[1]!.render(120)).toEqual([]);
+			const replay = buildConversationComponents(
+				[
+					fauxAssistantMessage(fauxToolCall("ipython", { code }, { id: "launch" }), { stopReason: "toolUse" }),
+					{ role: "toolResult", toolName: "ipython", toolCallId: "launch", ...result, timestamp: 1 },
+					notice,
+					next,
+				],
+				options,
+			);
+			expect(replay[3]!.render(120)).toEqual([]);
+		},
+	);
+
 	it("never overwrites an earlier raw notification with a duplicate", () => {
 		const launch = tool();
 		launch.updateResult(result);

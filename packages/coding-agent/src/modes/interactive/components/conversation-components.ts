@@ -46,7 +46,6 @@ export interface ConversationComponentsOptions {
 	hideThinkingBlock?: boolean;
 	hiddenThinkingLabel?: string;
 	toolsExpanded?: boolean;
-	agentMessagesExpanded?: boolean;
 	editDiffsExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
 }
@@ -56,7 +55,8 @@ export function isCompactAgentMessageNeighbor(component: Component | undefined):
 		component instanceof AgentMessageComponent ||
 		component instanceof ToolExecutionComponent ||
 		component instanceof IPythonCellComponent ||
-		component instanceof BashExecutionComponent
+		component instanceof BashExecutionComponent ||
+		component instanceof ShellCompletionComponent
 	);
 }
 
@@ -86,12 +86,19 @@ export function createShellCompletionComponent(
 		// A completion can arrive before its creating cell's final tool result.
 		if (tools.some((tool) => tool.isResultPending())) return;
 		for (const cleanup of cleanups) cleanup();
-		const matches = tools.filter((tool) => {
-			const handle = tool.getBackgroundShellHandle();
-			return handle?.pid === completion.details.pid && handle.command === completion.details.command;
-		});
+		const commandMatches = tools.filter(
+			(tool) =>
+				(tool.getBackgroundShellHandle()?.command ?? tool.getAssignedShellCommand()) === completion.details.command,
+		);
+		const pidMatches = commandMatches.filter(
+			(tool) => tool.getBackgroundShellHandle()?.pid === completion.details.pid,
+		);
+		const matches = pidMatches.length > 0 ? pidMatches : commandMatches;
 		if (matches.length !== 1) return;
-		if (matches[0]!.attachShellCompletion(completion)) component.setAttached();
+		const match = matches[0]!;
+		const handle = match.getBackgroundShellHandle();
+		if (handle && handle.pid !== completion.details.pid) return;
+		if (match.attachShellCompletion(completion)) component.setAttached();
 	};
 	for (const tool of tools) if (tool.isResultPending()) cleanups.push(tool.onResultUpdate(attach));
 	attach();
@@ -106,7 +113,6 @@ export function buildConversationComponents(
 	const components: Component[] = [];
 	const pendingTools = new Map<string, ToolExecutionComponent>();
 	const expanded = options.toolsExpanded ?? false;
-	const agentMessagesExpanded = options.agentMessagesExpanded ?? false;
 	const editDiffsExpanded = options.editDiffsExpanded ?? false;
 
 	for (const message of messages) {
@@ -120,9 +126,7 @@ export function buildConversationComponents(
 					{
 						cwd: options.cwd,
 						expanded,
-						precededByToolActivity:
-							components.at(-1) instanceof ToolExecutionComponent ||
-							components.at(-1) instanceof AgentMessageComponent,
+						precededByToolActivity: isCompactAgentMessageNeighbor(components.at(-1)),
 					},
 				),
 			);
@@ -140,7 +144,6 @@ export function buildConversationComponents(
 					options.cwd,
 				);
 				tool.setExpanded(expanded);
-				tool.setAgentMessagesExpanded(agentMessagesExpanded);
 				tool.setEditDiffsExpanded(editDiffsExpanded);
 				tool.markExecutionStarted();
 				tool.setArgsComplete();
@@ -190,7 +193,7 @@ export function buildConversationComponents(
 			const component = new AgentMessageComponent(message, options.markdownTheme, {
 				suppressLeadingSpace: isCompactAgentMessageNeighbor(components.at(-1)),
 			});
-			component.setExpanded(agentMessagesExpanded);
+			component.setExpanded(expanded);
 			components.push(component);
 		} else if (isInjectedPromptMessage(message) && message.display) {
 			const component =

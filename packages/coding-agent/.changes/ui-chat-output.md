@@ -4,7 +4,9 @@
 - Changed thinking rows to stay hidden in overview and appear as dim text without a repeated heading in the other detail modes, including newly streamed thinking.
 - Changed collapsed tool-call previews to render plain and dim instead of green or syntax-highlighted code, with dim line counts and durations, while expanded blocks keep full highlighting.
 - Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
-- Changed the conversation row hierarchy: event-row trailing detail (agent-message participant and previews, tool command previews, line counts, durations) renders dim while leading labels keep their colors.
+- Changed the conversation row hierarchy: event-row trailing detail (agent-message participants, tool command previews, line counts, durations) renders dim while leading labels keep their colors.
 - Changed background shell completions to update identifiable command rows, with compact fallback notices and full notifications retained in all output.
 - Replaced repeated conversation detail shortcut hints with a bottom-right label showing the current detail mode and configurable expand or collapse shortcut.
 - Changed expanded file diffs to start at the normal chat inset while preserving code indentation and diff gutters.
+- Changed sent and received agent messages to appear only in all output and removed their separate Ctrl+P toggle.
+- Fixed spacing after background shell completions and matched unique literal assignment-only shell launches to their completion notices.

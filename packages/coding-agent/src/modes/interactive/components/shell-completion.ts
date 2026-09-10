@@ -54,6 +54,28 @@ function readPythonString(literal: string): string | undefined {
 	return value;
 }
 
+function readLiteralShellLaunch(code: string): { command: string; assignmentOnly: boolean } | undefined {
+	const launch = code
+		.trim()
+		.split("\n")
+		.filter((line) => !/^(?:from rlm import bash|import rlm)\s*$/.test(line));
+	// Restrict to a single top-level launch, optionally followed by its variable.
+	const call = /^(?:([A-Za-z_]\w*)\s*=\s*)?(?:rlm\.)?bash\(\s*(.*)\s*\)\s*$/.exec(launch[0] ?? "");
+	if (!call || (launch.length > 1 && (launch.length !== 2 || launch[1]?.trim() !== call[1]))) return undefined;
+	const command = readPythonString(call[2]?.trim() ?? "");
+	return command === undefined ? undefined : { command, assignmentOnly: !!call[1] && launch.length === 1 };
+}
+
+// Assignment-only cells save no handle repr. The caller must require a unique
+// exact command match; this does not infer a PID or inspect an await expression.
+export function readAssignedShellCommand(code: string, details: unknown): string | undefined {
+	if (!details || typeof details !== "object") return undefined;
+	const record = details as Record<string, unknown>;
+	if (record.status !== "ok" || (record.result !== undefined && record.result !== "")) return undefined;
+	const launch = readLiteralShellLaunch(code);
+	return launch?.assignmentOnly ? launch.command : undefined;
+}
+
 // Only literal commands and a complete handle repr establish identity. Ordinary
 // output containing PID digits or a similar command is deliberately insufficient.
 export function readBackgroundShellHandle(code: string, details: unknown): BackgroundShellHandle | undefined {
@@ -68,14 +90,7 @@ export function readBackgroundShellHandle(code: string, details: unknown): Backg
 	if (command === undefined) return undefined;
 	const pid = Number(match[1]);
 	if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
-	const launch = code
-		.trim()
-		.split("\n")
-		.filter((line) => !/^(?:from rlm import bash|import rlm)\s*$/.test(line));
-	// Restrict to a single top-level launch, optionally followed by its variable.
-	const call = /^(?:([A-Za-z_]\w*)\s*=\s*)?(?:rlm\.)?bash\(\s*(.*)\s*\)\s*$/.exec(launch[0] ?? "");
-	if (!call || (launch.length > 1 && (launch.length !== 2 || launch[1]?.trim() !== call[1]))) return undefined;
-	if (readPythonString(call[2]?.trim() ?? "") !== command) return undefined;
+	if (readLiteralShellLaunch(code)?.command !== command) return undefined;
 	return { pid, command, exitCode: match[2] === "running" ? undefined : Number(match[2]!.slice(10)) };
 }
 

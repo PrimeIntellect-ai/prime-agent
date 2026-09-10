@@ -11,7 +11,12 @@ import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
-import { type BackgroundShellHandle, readBackgroundShellHandle, type ShellCompletion } from "./shell-completion.js";
+import {
+	type BackgroundShellHandle,
+	readAssignedShellCommand,
+	readBackgroundShellHandle,
+	type ShellCompletion,
+} from "./shell-completion.js";
 import { ToolPanel } from "./tool-panel.js";
 
 export interface ToolExecutionOptions {
@@ -80,7 +85,6 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
-	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
 	private showExpandHint = true;
 	private showImages: boolean;
@@ -271,6 +275,12 @@ export class ToolExecutionComponent extends Container {
 			: undefined;
 	}
 
+	getAssignedShellCommand(): string | undefined {
+		return this.shouldUseIpythonRenderer() && !this.isPartial && !this.result?.isError
+			? readAssignedShellCommand(getIpythonCodeFromArgs(this.args), this.result?.details)
+			: undefined;
+	}
+
 	hasRunningBackgroundShell(): boolean {
 		const handle = this.getBackgroundShellHandle();
 		return handle !== undefined && handle.exitCode === undefined && this.shellCompletion === undefined;
@@ -305,14 +315,6 @@ export class ToolExecutionComponent extends Container {
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
-		this.updateDisplay();
-	}
-
-	setAgentMessagesExpanded(expanded: boolean): void {
-		if (this.agentMessagesExpanded === expanded) {
-			return;
-		}
-		this.agentMessagesExpanded = expanded;
 		this.updateDisplay();
 	}
 
@@ -390,7 +392,6 @@ export class ToolExecutionComponent extends Container {
 					isPartial: this.isPartial,
 					isError: this.result?.isError ?? false,
 					expanded: this.expanded,
-					agentMessagesExpanded: this.agentMessagesExpanded,
 					editDiffsExpanded: this.editDiffsExpanded,
 					executionStarted: this.executionStarted,
 					argsComplete: this.argsComplete,
