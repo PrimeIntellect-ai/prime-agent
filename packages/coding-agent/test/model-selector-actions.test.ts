@@ -532,7 +532,7 @@ describe("ModelSelectorComponent", () => {
 
 		expect(row()).toContain("← ■ ■ □ □ → low");
 		// The cluster sits near the row's horizontal center, clear of the name.
-		expect(row()?.search(/[■□]/)).toBe(34);
+		expect(row()?.search(/[■□]/)).toBe(32);
 
 		selector.handleInput("\x1b[C");
 		expect(row()).toContain("■ ■ ■ □");
@@ -684,6 +684,64 @@ describe("ModelSelectorComponent", () => {
 		expect(longRaw).not.toContain(theme.getEffortSquareColor()("■"));
 		expect(longRaw).toContain(theme.fg("muted", "■"));
 		expect(longRaw).toContain(theme.fg("dim", "□"));
+	});
+
+	it("keeps the effort cluster width stable across level changes", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+				thinkingLevel: "low",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const row = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+		const before = row();
+		expect(before).toBeDefined();
+		const labelStart = before?.indexOf("→") ?? -1;
+		expect(labelStart).toBeGreaterThan(0);
+		const labelCell = (text: string) => text.slice(labelStart + 2, labelStart + 9);
+		// The label cell is fixed to the longest supported level name ("minimal").
+		expect(labelCell(before ?? "")).toBe("low    ");
+
+		selector.handleInput("\x1b[C");
+		const medium = row();
+		// Cluster start, arrow, and label cell all stay in place; only the
+		// square fills change.
+		expect(medium?.search(/[■□]/)).toBe(before?.search(/[■□]/));
+		expect(medium?.indexOf("→")).toBe(labelStart);
+		expect(labelCell(medium ?? "")).toBe("medium ");
+
+		selector.handleInput("\x1b[C");
+		expect(labelCell(row() ?? "")).toBe("high   ");
+
+		selector.handleInput("\x1b[C");
+		expect(labelCell(row() ?? "")).toBe("off    ");
+
+		selector.handleInput("\x1b[C");
+		const longest = row();
+		expect(longest?.search(/[■□]/)).toBe(before?.search(/[■□]/));
+		expect(labelCell(longest ?? "")).toBe("minimal");
 	});
 
 	it("uses current model, recency, and alphabetical order for equivalent matches", async () => {

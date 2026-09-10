@@ -146,6 +146,7 @@ interface EffortLayout {
 	nameColumn: number;
 	squareSlots: number;
 	gap: number;
+	labelWidth: number;
 	showLabel: boolean;
 	showCluster: boolean;
 }
@@ -432,6 +433,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			nameColumn: 0,
 			squareSlots: 0,
 			gap: 0,
+			labelWidth: 0,
 			showLabel: false,
 			showCluster: false,
 		};
@@ -464,7 +466,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			...reasoningItems.map((item) => this.getSelectableLevels(item).filter((level) => level !== "off").length),
 		);
 		const clusterWidth = squareSlots * 2 - 1;
-		const labelWidth = Math.max(...reasoningItems.map((item) => visibleWidth(this.getEffort(item) ?? "")));
+		// Fixed label cell sized to the longest supported level name, so changing
+		// the selected level never changes the cluster span or its centered gap.
+		const labelWidth = Math.max(
+			...reasoningItems.flatMap((item) => this.getSelectableLevels(item).map((level) => visibleWidth(level))),
+		);
 		// Arrow slots and the spaces around the squares and label. The ladder
 		// keeps one of those columns as the gap after the name cell, shrinks the
 		// name column next, and only then drops the label or the whole cluster,
@@ -476,7 +482,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const span = clusterWidth + (showLabel ? labelWidth + 5 : 4);
 			const desired = Math.floor(width / 2 - span / 2) - 2 - nameColumn;
 			const gap = Math.max(1, Math.min(desired, available - nameColumn - span));
-			return { nameColumn, squareSlots, gap, showLabel, showCluster: true };
+			return { nameColumn, squareSlots, gap, labelWidth, showLabel, showCluster: true };
 		};
 		if (maxNameColumn + clusterWidth + labelWidth + arrowsAndGaps <= available) {
 			return place(maxNameColumn, true);
@@ -606,7 +612,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Show visible slice of filtered models
 		const effortLayout = this.inline
 			? this.getEffortLayout(startIndex, endIndex)
-			: { nameColumn: 0, squareSlots: 0, gap: 0, showLabel: false, showCluster: false };
+			: { nameColumn: 0, squareSlots: 0, gap: 0, labelWidth: 0, showLabel: false, showCluster: false };
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i];
@@ -631,8 +637,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					const leftArrow = isSelected ? theme.fg("dim", "←") : " ";
 					const rightArrow = isSelected ? theme.fg("dim", "→") : " ";
 					const squares = this.renderEffortSquares(levels, effort, effortLayout.squareSlots, isSelected);
-					primary = effortLayout.showLabel
-						? `${nameCell}${gap}${leftArrow} ${squares} ${rightArrow} ${theme.fg("muted", effort)}`
+					const label = effortLayout.showLabel ? theme.fg("muted", effort.padEnd(effortLayout.labelWidth)) : "";
+					primary = label
+						? `${nameCell}${gap}${leftArrow} ${squares} ${rightArrow} ${label}`
 						: `${nameCell}${gap}${leftArrow} ${squares} ${rightArrow}`;
 				}
 			}
