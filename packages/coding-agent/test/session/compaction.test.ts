@@ -2,8 +2,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.js";
-import { SessionCompaction, type SessionCompactionHost } from "../../src/session/compaction.js";
-import { CompactionSkippedError } from "../../src/session/compaction-execution.js";
+import { SessionCompaction, type SessionCompactionHost } from "../../src/session/compaction/compaction.js";
+import { CompactionSkippedError } from "../../src/session/compaction/compaction-execution.js";
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;

@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RefinementPlan, RefinementResult } from "../../src/core/refinement/index.js";
-import type { AutoRefinement } from "../../src/session/auto-refinement.js";
+import type { AutoRefinement } from "../../src/session/refinement/auto-refinement.js";
 import type {
 	SerializedBackgroundPlanResult,
 	SessionRefinement,
 	SessionRefinementHost,
-} from "../../src/session/refinement.js";
-import type { RefinementExecution } from "../../src/session/refinement-execution.js";
+} from "../../src/session/refinement/refinement.js";
+import type { RefinementExecution } from "../../src/session/refinement/refinement-execution.js";
 import { createHarness, type Harness } from "./harness.js";
 import { createDeferred, withStreaming } from "./scheduling.js";
 

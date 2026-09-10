@@ -1,8 +1,8 @@
 import { AgentContinueError, type AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { SessionCommitFence } from "../../src/session/commit-fence.js";
-import { SessionContinuation, type SessionContinuationHost } from "../../src/session/continuation.js";
+import { SessionCommitFence } from "../../src/session/input/commit-fence.js";
+import { SessionContinuation, type SessionContinuationHost } from "../../src/session/turns/continuation.js";
 
 function deferred() {
 	let resolve!: () => void;

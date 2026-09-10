@@ -6,7 +6,7 @@ import {
 	type SubmissionNormalizationHost,
 	type SubmissionNormalizationPolicy,
 	SubmissionNormalizer,
-} from "../../src/session/submission-normalization.js";
+} from "../../src/session/input/submission-normalization.js";
 import { createDeferred } from "../suite/scheduling.js";
 
 const policy: SubmissionNormalizationPolicy = {

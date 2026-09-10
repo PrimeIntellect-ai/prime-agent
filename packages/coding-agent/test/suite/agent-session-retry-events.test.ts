@@ -3,10 +3,10 @@ import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompactionResult } from "../../src/core/compaction/index.js";
-import type { SessionCompaction } from "../../src/session/compaction.js";
-import type { CompactionExecutionOptions } from "../../src/session/compaction-execution.js";
-import type { SessionContinuation } from "../../src/session/continuation.js";
-import type { SessionRetry } from "../../src/session/retry.js";
+import type { SessionCompaction } from "../../src/session/compaction/compaction.js";
+import type { CompactionExecutionOptions } from "../../src/session/compaction/compaction-execution.js";
+import type { SessionContinuation } from "../../src/session/turns/continuation.js";
+import type { SessionRetry } from "../../src/session/turns/retry.js";
 import { createHarness, type Harness } from "./harness.js";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {

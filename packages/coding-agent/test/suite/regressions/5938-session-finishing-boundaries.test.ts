@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionMessageController, AgentSessionMessageReceipt } from "../../../src/core/agent-messages.js";
 import type { AgentObserveAgentSnapshot, AgentObserveController } from "../../../src/core/agent-observe.js";
 import type { AgentRlmHeartbeatController } from "../../../src/core/cron-jobs.js";
-import type { SessionTurnExecution } from "../../../src/session/turn-execution.js";
+import type { SessionTurnExecution } from "../../../src/session/turns/turn-execution.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const harnesses: Harness[] = [];

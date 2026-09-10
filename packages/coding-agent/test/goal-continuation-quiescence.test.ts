@@ -4,9 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { emptyGoalState } from "../src/core/goals.js";
 import { ActionStore } from "../src/core/session-action-store.js";
 import { GoalController } from "../src/goals/controller.js";
-import { SessionGoalContinuation, type SessionGoalContinuationHost } from "../src/session/goal-continuation.js";
-import { SessionInputScheduler } from "../src/session/input-scheduler.js";
+import { SessionInputScheduler } from "../src/session/input/input-scheduler.js";
 import type { QueuedSessionAction } from "../src/session/prepared-actions.js";
+import { SessionGoalContinuation, type SessionGoalContinuationHost } from "../src/session/turns/goal-continuation.js";
 
 function harness(overrides: { awaitsChildWork?: boolean } & Partial<SessionGoalContinuationHost> = {}) {
 	const goals = new GoalController({ load: emptyGoalState, save: () => {} }, () => {});

@@ -17,7 +17,7 @@ import {
 } from "../../../src/modes/interactive/components/injected-prompt-message.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../../../src/modes/interactive/theme/theme.js";
-import type { SessionCompaction } from "../../../src/session/compaction.js";
+import type { SessionCompaction } from "../../../src/session/compaction/compaction.js";
 import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type AddMessageToChatHost = {

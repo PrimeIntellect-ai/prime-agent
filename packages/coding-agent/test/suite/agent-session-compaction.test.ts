@@ -12,9 +12,9 @@ import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
-import type { SessionCompaction } from "../../src/session/compaction.js";
-import type { SessionContinuation } from "../../src/session/continuation.js";
+import type { SessionCompaction } from "../../src/session/compaction/compaction.js";
 import { createPreparedTurnAction } from "../../src/session/prepared-actions.js";
+import type { SessionContinuation } from "../../src/session/turns/continuation.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 

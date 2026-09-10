@@ -29,7 +29,7 @@ import {
 	saveHarnessState,
 } from "../../src/core/refinement/index.js";
 import { parseSessionSlashCommand } from "../../src/core/slash-commands.js";
-import type { SessionContinuation } from "../../src/session/continuation.js";
+import type { SessionContinuation } from "../../src/session/turns/continuation.js";
 import {
 	conversationMessages,
 	createHarness,

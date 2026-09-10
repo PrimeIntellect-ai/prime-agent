@@ -7,9 +7,9 @@ import { createHarnessDigestMessage } from "../../../src/core/messages.js";
 import { loadHarnessState } from "../../../src/core/refinement/index.js";
 import type { FileEntry, SessionEntry } from "../../../src/core/session-manager.js";
 import { emptyUsage, subtractAssistantUsage } from "../../../src/core/usage.js";
-import { SessionContextView } from "../../../src/session/context-view.js";
-import { SessionHarnessContext } from "../../../src/session/harness-context.js";
-import { SessionModelSelection } from "../../../src/session/model-selection.js";
+import { SessionContextView } from "../../../src/session/context/context-view.js";
+import { SessionHarnessContext } from "../../../src/session/context/harness-context.js";
+import { SessionModelSelection } from "../../../src/session/models/model-selection.js";
 import { createHarness, type Harness } from "../harness.js";
 
 function deferred() {

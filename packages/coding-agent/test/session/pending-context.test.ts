@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CustomMessage } from "../../src/core/messages.js";
 import { ActionStore } from "../../src/core/session-action-store.js";
-import { SessionCommitFence } from "../../src/session/commit-fence.js";
-import { SessionInputScheduler } from "../../src/session/input-scheduler.js";
-import { SessionPendingContext } from "../../src/session/pending-context.js";
+import { SessionPendingContext } from "../../src/session/context/pending-context.js";
+import { SessionCommitFence } from "../../src/session/input/commit-fence.js";
+import { SessionInputScheduler } from "../../src/session/input/input-scheduler.js";
 import type { QueuedSessionAction } from "../../src/session/prepared-actions.js";
 
 function createOwner() {

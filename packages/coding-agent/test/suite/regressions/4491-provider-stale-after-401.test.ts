@@ -3,7 +3,7 @@ import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
-import type { SessionRetry } from "../../../src/session/retry.js";
+import type { SessionRetry } from "../../../src/session/turns/retry.js";
 import { createHarness, type Harness } from "../harness.js";
 
 function structuredFailureMessage(kind: string, status: number, errorMessage: string): AssistantMessage {
