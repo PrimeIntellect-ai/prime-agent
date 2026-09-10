@@ -224,6 +224,7 @@ export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
 	installAgentTraceUpload(options.sessionManager, {
+		agentDir: options.services.agentDir,
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
 		semanticEdgesLedgerPath: semanticEdgeLedgerPath({

@@ -7,6 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import {
 	findEnvKeys,
 	getEnvApiKey,
@@ -108,6 +109,15 @@ export interface AuthStorageBackend {
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
 	constructor(private authPath: string = join(getAgentDir(), "auth.json")) {}
+
+	async read(): Promise<string | undefined> {
+		try {
+			return await readFile(this.authPath, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
+	}
 
 	private ensureParentDir(): void {
 		const dir = dirname(this.authPath);
@@ -692,9 +702,19 @@ export class AuthStorage {
 		}
 	}
 
-	/**
-	 * Get credential for a provider.
-	 */
+	/** Read a raw API-key configuration without credential commands, refreshes, or synchronous file locks. */
+	async readApiKeyConfig(provider: string): Promise<string | undefined> {
+		const runtime = this.runtimeOverrides.get(provider);
+		if (runtime) return runtime;
+		const data =
+			this.storage instanceof FileAuthStorageBackend
+				? this.parseStorageData(await this.storage.read())
+				: await this.storage.withLockAsync(async (content) => ({ result: this.parseStorageData(content) }));
+		const credential = data[provider];
+		return credential?.type === "api_key" && typeof credential.key === "string" ? credential.key : undefined;
+	}
+
+	/** Get the cached credential for a provider. */
 	get(provider: string): AuthCredential | undefined {
 		return this.data[provider] ?? undefined;
 	}

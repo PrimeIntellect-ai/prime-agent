@@ -517,6 +517,38 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("trace sharing consent", () => {
+		const cases = [undefined, false, true].flatMap((global) =>
+			[undefined, false, true].flatMap((project) =>
+				[undefined, false, true].map((runtime) => ({ global, project, runtime })),
+			),
+		);
+		it.each(cases)("global=$global project=$project runtime=$runtime", async ({ global, project, runtime }) => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ agentTraces: { enabled: global } }));
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ agentTraces: { enabled: project } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ agentTraces: { enabled: runtime } });
+			const enabled = global === true && project !== false && runtime !== false;
+			expect(manager.getAgentTracesEnabled()).toBe(enabled);
+			expect((await manager.readAgentTracesConsent(projectDir)).enabled).toBe(enabled);
+		});
+		it.each(['{"agentTraces":{"enabled":"false"}}', '{"agentTraces":null}', "{ invalid"])(
+			"fails closed for invalid consent settings: %s",
+			async (value) => {
+				writeFileSync(join(agentDir, "settings.json"), '{"agentTraces":{"enabled":true}}');
+				const manager = SettingsManager.create(projectDir, agentDir);
+				writeFileSync(join(projectDir, ".prime", "agent", "settings.json"), value);
+				expect(await manager.readAgentTracesConsent(projectDir)).toEqual({
+					enabled: false,
+					reason: "settings_unavailable",
+				});
+			},
+		);
+	});
+
 	describe("telemetry privacy controls", () => {
 		it("does not let project settings override a global opt-out or disclosure state", () => {
 			writeFileSync(

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
@@ -179,6 +180,30 @@ export interface AgentTracesSettings {
 	enabled?: boolean;
 }
 
+export interface AgentTraceConsent {
+	enabled: boolean;
+	reason: "enabled" | "global_off" | "project_off" | "runtime_off" | "settings_unavailable";
+}
+
+function traceConsent(global: Settings, project: Settings, runtime: Settings = {}): AgentTraceConsent {
+	for (const settings of [global, project, runtime]) {
+		const value = settings.agentTraces;
+		if (
+			value !== undefined &&
+			(value === null ||
+				typeof value !== "object" ||
+				Array.isArray(value) ||
+				(value.enabled !== undefined && typeof value.enabled !== "boolean"))
+		) {
+			return { enabled: false, reason: "settings_unavailable" };
+		}
+	}
+	if (global.agentTraces?.enabled !== true) return { enabled: false, reason: "global_off" };
+	if (project.agentTraces?.enabled === false) return { enabled: false, reason: "project_off" };
+	if (runtime.agentTraces?.enabled === false) return { enabled: false, reason: "runtime_off" };
+	return { enabled: true, reason: "enabled" };
+}
+
 export interface TelemetrySettings {
 	enabled?: boolean;
 	noticeShown?: boolean;
@@ -230,6 +255,49 @@ export class FileSettingsStorage implements SettingsStorage {
 	constructor(cwd: string, agentDir: string) {
 		this.globalSettingsPath = join(agentDir, "settings.json");
 		this.projectSettingsPath = join(cwd, CONFIG_DIR_NAME, "settings.json");
+	}
+
+	/** Small, lock-free consent reads let transcript persistence register durable intent across processes. */
+	readTraceConsentSync(cwd: string): AgentTraceConsent {
+		const read = (path: string): Settings => {
+			try {
+				const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+				if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+					throw new Error("Invalid settings");
+				return parsed as Settings;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+				throw error;
+			}
+		};
+		try {
+			return traceConsent(read(this.globalSettingsPath), read(join(cwd, CONFIG_DIR_NAME, "settings.json")));
+		} catch {
+			return { enabled: false, reason: "settings_unavailable" };
+		}
+	}
+
+	async readTraceConsent(cwd: string): Promise<AgentTraceConsent> {
+		const read = async (path: string): Promise<Settings> => {
+			try {
+				const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+				if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+					throw new Error("Invalid settings");
+				return parsed as Settings;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+				throw error;
+			}
+		};
+		try {
+			const [global, project] = await Promise.all([
+				read(this.globalSettingsPath),
+				read(join(cwd, CONFIG_DIR_NAME, "settings.json")),
+			]);
+			return traceConsent(global, project);
+		} catch {
+			return { enabled: false, reason: "settings_unavailable" };
+		}
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -839,7 +907,32 @@ export class SettingsManager {
 	}
 
 	getAgentTracesEnabled(): boolean {
-		return this.settings.agentTraces?.enabled ?? false;
+		return this.getAgentTracesConsent().enabled;
+	}
+
+	getAgentTracesConsent(): AgentTraceConsent {
+		if (this.globalSettingsLoadError || this.projectSettingsLoadError) {
+			return { enabled: false, reason: "settings_unavailable" };
+		}
+		return traceConsent(this.globalSettings, this.projectSettings, this.runtimeOverrides);
+	}
+
+	readAgentTracesConsentSync(cwd: string): AgentTraceConsent {
+		if (!(this.storage instanceof FileSettingsStorage)) return this.getAgentTracesConsent();
+		const consent = this.storage.readTraceConsentSync(cwd);
+		return consent.enabled && this.runtimeOverrides.agentTraces?.enabled === false
+			? { enabled: false, reason: "runtime_off" }
+			: consent;
+	}
+
+	/** Read consent for the transcript's project without settings locks or credential resolution. */
+	async readAgentTracesConsent(cwd: string): Promise<AgentTraceConsent> {
+		await this.writeQueue;
+		if (!(this.storage instanceof FileSettingsStorage)) return this.getAgentTracesConsent();
+		const consent = await this.storage.readTraceConsent(cwd);
+		return consent.enabled && this.runtimeOverrides.agentTraces?.enabled === false
+			? { enabled: false, reason: "runtime_off" }
+			: consent;
 	}
 
 	setAgentTracesEnabled(enabled: boolean): void {

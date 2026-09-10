@@ -9807,7 +9807,7 @@ function installGatedTraceUpload(sessionManager: SessionManager): {
 		settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 		baseUrl: "https://api.example.test",
 		fetchFn: (async (input: unknown, init?: RequestInit) => {
-			calls.push({ url: String(input), body: String(init?.body ?? "") });
+			calls.push({ url: String(input), body: await new Response(init?.body).text() });
 			await gate;
 			return new Response(JSON.stringify({ bytes_stored: 1 }), {
 				status: 200,
