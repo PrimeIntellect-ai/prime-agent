@@ -6139,7 +6139,7 @@ export class InteractiveMode {
 	private getPromptEffortLabel(maxWidth: number): string | undefined {
 		if (maxWidth < 1 || !this.getCurrentModel()?.reasoning) return undefined;
 		const level = this.connectionState?.thinkingLevel ?? "off";
-		const label = `${level} effort`;
+		const label = `${level} · /effort`;
 		if (visibleWidth(label) <= maxWidth) return theme.fg("dim", label);
 		return theme.fg("dim", truncateToWidth(level, maxWidth, ""));
 	}

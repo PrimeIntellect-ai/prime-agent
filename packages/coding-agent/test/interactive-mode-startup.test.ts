@@ -90,15 +90,15 @@ describe("InteractiveMode startup hints", () => {
 		const getLabel = (width: number) =>
 			Reflect.get(InteractiveMode.prototype, "getPromptEffortLabel").call(mode, width) as string | undefined;
 
-		expect(stripAnsi(getLabel(40)!)).toBe("high effort");
+		expect(stripAnsi(getLabel(40)!)).toBe("high · /effort");
 		expect(stripAnsi(getLabel(6)!)).toBe("high");
 		expect(stripAnsi(getLabel(3)!)).toBe("hig");
 		expect(getLabel(0)).toBeUndefined();
 		mode.connectionState.thinkingLevel = "off";
-		expect(stripAnsi(getLabel(40)!)).toBe("off effort");
+		expect(stripAnsi(getLabel(40)!)).toBe("off · /effort");
 		mode.connectionState.thinkingLevel = "xhigh";
 		mode.connectionState.isStreaming = true;
-		expect(stripAnsi(getLabel(40)!)).toBe("xhigh effort");
+		expect(stripAnsi(getLabel(40)!)).toBe("xhigh · /effort");
 		mode.connectionState.model.reasoning = false;
 		expect(getLabel(40)).toBeUndefined();
 	});
@@ -114,13 +114,13 @@ describe("InteractiveMode startup hints", () => {
 		Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
 		const render = () => stripAnsi(mode.recapContainer.render(80).join("\n"));
 
-		expect(render()).toContain("high effort");
+		expect(render()).toContain("high · /effort");
 		mode.connectionState.thinkingLevel = "low";
-		expect(render()).toContain("low effort");
+		expect(render()).toContain("low · /effort");
 		mode.connectionState.model.reasoning = false;
 		expect(mode.recapContainer.render(80)).toEqual([]);
 		mode.connectionState.model.reasoning = true;
-		expect(render()).toContain("low effort");
+		expect(render()).toContain("low · /effort");
 		Reflect.deleteProperty(mode.connectionState, "model");
 		expect(mode.recapContainer.render(80)).toEqual([]);
 	});
@@ -156,10 +156,10 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(replacement.render(80).join("\n"))).not.toContain("/effort");
 		if (ownHeader) expect(replacement.render(80)[1]).toContain("extension header");
 		const row = mode.recapContainer.render(80)[0]!;
-		expect(stripAnsi(row)).toMatch(/^ Recap: Updated files\s+high effort $/);
+		expect(stripAnsi(row)).toMatch(/^ Recap: Updated files\s+high · \/effort $/);
 		expect(row).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		mode.connectionState.thinkingLevel = "low";
-		expect(stripAnsi(mode.recapContainer.render(80)[0]!)).toContain("low effort");
+		expect(stripAnsi(mode.recapContainer.render(80)[0]!)).toContain("low · /effort");
 		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, undefined);
 		expect(defaultEditor.getText()).toBe("unfinished draft");
 		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
