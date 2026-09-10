@@ -345,6 +345,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		const live = new RefinementOutcomeMessageComponent(message);
 		const mode = Object.assign(Object.create(InteractiveMode.prototype), {
 			chatContainer: { children: [live] },
+			pendingBashComponents: [],
 			ui: { isFullscreen: () => true, requestRender: vi.fn() },
 		});
 		for (const [toolsExpanded, editDiffsExpanded] of [
