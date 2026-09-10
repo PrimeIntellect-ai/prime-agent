@@ -1041,8 +1041,8 @@ export class InteractiveMode {
 	private editDiffsExpanded = false;
 
 	private hideThinkingBlock = false;
-	/** Transiently revealed thinking block (Ctrl+T toggles it; never persisted). */
-	private revealedThinkingComponent: AssistantMessageComponent | undefined;
+	/** Transiently revealed thinking blocks (Ctrl+T shows all and hides them again; never persisted). */
+	private revealedThinkingComponents: AssistantMessageComponent[] = [];
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -7386,33 +7386,32 @@ export class InteractiveMode {
 	}
 
 	private toggleThinkingBlockVisibility(): void {
-		// Thinking rows are hidden by default; the toggle transiently reveals the
-		// most recent thinking block (label + trace) and hides it again. It never
-		// touches the persisted setting.
-		if (this.revealedThinkingComponent) {
-			this.revealedThinkingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-			this.revealedThinkingComponent = undefined;
+		// Thinking rows are hidden by default; the toggle transiently reveals every
+		// thinking block in the conversation and hides them again. It never touches
+		// the persisted setting, and blocks that appear after a reveal stay hidden
+		// until the toggle is pressed again.
+		if (this.revealedThinkingComponents.length > 0) {
+			for (const component of this.revealedThinkingComponents) {
+				component.setHideThinkingBlock(this.hideThinkingBlock);
+			}
+			this.revealedThinkingComponents = [];
 			this.showStatus("Thinking: hidden");
 		} else {
-			const target = this.findLatestThinkingComponent();
-			if (!target) {
+			const targets = this.chatContainer.children.filter(
+				(child): child is AssistantMessageComponent =>
+					child instanceof AssistantMessageComponent && child.hasThinkingContent(),
+			);
+			if (targets.length === 0) {
 				this.showStatus("No thinking to show yet");
 				return;
 			}
-			target.setHideThinkingBlock(false);
-			this.revealedThinkingComponent = target;
-			this.showStatus("Thinking: shown");
+			for (const component of targets) {
+				component.setHideThinkingBlock(false);
+			}
+			this.revealedThinkingComponents = targets;
+			this.showStatus(`Thinking: shown (${targets.length} blocks)`);
 		}
 		this.ui.requestRender();
-	}
-
-	private findLatestThinkingComponent(): AssistantMessageComponent | undefined {
-		for (const child of [...this.chatContainer.children].reverse()) {
-			if (child instanceof AssistantMessageComponent && child.hasThinkingContent()) {
-				return child;
-			}
-		}
-		return undefined;
 	}
 
 	private openExternalEditor(): void {
