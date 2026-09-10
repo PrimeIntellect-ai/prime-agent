@@ -393,13 +393,17 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			isQuotedPrefix && hasTrailingQuoteInItem && hasLeadingQuoteAfterCursor ? afterCursor.slice(1) : afterCursor;
 		const slashContext = getSlashCommandContext(lines, cursorLine, cursorCol);
 
-		const isSlashCommand =
-			slashContext?.kind === "name" &&
-			slashContext.prefix === prefix &&
-			this.commands.some((command) => ("name" in command ? command.name : command.value) === item.value);
+		const command = this.commands.find(
+			(command) => ("name" in command ? command.name : command.value) === item.value,
+		);
+		const isSlashCommand = slashContext?.kind === "name" && slashContext.prefix === prefix && command !== undefined;
 		if (isSlashCommand) {
+			const takesArgument =
+				command !== undefined && "takesArgument" in command ? command.takesArgument === true : false;
 			const hasSeparatorAfterCursor = /^[ \t]/.test(adjustedAfterCursor);
-			const separator = hasSeparatorAfterCursor ? "" : " ";
+			// Argument commands complete into the parameter position; commands without
+			// arguments complete bare so a following submit runs them as typed.
+			const separator = !takesArgument ? "" : hasSeparatorAfterCursor ? "" : " ";
 			const newLine = `${beforePrefix}/${item.value}${separator}${adjustedAfterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
@@ -407,7 +411,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			return {
 				lines: newLines,
 				cursorLine,
-				cursorCol: beforePrefix.length + item.value.length + 2,
+				cursorCol: beforePrefix.length + item.value.length + (takesArgument ? 2 : 1),
 			};
 		}
 
