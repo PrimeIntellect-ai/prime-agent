@@ -2234,6 +2234,132 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "");
 		});
 
+		it("submits a no-argument slash command accepted with Tab", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider([{ name: "model", description: "Select model" }], process.cwd()),
+			);
+
+			editor.handleInput("/");
+			editor.handleInput("m");
+			editor.handleInput("o");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\t");
+			assert.deepStrictEqual(submitted, ["/model"]);
+			assert.strictEqual(editor.getText(), "");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
+		it("submits a no-argument slash command accepted with Enter", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider([{ name: "model", description: "Select model" }], process.cwd()),
+			);
+
+			editor.handleInput("/");
+			editor.handleInput("m");
+			editor.handleInput("o");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\r");
+			assert.deepStrictEqual(submitted, ["/model"]);
+			assert.strictEqual(editor.getText(), "");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
+		it("completes an argument-taking command with Tab to the parameter position without submitting", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider(
+					[{ name: "goal", description: "Set a goal", takesArgument: true }],
+					process.cwd(),
+				),
+			);
+
+			editor.handleInput("/");
+			editor.handleInput("g");
+			editor.handleInput("o");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\t");
+			assert.strictEqual(editor.getText(), "/goal ");
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
+		it("completes an argument-taking command with Enter to the parameter position without submitting", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider(
+					[{ name: "goal", description: "Set a goal", takesArgument: true }],
+					process.cwd(),
+				),
+			);
+
+			editor.handleInput("/");
+			editor.handleInput("g");
+			editor.handleInput("o");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\r");
+			assert.strictEqual(editor.getText(), "/goal ");
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
+		it("cancels the slash command autocomplete with Escape without submitting", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider([{ name: "model", description: "Select model" }], process.cwd()),
+			);
+
+			editor.handleInput("/");
+			editor.handleInput("m");
+			editor.handleInput("o");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\x1b");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			assert.strictEqual(editor.getText(), "/mo");
+			assert.deepStrictEqual(submitted, []);
+		});
+
+		it("submits a fully typed no-argument command with Enter", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider([{ name: "model", description: "Select model" }], process.cwd()),
+			);
+
+			editor.handleInput("/");
+			for (const char of "model") {
+				editor.handleInput(char);
+			}
+			await flushAutocomplete();
+
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(submitted, ["/model"]);
+			assert.strictEqual(editor.getText(), "");
+		});
+
 		it("does not trigger slash command autocomplete inside URLs or paths", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			editor.setAutocompleteProvider(
@@ -2543,7 +2669,7 @@ describe("Editor component", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const provider = new CombinedAutocompleteProvider(
 				[
-					{ name: "help", description: "Show help" },
+					{ name: "help", description: "Show help", takesArgument: true },
 					{
 						name: "model",
 						description: "Switch model",
