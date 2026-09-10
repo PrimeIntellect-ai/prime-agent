@@ -732,6 +732,7 @@ export class Editor implements Component, Focusable {
 			if (kb.matches(data, "tui.input.tab")) {
 				const selected = this.autocompleteList.getSelectedItem();
 				if (selected && this.autocompleteProvider) {
+					const shouldSubmitSlashCommand = this.shouldSubmitSlashCommandCompletion();
 					this.pushUndoSnapshot();
 					this.lastAction = null;
 					const result = this.autocompleteProvider.applyCompletion(
@@ -745,6 +746,10 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 					this.cancelAutocomplete();
+					if (shouldSubmitSlashCommand && !selected.takesArgument && !this.disableSubmit) {
+						this.submitValue();
+						return;
+					}
 					if (this.onChange) this.onChange(this.getText());
 				}
 				return;
@@ -753,14 +758,7 @@ export class Editor implements Component, Focusable {
 			if (kb.matches(data, "tui.select.confirm")) {
 				const selected = this.autocompleteList.getSelectedItem();
 				if (selected && this.autocompleteProvider) {
-					const slashContext = this.getCurrentSlashCommandContext();
-					const isSlashCommandCompletion =
-						this.autocompleteKind === "slash-command" ||
-						(this.autocompleteKind === undefined &&
-							this.autocompleteState === "regular" &&
-							this.autocompletePrefix.startsWith("/"));
-					const shouldSubmitSlashCommand =
-						isSlashCommandCompletion && slashContext?.kind === "name" && slashContext.isAtPromptStart;
+					const shouldSubmitSlashCommand = this.shouldSubmitSlashCommandCompletion();
 					this.pushUndoSnapshot();
 					this.lastAction = null;
 					const result = this.autocompleteProvider.applyCompletion(
@@ -773,18 +771,13 @@ export class Editor implements Component, Focusable {
 					this.state.lines = result.lines;
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
+					this.cancelAutocomplete();
 
-					if (isSlashCommandCompletion) {
-						this.cancelAutocomplete();
-						if (!shouldSubmitSlashCommand || selected.takesArgument) {
-							if (this.onChange) this.onChange(this.getText());
-							return;
-						}
-					} else {
-						this.cancelAutocomplete();
+					if (!shouldSubmitSlashCommand || selected.takesArgument) {
 						if (this.onChange) this.onChange(this.getText());
 						return;
 					}
+					// A no-argument slash command accepted at the prompt start falls through to submit.
 				}
 			}
 		}
@@ -2138,6 +2131,17 @@ export class Editor implements Component, Focusable {
 
 	private getCurrentSlashCommandContext(): SlashCommandContext | null {
 		return getSlashCommandContext(this.state.lines, this.state.cursorLine, this.state.cursorCol);
+	}
+
+	/** True when the active autocomplete completes a slash command name at the prompt start. */
+	private shouldSubmitSlashCommandCompletion(): boolean {
+		const slashContext = this.getCurrentSlashCommandContext();
+		const isSlashCommandCompletion =
+			this.autocompleteKind === "slash-command" ||
+			(this.autocompleteKind === undefined &&
+				this.autocompleteState === "regular" &&
+				this.autocompletePrefix.startsWith("/"));
+		return isSlashCommandCompletion && slashContext?.kind === "name" && slashContext.isAtPromptStart;
 	}
 
 	/**
