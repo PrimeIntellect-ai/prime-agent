@@ -5,7 +5,7 @@ import {
 	isAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
 } from "../core/agent-messages.js";
-import type { AgentSessionEvent, PromptOptions } from "../core/agent-session.js";
+import type { InputSource } from "../core/extensions/index.js";
 import { GOAL_CONTEXT_CUSTOM_TYPE, GOAL_CONTEXT_PREVIEW_LABEL } from "../core/goals.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
@@ -20,6 +20,7 @@ import { throwIfPromptAdmissionCancelled } from "../core/prompt-admission.js";
 import { type ActionStore, canSelectSessionAction, type RuntimeActivity } from "../core/session-action-store.js";
 import type { SessionManager } from "../core/session-manager.js";
 import type { SessionCommitFence, SessionCommitLease } from "./commit-fence.js";
+import type { AgentSessionEvent } from "./events.js";
 import type { SessionInputAdmission } from "./input-admission.js";
 import type { SessionInputScheduler } from "./input-scheduler.js";
 import {
@@ -34,6 +35,25 @@ import {
 } from "./prepared-actions.js";
 import type { SubmissionNormalizer } from "./submission-normalization.js";
 import { createTurnExecutionPolicy, type TurnExecutionPolicy } from "./turn-preparation.js";
+export interface PromptOptions {
+	expandPromptTemplates?: boolean;
+	images?: ImageContent[];
+	streamingBehavior?: "steer" | "followUp";
+	followUpQueueKey?: string;
+	source?: InputSource;
+	preflightResult?: (success: boolean, queued?: boolean) => void;
+	queueIfBusy?: boolean;
+	resumeIfIdle?: boolean;
+	internalPrompt?: boolean;
+	suppressAutonomousContinuation?: boolean;
+	skipInputHandlers?: boolean;
+	signal?: AbortSignal;
+	admissionCommitted?: () => void;
+	agentMessageId?: string;
+	content?: (TextContent | ImageContent)[];
+	customMessage?: CustomMessage;
+}
+
 export interface InternalPromptOptions extends PromptOptions {
 	skipPrePromptWork?: boolean;
 	returnAfterAccepted?: boolean;

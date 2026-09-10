@@ -1,7 +1,6 @@
-import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@earendil-works/pi-ai";
+import type { Agent, AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, ServiceTier, Usage } from "@earendil-works/pi-ai";
 import { startsAgentRun } from "../core/agent-messages.js";
-import type { AgentSessionEvent, AgentSessionEventListener } from "../core/agent-session.js";
 import { addLoginGuidanceToAuthError, isLikelyAuthenticationError } from "../core/auth-guidance.js";
 import type {
 	ExtensionRunner,
@@ -14,23 +13,42 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "../core/extensions/index.js";
-import { createGoalContextMessage } from "../core/goals.js";
-import type { CustomMessage } from "../core/messages.js";
+import type { GoalState } from "../core/goals.js";
+import type { KernelSentAgentMessage } from "../core/kernel/index.js";
+import type { RefinementResult } from "../core/refinement/index.js";
 import { type ActionStore, type SessionActionSnapshot, transitionSessionAction } from "../core/session-action-store.js";
 import type { SessionManager } from "../core/session-manager.js";
-import type { GoalController } from "../goals/controller.js";
-import type { SessionCompaction } from "./compaction.js";
-import {
-	normalizeMessageContent,
-	primaryDeliveryRecord,
-	type QueuedSessionAction,
-	type SessionInputSchedule,
-} from "./prepared-actions.js";
+import type { SessionBashEvent } from "./bash.js";
+import type { RlmChildAgentSnapshot } from "./child-types.js";
+import type { SessionCompaction, SessionCompactionEvent } from "./compaction.js";
+import { primaryDeliveryRecord, type QueuedSessionAction } from "./prepared-actions.js";
 import type { SessionRefinement } from "./refinement.js";
-import type { SessionRetry } from "./retry.js";
+import type { SessionRetry, SessionRetryEvent } from "./retry.js";
+
+export type AgentSessionEvent =
+	| AgentEvent
+	| {
+			type: "ipython_sent_agent_message";
+			toolCallId: string;
+			message: KernelSentAgentMessage;
+	  }
+	| { type: "session_action_update"; actions: SessionActionSnapshot }
+	| SessionCompactionEvent
+	| { type: "session_info_changed"; name: string | undefined }
+	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| { type: "service_tier_changed"; serviceTier: ServiceTier }
+	| SessionRetryEvent
+	| { type: "rlm_child_update"; child: RlmChildAgentSnapshot }
+	| { type: "recap_update"; recap: string | undefined }
+	| { type: "goal_update"; goal: GoalState }
+	| SessionBashEvent
+	| { type: "refine_complete"; result: RefinementResult }
+	| { type: "refine_failed"; error: string };
+
+export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
 export interface SessionEventsHost {
-	getAgent(): Pick<Agent, "state" | "subscribe">;
+	getAgent(): Pick<Agent, "subscribe"> & { state: { messages: AgentMessage[]; errorMessage?: string } };
 	getStore(): Pick<SessionManager, "recordGitStateIfChanged" | "appendCustomMessageEntry" | "appendMessage">;
 	getExtensions(): Pick<ExtensionRunner, "emit" | "emitMessageEnd">;
 	getRetry(): Pick<
@@ -48,26 +66,23 @@ export interface SessionEventsHost {
 		SessionRefinement,
 		"observeAssistantEnd" | "serialized" | "_consumePendingRequestedRefine" | "_scheduleAutoRefineAfterAgentEnd"
 	>;
-	getGoals(): Pick<GoalController, "accountAssistantMessage" | "state">;
 	addAutonomousUsage(usage: Usage): void;
 	applyLateMessages(message: AgentMessage): void;
 	notifyCheckpoints(): void;
 	settleAgentMessage(id: string | undefined, leg: "delivery" | "completion", error?: Error): void;
 	getSnapshot(): SessionActionSnapshot;
-	queuePrompt(
-		schedule: SessionInputSchedule,
-		text: string,
-		images: ImageContent[] | undefined,
-		options: { message: CustomMessage; resumeIfIdle: boolean },
-	): Promise<boolean>;
+	accountAssistantBudget(message: AssistantMessage): Promise<boolean> | undefined;
 	finishGoal(message: AssistantMessage): void;
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
 }
 export class SessionEvents {
 	private listeners: AgentSessionEventListener[] = [];
 	private lastSnapshot: SessionActionSnapshot = { queuedCount: 0, steering: [], followUps: [] };
-	queue: Promise<void> = Promise.resolve();
-	lastAssistant: AssistantMessage | undefined;
+	private _queue: Promise<void> = Promise.resolve();
+	get queue(): Promise<void> {
+		return this._queue;
+	}
+	private lastAssistant: AssistantMessage | undefined;
 	private turnIndex = 0;
 	private unsubscribeAgent?: () => void;
 	constructor(
@@ -75,8 +90,8 @@ export class SessionEvents {
 		private readonly host: SessionEventsHost,
 	) {}
 	enqueue(work: () => void): void {
-		this.queue = this.queue.then(work, work);
-		this.queue.catch(() => {});
+		this._queue = this._queue.then(work, work);
+		this._queue.catch(() => {});
 	}
 	dispose(): void {
 		this.disconnectFromAgent();
@@ -182,11 +197,11 @@ export class SessionEvents {
 				}
 			}
 		}
-		this.queue = this.queue.then(
+		this._queue = this._queue.then(
 			() => this.processAgentEvent(event),
 			() => this.processAgentEvent(event),
 		);
-		this.queue.catch(() => {});
+		this._queue.catch(() => {});
 	};
 
 	findLastAssistantInMessages(messages: AgentMessage[]): AssistantMessage | undefined {
@@ -249,7 +264,7 @@ export class SessionEvents {
 				this.host.getAgent().state.messages = this.host
 					.getAgent()
 					.state.messages.filter((message) => !removed.has(message));
-				(this.host.getAgent().state as { errorMessage?: string }).errorMessage = undefined;
+				this.host.getAgent().state.errorMessage = undefined;
 				this.lastAssistant = undefined;
 				for (const action of cleared) this.actions.releaseTerminal(action);
 				this.host.notifyCheckpoints();
@@ -314,14 +329,8 @@ export class SessionEvents {
 					this.host.getCompaction().resetOverflowRecovery();
 				}
 				this.host.getRetry().observeAssistantEnd(assistantMsg);
-				if (this.host.getGoals().accountAssistantMessage(assistantMsg)) {
-					const message = createGoalContextMessage(this.host.getGoals().state, "budget_limit");
-					const normalized = normalizeMessageContent(message.content);
-					await this.host.queuePrompt("steer", normalized.text, normalized.images, {
-						message,
-						resumeIfIdle: true,
-					});
-				}
+				const budgetNotice = this.host.accountAssistantBudget(assistantMsg);
+				if (budgetNotice) await budgetNotice;
 			}
 		}
 

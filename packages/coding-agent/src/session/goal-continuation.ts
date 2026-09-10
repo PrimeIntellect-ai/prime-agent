@@ -23,6 +23,7 @@ import {
 
 export interface SessionGoalContinuationHost {
 	getGoalState(): GoalState;
+	queuePrompt: SessionInputAdmission["queuePreparedPrompt"];
 	getScheduler(): Pick<SessionInputScheduler, "admissionPaused" | "suspended">;
 	isDisposed(): boolean;
 	isDisposing(): boolean;
@@ -44,7 +45,7 @@ export class SessionGoalContinuation {
 	private _thresholdContinuation: AgentMessage | undefined;
 	constructor(
 		readonly controller: GoalController,
-		private readonly actions: ActionStore<QueuedSessionAction>,
+		private readonly actions: Pick<ActionStore<QueuedSessionAction>, "unfinishedActions">,
 		private readonly host: SessionGoalContinuationHost,
 	) {}
 	get awaitsChildWork(): boolean {
@@ -69,6 +70,16 @@ export class SessionGoalContinuation {
 
 	deferUntilChildSettlement(): void {
 		this._awaitsChildWork = true;
+	}
+
+	accountAssistantBudget(message: AssistantMessage): Promise<boolean> | undefined {
+		if (!this.controller.accountAssistantMessage(message)) return undefined;
+		const notice = createGoalContextMessage(this.controller.state, "budget_limit");
+		const normalized = normalizeMessageContent(notice.content);
+		return this.host.queuePrompt("steer", normalized.text, normalized.images, {
+			message: notice,
+			resumeIfIdle: true,
+		});
 	}
 
 	clearQueuedGoalContexts(): void {

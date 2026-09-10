@@ -18,11 +18,12 @@ export interface SessionInputCheckpointsHost {
 	scheduleInput(): void;
 	getAgent(): Pick<Agent, "waitForIdle" | "state">;
 	getUnfinishedCount(): number;
+	waitForIdle(): Promise<void>;
 }
 export class SessionInputCheckpoints {
 	private readonly waiters = new Set<() => void>();
 	constructor(
-		private readonly actions: ActionStore<QueuedSessionAction>,
+		private readonly actions: Pick<ActionStore<QueuedSessionAction>, "activeActions" | "queuedActions">,
 		private readonly host: SessionInputCheckpointsHost,
 	) {}
 	get hasWaiters(): boolean {
@@ -158,6 +159,15 @@ export class SessionInputCheckpoints {
 				throw error;
 			}
 			fence.release();
+		}
+	}
+
+	async waitForHeadlessIdle(): Promise<void> {
+		while (true) {
+			await this.host.waitForIdle();
+			const postCompactionContinuation = this.host.getContinuation().current?.promise;
+			if (!postCompactionContinuation) return;
+			await postCompactionContinuation;
 		}
 	}
 

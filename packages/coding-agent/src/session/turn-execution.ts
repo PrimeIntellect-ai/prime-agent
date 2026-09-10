@@ -21,6 +21,7 @@ export interface SessionTurnExecutionHost {
 	isDeferred(epoch: number): boolean;
 	isStreaming(): boolean;
 	getBasePrompt(): string;
+	refreshExtensionSystemPrompt(extensionPrompt: string, baseSnapshot: string): string;
 	getBasePromptOptions(): BuildSystemPromptOptions;
 	getExtensions(): Pick<ExtensionRunner, "emitBeforeAgentStart">;
 	getAgent(): Pick<Agent, "state" | "prompt">;
@@ -58,16 +59,6 @@ export class SessionTurnExecution {
 		}
 	}
 
-	refreshExtensionSystemPrompt(extensionPrompt: string, baseSnapshot: string): string {
-		if (this.host.getBasePrompt() === baseSnapshot) {
-			return extensionPrompt;
-		}
-		if (!extensionPrompt.includes(baseSnapshot)) {
-			return extensionPrompt;
-		}
-		return extensionPrompt.replace(baseSnapshot, () => this.host.getBasePrompt());
-	}
-
 	applyPreparedSystemPrompt(
 		preparation: PreparedPromptPreparation | undefined,
 		preserveEmptyExtensionPrompt: boolean,
@@ -78,7 +69,7 @@ export class SessionTurnExecution {
 			: Boolean(extensionPrompt);
 		this.host.getAgent().state.systemPrompt =
 			hasExtensionPrompt && extensionPrompt !== undefined && preparation !== undefined
-				? this.refreshExtensionSystemPrompt(extensionPrompt, preparation.basePromptSnapshot)
+				? this.host.refreshExtensionSystemPrompt(extensionPrompt, preparation.basePromptSnapshot)
 				: this.host.getBasePrompt();
 	}
 

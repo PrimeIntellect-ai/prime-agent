@@ -1,25 +1,19 @@
 import type {
 	Agent,
 	AgentContext,
-	AgentEvent,
 	AgentMessage,
 	AgentState,
 	AgentTool,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Model, ServiceTier, TextContent } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model, ServiceTier } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, cleanupSessionResources, supportsFastMode } from "@earendil-works/pi-ai";
 import { GoalController } from "../goals/controller.js";
 import { createGoalPersistence } from "../goals/persistence.js";
 import { SessionActionQueue } from "../session/action-queue.js";
 import { SessionActionRecovery } from "../session/action-recovery.js";
 import { SessionAutonomousContinuation } from "../session/autonomous-continuation.js";
-import {
-	type ExecuteBashOptions,
-	type RunUserBashOptions,
-	SessionBash,
-	type SessionBashEvent,
-} from "../session/bash.js";
+import { type ExecuteBashOptions, type RunUserBashOptions, SessionBash } from "../session/bash.js";
 import { createChildSessionDir, createInlineChildRuntime } from "../session/child-runtime.js";
 import { SessionChildState } from "../session/child-state.js";
 import {
@@ -32,7 +26,7 @@ import { SessionChildUsage } from "../session/child-usage.js";
 import { SessionChildren } from "../session/children.js";
 import { SessionCommandExecution } from "../session/command-execution.js";
 import { SessionCommitFence, type SessionCommitLease } from "../session/commit-fence.js";
-import { SessionCompaction, type SessionCompactionEvent } from "../session/compaction.js";
+import { SessionCompaction } from "../session/compaction.js";
 import {
 	type CompactionExecutionHost,
 	type CompactionExecutionOptions,
@@ -59,14 +53,10 @@ import { handleAgentMessageHostRequest } from "../session/message-host-requests.
 import { SessionModelSelection } from "../session/model-selection.js";
 import { handleAgentObserveHostRequest } from "../session/observe-host-requests.js";
 import { SessionPendingContext } from "../session/pending-context.js";
-import {
-	primaryDeliveryRecord,
-	type QueuedSessionAction,
-	visibleSessionActionProjection,
-} from "../session/prepared-actions.js";
-import { SessionPromptSubmission } from "../session/prompt-submission.js";
+import { type QueuedSessionAction, visibleSessionActionProjection } from "../session/prepared-actions.js";
+import { type PromptOptions, SessionPromptSubmission } from "../session/prompt-submission.js";
 import { type AutoRefineReviewer, SessionRefinement } from "../session/refinement.js";
-import { SessionRetry, type SessionRetryEvent } from "../session/retry.js";
+import { SessionRetry } from "../session/retry.js";
 import { SubmissionNormalizer } from "../session/submission-normalization.js";
 import { SessionTools } from "../session/tools.js";
 import { SessionTurnExecution } from "../session/turn-execution.js";
@@ -91,14 +81,13 @@ import { COMPACT_SKILL_NAME, type CompactionResult, calculateContextTokens } fro
 import type { AgentCronJob, AgentRlmHeartbeatController } from "./cron-jobs.js";
 import type {
 	ExtensionRunner,
-	InputSource,
 	ReplacedSessionContext,
 	SessionStartEvent,
 	ToolDefinition,
 	ToolInfo,
 } from "./extensions/index.js";
 import { createGoalContextMessage, GOAL_CONTEXT_CUSTOM_TYPE, GOAL_SKILL_NAME, type GoalState } from "./goals.js";
-import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
+import type { HostRequestHandlers } from "./kernel/index.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import { type CustomMessage, createHeartbeatPromptMessage, type RefinementSource } from "./messages.js";
@@ -117,7 +106,7 @@ import type {
 	SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import { SemanticEdgeRecorder, semanticEdgeLedgerPath, wrapStreamFnWithSemanticEdges } from "./semantic-edges.js";
-import { ActionStore, type RuntimeActivity, type SessionActionSnapshot } from "./session-action-store.js";
+import { ActionStore, type RuntimeActivity } from "./session-action-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
@@ -127,30 +116,8 @@ import type { IpythonKernelProvisioner } from "./tools/ipython.js";
 export type { RlmChildAgentActivity, RlmChildAgentSnapshot, RlmChildAgentStatus } from "../session/child-types.js";
 export { compactRlmText, rlmChildLabel } from "../session/child-types.js";
 export type { CompactionReason } from "../session/compaction.js";
-export type { GoalState, GoalStatus } from "./goals.js";
-export type { SessionStats } from "./session-stats.js";
-export { type ParsedSkillBlock, parseSkillBlock } from "./skill-blocks.js";
-
-export type AgentSessionEvent =
-	| AgentEvent
-	| {
-			type: "ipython_sent_agent_message";
-			toolCallId: string;
-			message: KernelSentAgentMessage;
-	  }
-	| { type: "session_action_update"; actions: SessionActionSnapshot }
-	| SessionCompactionEvent
-	| { type: "session_info_changed"; name: string | undefined }
-	| { type: "thinking_level_changed"; level: ThinkingLevel }
-	| { type: "service_tier_changed"; serviceTier: ServiceTier }
-	| SessionRetryEvent
-	| { type: "rlm_child_update"; child: RlmChildAgentSnapshot }
-	| { type: "recap_update"; recap: string | undefined }
-	| { type: "goal_update"; goal: GoalState }
-	| SessionBashEvent
-	| { type: "refine_complete"; result: RefinementResult }
-	| { type: "refine_failed"; error: string };
-
+export { CompactionSkippedError } from "../session/compaction-execution.js";
+export type { AgentSessionEvent, AgentSessionEventListener } from "../session/events.js";
 export {
 	SESSION_ACTION_RECOVERY_FORMAT_VERSION,
 	type SessionActionRecoveryAction,
@@ -158,14 +125,11 @@ export {
 	type SessionActionRecoveryRecord,
 	type SessionActionRecoverySnapshot,
 } from "../session/prepared-actions.js";
-
-export type { TurnExecutionPolicy } from "../session/turn-preparation.js";
-
-export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
-
-export { CompactionSkippedError } from "../session/compaction-execution.js";
-
 export { RefineSkippedError } from "../session/refinement.js";
+export type { TurnExecutionPolicy } from "../session/turn-preparation.js";
+export type { GoalState, GoalStatus } from "./goals.js";
+export type { SessionStats } from "./session-stats.js";
+export { type ParsedSkillBlock, parseSkillBlock } from "./skill-blocks.js";
 
 export interface AgentSessionConfig {
 	agent: Agent;
@@ -238,28 +202,9 @@ export interface AgentSessionConfig {
 }
 
 export type { ExtensionBindings } from "../session/extensions.js";
-
-export type { AutoRefineReviewer, AutoRefineReviewRequest } from "../session/refinement.js";
-export interface PromptOptions {
-	expandPromptTemplates?: boolean;
-	images?: ImageContent[];
-	streamingBehavior?: "steer" | "followUp";
-	followUpQueueKey?: string;
-	source?: InputSource;
-	preflightResult?: (success: boolean, queued?: boolean) => void;
-	queueIfBusy?: boolean;
-	resumeIfIdle?: boolean;
-	internalPrompt?: boolean;
-	suppressAutonomousContinuation?: boolean;
-	skipInputHandlers?: boolean;
-	signal?: AbortSignal;
-	admissionCommitted?: () => void;
-	agentMessageId?: string;
-	content?: (TextContent | ImageContent)[];
-	customMessage?: CustomMessage;
-}
-
 export type { ModelCycleResult } from "../session/model-selection.js";
+export type { PromptOptions } from "../session/prompt-submission.js";
+export type { AutoRefineReviewer, AutoRefineReviewRequest } from "../session/refinement.js";
 
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
@@ -347,11 +292,11 @@ export class AgentSession {
 		steeringStopPending: () => this._steeringStopPending,
 		stopGoalForTerminalMessage: (message) => this._stopGoalContinuationForTerminalMessage(message),
 		getGoals: () => this._goals,
-		queuePrompt: (schedule, text, images, options) => this._queuePreparedPrompt(schedule, text, images, options),
+		accountAssistantBudget: (message) => this._goalContinuation.accountAssistantBudget(message),
 		getRefinement: () => this._refinement,
 		getEventQueue: () => this._events.queue,
 		getCompaction: () => this._compaction,
-		getAgent: () => this.agent,
+		getMessages: () => this.agent.state.messages,
 		getSettings: () => this.settingsManager,
 		getModel: () => this.model,
 		getStore: () => this.sessionManager,
@@ -372,6 +317,7 @@ export class AgentSession {
 		isStreaming: () => this.isStreaming,
 		getBasePrompt: () => this._baseSystemPrompt,
 		getBasePromptOptions: () => this._baseSystemPromptOptions,
+		refreshExtensionSystemPrompt: (prompt, snapshot) => this._refreshExtensionSystemPrompt(prompt, snapshot),
 		getExtensions: () => this._extensionRunner,
 		getAgent: () => this.agent,
 		takeNextTurnMessages: () => this._takePendingNextTurnMessages(),
@@ -402,6 +348,7 @@ export class AgentSession {
 		scheduleInput: () => this._scheduleSessionInputPump(),
 		getAgent: () => this.agent,
 		getUnfinishedCount: () => this.unfinishedActionCount,
+		waitForIdle: () => this.waitForIdle(),
 	});
 	private readonly _promptSubmission = new SessionPromptSubmission(this._actionStore, {
 		waitForActivityChange: (signal) => this._waitForSessionActivityChange(signal),
@@ -509,13 +456,12 @@ export class AgentSession {
 		getRetry: () => this._retry,
 		getCompaction: () => this._compaction,
 		getRefinement: () => this._refinement,
-		getGoals: () => this._goals,
 		addAutonomousUsage: (usage) => this._autonomousContinuation.recordUsage(usage),
 		applyLateMessages: (message) => this._applyLateIpythonSentAgentMessages(message),
 		notifyCheckpoints: () => this._notifySessionInputCheckpointChange(),
 		settleAgentMessage: (id, leg, error) => this._settleAgentMessage(id, leg, error),
 		getSnapshot: () => this.getSessionActionSnapshot(),
-		queuePrompt: (schedule, text, images, options) => this._queuePreparedPrompt(schedule, text, images, options),
+		accountAssistantBudget: (message) => this._goalContinuation.accountAssistantBudget(message),
 		finishGoal: (message) => this._finishGoalForTerminalAssistantMessage(message),
 		checkCompaction: (message) => this._checkCompaction(message),
 	});
@@ -701,16 +647,16 @@ export class AgentSession {
 		recordBashResult: (command, result, options) => this.recordBashResult(command, result, options),
 	});
 
-	private _resourceLoader: ResourceLoader;
-	private _cwd: string;
-	private _agentDir?: string;
-	private _initialActiveToolNames?: string[];
-	private _includeGoals: boolean;
-	private _includeCompactSkill: boolean;
+	private readonly _resourceLoader: ResourceLoader;
+	private readonly _cwd: string;
+	private readonly _agentDir?: string;
+	private readonly _initialActiveToolNames?: string[];
+	private readonly _includeGoals: boolean;
+	private readonly _includeCompactSkill: boolean;
 	private _rlmHeartbeatController?: AgentRlmHeartbeatController;
-	private _agentMessageController?: AgentSessionMessageController;
-	private _agentObserveController?: AgentObserveController;
-	private _mcpManager?: McpManager;
+	private readonly _agentMessageController?: AgentSessionMessageController;
+	private readonly _agentObserveController?: AgentObserveController;
+	private readonly _mcpManager?: McpManager;
 	private _disposed = false;
 	private readonly _disposeCallbacks = new Set<() => void | Promise<void>>();
 	private _disposeCallbacksPromise?: Promise<void>;
@@ -719,10 +665,10 @@ export class AgentSession {
 	private _disposing = false;
 	private _disposeAsyncPromise?: Promise<void>;
 	private readonly _semanticEdges: SemanticEdgeRecorder;
-	private _rlmParentNodeId?: string;
-	private _rlmParentAgent?: string;
+	private readonly _rlmParentNodeId?: string;
+	private readonly _rlmParentAgent?: string;
 
-	private _modelRegistry: ModelRegistry;
+	private readonly _modelRegistry: ModelRegistry;
 
 	private readonly _continuation = new SessionContinuation({
 		waitForAgentIdle: () => this.agent.waitForIdle(),
@@ -1023,6 +969,8 @@ export class AgentSession {
 			this._actionStore,
 			{
 				getGoalState: () => this.goalState,
+				queuePrompt: (schedule, text, images, options) =>
+					this._queuePreparedPrompt(schedule, text, images, options),
 				getScheduler: () => this._inputScheduler,
 				isDisposed: () => this._disposed,
 				isDisposing: () => this._disposing,
@@ -1251,16 +1199,7 @@ export class AgentSession {
 	}
 
 	private get _steeringStopPending(): boolean {
-		return (
-			this._actionStore.queuedActions("next_turn_boundary").length > 0 ||
-			this._actionStore
-				.activeActions("next_turn_boundary")
-				.some(
-					(action) =>
-						action.payload.kind === "turn" &&
-						(action.lifecycle.state === "selected" || action.lifecycle.state === "preparing"),
-				)
-		);
+		return this._actionQueue.steeringStopPending;
 	}
 
 	private _shouldStopBeforeTurn(
@@ -1418,14 +1357,7 @@ export class AgentSession {
 	}
 
 	private _findLastAssistantMessage(): AssistantMessage | undefined {
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role === "assistant") {
-				return msg as AssistantMessage;
-			}
-		}
-		return undefined;
+		return this._events.findLastAssistantInMessages(this.agent.state.messages);
 	}
 
 	/**
@@ -1712,9 +1644,9 @@ export class AgentSession {
 	}
 
 	private _refreshExtensionSystemPrompt(
-		...args: Parameters<SessionTurnExecution["refreshExtensionSystemPrompt"]>
-	): ReturnType<SessionTurnExecution["refreshExtensionSystemPrompt"]> {
-		return this._turnExecution.refreshExtensionSystemPrompt(...args);
+		...args: Parameters<SessionTools["refreshExtensionSystemPrompt"]>
+	): ReturnType<SessionTools["refreshExtensionSystemPrompt"]> {
+		return this._tools.refreshExtensionSystemPrompt(...args);
 	}
 
 	private _normalizeSubmission(
@@ -1910,15 +1842,7 @@ export class AgentSession {
 	}
 
 	get hasPendingSessionWork(): boolean {
-		return this._actionStore.unfinishedActions().some((action) => {
-			const state = action.lifecycle.state;
-			return (
-				state === "queued" ||
-				state === "selected" ||
-				state === "preparing" ||
-				(state === "committing" && action.payload.kind === "turn" && !primaryDeliveryRecord(action).durable)
-			);
-		});
+		return this._actionQueue.hasPendingSessionWork;
 	}
 
 	get hasPendingAdmissionWaiters(): boolean {
@@ -2194,13 +2118,8 @@ export class AgentSession {
 	}
 
 	/** Waits out any owned post-compaction continuation and rejects when one cannot start; {@link waitForIdle} never rejects. */
-	async waitForHeadlessIdle(): Promise<void> {
-		while (true) {
-			await this.waitForIdle();
-			const postCompactionContinuation = this._continuation.current?.promise;
-			if (!postCompactionContinuation) return;
-			await postCompactionContinuation;
-		}
+	waitForHeadlessIdle(): Promise<void> {
+		return this._inputCheckpoints.waitForHeadlessIdle();
 	}
 
 	getPendingNextTurnMessageSnapshots(
@@ -2802,14 +2721,7 @@ export class AgentSession {
 	}
 
 	get hasAcceptedPromptInFlight(): boolean {
-		return this._actionStore
-			.unfinishedActions()
-			.some(
-				(action) =>
-					action.payload.kind === "turn" &&
-					!action.payload.queueVisible &&
-					action.payload.acceptedBeforeCompletion,
-			);
+		return this._actionQueue.hasAcceptedPromptInFlight;
 	}
 
 	get autoRetryEnabled(): boolean {

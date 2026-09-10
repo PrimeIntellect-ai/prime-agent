@@ -1,33 +1,29 @@
 import type {
-	Agent,
 	AgentMessage,
 	GetContinuationMessagesContext,
 	ShouldStopAfterTurnContext,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { shouldCompact } from "../core/compaction/index.js";
-import { createGoalContextMessage } from "../core/goals.js";
 import { getLatestCompactionEntry, type SessionManager } from "../core/session-manager.js";
 import type { SettingsManager } from "../core/settings-manager.js";
 import type { GoalController } from "../goals/controller.js";
 import type { SessionAutonomousContinuation } from "./autonomous-continuation.js";
 import type { SessionCompaction } from "./compaction.js";
-import type { SessionInputAdmission } from "./input-admission.js";
-import { normalizeMessageContent } from "./prepared-actions.js";
 import type { SessionRefinement } from "./refinement.js";
 
 export interface SessionTurnPolicyHost {
 	steeringStopPending(): boolean;
 	stopGoalForTerminalMessage(message: AssistantMessage): boolean;
-	getGoals(): Pick<GoalController, "accountAssistantMessage" | "state" | "checkpoint" | "restore">;
-	queuePrompt: SessionInputAdmission["queuePreparedPrompt"];
+	getGoals(): Pick<GoalController, "checkpoint" | "restore">;
+	accountAssistantBudget(message: AssistantMessage): Promise<boolean> | undefined;
 	getRefinement(): Pick<SessionRefinement, "serialized" | "_runSerializedRefineCheckpoint">;
 	getEventQueue(): Promise<void>;
 	getCompaction(): Pick<
 		SessionCompaction,
 		"resetContinuation" | "hasPendingRequest" | "requestContinuation" | "getThresholdContextTokens"
 	>;
-	getAgent(): Pick<Agent, "state">;
+	getMessages(): AgentMessage[];
 	getSettings(): Pick<SettingsManager, "getCompactionSettings">;
 	getModel(): Model<Api> | undefined;
 	getStore(): Pick<SessionManager, "getBranch">;
@@ -51,14 +47,8 @@ export class SessionTurnPolicy {
 			return true;
 		}
 		try {
-			if (this.host.getGoals().accountAssistantMessage(context.message)) {
-				const message = createGoalContextMessage(this.host.getGoals().state, "budget_limit");
-				const normalized = normalizeMessageContent(message.content);
-				await this.host.queuePrompt("steer", normalized.text, normalized.images, {
-					message,
-					resumeIfIdle: true,
-				});
-			}
+			const budgetNotice = this.host.accountAssistantBudget(context.message);
+			if (budgetNotice) await budgetNotice;
 		} catch {
 			// Goal accounting must not interrupt the core agent loop.
 		}
@@ -88,7 +78,7 @@ export class SessionTurnPolicy {
 			return false;
 		}
 
-		const lastMessage = this.host.getAgent().state.messages[this.host.getAgent().state.messages.length - 1];
+		const lastMessage = this.host.getMessages()[this.host.getMessages().length - 1];
 		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
 		if (lastMessage !== undefined && lastMessage.role !== "assistant")
 			this.host.getCompaction().requestContinuation();

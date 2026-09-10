@@ -22,6 +22,7 @@ function harness(overrides: { awaitsChildWork?: boolean } & Partial<SessionGoalC
 	);
 	const owner = new SessionGoalContinuation(goals, actions, {
 		getGoalState: () => goals.current,
+		queuePrompt: async () => false,
 		getScheduler: () => scheduler,
 		isDisposed: () => false,
 		isDisposing: () => false,

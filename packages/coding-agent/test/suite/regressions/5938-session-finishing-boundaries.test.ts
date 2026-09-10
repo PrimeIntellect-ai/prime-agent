@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionMessageController, AgentSessionMessageReceipt } from "../../../src/core/agent-messages.js";
 import type { AgentObserveAgentSnapshot, AgentObserveController } from "../../../src/core/agent-observe.js";
 import type { AgentRlmHeartbeatController } from "../../../src/core/cron-jobs.js";
+import type { SessionTurnExecution } from "../../../src/session/turn-execution.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const harnesses: Harness[] = [];
@@ -129,5 +130,51 @@ describe("session finishing boundaries", () => {
 		expect((await session._resolveRlmSubagentModel(`${parent.provider}/${parent.id}`)).model).toBe(parent);
 		expect(auth).not.toHaveBeenCalled();
 		expect(catalog).not.toHaveBeenCalled();
+	});
+	it.each(["facade", "prepared turn"])(
+		"refreshes %s prompts with the final live base and literal replacement text",
+		async (path) => {
+			const harness = await createHarness({ tools: [] });
+			harnesses.push(harness);
+			const session = harness.session as unknown as {
+				_tools: { baseSystemPrompt: string };
+				_turnExecution: Pick<SessionTurnExecution, "applyPreparedSystemPrompt">;
+				_refreshExtensionSystemPrompt(prompt: string, snapshot: string): string;
+			};
+			let reads = 0;
+			Object.defineProperty(session._tools, "baseSystemPrompt", {
+				configurable: true,
+				get: () => (++reads === 1 ? "intermediate" : "$& final base"),
+			});
+			if (path === "facade") {
+				expect(session._refreshExtensionSystemPrompt("prefix old suffix old", "old")).toBe(
+					"prefix $& final base suffix old",
+				);
+			} else {
+				session._turnExecution.applyPreparedSystemPrompt(
+					{ basePromptSnapshot: "old", result: { systemPrompt: "prefix old suffix old" } },
+					true,
+				);
+				expect(harness.session.agent.state.systemPrompt).toBe("prefix $& final base suffix old");
+			}
+			expect(reads).toBe(2);
+		},
+	);
+
+	it("headless waiting re-reads the public idle method after continuation settlement", async () => {
+		const harness = await createHarness({ tools: [] });
+		harnesses.push(harness);
+		const session = harness.session as unknown as {
+			_continuation: { readonly current?: { promise: Promise<void> } };
+		};
+		const failure = new Error("replacement idle failed");
+		const replacement = vi.fn().mockRejectedValue(failure);
+		const initial = vi.spyOn(harness.session, "waitForIdle").mockImplementationOnce(async () => {
+			harness.session.waitForIdle = replacement;
+		});
+		vi.spyOn(session._continuation, "current", "get").mockReturnValue({ promise: Promise.resolve() });
+		await expect(harness.session.waitForHeadlessIdle()).rejects.toBe(failure);
+		expect(initial).toHaveBeenCalledTimes(1);
+		expect(replacement).toHaveBeenCalledTimes(1);
 	});
 });

@@ -48,11 +48,50 @@ export interface SessionActionQueueHost {
 	resumeQueuedWork(): boolean;
 }
 export class SessionActionQueue {
-	clearEpoch = 0;
+	private _clearEpoch: number = 0;
+	get clearEpoch(): number {
+		return this._clearEpoch;
+	}
 	constructor(
 		private readonly actions: ActionStore<QueuedSessionAction>,
 		private readonly host: SessionActionQueueHost,
 	) {}
+	get steeringStopPending(): boolean {
+		return (
+			this.actions.queuedActions("next_turn_boundary").length > 0 ||
+			this.actions
+				.activeActions("next_turn_boundary")
+				.some(
+					(action) =>
+						action.payload.kind === "turn" &&
+						(action.lifecycle.state === "selected" || action.lifecycle.state === "preparing"),
+				)
+		);
+	}
+
+	get hasPendingSessionWork(): boolean {
+		return this.actions.unfinishedActions().some((action) => {
+			const state = action.lifecycle.state;
+			return (
+				state === "queued" ||
+				state === "selected" ||
+				state === "preparing" ||
+				(state === "committing" && action.payload.kind === "turn" && !primaryDeliveryRecord(action).durable)
+			);
+		});
+	}
+
+	get hasAcceptedPromptInFlight(): boolean {
+		return this.actions
+			.unfinishedActions()
+			.some(
+				(action) =>
+					action.payload.kind === "turn" &&
+					!action.payload.queueVisible &&
+					action.payload.acceptedBeforeCompletion,
+			);
+	}
+
 	cancelSessionActions(
 		predicate: (action: QueuedSessionAction) => boolean,
 		error: Error,
@@ -282,7 +321,7 @@ export class SessionActionQueue {
 	}
 
 	clearQueuedAgentMessages(): { steering: string[]; followUp: string[] } {
-		this.clearEpoch++;
+		this._clearEpoch++;
 		// customType identifies agent messages; the text parser covers persisted pre-grammar prompts.
 		return this.clearQueuedTurnActionsMatching(
 			(action) =>

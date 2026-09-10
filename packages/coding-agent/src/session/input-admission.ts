@@ -30,7 +30,10 @@ export interface SessionInputAdmissionHost {
 	suppressForMessage(message: AgentMessage): void;
 }
 export class SessionInputAdmission {
-	arrivalEpoch = 0;
+	private _arrivalEpoch: number = 0;
+	get arrivalEpoch(): number {
+		return this._arrivalEpoch;
+	}
 	constructor(
 		private readonly actions: ActionStore<QueuedSessionAction>,
 		private readonly host: SessionInputAdmissionHost,
@@ -116,7 +119,7 @@ export class SessionInputAdmission {
 			actionId: action.id,
 			disposition,
 		});
-		this.arrivalEpoch++;
+		this._arrivalEpoch++;
 		this.host.emitQueueUpdate();
 		if (
 			!options.restore &&

@@ -1016,7 +1016,11 @@ export class SessionChildren {
 	getRuntimeHost(): SubagentRuntimeHost | undefined {
 		return this._subagentRuntimeHost;
 	}
-	getActiveRuns(): Iterable<Readonly<RlmChildRun>> {
+	getActiveRuns(): Iterable<
+		Readonly<Pick<RlmChildRun, "id" | "prompt" | "status" | "sessionDir">> & {
+			readonly session?: Pick<AgentSession, "getContextTree">;
+		}
+	> {
 		return this._activeRlmChildRuns.values();
 	}
 }
