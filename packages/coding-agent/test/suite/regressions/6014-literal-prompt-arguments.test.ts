@@ -77,7 +77,7 @@ describe("ENG-6014 literal prompt arguments", () => {
 			await harness.session.prompt(command);
 
 			expect(getUserTexts(harness)).toEqual([expected]);
-			expect(providerTexts).toEqual([expected]);
+			expect(providerTexts.at(-1)).toBe(expected);
 			expect(harness.faux.state.callCount).toBe(1);
 		} finally {
 			harness.cleanup();

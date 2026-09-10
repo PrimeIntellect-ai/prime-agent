@@ -496,11 +496,11 @@ active extension doctrine`,
 		const promptPromise = harness.session.prompt("start");
 		await responseStarted.promise;
 		expect(harness.session.agent.state.systemPrompt).toContain("active extension doctrine");
-		expect(harness.session.agent.state.systemPrompt).not.toContain("A callable `rlm`");
+		expect(harness.session.agent.state.systemPrompt).not.toContain("An `rlm` object");
 
 		await harness.session.setRlmMaxDepth(2);
 
-		expect(harness.session.agent.state.systemPrompt).toContain("A callable `rlm`");
+		expect(harness.session.agent.state.systemPrompt).toContain("An `rlm` object");
 		expect(harness.session.agent.state.systemPrompt).toContain("active extension doctrine");
 		responseGate.resolve();
 		await promptPromise;
@@ -2170,9 +2170,7 @@ describe("Harness digest at cold boundaries", () => {
 		);
 		await harness.session.waitForIdle();
 
-		expect(
-			texts.filter((text) => text.startsWith("The persistent memories produced across this session so far:")),
-		).toHaveLength(1);
+		expect(texts.filter((text) => text.startsWith("[harness-digest]"))).toHaveLength(1);
 	});
 
 	it("strips the digest with a cleared first turn and re-delivers it on the next turn", async () => {

@@ -208,15 +208,13 @@ export async function nextAutonomousContinuation(
 		return undefined;
 	}
 	state.continuationsUsed++;
+	const gateFailureText = decision.reason === "gate_failed" ? buildGateFailureContinuation(state, now) : undefined;
 	return {
 		role: "user",
 		content: [
 			{
 				type: "text",
-				text:
-					decision.reason === "gate_failed"
-						? (buildGateFailureContinuation(state, now) ?? state.continuationPrompt)
-						: state.continuationPrompt,
+				text: gateFailureText ?? `[autonomous-continuation]\n\n${state.continuationPrompt}`,
 			},
 		],
 		timestamp: now,
@@ -352,6 +350,7 @@ export function buildAutonomousGateFailureContinuation(
 	timestamp = Date.now(),
 ): string {
 	return (
+		`[autonomous-continuation: gate-failed]\n\n` +
 		`Autonomous quality gate failed (attempt ${failure.attempt}/${maxRetries}): \`${failure.command}\` ${failure.exitText}.\n` +
 		(failure.output ? `\nOutput:\n${failure.output}\n` : "\n") +
 		`\nContinue working. Fix the failure, then produce terminal evidence. Timestamp: ${new Date(timestamp).toISOString()}.`

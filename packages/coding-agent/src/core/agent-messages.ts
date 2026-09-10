@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { HostRequestHandler } from "./kernel/index.js";
 import type { CustomMessage } from "./messages.js";
-import { ASYNC_BASH_COMPLETION_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE } from "./messages.js";
+import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	HEARTBEAT_PROMPT_CUSTOM_TYPE,
+	sanitizeMessageHeaderValue,
+} from "./messages.js";
 import { canonicalSessionPath } from "./session-lease.js";
 
 export const AGENT_MESSAGE_CUSTOM_TYPE = "agent_message";
@@ -83,20 +87,18 @@ export interface AgentFamilyCatalogEntry {
 	parentSessionId?: string;
 	parentSessionPath?: string;
 	sessionPath?: string;
+	cwd?: string;
+	rlmChildId?: string;
+	/** Set only for peers live in another worker; local rows read residency directly. */
+	activeSessionId?: string;
+	/** Persisted transcript facts; known only for entries read from disk. */
+	messageCount?: number;
+	firstMessage?: string;
 }
 
-export interface AgentFamilyRosterEntry {
+export interface AgentFamilyMember {
 	relationship: AgentFamilyRelationship;
-	name: string;
-	id: string;
-	depth: number;
-	status: AgentFamilyStatus;
-	repliedSinceTask?: boolean;
-}
-
-export interface AgentFamilyRosterResult {
-	current: { name: string; id: string; depth: number };
-	entries: AgentFamilyRosterEntry[];
+	entry: AgentFamilyCatalogEntry;
 }
 
 export interface AgentSessionNameScope {
@@ -157,7 +159,7 @@ export interface AgentSessionMessageSendInput {
 
 export interface AgentSessionMessageController {
 	listAgents(): AgentSessionMessageListResult | Promise<AgentSessionMessageListResult>;
-	roster?(): AgentFamilyRosterResult | Promise<AgentFamilyRosterResult>;
+	family?(): AgentFamilyMember[] | Promise<AgentFamilyMember[]>;
 	awaitPendingChildPublication?(selector: string): Promise<string | undefined>;
 	assertSessionNameAvailable?(input: AgentSessionNameAvailabilityInput): void | Promise<void>;
 	setSessionName?(name: string): void | Promise<void>;
@@ -214,40 +216,27 @@ export function assertAgentSessionNameAvailable(
 	}
 }
 
-export function buildAgentFamilyRoster(
+export function selectAgentFamily(
 	current: AgentFamilyCatalogEntry,
 	catalog: readonly AgentFamilyCatalogEntry[],
-): AgentFamilyRosterResult {
+): AgentFamilyMember[] {
 	const parent = catalog.find((entry) => isAgentFamilyParent(entry, current));
 	const siblings = catalog.filter(
 		(entry) =>
 			entry.id !== current.id && entry.depth === current.depth && sameAgentFamilyParent(entry, current, catalog),
 	);
 	const children = catalog.filter((entry) => entry.depth === current.depth + 1 && isAgentFamilyParent(current, entry));
-	const row = (relationship: AgentFamilyRelationship, entry: AgentFamilyCatalogEntry): AgentFamilyRosterEntry => ({
-		relationship,
-		name: entry.name ?? entry.id,
-		id: entry.id,
-		depth: entry.depth,
-		status: entry.status,
-		...(relationship === "child" && entry.repliedSinceTask !== undefined
-			? { repliedSinceTask: entry.repliedSinceTask }
-			: {}),
-	});
-	return {
-		current: {
-			name: current.name ?? current.id,
-			id: current.id,
-			depth: current.depth,
-		},
-		entries: [
-			...(parent ? [row("parent", parent)] : []),
-			...siblings
-				.sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id))
-				.map((entry) => row("sibling", entry)),
-			...children.sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id)).map((entry) => row("child", entry)),
-		],
-	};
+	const byName = (a: AgentFamilyCatalogEntry, b: AgentFamilyCatalogEntry) =>
+		agentFamilyMemberName(a).localeCompare(agentFamilyMemberName(b));
+	return [
+		...(parent ? [{ relationship: "parent" as const, entry: parent }] : []),
+		...siblings.sort(byName).map((entry) => ({ relationship: "sibling" as const, entry })),
+		...children.sort(byName).map((entry) => ({ relationship: "child" as const, entry })),
+	];
+}
+
+export function agentFamilyMemberName(entry: AgentFamilyCatalogEntry): string {
+	return entry.name ?? entry.id;
 }
 
 function sameAgentSessionNameParent(
@@ -365,6 +354,10 @@ export function assertAgentMessageQueueCapacity(
 	}
 }
 
+/**
+ * Parses the message id out of the pre-bracket-grammar header that persisted
+ * transcripts still contain; current prompts keep the id in details only.
+ */
 export function parseAgentSessionMessagePromptId(text: string): string | undefined {
 	const lines = text.split("\n");
 	const offset = lines[0]?.startsWith("[from ") ? 1 : 0;
@@ -387,22 +380,16 @@ export function isAgentSessionMessagePrompt(text: string): boolean {
 }
 
 export function createAgentSessionMessagePrompt(payload: AgentSessionMessagePayload): string {
-	const relationshipLabel = payload.fromRelationship
-		? `[from ${payload.fromRelationship}${payload.fromRelationship === "parent" ? "" : `:${formatAgentSessionMessageMetadata(payload.from?.sessionName ?? payload.from?.sessionId ?? payload.from?.activeSessionId ?? "unknown")}`}]`
-		: undefined;
-	const lines = [
-		...(relationshipLabel ? [relationshipLabel] : []),
-		"Agent-to-agent message received.",
-		`Source: ${payload.source}`,
-	];
-	if (payload.from) {
-		lines.push(`From: ${formatAgentSessionMessageSender(payload.from)}`);
-	}
-	lines.push(`To: ${formatAgentSessionMessageEndpoint(payload.target)}`);
-	lines.push(`Message id: ${payload.id}`);
-	lines.push("");
-	lines.push(payload.message);
-	return lines.join("\n");
+	const senderName =
+		sanitizeMessageHeaderValue(
+			payload.from?.sessionName ??
+				payload.from?.sessionId ??
+				payload.from?.activeSessionId ??
+				payload.from?.clientId ??
+				"unknown",
+		) || "unknown";
+	const sender = payload.fromRelationship ? `${payload.fromRelationship}:${senderName}` : senderName;
+	return `[agent-message from ${sender}]\n\n${payload.message}`;
 }
 
 export function createAgentSessionMessage(
@@ -535,12 +522,16 @@ export class AgentSessionMessageRateLimiter {
 }
 
 export function createAgentMessageHostHandlers(
-	controller: Pick<AgentSessionMessageController, "roster" | "sendAgentMessage" | "awaitPendingChildPublication">,
+	controller: Pick<AgentSessionMessageController, "sendAgentMessage" | "awaitPendingChildPublication"> & {
+		family(): Promise<AgentFamilyMember[]>;
+	},
 ): Record<string, HostRequestHandler> {
 	return {
 		"agent_message.list_agents": async () => {
-			if (!controller.roster) throw new Error("agent family roster is not available in this session");
-			return (await controller.roster()) as unknown as Record<string, unknown>;
+			throw new Error(
+				"agent_message.list_agents was removed; the family roster now lives in agent_observe.list_agents(). " +
+					"Restart the Python kernel to load the current skills, then call await agent_observe.list_agents().",
+			);
 		},
 		"agent_message.send": async (payload) => {
 			if (typeof payload.message !== "string") {
@@ -556,14 +547,13 @@ export function createAgentMessageHostHandlers(
 				if (payload.receiver_role !== undefined || payload.receiver_name !== undefined) {
 					throw new Error("agent_message.send broadcast cannot be combined with receiver_role/receiver_name");
 				}
-				if (!controller.roster) throw new Error("agent family roster is not available in this session");
-				const roster = await controller.roster();
+				const family = await controller.family();
 				const results = await Promise.allSettled(
-					roster.entries.map((entry) =>
+					family.map((member) =>
 						controller.sendAgentMessage({
-							target: entry.id,
+							target: member.entry.id,
 							message: payload.message as string,
-							receiverRole: entry.relationship,
+							receiverRole: member.relationship,
 						}),
 					),
 				);
@@ -571,7 +561,7 @@ export function createAgentMessageHostHandlers(
 					result.status === "fulfilled"
 						? result.value
 						: {
-								target: roster.entries[index]!.id,
+								target: family[index]!.entry.id,
 								error: result.reason instanceof Error ? result.reason.message : String(result.reason),
 							},
 				);
@@ -588,17 +578,18 @@ export function createAgentMessageHostHandlers(
 				if (role !== "parent" && (typeof receiverName !== "string" || !receiverName.trim())) {
 					throw new Error("agent_message.send receiver_name is required for sibling and child messages");
 				}
-				if (!controller.roster) throw new Error("agent family roster is not available in this session");
 				const selector = typeof receiverName === "string" ? receiverName.trim() : undefined;
 				const publishedId =
 					role === "child" && selector && controller.awaitPendingChildPublication
 						? await controller.awaitPendingChildPublication(selector)
 						: undefined;
-				const roster = await controller.roster();
-				const matches = roster.entries.filter(
-					(entry) =>
-						entry.relationship === role &&
-						(role === "parent" || entry.name === selector || entry.id === selector || entry.id === publishedId),
+				const matches = (await controller.family()).filter(
+					(member) =>
+						member.relationship === role &&
+						(role === "parent" ||
+							agentFamilyMemberName(member.entry) === selector ||
+							member.entry.id === selector ||
+							member.entry.id === publishedId),
 				);
 				if (matches.length !== 1) {
 					throw new Error(
@@ -607,7 +598,7 @@ export function createAgentMessageHostHandlers(
 							: `${role} selector ${JSON.stringify(receiverName)} is ambiguous`,
 					);
 				}
-				target = matches[0]!.id;
+				target = matches[0]!.entry.id;
 			}
 			return (await controller.sendAgentMessage({
 				target,
@@ -616,33 +607,4 @@ export function createAgentMessageHostHandlers(
 			})) as unknown as Record<string, unknown>;
 		},
 	};
-}
-
-function formatAgentSessionMessageMetadata(value: string): string {
-	return value.replace(/[\s,[\]]+/g, " ").trim();
-}
-
-function formatAgentSessionMessageSender(sender: AgentSessionMessageSender): string {
-	const parts: string[] = [];
-	if (sender.sessionName) {
-		const sessionName = formatAgentSessionMessageMetadata(sender.sessionName);
-		if (sessionName) {
-			parts.push(sessionName);
-		}
-	}
-	if (sender.activeSessionId) {
-		parts.push(`active ${formatAgentSessionMessageMetadata(sender.activeSessionId)}`);
-	}
-	if (sender.sessionId) {
-		parts.push(`session ${formatAgentSessionMessageMetadata(sender.sessionId)}`);
-	}
-	if (sender.clientId) {
-		parts.push(`client ${formatAgentSessionMessageMetadata(sender.clientId)}`);
-	}
-	return parts.length > 0 ? parts.join(", ") : "unknown sender";
-}
-
-function formatAgentSessionMessageEndpoint(endpoint: AgentSessionMessageEndpoint): string {
-	const name = endpoint.sessionName ? `${formatAgentSessionMessageMetadata(endpoint.sessionName)}, ` : "";
-	return `${name}active ${formatAgentSessionMessageMetadata(endpoint.activeSessionId)}, session ${formatAgentSessionMessageMetadata(endpoint.sessionId)}`;
 }

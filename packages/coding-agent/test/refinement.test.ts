@@ -1073,7 +1073,7 @@ describe("harness refinement", () => {
 		expect(state.entries.prompt.base_system_prompt).toBeUndefined();
 	});
 
-	it("requests JSON refinement without model reasoning even when session thinking is enabled", async () => {
+	it("requests JSON refinement with low reasoning when session thinking is enabled", async () => {
 		const state = loadHarnessState(makeTempDir());
 		completeSimpleMock.mockResolvedValueOnce(
 			assistantText(
@@ -1123,11 +1123,11 @@ describe("harness refinement", () => {
 		});
 		// Budget is derived from the model (8192) rather than a fixed literal.
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
+			reasoning: "low",
 			maxTokens: 8192,
 			apiKey: "api-key",
 			headers: { "x-test-header": "1" },
 		});
-		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
 		expect(result.appliedEdits[0]).toMatchObject({
 			action: "create",
 			kind: "memory",
@@ -1472,7 +1472,7 @@ describe("global refinement history", () => {
 		const userPrompt = request.messages[0].content[0].text;
 		expect(userPrompt).toContain("Requested refinement scope: local");
 		expect(userPrompt).toContain("Global entries in the overview are read-only context");
-		expect(request.systemPrompt).toContain('handle = await rlm("sub-task")');
+		expect(request.systemPrompt).toContain('handle = await rlm.spawn("sub-task", name="worker")');
 		expect(request.systemPrompt).toContain("never the child's answer");
 		expect(request.systemPrompt).toContain('receiver_role="parent"');
 		expect(request.systemPrompt).toContain("await rlm.list_subagents()");

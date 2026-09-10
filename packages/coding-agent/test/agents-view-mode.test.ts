@@ -816,6 +816,45 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("shows the recorded model on inactive saved sessions and keeps '-' without one", () => {
+		const saved = (id: string, model?: { provider: string; modelId: string }) => ({
+			path: `/tmp/${id}.jsonl`,
+			id,
+			cwd: "/tmp",
+			created: new Date("2026-01-01T00:00:00Z"),
+			modified: new Date("2026-01-01T00:00:00Z"),
+			messageCount: 1,
+			firstMessage: "hello",
+			allMessagesText: "hello",
+			...(model ? { model } : {}),
+		});
+		const records = reconcileUnifiedSessions(
+			[],
+			[saved("with-model", { provider: "prime-inference", modelId: "glm-4.7" }), saved("bare")],
+		);
+		const rows = buildAgentsViewRows(records);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		Reflect.set(view, "selectedIndex", -1);
+		try {
+			const render = (id: string) =>
+				stripAnsi(invoke("renderRow", view, rows.find((row) => row.summary.sessionId === id)!, 120) as string);
+			expect(render("with-model")).toContain("glm-4.7");
+			expect(render("bare")).toMatch(/\s-\s/);
+			expect(render("bare")).not.toContain("glm-4.7");
+			// The actions panel shows the same recorded model instead of "unknown".
+			Reflect.set(
+				view,
+				"selectedIndex",
+				rows.findIndex((row) => row.summary.sessionId === "with-model"),
+			);
+			const actions = (invoke("renderActions", view, 120) as string[]).map(stripAnsi).join("\n");
+			expect(actions).toContain("Model: prime-inference/glm-4.7");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("renders one column header across status groups without repeating subagent hints", () => {
 		const summaries = [
 			summary({

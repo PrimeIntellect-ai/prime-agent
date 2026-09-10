@@ -66,7 +66,10 @@ describe("AgentSession autonomous mode", () => {
 			"Which package manager should I use?",
 			"I inspected the repo and used npm.",
 		]);
-		expect(getUserTexts(harness)).toEqual(["fix the project", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"fix the project",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			continuationsUsed: 1,
@@ -88,7 +91,10 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("run the private eval");
 
-		expect(getUserTexts(harness)).toEqual(["run the private eval", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"run the private eval",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			continuationsUsed: 1,
@@ -112,7 +118,10 @@ describe("AgentSession autonomous mode", () => {
 			"Can you confirm the test command?",
 			"Can you confirm whether to run lint too?",
 		]);
-		expect(getUserTexts(harness)).toEqual(["make the change", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"make the change",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
@@ -160,6 +169,8 @@ describe("AgentSession autonomous mode", () => {
 			(message) => message.role === "custom" && message.customType === "autonomous_status",
 		);
 		expect(statusMessages).toHaveLength(2);
+		expect(getMessageText(statusMessages[0]).startsWith("[autonomous-status: on]\n\n")).toBe(true);
+		expect(getMessageText(statusMessages[1]).startsWith("[autonomous-status: off]\n\n")).toBe(true);
 	});
 
 	it("continues when the assistant tries to finish without terminal evidence", async () => {
@@ -171,7 +182,10 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("make the change");
 
-		expect(getUserTexts(harness)).toEqual(["make the change", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"make the change",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
@@ -198,7 +212,9 @@ describe("AgentSession autonomous mode", () => {
 		await harness.session.prompt("make the change");
 
 		expect(getUserTexts(harness)[0]).toBe("make the change");
-		expect(getUserTexts(harness).slice(1)).toContain(DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT);
+		expect(getUserTexts(harness).slice(1)).toContain(
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBeGreaterThan(0);
 	});
 
@@ -259,8 +275,9 @@ describe("AgentSession autonomous mode", () => {
 		await harness.session.prompt("make the change");
 
 		const users = getUserTexts(harness);
-		expect(users[1]).toContain("Autonomous quality gate failed");
-		expect(users[1]).toContain("gate failed");
+		expect(users[1].startsWith("[autonomous-continuation: gate-failed]\n\nAutonomous quality gate failed")).toBe(
+			true,
+		);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 

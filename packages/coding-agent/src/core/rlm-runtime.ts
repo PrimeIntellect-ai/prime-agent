@@ -5,7 +5,7 @@ import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 
-/** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
+/** Request emitted by `rlm.spawn`; cellSourceCode preserves the spawning cell for display. */
 export interface RlmRunRequest {
 	prompt: string;
 	kwargs: Record<string, unknown>;
@@ -81,7 +81,7 @@ const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
 
-export function normalizeRequestedRlmSubagentSessionName(value: unknown, operation = "rlm.run"): string | undefined {
+export function normalizeRequestedRlmSubagentSessionName(value: unknown, operation = "rlm.spawn"): string | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
@@ -100,7 +100,7 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown, operati
 
 export function normalizeRequestedRlmSubagentThinkingLevel(
 	value: unknown,
-	operation = "rlm.run",
+	operation = "rlm.spawn",
 ): ThinkingLevel | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -115,7 +115,7 @@ export function normalizeRequestedRlmSubagentThinkingLevel(
 	return level as ThinkingLevel;
 }
 
-export function normalizeRequestedRlmSubagentModel(value: unknown, operation = "rlm.run"): string | undefined {
+export function normalizeRequestedRlmSubagentModel(value: unknown, operation = "rlm.spawn"): string | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
@@ -201,7 +201,7 @@ export function createRlmCreateSessionHostHandler(handler: RlmCreateSessionHandl
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.prompt !== "string") {
-			throw new Error("rlm.run prompt must be a string");
+			throw new Error("rlm.spawn prompt must be a string");
 		}
 		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
 		const cellSourceCode = typeof payload.cellSourceCode === "string" ? payload.cellSourceCode : undefined;

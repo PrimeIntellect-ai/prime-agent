@@ -104,17 +104,17 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
 Normal interactive sessions are persistent agents backed by isolated worker processes. Closing the TUI detaches the client; use `prime-agent agents`, `prime-agent list`, or `prime-agent attach <agent>` to find and reattach to running work. `prime-agent stop <agent>` stops one root agent, while `prime-agent shutdown` stops all workers and the local supervisor.
 
-Within a session, the model can delegate through the `rlm` callable already available in the Python REPL:
+Within a session, the model can delegate through the `rlm` object already available in the Python REPL:
 
 ```python
 # Spawn independent children. Each call returns at admission with a child handle,
 # never the child's answer.
-review = await rlm(
+review = await rlm.spawn(
     "Review authentication and reply to the parent with findings.",
     name="auth-reviewer",
 )
-tests = await rlm("Find missing regression tests and reply to the parent.", name="test-reviewer")
-docs = await rlm("Find stale public documentation and reply to the parent.", name="docs-reviewer")
+tests = await rlm.spawn("Find missing regression tests and reply to the parent.", name="test-reviewer")
+docs = await rlm.spawn("Find stale public documentation and reply to the parent.", name="docs-reviewer")
 
 # Children reply from their own sessions with:
 # await agent_message.send(message, receiver_role="parent")
