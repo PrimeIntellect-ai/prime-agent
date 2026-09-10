@@ -259,9 +259,15 @@ describe("ConfigurationMenuComponent", () => {
 			expect(output).toContain("$2.75");
 			expect(output).not.toContain("$1.1525");
 			expect(output).not.toContain("$3");
-			// The unit rides on the provider/model line; the block ends with clear whitespace.
-			const headerLine = lines.find((line) => line.includes("USD / 1M tokens"));
-			expect(headerLine).toContain("faux/faux-1 · USD / 1M tokens");
+			// The header carries only the qualified model key; the unit trails the
+			// price row and the block ends with clear whitespace.
+			const headerLine = lines.find((line) => line.includes("faux/faux-1"));
+			expect(headerLine).toBeDefined();
+			expect(headerLine).not.toContain("dollars");
+			expect(output).not.toContain("USD / 1M tokens");
+			const unitLine = lines.find((line) => line.includes("dollars per 1 million tokens"));
+			expect(unitLine).toBeDefined();
+			expect(unitLine).toContain("Output");
 			const lastPriceRow = lines.findIndex((line) => line.includes("$2.75"));
 			expect(lastPriceRow).toBeGreaterThan(0);
 			expect(lines[lastPriceRow + 1]?.trim()).toBe("");

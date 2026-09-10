@@ -138,6 +138,9 @@ const MODEL_HELP_MIN_ROWS = 12;
 const MODEL_DETAIL_MIN_ROWS = 14;
 const EFFORT_NAME_COLUMN_MAX = 30;
 const EFFORT_NAME_COLUMN_MIN = 12;
+const PRICE_UNIT_TEXT = "dollars per 1 million tokens";
+/** Wide detail columns must still fit the longest label, "Cached input". */
+const PRICE_COLUMN_MIN_WIDTH = 13;
 
 interface EffortLayout {
 	nameColumn: number;
@@ -837,9 +840,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			["Cached input", price(item.model.cost?.cacheRead)],
 			["Output", price(item.model.cost?.output)],
 		];
-		const lines = ["", theme.fg("muted", `${item.provider}/${item.id} · USD / 1M tokens`)];
+		const unit = theme.fg("muted", PRICE_UNIT_TEXT);
+		const lines = ["", theme.fg("muted", `${item.provider}/${item.id}`)];
 		if (width >= 58) {
-			const columnWidth = Math.floor((width - 2) / 3);
+			// Shrink the columns so the unit can trail the Output column.
+			const columnWidth = Math.max(
+				PRICE_COLUMN_MIN_WIDTH,
+				Math.floor((width - 2 - (visibleWidth(PRICE_UNIT_TEXT) + 1)) / 3),
+			);
 			const row = (index: number) =>
 				entries
 					.map((entry) => {
@@ -847,9 +855,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 						return text + " ".repeat(Math.max(0, columnWidth - visibleWidth(text)));
 					})
 					.join("");
-			lines.push(theme.fg("muted", row(0)), row(1));
+			lines.push(`${theme.fg("muted", row(0))} ${unit}`, row(1));
 		} else {
-			lines.push(...entries.map(([label, value]) => `${theme.fg("muted", `${label}:`)} ${value}`));
+			lines.push(
+				...entries.map(([label, value], index) => {
+					const suffix = index === entries.length - 1 ? ` ${unit}` : "";
+					return `${theme.fg("muted", `${label}:`)} ${value}${suffix}`;
+				}),
+			);
 		}
 		lines.push("");
 		return lines.map((line) => truncateToWidth(` ${line}`, width, "…", true));
