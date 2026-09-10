@@ -263,9 +263,9 @@ describe("ConfigurationMenuComponent", () => {
 			// price row and the block ends with clear whitespace.
 			const headerLine = lines.find((line) => line.includes("faux/faux-1"));
 			expect(headerLine).toBeDefined();
-			expect(headerLine).not.toContain("dollars");
+			expect(headerLine).not.toContain("$ / 1M tokens");
 			expect(output).not.toContain("USD / 1M tokens");
-			const unitLine = lines.find((line) => line.includes("dollars per 1 million tokens"));
+			const unitLine = lines.find((line) => line.includes("$ / 1M tokens"));
 			expect(unitLine).toBeDefined();
 			expect(unitLine).toContain("Output");
 			const lastPriceRow = lines.findIndex((line) => line.includes("$2.75"));
