@@ -967,7 +967,7 @@ export class InteractiveMode {
 	private contextUsageTokenBaseline = 0;
 	// Refresh ordering: a stale failure must never clobber a newer success.
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
-	private readonly defaultHiddenThinkingLabel = "Thinking...";
+	private readonly defaultHiddenThinkingLabel = "Thinking:";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private ctrlCExitHintExpiresAt = 0;
