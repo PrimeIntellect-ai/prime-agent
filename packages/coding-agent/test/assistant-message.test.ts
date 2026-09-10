@@ -102,7 +102,7 @@ describe("AssistantMessageComponent", () => {
 		const rendered = stripAnsi(component.render(100).join("\n"));
 
 		expect(rendered).toContain("/tmp/internal.py");
-		expect(rendered).not.toContain("Ctrl+O cycle detail");
+		expect(rendered).not.toContain("Ctrl+O");
 	});
 
 	test("renders auth recovery guidance inline for simple provider errors", () => {
@@ -118,7 +118,7 @@ describe("AssistantMessageComponent", () => {
 		const rendered = stripAnsi(raw);
 
 		expect(rendered).toContain("Error: 401 status code (no body) · Run /login to update credentials.");
-		expect(rendered).not.toContain("Ctrl+O cycle detail");
+		expect(rendered).not.toContain("Ctrl+O");
 		expect(raw).toContain(theme.getFgAnsi("error"));
 	});
 
@@ -140,7 +140,7 @@ describe("AssistantMessageComponent", () => {
 		const rendered = stripAnsi(raw);
 
 		expect(rendered).toContain("Error: Provider request failed");
-		expect(rendered).toContain("cycle detail");
+		expect(rendered).not.toContain("cycle detail");
 		expect(raw).toContain(theme.getFgAnsi("error"));
 	});
 });
@@ -242,16 +242,37 @@ describe("AssistantMessageComponent streaming identity", () => {
 		expect(hidden).not.toContain("Some detail");
 		expect(hiddenRaw).not.toContain(theme.getFgAnsi("thinkingText"));
 
-		// Revealed: the label row with the detail cycle hint, then the dim trace.
+		// Revealed thinking renders only the dim trace.
 		const revealedRaw = new AssistantMessageComponent(message, false).render(120).join("\n");
 		const revealed = stripAnsi(revealedRaw);
-		expect(revealed).toContain("Thinking: (Ctrl+O cycle detail)");
+		expect(revealed).not.toContain("Thinking:");
+		expect(revealed).not.toContain("Ctrl+O");
 		expect(revealed).toContain("Some detail about the options.");
-		expect(revealedRaw).toContain(theme.getFgAnsi("thinkingText"));
+		expect(revealedRaw).not.toContain(theme.getFgAnsi("thinkingText"));
 		expect(revealedRaw).toContain(theme.getFgAnsi("dim"));
-		const labelLine = revealedRaw.split("\n").find((line) => line.includes("Thinking:"));
-		expect(labelLine).toBeDefined();
-		expect(labelLine).not.toContain("\x1b[1m");
+		const traceLine = revealedRaw.split("\n").find((line) => line.includes("Some detail about the options."));
+		expect(traceLine).toBeDefined();
+		expect(traceLine).toContain(theme.getFgAnsi("dim"));
+		expect(traceLine).not.toContain("\x1b[1m");
+	});
+
+	test("separates consecutive thinking blocks and the answer without header rows", () => {
+		initTheme("dark");
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "First trace." },
+			{ type: "thinking", thinking: "Second trace." },
+			{ type: "text", text: "Answer." },
+		]);
+		const component = new AssistantMessageComponent(message, false, undefined, "Custom thinking header");
+		const render = () => component.render(80).map((line) => stripAnsi(line).trim());
+
+		expect(render()).toEqual(["", "First trace.", "", "Second trace.", "", "Answer."]);
+		component.setHiddenThinkingLabel("Updated thinking header");
+		expect(render()).toEqual(["", "First trace.", "", "Second trace.", "", "Answer."]);
+		component.setHideThinkingBlock(true);
+		expect(render()).toEqual(["", "Answer."]);
+		component.setHideThinkingBlock(false);
+		expect(render()).toEqual(["", "First trace.", "", "Second trace.", "", "Answer."]);
 	});
 
 	test("a thinking-only message renders nothing while hidden", () => {
@@ -272,7 +293,8 @@ describe("AssistantMessageComponent streaming identity", () => {
 
 		component.setHideThinkingBlock(false);
 		const revealed = stripAnsi(component.render(120).join("\n"));
-		expect(revealed).toContain("Thinking: (Ctrl+O cycle detail)");
+		expect(revealed).not.toContain("Thinking:");
+		expect(revealed).not.toContain("Ctrl+O");
 		expect(revealed).toContain("Trace.");
 
 		component.setHideThinkingBlock(true);
@@ -340,7 +362,7 @@ describe("AssistantMessageComponent body text color", () => {
 		expect(raw).toContain(theme.getFgAnsi("mdBody"));
 	});
 
-	test("renders the thinking trace dimmer than the label, never mdBody", () => {
+	test("renders the thinking trace in its existing dim color without a header", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 
@@ -349,7 +371,7 @@ describe("AssistantMessageComponent body text color", () => {
 
 		expect(stripAnsi(raw)).toContain("Quiet reasoning.");
 		expect(raw).toContain(theme.getFgAnsi("dim"));
-		expect(raw).toContain(theme.getFgAnsi("thinkingText"));
+		expect(raw).not.toContain(theme.getFgAnsi("thinkingText"));
 		expect(raw).not.toContain(theme.getFgAnsi("mdBody"));
 	});
 

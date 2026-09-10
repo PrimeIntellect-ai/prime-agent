@@ -82,7 +82,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(collapsed).toContain("[refinement]");
 		expect(collapsed).toContain("Added local guidance to make conversational responses rhyme.");
 		expect(collapsed).toContain("1 edit applied");
-		expect(collapsed).toContain("Ctrl+O cycle detail");
+		expect(collapsed).not.toContain("Ctrl+O");
 		expect(collapsed).not.toContain("Created local prompt");
 		expect(collapsed).not.toContain('Make conversational responses rhyme."');
 
@@ -104,7 +104,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(content).toHaveLength(2);
 		expect(content[1]).toContain("…");
 		expect(content[1]).toContain("1 edit applied");
-		expect(content[1]).toContain("Ctrl+O cycle detail");
+		expect(content[1]).not.toContain("Ctrl+O");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		}

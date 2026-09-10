@@ -4,11 +4,7 @@ import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
-import {
-	countChangedLines,
-	FILE_CHANGE_DIFF_INDENT,
-	formatFileChangeSummaryLine,
-} from "../../modes/interactive/components/edit-summary.js";
+import { countChangedLines, formatFileChangeSummaryLine } from "../../modes/interactive/components/edit-summary.js";
 import type { ToolDefinition } from "../extensions/types.js";
 import {
 	applyEditsToNormalizedContent,
@@ -249,8 +245,7 @@ function getEditHeaderBg(
 	return (text: string) => theme.bg("toolPendingBg", text);
 }
 
-// Width-aware `╰─ <path> +N -M` summary plus optional indented diff rows: the
-// summary truncates to one row and wrapped diff lines keep the indent column.
+// Width-aware file summary with optional diff rows at the containing box's content margin.
 class EditChangeSummaryComponent implements Component {
 	constructor(
 		private readonly rawPath: string,
@@ -264,11 +259,9 @@ class EditChangeSummaryComponent implements Component {
 		const safeWidth = Math.max(1, width);
 		const lines = [formatFileChangeSummaryLine(this.rawPath, this.cwd, this.change, this.diffsExpanded, safeWidth)];
 		if (this.diffLines !== undefined) {
-			const indent = FILE_CHANGE_DIFF_INDENT.slice(0, Math.max(0, safeWidth - 1));
-			const contentWidth = Math.max(1, safeWidth - indent.length);
 			for (const line of this.diffLines) {
-				for (const row of wrapTextWithAnsi(line, contentWidth)) {
-					lines.push(`${indent}${row}`);
+				for (const row of wrapTextWithAnsi(line, safeWidth)) {
+					lines.push(row);
 				}
 			}
 		}
@@ -299,8 +292,7 @@ function buildEditCallComponent(
 		return component;
 	}
 
-	// The `╰─ <path> +N -M` summary line renders in both states; ctrl+j only
-	// attaches or removes the indented diff lines underneath it.
+	// Keep the file summary visible while detail expansion reveals the diff.
 	const rawPath = str(args?.file_path ?? args?.path);
 	const change = countChangedLines(component.preview.diff);
 	component.addChild(new Spacer(1));
@@ -309,9 +301,6 @@ function buildEditCallComponent(
 			rawPath ?? "...",
 			cwd,
 			change,
-			// The ctrl+j hint renders on every edit summary row (unlike the ctrl+o
-			// hint, which the latest tool row owns), matching thinking and
-			// agent-message hints.
 			expanded,
 			expanded ? renderDiff(component.preview.diff).split("\n") : undefined,
 		),

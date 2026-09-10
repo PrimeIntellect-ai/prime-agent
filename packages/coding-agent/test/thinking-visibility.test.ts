@@ -20,7 +20,8 @@ describe("thinking visibility", () => {
 		expect(render()).toContain("Answer.");
 		expect(render()).not.toContain("Trace one.");
 		component.setHideThinkingBlock(false);
-		expect(render()).toContain("Thinking: (Ctrl+O cycle detail)");
+		expect(render()).not.toContain("Thinking:");
+		expect(render()).not.toContain("Ctrl+O");
 		expect(render()).toContain("Trace one.");
 		component.setHideThinkingBlock(true);
 		expect(render()).not.toContain("Trace one.");

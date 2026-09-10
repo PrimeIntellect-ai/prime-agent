@@ -132,7 +132,7 @@ describe("#2068 shell message steering", () => {
 				.render(120)
 				.join("\n")
 				.replace(/\u001b\[[0-9;]*m/g, "");
-		expect(render()).toContain("◆ Shell message received · pid 42 · exit 0");
+		expect(render()).toContain("✓ Background shell command finished");
 		expect(render()).not.toMatch(/Follow-up:|Steering:|Agent message received/);
 		component.setExpanded(true);
 		expect(render()).toContain("Source: bash");
