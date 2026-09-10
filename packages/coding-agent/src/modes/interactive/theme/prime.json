@@ -57,7 +57,7 @@
 		"mdHeading": "primarySoft",
 		"mdLink": "info",
 		"mdLinkUrl": "dim",
-		"mdCode": "neutral",
+		"mdCode": "#c8c8cd",
 		"mdCodeBlock": "stringMint",
 		"mdCodeBlockBorder": "grid",
 		"mdQuote": "muted",
