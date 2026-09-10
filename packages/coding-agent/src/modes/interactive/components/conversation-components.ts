@@ -110,6 +110,10 @@ export function buildConversationComponents(
 				),
 			);
 			for (const content of message.content) {
+				if (content.type === "text" && content.text.trim().length > 0) {
+					grouper.noteAssistantText();
+					continue;
+				}
 				if (content.type !== "toolCall") {
 					continue;
 				}
@@ -138,8 +142,7 @@ export function buildConversationComponents(
 					pendingTools.set(content.id, tool);
 				}
 			}
-			// A turn-ending reply closes the open run segment; mid-run notes
-			// and thinking never do.
+			// A turn-ending reply closes the open run segment.
 			if (message.stopReason !== "toolUse") {
 				grouper.close();
 			}

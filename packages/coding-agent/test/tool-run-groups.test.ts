@@ -90,7 +90,9 @@ async function deliverStreamingMessage(feed: StreamingFeed, message: AgentMessag
 		for (let end = 1; end <= message.content.length; end++) {
 			const partial: AssistantMessage = { ...message, content: message.content.slice(0, end) };
 			for (const content of partial.content) {
-				if (content.type === "toolCall" && !feed.tools.has(content.id)) {
+				if (content.type === "text" && content.text.trim().length > 0) {
+					feed.grouper.noteAssistantText();
+				} else if (content.type === "toolCall" && !feed.tools.has(content.id)) {
 					const component = new ToolExecutionComponent(
 						content.name,
 						content.id,
@@ -232,7 +234,7 @@ describe("tool run groups", () => {
 		expect(streamedGroup.getToolComponents()).toHaveLength(reloadedGroup.getToolComponents().length);
 	});
 
-	it("groups cells across the model's mid-run notes and thinking", () => {
+	it("splits segments at text output and crosses past thinking-only messages", () => {
 		const messages: AgentMessage[] = [
 			userMessage,
 			fauxAssistantMessage(
@@ -263,13 +265,19 @@ describe("tool run groups", () => {
 
 		const components = reloadBuild(messages);
 		const groups = groupsOf(components);
-		expect(groups).toHaveLength(1);
-		expect(render(groups[0])).toContain("Ran 3 Python cells");
-		// The notes still render as assistant text between the rows.
-		expect(components.some((component) => render(component).includes("A spinning torus."))).toBe(true);
+		// Text output between tool calls starts a fresh segment; the
+		// thinking-only follow-up never breaks one.
+		expect(groups).toHaveLength(2);
+		expect(render(groups[0])).toContain("Ran 1 Python cell");
+		expect(render(groups[1])).toContain("Ran 2 Python cells");
+		// The notes render as assistant text, each above the group it precedes.
+		const noteIndex = components.findIndex((component) => render(component).includes("A spinning torus."));
+		expect(noteIndex).toBeGreaterThan(-1);
+		expect(components.indexOf(groups[0])).toBeLessThan(noteIndex);
+		expect(noteIndex).toBeLessThan(components.indexOf(groups[1]));
 	});
 
-	it("resets the segment only when the model sends a text answer", () => {
+	it("resets the segment at the model's text output", () => {
 		const messages: AgentMessage[] = [
 			userMessage,
 			fauxAssistantMessage(fauxToolCall("ipython", { code: "a = 1" }, { id: "cell-a" }), {
@@ -291,6 +299,77 @@ describe("tool run groups", () => {
 		expect(groups).toHaveLength(2);
 		expect(render(groups[0])).toContain("Ran 2 Python cells");
 		expect(render(groups[1])).toContain("Ran 1 Python cell");
+	});
+
+	it("renders every cell in interleaved text runs with single blank separators", async () => {
+		const messages: AgentMessage[] = [
+			userMessage,
+			fauxAssistantMessage(
+				[
+					fauxThinking("Planning."),
+					fauxText("The worker flagged a concern — verifying now:"),
+					fauxToolCall("ipython", { code: "x = 1" }, { id: "cell-a" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			createToolResult("cell-a", "ipython", "ok"),
+			fauxAssistantMessage(
+				[
+					fauxThinking("Digging deeper."),
+					fauxText("Found it — cleaning the environment:"),
+					fauxToolCall("ipython", { code: "y = 2" }, { id: "cell-b" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			createToolResult("cell-b", "ipython", "ok"),
+			fauxAssistantMessage(
+				[fauxThinking("One more check."), fauxToolCall("ipython", { code: "z = 3" }, { id: "cell-c" })],
+				{ stopReason: "toolUse" },
+			),
+			createToolResult("cell-c", "ipython", "ok"),
+			fauxAssistantMessage("All clean — 214/214 verified.", { stopReason: "stop" }),
+		];
+
+		const components = reloadBuild(messages);
+		const groups = groupsOf(components);
+		// Each narration text starts a fresh segment; the thinking-only
+		// follow-up joins the open group.
+		expect(groups).toHaveLength(2);
+		expect(render(groups[0])).toContain("Ran 1 Python cell");
+		expect(render(groups[1])).toContain("Ran 2 Python cells");
+		// Every cell renders — no swallowed rows.
+		const renderedCells = [render(groups[0]), render(groups[1])].join("\n");
+		for (const code of ["x = 1", "y = 2", "z = 3"]) {
+			expect(renderedCells).toContain(code);
+		}
+		// Chronology: each narration text renders above the group it precedes,
+		// and the final answer renders after the last group.
+		const indexOfText = (needle: string): number =>
+			components.findIndex((component) => render(component).includes(needle));
+		expect(indexOfText("verifying now:")).toBeLessThan(components.indexOf(groups[0]));
+		expect(indexOfText("cleaning the environment")).toBeGreaterThan(components.indexOf(groups[0]));
+		expect(indexOfText("cleaning the environment")).toBeLessThan(components.indexOf(groups[1]));
+		expect(indexOfText("214/214 verified")).toBeGreaterThan(components.indexOf(groups[1]));
+		// Spacing: exactly one blank line between the rendered blocks around
+		// each group (empty-rendering hidden-thinking messages contribute no
+		// lines, matching the chat container).
+		const lines = components
+			.map((component) => render(component))
+			.filter((text) => text.length > 0)
+			.join("\n")
+			.split("\n");
+		const groupHeader = lines.findIndex((line) => line.includes("Ran 1 Python cell"));
+		expect(lines[groupHeader - 1]).toBe("");
+		expect(lines[groupHeader - 2].trim()).toContain("verifying now:");
+		const answerLine = lines.findIndex((line) => line.includes("214/214 verified"));
+		expect(lines[answerLine - 1]).toBe("");
+		expect(lines[answerLine - 2].trim()).toContain("z = 3");
+		// The streaming derivation groups identically for the same shape.
+		const feed = await streamFeed(messages);
+		const streamedGroups = groupsOf(feed.components);
+		expect(streamedGroups).toHaveLength(2);
+		expect(render(streamedGroups[0])).toBe(render(groups[0]));
+		expect(render(streamedGroups[1])).toBe(render(groups[1]));
 	});
 
 	it("combines both types in one group header", () => {

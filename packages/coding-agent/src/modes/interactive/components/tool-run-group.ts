@@ -141,13 +141,19 @@ export type ToolRunGroupMount = (component: Component) => void;
  * Derives "Running N ..." groups from the conversation's message sequence.
  * Both the streaming path and the reload path feed the same block-ordered
  * events — tool call mounts, other conversation rows, and segment boundaries —
- * so live and reloaded transcripts group identically. Assistant text and
- * thinking blocks never break a run; only a turn-ending reply does.
+ * so live and reloaded transcripts group identically. Assistant text output
+ * tokens end the open run segment so the cells that follow start a fresh
+ * "Ran N ..." block; thinking-only messages never break a run.
  */
 export class ToolRunGrouper {
 	private openGroup: ToolRunGroupComponent | undefined;
 
 	constructor(private readonly mount: ToolRunGroupMount) {}
+
+	/** A non-empty assistant text block arrived: the open run segment ends. */
+	noteAssistantText(): void {
+		this.openGroup = undefined;
+	}
 
 	/** A non-tool conversation row arrived: the open run segment ends. */
 	noteConversationRow(): void {
