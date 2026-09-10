@@ -446,6 +446,7 @@ export interface BrandSplashMetadataLine {
 export interface BrandSplashHeaderOptions {
 	logo?: string;
 	topPadding?: boolean;
+	getModelId?: () => string | undefined;
 	getExtraMetadata?: () => readonly BrandSplashMetadataLine[];
 }
 
@@ -478,9 +479,21 @@ export class BrandSplashHeader implements Component {
 		const version = theme.fg("muted", `v${this.version}`);
 		const titleText = "prime agent";
 		const title = theme.fg("text", titleText);
+		const modelLabel = "model ";
 		const cwdLabel = "cwd ";
 		const metaLines = [
 			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
+			...(this.options.getModelId
+				? [
+						`${theme.fg("dim", modelLabel)}${theme.fg(
+							"muted",
+							truncateToWidth(
+								this.options.getModelId() ?? "—",
+								Math.max(1, metaWidth - visibleWidth(modelLabel)),
+							),
+						)}`,
+					]
+				: []),
 			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
 			`${theme.fg("dim", cwdLabel)}${theme.fg("muted", truncatePathMiddle(formatSplashCwd(this.getCwd()), Math.max(1, metaWidth - visibleWidth(cwdLabel))))}`,
 		];
@@ -1453,6 +1466,7 @@ export class InteractiveMode {
 				: undefined;
 			this.builtInHeader = new BrandSplashHeader(this.version, () => this.getCurrentCwd(), verboseInstructions, {
 				topPadding: true,
+				getModelId: () => this.getCurrentModelId(),
 			});
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
@@ -2760,6 +2774,10 @@ export class InteractiveMode {
 
 	private getCurrentModel(): AgentConnectionModel | undefined {
 		return this.connectionState?.model;
+	}
+
+	private getCurrentModelId(): string | undefined {
+		return this.getCurrentModel()?.id;
 	}
 
 	private isAgentStreaming(): boolean {

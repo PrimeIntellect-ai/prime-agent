@@ -50,11 +50,37 @@ describe("InteractiveMode startup hints", () => {
 		expect(output).toMatch(/[▗▙▛▜]/u);
 		expect(stripAnsi(lines[4])).toContain("agents 2 running");
 		expect(stripAnsi(lines[5])).toContain("cwd /tmp/project");
+		expect(output).not.toContain("model ");
 		expect(output).not.toContain("Try ");
 		expect(output).not.toContain("type to search sessions");
 
 		const unpadded = new BrandSplashHeader("0.0.0", () => "/tmp/project");
 		expect(unpadded.render(120)[0]).not.toBe("");
+	});
+
+	it("renders the model line in the chat splash without effort metadata", () => {
+		let modelId: string | undefined = "first-model";
+		const header = new BrandSplashHeader("0.0.0", () => "/tmp/project", undefined, {
+			topPadding: true,
+			getModelId: () => modelId,
+		});
+
+		const lines = header.render(120);
+		const output = stripAnsi(lines.join("\n"));
+
+		expect(output).toContain("prime agent v0.0.0");
+		expect(stripAnsi(lines[3])).toContain("prime agent v0.0.0");
+		expect(stripAnsi(lines[4])).toContain("model first-model");
+		expect(stripAnsi(lines[5])).toContain("cwd /tmp/project");
+		expect(output).not.toContain("•");
+
+		modelId = "second-model";
+		const updated = stripAnsi(header.render(120).join("\n"));
+		expect(updated).toContain("model second-model");
+		expect(updated).not.toContain("first-model");
+
+		modelId = undefined;
+		expect(stripAnsi(header.render(120).join("\n"))).toContain("model —");
 	});
 
 	it("keeps metadata visible in narrow terminals and bounds every rendered row", () => {
