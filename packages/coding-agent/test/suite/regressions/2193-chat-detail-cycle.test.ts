@@ -91,7 +91,7 @@ function assertMode(mode: ModeControls, detail: "overview" | "details" | "all"):
 	expect(text.includes("NEW_FILE_CONTENT")).toBe(detail !== "overview");
 	expect(text.includes("FULL_TOOL_OUTPUT")).toBe(detail === "all");
 	expect(text.includes("AGENT_MESSAGE_BODY")).toBe(detail === "all");
-	expect(text.includes("Agent message received")).toBe(detail === "all");
+	expect(text).toContain("Agent message received");
 }
 describe("conversation detail cycle", () => {
 	test("cycles a reopened saved chat without changing messages or JSONL", async () => {
@@ -187,7 +187,7 @@ describe("conversation detail cycle", () => {
 		cycle(mode);
 		expect(render(mode)).toContain("LATER_THINKING");
 	});
-	test("applies all-output-only agent messages to newly arriving live events", async () => {
+	test("keeps live agent notices visible while only all output reveals bodies", async () => {
 		harness = await createHarness();
 		const mode = createMode(harness);
 		const message = createAgentSessionMessage({
@@ -200,9 +200,9 @@ describe("conversation detail cycle", () => {
 		});
 		await mode.handleEvent({ type: "message_start", message });
 		expect(render(mode)).not.toContain("LIVE_AGENT_BODY");
-		expect(render(mode)).not.toContain("Agent message received");
+		expect(render(mode)).toContain("Agent message received");
 		cycle(mode);
-		expect(render(mode)).not.toContain("Agent message received");
+		expect(render(mode)).toContain("Agent message received");
 		cycle(mode);
 		expect(render(mode)).toContain("LIVE_AGENT_BODY");
 		await mode.handleEvent({
@@ -213,7 +213,9 @@ describe("conversation detail cycle", () => {
 		mode.defaultEditor.handleInput("\x10");
 		expect(render(mode)).toContain("LATER_AGENT_BODY");
 		cycle(mode);
-		expect(render(mode)).not.toContain("Agent message received");
+		expect(render(mode)).toContain("Agent message received");
+		expect(render(mode)).not.toContain("LIVE_AGENT_BODY");
+		expect(render(mode)).not.toContain("LATER_AGENT_BODY");
 	});
 
 	test("cycles finished side-pane and pending main-chat bash output", async () => {

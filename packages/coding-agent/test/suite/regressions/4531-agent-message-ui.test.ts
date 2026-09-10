@@ -345,7 +345,7 @@ describe("ENG-4531 agent message UI", () => {
 		expect(render(components[0] as AgentMessageComponent)).toContain("Agent message received · from parent Planner");
 	});
 
-	it("uses compact rebuilt spacing for agent messages next to messages and tool cells", () => {
+	it.each([false, true])("uses compact rebuilt agent-message spacing with all output=%s", (expanded) => {
 		const first = createAgentSessionMessage(createPayload("First notification."));
 		const second = createAgentSessionMessage({ ...createPayload("Second notification."), id: "agentmsg_4531_2" });
 		const toolCall = fauxAssistantMessage(fauxToolCall("ipython", { code: "print('ready')" }), {
@@ -355,7 +355,7 @@ describe("ENG-4531 agent message UI", () => {
 			ui: { requestRender: () => {} } as unknown as TUI,
 			cwd: "/tmp",
 			toolOptions: {},
-			toolsExpanded: true,
+			toolsExpanded: expanded,
 			getToolDefinition: () => undefined,
 		};
 
@@ -384,11 +384,11 @@ describe("ENG-4531 agent message UI", () => {
 		expect(assistantThenMessage[1]?.render(120)[0]).toBe("");
 	});
 
-	it("suppresses live spacing between agent messages and following tool activity", () => {
+	it.each([false, true])("uses compact live agent-message spacing with all output=%s", (expanded) => {
 		const chatContainer = new Container();
 		const mode = {
 			chatContainer,
-			toolOutputExpanded: true,
+			toolOutputExpanded: expanded,
 			getCurrentCwd: () => "/tmp",
 			getMarkdownThemeWithSettings: () => undefined,
 		};
@@ -412,7 +412,7 @@ describe("ENG-4531 agent message UI", () => {
 				ui: { requestRender: () => {} } as unknown as TUI,
 				cwd: "/tmp",
 				toolOptions: {},
-				toolsExpanded: true,
+				toolsExpanded: expanded,
 				getToolDefinition: () => undefined,
 			},
 		);
@@ -476,10 +476,13 @@ describe("ENG-4531 agent message UI", () => {
 		expect(render(expanded)).toContain("Agent message received · from sibling Peer");
 	});
 
-	it("hides received messages until all output and restores the multiline body", () => {
+	it("keeps the received notice compact and reveals its multiline body only in all output", () => {
 		const body = "Reply to your parent with exactly: hi\nThen wait for more work.";
 		const component = new AgentMessageComponent(createAgentSessionMessage(createPayload(body)));
-		expect(component.render(120)).toEqual([]);
+		expect(component.render(120).map((line) => stripAnsi(line).trimEnd())).toEqual([
+			"",
+			" ◆ Agent message received · from Planner",
+		]);
 
 		component.setExpanded(true);
 		const expanded = render(component);
@@ -635,7 +638,7 @@ describe("ENG-4531 agent message UI", () => {
 		expect(rendered).toContain("done");
 	});
 
-	it("shows sent messages only with all tool output", () => {
+	it("keeps sent notices compact until all output reveals their bodies", () => {
 		const sentAgentMessage = {
 			id: "agentmsg_4531_decoupled",
 			message: "Decouple me.",
@@ -655,7 +658,8 @@ describe("ENG-4531 agent message UI", () => {
 		};
 
 		const collapsed = stripAnsi(new IPythonCellComponent({ ...baseState, expanded: false }).render(120).join("\n"));
-		expect(collapsed).not.toContain("Agent message sent");
+		expect(collapsed).toContain("◆ Agent message sent · to parent Worker");
+		expect(collapsed.split("\n")).toHaveLength(2);
 		expect(collapsed).not.toContain("╰─ Decouple me.");
 
 		const toolExpanded = stripAnsi(new IPythonCellComponent({ ...baseState, expanded: true }).render(120).join("\n"));

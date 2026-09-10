@@ -6,7 +6,7 @@
 - Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
 - Changed the conversation row hierarchy: event-row trailing detail (agent-message participants, tool command previews, line counts, durations) renders dim while leading labels keep their colors.
 - Changed background shell completions to update identifiable command rows, with compact fallback notices and full notifications retained in all output.
-- Replaced repeated conversation detail shortcut hints with a bottom-right label showing the current detail mode and configurable expand or collapse shortcut.
+- Replaced repeated conversation detail shortcut hints with a status label showing the current detail mode and configurable expand or collapse shortcut.
 - Changed expanded file diffs to start at the normal chat inset while preserving code indentation and diff gutters.
-- Changed sent and received agent messages to appear only in all output and removed their separate Ctrl+P toggle.
+- Changed sent and received agent messages to keep compact notices in overview and details, show full bodies only in all output, and use the shared detail cycle instead of a separate Ctrl+P toggle.
 - Fixed spacing after background shell completions and matched unique literal assignment-only shell launches to their completion notices.

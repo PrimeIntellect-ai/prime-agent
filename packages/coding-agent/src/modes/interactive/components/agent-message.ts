@@ -60,7 +60,6 @@ export class AgentMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (!this.expanded) return [];
 		const lines = super.render(width);
 		return this.suppressLeadingSpace ? lines : ["", ...lines];
 	}
