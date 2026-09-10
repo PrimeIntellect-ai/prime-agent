@@ -38,9 +38,11 @@ import { parseGoalSlashCommand } from "../goals/commands.js";
 import { GoalController } from "../goals/controller.js";
 import { createGoalPersistence } from "../goals/persistence.js";
 import { theme } from "../modes/interactive/theme/theme.js";
+import { SessionCommitFence, type SessionCommitLease } from "../session/commit-fence.js";
 import { SessionInputScheduler } from "../session/input-scheduler.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
+import { waitForPromiseOrAbort } from "../utils/wait-for-abort.js";
 import {
 	AGENT_MESSAGE_CUSTOM_TYPE,
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
@@ -1036,35 +1038,6 @@ function readAssistantText(message: AssistantMessage): string {
 		.join("");
 }
 
-function waitForPromiseOrAbort<T>(
-	promise: Promise<T>,
-	signal: AbortSignal | undefined,
-	abortMessage: string,
-): Promise<T> {
-	if (!signal) return promise;
-	if (signal.aborted) return Promise.reject(new Error(abortMessage));
-	return new Promise<T>((resolve, reject) => {
-		const onAbort = () => {
-			cleanup();
-			reject(new Error(abortMessage));
-		};
-		const cleanup = () => signal.removeEventListener("abort", onAbort);
-		signal.addEventListener("abort", onAbort, { once: true });
-		// Close the listener-registration race before observing the awaited work.
-		if (signal.aborted) return onAbort();
-		promise.then(
-			(value) => {
-				cleanup();
-				resolve(value);
-			},
-			(error: unknown) => {
-				cleanup();
-				reject(error);
-			},
-		);
-	});
-}
-
 // Bounds how much accumulated child usage a parent process crash can lose.
 const RLM_CHILD_USAGE_FLUSH_MAX_PENDING_MS = 60_000;
 
@@ -1124,11 +1097,7 @@ export class AgentSession {
 	});
 	private _sessionInputArrivalEpoch = 0;
 	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
-	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
-	private _sessionActionCommitOwner: symbol | undefined;
-	private _pendingSessionActionFenceWaiters = 0;
-	private readonly _sessionActionCommitContext = new AsyncLocalStorage<symbol>();
-	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
+	private readonly _commitFence = new SessionCommitFence();
 	// Checkpoint, handoff, and activity waiters share lifecycle-edge notifications to avoid polling.
 	private readonly _sessionInputCheckpointWaiters = new Set<() => void>();
 	private _pendingNextTurnMessages: CustomMessage[] = [];
@@ -3723,7 +3692,7 @@ export class AgentSession {
 				return this._disposeCallbacksPromise;
 			}
 			this._disposing = true;
-			this._sessionActionCommitDisposeAbortController.abort();
+			this._commitFence.dispose();
 			await this._disposeAsyncOnce(kernelSnapshot);
 		})();
 		return this._disposeAsyncPromise;
@@ -3928,7 +3897,7 @@ export class AgentSession {
 		this._disposed = true;
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
-		this._sessionActionCommitDisposeAbortController.abort();
+		this._commitFence.dispose();
 		try {
 			// Invalidate scheduled timers and abort any in-flight review so a late
 			// resolution cannot write harness state or re-subscribe handlers.
@@ -4539,7 +4508,7 @@ export class AgentSession {
 	}
 
 	private async _acquireRlmTerminalNoticeRetentionFence(): Promise<{ owner: symbol; release(): void } | undefined> {
-		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+		const disposeSignal = this._commitFence.disposeSignal;
 		while (!this._disposed && !this._disposing && !disposeSignal.aborted) {
 			if (this._inputScheduler.queuedWorkPauseCount > 0) {
 				let wake = () => {};
@@ -4872,7 +4841,7 @@ export class AgentSession {
 				commitFence?.release();
 			}
 		};
-		return commitFence ? this._sessionActionCommitContext.run(commitFence.owner, run) : run();
+		return commitFence ? this._commitFence.run(commitFence, run) : run();
 	}
 
 	private _executeExtensionCommand(text: string): Promise<void> | undefined {
@@ -5522,11 +5491,7 @@ export class AgentSession {
 	}
 
 	get hasPendingAdmissionWaiters(): boolean {
-		return (
-			this._sessionActionCommitOwner !== undefined ||
-			this._pendingSessionActionFenceWaiters > 0 ||
-			this._sessionInputCheckpointWaiters.size > 0
-		);
+		return this._commitFence.hasPendingWork || this._sessionInputCheckpointWaiters.size > 0;
 	}
 
 	private _scheduleSessionInputPump(): void {
@@ -5692,7 +5657,7 @@ export class AgentSession {
 		const input = action.payload;
 		const commitFence = await this._acquireSessionActionCommitFence();
 		try {
-			await this._sessionActionCommitContext.run(commitFence.owner, async () => {
+			await this._commitFence.run(commitFence, async () => {
 				const isCancelled = () => action.lifecycle.state === "cancelled";
 				if (isCancelled()) return;
 				await this._waitForRefineIdle();
@@ -5857,7 +5822,7 @@ export class AgentSession {
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let promptPromise: Promise<void>;
 			try {
-				promptPromise = this._sessionActionCommitContext.run(commitFence.owner, () => {
+				promptPromise = this._commitFence.run(commitFence, () => {
 					if (
 						this._isSessionInputHandoffDeferred(epoch) ||
 						this.isStreaming ||
@@ -6576,12 +6541,11 @@ export class AgentSession {
 	}
 
 	private async _acquireDirectTurnAdmissionFence(signal?: AbortSignal): Promise<{ owner: symbol; release(): void }> {
-		const inheritedOwner = this._sessionActionCommitContext.getStore();
-		if (inheritedOwner !== undefined && inheritedOwner === this._sessionActionCommitOwner) {
+		if (this._commitFence.isHeldByCurrentContext) {
 			this._assertSessionActionAdmissionAvailable();
 			return this._acquireSessionActionCommitFence(signal);
 		}
-		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+		const disposeSignal = this._commitFence.disposeSignal;
 		const waitSignal = signal ? AbortSignal.any([signal, disposeSignal]) : disposeSignal;
 		while (true) {
 			this._assertSessionActionAdmissionAvailable();
@@ -6617,43 +6581,8 @@ export class AgentSession {
 		}
 	}
 
-	private async _acquireSessionActionCommitFence(signal?: AbortSignal): Promise<{ owner: symbol; release(): void }> {
-		const inheritedOwner = this._sessionActionCommitContext.getStore();
-		if (inheritedOwner !== undefined && inheritedOwner === this._sessionActionCommitOwner) {
-			return { owner: inheritedOwner, release: () => {} };
-		}
-		const previous = this._sessionActionCommitTail;
-		let resolve = () => {};
-		this._sessionActionCommitTail = new Promise<void>((release) => {
-			resolve = release;
-		});
-		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
-		const waitSignal = signal ? AbortSignal.any([signal, disposeSignal]) : disposeSignal;
-		this._pendingSessionActionFenceWaiters++;
-		try {
-			await waitForPromiseOrAbort(previous, waitSignal, "Update restart preparation cancelled");
-		} catch (error) {
-			this._pendingSessionActionFenceWaiters--;
-			// A cancelled waiter remains in the FIFO chain until its predecessor releases.
-			void previous.then(resolve, resolve);
-			if (disposeSignal.aborted) {
-				throw new Error("Cannot admit a session action because the session is disposing or disposed.");
-			}
-			throw error;
-		}
-		const owner = Symbol("session-action-commit");
-		this._sessionActionCommitOwner = owner;
-		this._pendingSessionActionFenceWaiters--;
-		let released = false;
-		return {
-			owner,
-			release: () => {
-				if (released) return;
-				released = true;
-				if (this._sessionActionCommitOwner === owner) this._sessionActionCommitOwner = undefined;
-				resolve();
-			},
-		};
+	private _acquireSessionActionCommitFence(signal?: AbortSignal): Promise<SessionCommitLease> {
+		return this._commitFence.acquire(signal);
 	}
 
 	private _resumeSessionInputAdmission(): void {
@@ -9209,7 +9138,7 @@ export class AgentSession {
 			})),
 			"bash.completed": createAsyncBashCompletionHostHandler(async (details) => {
 				const message = createAsyncBashCompletionMessage(details);
-				const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+				const disposeSignal = this._commitFence.disposeSignal;
 				while (true) {
 					let admissionCommitted = false;
 					try {
@@ -11626,7 +11555,7 @@ export class AgentSession {
 		try {
 			// Branch navigation and turn dispatch mutate the same transcript leaf.
 			commitFence = await this._acquireSessionActionCommitFence();
-			return await this._sessionActionCommitContext.run(commitFence.owner, async () => {
+			return await this._commitFence.run(commitFence, async () => {
 				await this.agent.waitForIdle();
 				await this._agentEventQueue;
 				return this._navigateTreeUnderPause(targetId, targetEntry, options);
