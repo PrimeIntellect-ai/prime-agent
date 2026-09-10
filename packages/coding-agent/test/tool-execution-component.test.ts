@@ -450,7 +450,7 @@ describe("ToolExecutionComponent parity", () => {
 		const collapsed = stripAnsi(component.render(120).join("\n"));
 		expect(collapsed).not.toContain("-1 before");
 		expect(collapsed).toContain("+1 -1");
-		// The file summary keeps its counts without repeating the prompt detail hint.
+		// The file summary keeps its counts without inline detail hints.
 		expect(collapsed.split("\n").find((line) => line.includes("╰─"))).not.toContain("cycle detail");
 		expect(collapsed).not.toContain("Ctrl+O");
 

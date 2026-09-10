@@ -6,5 +6,5 @@
 - Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
 - Changed the conversation row hierarchy: event-row trailing detail (agent-message participant and previews, tool command previews, line counts, durations) renders dim while leading labels keep their colors.
 - Changed background shell completions to update identifiable command rows, with compact fallback notices and full notifications retained in all output.
-- Moved the configurable conversation detail shortcut to one hint beside the prompt.
+- Removed repeated conversation detail shortcut hints from transcript rows while retaining the shortcut in help.
 - Changed expanded file diffs to start at the normal chat inset while preserving code indentation and diff gutters.
