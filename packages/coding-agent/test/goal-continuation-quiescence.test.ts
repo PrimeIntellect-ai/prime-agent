@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { emptyGoalState } from "../src/core/goals.js";
-import { GoalController } from "../src/core/session/goals/controller.js";
+import { GoalController } from "../src/goals/controller.js";
 
 type Harness = {
 	_goals: GoalController;

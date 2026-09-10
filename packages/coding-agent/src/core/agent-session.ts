@@ -34,6 +34,9 @@ import {
 	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
+import { parseGoalSlashCommand } from "../goals/commands.js";
+import { GoalController } from "../goals/controller.js";
+import { createGoalPersistence } from "../goals/persistence.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -257,9 +260,6 @@ import {
 	semanticEdgeLedgerPath,
 	wrapStreamFnWithSemanticEdges,
 } from "./semantic-edges.js";
-import { parseGoalSlashCommand } from "./session/goals/commands.js";
-import { GoalController } from "./session/goals/controller.js";
-import { createGoalPersistence } from "./session/goals/persistence.js";
 import {
 	ActionStore,
 	type ActionTicket,
