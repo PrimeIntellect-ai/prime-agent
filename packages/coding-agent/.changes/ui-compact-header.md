@@ -1,0 +1,2 @@
+- Changed chat and agents headers to use a compact butterfly mark and concise metadata that stays visible in narrow terminals.
+- Removed duplicate prompt suggestions from chat and agents headers.

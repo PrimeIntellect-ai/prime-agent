@@ -16,3 +16,9 @@ export const PRIME_BUTTERFLY_LOGO = `                          ▄▄███�
  █████    ▀█▄▄▄█████▀
 ███████▄  ████████▀
 ▀███▀▀    █████▀`;
+
+/** Four rows × 12 cols for compact chat and session headers. */
+export const PRIME_BUTTERFLY_LOGO_COMPACT = `  ▄▄    ▄▄█▀
+ ███▄▄▄██▀
+ █ █████
+██▀ ██▀`;
