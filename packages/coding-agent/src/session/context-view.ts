@@ -134,10 +134,6 @@ export class SessionContextView {
 		return (provider, modelId) => this.host.findModel(provider, modelId)?.contextWindow;
 	}
 
-	private _subtractUnindexedChildUsage(ownUsage: Usage, entries: SessionEntry[]): void {
-		this.host.subtractUnindexedChildUsage(ownUsage, entries);
-	}
-
 	getOwnUsageSummary(): SessionUsageSummary | undefined {
 		const entries = this.host.sessionManager.getEntries();
 		const tailId = entries.at(-1)?.id;
@@ -146,7 +142,7 @@ export class SessionContextView {
 			return memo.usage;
 		}
 		const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
-		this._subtractUnindexedChildUsage(ownUsage, entries);
+		this.host.subtractUnindexedChildUsage(ownUsage, entries);
 		const usage = sessionUsageSummaryFrom(ownUsage);
 		this._ownUsageMemo = { count: entries.length, tailId, usage };
 		return usage;
@@ -156,7 +152,7 @@ export class SessionContextView {
 		const resolveContextWindow = this._contextWindowResolver();
 		const branch = this.host.sessionManager.getBranch();
 		const { ownUsage, totalUsage } = computeOwnAndTotalUsage(branch, this.host.sessionManager.getEntries());
-		this._subtractUnindexedChildUsage(ownUsage, branch);
+		this.host.subtractUnindexedChildUsage(ownUsage, branch);
 
 		const children: ContextTreeNode[] = [];
 		const liveIds = new Set<string>();

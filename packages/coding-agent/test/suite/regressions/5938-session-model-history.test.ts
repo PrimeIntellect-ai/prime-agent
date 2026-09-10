@@ -303,9 +303,11 @@ describe("session model and history ownership boundaries", () => {
 			getContextUsage: () => harness.session.getContextUsage(),
 			getModel: () => harness.session.model,
 			findModel: (provider, id) => harness.session.modelRegistry.find(provider, id),
-			subtractUnindexedChildUsage: (ownUsage, candidates) => {
-				if (unindexed && candidates.some((entry) => entry.type === "message" && entry.message === message)) {
-					subtractAssistantUsage(ownUsage, unindexed);
+			subtractUnindexedChildUsage: (ownUsage, entries) => {
+				for (const entry of entries) {
+					if (entry.type === "message" && entry.message === message && unindexed) {
+						subtractAssistantUsage(ownUsage, unindexed);
+					}
 				}
 			},
 			getLiveChildren: () => [],
