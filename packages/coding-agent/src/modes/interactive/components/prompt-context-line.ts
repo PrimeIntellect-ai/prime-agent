@@ -14,7 +14,7 @@ export class PromptContextLine implements Component {
 		const contentWidth = width - paddingX * 2;
 		const recap = this.getRecap()?.replace(/\s+/g, " ").trim();
 		const left = recap ? `Recap: ${recap}` : "";
-		const maxRightWidth = left ? Math.max(1, Math.floor(contentWidth / 2)) : contentWidth;
+		const maxRightWidth = left ? Math.max(1, contentWidth - 3) : contentWidth;
 		const right = truncateToWidth(this.getModelLabel(maxRightWidth) ?? "", maxRightWidth, "");
 		if (!left && !right) return [];
 		const gap = left && right ? 2 : 0;
@@ -22,8 +22,8 @@ export class PromptContextLine implements Component {
 		const renderedLeft = truncateToWidth(left, leftWidth, "…");
 		const space = " ".repeat(Math.max(0, contentWidth - visibleWidth(renderedLeft) - visibleWidth(right)));
 		const row = " ".repeat(paddingX) + theme.fg("dim", renderedLeft) + space + right + " ".repeat(paddingX);
-		// One blank line of breathing room between the context line and the prompt bar.
-		return [row, ""];
+		// Separate the context row from the chat while keeping it adjacent to the prompt.
+		return ["", row];
 	}
 
 	invalidate(): void {
