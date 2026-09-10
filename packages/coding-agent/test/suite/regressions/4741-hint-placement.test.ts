@@ -62,7 +62,7 @@ describe("ENG-4741 hint placement", () => {
 		vi.useRealTimers();
 	});
 
-	it("orders hints below the recap and above queued messages and side questions", () => {
+	it("keeps hints above queued messages and side questions, with recap and effort in the prompt dock", () => {
 		const recapContainer = new Container();
 		const featureHintContainer = new Container();
 		const queuedMessagesContainer = new Container();
@@ -81,12 +81,16 @@ describe("ENG-4741 hint placement", () => {
 		});
 
 		expect(callPrivate(mode, "getPromptContextContainers")).toEqual([
-			recapContainer,
 			featureHintContainer,
 			queuedMessagesContainer,
 			sideQuestionContainer,
 		]);
-		expect(callPrivate(mode, "getPromptDockComponents")).toEqual([editorContainer, subagentSummaryLine, footerSlot]);
+		expect(callPrivate(mode, "getPromptDockComponents")).toEqual([
+			recapContainer,
+			editorContainer,
+			subagentSummaryLine,
+			footerSlot,
+		]);
 	});
 
 	it("keeps hints in the fullscreen transcript instead of the prompt dock", () => {
@@ -124,7 +128,6 @@ describe("ENG-4741 hint placement", () => {
 					headerContainer,
 					mainViewContainer,
 					widgetContainerAbove,
-					recapContainer,
 					featureHintContainer,
 					queuedMessagesContainer,
 					sideQuestionContainer,
