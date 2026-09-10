@@ -38,7 +38,28 @@ An isolated SDK driver exercised actual sessions, successful/failed/cancelled ru
 
 The shell installer driver used fake download, checksum and package commands while retaining actual installer control flow. Success and four failure stages emitted 48 installation events; the saved opt-out emitted none. Every enabled event retained `workload_origin=test` after the fix. No real package installation or paid model request was performed.
 
-Platform preview image build and Vercel deployment succeeded in [the preview workflow](https://github.com/PrimeIntellect-ai/platform/actions/runs/34420294102). The [backend readiness check](https://github.com/PrimeIntellect-ai/platform/actions/runs/34421716559) then confirmed that `backend-preview-5228.pintel.dev` returned HTTP 503. A real CLI run against that endpoint completed locally with exit zero while telemetry requests received 503. No successful collector acknowledgement or retained PostHog record was verified. The preview CI account lacks pod inspection permission; the available work GCP login requires reauthentication. Live forwarding, native exception reconciliation, deployed IP limiting and dashboard preflight remain pending.
+Platform preview image build and Vercel deployment succeeded in [the preview workflow](https://github.com/PrimeIntellect-ai/platform/actions/runs/34420294102). The [backend readiness check](https://github.com/PrimeIntellect-ai/platform/actions/runs/34421716559) then confirmed that `backend-preview-5228.pintel.dev` returned HTTP 503. A real CLI run against that endpoint completed locally with exit zero while telemetry requests received 503. After GCP reauthentication, inspection confirmed that SQL migrations succeeded but demo seeding failed because its job omitted MongoDB connection settings and defaulted to localhost. The available account cannot create/delete preview jobs. No live forwarding through this cloud preview was verified.
+
+## Local HTTP collector to real PostHog on 2026-09-10 UTC
+
+The alternative test used Agent implementation commit `3d1cb0843` and Platform collector code from `06ffe80f44`, followed by the IP-enrichment correction described below. Two local HTTP servers mounted the unchanged telemetry router, validation, forwarding and native-exception modules. They used the production Redis helpers and the unchanged rate-limiter functions loaded from source, backed by a disposable Redis 7.4 instance. Unrelated Platform API imports/startup, cloud routing, TLS and proxy configuration were excluded. Upstream delivery was real HTTPS to PostHog project 22174, with the ingestion credential supplied only in process memory.
+
+The planned SDK, CLI and installer scenarios emitted 191 source events: 106 SDK records across all 14 event types, 37 real CLI records and 48 installation records. All 191 were acknowledged and reconciled by UUID with retained PostHog records. Every client-owned property matched. Eight error occurrences produced eight native exception records; recovery updates produced none. The CLI cost estimate of USD 0.00013 and its token/timing fields were retained. Synthetic prompt/credential canaries were absent from the retained records, GeoIP was disabled, and person processing was false. Settings and environment opt-outs emitted zero requests and created no installation identity.
+
+The first SDK attempt shared one client across helpers that normally own separate clients; installation cleanup cleared unrelated queued fixture events. Correcting fixture ownership restored all 106 records without changing Agent production code. The separate CLI process checks passed with real delivery.
+
+Live inspection found that PostHog replaces `$ip: null` with the collector's network address. Platform now supplies `$ip: "0.0.0.0"` while retaining `$geoip_disable: true`. After restarting the collector with that correction, all 13 retained compatibility/error-check records had the neutral IP value, disabled GeoIP and disabled person processing. The 37 focused collector tests passed with updated source/native IP assertions.
+
+Additional real HTTP/PostHog checks passed:
+
+- All five historical event types retained the original count-only acknowledgement.
+- A mixed batch retained its valid event and acknowledged rejection of its invalid neighbor.
+- Replaying the same error batch preserved source/native UUIDs; PostHog retained one record per UUID. Two `ECONNREFUSED` occurrences shared one native issue; `ETIMEDOUT` used another. A recovery update created no native exception.
+- Empty, malformed, oversized and unsupported-version requests returned 400, 422, 413 and 422 respectively.
+- Alternating requests between two collector processes shared one Redis IP bucket: the first 60 reached validation and request 61 returned 429 with `Retry-After: 60`. Varying `X-Forwarded-For` did not bypass the limiter with proxy-header trust disabled.
+- Stopping the isolated Redis service produced 503 with `Retry-After: 10`; capability discovery remained available.
+
+This establishes live Agent-to-collector-to-PostHog behavior for the tested scenarios. The cloud preview, deployed proxy trust/access logging, representative UI/daemon version combinations, abrupt-exit loss measurements, dashboard publication preflight and operational rollout criteria above remain separate checks. No shared PostHog settings, dashboards, alerts or production services were changed.
 
 ## Boundaries
 
