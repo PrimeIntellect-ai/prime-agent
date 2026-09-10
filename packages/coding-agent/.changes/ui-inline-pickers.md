@@ -13,3 +13,4 @@
 - Moved the model detail pricing unit onto the price row as "dollars per 1 million tokens" and left the provider/model line bare.
 - Fixed the effort cluster so changing the level never shifts the row; the level label renders in a fixed-width cell sized to the longest supported level name.
 - Refined the model picker effort marks to the larger medium-square glyphs, softened the effort purple, and shortened the pricing unit to "$ / 1M tokens".
+- Dropped the provider/model-id line from the inline model detail block; the prices now follow the list row directly.
