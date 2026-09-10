@@ -216,7 +216,7 @@ describe("AssistantMessageComponent streaming identity", () => {
 		}
 	});
 
-	test("collapsed thinking shows a bold label, recap, and bracketed hint", () => {
+	test("collapsed thinking shows a quiet label, recap, and bracketed hint", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 
@@ -233,14 +233,24 @@ describe("AssistantMessageComponent streaming identity", () => {
 			{ type: "thinking", thinking },
 			{ type: "text", text: "Answer." },
 		]);
-		const rendered = stripAnsi(new AssistantMessageComponent(message, true).render(120).join("\n"));
+		const collapsedRaw = new AssistantMessageComponent(message, true).render(120).join("\n");
+		const rendered = stripAnsi(collapsedRaw);
 
 		expect(rendered).toContain("Thinking... · Deciding the approach (Ctrl+T to expand)");
 		expect(rendered).not.toContain("Some detail");
+		// The label keeps the thinkingText color but is no longer bolded.
+		expect(collapsedRaw).toContain(theme.getFgAnsi("thinkingText"));
+		expect(collapsedRaw).not.toContain("\x1b[1m");
 
-		const expanded = stripAnsi(new AssistantMessageComponent(message, false).render(120).join("\n"));
+		const expandedRaw = new AssistantMessageComponent(message, false).render(120).join("\n");
+		const expanded = stripAnsi(expandedRaw);
 		expect(expanded).toContain("Thinking... (Ctrl+T to collapse)");
 		expect(expanded).toContain("Some detail about the options.");
+		// The visible trace renders one step dimmer than the label.
+		expect(expandedRaw).toContain(theme.getFgAnsi("dim"));
+		const labelLine = expandedRaw.split("\n").find((line) => line.includes("Thinking..."));
+		expect(labelLine).toBeDefined();
+		expect(labelLine).not.toContain("\x1b[1m");
 
 		// A whitespace-only trace falls back to the label instead of an empty recap.
 		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
@@ -345,7 +355,7 @@ describe("AssistantMessageComponent body text color", () => {
 		expect(raw).toContain(theme.getFgAnsi("mdBody"));
 	});
 
-	test("keeps thinking text on thinkingText instead of mdBody", () => {
+	test("renders the thinking trace dimmer than the label, never mdBody", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 
@@ -353,7 +363,23 @@ describe("AssistantMessageComponent body text color", () => {
 		const raw = new AssistantMessageComponent(message, false).render(120).join("\n");
 
 		expect(stripAnsi(raw)).toContain("Quiet reasoning.");
+		expect(raw).toContain(theme.getFgAnsi("dim"));
 		expect(raw).toContain(theme.getFgAnsi("thinkingText"));
 		expect(raw).not.toContain(theme.getFgAnsi("mdBody"));
+	});
+
+	test("keeps assistant prose on mdBody while the thinking trace stays dim", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "Trace line." },
+			{ type: "text", text: "Answer prose." },
+		]);
+		const raw = new AssistantMessageComponent(message, false).render(120).join("\n");
+
+		expect(raw).toContain(theme.getFgAnsi("dim"));
+		expect(raw).toContain(theme.getFgAnsi("mdBody"));
+		expect(theme.getFgAnsi("dim")).not.toBe(theme.getFgAnsi("mdBody"));
 	});
 });

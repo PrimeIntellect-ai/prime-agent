@@ -36,7 +36,7 @@ export interface AssistantMessageComponentOptions {
 }
 
 function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
-	const quiet = (text: string) => theme.fg("thinkingText", text);
+	const quiet = (text: string) => theme.fg("dim", text);
 	return {
 		...baseTheme,
 		heading: quiet,
@@ -316,9 +316,9 @@ export class AssistantMessageComponent extends Container {
 					.slice(i + 1)
 					.some((c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()));
 
-				const thinkingLabel = theme.bold(theme.fg("thinkingText", this.hiddenThinkingLabel));
+				const thinkingLabel = theme.fg("thinkingText", this.hiddenThinkingLabel);
 				if (this.hideThinkingBlock) {
-					// Collapsed row: bold label, a one-line recap of the trace, and the
+					// Collapsed row: quiet label, a one-line recap of the trace, and the
 					// hint. The row truncates the recap to the render width so it never
 					// wraps onto a second line on narrow terminals.
 					const recap = thinkingRecap(content.thinking, this.hiddenThinkingLabel);
@@ -340,7 +340,7 @@ export class AssistantMessageComponent extends Container {
 						0,
 						getThinkingMarkdownTheme(this.markdownTheme),
 						{
-							color: (text: string) => theme.fg("thinkingText", text),
+							color: (text: string) => theme.fg("dim", text),
 						},
 						{ baseUrl: this.baseUrl },
 					);

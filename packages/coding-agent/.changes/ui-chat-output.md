@@ -1,1 +1,2 @@
 - Changed assistant message body text to a new dimmed `mdBody` theme color, easing the wall of bright default-foreground text while headings, links, and code keep their styling.
+- Changed the thinking block styling: the "Thinking..." label is no longer bold, and the visible reasoning trace renders one step dimmer while the label and recap keep the thinkingText color.
