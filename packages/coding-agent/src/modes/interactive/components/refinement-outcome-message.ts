@@ -176,8 +176,15 @@ class RefinementEditSection implements Component {
 
 /** Durable refinement outcome with per-edit details available on demand. */
 export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
+	private summaryExpanded = false;
 	constructor(private readonly message: RefinementOutcomeMessage) {
 		super();
+		this.updateDisplay();
+	}
+
+	setEditDiffsExpanded(expanded: boolean): void {
+		if (this.summaryExpanded === expanded) return;
+		this.summaryExpanded = expanded;
 		this.updateDisplay();
 	}
 
@@ -186,15 +193,19 @@ export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
 
 		const { summary, edits, scope, rollbackOf, refinementId } = this.message.details;
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("accent", `◆ ${refinementHeader(this.message)}`), 1, 0));
-		this.addSummary(summary.trim() || "No summary was recorded for this harness change.");
+		const outcome = refinementHeader(this.message);
+		const header = outcome.startsWith("Harness refined ·") ? "Harness refined" : outcome;
+		this.addChild(new Text(theme.fg("customMessageLabel", `◆ ${header}`), 1, 0));
+		if (this.summaryExpanded || this.expanded) {
+			this.addSummary(summary.trim() || "No summary was recorded for this harness change.", undefined, "mdHeading");
+		}
 		if (this.expanded) {
 			this.addChild(new Spacer(1));
 			this.addChild(
 				new Text(
 					theme.fg(
 						"dim",
-						`Refinement ${refinementId} · ${scope}${rollbackOf ? ` · rollback of ${rollbackOf}` : ""}`,
+						`${outcome} · Refinement ${refinementId} · ${scope}${rollbackOf ? ` · rollback of ${rollbackOf}` : ""}`,
 					),
 					1,
 					0,
