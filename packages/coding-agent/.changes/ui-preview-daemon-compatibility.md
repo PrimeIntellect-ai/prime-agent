@@ -1,0 +1,1 @@
+- Fixed local UI preview startup to reuse the compatible running daemon without interrupting active sessions.

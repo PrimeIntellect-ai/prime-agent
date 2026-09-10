@@ -68,9 +68,14 @@ type DaemonVersionProbe =
 	| { status: "unresponsive" };
 
 function isCurrentDaemonHello(hello: DaemonHello): boolean {
+	// This local preview only adds optional saved-session model metadata to schema 27.
+	// Pin both schema IDs so future wire changes cannot inherit this exception.
+	const compatiblePreviewSchema =
+		DAEMON_SCHEMA_ID === "protocol-7-schema-28-92bc5368a082" &&
+		hello.schemaId === "protocol-7-schema-27-962b8b4c5e35";
 	return (
 		hello.protocol.version === DAEMON_PROTOCOL_VERSION &&
-		hello.schemaId === DAEMON_SCHEMA_ID &&
+		(hello.schemaId === DAEMON_SCHEMA_ID || compatiblePreviewSchema) &&
 		hello.appVersion === VERSION
 	);
 }

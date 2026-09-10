@@ -239,6 +239,47 @@ describe("ensureInteractiveDaemonRunning", () => {
 		await Promise.all(cleanups.splice(0).map((fn) => fn()));
 	});
 
+	it.each([false, true])("reuses the known schema-27 daemon without replacement when busy is %s", async (busy) => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			appVersion: VERSION,
+			schemaId: "protocol-7-schema-27-962b8b4c5e35",
+			sessions: [{ id: "active-1", activeSessionId: "active-1", isSessionActive: busy, isStreaming: busy }],
+			busyClientOwnedSessionCount: busy ? 1 : 0,
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).resolves.toBeUndefined();
+		await expect(probeDaemonVersion(daemon.socketPath)).resolves.toMatchObject({
+			status: "current",
+			hello: { schemaId: "protocol-7-schema-27-962b8b4c5e35" },
+		});
+		expect(commands).not.toContain("list");
+		expect(commands).not.toContain("shutdown");
+	});
+
+	it.each([
+		["unknown schema", { schemaId: "protocol-7-schema-27-unknown" }],
+		["older schema", { schemaId: "protocol-7-schema-26-unknown" }],
+		["different protocol", { protocolVersion: DAEMON_PROTOCOL_VERSION + 1 }],
+		["different app version", { appVersion: "0.9.3" }],
+	])("refuses a busy daemon with %s despite preview compatibility", async (_label, mismatch) => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			appVersion: VERSION,
+			schemaId: "protocol-7-schema-27-962b8b4c5e35",
+			sessions: [{ id: "active-1", activeSessionId: "active-1", isSessionActive: true, isStreaming: true }],
+			onCommand: (command) => commands.push(command.type),
+			...mismatch,
+		});
+		cleanups.push(daemon.close);
+
+		await expect(probeDaemonVersion(daemon.socketPath)).resolves.toMatchObject({ status: "stale" });
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).rejects.toThrow("incompatible");
+		expect(commands).not.toContain("shutdown");
+	});
+
 	it("rejects a busy pre-session-action daemon before attach", async () => {
 		const commands: string[] = [];
 		const daemon = await startFakeDaemon({
