@@ -1820,6 +1820,24 @@ prime_agent_install_native() {
 	printf '%s\n' "$native_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || {
 		printf 'error: invalid native release version.\n' >&2; exit 1;
 	}
+	# Select the release format before touching native-owned installation paths.
+	prime_agent_download_dir=$(create_temp_dir)
+	native_file="prime-agent-$native_version-$native_platform.tar.gz"
+	native_checksums="$prime_agent_download_dir/SHA256SUMS"
+	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading release checksums" "Prime Agent v$native_version" \
+		curl -fsSL --connect-timeout 10 --max-time 120 "$prime_agent_base_url/releases/v$native_version/SHA256SUMS" -o "$native_checksums"
+	awk -v file="$native_file" '$2 == file { count++; hash=$1; fields=NF } END { if (count != 1 || fields != 2 || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1; print tolower(hash) "  " file }' \
+		"$native_checksums" >"$prime_agent_download_dir/selected.sha256" || {
+		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ] &&
+			prime_agent_release_is_node_only "$native_checksums" "$prime_agent_package-$native_version.tgz"; then
+			rm -rf "$prime_agent_download_dir"
+			prime_agent_download_dir=
+			printf 'This release only provides npm packages; using the Node installation.\n' >&2
+			prime_agent_install_node "$native_version"
+			return
+		fi
+		printf 'error: expected one valid checksum for %s.\n' "$native_file" >&2; exit 1;
+	}
 	if [ "${PRIME_AGENT_INSTALLER_NONINTERACTIVE:-0}" != 1 ]; then
 		if prime_agent_prompt_yes_no "Install Prime Agent v$native_version?" "Downloads and verifies the compiled application." "Install? [Y/n]"; then
 			:
@@ -1830,22 +1848,10 @@ prime_agent_install_native() {
 	fi
 	prime_agent_native_prepare_root
 	prime_agent_native_check_public_link
-	native_file="prime-agent-$native_version-$native_platform.tar.gz"
+	mv "$prime_agent_download_dir/selected.sha256" "$prime_agent_native_stage/selected.sha256"
+	rm -rf "$prime_agent_download_dir"
+	prime_agent_download_dir=
 	native_archive="$prime_agent_native_stage/$native_file"
-	native_checksums="$prime_agent_native_stage/SHA256SUMS"
-	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading release checksums" "Prime Agent v$native_version" \
-		curl -fsSL --connect-timeout 10 --max-time 120 "$prime_agent_base_url/releases/v$native_version/SHA256SUMS" -o "$native_checksums"
-	awk -v file="$native_file" '$2 == file { count++; hash=$1; fields=NF } END { if (count != 1 || fields != 2 || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1; print tolower(hash) "  " file }' \
-		"$native_checksums" >"$prime_agent_native_stage/selected.sha256" || {
-		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ] &&
-			prime_agent_release_is_node_only "$native_checksums" "$prime_agent_package-$native_version.tgz"; then
-			prime_agent_native_cleanup
-			printf 'This release only provides npm packages; using the Node installation.\n' >&2
-			prime_agent_install_node "$native_version"
-			return
-		fi
-		printf 'error: expected one valid checksum for %s.\n' "$native_file" >&2; exit 1;
-	}
 	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading compiled Prime Agent" "$native_platform" \
 		curl -fsSL --connect-timeout 10 --max-time 300 "$prime_agent_base_url/releases/v$native_version/$native_file" -o "$native_archive"
 	if command -v sha256sum >/dev/null 2>&1; then native_checker=sha256sum; else native_checker=shasum; fi

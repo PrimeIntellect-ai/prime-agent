@@ -1,8 +1,17 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const version = "1.2.3";
@@ -19,9 +28,28 @@ const server = createServer((request, response) => {
 	response.end(found ? checksums : "missing archive");
 });
 
-async function install(inventory: string, method = "auto") {
+async function install(
+	inventory: string,
+	method = "auto",
+	existing: "npm" | "unmanaged-root" | "both" | undefined = undefined,
+) {
 	checksums = inventory;
 	const home = mkdtempSync(join(root, "home-"));
+	const publicCommand = join(home, ".local/bin/prime-agent");
+	const nativeRoot = join(home, ".local/share/prime-agent");
+	const hasNpm = existing === "npm" || existing === "both";
+	const hasUnmanagedRoot = existing === "unmanaged-root" || existing === "both";
+	if (hasNpm) {
+		const npmEntry = join(home, ".local/lib/node_modules/prime-agent/dist/bundle/cli.js");
+		mkdirSync(dirname(npmEntry), { recursive: true });
+		writeFileSync(npmEntry, "existing npm entrypoint");
+		mkdirSync(join(home, ".local/bin"), { recursive: true });
+		symlinkSync("../lib/node_modules/prime-agent/dist/bundle/cli.js", publicCommand);
+	}
+	if (hasUnmanagedRoot) {
+		mkdirSync(nativeRoot, { recursive: true });
+		writeFileSync(join(nativeRoot, "keep"), "user-owned data");
+	}
 	const child = spawn("sh", [harness, version], {
 		env: {
 			HOME: home,
@@ -47,8 +75,13 @@ async function install(inventory: string, method = "auto") {
 		child.once("close", done);
 	});
 	expect(existsSync(join(home, ".local/share/prime-agent/.install-lock"))).toBe(false);
-	expect(existsSync(join(home, ".local/bin/prime-agent"))).toBe(false);
-	return { code, output };
+	expect(existsSync(publicCommand)).toBe(hasNpm);
+	if (hasNpm) {
+		expect(readlinkSync(publicCommand)).toBe("../lib/node_modules/prime-agent/dist/bundle/cli.js");
+		expect(readFileSync(publicCommand, "utf8")).toBe("existing npm entrypoint");
+	}
+	if (hasUnmanagedRoot) expect(readFileSync(join(nativeRoot, "keep"), "utf8")).toBe("user-owned data");
+	return { code, output, nativeRoot };
 }
 
 describe.skipIf(process.platform === "win32")("installer release format selection", () => {
@@ -84,6 +117,28 @@ describe.skipIf(process.platform === "win32")("installer release format selectio
 		expect(result.code).not.toBe(0);
 		expect(result.output).not.toContain("node-route:");
 	});
+
+	it.each(["npm", "unmanaged-root", "both"] as const)(
+		"selects the npm-only release before checking native ownership with %s present",
+		async (existing) => {
+			const result = await install(`${digest}  ${nodeFile}\n`, "auto", existing);
+			expect(result.code, result.output).toBe(0);
+			expect(result.output).toContain(`node-route:${version}`);
+			expect(existsSync(join(result.nativeRoot, ".managed"))).toBe(false);
+		},
+	);
+
+	it.each(["npm", "unmanaged-root"] as const)(
+		"still rejects native ownership conflicts with %s present",
+		async (existing) => {
+			const result = await install(`${digest}  ${nativeFile}\n`, "auto", existing);
+			expect(result.code).not.toBe(0);
+			expect(result.output).toContain(
+				existing === "npm" ? "refusing to replace existing command" : "refusing to take ownership",
+			);
+			expect(result.output).not.toContain("node-route:");
+		},
+	);
 
 	it.each([
 		["empty inventory", ""],
