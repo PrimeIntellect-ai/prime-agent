@@ -1461,7 +1461,7 @@ export class InteractiveMode {
 		}
 
 		this.mainContainer.addChild(this.mainViewContainer);
-		this.renderWidgets(); // Initialize with default spacer
+		this.renderWidgets();
 		this.mainContainer.addChild(this.widgetContainerAbove);
 		this.renderRecap();
 		for (const container of this.getPromptContextContainers()) {
@@ -3522,7 +3522,7 @@ export class InteractiveMode {
 
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, false, true);
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
 	}
