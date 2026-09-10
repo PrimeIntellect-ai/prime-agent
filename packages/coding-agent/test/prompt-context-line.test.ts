@@ -10,7 +10,7 @@ describe("PromptContextLine", () => {
 		await preloadCodeHighlighter();
 	});
 
-	it.each(["dark", "light"])("shares a plain row between recap and effort in the %s theme", (name) => {
+	it.each(["dark", "light"])("stacks recap and effort rows with breathing room in the %s theme", (name) => {
 		initTheme(name);
 		const line = new PromptContextLine(
 			() => "Updated the prompt layout",
@@ -18,19 +18,26 @@ describe("PromptContextLine", () => {
 		);
 		const rows = line.render(80);
 
-		expect(rows).toHaveLength(1);
-		expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated the prompt layout\s{2,}high · \/effort $/);
+		expect(rows).toHaveLength(4);
+		expect(stripAnsi(rows[0]!)).toBe(" Recap: Updated the prompt layout".padEnd(80));
+		expect(rows[1]).toBe("");
+		expect(stripAnsi(rows[2]!)).toBe(`${"high · /effort".padStart(79)} `);
+		expect(rows[3]).toBe("");
 		expect(visibleWidth(rows[0]!)).toBe(80);
+		expect(visibleWidth(rows[2]!)).toBe(80);
 		expect(rows[0]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 	});
 
-	it("keeps effort aligned right before the first recap", () => {
+	it("keeps effort aligned right above the prompt", () => {
 		const line = new PromptContextLine(
 			() => undefined,
 			() => "high · /effort",
 		);
 
-		expect(stripAnsi(line.render(40)[0]!)).toBe(`${"high · /effort".padStart(39)} `);
+		const rows = line.render(40);
+		expect(rows).toHaveLength(2);
+		expect(stripAnsi(rows[0]!)).toBe(`${"high · /effort".padStart(39)} `);
+		expect(rows[1]).toBe("");
 	});
 
 	it("uses the full row for recap when the model does not support effort", () => {
@@ -39,9 +46,11 @@ describe("PromptContextLine", () => {
 			() => undefined,
 		);
 
-		const rendered = line.render(48)[0]!;
-		expect(stripAnsi(rendered).trim()).toBe("Recap: Updated files and checked the result");
-		expect(visibleWidth(rendered)).toBe(48);
+		const rows = line.render(48);
+		expect(rows).toHaveLength(2);
+		expect(stripAnsi(rows[0]!).trim()).toBe("Recap: Updated files and checked the result");
+		expect(visibleWidth(rows[0]!)).toBe(48);
+		expect(rows[1]).toBe("");
 	});
 
 	it("keeps long Unicode recaps and effort within narrow terminal widths", () => {
@@ -52,12 +61,13 @@ describe("PromptContextLine", () => {
 
 		for (const width of [1, 2, 3, 4, 8, 16, 24, 40, 80, 120]) {
 			const rows = line.render(width);
-			const plain = stripAnsi(rows[0]!);
-			expect(rows).toHaveLength(1);
+			expect(rows).toHaveLength(4);
 			expect(visibleWidth(rows[0]!)).toBe(width);
-			expect(plain).toContain("x");
+			expect(visibleWidth(rows[2]!)).toBe(width);
+			expect(stripAnsi(rows[2]!)).toContain("x");
 			if (width >= 40) {
-				expect(plain).toMatch(/^ Recap: .+ {2,}xhigh · \/effort $/);
+				expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: .+$/);
+				expect(stripAnsi(rows[2]!)).toMatch(/^ *xhigh · \/effort $/);
 			}
 		}
 	});

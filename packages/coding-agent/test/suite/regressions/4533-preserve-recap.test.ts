@@ -104,8 +104,8 @@ describe("ENG-4533 recap layout", () => {
 		mode.sessionRecap = "Preparing the fix plan";
 		const updated = render(mode);
 
-		expect(previous).toHaveLength(1);
-		expect(updated).toHaveLength(1);
+		expect(previous).toHaveLength(2);
+		expect(updated).toHaveLength(2);
 		expect(stripAnsi(updated[0] ?? "")).toContain("Recap: Preparing the fix plan");
 	});
 
@@ -119,8 +119,9 @@ describe("ENG-4533 recap layout", () => {
 		const mode = createRenderMode("Reviewing the implementation and preparing a clean regression test");
 		const lines = render(mode, 24);
 
-		expect(lines).toHaveLength(1);
+		expect(lines).toHaveLength(2);
 		expect(visibleWidth(lines[0] ?? "")).toBe(24);
 		expect(stripAnsi(lines[0] ?? "")).toContain("Recap:");
+		expect(lines[1]).toBe("");
 	});
 });
