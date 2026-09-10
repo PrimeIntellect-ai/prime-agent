@@ -68,7 +68,8 @@ type SerializedInternals = {
 	_events: {
 		lastAssistant: unknown;
 		handleAgentEvent(event: { type: string; messages?: unknown[] }): void;
-		queue: Promise<void>;
+		readonly queue: Promise<void>;
+		enqueue(work: () => void): void;
 	};
 	_turnPolicy: { shouldStopForThresholdCompaction(ctx: unknown): Promise<boolean> };
 
@@ -1308,9 +1309,10 @@ describe("Serialized refine review-fix regressions", () => {
 		await vi.waitFor(() => expect(waitForIdle).toHaveBeenCalledOnce());
 
 		let releaseEventQueue: () => void = () => {};
-		internals._events.queue = new Promise<void>((resolve) => {
+		const eventQueue = new Promise<void>((resolve) => {
 			releaseEventQueue = resolve;
 		});
+		internals._events.enqueue(() => eventQueue);
 		let releaseCompaction: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			releaseCompaction = resolve;

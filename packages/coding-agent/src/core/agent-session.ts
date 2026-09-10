@@ -351,6 +351,7 @@ export class AgentSession {
 		waitForIdle: () => this.waitForIdle(),
 	});
 	private readonly _promptSubmission = new SessionPromptSubmission(this._actionStore, {
+		promptInjectedMessage: (text, message, options) => this._promptInjectedMessage(text, message, options),
 		waitForActivityChange: (signal) => this._waitForSessionActivityChange(signal),
 		queueAgentMessagePrompt: (text, streamingBehavior, customMessage) =>
 			this.queueAgentMessagePrompt(text, streamingBehavior, customMessage),

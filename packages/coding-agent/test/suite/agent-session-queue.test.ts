@@ -3014,12 +3014,15 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		const initialEvent = createDeferred();
 		const chainedOperation = createDeferred();
-		const internals = harness.session as unknown as { _events: { queue: Promise<void> } };
-		let eventQueue: Promise<void>;
-		eventQueue = initialEvent.promise.then(() => {
-			internals._events.queue = eventQueue.then(() => chainedOperation.promise);
-		});
-		internals._events.queue = eventQueue;
+		const internals = harness.session as unknown as {
+			_events: { readonly queue: Promise<void>; enqueue(work: () => void): void };
+		};
+		internals._events.enqueue(() =>
+			initialEvent.promise.then(() => {
+				internals._events.enqueue(() => chainedOperation.promise);
+			}),
+		);
+		const eventQueue = internals._events.queue;
 		let idle = false;
 		const waiting = harness.session.waitForIdle().then(() => {
 			idle = true;

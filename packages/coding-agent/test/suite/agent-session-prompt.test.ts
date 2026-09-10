@@ -1958,9 +1958,10 @@ stale post-hook extension instructions`,
 	it("propagates a snapshotted event queue rejection without flushing", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		(harness.session as unknown as { _events: { queue: Promise<void> } })._events.queue = Promise.reject(
-			new Error("event queue failed"),
-		);
+		const internals = harness.session as unknown as { _events: { enqueue(work: () => void): void } };
+		internals._events.enqueue(() => {
+			throw new Error("event queue failed");
+		});
 		const flushNow = vi.spyOn(harness.sessionManager, "flushNow");
 
 		await expect(harness.session.waitForSessionInputCheckpoint()).rejects.toThrow("event queue failed");

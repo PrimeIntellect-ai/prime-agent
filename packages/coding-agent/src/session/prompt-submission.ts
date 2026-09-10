@@ -83,6 +83,7 @@ function injectedMessagePreviewLabel(message: CustomMessage): string | undefined
 	}
 }
 export interface SessionPromptSubmissionHost {
+	promptInjectedMessage: SessionPromptSubmission["promptInjectedMessage"];
 	queueAgentMessagePrompt(
 		text: string,
 		streamingBehavior: "steer" | "followUp",
@@ -131,7 +132,7 @@ export class SessionPromptSubmission {
 		while (true) {
 			let admissionCommitted = false;
 			try {
-				await this.promptInjectedMessage(message.content, message, {
+				await this.host.promptInjectedMessage(message.content, message, {
 					streamingBehavior: "steer",
 					queueIfBusy: true,
 					resumeIfIdle: true,
