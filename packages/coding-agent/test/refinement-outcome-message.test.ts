@@ -1,6 +1,6 @@
 import { setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import {
 	convertToLlm,
@@ -11,7 +11,7 @@ import {
 import type { HarnessEntry, RefinementResult } from "../src/core/refinement/refinement.js";
 import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
 import { RefinementOutcomeMessageComponent } from "../src/modes/interactive/components/refinement-outcome-message.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 function entry(overrides: Partial<HarnessEntry> = {}): HarnessEntry {
 	return {
@@ -78,21 +78,27 @@ function expectChatInset(lines: string[]): void {
 
 describe("RefinementOutcomeMessageComponent", () => {
 	beforeAll(() => {
+		vi.stubEnv("COLORTERM", "truecolor");
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 	});
 
-	test("shows the outcome before quiet metadata and expands through the shared tool toggle", () => {
+	afterAll(() => vi.unstubAllEnvs());
+
+	test("shows a spaced accent harness header before its semantic summary", () => {
 		const message = createRefinementOutcomeMessage(result());
 		const component = new RefinementOutcomeMessageComponent(message);
 
 		const collapsed = rendered(component);
 		const content = collapsed.split("\n").filter((line) => line.trim());
-		expect(content[0]).toBe(" Added local guidance to make conversational responses rhyme.");
-		expect(content[1]).toContain("Refinement · 1 edit applied");
-		expect(content[1]).toContain("Ctrl+O to expand");
+		expect(content[0]?.trimEnd()).toBe(" ◆ Harness refined · 1 prompt created");
+		expect(content[1]).toBe(" Added local guidance to make conversational responses rhyme.");
+		expect(component.render(120)[1]).toContain(theme.fg("accent", "◆ Harness refined · 1 prompt created"));
+		expect(collapsed.split("\n")[0].trim()).toBe("");
+		expect(collapsed.split("\n").at(-1)?.trim()).toBe("");
+		expect(collapsed).not.toContain("Ctrl+O");
 		expect(collapsed).not.toContain("[refinement]");
-		expect(collapsed).toContain("╰─ Created local prompt `rhyme-response-guidance`");
+		expect(collapsed).not.toContain("rhyme-response-guidance");
 		expectChatInset(collapsed.split("\n"));
 		// Collapsed rows stay compact: entry details only render when expanded.
 		expect(collapsed).not.toContain("Rhyme response guidance");
@@ -102,10 +108,13 @@ describe("RefinementOutcomeMessageComponent", () => {
 		component.setExpanded(true);
 		const expanded = rendered(component);
 		expect(expanded).toContain("Created local prompt `rhyme-response-guidance`");
-		expect(expanded).toContain("Title      Rhyme response guidance");
-		expect(expanded).toContain("Content    Make conversational responses rhyme.");
-		expect(expanded).toContain("Path       prompts/rhyme-response-guidance.md");
-		expect(expanded).toContain("Ctrl+O to collapse");
+		expect(expanded).toContain(" Title");
+		expect(expanded).toContain("+ Rhyme response guidance");
+		expect(expanded).toContain(" Description");
+		expect(expanded).toContain("+ Make conversational responses rhyme.");
+		expect(expanded).toContain(" Path");
+		expect(expanded).toContain("prompts/rhyme-response-guidance.md");
+		expect(expanded).not.toContain("Ctrl+O");
 		expectChatInset(expanded.split("\n"));
 		// Structured rows, not a JSON dump.
 		expect(expanded).not.toContain('"content":');
@@ -117,7 +126,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(rendered(component)).toBe(collapsed);
 	});
 
-	test("gives long outcomes two preview lines without sacrificing the edit count and details hint", () => {
+	test("gives long semantic summaries two preview lines beneath the harness header", () => {
 		const long = result();
 		long.summary =
 			"Created local memory entries for the verifiers project context and running subagent tracking, plus a reusable subagent spec for parallel codebase exploration.";
@@ -125,12 +134,10 @@ describe("RefinementOutcomeMessageComponent", () => {
 
 		const lines = component.render(80).map((line) => stripAnsi(line));
 		const content = lines.filter((line) => line.trim().length > 0);
-		expect(content).toHaveLength(4);
-		expect(content[0]).toContain("Created local memory entries for the verifiers project context");
-		expect(content[1]).toContain("…");
-		expect(content[2]).toContain("1 edit applied");
-		expect(content[2]).toContain("Ctrl+O to expand");
-		expect(content[3]).toContain("╰─ Created local prompt `rhyme-response-guidance`");
+		expect(content).toHaveLength(3);
+		expect(content[0]).toContain("Harness refined · 1 prompt created");
+		expect(content[1]).toContain("Created local memory entries for the verifiers project context");
+		expect(content[2]).toContain("…");
 		expectChatInset(lines);
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
@@ -164,11 +171,12 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expectChatInset(output.split("\n"));
 
 		expect(output).toContain("Updated local prompt `tone-guidance`");
-		expect(output).toContain("Content  - Respond plainly.");
-		expect(output).toMatch(/ {13}\+ Respond in rhyme\./);
-		expect(output).toContain("Title      Tone guidance");
+		expect(output).toContain(" Description");
+		expect(output).toContain("  1 - Respond plainly.");
+		expect(output).toContain("  1 + Respond in rhyme.");
+		expect(output).toContain(" Tone guidance");
 		expect(output).toContain("Deleted local prompt `obsolete-guidance`");
-		expect(output).toContain("Content    Use prose.");
+		expect(output).toContain("  1 - Use prose.");
 		expect(output).not.toContain('"content":');
 	});
 
@@ -217,23 +225,23 @@ describe("RefinementOutcomeMessageComponent", () => {
 		const component = new RefinementOutcomeMessageComponent(message);
 
 		const collapsed = rendered(component);
-		expect(collapsed).toContain("Refinement · 2/3 edits applied");
-		expect(collapsed).toContain("╰─ Created local skill `linear`");
-		expect(collapsed).toContain("╰─ Updated local memory `osint-tips`");
-		expect(collapsed).toContain("╰─ Failed to delete local prompt `stale-note`: entry not found");
+		expect(collapsed).toContain("Harness partially refined · 2/3 edits applied");
+		expect(collapsed).not.toContain("`linear`");
+		expect(collapsed).not.toContain("`osint-tips`");
+		expect(collapsed).not.toContain("`stale-note`");
 		expectChatInset(collapsed.split("\n"));
 
 		component.setExpanded(true);
 		const expanded = rendered(component);
 		expectChatInset(expanded.split("\n"));
-		expect(expanded).toContain("Title      Linear issues");
-		expect(expanded).toContain("Content    Read and write Linear issues via MCP.");
-		expect(expanded).toContain('Reference  {"type":"python","import":"linear","callable":"run"}');
-		expect(expanded).toContain('Arguments  {"name":{"type":"string","required":true}}');
-		expect(expanded).toContain("Content  - Use blogs.");
-		expect(expanded).toMatch(/ {13}\+ Use blogs and acknowledgements\./);
+		expect(expanded).toContain("+ Linear issues");
+		expect(expanded).toContain("+ Read and write Linear issues via MCP.");
+		expect(expanded).toContain('+ {"type":"python","import":"linear","callable":"run"}');
+		expect(expanded).toContain('+ {"name":{"type":"string","required":true}}');
+		expect(expanded).toContain("  1 - Use blogs.");
+		expect(expanded).toContain("  1 + Use blogs and acknowledgements.");
 		expect(expanded).toContain("Failed to delete local prompt `stale-note`: entry not found");
-		expect(expanded).toContain("Title      Stale note");
+		expect(expanded).toContain(" Stale note");
 		// The raw JSON-diff blob is gone.
 		expect(expanded).not.toContain('"content":');
 		expect(expanded).not.toContain('"title":');
@@ -242,6 +250,75 @@ describe("RefinementOutcomeMessageComponent", () => {
 		for (const width of [80, 40, 24, 12]) {
 			for (const line of component.render(width)) {
 				expect(visibleWidth(stripAnsi(line))).toBeLessThanOrEqual(width);
+			}
+		}
+	});
+
+	test("shows memory action counts and file-style Title and Description backgrounds without changing the message", () => {
+		const before = entry({ kind: "memory", title: "Old title", content: "    preserve indentation\nOld guidance" });
+		const after = entry({ ...before, title: "New title", content: "    preserve indentation\nNew guidance" });
+		const message = createRefinementOutcomeMessage({
+			...result(),
+			summary: "Remembered the project's authentication conventions.",
+			appliedEdits: [
+				{
+					action: "update",
+					kind: "memory",
+					id: before.id,
+					before,
+					after,
+					applied: true,
+					reason: "Repeated user preference",
+				},
+			],
+		});
+		const original = JSON.stringify(message);
+		const component = new RefinementOutcomeMessageComponent(message);
+		expect(rendered(component)).toContain("◆ Harness refined · 1 memory updated");
+		component.setExpanded(true);
+		const rows = component.render(80);
+		const output = rows.map(stripAnsi).join("\n");
+		expect(output).toMatch(/ Title +\n/);
+		expect(output).toMatch(/ Description +\n/);
+		expect(output).toContain("     preserve indentation");
+		expect(output).toContain("Reason: Repeated user preference");
+		const removed = rows.find((row) => stripAnsi(row).includes("- Old guidance"))!;
+		const added = rows.find((row) => stripAnsi(row).includes("+ New guidance"))!;
+		expect(removed.startsWith(` ${theme.bg("toolDiffRemovedBg", "").slice(0, -5)}`)).toBe(true);
+		expect(added.startsWith(` ${theme.bg("toolDiffAddedBg", "").slice(0, -5)}`)).toBe(true);
+		expect(visibleWidth(removed)).toBe(80);
+		expect(visibleWidth(added)).toBe(80);
+		expect(output).not.toContain("Content");
+		for (const width of [12, 24, 40, 80]) {
+			for (const row of component.render(width)) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+		}
+		expect(JSON.stringify(message)).toBe(original);
+	});
+
+	test("labels no-change, failed, partial, and rollback outcomes honestly and preserves failure details", () => {
+		const failed = { ...result().appliedEdits[0]!, applied: false, error: "Permission denied" };
+		for (const [edits, rollbackOf, expected] of [
+			[[], undefined, "Harness unchanged · no edits applied"],
+			[[failed], undefined, "Harness refinement failed · 0/1 edits applied"],
+			[[failed], "old-refinement", "Harness rollback failed · 0/1 edits applied"],
+			[[...result().appliedEdits, failed], "old-refinement", "Harness partially rolled back · 1/2 edits applied"],
+			[result().appliedEdits, "old-refinement", "Harness rollback completed · 1 edit applied"],
+		] as const) {
+			const component = new RefinementOutcomeMessageComponent(
+				createRefinementOutcomeMessage({
+					...result(),
+					summary: "",
+					appliedEdits: [...edits],
+					rollbackOf,
+				}),
+			);
+			expect(rendered(component)).toContain(expected);
+			expect(rendered(component)).toContain("No summary was recorded");
+			component.setExpanded(true);
+			if (rollbackOf) expect(rendered(component)).toContain(`rollback of ${rollbackOf}`);
+			if (edits.some((edit) => !edit.applied)) expect(rendered(component)).toContain("Permission denied");
+			if (edits.every((edit) => !edit.applied)) {
+				expect(component.render(120).join("\n")).not.toContain(theme.bg("toolDiffAddedBg", "").slice(0, -5));
 			}
 		}
 	});
@@ -257,7 +334,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		});
 
 		expect(component).toBeInstanceOf(RefinementOutcomeMessageComponent);
-		expect(stripAnsi(component!.render(120).join("\n"))).toContain("Content    Make conversational responses rhyme.");
+		expect(stripAnsi(component!.render(120).join("\n"))).toContain("+ Make conversational responses rhyme.");
 	});
 
 	test("uses a typed, presentation-only custom message", () => {

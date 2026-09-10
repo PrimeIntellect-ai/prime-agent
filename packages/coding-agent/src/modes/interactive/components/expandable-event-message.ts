@@ -1,6 +1,5 @@
 import { type Component, Container, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
 
 class EventSummary implements Component {
 	constructor(
@@ -39,11 +38,9 @@ export abstract class ExpandableEventMessage extends Container {
 		this.updateDisplay();
 	}
 
-	protected addSummary(summary: string, metadata: string): void {
+	protected addSummary(summary: string, metadata?: string): void {
 		this.addChild(new EventSummary(summary, this.expanded));
-		this.addChild(
-			new Text(`${theme.fg("dim", metadata)} ${expandCollapseHint("app.tools.expand", this.expanded)}`, 1, 0),
-		);
+		if (metadata) this.addChild(new Text(theme.fg("dim", metadata), 1, 0));
 	}
 
 	protected abstract updateDisplay(): void;

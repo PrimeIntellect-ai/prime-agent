@@ -1,2 +1,3 @@
-- Changed refinement and compaction notices to show readable outcomes with muted metadata and expandable details in a compact layout.
-- Fixed refinement and compaction outcome messages to sit inside the chat's standard left inset, and replaced the refinement detail JSON blob with structured per-edit rows.
+- Changed refinement notices to show a spaced harness header with an accent diamond, accurate change counts, and a semantic summary.
+- Added expandable Title and Description diffs with the same red and green backgrounds as file edits, preserving other fields and failure details.
+- Changed compaction notices to show compact outcomes and expandable summaries without repeated detail shortcuts.
