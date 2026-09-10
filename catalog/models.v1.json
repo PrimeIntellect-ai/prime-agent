@@ -15025,6 +15025,38 @@
 			"maxTokens": 384000
 		},
 		{
+			"id": "deepseek/deepseek-v4.1-flash",
+			"name": "DeepSeek: DeepSeek V4.1 Flash",
+			"api": "openai-completions",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"compat": {
+				"requiresReasoningContentOnAssistantMessages": true,
+				"thinkingFormat": "deepseek"
+			},
+			"reasoning": true,
+			"thinkingLevelMap": {
+				"minimal": null,
+				"low": null,
+				"medium": null,
+				"high": "high",
+				"xhigh": "max",
+				"max": null
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.006,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 384000
+		},
+		{
 			"id": "dots-studio/dots-3-note-preview:free",
 			"name": "Dots Studio: Dots3-Note Preview (free)",
 			"api": "openai-completions",
@@ -15749,6 +15781,33 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 50000
+		},
+		{
+			"id": "inception/mercury-2.5",
+			"name": "Inception: Mercury 2.5",
+			"api": "openai-completions",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"thinkingLevelMap": {
+				"minimal": null,
+				"low": "low",
+				"medium": "medium",
+				"high": "high",
+				"xhigh": null,
+				"max": null
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.04,
+				"output": 0.15,
+				"cacheRead": 0.004,
+				"cacheWrite": 0
+			},
+			"contextWindow": 260000,
+			"maxTokens": 65536
 		},
 		{
 			"id": "inception/mercury-2.5-preview",
@@ -17110,6 +17169,62 @@
 				"input": 0.25,
 				"output": 1,
 				"cacheRead": 0.024999999999999998,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 235929
+		},
+		{
+			"id": "nex-agi/nex-n2.5-mini:free",
+			"name": "Nex AGI: Nex-N2.5-Mini (free)",
+			"api": "openai-completions",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"thinkingLevelMap": {
+				"minimal": null,
+				"low": null,
+				"medium": "medium",
+				"high": "high",
+				"xhigh": null,
+				"max": null
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 235929
+		},
+		{
+			"id": "nex-agi/nex-n2.5-pro:free",
+			"name": "Nex AGI: Nex-N2.5-Pro (free)",
+			"api": "openai-completions",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"thinkingLevelMap": {
+				"minimal": null,
+				"low": null,
+				"medium": "medium",
+				"high": "high",
+				"xhigh": null,
+				"max": null
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
