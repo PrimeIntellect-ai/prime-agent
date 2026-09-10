@@ -37,16 +37,10 @@ describe("InteractiveMode startup hints", () => {
 	}
 
 	it("shows a compact butterfly beside metadata without a repeated input hint", () => {
-		const header = new BrandSplashHeader(
-			"0.0.0",
-			() => "test-model",
-			() => "/tmp/project",
-			undefined,
-			{
-				topPadding: true,
-				getExtraMetadata: () => [{ label: "agents", value: "2 running" }],
-			},
-		);
+		const header = new BrandSplashHeader("0.0.0", () => "/tmp/project", undefined, {
+			topPadding: true,
+			getExtraMetadata: () => [{ label: "agents", value: "2 running" }],
+		});
 
 		const lines = header.render(120);
 		const output = stripAnsi(lines.join("\n"));
@@ -55,26 +49,17 @@ describe("InteractiveMode startup hints", () => {
 		expect(lines.length).toBeLessThanOrEqual(8);
 		expect(output).toContain("prime agent v0.0.0");
 		expect(output).toMatch(/[▗▙▛▜]/u);
-		expect(output).toContain("test-model");
 		expect(output).toContain("/tmp/project");
-		expect(stripAnsi(lines[4])).toContain("agents 2 running");
+		expect(stripAnsi(lines[5])).toContain("agents 2 running");
 		expect(output).not.toContain("Try ");
 		expect(output).not.toContain("type to search sessions");
 
-		const unpadded = new BrandSplashHeader(
-			"0.0.0",
-			() => "test-model",
-			() => "/tmp/project",
-		);
+		const unpadded = new BrandSplashHeader("0.0.0", () => "/tmp/project");
 		expect(unpadded.render(120)[0]).not.toBe("");
 	});
 
 	it("keeps metadata visible in narrow terminals and bounds every rendered row", () => {
-		const header = new BrandSplashHeader(
-			"0.0.0",
-			() => "test-model",
-			() => "/tmp/project",
-		);
+		const header = new BrandSplashHeader("0.0.0", () => "/tmp/project");
 
 		for (const width of [1, 2, 12, 14, 20, 24, 39, 40, 50, 51, 80]) {
 			const lines = header.render(width);
@@ -89,28 +74,20 @@ describe("InteractiveMode startup hints", () => {
 			}
 			if (width >= 14) {
 				expect(output).toContain("v0.0.0");
-				expect(output).toContain("test-model");
 				expect(output).toContain("/tmp/project");
 			}
 		}
 	});
 
 	it("renders live agents metadata, custom marks, and verbose instructions", () => {
-		let model = "first-model";
 		let cwd = "/tmp/first";
-		const header = new BrandSplashHeader(
-			"0.0.0",
-			() => model,
-			() => cwd,
-			"custom shortcut instructions",
-			{
-				logo: "<>\n><",
-				getExtraMetadata: () => [
-					{ label: "agents", value: "2 running" },
-					{ label: "scope", value: "current project" },
-				],
-			},
-		);
+		const header = new BrandSplashHeader("0.0.0", () => cwd, "custom shortcut instructions", {
+			logo: "<>\n><",
+			getExtraMetadata: () => [
+				{ label: "agents", value: "2 running" },
+				{ label: "scope", value: "current project" },
+			],
+		});
 
 		const initial = stripAnsi(header.render(80).join("\n"));
 		expect(initial).toContain("<>");
@@ -119,12 +96,9 @@ describe("InteractiveMode startup hints", () => {
 		expect(initial).toContain("scope current project");
 		expect(initial).toContain("custom shortcut instructions");
 
-		model = "second-model";
 		cwd = "/tmp/second";
 		const updated = stripAnsi(header.render(80).join("\n"));
-		expect(updated).toContain("second-model");
 		expect(updated).toContain("/tmp/second");
-		expect(updated).not.toContain("first-model");
 	});
 
 	it("randomly selects from five concise filepath prompts", () => {
