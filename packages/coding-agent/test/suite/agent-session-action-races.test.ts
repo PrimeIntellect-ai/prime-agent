@@ -326,9 +326,7 @@ describe("AgentSession action commit-fence races", () => {
 		harness.setResponses([
 			(context) => {
 				deliveredMessages.push(
-					...context.messages
-						.map(getMessageText)
-						.filter((text) => !text.startsWith("The persistent memories produced across this session so far:")),
+					...context.messages.map(getMessageText).filter((text) => !text.startsWith("[harness-digest]")),
 				);
 				return fauxAssistantMessage("done");
 			},
