@@ -1,0 +1,4 @@
+- Changed thinking rows to stay hidden by default: no thinking summary renders while the agent works, and the thinking keybinding reveals every thinking block in the conversation on demand and hides them again, with the trace and recap in a dim tone under a quiet "Thinking:" label.
+- Changed collapsed tool-call previews to render plain and dim instead of green or syntax-highlighted code, with dim line counts and durations, while expanded blocks keep full highlighting.
+- Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
+- Changed the conversation row hierarchy: event-row trailing detail (agent-message participant and previews, tool command previews, line counts, durations) renders dim while leading labels keep their colors.

@@ -3,7 +3,7 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
-import { AssistantMessageComponent, thinkingRecap } from "../src/modes/interactive/components/assistant-message.js";
+import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -216,7 +216,7 @@ describe("AssistantMessageComponent streaming identity", () => {
 		}
 	});
 
-	test("collapsed thinking shows a bold label, recap, and bracketed hint", () => {
+	test("hidden thinking renders nothing and the reveal shows the trace", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 
@@ -233,55 +233,50 @@ describe("AssistantMessageComponent streaming identity", () => {
 			{ type: "thinking", thinking },
 			{ type: "text", text: "Answer." },
 		]);
-		const rendered = stripAnsi(new AssistantMessageComponent(message, true).render(120).join("\n"));
 
-		expect(rendered).toContain("Thinking... · Deciding the approach (Ctrl+T to expand)");
-		expect(rendered).not.toContain("Some detail");
+		// Hidden by default: no thinking row at all, only the text block renders.
+		const hiddenRaw = new AssistantMessageComponent(message, true).render(120).join("\n");
+		const hidden = stripAnsi(hiddenRaw);
+		expect(hidden).toContain("Answer.");
+		expect(hidden).not.toContain("Thinking:");
+		expect(hidden).not.toContain("Some detail");
+		expect(hiddenRaw).not.toContain(theme.getFgAnsi("thinkingText"));
 
-		const expanded = stripAnsi(new AssistantMessageComponent(message, false).render(120).join("\n"));
-		expect(expanded).toContain("Thinking... (Ctrl+T to collapse)");
-		expect(expanded).toContain("Some detail about the options.");
-
-		// A whitespace-only trace falls back to the label instead of an empty recap.
-		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
+		// Revealed: the label row with the hide hint, then the dim trace.
+		const revealedRaw = new AssistantMessageComponent(message, false).render(120).join("\n");
+		const revealed = stripAnsi(revealedRaw);
+		expect(revealed).toContain("Thinking: (Ctrl+T to hide)");
+		expect(revealed).toContain("Some detail about the options.");
+		expect(revealedRaw).toContain(theme.getFgAnsi("thinkingText"));
+		expect(revealedRaw).toContain(theme.getFgAnsi("dim"));
+		const labelLine = revealedRaw.split("\n").find((line) => line.includes("Thinking:"));
+		expect(labelLine).toBeDefined();
+		expect(labelLine).not.toContain("\x1b[1m");
 	});
 
-	test("recap text with delimiters cannot mask structural changes", () => {
+	test("a thinking-only message renders nothing while hidden", () => {
+		initTheme("dark");
+
+		const message = createAssistantMessage([{ type: "thinking", thinking: "Trace only." }]);
+		const lines = new AssistantMessageComponent(message, true).render(80);
+		expect(lines).toEqual([]);
+	});
+
+	test("setHideThinkingBlock toggles the reveal without stale rows", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 
-		// Unescaped, the first recap "X|1:text:1" makes this signature identical
-		// to the next structure's (recap "X" plus a real text block), so the
-		// rebuild that renders the new text block would be skipped.
 		const component = new AssistantMessageComponent(undefined, true);
-		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "X|1:text:1" }]));
-		component.render(120);
+		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "Trace." }]));
+		expect(component.render(120)).toEqual([]);
 
-		component.updateContent(
-			createAssistantMessage([
-				{ type: "thinking", thinking: "X" },
-				{ type: "text", text: "Visible answer." },
-			]),
-		);
-		const rendered = stripAnsi(component.render(120).join("\n"));
+		component.setHideThinkingBlock(false);
+		const revealed = stripAnsi(component.render(120).join("\n"));
+		expect(revealed).toContain("Thinking: (Ctrl+T to hide)");
+		expect(revealed).toContain("Trace.");
 
-		expect(rendered).toContain("Visible answer.");
-	});
-
-	test("collapsed thinking row truncates instead of wrapping on narrow widths", () => {
-		initTheme("dark");
-		setKeybindings(new KeybindingsManager());
-
-		const thinking = `**${"A deliberately verbose reasoning summary header that keeps going ".repeat(3).trim()}**`;
-		const message = createAssistantMessage([{ type: "thinking", thinking }]);
-		const lines = new AssistantMessageComponent(message, true)
-			.render(60)
-			.map((line) => stripAnsi(line))
-			.filter((line) => line.trim().length > 0);
-
-		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("Thinking...");
-		expect(lines[0]).toContain("to expand");
+		component.setHideThinkingBlock(true);
+		expect(component.render(120)).toEqual([]);
 	});
 
 	test("setHideThinkingBlock and setExpanded mid-stream render identically", () => {
@@ -345,7 +340,7 @@ describe("AssistantMessageComponent body text color", () => {
 		expect(raw).toContain(theme.getFgAnsi("mdBody"));
 	});
 
-	test("keeps thinking text on thinkingText instead of mdBody", () => {
+	test("renders the thinking trace dimmer than the label, never mdBody", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 
@@ -353,7 +348,23 @@ describe("AssistantMessageComponent body text color", () => {
 		const raw = new AssistantMessageComponent(message, false).render(120).join("\n");
 
 		expect(stripAnsi(raw)).toContain("Quiet reasoning.");
+		expect(raw).toContain(theme.getFgAnsi("dim"));
 		expect(raw).toContain(theme.getFgAnsi("thinkingText"));
 		expect(raw).not.toContain(theme.getFgAnsi("mdBody"));
+	});
+
+	test("keeps assistant prose on mdBody while the thinking trace stays dim", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "Trace line." },
+			{ type: "text", text: "Answer prose." },
+		]);
+		const raw = new AssistantMessageComponent(message, false).render(120).join("\n");
+
+		expect(raw).toContain(theme.getFgAnsi("dim"));
+		expect(raw).toContain(theme.getFgAnsi("mdBody"));
+		expect(theme.getFgAnsi("dim")).not.toBe(theme.getFgAnsi("mdBody"));
 	});
 });

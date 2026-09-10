@@ -978,7 +978,7 @@ export class InteractiveMode {
 	private contextUsageTokenBaseline = 0;
 	// Refresh ordering: a stale failure must never clobber a newer success.
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
-	private readonly defaultHiddenThinkingLabel = "Thinking...";
+	private readonly defaultHiddenThinkingLabel = "Thinking:";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private ctrlCExitHintExpiresAt = 0;
@@ -1041,6 +1041,8 @@ export class InteractiveMode {
 	private editDiffsExpanded = false;
 
 	private hideThinkingBlock = false;
+	/** Transiently revealed thinking blocks (Ctrl+T shows all and hides them again; never persisted). */
+	private revealedThinkingComponents: AssistantMessageComponent[] = [];
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -1452,7 +1454,7 @@ export class InteractiveMode {
 						hint("app.tools.expand", "to expand tools"),
 						hint("app.messages.expand", "to expand agent messages"),
 						hint("app.edits.expand", "to expand edit diffs"),
-						hint("app.thinking.toggle", "to expand thinking"),
+						hint("app.thinking.toggle", "to show thinking"),
 						hint("app.subagents.focus", "to inspect subagents"),
 						hint("app.editor.external", "for external editor"),
 						hint("app.prompt.stash", "to stash prompt"),
@@ -7384,24 +7386,32 @@ export class InteractiveMode {
 	}
 
 	private toggleThinkingBlockVisibility(): void {
-		this.hideThinkingBlock = !this.hideThinkingBlock;
-		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
-
-		void (async () => {
-			// Rebuild chat from session messages
-			await this.rebuildChatFromMessages();
-
-			// If streaming, re-add the streaming component with updated visibility and re-render
-			if (this.streamingComponent && this.streamingMessage) {
-				this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-				this.streamingComponent.updateContent(this.streamingMessage);
-				this.chatContainer.addChild(this.streamingComponent);
+		// Thinking rows are hidden by default; the toggle transiently reveals every
+		// thinking block in the conversation and hides them again. It never touches
+		// the persisted setting, and blocks that appear after a reveal stay hidden
+		// until the toggle is pressed again.
+		if (this.revealedThinkingComponents.length > 0) {
+			for (const component of this.revealedThinkingComponents) {
+				component.setHideThinkingBlock(this.hideThinkingBlock);
 			}
-
-			this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
-		})().catch((error) => {
-			this.showError(error instanceof Error ? error.message : String(error));
-		});
+			this.revealedThinkingComponents = [];
+			this.showStatus("Thinking: hidden");
+		} else {
+			const targets = this.chatContainer.children.filter(
+				(child): child is AssistantMessageComponent =>
+					child instanceof AssistantMessageComponent && child.hasThinkingContent(),
+			);
+			if (targets.length === 0) {
+				this.showStatus("No thinking to show yet");
+				return;
+			}
+			for (const component of targets) {
+				component.setHideThinkingBlock(false);
+			}
+			this.revealedThinkingComponents = targets;
+			this.showStatus(`Thinking: shown (${targets.length} blocks)`);
+		}
+		this.ui.requestRender();
 	}
 
 	private openExternalEditor(): void {
@@ -9278,13 +9288,13 @@ export class InteractiveMode {
 		const stats = await this.agentConnection.getSessionStats();
 		const sessionName = this.getCurrentSessionName();
 
-		let info = `${theme.bold("Session Info")}\n\n`;
+		let info = `Session Info\n\n`;
 		if (sessionName) {
 			info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
 		}
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
-		info += `${theme.bold("Messages")}\n`;
+		info += `Messages\n`;
 		info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
 		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
 		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
@@ -9299,7 +9309,7 @@ export class InteractiveMode {
 
 	private handleLogsCommand(): void {
 		const logsDir = getLogsDir();
-		let info = `${theme.bold("Logs")}\n\n`;
+		let info = `Logs\n\n`;
 		info += `${theme.fg("dim", "Directory:")} ${logsDir}\n\n`;
 
 		let files: string[] = [];
@@ -9332,7 +9342,7 @@ export class InteractiveMode {
 
 	private async handleSystemPromptCommand(): Promise<void> {
 		const prompt = await this.agentConnection.getSystemPrompt();
-		const header = `${theme.bold("System Prompt")} ${theme.fg("dim", `(${prompt.length} chars)`)}`;
+		const header = `System Prompt ${theme.fg("dim", `(${prompt.length} chars)`)}`;
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(header, 1, 0));
@@ -9404,7 +9414,7 @@ export class InteractiveMode {
 
 	private formatTracePreview(result: Extract<AgentTracePreviewResult, { status: "ready" }>): string {
 		const lines = [
-			theme.bold("Trace Preview"),
+			"Trace Preview",
 			theme.fg("dim", "Nothing has been uploaded by this command."),
 			"",
 			`${theme.fg("dim", "File:")} ${result.sessionFile}`,
@@ -9423,7 +9433,7 @@ export class InteractiveMode {
 		if (result.gitCommit) {
 			lines.push(`${theme.fg("dim", "Git commit:")} ${result.gitCommit}`);
 		}
-		lines.push("", theme.bold("Raw JSONL payload preview"));
+		lines.push("", "Raw JSONL payload preview");
 		if (result.contentPreview) {
 			lines.push(result.contentPreview);
 			if (result.truncated) {
@@ -9465,7 +9475,7 @@ export class InteractiveMode {
 			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
 			const state = await this.agentConnection.getState();
 			const info = [
-				theme.bold("Trace Sharing"),
+				"Trace Sharing",
 				"",
 				`${theme.fg("dim", "Automatic uploads:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
 				`${theme.fg("dim", "Credential:")} ${credential?.label ?? "Not configured"}`,
@@ -9779,7 +9789,7 @@ export class InteractiveMode {
 		const next = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "-";
 		const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : "-";
 		const lines = [
-			theme.bold("Heartbeat"),
+			"Heartbeat",
 			"",
 			`${theme.fg("dim", "Status:")} ${job.status}`,
 			`${theme.fg("dim", "Every:")} ${job.schedule.expression}`,
@@ -9811,7 +9821,7 @@ export class InteractiveMode {
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("accent", "What's New"), 1, 0));
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
 		this.chatContainer.addChild(new DynamicBorder());

@@ -396,19 +396,21 @@ export class IPythonCellComponent implements Component {
 		const parts = [`${this.marker(details)} ${theme.fg("muted", languageLabel)}`];
 
 		if (preview.text) {
-			parts.push(this.highlightInputLine(preview.text, preview.language === "bash"));
+			// Collapsed preview stays plain and dim so the one-line summary reads as
+			// quiet metadata; the expanded block below keeps full highlighting.
+			parts.push(theme.fg("dim", preview.text));
 		} else if (!this.state.executionStarted) {
-			parts.push(theme.fg("muted", "waiting for code"));
+			parts.push(theme.fg("dim", "waiting for code"));
 		}
 
 		const counts = this.lineCounts(details);
 		if (counts) {
-			parts.push(theme.fg("muted", counts));
+			parts.push(theme.fg("dim", counts));
 		}
 
 		const duration = formatDuration(details.durationMs);
 		if (duration) {
-			parts.push(theme.fg("muted", duration));
+			parts.push(theme.fg("dim", duration));
 		}
 
 		const errorName = !this.state.isPartial ? (details.error?.ename ?? details.errorEname) : undefined;
@@ -521,14 +523,6 @@ export class IPythonCellComponent implements Component {
 		}
 
 		return true;
-	}
-
-	private highlightInputLine(line: string, isBashCell: boolean): string {
-		if (isBashCell || MAGIC_LINE_PATTERN.test(line) || parseIpythonBashCell(line) !== undefined) {
-			return theme.fg("bashMode", line);
-		}
-		const highlighted = highlightCode(line, "python");
-		return highlighted[0] ?? theme.fg("mdCodeBlock", line);
 	}
 
 	// Only runs when expanded — shows full output below the code, no previews.
