@@ -5,3 +5,4 @@
 - Stacked the recap and effort lines with blank-line breathing room above the prompt bar.
 - Restored the model, manage, and context-usage tray entries and hid the tray while a picker is open.
 - Hid the subagents summary box while a picker is open and stopped showing a depth label for root sessions.
+- Kept the recap and effort label on one shared line with a single blank line above the prompt bar.
