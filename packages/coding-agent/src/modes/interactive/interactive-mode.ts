@@ -480,8 +480,8 @@ export class BrandSplashHeader implements Component {
 		const title = theme.fg("text", titleText);
 		const metaLines = [
 			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
-			theme.fg("dim", truncatePathMiddle(formatSplashCwd(this.getCwd()), metaWidth)),
 			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
+			theme.fg("dim", truncatePathMiddle(formatSplashCwd(this.getCwd()), metaWidth)),
 		];
 		const lines = this.options.topPadding ? [""] : [];
 		const rowCount = Math.max(showLogo ? this.logoRaw.length : 0, metaLines.length);
