@@ -11,3 +11,4 @@
 - Centered the models picker effort cluster near the row midpoint with square glyphs; fills render light gray and reserve the saturated purple for the highlighted row.
 - Removed the explanatory title and subtitle lines from the model, provider, and MCP pickers; the search row now leads each picker.
 - Moved the model detail pricing unit onto the price row as "dollars per 1 million tokens" and left the provider/model line bare.
+- Fixed the effort cluster so changing the level never shifts the row; the level label renders in a fixed-width cell sized to the longest supported level name.
