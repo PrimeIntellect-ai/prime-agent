@@ -175,7 +175,7 @@ export function buildPromptContent(text: string, images?: ImageContent[]): (Text
 	return content;
 }
 
-export function deliveryPolicy(schedule: SessionInputSchedule): DeliveryPolicy {
+function deliveryPolicy(schedule: SessionInputSchedule): DeliveryPolicy {
 	return schedule === "steer" ? "next_turn_boundary" : "when_run_idle";
 }
 
