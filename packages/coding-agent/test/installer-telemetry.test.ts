@@ -217,6 +217,16 @@ describe("installer outcome telemetry", () => {
 		expect(result.stdout + result.stderr).not.toContain(installationId);
 	});
 
+	it.each(["internal", "test", "private-origin", ""])("categorizes installer traffic from origin %j", (origin) => {
+		const f = fixture();
+		const result = f.run({ PRIME_AGENT_TELEMETRY_ORIGIN: origin });
+		expect(result.status, result.stderr).toBe(0);
+		const [batch] = f.batches();
+		const expected = origin === "internal" || origin === "test" ? origin : "unknown";
+		for (const event of batch.events) expect(event.properties.workload_origin).toBe(expected);
+		expect(JSON.stringify(batch)).not.toContain("private-origin");
+	});
+
 	it.each([
 		["release_lookup", "release_lookup_failed", "TEST_RELEASE_STATUS", "22", 1],
 		["download", "download_failed", "TEST_DOWNLOAD_STATUS", "23", 23],

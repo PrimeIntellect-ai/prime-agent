@@ -189,6 +189,7 @@ async function main() {
     const targetVersion = semver.test(rawTargetVersion) ? rawTargetVersion : undefined;
     const properties = {
       version: targetVersion ?? "0.0.0", os_family: platform(), architecture: arch(), install_method: "npm", execution_mode: "unknown", schema_revision: 3,
+      workload_origin: ["internal", "test"].includes(process.env.PRIME_AGENT_TELEMETRY_ORIGIN) ? process.env.PRIME_AGENT_TELEMETRY_ORIGIN : "unknown",
       installation_attempt_id: state.attemptId, installation_action: "install", installation_source: "shell_installer", stage, outcome, duration_ms: null,
       ...(targetVersion ? { target_version: targetVersion } : {}),
       ...(reasons.includes(reason) ? { reason } : {}),
