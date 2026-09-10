@@ -163,7 +163,9 @@ describe("InteractiveMode startup hints", () => {
 		const label = Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);
 
 		expect(stripAnsi(label)).toBe("GLM 5.3 Fast · high · 175k (44%)");
-		expect(Reflect.get(InteractiveMode.prototype, "getTrayContextLabel").call(mode)).toBeUndefined();
+		expect(Reflect.get(InteractiveMode.prototype, "getTrayContextLabel").call(mode)).toBe(
+			"Showing overview (Ctrl+O to expand)",
+		);
 	});
 
 	it("keeps available context usage visible when the model is unknown", () => {
@@ -497,7 +499,7 @@ describe("InteractiveMode startup hints", () => {
 		Object.assign(mode, { ctrlCExitHintExpiresAt: Date.now() + 60_000 });
 
 		expect(stripAnsi(locationLabel())).toBe("← manage");
-		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s)");
+		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 		expect(stripAnsi(overrideLabel())).toBe("Press Ctrl+C again to exit");
 
 		mode.ui.hasOverlay = () => true;

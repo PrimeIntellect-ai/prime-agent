@@ -207,7 +207,13 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
-import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
+import {
+	formatConversationDetailStatus,
+	formatKeyText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "./components/keybinding-hints.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
@@ -6033,7 +6039,13 @@ export class InteractiveMode {
 		if (this.isInlinePickerOpen()) return undefined;
 		const goalLabel = this.getTrayGoalLabel();
 		const heartbeatLabel = this.getTrayHeartbeatLabel();
-		return [goalLabel, heartbeatLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		return [
+			goalLabel,
+			heartbeatLabel,
+			formatConversationDetailStatus(this.toolOutputExpanded, this.editDiffsExpanded),
+		]
+			.filter((label) => label !== undefined)
+			.join(" · ");
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {

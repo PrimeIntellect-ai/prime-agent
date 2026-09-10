@@ -4292,6 +4292,7 @@ describe("InteractiveMode goal status announcements", () => {
 });
 
 describe("InteractiveMode tray goal label", () => {
+	beforeAll(() => setKeybindings(new KeybindingsManager()));
 	type TrayUsage = { contextWindow: number; tokens: number | null; percent: number | null };
 	type TrayLabelHarness = {
 		heartbeatCatalog: AgentConnectionHeartbeat[];
@@ -4349,7 +4350,7 @@ describe("InteractiveMode tray goal label", () => {
 		fakeThis.ui = { hasOverlay: () => false };
 		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 	});
 
 	test("keeps context usage out of the lower tray while preserving active goals", () => {
@@ -4373,7 +4374,7 @@ describe("InteractiveMode tray goal label", () => {
 		fakeThis.ui = { hasOverlay: () => false };
 		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 	});
 
 	test("combines active goals and heartbeats without duplicating context usage below", () => {
@@ -4398,7 +4399,9 @@ describe("InteractiveMode tray goal label", () => {
 		fakeThis.ui = { hasOverlay: () => false };
 		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat");
+		expect(getTrayContextLabel.call(fakeThis)).toBe(
+			"Pursuing goal (1m 05s) · 1 heartbeat (Ctrl+R) · Showing overview (Ctrl+O to expand)",
+		);
 	});
 
 	test("omits the usage segment when token count is unknown", () => {
@@ -4422,7 +4425,7 @@ describe("InteractiveMode tray goal label", () => {
 		fakeThis.ui = { hasOverlay: () => false };
 		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 	});
 });
 

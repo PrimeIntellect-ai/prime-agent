@@ -1,5 +1,4 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
-import stripAnsi from "strip-ansi";
 import { beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { expandCollapseHint, formatKeyText } from "../src/modes/interactive/components/keybinding-hints.js";
@@ -19,11 +18,11 @@ describe("keybinding hint formatting", () => {
 		expect(expandCollapseHint("app.tools.expand", false)).toBe("");
 	});
 
-	it("preserves configurable message expansion hints", () => {
-		expect(stripAnsi(expandCollapseHint("app.messages.expand", false))).toBe("(Ctrl+P to expand)");
-		expect(stripAnsi(expandCollapseHint("app.messages.expand", true))).toBe("(Ctrl+P to collapse)");
+	it("omits inline message expansion hints even when remapped", () => {
+		expect(expandCollapseHint("app.messages.expand", false)).toBe("");
+		expect(expandCollapseHint("app.messages.expand", true)).toBe("");
 		setKeybindings(new KeybindingsManager({ "app.messages.expand": "ctrl+e" }));
-		expect(stripAnsi(expandCollapseHint("app.messages.expand", false))).toBe("(Ctrl+E to expand)");
+		expect(expandCollapseHint("app.messages.expand", false)).toBe("");
 	});
 
 	it("uses macOS modifier names on darwin but keeps Ctrl literal", () => {

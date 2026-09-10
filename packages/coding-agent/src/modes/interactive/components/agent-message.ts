@@ -10,7 +10,6 @@ import {
 } from "@earendil-works/pi-tui";
 import { type AgentSessionMessage, formatAgentMessageParticipant } from "../../../core/agent-messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
 
 function collapseText(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
@@ -99,13 +98,12 @@ export class AgentMessageComponent extends Container {
 			this.message.details.fromRelationship,
 			this.message.details.from,
 		);
-		const hint = expandCollapseHint("app.messages.expand", this.expanded);
 		if (this.expanded) {
-			return `${agentMessageSummaryLine(label, participant)} ${hint}`;
+			return agentMessageSummaryLine(label, participant);
 		}
 
 		const prefixWidth = visibleWidth(`◆ ${label} · ${participant} · `);
 		const preview = agentMessagePreview(prefixWidth, this.message.details.message);
-		return `${agentMessageSummaryLine(label, participant, preview)} ${hint}`;
+		return agentMessageSummaryLine(label, participant, preview);
 	}
 }
