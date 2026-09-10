@@ -280,22 +280,6 @@ export interface PromptOptions {
 	customMessage?: CustomMessage;
 }
 
-interface AgentMessageDeferred {
-	promise: Promise<void>;
-	resolve: () => void;
-	reject: (error: Error) => void;
-}
-
-function _createAgentMessageDeferred(): AgentMessageDeferred {
-	const deferred = {} as AgentMessageDeferred;
-	deferred.promise = new Promise<void>((resolve, reject) => {
-		deferred.resolve = resolve;
-		deferred.reject = reject;
-	});
-	deferred.promise.catch(() => undefined);
-	return deferred;
-}
-
 export type { ModelCycleResult } from "../session/model-selection.js";
 
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
