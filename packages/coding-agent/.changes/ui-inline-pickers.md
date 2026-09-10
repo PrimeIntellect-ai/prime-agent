@@ -4,3 +4,4 @@
 - Changed model rows to right-align the provider label with a require sign in hint beside it, and to list signed-in providers first with Prime Inference pinned on top when signed in.
 - Added per-model effort squares to the models picker; left/right adjusts the highlighted model's reasoning level and Enter applies the model and effort together.
 - Fixed the models picker search to keep signed-in providers above unsigned matches, with Prime Inference pinned on top of the signed-in group.
+- Softened the selected row highlight in menu pickers: the selection background blends toward the editor surface and the selected label renders bold instead of accent-colored.
