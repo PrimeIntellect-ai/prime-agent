@@ -254,7 +254,7 @@ describe("ModelSelectorComponent", () => {
 		expect(output).toContain("(2/12)");
 	});
 
-	it("keeps exact matches ahead of weaker signed-in matches and prefers sign-in for equivalent matches", async () => {
+	it("keeps signed-in matches above unsigned matches and orders by quality within them", async () => {
 		const harness = await createHarness({
 			models: [{ id: "base", name: "Base", reasoning: true }],
 		});
@@ -290,8 +290,8 @@ describe("ModelSelectorComponent", () => {
 		const signedOutExactRow = lines.findIndex((line) => line.includes("opencode"));
 		const signedInFuzzyRow = lines.findIndex((line) => line.includes("glorious-language-model-5.2"));
 		expect(signedInExactRow).toBeGreaterThanOrEqual(0);
-		expect(signedInExactRow).toBeLessThan(signedOutExactRow);
-		expect(signedOutExactRow).toBeLessThan(signedInFuzzyRow);
+		expect(signedInExactRow).toBeLessThan(signedInFuzzyRow);
+		expect(signedInFuzzyRow).toBeLessThan(signedOutExactRow);
 	});
 
 	it("orders provider-qualified exact, prefix, and fuzzy matches by quality", async () => {
@@ -302,8 +302,8 @@ describe("ModelSelectorComponent", () => {
 
 		const base = harness.getModel("base")!;
 		const exact = { ...base, provider: "openai", id: "gpt-5", name: "GPT-5" };
-		const prefix = { ...base, provider: "prime-inference", id: "openai-gpt-5-preview", name: "GPT-5 Preview" };
-		const fuzzy = { ...base, provider: "prime-inference", id: "other-openai-gpt-5", name: "Other GPT-5" };
+		const prefix = { ...base, provider: "openai", id: "openai-gpt-5-preview", name: "GPT-5 Preview" };
+		const fuzzy = { ...base, provider: "openai", id: "other-openai-gpt-5", name: "Other GPT-5" };
 		const selector = new ModelSelectorComponent(
 			createFakeTui(),
 			undefined,
@@ -314,7 +314,7 @@ describe("ModelSelectorComponent", () => {
 			"openai/gpt5",
 			{
 				availableModels: [fuzzy, prefix, exact],
-				configuredProviders: new Set(["prime-inference"]),
+				configuredProviders: new Set(["openai"]),
 			},
 		);
 
@@ -329,6 +329,54 @@ describe("ModelSelectorComponent", () => {
 		expect(exactRow).toBeGreaterThanOrEqual(0);
 		expect(exactRow).toBeLessThan(prefixRow);
 		expect(prefixRow).toBeLessThan(fuzzyRow);
+	});
+
+	it("keeps signed-in providers above unsigned matches in search results", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const primeCodex = { ...base, provider: "prime-inference", id: "codex-prime", name: "Prime Codex Model" };
+		const openaiExact = { ...base, provider: "openai", id: "codex", name: "Standard Codex" };
+		const openaiWeaker = { ...base, provider: "openai", id: "glorious-codex-thing", name: "Glorious Codex" };
+		const opencodeCodex = { ...base, provider: "opencode", id: "gpt-5-codex", name: "Rival Codex" };
+		const vercelCodex = {
+			...base,
+			provider: "vercel-ai-gateway",
+			id: "codex-gateway",
+			name: "Gateway Codex",
+		};
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			"codex",
+			{
+				availableModels: [opencodeCodex, vercelCodex, openaiWeaker, openaiExact, primeCodex],
+				configuredProviders: new Set(["prime-inference", "openai"]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const rowOf = (text: string) => lines.findIndex((line) => line.includes(text));
+		const primeRow = rowOf("Prime Codex Model");
+		const openaiExactRow = rowOf("Standard Codex");
+		const openaiWeakerRow = rowOf("Glorious Codex");
+		const opencodeRow = rowOf("Rival Codex");
+		const vercelRow = rowOf("Gateway Codex");
+		expect(primeRow).toBeGreaterThanOrEqual(0);
+		expect(primeRow).toBeLessThan(openaiExactRow);
+		expect(openaiExactRow).toBeLessThan(openaiWeakerRow);
+		expect(openaiWeakerRow).toBeLessThan(opencodeRow);
+		expect(openaiWeakerRow).toBeLessThan(vercelRow);
 	});
 
 	it("right-aligns the provider with the require sign in hint to its left", async () => {
