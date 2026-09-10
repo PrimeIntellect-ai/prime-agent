@@ -18,28 +18,12 @@ export interface ToolRunGroupCounts {
 	ipython: number;
 }
 
-const COUNT_WORDS = [
-	"one",
-	"two",
-	"three",
-	"four",
-	"five",
-	"six",
-	"seven",
-	"eight",
-	"nine",
-	"ten",
-	"eleven",
-	"twelve",
-] as const;
-
 function formatCount(count: number, noun: string): string {
-	const word = COUNT_WORDS[count - 1];
-	return `${word ?? count} ${noun}${count === 1 ? "" : "s"}`;
+	return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-/** `Running two shell commands · one Python cell` label for the group header. */
-export function formatToolRunGroupHeader(counts: ToolRunGroupCounts): string {
+/** `Running 2 shell commands · 1 Python cell` label for the group header. */
+export function formatToolRunGroupHeader(counts: ToolRunGroupCounts, complete: boolean): string {
 	const parts: string[] = [];
 	if (counts.bash > 0) {
 		parts.push(formatCount(counts.bash, "shell command"));
@@ -47,7 +31,7 @@ export function formatToolRunGroupHeader(counts: ToolRunGroupCounts): string {
 	if (counts.ipython > 0) {
 		parts.push(formatCount(counts.ipython, "Python cell"));
 	}
-	return `Running ${parts.join(" · ")}`;
+	return `${complete ? "Ran" : "Running"} ${parts.join(" · ")}`;
 }
 
 /**
@@ -108,9 +92,12 @@ export class ToolRunGroupComponent implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
+		// The header reads "Running N ..." until every nested call has finished,
+		// then settles on "Ran N ...".
+		const complete = this.tools.length > 0 && this.tools.every((tool) => tool.isRunComplete());
 		const lines = [
 			truncateToWidth(
-				`${GROUP_INDENT}${theme.fg("accent", "◆")} ${theme.fg("muted", formatToolRunGroupHeader(this.counts))}`,
+				`${GROUP_INDENT}${theme.fg("accent", "◆")} ${theme.fg("muted", formatToolRunGroupHeader(this.counts, complete))}`,
 				safeWidth,
 				"",
 			),
@@ -153,25 +140,21 @@ export type ToolRunGroupMount = (component: Component) => void;
 /**
  * Derives "Running N ..." groups from the conversation's message sequence.
  * Both the streaming path and the reload path feed the same block-ordered
- * events — assistant text blocks, tool call mounts, other conversation rows,
- * and segment boundaries — so live and reloaded transcripts group identically.
+ * events — tool call mounts, other conversation rows, and segment boundaries —
+ * so live and reloaded transcripts group identically. Assistant text and
+ * thinking blocks never break a run; only a turn-ending reply does.
  */
 export class ToolRunGrouper {
 	private openGroup: ToolRunGroupComponent | undefined;
 
 	constructor(private readonly mount: ToolRunGroupMount) {}
 
-	/** A non-empty assistant text block arrived: the open run segment ends. */
-	noteAssistantText(): void {
-		this.openGroup = undefined;
-	}
-
 	/** A non-tool conversation row arrived: the open run segment ends. */
 	noteConversationRow(): void {
 		this.openGroup = undefined;
 	}
 
-	/** Turn or abort boundary: the open run segment ends. */
+	/** Turn or abort boundary, or a turn-ending reply: the run segment ends. */
 	close(): void {
 		this.openGroup = undefined;
 	}

@@ -110,10 +110,6 @@ export function buildConversationComponents(
 				),
 			);
 			for (const content of message.content) {
-				if (content.type === "text" && content.text.trim()) {
-					grouper.noteAssistantText();
-					continue;
-				}
 				if (content.type !== "toolCall") {
 					continue;
 				}
@@ -142,7 +138,9 @@ export function buildConversationComponents(
 					pendingTools.set(content.id, tool);
 				}
 			}
-			if (message.stopReason === "aborted" || message.stopReason === "error") {
+			// A turn-ending reply closes the open run segment; mid-run notes
+			// and thinking never do.
+			if (message.stopReason !== "toolUse") {
 				grouper.close();
 			}
 		} else if (message.role === "toolResult") {
