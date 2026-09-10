@@ -831,7 +831,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private getInlineDetailRows(): number {
-		const detailRows = this.renderWidth >= 58 ? 5 : 6;
+		const detailRows = this.renderWidth >= 58 ? 4 : 5;
 		return this.hasRows(this.getHeaderRows() + 5 + (this.scopeText ? 1 : 0) + detailRows) ? detailRows : 0;
 	}
 
@@ -848,7 +848,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			["Output", price(item.model.cost?.output)],
 		];
 		const unit = theme.fg("muted", PRICE_UNIT_TEXT);
-		const lines = ["", theme.fg("muted", `${item.provider}/${item.id}`)];
+		const lines = [""];
 		if (width >= 58) {
 			// Shrink the columns so the unit can trail the Output column.
 			const columnWidth = Math.max(

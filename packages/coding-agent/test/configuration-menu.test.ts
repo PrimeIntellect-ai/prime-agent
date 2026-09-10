@@ -192,7 +192,7 @@ describe("ConfigurationMenuComponent", () => {
 
 		menu.updateModels(postLoginModel);
 		let output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("faux-1");
+		expect(output).toContain("Faux One");
 		expect(menu.getSearchValue("models")).toBe("faux");
 
 		menu.updateModels(postLoginModel, [firstModel, postLoginModel]);
@@ -259,11 +259,9 @@ describe("ConfigurationMenuComponent", () => {
 			expect(output).toContain("$2.75");
 			expect(output).not.toContain("$1.1525");
 			expect(output).not.toContain("$3");
-			// The header carries only the qualified model key; the unit trails the
-			// price row and the block ends with clear whitespace.
-			const headerLine = lines.find((line) => line.includes("faux/faux-1"));
-			expect(headerLine).toBeDefined();
-			expect(headerLine).not.toContain("$ / 1M tokens");
+			// The provider/model-id header line is gone; the unit trails the price
+			// row and the block ends with clear whitespace.
+			expect(output).not.toContain("faux/faux-1");
 			expect(output).not.toContain("USD / 1M tokens");
 			const unitLine = lines.find((line) => line.includes("$ / 1M tokens"));
 			expect(unitLine).toBeDefined();
