@@ -24,7 +24,7 @@ export class CompactionSummaryMessageComponent extends ExpandableEventMessage {
 
 		this.addChild(new Spacer(1));
 		this.addChild(
-			new Markdown(this.message.summary, 0, 0, this.markdownTheme, {
+			new Markdown(this.message.summary, 1, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);

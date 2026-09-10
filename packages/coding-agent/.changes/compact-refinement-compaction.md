@@ -1,1 +1,2 @@
 - Changed refinement and compaction notices to show readable outcomes with muted metadata and expandable details in a compact layout.
+- Fixed refinement and compaction outcome messages to sit inside the chat's standard left inset, and replaced the refinement detail JSON blob with structured per-edit rows.
