@@ -380,6 +380,7 @@ describe("#502 unified session view regressions", () => {
 		{ mode: "search", prompt: ["prompt top", "prompt input", "prompt bottom"] },
 		{ mode: "reply", prompt: ["prompt top", "reply header", "reply gap", "prompt input", "prompt bottom"] },
 	])("short content reserves the $mode editor and a session row ahead of startup chrome", ({ prompt }) => {
+		initTheme("dark");
 		const renderSessionRows = vi.fn(() => ["session row"]);
 		const harness = {
 			splash: { render: () => Array.from({ length: 8 }, () => "splash") },
