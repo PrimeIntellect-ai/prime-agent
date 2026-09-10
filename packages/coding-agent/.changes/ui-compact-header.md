@@ -1,2 +1,2 @@
-- Replaced chat and agents splash logos with a compact PRIME wordmark beside runtime metadata, with a "prime agent" text heading in narrow terminals.
+- Replaced chat and agents splash logos with a compact butterfly beside runtime metadata, with a "prime agent" text heading in narrow terminals.
 - Removed duplicate prompt suggestions from chat and agents headers.
