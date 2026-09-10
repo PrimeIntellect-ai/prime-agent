@@ -189,6 +189,8 @@ type ColorMode = "truecolor" | "256color";
 
 const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = { r: 0, g: 95, b: 135 };
 const SOFT_SELECTION_ALPHA = 0.5;
+const EFFORT_SQUARE_DARK_COLOR = "#8b5cf6";
+const EFFORT_SQUARE_LIGHT_COLOR = "#7c3aed";
 const SURFACE_MIN_LUMINANCE_DELTA = 12;
 const SURFACE_CONTRAST_ALPHA = 0.08;
 // Selection rows must stand out clearly, much more than passive surfaces.
@@ -550,6 +552,17 @@ export class Theme {
 		}
 		const ansi = bgAnsi(adjustedColor, this.mode);
 		return (str: string) => `${ansi}${str}\x1b[49m`;
+	}
+
+	/** Filled effort squares: a saturated purple that reads stronger than the theme accent. */
+	getEffortSquareColor(): (str: string) => string {
+		const hex = getTerminalBackgroundKind() === "light" ? EFFORT_SQUARE_LIGHT_COLOR : EFFORT_SQUARE_DARK_COLOR;
+		const color = bestAnsiColor(hexToRgb(hex), this.mode);
+		if (color === "") {
+			return (str: string) => this.fg("accent", str);
+		}
+		const ansi = fgAnsi(color, this.mode);
+		return (str: string) => `${ansi}${str}[39m`;
 	}
 
 	getAdaptiveAccentColor(): (str: string) => string {

@@ -530,18 +530,21 @@ describe("ModelSelectorComponent", () => {
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
 
-		expect(row()).toContain("▓▓░░");
+		expect(row()).toContain("← ▓ ▓ ░ ░ → low");
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("▓▓▓░");
+		expect(row()).toContain("▓ ▓ ▓ ░");
+		expect(row()).toContain("medium");
 
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("░░░░");
+		expect(row()).toContain("░ ░ ░ ░");
+		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("▓▓▓▓");
+		expect(row()).toContain("▓ ▓ ▓ ▓");
+		expect(row()).toContain("high");
 	});
 
 	it("shows no effort squares for models without reasoning support", async () => {
@@ -578,6 +581,8 @@ describe("ModelSelectorComponent", () => {
 		expect(renderRow()).toBeDefined();
 		expect(renderRow()).not.toContain("▓");
 		expect(renderRow()).not.toContain("░");
+		expect(renderRow()).not.toContain("←");
+		expect(renderRow()).not.toContain("→");
 
 		selector.handleInput("\x1b[C");
 		expect(renderRow()).not.toContain("▓");
@@ -617,14 +622,56 @@ describe("ModelSelectorComponent", () => {
 			stripAnsi(selector.render(80).join("\n"))
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
-		expect(row()).toContain("░░░░");
+		expect(row()).toContain("░ ░ ░ ░");
+		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("▓░░░");
+		expect(row()).toContain("▓ ░ ░ ░");
 
 		selector.handleInput("\r");
 		expect(selectedId).toBe("beta-one");
 		expect(selectedLevel).toBe("minimal");
+	});
+
+	it("aligns effort squares, arrows, and labels across rows", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const short = { ...base, provider: "signed-in-beta", id: "beta-one", name: "GLM 5.3" };
+		const long = { ...base, provider: "unsigned-zeta", id: "zeta-one", name: "A Considerably Longer Model Name" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [short, long],
+				configuredProviders: new Set([short.provider]),
+				inline: true,
+				thinkingLevel: "low",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const shortRow = lines.find((line) => line.includes("GLM 5.3"));
+		const longRow = lines.find((line) => line.includes("A Considerably Longer"));
+		expect(shortRow).toBeDefined();
+		expect(longRow).toBeDefined();
+		expect(shortRow?.search(/[▓░]/)).toBe(longRow?.search(/[▓░]/));
+		expect(shortRow?.indexOf(" low")).toBe(longRow?.indexOf(" low"));
+		expect(shortRow).toContain("←");
+		expect(shortRow).toContain("→");
+		expect(longRow).not.toContain("←");
+		expect(longRow).not.toContain("→");
+		expect(longRow).toContain("▓ ▓ ░ ░");
 	});
 
 	it("uses current model, recency, and alphabetical order for equivalent matches", async () => {

@@ -191,6 +191,26 @@ export function getMenuListLayout(options: MenuListLayoutOptions): MenuListLayou
 		: { compact: false, visibleItems: comfortableLayout.visibleItems };
 }
 
+function reduceInlineTrailingSegments(segments: ReadonlyArray<string>, budget: number): string[] {
+	let current = segments.filter((segment) => segment.length > 0);
+	while (current.length > 1 && visibleWidth(current.join(" · ")) > budget) {
+		current = current.slice(1);
+	}
+	return current;
+}
+
+/**
+ * Rendered width of a trailing cluster at the given row width, mirroring how
+ * MenuRow degrades and truncates it. Pickers use this to budget row content.
+ */
+export function getInlineTrailingWidth(segments: ReadonlyArray<string>, width: number): number {
+	const innerWidth = Math.max(1, width - 2);
+	const budget = Math.max(1, innerWidth - 5);
+	const reduced = reduceInlineTrailingSegments(segments, budget);
+	if (reduced.length === 0) return 0;
+	return Math.min(visibleWidth(reduced.join(" · ")), budget);
+}
+
 function paddedBackgroundLine(
 	text: string,
 	width: number,
@@ -453,10 +473,7 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 			return details ? truncateToWidth(theme.fg("muted", details), Math.floor(innerWidth / 2), "…") : "";
 		}
 		const budget = Math.max(1, innerWidth - 5);
-		let segments = this.options.trailing.filter((segment) => segment.length > 0);
-		while (segments.length > 1 && visibleWidth(segments.join(" · ")) > budget) {
-			segments = segments.slice(1);
-		}
+		const segments = reduceInlineTrailingSegments(this.options.trailing, budget);
 		if (segments.length === 0) return "";
 		return truncateToWidth(theme.fg("muted", segments.join(" · ")), budget, "…");
 	}

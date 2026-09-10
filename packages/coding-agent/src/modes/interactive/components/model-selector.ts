@@ -22,6 +22,7 @@ import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.
 import { theme } from "../theme/theme.js";
 import { keyHint } from "./keybinding-hints.js";
 import {
+	getInlineTrailingWidth,
 	getMenuListLayout,
 	MenuList,
 	MenuPanel,
@@ -135,6 +136,15 @@ const MODEL_LIST_RESERVED_ROWS = {
 const MODEL_SCROLL_INDICATOR_ROWS = 1;
 const MODEL_HELP_MIN_ROWS = 12;
 const MODEL_DETAIL_MIN_ROWS = 14;
+const EFFORT_NAME_COLUMN_MAX = 30;
+const EFFORT_NAME_COLUMN_MIN = 12;
+
+interface EffortLayout {
+	nameColumn: number;
+	squareSlots: number;
+	showLabel: boolean;
+	showCluster: boolean;
+}
 
 /**
  * Component that renders a model selector with search
@@ -405,12 +415,79 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		return true;
 	}
 
-	private renderEffortSquares(levels: ModelThinkingLevel[], effort: ModelThinkingLevel | undefined): string {
+	private getTrailingSegments(item: ModelItem, isCurrent: boolean, isConfigured: boolean): string[] {
+		const segments: string[] = [];
+		if (isCurrent) segments.push("current");
+		if (!isConfigured) segments.push("require sign in");
+		segments.push(item.provider);
+		return segments;
+	}
+
+	private getEffortLayout(startIndex: number, endIndex: number): EffortLayout {
+		const empty: EffortLayout = { nameColumn: 0, squareSlots: 0, showLabel: false, showCluster: false };
+		const reasoningItems: ModelItem[] = [];
+		for (let i = startIndex; i < endIndex; i++) {
+			const item = this.filteredModels[i];
+			if (item && this.getSelectableLevels(item).length > 0) reasoningItems.push(item);
+		}
+		if (reasoningItems.length === 0) return empty;
+
+		const width = this.renderWidth;
+		let maxTrailingWidth = 0;
+		for (let i = startIndex; i < endIndex; i++) {
+			const item = this.filteredModels[i];
+			if (!item) continue;
+			const segments = this.getTrailingSegments(
+				item,
+				modelsAreEqual(this.currentModel, item.model),
+				this.isProviderConfigured(item),
+			);
+			maxTrailingWidth = Math.max(maxTrailingWidth, getInlineTrailingWidth(segments, width));
+		}
+		const available = Math.max(1, width - 2 - maxTrailingWidth - 2);
+
+		const nameColumn = Math.min(
+			Math.max(...reasoningItems.map((item) => visibleWidth(item.model.name))),
+			EFFORT_NAME_COLUMN_MAX,
+		);
+		const squareSlots = Math.max(
+			...reasoningItems.map((item) => this.getSelectableLevels(item).filter((level) => level !== "off").length),
+		);
+		const clusterWidth = squareSlots * 2 - 1;
+		const labelWidth = Math.max(...reasoningItems.map((item) => visibleWidth(this.getEffort(item) ?? "")));
+		// Space, arrow slot, and space on each side of the squares cluster, plus
+		// the space before the label. Shrink the name column before dropping the
+		// label or the cluster so rows stay aligned at every width.
+		const arrowsAndGaps = 6;
+		if (nameColumn + clusterWidth + labelWidth + arrowsAndGaps <= available) {
+			return { nameColumn, squareSlots, showLabel: true, showCluster: true };
+		}
+		const labelNameColumn = available - clusterWidth - labelWidth - arrowsAndGaps;
+		if (labelNameColumn >= EFFORT_NAME_COLUMN_MIN) {
+			return { nameColumn: labelNameColumn, squareSlots, showLabel: true, showCluster: true };
+		}
+		if (nameColumn + clusterWidth + arrowsAndGaps <= available) {
+			return { nameColumn, squareSlots, showLabel: false, showCluster: true };
+		}
+		const clusterNameColumn = available - clusterWidth - arrowsAndGaps;
+		if (clusterNameColumn >= EFFORT_NAME_COLUMN_MIN) {
+			return { nameColumn: clusterNameColumn, squareSlots, showLabel: false, showCluster: true };
+		}
+		return empty;
+	}
+
+	private renderEffortSquares(
+		levels: ModelThinkingLevel[],
+		effort: ModelThinkingLevel | undefined,
+		squareSlots: number,
+	): string {
 		const onLevels = levels.filter((level) => level !== "off");
 		if (onLevels.length === 0) return "";
+		const filledColor = theme.getEffortSquareColor();
 		const filled = effort === undefined || effort === "off" ? 0 : onLevels.indexOf(effort) + 1;
-		const filledCount = Math.max(0, Math.min(onLevels.length, filled));
-		return theme.fg("accent", "▓".repeat(filledCount)) + theme.fg("dim", "░".repeat(onLevels.length - filledCount));
+		const squares = onLevels.map((_, index) => (index < filled ? filledColor("▓") : theme.fg("dim", "░")));
+		const spaced = squares.join(" ");
+		return spaced + " ".repeat(Math.max(0, squareSlots * 2 - 1 - visibleWidth(spaced)));
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
@@ -507,6 +584,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
 
 		// Show visible slice of filtered models
+		const effortLayout = this.inline
+			? this.getEffortLayout(startIndex, endIndex)
+			: { nameColumn: 0, squareSlots: 0, showLabel: false, showCluster: false };
+
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i];
 			if (!item) continue;
@@ -519,17 +600,25 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					? theme.fg("success", "current")
 					: undefined
 				: theme.fg("warning", isCurrent ? "current · require sign in" : "require sign in");
-			const inlineSegments: string[] = [];
-			if (isCurrent) inlineSegments.push("current");
-			if (!isConfigured) inlineSegments.push("require sign in");
-			inlineSegments.push(item.provider);
-			const levels = this.getSelectableLevels(item);
-			const effort = this.getEffort(item);
-			const squares = this.renderEffortSquares(levels, effort);
+			const inlineSegments = this.getTrailingSegments(item, isCurrent, isConfigured);
+			let primary = this.inline ? item.model.name : item.id;
+			if (this.inline && effortLayout.showCluster) {
+				const levels = this.getSelectableLevels(item);
+				const effort = this.getEffort(item);
+				if (levels.length > 0 && effort !== undefined) {
+					const nameCell = truncateToWidth(item.model.name, effortLayout.nameColumn, "…", true);
+					const leftArrow = isSelected ? theme.fg("dim", "←") : " ";
+					const rightArrow = isSelected ? theme.fg("dim", "→") : " ";
+					const squares = this.renderEffortSquares(levels, effort, effortLayout.squareSlots);
+					primary = effortLayout.showLabel
+						? `${nameCell} ${leftArrow} ${squares} ${rightArrow} ${theme.fg("muted", effort)}`
+						: `${nameCell} ${leftArrow} ${squares} ${rightArrow}`;
+				}
+			}
 
 			this.listContainer.addChild(
 				new MenuRow({
-					primary: this.inline ? `${item.model.name}${squares ? ` ${squares}` : ""}` : item.id,
+					primary,
 					secondary: this.inline ? undefined : item.provider,
 					meta: this.inline ? undefined : meta,
 					trailing: this.inline ? inlineSegments : undefined,
@@ -665,7 +754,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				comfortableListPaddingRows: 0,
 				scrollIndicatorRows: 1,
 			});
-			this.responsiveLayoutKey = `inline:${this.getHeaderRows()}:${detailRows}:${this.listLayout.visibleItems}`;
+			this.responsiveLayoutKey = `inline:${this.getHeaderRows()}:${detailRows}:${this.listLayout.visibleItems}:${this.renderWidth}`;
 			return;
 		}
 		const showHeaderHelp = this.shouldShowHeaderHelp();
