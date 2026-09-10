@@ -10,20 +10,23 @@ describe("PromptContextLine", () => {
 		await preloadCodeHighlighter();
 	});
 
-	it.each(["dark", "light"])("shares one plain row between recap and effort with one blank line above the prompt in the %s theme", (name) => {
-		initTheme(name);
-		const line = new PromptContextLine(
-			() => "Updated the prompt layout",
-			() => theme.fg("dim", "high · /effort"),
-		);
-		const rows = line.render(80);
+	it.each(["dark", "light"])(
+		"shares one plain row between recap and effort with one blank line above the prompt in the %s theme",
+		(name) => {
+			initTheme(name);
+			const line = new PromptContextLine(
+				() => "Updated the prompt layout",
+				() => theme.fg("dim", "high · /effort"),
+			);
+			const rows = line.render(80);
 
-		expect(rows).toHaveLength(2);
-		expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated the prompt layout\s{2,}high · \/effort $/);
-		expect(rows[1]).toBe("");
-		expect(visibleWidth(rows[0]!)).toBe(80);
-		expect(rows[0]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
-	});
+			expect(rows).toHaveLength(2);
+			expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated the prompt layout\s{2,}high · \/effort $/);
+			expect(rows[1]).toBe("");
+			expect(visibleWidth(rows[0]!)).toBe(80);
+			expect(rows[0]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
+		},
+	);
 
 	it("keeps effort aligned right above the prompt", () => {
 		const line = new PromptContextLine(
