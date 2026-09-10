@@ -35,7 +35,7 @@ export class SessionPendingContext {
 	private messages: CustomMessage[] = [];
 	private readonly terminalNoticeActionIds = new Set<string>();
 	constructor(
-		private readonly actions: ActionStore<QueuedSessionAction>,
+		private readonly actions: Pick<ActionStore<QueuedSessionAction>, "clearableActions" | "unfinishedActions">,
 		private readonly host: SessionPendingContextHost,
 	) {}
 	appendMessages(...messages: CustomMessage[]): void {

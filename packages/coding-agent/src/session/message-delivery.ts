@@ -104,7 +104,7 @@ export class SessionMessageDelivery {
 	private readonly outcomes = new Map<string, AgentMessageOutcome>();
 	private readonly lateMessages = new Map<string, KernelSentAgentMessage[]>();
 	constructor(
-		private readonly actions: ActionStore<QueuedSessionAction>,
+		private readonly actions: Pick<ActionStore<QueuedSessionAction>, "unfinishedActions">,
 		private readonly host: SessionMessageDeliveryHost,
 	) {}
 	dispose(deliveryError: Error, completionError: Error): void {

@@ -17,7 +17,7 @@ export interface SessionActionRecoveryHost {
 }
 export class SessionActionRecovery {
 	constructor(
-		private readonly actions: ActionStore<QueuedSessionAction>,
+		private readonly actions: Pick<ActionStore<QueuedSessionAction>, "ownedActions" | "snapshotActions">,
 		private readonly host: SessionActionRecoveryHost,
 	) {}
 	async restoreSessionActions(snapshot: SessionActionRecoverySnapshot): Promise<number> {
