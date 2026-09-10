@@ -3673,7 +3673,7 @@ export class InteractiveMode {
 		this.recapContainer.addChild(
 			new PromptContextLine(
 				() => this.sessionRecap,
-				(maxWidth) => this.getPromptEffortLabel(maxWidth),
+				(maxWidth) => this.getPromptContextLabel(maxWidth),
 			),
 		);
 		this.ui.requestRender();
@@ -6129,7 +6129,6 @@ export class InteractiveMode {
 
 	private getTrayLocationLabel(): string | undefined {
 		if (this.isInlinePickerOpen()) return undefined;
-		const modelLabel = this.getModelTrayLabel();
 		const sessionDepth = this.options.sessionDepth;
 		const hasChildren = this.options.sessionHasChildren === true || (this.subagentSnapshots?.size ?? 0) > 0;
 		// Depth is subagent-session context: a root session (depth 0) never shows
@@ -6137,9 +6136,7 @@ export class InteractiveMode {
 		const depthLabel = sessionDepth ? formatAgentDepthLabel(sessionDepth, hasChildren) : undefined;
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
-			.filter((label): label is string => label !== undefined)
-			.join("  ");
+		return [agentsHint, depthLabel, shortcutsHint].filter((label): label is string => label !== undefined).join("  ");
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -6153,29 +6150,30 @@ export class InteractiveMode {
 		return (this.connectionState?.messageCount ?? 0) === 0 && this.connectionState?.isStreaming !== true;
 	}
 
-	private getModelTrayLabel(): string {
+	private getPromptContextLabel(maxWidth: number): string | undefined {
 		const model = this.getCurrentModel();
-		if (!model) {
-			return "—";
-		}
+		if (maxWidth < 1 || !model) return undefined;
 		const name = model.name.trim().replace(/\s+\(internal\)$/i, "");
 		const providerPrefix = `${model.provider}/`;
 		const compactName = name.startsWith(providerPrefix)
 			? name.slice(providerPrefix.length)
 			: name.replace(/^internal\//, "");
-		const parts = [compactName || model.name];
+		const displayName = /[\s/]/.test(compactName)
+			? compactName
+			: compactName
+					.split("-")
+					.map((part) =>
+						/^(glm|gpt|oss)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
+					)
+					.join(" ");
+		const parts = [displayName || model.name];
+		if (model.reasoning) {
+			parts.push(this.connectionState?.thinkingLevel ?? "off");
+		}
 		if (this.connectionState?.serviceTier === "priority") {
 			parts.push("fast");
 		}
-		return parts.join(" • ");
-	}
-
-	private getPromptEffortLabel(maxWidth: number): string | undefined {
-		if (maxWidth < 1 || !this.getCurrentModel()?.reasoning) return undefined;
-		const level = this.connectionState?.thinkingLevel ?? "off";
-		const label = `${level} · /effort`;
-		if (visibleWidth(label) <= maxWidth) return theme.fg("dim", label);
-		return theme.fg("dim", truncateToWidth(level, maxWidth, ""));
+		return theme.fg("dim", truncateToWidth(parts.join(" · "), maxWidth, ""));
 	}
 
 	private getAgentsViewTrayHint(): string | undefined {

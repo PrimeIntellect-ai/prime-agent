@@ -1,9 +1,4 @@
-- Moved reasoning effort above the prompt bar beside the recap, shortened model labels, and renamed the session navigation hint to manage.
-- Rendered the effort label as plain text like "high effort" without the separator and slash-command reference.
-- Removed the model, manage, and context-usage tray entries so the bottom bar stays quiet; the model picker remains the single bottom-surface control.
-- Restored the effort label separator and /effort slash-command reference above the prompt bar.
-- Stacked the recap and effort lines with blank-line breathing room above the prompt bar.
-- Restored the model, manage, and context-usage tray entries and hid the tray while a picker is open.
-- Hid the subagents summary box while a picker is open and stopped showing a depth label for root sessions.
-- Kept the recap and effort label on one shared line with a single blank line above the prompt bar.
-- Kept slash command autocomplete completion-only: Tab or Enter completes the command without running it, and pressing Enter again runs it.
+- Moved readable model names and lowercase reasoning effort above the prompt beside the recap, with one blank line before the input and no duplicate model in the lower tray.
+- Kept fast mode beside model and effort, renamed session navigation to manage, and preserved context usage and shortcut hints below the prompt.
+- Hid the tray and subagents summary while pickers are open and showed depth only for subagent sessions.
+- Kept slash command autocomplete completion-only: Tab or Enter completes the command, and pressing Enter again runs it.
