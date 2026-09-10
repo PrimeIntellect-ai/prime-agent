@@ -135,7 +135,7 @@ Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, 
 | `app.message.moveEarlier` | `ctrl+alt+up` | Move the selected pending message one place earlier in its queue |
 | `app.message.moveLater` | `ctrl+alt+down` | Move the selected pending message one place later in its queue |
 
-Ctrl+O changes presentation only: the default hides thinking and collapses tools and diffs; the first press reveals thinking and file diffs; the second expands tool output and reveals agent-to-agent messages; the third returns to the default. This also works for restored conversations and new streaming content. Ctrl+J, Ctrl+T, and Ctrl+P no longer control conversation expansion.
+Ctrl+O changes presentation only: the default hides thinking and collapses tools and diffs; the first press reveals thinking and file diffs; the second expands tool output and full agent-to-agent message bodies; the third returns to the default. Compact sent and received message notices remain visible in every mode. This also works for restored conversations and new streaming content. Ctrl+J, Ctrl+T, and Ctrl+P no longer control conversation expansion.
 
 ### Tree Navigation
 
