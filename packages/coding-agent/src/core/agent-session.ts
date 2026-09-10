@@ -975,6 +975,7 @@ export class AgentSession {
 			getToolDefinition: (name) => this.getToolDefinition(name),
 		});
 		this._contextView = new SessionContextView({
+			getContextUsage: () => this.getContextUsage(),
 			sessionManager: this.sessionManager,
 			getMessages: () => this.messages,
 			getModel: () => this.model,
@@ -1047,6 +1048,9 @@ export class AgentSession {
 		this._modelSelection = new SessionModelSelection(
 			{
 				getState: () => this.agent.state,
+				setThinkingLevel: (level) => this.setThinkingLevel(level),
+				getAvailableThinkingLevels: () => this.getAvailableThinkingLevels(),
+				supportsThinking: () => this.supportsThinking(),
 				getRegistry: () => this._modelRegistry,
 				getExtensions: () => this._extensionRunner,
 				sessionManager: this.sessionManager,

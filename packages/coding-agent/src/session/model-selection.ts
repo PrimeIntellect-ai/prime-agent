@@ -32,6 +32,9 @@ export interface ScopedModel {
 }
 export interface ModelSelectionHost {
 	getState(): Pick<AgentState, "model" | "thinkingLevel" | "serviceTier">;
+	setThinkingLevel(level: ThinkingLevel): void;
+	getAvailableThinkingLevels(): ThinkingLevel[];
+	supportsThinking(): boolean;
 	getRegistry(): Pick<
 		ModelRegistry,
 		| "getApiKeyAndHeaders"
@@ -161,7 +164,7 @@ export class SessionModelSelection {
 		this.host.sessionManager.appendModelChange(model.provider, model.id);
 		this.host.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
-		this.setThinkingLevel(thinkingLevel);
+		this.host.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
 		const emitPromise = this._queueModelSelectEmit(model, previousModel, "set");
@@ -228,7 +231,7 @@ export class SessionModelSelection {
 		this.host.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.host.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
-		this.setThinkingLevel(thinkingLevel);
+		this.host.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
 		const emitPromise = this._queueModelSelectEmit(next.model, currentModel, "cycle");
@@ -267,7 +270,7 @@ export class SessionModelSelection {
 		this.host.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.host.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
-		this.setThinkingLevel(thinkingLevel);
+		this.host.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
 		const emitPromise = this._queueModelSelectEmit(nextModel, currentModel, "cycle");
@@ -286,7 +289,7 @@ export class SessionModelSelection {
 	}
 
 	setThinkingLevel(level: ThinkingLevel): void {
-		const availableLevels = this.getAvailableThinkingLevels();
+		const availableLevels = this.host.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
 		const previousLevel = this.host.getState().thinkingLevel;
@@ -296,7 +299,7 @@ export class SessionModelSelection {
 
 		if (isChanging) {
 			this.host.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (this.supportsThinking() || effectiveLevel !== "off") {
+			if (this.host.supportsThinking() || effectiveLevel !== "off") {
 				this.host.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
 			this.host.emit({ type: "thinking_level_changed", level: effectiveLevel });
@@ -352,14 +355,14 @@ export class SessionModelSelection {
 	}
 
 	cycleThinkingLevel(): ThinkingLevel | undefined {
-		if (!this.supportsThinking()) return undefined;
+		if (!this.host.supportsThinking()) return undefined;
 
-		const levels = this.getAvailableThinkingLevels();
+		const levels = this.host.getAvailableThinkingLevels();
 		const currentIndex = levels.indexOf(this.thinkingLevel);
 		const nextIndex = (currentIndex + 1) % levels.length;
 		const nextLevel = levels[nextIndex];
 
-		this.setThinkingLevel(nextLevel);
+		this.host.setThinkingLevel(nextLevel);
 		return nextLevel;
 	}
 
@@ -376,7 +379,7 @@ export class SessionModelSelection {
 		if (explicitLevel !== undefined) {
 			return explicitLevel;
 		}
-		if (!this.supportsThinking()) {
+		if (!this.host.supportsThinking()) {
 			return this.host.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
 		}
 		return this.thinkingLevel;

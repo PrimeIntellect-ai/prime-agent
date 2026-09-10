@@ -31,6 +31,119 @@ describe("session model and history ownership boundaries", () => {
 		while (harnesses.length) harnesses.pop()?.cleanup();
 	});
 
+	it.each(["set", "available", "scoped"] as const)(
+		"honors a late thinking wrapper before tier changes and model hooks during %s selection",
+		async (selection) => {
+			const harness = await createHarness({ models: [{ id: "one" }, { id: "two" }] });
+			harnesses.push(harness);
+			const { session, sessionManager, settingsManager } = harness;
+			const nextModel = harness.getModel("two")!;
+			if (selection === "scoped") session.setScopedModels(harness.models.map((model) => ({ model })));
+			const events: string[] = [];
+			const original = session.setThinkingLevel.bind(session);
+			const wrapper = vi.spyOn(session, "setThinkingLevel").mockImplementation((level) => {
+				expect(session.model).toMatchObject({ provider: nextModel.provider, id: nextModel.id });
+				expect(sessionManager.getEntries().at(-1)).toMatchObject({ type: "model_change", modelId: "two" });
+				expect(settingsManager.getDefaultModel()).toBe("two");
+				expect(session.serviceTier).toBe("priority");
+				events.push("thinking");
+				original(level);
+			});
+			session.subscribe((event) => {
+				if (event.type === "service_tier_changed") events.push("tier");
+			});
+			vi.spyOn(session.extensionRunner, "emit").mockImplementation(async (event) => {
+				if (event.type === "model_select") events.push("model");
+				return undefined;
+			});
+			session.state.serviceTier = "priority";
+			if (selection === "set") await session.setModel(nextModel);
+			else await session.cycleModel();
+			expect(wrapper).toHaveBeenCalledOnce();
+			expect(events).toEqual(["thinking", "tier", "model"]);
+			expect(session.serviceTier).toBe("default");
+		},
+	);
+
+	it.each(["set", "available", "scoped"] as const)(
+		"preserves partial updates and rejection when a late thinking wrapper throws during %s selection",
+		async (selection) => {
+			const harness = await createHarness({ models: [{ id: "one" }, { id: "two" }] });
+			harnesses.push(harness);
+			const { session, sessionManager, settingsManager } = harness;
+			if (selection === "scoped") session.setScopedModels(harness.models.map((model) => ({ model })));
+			const failure = new Error("thinking wrapper failed");
+			vi.spyOn(session, "setThinkingLevel").mockImplementation(() => {
+				throw failure;
+			});
+			const emit = vi.spyOn(session.extensionRunner, "emit");
+			const events = vi.fn();
+			session.subscribe(events);
+			session.state.serviceTier = "priority";
+			const selectionPromise =
+				selection === "set" ? session.setModel(harness.getModel("two")!) : session.cycleModel();
+			await expect(selectionPromise).rejects.toBe(failure);
+			expect(session.model?.id).toBe("two");
+			expect(sessionManager.getEntries().at(-1)).toMatchObject({ type: "model_change", modelId: "two" });
+			expect(settingsManager.getDefaultModel()).toBe("two");
+			expect(session.serviceTier).toBe("priority");
+			expect(events).not.toHaveBeenCalled();
+			expect(emit).not.toHaveBeenCalled();
+		},
+	);
+
+	it("uses late capability and thinking-level overrides for cycling and preference persistence", async () => {
+		const harness = await createHarness({ models: [{ id: "one", reasoning: false }] });
+		harnesses.push(harness);
+		const { session, settingsManager } = harness;
+		const supports = vi.spyOn(session, "supportsThinking").mockReturnValue(true);
+		vi.spyOn(session, "getAvailableThinkingLevels").mockReturnValue(["off", "high"]);
+		const original = session.setThinkingLevel.bind(session);
+		const wrapper = vi.spyOn(session, "setThinkingLevel").mockImplementation((level) => original(level));
+		session.state.thinkingLevel = "off";
+		expect(session.cycleThinkingLevel()).toBe("high");
+		expect(session.thinkingLevel).toBe("high");
+		expect(wrapper).toHaveBeenLastCalledWith("high");
+		expect(session.cycleThinkingLevel()).toBe("off");
+		expect(settingsManager.getDefaultThinkingLevel()).toBe("off");
+		supports.mockReturnValue(false);
+		wrapper.mockClear();
+		expect(session.cycleThinkingLevel()).toBeUndefined();
+		expect(wrapper).not.toHaveBeenCalled();
+	});
+
+	it("uses a late capability override to restore the saved thinking preference during model selection", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "one", reasoning: true },
+				{ id: "two", reasoning: true },
+			],
+		});
+		harnesses.push(harness);
+		const { session, settingsManager } = harness;
+		session.state.thinkingLevel = "low";
+		settingsManager.setDefaultThinkingLevel("high");
+		vi.spyOn(session, "supportsThinking").mockReturnValue(false);
+		vi.spyOn(session, "getAvailableThinkingLevels").mockReturnValue(["low", "high"]);
+		await session.setModel(harness.getModel("two")!);
+		expect(session.thinkingLevel).toBe("high");
+	});
+
+	it("uses a context-usage wrapper installed after construction for stats and tree aggregates", async () => {
+		const harness = await createHarness({ tools: [] });
+		harnesses.push(harness);
+		const { session } = harness;
+		const original = session.getContextUsage.bind(session);
+		const replacement = { tokens: 42, contextWindow: 100, percent: 42 };
+		const wrapper = vi.spyOn(session, "getContextUsage").mockImplementation(() => {
+			expect(original()).toBeDefined();
+			return replacement;
+		});
+		expect(session.getSessionStats().contextUsage).toBe(replacement);
+		expect(session.getContextTree().contextUsage).toBe(replacement);
+		expect(wrapper).toHaveBeenCalledTimes(2);
+	});
+
 	it("resolves request auth freshly and reads the current registry after replacement", async () => {
 		const first = await createHarness();
 		const second = await createHarness();
@@ -39,6 +152,9 @@ describe("session model and history ownership boundaries", () => {
 		const owner = new SessionModelSelection(
 			{
 				getState: () => first.session.state,
+				setThinkingLevel: (level) => first.session.setThinkingLevel(level),
+				getAvailableThinkingLevels: () => first.session.getAvailableThinkingLevels(),
+				supportsThinking: () => first.session.supportsThinking(),
 				getRegistry: () => registry,
 				getExtensions: () => first.session.extensionRunner,
 				sessionManager: first.sessionManager,
@@ -97,6 +213,9 @@ describe("session model and history ownership boundaries", () => {
 		const owner = new SessionModelSelection(
 			{
 				getState: () => first.session.state,
+				setThinkingLevel: (level) => first.session.setThinkingLevel(level),
+				getAvailableThinkingLevels: () => first.session.getAvailableThinkingLevels(),
+				supportsThinking: () => first.session.supportsThinking(),
 				getRegistry: () => first.session.modelRegistry,
 				getExtensions: () => extensions,
 				sessionManager: first.sessionManager,
@@ -179,6 +298,7 @@ describe("session model and history ownership boundaries", () => {
 				getSessionName: () => undefined,
 			},
 			getMessages: () => [message],
+			getContextUsage: () => harness.session.getContextUsage(),
 			getModel: () => harness.session.model,
 			findModel: (provider, id) => harness.session.modelRegistry.find(provider, id),
 			subtractUnindexedChildUsage: (ownUsage, candidates) => {
