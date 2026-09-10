@@ -10,7 +10,9 @@ import { GOAL_CONTEXT_CUSTOM_TYPE, GOAL_CONTEXT_PREVIEW_LABEL } from "../core/go
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+	type AsyncBashCompletionDetails,
 	type CustomMessage,
+	createAsyncBashCompletionMessage,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 } from "../core/messages.js";
@@ -28,6 +30,7 @@ import {
 	normalizeMessageContent,
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
+	SessionInputAdmissionPausedError,
 } from "./prepared-actions.js";
 import type { SubmissionNormalizer } from "./submission-normalization.js";
 import { createTurnExecutionPolicy, type TurnExecutionPolicy } from "./turn-preparation.js";
@@ -65,8 +68,9 @@ export interface SessionPromptSubmissionHost {
 		streamingBehavior: "steer" | "followUp",
 		customMessage?: AgentSessionMessage,
 	): Promise<boolean>;
-	getScheduler(): Pick<SessionInputScheduler, "epoch" | "suspended" | "suspendedForUpdateRestart">;
-	getFence(): Pick<SessionCommitFence, "run">;
+	getScheduler(): Pick<SessionInputScheduler, "epoch" | "suspended" | "suspendedForUpdateRestart" | "admissionPaused">;
+	getFence(): Pick<SessionCommitFence, "run" | "disposeSignal">;
+	waitForActivityChange(signal: AbortSignal): Promise<void>;
 	isStreaming(): boolean;
 	isCompacting(): boolean;
 	isRetrying(): boolean;
@@ -101,6 +105,32 @@ export class SessionPromptSubmission {
 		private readonly actions: ActionStore<QueuedSessionAction>,
 		private readonly host: SessionPromptSubmissionHost,
 	) {}
+	async handleKernelBashCompletion(details: AsyncBashCompletionDetails): Promise<void> {
+		const message = createAsyncBashCompletionMessage(details);
+		const disposeSignal = this.host.getFence().disposeSignal;
+		while (true) {
+			let admissionCommitted = false;
+			try {
+				await this.promptInjectedMessage(message.content, message, {
+					streamingBehavior: "steer",
+					queueIfBusy: true,
+					resumeIfIdle: true,
+					returnAfterAccepted: true,
+					suppressAutonomousContinuation: true,
+					admissionCommitted: () => {
+						admissionCommitted = true;
+					},
+				});
+				return;
+			} catch (error) {
+				if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
+				while (this.host.getScheduler().admissionPaused && !disposeSignal.aborted) {
+					await this.host.waitForActivityChange(disposeSignal);
+				}
+			}
+		}
+	}
+
 	async promptInjectedMessage(
 		text: string,
 		message: CustomMessage,

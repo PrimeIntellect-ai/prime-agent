@@ -25,6 +25,8 @@ function setup() {
 	const order: string[] = [];
 	const result = { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 1000 };
 	const host = {
+		includesCompactSkill: () => true,
+		getContextUsage: () => undefined,
 		getSettings: vi.fn(() => ({ enabled: false, reserveTokens: 100, keepRecentTokens: 10 })),
 		runAutomatic: vi.fn<SessionCompactionHost["runAutomatic"]>(async () => false),
 		queueGoalContinuation: vi.fn(() => false),

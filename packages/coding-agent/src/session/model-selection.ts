@@ -9,10 +9,15 @@ import {
 	type ServiceTier,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
-import { formatAuthenticationFailedMessage, formatNoApiKeyFoundMessage } from "../core/auth-guidance.js";
+import {
+	formatAuthenticationFailedMessage,
+	formatNoApiKeyFoundMessage,
+	formatNoModelSelectedMessage,
+} from "../core/auth-guidance.js";
 import { DEFAULT_THINKING_LEVEL } from "../core/defaults.js";
 import type { ExtensionRunner } from "../core/extensions/index.js";
 import type { ModelRegistry } from "../core/model-registry.js";
+import { findRlmModelMatches, type RlmFindModelsResult } from "../core/rlm-runtime.js";
 import type { SessionManager } from "../core/session-manager.js";
 import type { SettingsManager } from "../core/settings-manager.js";
 import { THINKING_LEVELS } from "../core/thinking-levels.js";
@@ -31,12 +36,14 @@ export interface ScopedModel {
 	thinkingLevel?: ThinkingLevel;
 }
 export interface ModelSelectionHost {
+	getModel(): Model<Api> | undefined;
 	getState(): Pick<AgentState, "model" | "thinkingLevel" | "serviceTier">;
 	setThinkingLevel(level: ThinkingLevel): void;
 	getAvailableThinkingLevels(): ThinkingLevel[];
 	supportsThinking(): boolean;
 	getRegistry(): Pick<
 		ModelRegistry,
+		| "getExecutableModels"
 		| "getApiKeyAndHeaders"
 		| "isUsingOAuth"
 		| "hasConfiguredAuth"
@@ -68,8 +75,61 @@ export class SessionModelSelection {
 		private _serviceTierPreference: ServiceTier,
 		private _scopedModels: ScopedModel[],
 	) {}
+	async validateCanStartAgentRun(): Promise<void> {
+		if (!this.model) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+		if (!this.host.getRegistry().hasConfiguredAuth(this.model)) {
+			const isOAuth = this.host.getRegistry().isUsingOAuth(this.model);
+			if (isOAuth) {
+				throw new Error(formatAuthenticationFailedMessage(this.model.provider));
+			}
+			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+		}
+	}
+
+	async authenticatedRlmModels(): Promise<Model<Api>[]> {
+		return (await this.host.getRegistry().getExecutableModels()).filter((model) => {
+			const status = this.host.getRegistry().getProviderAuthStatus(model.provider);
+			return status.source !== "stale" && status.label !== "expired";
+		});
+	}
+
+	async findRlmModels(query: string, limit: number): Promise<RlmFindModelsResult> {
+		return {
+			models: findRlmModelMatches(query, await this.authenticatedRlmModels(), limit),
+		};
+	}
+
+	async resolveRlmSubagentModel(reference: string | undefined, target = "subagent"): Promise<{ model: Model<Api> }> {
+		const parentModel = this.model;
+		if (!parentModel) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+		if (!reference) {
+			return { model: parentModel };
+		}
+
+		const normalizedReference = reference.toLowerCase();
+		if (`${parentModel.provider}/${parentModel.id}`.toLowerCase() === normalizedReference) {
+			return { model: parentModel };
+		}
+		const model = (await this.authenticatedRlmModels()).find(
+			(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === normalizedReference,
+		);
+		if (!model) {
+			throw new Error(`Requested ${target} model "${reference}" is unavailable, unauthenticated, or expired`);
+		}
+
+		const auth = await this.host.getRegistry().getApiKeyAndHeaders(model);
+		if (!auth.ok) {
+			throw new Error(`Requested ${target} model "${reference}" failed authentication preflight`);
+		}
+		return { model };
+	}
+
 	get model(): Model<Api> | undefined {
-		return this.host.getState().model;
+		return this.host.getModel();
 	}
 	get thinkingLevel(): ThinkingLevel {
 		return this.host.getState().thinkingLevel;

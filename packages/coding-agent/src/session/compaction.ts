@@ -6,8 +6,10 @@ import {
 	type CompactionSettings,
 	calculateContextTokens,
 	estimateContextTokens,
+	prepareCompaction,
 	shouldCompact,
 } from "../core/compaction/index.js";
+import type { ContextUsage } from "../core/extensions/index.js";
 import {
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
@@ -33,6 +35,8 @@ export type SessionCompactionEvent =
 	  };
 
 export interface SessionCompactionHost {
+	includesCompactSkill(): boolean;
+	getContextUsage(): ContextUsage | undefined;
 	getSettings(): CompactionSettings;
 	runAutomatic(reason: "overflow" | "threshold" | "requested", willRetry: boolean): Promise<boolean>;
 	queueGoalContinuation(message: AssistantMessage): boolean;
@@ -74,6 +78,50 @@ export class SessionCompaction {
 	private continueAfterThreshold = false;
 
 	constructor(private readonly host: SessionCompactionHost) {}
+
+	handleCompactHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+		if (!this.host.includesCompactSkill()) {
+			throw new Error("the compact skill is disabled in this session");
+		}
+		switch (type) {
+			case "compact.status": {
+				const usage = this.host.getContextUsage();
+				return {
+					tokens: usage?.tokens ?? null,
+					context_window: usage?.contextWindow ?? null,
+					percent: usage?.percent ?? null,
+					scheduled: this.hasPendingRequest,
+				};
+			}
+			case "compact.run": {
+				const instructions = payload.instructions;
+				if (instructions !== undefined && typeof instructions !== "string") {
+					throw new Error("compact.run instructions must be a string when provided");
+				}
+				if (!this.host.isStreaming()) {
+					return {
+						scheduled: false,
+						reason: "no active turn; compaction can only be requested while a turn is running",
+					};
+				}
+				const preparation = prepareCompaction(this.host.getSessionStore().getBranch(), this.host.getSettings());
+				if (!preparation) {
+					const lastEntry = this.host.getSessionStore().getBranch().at(-1);
+					return {
+						scheduled: false,
+						reason: lastEntry?.type === "compaction" ? "already compacted" : "session is too short to compact",
+					};
+				}
+				this.request(instructions);
+				return {
+					scheduled: true,
+					note: "Compaction runs when the current turn ends; you resume automatically afterwards. Continue working normally.",
+				};
+			}
+			default:
+				throw new Error(`unknown compact request type "${type}"`);
+		}
+	}
 
 	private get model(): Model<Api> | undefined {
 		return this.host.getModel();

@@ -152,6 +152,7 @@ describe("session model and history ownership boundaries", () => {
 		const owner = new SessionModelSelection(
 			{
 				getState: () => first.session.state,
+				getModel: () => first.session.model,
 				setThinkingLevel: (level) => first.session.setThinkingLevel(level),
 				getAvailableThinkingLevels: () => first.session.getAvailableThinkingLevels(),
 				supportsThinking: () => first.session.supportsThinking(),
@@ -213,6 +214,7 @@ describe("session model and history ownership boundaries", () => {
 		const owner = new SessionModelSelection(
 			{
 				getState: () => first.session.state,
+				getModel: () => first.session.model,
 				setThinkingLevel: (level) => first.session.setThinkingLevel(level),
 				getAvailableThinkingLevels: () => first.session.getAvailableThinkingLevels(),
 				supportsThinking: () => first.session.supportsThinking(),

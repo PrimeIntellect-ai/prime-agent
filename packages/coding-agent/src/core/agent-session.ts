@@ -7,7 +7,7 @@ import type {
 	AgentTool,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, ImageContent, Model, ServiceTier, TextContent } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, Model, ServiceTier, TextContent } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, cleanupSessionResources, supportsFastMode } from "@earendil-works/pi-ai";
 import { GoalController } from "../goals/controller.js";
 import { createGoalPersistence } from "../goals/persistence.js";
@@ -45,6 +45,7 @@ import { SessionExport } from "../session/export.js";
 import { type ExtensionBindings, installExtensionToolHooks, SessionExtensions } from "../session/extensions.js";
 import { SessionGoalContinuation } from "../session/goal-continuation.js";
 import { SessionHarnessContext } from "../session/harness-context.js";
+import { handleRlmHeartbeatHostRequest } from "../session/heartbeat-host-requests.js";
 import { SessionHistoryNavigation } from "../session/history-navigation.js";
 import { SessionInputAdmission } from "../session/input-admission.js";
 import { SessionInputCheckpoints } from "../session/input-checkpoints.js";
@@ -54,12 +55,13 @@ import { SessionKernel } from "../session/kernel.js";
 import { KernelEnvironment } from "../session/kernel-environment.js";
 import { createSessionKernelHostHandlers } from "../session/kernel-host-handlers.js";
 import { SessionMessageDelivery } from "../session/message-delivery.js";
+import { handleAgentMessageHostRequest } from "../session/message-host-requests.js";
 import { SessionModelSelection } from "../session/model-selection.js";
+import { handleAgentObserveHostRequest } from "../session/observe-host-requests.js";
 import { SessionPendingContext } from "../session/pending-context.js";
 import {
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
-	SessionInputAdmissionPausedError,
 	visibleSessionActionProjection,
 } from "../session/prepared-actions.js";
 import { SessionPromptSubmission } from "../session/prompt-submission.js";
@@ -74,8 +76,6 @@ import {
 	AGENT_MESSAGE_SKILL_NAME,
 	type AgentSessionMessageController,
 	type AgentSessionMessageReceipt,
-	assertDirectAgentMessageTarget,
-	normalizeAgentSessionMessage,
 } from "./agent-messages.js";
 import {
 	AGENT_OBSERVE_SKILL_NAME,
@@ -83,25 +83,12 @@ import {
 	type AgentObserveController,
 	type AgentObserveListResult,
 	type AgentObserveRecentMessagesResult,
-	normalizeObserveLimit,
-	normalizeObserveMaxChars,
 	ORCHESTRATION_HEARTBEAT_SKILL_NAME,
 } from "./agent-observe.js";
-import {
-	formatAuthenticationFailedMessage,
-	formatNoApiKeyFoundMessage,
-	formatNoModelSelectedMessage,
-} from "./auth-guidance.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { BashResult } from "./bash-executor.js";
-import {
-	COMPACT_SKILL_NAME,
-	type CompactionResult,
-	calculateContextTokens,
-	prepareCompaction,
-} from "./compaction/index.js";
-import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
-import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
+import { COMPACT_SKILL_NAME, type CompactionResult, calculateContextTokens } from "./compaction/index.js";
+import type { AgentCronJob, AgentRlmHeartbeatController } from "./cron-jobs.js";
 import type {
 	ExtensionRunner,
 	InputSource,
@@ -114,28 +101,20 @@ import { createGoalContextMessage, GOAL_CONTEXT_CUSTOM_TYPE, GOAL_SKILL_NAME, ty
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
-import type { AsyncBashCompletionDetails } from "./messages.js";
-import {
-	type CustomMessage,
-	createAsyncBashCompletionMessage,
-	createHeartbeatPromptMessage,
-	type RefinementSource,
-} from "./messages.js";
+import { type CustomMessage, createHeartbeatPromptMessage, type RefinementSource } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import type { PromptTemplate } from "./prompt-templates.js";
 import { providerRetryPolicy } from "./provider-retry.js";
 import { REFINE_SKILL_NAME, type RefinementResult } from "./refinement/index.js";
 import type { ResourceLoader } from "./resource-loader.js";
-import {
-	type CreateRlmSubagentRuntimeOptions,
-	findRlmModelMatches,
-	type RlmCreateSessionResult,
-	type RlmDeleteSubagentResult,
-	type RlmFindModelsResult,
-	type RlmListSubagentsResult,
-	type RlmSpawnHandle,
-	type RlmSubagentRuntime,
-	type SubagentRuntimeHost,
+import type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmCreateSessionResult,
+	RlmDeleteSubagentResult,
+	RlmListSubagentsResult,
+	RlmSpawnHandle,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import { SemanticEdgeRecorder, semanticEdgeLedgerPath, wrapStreamFnWithSemanticEdges } from "./semantic-edges.js";
 import { ActionStore, type RuntimeActivity, type SessionActionSnapshot } from "./session-action-store.js";
@@ -286,10 +265,6 @@ import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js
 
 export type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
-interface RlmSubagentModelSelection {
-	model: Model<Api>;
-}
-
 export class AgentSession {
 	private readonly _tools: SessionTools;
 	private readonly _extensions: SessionExtensions;
@@ -429,6 +404,7 @@ export class AgentSession {
 		getUnfinishedCount: () => this.unfinishedActionCount,
 	});
 	private readonly _promptSubmission = new SessionPromptSubmission(this._actionStore, {
+		waitForActivityChange: (signal) => this._waitForSessionActivityChange(signal),
 		queueAgentMessagePrompt: (text, streamingBehavior, customMessage) =>
 			this.queueAgentMessagePrompt(text, streamingBehavior, customMessage),
 		getScheduler: () => this._inputScheduler,
@@ -613,6 +589,8 @@ export class AgentSession {
 	}
 
 	private readonly _compaction = new SessionCompaction({
+		includesCompactSkill: () => this._includeCompactSkill,
+		getContextUsage: () => this.getContextUsage(),
 		getModel: () => this.model,
 		isStreaming: () => this.isStreaming,
 		getSettings: () => this.settingsManager.getCompactionSettings(),
@@ -865,6 +843,7 @@ export class AgentSession {
 		);
 		this._modelSelection = new SessionModelSelection(
 			{
+				getModel: () => this.model,
 				getState: () => this.agent.state,
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
 				getAvailableThinkingLevels: () => this.getAvailableThinkingLevels(),
@@ -1226,17 +1205,10 @@ export class AgentSession {
 		return this._autonomousContinuation.handleAutonomousSlashCommand(...args);
 	}
 
-	private async _validateCanStartAgentRun(): Promise<void> {
-		if (!this.model) {
-			throw new Error(formatNoModelSelectedMessage());
-		}
-		if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
-			const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
-			if (isOAuth) {
-				throw new Error(formatAuthenticationFailedMessage(this.model.provider));
-			}
-			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
-		}
+	private _validateCanStartAgentRun(
+		...args: Parameters<SessionModelSelection["validateCanStartAgentRun"]>
+	): ReturnType<SessionModelSelection["validateCanStartAgentRun"]> {
+		return this._modelSelection.validateCanStartAgentRun(...args);
 	}
 
 	/**
@@ -1361,51 +1333,10 @@ export class AgentSession {
 	 * abort the run executing the requesting cell, so compact.run only schedules
 	 * it; _checkCompaction consumes the request at the turn boundary.
 	 */
-	handleCompactHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
-		if (!this._includeCompactSkill) {
-			throw new Error("the compact skill is disabled in this session");
-		}
-		switch (type) {
-			case "compact.status": {
-				const usage = this.getContextUsage();
-				return {
-					tokens: usage?.tokens ?? null,
-					context_window: usage?.contextWindow ?? null,
-					percent: usage?.percent ?? null,
-					scheduled: this._compaction.hasPendingRequest,
-				};
-			}
-			case "compact.run": {
-				const instructions = payload.instructions;
-				if (instructions !== undefined && typeof instructions !== "string") {
-					throw new Error("compact.run instructions must be a string when provided");
-				}
-				if (!this.isStreaming) {
-					return {
-						scheduled: false,
-						reason: "no active turn; compaction can only be requested while a turn is running",
-					};
-				}
-				const preparation = prepareCompaction(
-					this.sessionManager.getBranch(),
-					this.settingsManager.getCompactionSettings(),
-				);
-				if (!preparation) {
-					const lastEntry = this.sessionManager.getBranch().at(-1);
-					return {
-						scheduled: false,
-						reason: lastEntry?.type === "compaction" ? "already compacted" : "session is too short to compact",
-					};
-				}
-				this._compaction.request(instructions);
-				return {
-					scheduled: true,
-					note: "Compaction runs when the current turn ends; you resume automatically afterwards. Continue working normally.",
-				};
-			}
-			default:
-				throw new Error(`unknown compact request type "${type}"`);
-		}
+	handleCompactHostRequest(
+		...args: Parameters<SessionCompaction["handleCompactHostRequest"]>
+	): ReturnType<SessionCompaction["handleCompactHostRequest"]> {
+		return this._compaction.handleCompactHostRequest(...args);
 	}
 
 	/**
@@ -1425,117 +1356,14 @@ export class AgentSession {
 	 * mutate the user-level /heartbeat.
 	 */
 	handleRlmHeartbeatHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
-		const controller = this._rlmHeartbeatController;
-		if (!controller) {
-			throw new Error("RLM heartbeat skill is not available in this session");
-		}
-		switch (type) {
-			case "rlm_heartbeat.list": {
-				const includeInactive = payload.include_inactive === true || payload.includeInactive === true;
-				return {
-					heartbeats: controller
-						.listRlmHeartbeats({ includeInactive })
-						.map((heartbeat) => rlmHeartbeatHostResponse(heartbeat)),
-				};
-			}
-			case "rlm_heartbeat.create": {
-				if (typeof payload.instruction !== "string") {
-					throw new Error("rlm_heartbeat.create instruction must be a string");
-				}
-				if (payload.interval !== undefined && typeof payload.interval !== "string") {
-					throw new Error("rlm_heartbeat.create interval must be a string when provided");
-				}
-				if (payload.label !== undefined && typeof payload.label !== "string") {
-					throw new Error("rlm_heartbeat.create label must be a string when provided");
-				}
-				const deliveryMode = normalizeHeartbeatDeliveryMode(payload.delivery_mode ?? payload.deliveryMode);
-				return {
-					heartbeat: rlmHeartbeatHostResponse(
-						controller.createRlmHeartbeat({
-							instruction: payload.instruction,
-							interval: payload.interval,
-							label: payload.label,
-							deliveryMode,
-						}),
-					),
-				};
-			}
-			case "rlm_heartbeat.update": {
-				if (typeof payload.id !== "string") {
-					throw new Error("rlm_heartbeat.update id must be a string");
-				}
-				if (payload.instruction !== undefined && typeof payload.instruction !== "string") {
-					throw new Error("rlm_heartbeat.update instruction must be a string when provided");
-				}
-				if (payload.interval !== undefined && typeof payload.interval !== "string") {
-					throw new Error("rlm_heartbeat.update interval must be a string when provided");
-				}
-				if (payload.label !== undefined && typeof payload.label !== "string") {
-					throw new Error("rlm_heartbeat.update label must be a string when provided");
-				}
-				if (payload.status !== undefined && !isRlmHeartbeatStatusUpdate(payload.status)) {
-					throw new Error('rlm_heartbeat.update status must be "pause" or "resume" when provided');
-				}
-				const rawDeliveryMode = payload.delivery_mode ?? payload.deliveryMode;
-				const deliveryMode = normalizeHeartbeatDeliveryMode(rawDeliveryMode);
-				if (
-					payload.instruction === undefined &&
-					payload.interval === undefined &&
-					payload.label === undefined &&
-					payload.status === undefined &&
-					rawDeliveryMode === undefined
-				) {
-					throw new Error("rlm_heartbeat.update requires at least one field to update");
-				}
-				const heartbeat = controller.updateRlmHeartbeat({
-					id: payload.id,
-					instruction: payload.instruction,
-					interval: payload.interval,
-					label: payload.label,
-					status: payload.status,
-					deliveryMode,
-				});
-				return {
-					heartbeat: heartbeat ? rlmHeartbeatHostResponse(heartbeat) : null,
-				};
-			}
-			case "rlm_heartbeat.delete": {
-				if (typeof payload.id !== "string") {
-					throw new Error("rlm_heartbeat.delete id must be a string");
-				}
-				const heartbeat = controller.deleteRlmHeartbeat(payload.id);
-				return {
-					heartbeat: heartbeat ? rlmHeartbeatHostResponse(heartbeat) : null,
-				};
-			}
-			default:
-				throw new Error(`unknown RLM heartbeat request type "${type}"`);
-		}
+		return handleRlmHeartbeatHostRequest(this._rlmHeartbeatController, type, payload);
 	}
 
 	handleAgentMessageHostRequest(
 		type: string,
 		payload: Record<string, unknown> = {},
 	): Promise<AgentSessionMessageReceipt> {
-		if (!this._agentMessageController) {
-			throw new Error("agent messaging is not available in this session");
-		}
-		switch (type) {
-			case "agent_message.send": {
-				if (typeof payload.target !== "string") {
-					throw new Error("agent_message.send target must be a string");
-				}
-				if (typeof payload.message !== "string") {
-					throw new Error("agent_message.send message must be a string");
-				}
-				return this._agentMessageController.sendAgentMessage({
-					target: assertDirectAgentMessageTarget(payload.target),
-					message: normalizeAgentSessionMessage(payload.message),
-				});
-			}
-			default:
-				throw new Error(`unknown agent message request type "${type}"`);
-		}
+		return handleAgentMessageHostRequest(() => this._agentMessageController, type, payload);
 	}
 
 	handleAgentObserveHostRequest(
@@ -1546,32 +1374,7 @@ export class AgentSession {
 		| AgentObserveAgentSnapshot
 		| AgentObserveRecentMessagesResult
 		| Promise<AgentObserveListResult | AgentObserveAgentSnapshot | AgentObserveRecentMessagesResult> {
-		const controller = this._agentObserveController;
-		if (!controller) {
-			throw new Error("agent observation is not available in this session");
-		}
-		switch (type) {
-			case "agent_observe.list":
-				return controller.listAgents();
-			case "agent_observe.get": {
-				if (typeof payload.target !== "string") {
-					throw new Error("agent_observe.get target must be a string");
-				}
-				return controller.getAgent(payload.target);
-			}
-			case "agent_observe.recent": {
-				if (typeof payload.target !== "string") {
-					throw new Error("agent_observe.recent target must be a string");
-				}
-				return controller.recentMessages({
-					target: payload.target,
-					limit: normalizeObserveLimit(payload.limit as number | undefined),
-					maxChars: normalizeObserveMaxChars((payload.max_chars ?? payload.maxChars) as number | undefined),
-				});
-			}
-			default:
-				throw new Error(`unknown agent observe request type "${type}"`);
-		}
+		return handleAgentObserveHostRequest(this._agentObserveController, type, payload);
 	}
 
 	private _getGoalContinuationMessages(
@@ -2775,30 +2578,10 @@ export class AgentSession {
 		});
 	}
 
-	private async _handleKernelBashCompletion(details: AsyncBashCompletionDetails): Promise<void> {
-		const message = createAsyncBashCompletionMessage(details);
-		const disposeSignal = this._commitFence.disposeSignal;
-		while (true) {
-			let admissionCommitted = false;
-			try {
-				await this._promptInjectedMessage(message.content, message, {
-					streamingBehavior: "steer",
-					queueIfBusy: true,
-					resumeIfIdle: true,
-					returnAfterAccepted: true,
-					suppressAutonomousContinuation: true,
-					admissionCommitted: () => {
-						admissionCommitted = true;
-					},
-				});
-				return;
-			} catch (error) {
-				if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
-				while (this._inputScheduler.admissionPaused && !disposeSignal.aborted) {
-					await this._waitForSessionActivityChange(disposeSignal);
-				}
-			}
-		}
+	private _handleKernelBashCompletion(
+		...args: Parameters<SessionPromptSubmission["handleKernelBashCompletion"]>
+	): ReturnType<SessionPromptSubmission["handleKernelBashCompletion"]> {
+		return this._promptSubmission.handleKernelBashCompletion(...args);
 	}
 
 	reload(): Promise<void> {
@@ -2982,47 +2765,16 @@ export class AgentSession {
 		return this._children.cancelRunningRlmDescendants(reason);
 	}
 
-	private async _authenticatedRlmModels(): Promise<Model<Api>[]> {
-		return (await this._modelRegistry.getExecutableModels()).filter((model) => {
-			const status = this._modelRegistry.getProviderAuthStatus(model.provider);
-			return status.source !== "stale" && status.label !== "expired";
-		});
+	findRlmModels(
+		...args: Parameters<SessionModelSelection["findRlmModels"]>
+	): ReturnType<SessionModelSelection["findRlmModels"]> {
+		return this._modelSelection.findRlmModels(...args);
 	}
 
-	async findRlmModels(query: string, limit: number): Promise<RlmFindModelsResult> {
-		return {
-			models: findRlmModelMatches(query, await this._authenticatedRlmModels(), limit),
-		};
-	}
-
-	private async _resolveRlmSubagentModel(
-		reference: string | undefined,
-		target = "subagent",
-	): Promise<RlmSubagentModelSelection> {
-		const parentModel = this.model;
-		if (!parentModel) {
-			throw new Error(formatNoModelSelectedMessage());
-		}
-		if (!reference) {
-			return { model: parentModel };
-		}
-
-		const normalizedReference = reference.toLowerCase();
-		if (`${parentModel.provider}/${parentModel.id}`.toLowerCase() === normalizedReference) {
-			return { model: parentModel };
-		}
-		const model = (await this._authenticatedRlmModels()).find(
-			(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === normalizedReference,
-		);
-		if (!model) {
-			throw new Error(`Requested ${target} model "${reference}" is unavailable, unauthenticated, or expired`);
-		}
-
-		const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) {
-			throw new Error(`Requested ${target} model "${reference}" failed authentication preflight`);
-		}
-		return { model };
+	private _resolveRlmSubagentModel(
+		...args: Parameters<SessionModelSelection["resolveRlmSubagentModel"]>
+	): ReturnType<SessionModelSelection["resolveRlmSubagentModel"]> {
+		return this._modelSelection.resolveRlmSubagentModel(...args);
 	}
 
 	createRlmSession(prompt: string, kwargs: Record<string, unknown> = {}): Promise<RlmCreateSessionResult> {
@@ -3248,25 +3000,4 @@ export class AgentSession {
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
 	}
-}
-
-function isRlmHeartbeatStatusUpdate(value: unknown): value is AgentRlmHeartbeatStatusUpdate {
-	return value === "pause" || value === "resume";
-}
-
-function rlmHeartbeatHostResponse(job: AgentCronJob): Record<string, unknown> {
-	return {
-		id: job.id,
-		status: job.status,
-		label: job.label ?? null,
-		delivery_mode: job.deliveryMode ?? "steer",
-		instruction: job.prompt,
-		schedule: job.schedule,
-		created_at: job.createdAt,
-		updated_at: job.updatedAt,
-		next_run_at: job.nextRunAt ?? null,
-		last_run_at: job.lastRunAt ?? null,
-		last_error: job.lastError ?? null,
-		run_count: job.runCount,
-	};
 }
