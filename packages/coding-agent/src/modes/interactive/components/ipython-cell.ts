@@ -6,7 +6,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { formatAgentMessageParticipant } from "../../../core/agent-messages.js";
-import { previewIpythonCode } from "../../../core/tools/code-preview.js";
+import { previewIpythonCode, pythonStatementLines } from "../../../core/tools/code-preview.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { parseIpythonBashCell } from "../../../core/tools/ipython-cell-code.js";
 import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
@@ -535,12 +535,18 @@ export class IPythonCellComponent implements Component {
 		this.addBlank(lines, width);
 		const isBashCell = parseIpythonBashCell(code) !== undefined;
 		const rawLines = code.split("\n");
-		// Highlight the whole cell at once so multi-line strings keep their color.
-		const highlightedLines = isBashCell ? [] : highlightCode(code, "python");
+		// Reopen inherited ANSI styles on each source line before gutters reset them.
+		const sourceWidth = rawLines.reduce((max, line) => Math.max(max, visibleWidth(line)), 1);
+		const highlightedLines = isBashCell
+			? []
+			: wrapTextWithAnsi(highlightCode(code, "python").join("\n"), sourceWidth);
+		const statementLines = isBashCell ? rawLines : pythonStatementLines(code);
 		for (const [index, rawLine] of rawLines.entries()) {
 			const prefix = index === 0 ? theme.fg("dim", "› ") : theme.fg("dim", "  ");
 			const highlighted =
-				isBashCell || MAGIC_LINE_PATTERN.test(rawLine) || parseIpythonBashCell(rawLine) !== undefined
+				isBashCell ||
+				MAGIC_LINE_PATTERN.test(statementLines[index] ?? "") ||
+				parseIpythonBashCell(statementLines[index] ?? "") !== undefined
 					? theme.fg("bashMode", rawLine)
 					: (highlightedLines[index] ?? theme.fg("mdCodeBlock", rawLine));
 			this.addWrapped(lines, prefix, highlighted || " ", width);
