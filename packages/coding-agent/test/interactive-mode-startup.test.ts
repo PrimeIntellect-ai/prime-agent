@@ -1,7 +1,6 @@
 import { Container, setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { APP_TITLE } from "../src/config.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
 import {
@@ -37,7 +36,7 @@ describe("InteractiveMode startup hints", () => {
 		return mode;
 	}
 
-	it("keeps the shared splash compact without repeating the input hint", () => {
+	it("shows a compact text header without a logo or repeated input hint", () => {
 		const header = new BrandSplashHeader(
 			"0.0.0",
 			() => "test-model",
@@ -52,8 +51,9 @@ describe("InteractiveMode startup hints", () => {
 		const output = stripAnsi(lines.join("\n"));
 
 		expect(lines[0]).toBe("");
-		expect(lines.length).toBeLessThanOrEqual(5);
-		expect(output).toContain(`${APP_TITLE} v0.0.0`);
+		expect(lines.length).toBeLessThanOrEqual(4);
+		expect(output).toContain("prime agent v0.0.0");
+		expect(output).not.toMatch(/[▀▄█]/);
 		expect(output).toContain("test-model");
 		expect(output).toContain("/tmp/project");
 		expect(output).not.toContain("Try ");
@@ -74,11 +74,12 @@ describe("InteractiveMode startup hints", () => {
 			() => "/tmp/project",
 		);
 
-		for (const width of [1, 2, 12, 24, 39, 40, 80]) {
+		for (const width of [1, 2, 12, 14, 20, 24, 39, 40, 80]) {
 			const lines = header.render(width);
 			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-			if (width >= 24) {
+			if (width >= 14) {
 				const output = stripAnsi(lines.join("\n"));
+				expect(output).toContain("prime agent");
 				expect(output).toContain("v0.0.0");
 				expect(output).toContain("test-model");
 				expect(output).toContain("/tmp/project");
@@ -86,7 +87,7 @@ describe("InteractiveMode startup hints", () => {
 		}
 	});
 
-	it("renders live metadata and extra rows even when the custom mark is shorter", () => {
+	it("renders live agents metadata, custom marks, and verbose instructions", () => {
 		let model = "first-model";
 		let cwd = "/tmp/first";
 		const header = new BrandSplashHeader(

@@ -135,7 +135,6 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
-import { PRIME_BUTTERFLY_LOGO_COMPACT } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -461,7 +460,7 @@ export class BrandSplashHeader implements Component {
 		private readonly verboseInstructions?: string,
 		private readonly options: BrandSplashHeaderOptions = {},
 	) {
-		this.logoRaw = (options.logo ?? PRIME_BUTTERFLY_LOGO_COMPACT).split("\n");
+		this.logoRaw = options.logo?.split("\n") ?? [];
 		this.logoCanvasWidth = this.logoRaw.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 	}
 
@@ -477,9 +476,10 @@ export class BrandSplashHeader implements Component {
 		const metaWidth = showLogo ? contentWidth - this.logoCanvasWidth - this.gutter : contentWidth;
 		const extraMetadata = this.options.getExtraMetadata?.() ?? [];
 		const version = theme.fg("muted", `v${this.version}`);
-		const title = theme.bold(theme.fg("text", APP_TITLE));
+		const titleText = "prime agent";
+		const title = theme.fg("text", titleText);
 		const metaLines = [
-			visibleWidth(`${APP_TITLE} v${this.version}`) <= metaWidth ? `${title} ${version}` : version,
+			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
 			theme.fg("muted", truncateToWidth(this.getModelId() ?? "—", metaWidth)),
 			theme.fg("dim", truncatePathMiddle(formatSplashCwd(this.getCwd()), metaWidth)),
 			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
@@ -1418,12 +1418,12 @@ export class InteractiveMode {
 
 		this.ui.addChild(this.headerContainer);
 
-		// Brand splash: side-panel layout with structured runtime metadata on the right.
+		// Compact text header with runtime metadata.
 		// The model/cwd are read through live getters, so they fill in once the
 		// connection state loads (rebindCurrentSession below). Onboarding, when
 		// required, renders as a full-screen overlay on top of this header.
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			// Verbose: include the full keybinding cheatsheet under the brand mark.
+			// Verbose: include the full keybinding cheatsheet below the header.
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 			const verboseInstructions = this.options.verbose
 				? [
