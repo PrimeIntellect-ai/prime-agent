@@ -478,14 +478,14 @@ describe("ENG-4531 agent message UI", () => {
 		const collapsed = render(component);
 
 		expect(collapsed).toContain("◆ Agent message received · from Planner");
-		expect(collapsed).toContain("to expand");
+		expect(collapsed).not.toContain("to expand");
 		expect(collapsed).not.toContain("Then wait for more work.");
 
 		component.setExpanded(true);
 		const expanded = render(component);
-		expect(expanded).toContain("to collapse");
+		expect(expanded).not.toContain("to collapse");
 		const expandedLines = expanded.split("\n");
-		expect(expandedLines[1]?.trimEnd()).toMatch(/^ ◆ Agent message received · from Planner \(.*to collapse\)$/);
+		expect(expandedLines[1]?.trimEnd()).toBe(" ◆ Agent message received · from Planner");
 		expect(expandedLines.slice(2)).toEqual([
 			" ╰─ Reply to your parent with exactly: hi",
 			"    Then wait for more work.",
@@ -532,7 +532,7 @@ describe("ENG-4531 agent message UI", () => {
 		expect(lines).toEqual([
 			expect.stringContaining("python"),
 			expect.stringContaining("await agent_message.send"),
-			expect.stringMatching(/^ ◆ Agent message sent · to parent Worker \(.*to collapse\)$/),
+			" ◆ Agent message sent · to parent Worker",
 			" ╰─ Continue with shard eight.",
 			"    Then report back.",
 		]);

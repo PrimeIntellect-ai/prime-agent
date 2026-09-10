@@ -208,7 +208,13 @@ import { FEATURE_HINT_ANIMATION_INTERVAL_MS, FeatureHintComponent } from "./comp
 import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
-import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
+import {
+	formatConversationDetailStatus,
+	formatKeyText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "./components/keybinding-hints.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
@@ -6161,7 +6167,16 @@ export class InteractiveMode {
 			usage && typeof usage.tokens === "number" && typeof usage.percent === "number"
 				? `${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`
 				: undefined;
-		return [goalLabel, heartbeatLabel, contextLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		return (
+			[
+				goalLabel,
+				heartbeatLabel,
+				contextLabel,
+				formatConversationDetailStatus(this.toolOutputExpanded, this.editDiffsExpanded),
+			]
+				.filter((label) => label !== undefined)
+				.join(" · ") || undefined
+		);
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {

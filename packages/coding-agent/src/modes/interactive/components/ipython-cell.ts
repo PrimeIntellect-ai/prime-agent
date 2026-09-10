@@ -15,7 +15,6 @@ import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } f
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
 import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
 import {
 	type BackgroundShellHandle,
 	formatShellCompletionTime,
@@ -671,12 +670,11 @@ export class IPythonCellComponent implements Component {
 		for (const message of messages) {
 			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
-			const hint = expandCollapseHint("app.messages.expand", this.state.agentMessagesExpanded === true);
 			if (this.state.agentMessagesExpanded) {
 				this.addBlank(lines, width);
 				this.addPlain(
 					lines,
-					truncateToWidth(`${agentMessageSummaryLine(label, recipient)} ${hint}`, Math.max(1, width - 1), "…"),
+					truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"),
 				);
 				for (const bodyLine of agentMessageBodyLines(message.message, width)) {
 					lines.push(bodyLine);
@@ -687,17 +685,12 @@ export class IPythonCellComponent implements Component {
 			const preview = agentMessagePreview(prefixWidth, message.message);
 			this.addPlain(
 				lines,
-				truncateToWidth(
-					`${agentMessageSummaryLine(label, recipient, preview)} ${hint}`,
-					Math.max(1, width - 1),
-					"…",
-				),
+				truncateToWidth(agentMessageSummaryLine(label, recipient, preview), Math.max(1, width - 1), "…"),
 			);
 		}
 	}
 
-	// The `╰─ <path> +N -M` summary line renders in both states; ctrl+j only
-	// attaches or removes the indented diff rows underneath it.
+	// The path summary stays visible while conversation detail toggles the diff rows.
 	private renderDiffs(lines: string[], width: number, diffs: readonly DiffDisplay[], hasCode: boolean): void {
 		const diffsByPath = new Map<string, DiffDisplay[]>();
 		for (const diff of diffs) {

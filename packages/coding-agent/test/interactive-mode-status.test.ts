@@ -4253,6 +4253,7 @@ describe("InteractiveMode goal status announcements", () => {
 });
 
 describe("InteractiveMode tray goal label", () => {
+	beforeAll(() => setKeybindings(new KeybindingsManager()));
 	type TrayUsage = { contextWindow: number; tokens: number | null; percent: number | null };
 	type TrayLabelHarness = {
 		heartbeatCatalog: AgentConnectionHeartbeat[];
@@ -4306,7 +4307,7 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 	});
 
 	test("combines active goals with token/context usage in one lower-tray label", () => {
@@ -4328,7 +4329,9 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 75k (75%)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe(
+			"Pursuing goal (1m 05s) · 75k (75%) · Showing overview (Ctrl+O to expand)",
+		);
 	});
 
 	test("combines active goals, active heartbeats, and context usage in one lower-tray label", () => {
@@ -4351,7 +4354,9 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat · 75k (75%)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe(
+			"Pursuing goal (1m 05s) · 1 heartbeat (Ctrl+R) · 75k (75%) · Showing overview (Ctrl+O to expand)",
+		);
 	});
 
 	test("omits the usage segment when token count is unknown", () => {
@@ -4373,7 +4378,7 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 	});
 });
 
