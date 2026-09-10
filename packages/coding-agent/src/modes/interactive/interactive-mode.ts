@@ -571,6 +571,17 @@ const HEARTBEAT_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
 	},
 ];
 
+const TRACES_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
+	{ value: "status", label: "status", description: "Show trace sharing status" },
+	{ value: "on", label: "on", description: "Enable automatic trace uploads" },
+	{ value: "off", label: "off", description: "Disable automatic trace uploads" },
+	{ value: "preview", label: "preview", description: "Preview the current session trace" },
+	{ value: "upload", label: "upload", description: "Alias of upload-current" },
+	{ value: "upload-current", label: "upload-current", description: "Upload the current session trace" },
+	{ value: "upload-all", label: "upload-all", description: "Upload all persisted traces" },
+	{ value: "login", label: "login", description: "Configure the Prime API key for trace uploads" },
+];
+
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
 // Cap on retained pasted-image bytes (base64). Images are resized below the
@@ -1360,6 +1371,12 @@ export class InteractiveMode {
 		if (heartbeatCommand) {
 			heartbeatCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
 				this.getHeartbeatArgumentCompletions(prefix);
+		}
+
+		const tracesCommand = slashCommands.find((command) => command.name === "traces");
+		if (tracesCommand) {
+			tracesCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				this.getTracesArgumentCompletions(prefix);
 		}
 
 		const connectionCommands = this.connectionCommands;
@@ -8010,6 +8027,14 @@ export class InteractiveMode {
 					(item) => item.value.toLowerCase().startsWith(term) || item.label.toLowerCase().startsWith(term),
 				)
 			: HEARTBEAT_ARGUMENT_COMPLETIONS;
+		return filtered.length === 0 ? null : filtered;
+	}
+
+	private getTracesArgumentCompletions(prefix: string): AutocompleteItem[] | null {
+		const term = prefix.trim().toLowerCase();
+		const filtered = term
+			? TRACES_ARGUMENT_COMPLETIONS.filter((item) => item.value.toLowerCase().startsWith(term))
+			: TRACES_ARGUMENT_COMPLETIONS;
 		return filtered.length === 0 ? null : filtered;
 	}
 
