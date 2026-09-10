@@ -1,0 +1,1 @@
+- Fixed non-worker draft discard dropping closeSession failures and discarding drafts with an in-flight attach ([#1922](https://github.com/PrimeIntellect-ai/prime-agent/issues/1922))
