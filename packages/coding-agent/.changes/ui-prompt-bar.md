@@ -3,3 +3,5 @@
 - Removed the model, manage, and context-usage tray entries so the bottom bar stays quiet; the model picker remains the single bottom-surface control.
 - Restored the effort label separator and /effort slash-command reference above the prompt bar.
 - Stacked the recap and effort lines with blank-line breathing room above the prompt bar.
+- Restored the model, manage, and context-usage tray entries and hid the tray while a picker is open.
+- Hid the subagents summary box while a picker is open and stopped showing a depth label for root sessions.

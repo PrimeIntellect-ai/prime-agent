@@ -65,6 +65,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 		private readonly getLocationLabel: () => string | undefined = () => undefined,
 		private readonly getContextLabel: () => string | undefined = () => undefined,
 		private readonly getOverrideLabel: () => string | undefined = () => undefined,
+		private readonly getPickerOpen: () => boolean = () => false,
 	) {}
 
 	setSubagentCounts(counts: SubagentSummaryCounts): void {
@@ -97,6 +98,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		if (this.getPickerOpen()) return [];
 		const lines = this.renderInfoLine(width);
 		if (this.counts.total === 0) return lines;
 		if (width < 2) return lines;

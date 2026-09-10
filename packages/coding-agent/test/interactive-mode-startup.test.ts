@@ -22,9 +22,14 @@ describe("InteractiveMode startup hints", () => {
 	});
 
 	function createMode(messageCount = 0, returnToAgentsView = false, getEditorText = () => "") {
+		const editor = { getText: getEditorText };
 		const mode = {
 			options: { returnToAgentsView },
-			editor: { getText: getEditorText },
+			editor,
+			editorContainer: { children: [editor] as unknown[] },
+			ui: { hasOverlay: () => false },
+			heartbeatCatalog: [],
+			subagentSnapshots: new Map(),
 			connectionState: {
 				model: { id: "test-model", name: "test-model", provider: "test-provider", reasoning: true },
 				thinkingLevel: "high",
@@ -113,11 +118,11 @@ describe("InteractiveMode startup hints", () => {
 		}
 	});
 
-	it("places the fresh-chat shortcut hint in the tray", () => {
+	it("places the fresh-chat shortcut hint after the model", () => {
 		const mode = createMode();
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("? for shortcuts");
+		expect(stripAnsi(label)).toBe("test-model  ? for shortcuts");
 	});
 
 	it("shows current effort in a compact prompt label and hides it for non-reasoning models", () => {
@@ -136,6 +141,21 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(getLabel(40)!)).toBe("xhigh · /effort");
 		mode.connectionState.model.reasoning = false;
 		expect(getLabel(40)).toBeUndefined();
+	});
+
+	it.each([
+		["GLM 5.3 Fast (internal)", "GLM 5.3 Fast"],
+		["internal/glm-5.3-fast", "glm-5.3-fast"],
+		["test-provider/test-model", "test-model"],
+		["Qwen/Qwen3-Next-80B-A3B-Instruct", "Qwen/Qwen3-Next-80B-A3B-Instruct"],
+		["custom/fine-tune (thinking)", "custom/fine-tune (thinking)"],
+	])("shortens the prompt model name %s without changing model identity", (name, expected) => {
+		const mode = createMode();
+		mode.connectionState.model.name = name;
+		const before = { ...mode.connectionState.model };
+
+		expect(Reflect.get(InteractiveMode.prototype, "getModelTrayLabel").call(mode)).toBe(expected);
+		expect(mode.connectionState.model).toEqual(before);
 	});
 
 	it("refreshes effort above the prompt without rebuilding the recap", () => {
@@ -203,6 +223,13 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
 	});
 
+	it("uses the configured keybinding in the manage hint", () => {
+		setKeybindings(new KeybindingsManager({ "app.agents.back": "ctrl+g" }));
+		const label = Reflect.get(InteractiveMode.prototype, "getAgentsViewTrayHint").call(createMode(0, true));
+
+		expect(stripAnsi(label)).toBe("Ctrl+G manage");
+	});
+
 	it("keeps fresh-chat guidance hidden when a mid-turn snapshot still has no committed messages", () => {
 		const mode = createMode();
 		const patchConnectionState = (patch: Record<string, unknown>) => Object.assign(mode.connectionState, patch);
@@ -215,7 +242,7 @@ describe("InteractiveMode startup hints", () => {
 			InteractiveMode.prototype,
 			"updateConnectionStateFromEvent",
 		) as (event: unknown) => void;
-		const getLabel = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode) ?? "");
+		const getLabel = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
 		const message = { role: "user", content: "hello", timestamp: 1 };
 
 		updateConnectionStateFromEvent.call(mode, { type: "agent_start" });
@@ -347,15 +374,15 @@ describe("InteractiveMode startup hints", () => {
 		expect(shutdown).not.toHaveBeenCalled();
 	});
 
-	it("keeps the tray quiet while typing", () => {
+	it("keeps the manage hint while typing", () => {
 		let editorText = "";
 		const mode = createMode(0, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("← manage  test-model  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(getLabel()).toBeUndefined();
+		expect(stripAnsi(getLabel())).toBe("← manage  test-model");
 	});
 
 	it("hides the fresh-chat shortcut hint while the prompt has text", () => {
@@ -363,23 +390,70 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, false, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(getLabel()).toBeUndefined();
+		expect(stripAnsi(getLabel())).toBe("test-model");
 
 		editorText = " ";
-		expect(getLabel()).toBeUndefined();
+		expect(stripAnsi(getLabel())).toBe("test-model");
 
 		editorText = "";
-		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
 	});
 
 	it("hides the tray shortcut guidance for chats with history", () => {
 		const mode = createMode(1);
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(label).toBeUndefined();
+		expect(stripAnsi(label)).toBe("test-model");
+	});
+
+	it("hides the tray while an inline picker is open", () => {
+		const mode = createMode(0, true);
+		const locationLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
+		const contextLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayContextLabel").call(mode);
+		const overrideLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayOverrideLabel").call(mode);
+		Object.assign(mode.connectionState, {
+			goal: {
+				active: true,
+				status: "active",
+				objective: "finish the task",
+				tokensUsed: 0,
+				timeUsedSeconds: 65,
+				continuationsUsed: 1,
+			},
+			contextUsage: { contextWindow: 100_000, tokens: 75_000, percent: 75 },
+		});
+		Object.assign(mode, { ctrlCExitHintExpiresAt: Date.now() + 60_000 });
+
+		expect(stripAnsi(locationLabel())).toBe("← manage  test-model  ? for shortcuts");
+		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s) · 75k (75%)");
+		expect(stripAnsi(overrideLabel())).toBe("Press Ctrl+C again to exit");
+
+		mode.ui.hasOverlay = () => true;
+		expect(locationLabel()).toBeUndefined();
+		expect(contextLabel()).toBeUndefined();
+		expect(overrideLabel()).toBeUndefined();
+
+		mode.ui.hasOverlay = () => false;
+		mode.editorContainer.children.length = 0;
+		mode.editorContainer.children.push({});
+		expect(locationLabel()).toBeUndefined();
+		expect(contextLabel()).toBeUndefined();
+		expect(overrideLabel()).toBeUndefined();
+	});
+
+	it("never shows a depth label for root sessions and keeps it for subagent sessions", () => {
+		const root = createMode();
+		Object.assign(root.options, { sessionDepth: 0, sessionHasChildren: true });
+		const subagent = createMode(1);
+		Object.assign(subagent.options, { sessionDepth: 1 });
+		const getLabel = (mode: ReturnType<typeof createMode>) =>
+			stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+
+		expect(getLabel(root)).toBe("test-model  ? for shortcuts");
+		expect(getLabel(subagent)).toBe("depth 1  test-model");
 	});
 
 	it("keeps the question-mark shortcut guide compact", () => {
