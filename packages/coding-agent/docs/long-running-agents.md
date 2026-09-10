@@ -224,9 +224,12 @@ prime-agent \
 The slash-command flags (`--max-continuations`, `--max-turns`, `--max-tokens`,
 `--timeout-ms`, `--gate`, `--gate-retries`, `--gate-timeout-ms`) accept both
 `--flag <value>` and `--flag=<value>`, and the full CLI spellings such as
-`--autonomous-max-continuations` work as aliases. Flags only change the limits
-they name; unspecified limits keep the configured or default values, and
-repeating `--gate` appends another gate.
+`--autonomous-max-continuations` work as aliases. Numeric values may use `,`
+or `_` as digit separators (`--max-tokens 100,000,000,000`). The four budget
+limits also accept `unlimited` to remove that cap; without gates, an unlimited
+run only stops on an error or a manual abort, so pair unlimited budgets with a
+quality gate. Flags only change the limits they name; unspecified limits keep
+the configured or default values, and repeating `--gate` appends another gate.
 
 Autonomous mode supports limits for continuations, assistant turns, tokens, and wall-clock duration. Gate commands run before the session may finish; a failed gate returns its bounded output to the agent for another attempt. Prime Agent avoids rerunning the same failed gate when the workspace has not changed.
 

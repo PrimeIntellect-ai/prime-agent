@@ -59,6 +59,17 @@ export const DEFAULT_AUTONOMOUS_GATES: Required<AgentAutonomousGateConfig> = {
 	timeoutMs: 5 * 60 * 1000,
 };
 
+/**
+ * JSON-safe sentinel meaning "no cap". Limit checks compare usage against the
+ * configured value, so this stays finite and serializes to JSON while no
+ * realistic run can ever reach it.
+ */
+export const UNLIMITED_AUTONOMOUS_LIMIT = Number.MAX_SAFE_INTEGER;
+
+export function isUnlimitedAutonomousLimit(value: number): boolean {
+	return value >= UNLIMITED_AUTONOMOUS_LIMIT;
+}
+
 const MAX_GATE_OUTPUT_CHARS = 6000;
 const MAX_CHILD_PROCESS_OUTPUT_CHARS = 1024 * 1024;
 

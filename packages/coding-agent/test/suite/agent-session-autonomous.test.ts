@@ -7,8 +7,10 @@ import {
 	addAutonomousUsage,
 	createAutonomousRuntimeState,
 	DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT,
+	isUnlimitedAutonomousLimit,
 	nextAutonomousContinuation,
 	shouldAutonomouslyContinue,
+	UNLIMITED_AUTONOMOUS_LIMIT,
 } from "../../src/core/autonomous.js";
 import type { AgentCronJob } from "../../src/core/cron-jobs.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
@@ -249,6 +251,63 @@ describe("AgentSession autonomous mode", () => {
 		expect(status.gates.commands).toEqual(["npm run lint", "npm test"]);
 	});
 
+	it("accepts large budgets written with digit separators", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			"/autonomous on --max-tokens 100,000,000,000 --max-continuations 1_000 --max-turns 10,000 --timeout-ms 3,600,000",
+		);
+
+		expect(harness.session.getAutonomousStatus().limits).toEqual({
+			maxContinuations: 1_000,
+			maxTurns: 10_000,
+			maxTokens: 100_000_000_000,
+			timeoutMs: 3_600_000,
+		});
+		const statusMessages = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "autonomous_status",
+		);
+		expect(getMessageText(statusMessages[0])).toContain("Tokens: 0/100,000,000,000");
+	});
+
+	it("supports unlimited budget values", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			"/autonomous on --max-continuations unlimited --max-turns unlimited --max-tokens unlimited --timeout-ms unlimited",
+		);
+
+		expect(harness.session.getAutonomousStatus().limits).toEqual({
+			maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTokens: UNLIMITED_AUTONOMOUS_LIMIT,
+			timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
+		});
+		const statusMessages = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "autonomous_status",
+		);
+		const statusText = getMessageText(statusMessages[0]);
+		expect(statusText).toContain("Continuations: 0/unlimited");
+		expect(statusText).toContain("Time: 0s/unlimited");
+	});
+
+	it("continues an unlimited-continuation run past the default three", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses(
+			Array.from({ length: 6 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
+		);
+
+		await harness.session.prompt("/autonomous on --max-continuations unlimited --max-turns unlimited");
+		await harness.session.prompt("make the change");
+
+		const status = harness.session.getAutonomousStatus();
+		expect(isUnlimitedAutonomousLimit(status.limits.maxContinuations)).toBe(true);
+		expect(status.continuationsUsed).toBe(6);
+	});
+
 	it("rejects invalid budget flags without enabling autonomous mode", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -257,6 +316,7 @@ describe("AgentSession autonomous mode", () => {
 			"/autonomous on --max-continuations 0",
 			"/autonomous on --max-continuations",
 			"/autonomous on --speed 10",
+			"/autonomous on --gate-retries unlimited",
 			"/autonomous off --max-continuations 2",
 		]) {
 			await harness.session.prompt(input);
@@ -265,9 +325,10 @@ describe("AgentSession autonomous mode", () => {
 			.filter((message) => message.role === "custom" && message.customType === "session_slash_command_result")
 			.map((message) => (message as { content: string }).content);
 		expect(commandErrors).toEqual([
-			expect.stringContaining("--max-continuations must be a positive integer"),
+			expect.stringContaining('--max-continuations must be a positive integer or "unlimited"'),
 			expect.stringContaining("Missing value for --max-continuations"),
 			expect.stringContaining("Unknown autonomous budget flag: --speed"),
+			expect.stringContaining("--gate-retries must be a positive integer."),
 			expect.stringContaining("Unexpected autonomous argument: --max-continuations"),
 		]);
 

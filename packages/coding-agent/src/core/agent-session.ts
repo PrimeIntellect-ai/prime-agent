@@ -87,10 +87,12 @@ import {
 	addAutonomousUsage,
 	autonomousStatus,
 	createAutonomousRuntimeState,
+	isUnlimitedAutonomousLimit,
 	nextAutonomousContinuation,
 	refreshAutonomousQualityGates,
 	setAutonomousEnabled,
 	setAutonomousLimits,
+	UNLIMITED_AUTONOMOUS_LIMIT,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
@@ -1035,8 +1037,10 @@ function parseGoalBudgetValue(value: string): number {
 	return budget;
 }
 
+const AUTONOMOUS_STATUS_NUMBER_FORMAT = new Intl.NumberFormat("en-US");
+
 const AUTONOMOUS_BUDGET_USAGE =
-	"Usage: /autonomous [status|off] or /autonomous on [--max-continuations <n>] [--max-turns <n>] [--max-tokens <n>] [--timeout-ms <n>] [--gate <command>] [--gate-retries <n>] [--gate-timeout-ms <n>]";
+	"Usage: /autonomous [status|off] or /autonomous on [--max-continuations <n|unlimited>] [--max-turns <n|unlimited>] [--max-tokens <n|unlimited>] [--timeout-ms <n|unlimited>] [--gate <command>] [--gate-retries <n>] [--gate-timeout-ms <n>]";
 
 // `/autonomous` budget flags mirror the `--autonomous-*` CLI options. The CLI
 // spelling (`--autonomous-max-continuations`) is accepted as an alias so the
@@ -1051,11 +1055,18 @@ const AUTONOMOUS_BUDGET_FLAGS: ReadonlySet<string> = new Set([
 	"gate-timeout-ms",
 ]);
 
-function parseAutonomousBudgetInt(flag: string, value: string): number {
-	if (!/^[1-9]\d*$/.test(value)) {
-		throw new Error(`--${flag} must be a positive integer. ${AUTONOMOUS_BUDGET_USAGE}`);
+function parseAutonomousBudgetInt(flag: string, value: string, allowUnlimited = false): number {
+	if (allowUnlimited && value.toLowerCase() === "unlimited") {
+		return UNLIMITED_AUTONOMOUS_LIMIT;
 	}
-	return Number(value);
+	// Commas and underscores are accepted as digit separators (100,000,000).
+	const digits = value.replace(/[,_]/g, "");
+	if (!/^[1-9]\d*$/.test(digits)) {
+		throw new Error(
+			`--${flag} must be a positive integer${allowUnlimited ? ' or "unlimited"' : ""}. ${AUTONOMOUS_BUDGET_USAGE}`,
+		);
+	}
+	return Number(digits);
 }
 
 function parseAutonomousBudgetOptions(tokens: string[]): AgentAutonomousConfig {
@@ -1098,16 +1109,16 @@ function parseAutonomousBudgetOptions(tokens: string[]): AgentAutonomousConfig {
 				config.gates.timeoutMs = parseAutonomousBudgetInt(flag, value);
 				break;
 			case "max-continuations":
-				config.maxContinuations = parseAutonomousBudgetInt(flag, value);
+				config.maxContinuations = parseAutonomousBudgetInt(flag, value, true);
 				break;
 			case "max-turns":
-				config.maxTurns = parseAutonomousBudgetInt(flag, value);
+				config.maxTurns = parseAutonomousBudgetInt(flag, value, true);
 				break;
 			case "max-tokens":
-				config.maxTokens = parseAutonomousBudgetInt(flag, value);
+				config.maxTokens = parseAutonomousBudgetInt(flag, value, true);
 				break;
 			case "timeout-ms":
-				config.timeoutMs = parseAutonomousBudgetInt(flag, value);
+				config.timeoutMs = parseAutonomousBudgetInt(flag, value, true);
 				break;
 		}
 	}
@@ -2199,7 +2210,12 @@ export class AgentSession {
 		const elapsedSeconds = status.startedAt ? Math.round((Date.now() - status.startedAt) / 1000) : 0;
 		const gateSummary =
 			status.gates.commands.length > 0 ? status.gates.commands.map((command) => `"${command}"`).join(", ") : "none";
-		return `[autonomous-status: ${state}]\n\nContinuations: ${status.continuationsUsed}/${status.limits.maxContinuations}. Turns: ${status.turnsUsed}/${status.limits.maxTurns}. Tokens: ${status.tokensUsed}/${status.limits.maxTokens}. Time: ${elapsedSeconds}s/${Math.round(status.limits.timeoutMs / 1000)}s. Gates: ${gateSummary}.`;
+		const formatCount = (value: number): string =>
+			isUnlimitedAutonomousLimit(value) ? "unlimited" : AUTONOMOUS_STATUS_NUMBER_FORMAT.format(value);
+		const timeBudget = isUnlimitedAutonomousLimit(status.limits.timeoutMs)
+			? "unlimited"
+			: `${AUTONOMOUS_STATUS_NUMBER_FORMAT.format(Math.round(status.limits.timeoutMs / 1000))}s`;
+		return `[autonomous-status: ${state}]\n\nContinuations: ${formatCount(status.continuationsUsed)}/${formatCount(status.limits.maxContinuations)}. Turns: ${formatCount(status.turnsUsed)}/${formatCount(status.limits.maxTurns)}. Tokens: ${formatCount(status.tokensUsed)}/${formatCount(status.limits.maxTokens)}. Time: ${elapsedSeconds}s/${timeBudget}. Gates: ${gateSummary}.`;
 	}
 
 	private _emitAutonomousStatus(): void {
