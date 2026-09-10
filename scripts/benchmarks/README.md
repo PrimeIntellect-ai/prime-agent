@@ -100,10 +100,12 @@ subsystem measurements alongside the normal installed CLI benchmarks, not end-to
 
 The comment has four columns: metric, main, PR, and signed change with the percentage in parentheses.
 A single summary counts regressions, improvements, metrics with no clear change, and incomplete or
-unavailable comparisons. Improvements are green with `↓`, regressions red with `↑`, and changes within
-the noise threshold remain neutral with `≈`. The entire change value, including the arrow, delta, and
-percentage, goes from muted to vivid as the absolute percentage grows, reaching maximum intensity at
-100%. An undefined percentage uses the muted shade. Colors use GitHub's native MathJax rendering;
+unavailable comparisons. Every nonzero change is green for a decrease or red for an increase, including
+changes within the noise threshold, which retain `≈` and count as no clear change in the summary.
+Changes exceeding the threshold use `↓` for improvements and `↑` for regressions. The entire change
+value, including the symbol, delta, and percentage, goes from muted to vivid as the absolute percentage
+grows, reaching maximum intensity at 100%. An undefined percentage uses the muted shade. Exact zero,
+incomplete, and unavailable changes remain neutral. Colors use GitHub's native MathJax rendering;
 no external badge service is required. Successful/attempted counts and spread appear in the collapsed
 methodology.
 Arrows require a change larger than the metric's absolute floor, relative floor,

@@ -178,14 +178,18 @@ def comparison(
     change = f"{number(delta, definition, True)} {definition.unit} ({percentage})"
     if len(left) != expected or len(right) != expected:
         return Comparison(main_text, head_text, f"{change}; incomplete", "incomplete")
-    threshold = max(definition.absolute, main * definition.relative, spread(left), spread(right))
-    if abs(delta) <= threshold:
+    if delta == 0:
         return Comparison(main_text, head_text, f"≈ {change}", "no clear change")
-    signal = "↑" if delta > 0 else "↓"
+    threshold = max(definition.absolute, main * definition.relative, spread(left), spread(right))
+    signal = "≈"
+    outcome: Literal["regressed", "improved", "no clear change"] = "no clear change"
+    if abs(delta) > threshold:
+        signal = "↑" if delta > 0 else "↓"
+        outcome = "regressed" if delta > 0 else "improved"
     color = change_color(relative_change, regressed=delta > 0)
     text = f"{signal} {change}".replace("%", r"\%")
     colored = rf"$`\textcolor{{{color}}}{{\textsf{{{text}}}}}`$"
-    return Comparison(main_text, head_text, colored, "regressed" if delta > 0 else "improved")
+    return Comparison(main_text, head_text, colored, outcome)
 
 
 def comparisons(report: Report) -> dict[Metric, Comparison]:

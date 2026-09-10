@@ -128,6 +128,18 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(slower.change, r"$`\textcolor{#b9625f}{\textsf{↑ +500.0 ms (+25.00\%)}}`$")
         self.assertEqual(faster.change, r"$`\textcolor{#548565}{\textsf{↓ -500.0 ms (-25.00\%)}}`$")
 
+    def test_small_changes_are_colored_without_changing_the_overall_assessment(self):
+        report = fixture()
+        report.status = "partial"
+        report.main.metrics["cold"] = observations(*([3.0] * 10))
+        report.pr_head.metrics["cold"] = observations(*([3.03] * 10))
+        report.main.metrics["warm"] = observations(*([2.0] * 10))
+        report.pr_head.metrics["warm"] = observations(*([1.98] * 10))
+        text = render(report)
+        self.assertIn("**Overall: 0 regressed · 0 improved · 2 no clear change · 15 unavailable.**", text)
+        self.assertIn(r"$`\textcolor{#ab6a65}{\textsf{≈ +30.0 ms (+1.00\%)}}`$", text)
+        self.assertIn(r"$`\textcolor{#65816d}{\textsf{≈ -20.0 ms (-1.00\%)}}`$", text)
+
     def test_larger_percentages_are_more_vivid_and_intensity_is_capped(self):
         def color(baseline, head):
             result = comparison(METRICS[3], observations(baseline), observations(head), 1)
@@ -168,9 +180,15 @@ class ReportTests(unittest.TestCase):
         cells = comparison(METRICS[3], observations(0), observations(65537), 1)
         self.assertIn("(N/A)", cells.change)
         self.assertEqual(cells.outcome, "regressed")
-        unchanged = comparison(METRICS[3], observations(10_000_000), observations(10_001_000), 1)
-        self.assertEqual(unchanged.outcome, "no clear change")
-        self.assertEqual(unchanged.change, "≈ +0.001 MB (+0.01%)")
+        small = comparison(METRICS[3], observations(10_000_000), observations(10_001_000), 1)
+        self.assertEqual(small.outcome, "no clear change")
+        self.assertEqual(small.change, r"$`\textcolor{#aa6a65}{\textsf{≈ +0.001 MB (+0.01\%)}}`$")
+        for baseline in (0, 10_000_000):
+            with self.subTest(baseline=baseline):
+                unchanged = comparison(METRICS[3], observations(baseline), observations(baseline), 1)
+                self.assertEqual(unchanged.outcome, "no clear change")
+                self.assertNotIn("textcolor", unchanged.change)
+                self.assertTrue(unchanged.change.startswith("≈ +0.00 MB"))
 
     def test_compact_tables_summarize_outcomes_without_treating_missing_samples_as_unchanged(self):
         report = fixture()
