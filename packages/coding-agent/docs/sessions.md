@@ -9,11 +9,13 @@ Sessions auto-save to `~/.prime/agent/sessions/`. Each session is a JSONL file w
 ```bash
 prime-agent --continue          # Continue the most recent session
 prime-agent --resume [path|id]  # Browse past sessions or resume one directly
-prime-agent --no-session        # Ephemeral mode; do not save
+prime-agent --no-session        # Do not persist root or RLM descendant session transcripts/artifacts
 prime-agent --fork <path|id>    # Fork a session file or partial session ID into a new session
 ```
 
 Use `/session` in interactive mode to see the current session file, session ID, and message count. Use `/usage` for token, cost, and context usage.
+
+`--no-session` does not make commands stateless or sandboxed; see [Security and Sandboxing](security.md) for remaining state and isolation guidance.
 
 For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
 

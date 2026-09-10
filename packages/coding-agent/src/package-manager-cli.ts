@@ -724,10 +724,14 @@ function parseDaemonUpdateRestartSession(value: unknown): DaemonUpdateRestartSes
 	}
 	const clientEnv = readOptionalStringRecord(value.clientEnv, "clientEnv");
 	const runtimeMetadata = parseDaemonUpdateRestartRuntimeMetadata(value.runtimeMetadata);
+	if (value.persistence !== undefined && value.persistence !== "memory") {
+		throw new Error("Daemon update restart response contains invalid persistence");
+	}
 	return {
 		activeSessionId: readString(value.activeSessionId, "activeSessionId"),
 		sessionId: readString(value.sessionId, "sessionId"),
 		sessionFile: readString(value.sessionFile, "sessionFile"),
+		...(value.persistence === "memory" ? { persistence: "memory" as const } : {}),
 		cwd: readString(value.cwd, "cwd"),
 		config: config as DaemonUpdateRestartSession["config"],
 		...(runtimeMetadata ? { runtimeMetadata } : {}),
@@ -993,6 +997,7 @@ async function restoreDaemonUpdateRestartSession(
 		{
 			type: "create",
 			sessionPath: session.sessionFile,
+			noSession: session.persistence === "memory",
 			config: session.config,
 			...(runtimeMetadata ? { runtimeMetadata } : {}),
 			...(session.clientEnv ? { env: session.clientEnv } : {}),
@@ -1005,6 +1010,7 @@ async function restoreDaemonUpdateRestartSession(
 	}
 	const activeSessionId = readCreatedActiveSessionId(createResponse.data);
 	restoredActiveSessionIds.set(session.activeSessionId, activeSessionId);
+	if (session.persistence === "memory") rmSync(session.sessionFile, { force: true });
 	if (session.activeSessionId === restartOriginActiveSessionId) {
 		try {
 			const noticeResponse = await client.request(

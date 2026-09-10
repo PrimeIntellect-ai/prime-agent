@@ -58,7 +58,7 @@ describe("createAgentSession session manager defaults", () => {
 		});
 
 		expect(session.sessionManager).toBe(sessionManager);
-		expect(session.sessionManager.isPersisted()).toBe(false);
+		expect(session.sessionManager.allowsPersistence()).toBe(false);
 
 		session.dispose();
 	});

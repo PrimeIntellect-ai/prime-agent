@@ -494,6 +494,7 @@ export class AgentDaemon {
 		deadline?: ReturnType<typeof setTimeout>;
 		phase: "preparing" | "fencing" | "prepared" | "publishing";
 		manifest?: DaemonUpdateRestartManifest;
+		memoryCheckpointFiles: Set<string>;
 		deferredClientEnv: Array<{
 			client: DaemonSocketClient;
 			state: ActiveSessionState;
@@ -1874,7 +1875,9 @@ export class AgentDaemon {
 		try {
 			sessionLease = acquireSessionLease(sessionPath, agentDir);
 			sessionManager = sessionPath
-				? await SessionManager.openAsync(sessionPath, config.sessionDir, cwdOverride)
+				? command.noSession
+					? await SessionManager.openInMemoryAsync(sessionPath, config.sessionDir, cwdOverride)
+					: await SessionManager.openAsync(sessionPath, config.sessionDir, cwdOverride)
 				: command.noSession
 					? SessionManager.inMemory(cwd)
 					: command.continueRecent
@@ -2543,7 +2546,9 @@ export class AgentDaemon {
 						candidate.runtime.metadata.rlmChildId === childId &&
 						candidate.runtime.session === session,
 				);
-				if (!state?.runtime.session.sessionFile) return false;
+				if (!state) return false;
+				if (!state.runtime.session.sessionManager.allowsPersistence()) return true;
+				if (!state.runtime.session.sessionFile) return false;
 				if (state.runtime.metadata.rehydratedCompleted) return true;
 				const metadata = state.runtime.metadata;
 				const model = session.model;
@@ -2777,7 +2782,10 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
-		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
+		const childCwd = options.parentSession.sessionManager.getCwd();
+		const sessionManager = options.parentSession.sessionManager.allowsPersistence()
+			? SessionManager.create(childCwd, options.sessionDir)
+			: SessionManager.inMemory(childCwd, options.sessionDir);
 		sessionManager.newSession({
 			parentSession: options.parentSession.sessionFile,
 			rlmDepth: options.rlmDepth,
@@ -6375,10 +6383,13 @@ export class AgentDaemon {
 		const sessionFile =
 			session.sessionFile ??
 			(hasQueuedMessages || shouldResume
-				? session.sessionManager.materializeSessionFile(
+				? session.sessionManager.writeCheckpointFile(
 						state.runtime.runtimeConfig?.sessionDir ?? this.options.defaultSessionConfig.sessionDir,
 					)
 				: undefined);
+		if (sessionFile && !session.sessionManager.allowsPersistence()) {
+			this.updateRestart?.memoryCheckpointFiles.add(sessionFile);
+		}
 		if (!sessionFile || (this.isEmptyDraftContent(state) && !hasQueuedMessages && !shouldResume)) {
 			return undefined;
 		}
@@ -6386,6 +6397,7 @@ export class AgentDaemon {
 			activeSessionId: state.activeSessionId,
 			sessionId: session.sessionId,
 			sessionFile,
+			...(session.sessionManager.allowsPersistence() ? {} : { persistence: "memory" as const }),
 			cwd: session.sessionManager.getCwd(),
 			config: {
 				...state.runtime.runtimeConfig,
@@ -6459,6 +6471,7 @@ export class AgentDaemon {
 			...(owner ? { owner } : {}),
 			abort: new AbortController(),
 			phase: "preparing",
+			memoryCheckpointFiles: new Set(),
 			deferredClientEnv: [],
 		};
 		this.updateRestart = transaction;
@@ -6563,6 +6576,12 @@ export class AgentDaemon {
 		return manifest;
 	}
 
+	private removeMemoryRestartCheckpoints(manifest: DaemonUpdateRestartManifest | undefined): void {
+		for (const session of manifest?.sessions ?? []) {
+			if (session.persistence === "memory") rmSync(session.sessionFile, { force: true });
+		}
+	}
+
 	private cancelPreparedUpdateRestart(transactionId?: symbol): void {
 		const transaction = this.updateRestart;
 		if (!transaction || (transactionId && transaction.id !== transactionId)) return;
@@ -6570,6 +6589,9 @@ export class AgentDaemon {
 		transaction.deadline = undefined;
 		transaction.abort.abort();
 		if (transaction.phase === "publishing") return;
+		this.removeMemoryRestartCheckpoints(transaction.manifest);
+		for (const path of transaction.memoryCheckpointFiles) rmSync(path, { force: true });
+		transaction.memoryCheckpointFiles.clear();
 		this.updateRestart = undefined;
 		for (const deferred of transaction.deferredClientEnv) {
 			if (

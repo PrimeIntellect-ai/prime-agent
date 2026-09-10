@@ -12,6 +12,10 @@
           "path": "quickstart.md"
         },
         {
+          "title": "Security and Sandboxing",
+          "path": "security.md"
+        },
+        {
           "title": "Architecture Overview",
           "path": "architecture.md"
         },

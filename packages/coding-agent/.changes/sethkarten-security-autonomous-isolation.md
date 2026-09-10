@@ -1,0 +1,1 @@
+- Added security and sandboxing guidance for unattended runs and clarified that `--no-session` is not fully stateless ([#1120](https://github.com/PrimeIntellect-ai/prime-agent/issues/1120)).

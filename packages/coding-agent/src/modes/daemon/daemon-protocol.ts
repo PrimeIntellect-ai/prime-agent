@@ -358,6 +358,7 @@ export interface DaemonUpdateRestartSession {
 	activeSessionId: string;
 	sessionId: string;
 	sessionFile: string;
+	persistence?: "memory";
 	cwd: string;
 	config: AgentSessionRuntimeConfig;
 	runtimeMetadata?: AgentSessionRuntimeMetadata;

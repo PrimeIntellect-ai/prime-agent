@@ -85,7 +85,7 @@ Sessions are saved automatically as flat JSONL files under `~/.prime/agent/sessi
 ```bash
 prime-agent -c                  # Continue most recent session
 prime-agent -r [path|id]        # Browse sessions or resume one directly
-prime-agent --no-session        # Ephemeral mode; do not save
+prime-agent --no-session        # Do not persist root or RLM descendant session transcripts/artifacts
 prime-agent --fork <path|id>    # Fork a session into a new session file
 ```
 
@@ -221,7 +221,7 @@ Use `prime-agent model list [search]` to list available models.
 | `-r`, `--resume [path\|id]` | Browse and select a session, or resume a specific session file or partial UUID |
 | `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
-| `--no-session` | Ephemeral mode; do not save |
+| `--no-session` | Do not persist root or RLM descendant session transcripts/artifact trees; temporary RLM working files may still exist; not a sandbox |
 
 Use `prime-agent session export <file> [output]` to export a session to HTML.
 
@@ -258,6 +258,8 @@ prime-agent --no-extensions -e ./my-extension.ts
 ### Autonomous Options
 
 Autonomous mode is a host policy for unattended work. It starts disabled. `--autonomous` enables it, and supplying any `--autonomous-*` sub-option also enables it. The host starts each enabled run with fresh continuation, turn, token, and elapsed-time counters.
+
+Autonomous limits and gates do not sandbox IPython or commands, and the elapsed-time limit does not forcibly terminate arbitrary code already running. See [Security and Sandboxing](security.md) before unattended use.
 
 | Option | Behavior, units, and default |
 |--------|------------------------------|

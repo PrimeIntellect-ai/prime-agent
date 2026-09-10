@@ -38,6 +38,7 @@ type AgentDaemonUpdateInternals = {
 		abort: AbortController;
 		phase: "preparing" | "fencing" | "prepared" | "publishing";
 		manifest?: DaemonUpdateRestartManifest;
+		memoryCheckpointFiles: Set<string>;
 		owner?: DaemonSocketClient;
 		deferredClientEnv: Array<{
 			client: DaemonSocketClient;
@@ -166,6 +167,7 @@ describe("issue #4257 update restart resume", () => {
 				id: Symbol("update-restart"),
 				abort: new AbortController(),
 				phase,
+				memoryCheckpointFiles: new Set<string>(),
 				deferredClientEnv: [],
 			};
 		}
@@ -316,6 +318,7 @@ describe("issue #4257 update restart resume", () => {
 			id: Symbol("update-restart"),
 			abort: new AbortController(),
 			phase: "preparing" as const,
+			memoryCheckpointFiles: new Set<string>(),
 			deferredClientEnv: [],
 		};
 		internals.updateRestart = transaction;
@@ -486,6 +489,7 @@ describe("issue #4257 update restart resume", () => {
 					id: Symbol("newer-update-restart"),
 					abort: new AbortController(),
 					phase: "publishing" as const,
+					memoryCheckpointFiles: new Set<string>(),
 					deferredClientEnv: [],
 				};
 				vi.spyOn(internals, "commitPreparedUpdateRestart").mockImplementationOnce(async () => {
@@ -898,19 +902,10 @@ describe("issue #4257 update restart resume", () => {
 		});
 	});
 
-	it("materializes queued in-memory drafts before update restart", async () => {
+	it("checkpoints in-memory ancestry for update restart without changing its persistence policy", async () => {
 		const harness = await createHarness({ persistSession: false });
 		harnesses.push(harness);
-
-		const followUpContent: TextContent[] = [
-			{ type: "text", text: "queued context" },
-			{ type: "text", text: "queued follow-up" },
-		];
-		await harness.session.restoreFollowUpMessage("queued follow-up", undefined, {
-			queueKey: "heartbeat:job-1",
-			agentMessageId: "agentmsg_followup",
-			content: followUpContent,
-		});
+		await harness.session.restoreFollowUpMessage("queued follow-up");
 
 		const sessionDir = `${harness.tempDir}/sessions`;
 		const internals = createDaemonInternals(harness, { sessionDir });
@@ -919,46 +914,26 @@ describe("issue #4257 update restart resume", () => {
 			createState(harness, "active-1", { kind: "top-level", createdAt: Date.now() }),
 		);
 
-		const manifest = await internals.prepareUpdateRestart();
+		const transaction = internals.beginUpdateRestartTransaction();
+		const manifest = await internals.runUpdateRestartPreparation(transaction);
 
 		expect(manifest.sessions).toHaveLength(1);
-		const session = manifest.sessions[0];
-		expect(session?.sessionFile.startsWith(`${sessionDir}/`)).toBe(true);
-		expect(harness.session.sessionFile).toBe(session?.sessionFile);
-		expect(readFileSync(session?.sessionFile ?? "", "utf8")).toContain('"type":"session"');
-		expect(session?.queue.actions.actions).toEqual([
-			expect.objectContaining({
-				queueKey: "heartbeat:job-1",
-				agentMessageId: "agentmsg_followup",
-				payload: expect.objectContaining({ kind: "turn", text: "queued follow-up", content: followUpContent }),
-			}),
-		]);
-		expect(session?.shouldResume).toBe(true);
-	});
-
-	it("materializes busy in-memory drafts before update restart", async () => {
-		const harness = await createHarness({ persistSession: false });
-		harnesses.push(harness);
-		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = true;
-
-		const sessionDir = `${harness.tempDir}/sessions`;
-		const internals = createDaemonInternals(harness, { sessionDir });
-		internals.sessions.set(
-			"active-1",
-			createState(harness, "active-1", { kind: "top-level", createdAt: Date.now() }),
-		);
-
-		const manifest = await internals.prepareUpdateRestart();
-
-		expect(manifest.sessions).toHaveLength(1);
-		const session = manifest.sessions[0];
-		expect(session?.sessionFile.startsWith(`${sessionDir}/`)).toBe(true);
-		expect(harness.session.sessionFile).toBe(session?.sessionFile);
-		expect(session).toMatchObject({
+		expect(manifest.sessions[0]).toMatchObject({
+			persistence: "memory",
 			shouldResume: true,
-			wasStreaming: true,
-			queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
+			queue: {
+				actions: {
+					actions: [expect.objectContaining({ payload: expect.objectContaining({ text: "queued follow-up" }) })],
+				},
+			},
 		});
+		expect(harness.session.sessionFile).toBeUndefined();
+		expect(harness.sessionManager.allowsPersistence()).toBe(false);
+		const checkpoint = manifest.sessions[0]!.sessionFile;
+		const checkpointHeader = JSON.parse(readFileSync(checkpoint, "utf8").split("\n")[0]!) as { id: string };
+		expect(checkpointHeader.id).toBe(harness.session.sessionId);
+		internals.cancelPreparedUpdateRestart();
+		expect(() => readFileSync(checkpoint, "utf8")).toThrow();
 	});
 
 	it("restores queued actions through the public recovery API with stable ids and FIFO", async () => {
