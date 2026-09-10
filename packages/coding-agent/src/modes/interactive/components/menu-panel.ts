@@ -12,6 +12,7 @@ import { theme } from "../theme/theme.js";
 interface MenuPanelOptions {
 	title: string;
 	subtitle?: string;
+	inline?: boolean;
 }
 
 export interface MenuViewportProvider {
@@ -20,6 +21,7 @@ export interface MenuViewportProvider {
 
 interface MenuListOptions {
 	compact?: boolean | (() => boolean);
+	inline?: boolean;
 }
 
 interface MenuListLayoutOptions extends MenuViewportProvider {
@@ -46,9 +48,9 @@ const ROW_PADDING_X = 2;
 const ROW_PADDING_Y = 1;
 const ANSI_RESET = "\x1b[0m";
 
-export function getMenuPanelInnerWidth(width: number): number {
-	const safeWidth = Math.max(PANEL_PADDING_X * 2 + 1, width);
-	return Math.max(1, safeWidth - PANEL_PADDING_X * 2);
+export function getMenuPanelInnerWidth(width: number, inline = false): number {
+	const padding = inline ? 1 : PANEL_PADDING_X;
+	return Math.max(1, width - padding * 2);
 }
 
 interface FullWidthMenuComponent {
@@ -235,6 +237,18 @@ export class MenuPanel extends Container {
 	}
 
 	override render(width: number): string[] {
+		if (this.options.inline) {
+			const lines: string[] = [];
+			if (this.title) lines.push(theme.fg("muted", ` ${this.title}`));
+			for (const child of this.children) {
+				lines.push(
+					...child
+						.render(fillsMenuPanel(child) ? width : getMenuPanelInnerWidth(width, true))
+						.map((line) => (fillsMenuPanel(child) ? line : ` ${line}`)),
+				);
+			}
+			return lines.map((line) => truncateToWidth(line, width, "", true));
+		}
 		const safeWidth = Math.max(PANEL_PADDING_X * 2 + 1, width);
 		const innerWidth = getMenuPanelInnerWidth(width);
 		const lines: string[] = [];
@@ -274,7 +288,10 @@ export class MenuSearchInput implements Component, Focusable, FullWidthMenuCompo
 	readonly fillsMenuPanel = true;
 	private readonly input = new Input();
 
-	constructor(private readonly placeholder: string) {}
+	constructor(
+		private readonly placeholder: string,
+		private readonly inline = false,
+	) {}
 
 	get focused(): boolean {
 		return this.input.focused;
@@ -309,6 +326,16 @@ export class MenuSearchInput implements Component, Focusable, FullWidthMenuCompo
 	}
 
 	render(width: number): string[] {
+		if (this.inline) {
+			const border = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
+			let content = this.input.render(Math.max(1, width - 2))[0] ?? "";
+			if (this.getValue() === "") {
+				content = this.focused
+					? `${content.trimEnd()}${theme.fg("dim", this.placeholder)}`
+					: `> ${theme.fg("dim", this.placeholder)}`;
+			}
+			return [border, truncateToWidth(` ${content}`, width, "", true), border];
+		}
 		const safeWidth = Math.max(FIELD_PADDING_X * 2 + 1, width);
 		const innerWidth = Math.max(1, safeWidth - FIELD_PADDING_X * 2);
 		const content =
@@ -328,6 +355,7 @@ interface MenuRowOptions {
 	secondary?: string;
 	meta?: string;
 	selected: boolean;
+	inline?: boolean;
 }
 
 export class MenuRow implements Component, FullWidthMenuComponent {
@@ -353,6 +381,23 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 	}
 
 	renderContent(width: number): string[] {
+		if (this.options.inline) {
+			const innerWidth = Math.max(1, width - 3);
+			const secondary = width >= 60 ? this.options.secondary : undefined;
+			const details = [secondary, this.options.meta].filter(Boolean).join(" · ");
+			const meta = truncateToWidth(theme.fg("muted", details), Math.floor(innerWidth / 2), "…");
+			const primaryWidth = Math.max(1, innerWidth - visibleWidth(meta) - (meta ? 2 : 0));
+			const primary = truncateToWidth(
+				theme.fg(this.selected ? "accent" : "text", this.options.primary),
+				primaryWidth,
+				"…",
+				true,
+			);
+			const content = `${this.selected ? "›" : " "} ${primary}${meta ? `  ${meta}` : ""}`;
+			return [
+				paddedBackgroundLine(content, width, 0, this.selected ? theme.getSelectionBackgroundColor() : undefined),
+			];
+		}
 		const safeWidth = Math.max(ROW_PADDING_X * 2 + 1, width);
 		const meta = this.options.meta ? theme.fg("muted", this.options.meta) : "";
 		const secondary = this.options.secondary ? theme.fg("muted", this.options.secondary) : "";
@@ -396,6 +441,11 @@ export class MenuList extends Container implements FullWidthMenuComponent {
 	}
 
 	override render(width: number): string[] {
+		if (this.options.inline) {
+			return this.children.flatMap((child) =>
+				child instanceof MenuRow ? child.renderContent(width) : child.render(width),
+			);
+		}
 		const lines: string[] = [];
 		const compact = this.isCompact();
 		for (let index = 0; index < this.children.length; index++) {

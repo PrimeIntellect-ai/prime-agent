@@ -5,6 +5,7 @@ import {
 	type Focusable,
 	getKeybindings,
 	type TUI,
+	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -48,7 +49,7 @@ export interface ConfigurationMenuOptions {
 const TAB_LABELS: Record<ConfigurationMenuTab, string> = {
 	providers: "Providers",
 	models: "Models",
-	"mcp-connections": "MCP Connections",
+	"mcp-connections": "MCP",
 };
 
 class ConfigurationMenuTabBar implements Component {
@@ -66,19 +67,10 @@ class ConfigurationMenuTabBar implements Component {
 		const safeWidth = Math.max(1, width);
 		const activeTab = this.getActiveTab();
 		const labels = CONFIGURATION_MENU_TABS.map((tab) => {
-			const label = `[${tab === activeTab ? "▶" : " "} ${TAB_LABELS[tab]}]`;
-			return tab === activeTab ? theme.bold(theme.fg("accent", label)) : theme.fg("text", label);
+			const label = `${tab === activeTab ? "› " : ""}${TAB_LABELS[tab]}`;
+			return theme.fg(tab === activeTab ? "accent" : "muted", label);
 		});
-		const lines = this.wrapItems(
-			[theme.bold(theme.fg("muted", "Tabs:")), ...labels],
-			theme.fg("muted", "  "),
-			safeWidth,
-		);
-		const tabKey = keyText("tui.input.tab", { primaryOnly: true });
-		const shiftTabKey = keyText("app.configuration.previousTab", { primaryOnly: true });
-		const closeKey = keyText("tui.select.cancel", { primaryOnly: true });
-		const hint = `${theme.fg("dim", `${tabKey}/${shiftTabKey}`)}${theme.fg("muted", " switch tabs · ")}${theme.fg("dim", closeKey)}${theme.fg("muted", " close")}`;
-		return [...lines, ...wrapTextWithAnsi(hint, safeWidth)];
+		return this.wrapItems(labels, "  ", safeWidth);
 	}
 
 	private wrapItems(items: string[], separator: string, width: number): string[] {
@@ -116,7 +108,8 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		super();
 		this.activeTab = options.initialTab;
 		const tabBar = new ConfigurationMenuTabBar(() => this.activeTab);
-		const getHeaderRows = () => tabBar.getRowCount(getMenuPanelInnerWidth(this.renderWidth)) + 1;
+		const getHeaderRows = () => tabBar.getRowCount(getMenuPanelInnerWidth(this.renderWidth, true));
+		const getRows = () => Math.max(1, (options.getRows?.() ?? 24) - 1);
 		const providerOptions = options.providerOptions.filter(
 			(provider) => (provider.category ?? "provider") === "provider",
 		);
@@ -130,7 +123,8 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			options.onCancel,
 			(providerId) => options.modelRegistry.getProviderAuthStatus(providerId),
 			{
-				getRows: options.getRows,
+				getRows,
+				inline: true,
 				header: tabBar,
 				getHeaderRows,
 				title: "Providers",
@@ -151,7 +145,8 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 				configuredProviders: options.configuredProviders,
 				header: tabBar,
 				getHeaderRows,
-				getRows: options.getRows,
+				getRows,
+				inline: true,
 				recentModels: options.recentModels,
 			},
 		);
@@ -163,12 +158,14 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			options.onCancel,
 			(providerId) => options.modelRegistry.getProviderAuthStatus(providerId),
 			{
-				getRows: options.getRows,
+				getRows,
+				inline: true,
 				header: tabBar,
 				getHeaderRows,
 				title: "MCP Connections",
 				subtitle: "Connect MCP integrations and service credentials.",
 				searchPlaceholder: "Search MCP connections",
+				emptyMessage: "No MCP connections. Use /mcp add to configure a server.",
 			},
 		);
 
@@ -191,7 +188,16 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 
 	override render(width: number): string[] {
 		this.renderWidth = width;
-		return super.render(width);
+		const selectKey = keyText("tui.select.confirm", { primaryOnly: true });
+		const closeKey = keyText("tui.select.cancel", { primaryOnly: true });
+		const tabKey = keyText("tui.input.tab", { primaryOnly: true });
+		const previousTabKey = keyText("app.configuration.previousTab", { primaryOnly: true });
+		const navigate = `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })}`;
+		const hint =
+			width >= 70
+				? `${navigate} navigate · ${selectKey} select · ${closeKey} close · ${tabKey}/${previousTabKey} tabs`
+				: `${selectKey} select · ${closeKey} close${width >= 40 ? ` · ${tabKey} tabs` : ""}`;
+		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${hint}`), width, "", true)];
 	}
 
 	getActiveTab(): ConfigurationMenuTab {

@@ -24,14 +24,22 @@ describe("ConfigurationMenuComponent", () => {
 			getRows?: () => number;
 			requestRender?: () => void;
 			onSelectProvider?: () => void;
+			onSelectModel?: (model: { id: string }) => void;
+			modelCount?: number;
+			cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 			onCancel?: () => void;
 		} = {},
 	): Promise<ConfigurationMenuComponent> {
-		const harness = await createHarness({
-			models: [{ id: "faux-1", name: "Faux One", reasoning: true }],
-		});
+		const specifications = Array.from({ length: options.modelCount ?? 1 }, (_, index) => ({
+			id: `faux-${index + 1}`,
+			name: index === 0 ? "Faux One" : `Faux ${index + 1}`,
+			reasoning: true,
+		}));
+		const harness = await createHarness({ models: specifications });
 		harnesses.push(harness);
 		const model = harness.getModel("faux-1")!;
+		const models = specifications.map(({ id }) => harness.getModel(id)!);
+		if (options.cost) model.cost = options.cost;
 		return new ConfigurationMenuComponent({
 			initialTab: options.initialTab ?? "providers",
 			tui: createFakeTui(),
@@ -48,13 +56,13 @@ describe("ConfigurationMenuComponent", () => {
 			modelRegistry: harness.session.modelRegistry,
 			currentModel: model,
 			scopedModels: [],
-			availableModels: [model],
+			availableModels: models,
 			configuredProviders: new Set([model.provider]),
 			getRows: options.getRows,
 			requestRender: options.requestRender ?? (() => {}),
 			onSelectProvider: options.onSelectProvider ?? (() => {}),
 			onSelectMcpConnection: () => {},
-			onSelectModel: () => {},
+			onSelectModel: options.onSelectModel ?? (() => {}),
 			onCancel: options.onCancel ?? (() => {}),
 		});
 	}
@@ -80,18 +88,14 @@ describe("ConfigurationMenuComponent", () => {
 		const menu = await createMenu({ requestRender, onSelectProvider: selectProvider });
 
 		let output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("Tabs:");
-		expect(output).toContain("[▶ Providers]");
-		expect(output).toContain("[  Models]");
-		expect(output).toContain("[  MCP Connections]");
+		expect(output).toContain("› Providers  Models  MCP");
 		expect(output).toContain("Anthropic");
 		expect(output).not.toContain("Serper (web search)");
 
 		menu.handleInput("a");
 		menu.setActiveTab("models");
 		output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("[  Providers]");
-		expect(output).toContain("[▶ Models]");
+		expect(output).toContain("Providers  › Models  MCP");
 		expect(output).toContain("Faux One");
 
 		menu.setActiveTab("providers");
@@ -105,7 +109,7 @@ describe("ConfigurationMenuComponent", () => {
 
 		menu.setActiveTab("mcp-connections");
 		output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("[▶ MCP Connections]");
+		expect(output).toContain("› MCP");
 		expect(output).toContain("Serper (web search)");
 		expect(output).not.toContain("Anthropic");
 	});
@@ -114,8 +118,8 @@ describe("ConfigurationMenuComponent", () => {
 		const menu = await createMenu();
 		menu.focused = true;
 		const lines = stripAnsi(menu.render(120).join("\n")).split("\n");
-		const tabsLine = lines.findIndex((line) => line.includes("[▶ Providers]"));
-		const shortcutsLine = lines.findIndex((line) => line.includes("Tab/Shift+Tab switch tabs"));
+		const tabsLine = lines.findIndex((line) => line.includes("› Providers"));
+		const shortcutsLine = lines.findIndex((line) => line.includes("Tab/Shift+Tab tabs"));
 		expect(shortcutsLine).toBeGreaterThan(tabsLine);
 		expect(lines[shortcutsLine]).toContain("Esc close");
 
@@ -172,7 +176,7 @@ describe("ConfigurationMenuComponent", () => {
 
 		menu.updateModels(postLoginModel, [firstModel, postLoginModel]);
 		output = stripAnsi(menu.render(120).join("\n"));
-		const postLoginRow = output.split("\n").find((line) => line.includes("faux-2"));
+		const postLoginRow = output.split("\n").find((line) => line.includes("Faux Two"));
 		expect(postLoginRow).toContain("current");
 	});
 
@@ -205,7 +209,7 @@ describe("ConfigurationMenuComponent", () => {
 			const output = stripAnsi(lines.join("\n"));
 			expect(output).toContain("Providers");
 			expect(output).toContain("Models");
-			expect(output).toContain("MCP Connections");
+			expect(output).toContain("MCP");
 			expect(lines.length).toBeLessThanOrEqual(24);
 			for (const line of lines) {
 				expect(visibleWidth(line)).toBe(24);
@@ -219,8 +223,66 @@ describe("ConfigurationMenuComponent", () => {
 		for (const themeName of ["dark", "light", "prime"] as const) {
 			initTheme(themeName);
 			const rendered = menu.render(120).join("\n");
-			expect(stripAnsi(rendered)).toContain("[▶ Providers]");
+			expect(stripAnsi(rendered)).toContain("› Providers");
 			expect(rendered).not.toBe(stripAnsi(rendered));
+		}
+	});
+
+	it("shows exact catalog input, cached-input, and output rates per million tokens", async () => {
+		const menu = await createMenu({
+			initialTab: "models",
+			cost: { input: 0.45, cacheRead: 0.1125, output: 2.75, cacheWrite: 3 },
+		});
+		for (const width of [120, 48]) {
+			const output = stripAnsi(menu.render(width).join("\n"));
+			expect(output).toContain("Input");
+			expect(output).toContain("Cached input");
+			expect(output).toContain("Output");
+			expect(output).toContain("$0.45");
+			expect(output).toContain("$0.1125");
+			expect(output).toContain("$2.75");
+			expect(output).not.toContain("$3");
+			expect(output).toContain("USD / 1M tokens");
+		}
+	});
+
+	it("distinguishes catalog zero rates from invalid prices", async () => {
+		const menu = await createMenu({
+			initialTab: "models",
+			cost: { input: 0, cacheRead: Number.NaN, output: Number.POSITIVE_INFINITY, cacheWrite: 0 },
+		});
+		const output = stripAnsi(menu.render(48).join("\n"));
+		expect(output).toContain("Input: $0");
+		expect(output).toContain("Cached input: —");
+		expect(output).toContain("Output: —");
+		expect(output).not.toMatch(/NaN|Infinity/);
+	});
+
+	it("keeps navigation and selection usable when an inline picker is resized", async () => {
+		let rows = 20;
+		const onSelectModel = vi.fn();
+		const menu = await createMenu({ initialTab: "models", modelCount: 18, getRows: () => rows, onSelectModel });
+		menu.render(120);
+		menu.handleInput("\x1b[6~");
+		for (const width of [120, 60, 24]) {
+			rows = 12;
+			const lines = menu.render(width);
+			expect(lines.length).toBeLessThanOrEqual(rows);
+			for (const line of lines) expect(visibleWidth(line)).toBe(width);
+		}
+		menu.handleInput("\r");
+		expect(onSelectModel).toHaveBeenCalledOnce();
+		expect(onSelectModel.mock.calls[0]?.[0].id).not.toBe("faux-1");
+	});
+
+	it("reserves space for search and selection on short, narrow terminals", async () => {
+		const menu = await createMenu({ getRows: () => 8 });
+		for (const tab of ["providers", "models", "mcp-connections"] as const) {
+			menu.setActiveTab(tab);
+			const lines = menu.render(24);
+			expect(lines.length).toBeLessThanOrEqual(8);
+			expect(stripAnsi(lines.join("\n"))).toContain("Enter select");
+			for (const line of lines) expect(visibleWidth(line)).toBe(24);
 		}
 	});
 });

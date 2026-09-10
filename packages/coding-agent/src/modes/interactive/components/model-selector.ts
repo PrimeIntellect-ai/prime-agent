@@ -8,6 +8,8 @@ import {
 	Spacer,
 	Text,
 	type TUI,
+	truncateToWidth,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import { theme } from "../theme/theme.js";
@@ -112,6 +114,7 @@ export interface ModelSelectorOptions {
 	subtitle?: string;
 	getRows?: () => number;
 	recentModels?: ReadonlyArray<string>;
+	inline?: boolean;
 }
 
 type ModelScope = "all" | "scoped";
@@ -155,6 +158,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private configuredProviders?: ReadonlySet<string>;
 	private recentRank: Map<string, number>;
 	private errorMessage?: string;
+	private configuredAuth = new Map<string, boolean>();
+	private readonly inline: boolean;
+	private renderWidth = 80;
 	private tui: TUI;
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
 	private scope: ModelScope = "all";
@@ -186,6 +192,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		super();
 
 		this.tui = tui;
+		this.inline = options.inline === true;
 		this.currentModel = currentModel;
 		this.modelRegistry = modelRegistry;
 		this.scopedModels = scopedModels;
@@ -196,16 +203,17 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.configuredProviders = options.configuredProviders;
 		this.recentRank = new Map((options.recentModels ?? []).map((key, i) => [key, i]));
 		this.viewport = { getRows: options.getRows };
-		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => 2)) : () => 0;
+		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => 2)) : () => (this.inline ? 1 : 0);
 
 		this.panel = new MenuPanel({
-			title: "Models",
+			title: this.inline && options.header ? "" : "Models",
 			subtitle: options.subtitle ?? "All models across supported providers.",
+			inline: this.inline,
 		});
 		this.addChild(this.panel);
 		if (options.header) {
 			this.panel.addChild(options.header);
-			this.panel.addChild(new Spacer(1));
+			if (!this.inline) this.panel.addChild(new Spacer(1));
 		}
 
 		// Add hint about model filtering
@@ -220,7 +228,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.panel.addChild(this.headerHelpContainer);
 
 		// Create search input
-		this.searchInput = new MenuSearchInput("Search models");
+		this.searchInput = new MenuSearchInput("Search models", this.inline);
 		if (initialSearchInput) {
 			this.searchInput.setValue(initialSearchInput);
 		}
@@ -229,10 +237,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		};
 		this.panel.addChild(this.searchInput);
 
-		this.panel.addChild(new Spacer(1));
+		if (!this.inline) this.panel.addChild(new Spacer(1));
 
 		// Create list container
-		this.listContainer = new MenuList({ compact: () => this.listLayout.compact });
+		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: this.inline });
 		this.panel.addChild(this.listContainer);
 		this.updateResponsiveLayout();
 
@@ -277,6 +285,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private loadModels(): void {
 		let models: ModelItem[];
 		this.errorMessage = undefined;
+		this.configuredAuth.clear();
 
 		if (this.availableModels === undefined) {
 			this.modelRegistry.refresh();
@@ -343,7 +352,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private isProviderConfigured(item: ModelItem): boolean {
-		return this.configuredProviders?.has(item.provider) || this.modelRegistry.hasConfiguredAuth(item.model);
+		const key = this.getModelKey(item);
+		let configured = this.configuredAuth.get(key);
+		if (configured === undefined) {
+			configured = this.configuredProviders?.has(item.provider) || this.modelRegistry.hasConfiguredAuth(item.model);
+			this.configuredAuth.set(key, configured);
+		}
+		return configured;
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
@@ -415,6 +430,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	override render(width: number): string[] {
+		this.renderWidth = width;
 		const previousLayoutKey = this.responsiveLayoutKey;
 		this.updateResponsiveLayout();
 		if (this.responsiveLayoutKey !== previousLayoutKey) {
@@ -451,10 +467,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 			this.listContainer.addChild(
 				new MenuRow({
-					primary: item.id,
+					primary: this.inline ? item.model.name : item.id,
 					secondary: item.provider,
-					meta,
+					meta: this.inline ? (isCurrent ? "current" : isConfigured ? undefined : "sign in") : meta,
 					selected: isSelected,
+					inline: this.inline,
 				}),
 			);
 		}
@@ -476,7 +493,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new Text(theme.fg("muted", "No matching models"), 0, 0));
 		} else {
 			const selected = this.filteredModels[this.selectedIndex];
-			if (selected && this.shouldShowSelectedDetails()) {
+			if (selected && this.inline && this.getInlineDetailRows() > 0) {
+				this.listContainer.addChild({
+					render: (width) => this.renderInlineModelDetails(selected, width),
+					invalidate: () => {},
+				});
+			} else if (selected && !this.inline && this.shouldShowSelectedDetails()) {
 				this.listContainer.addChild(new Spacer(1));
 				this.listContainer.addChild(new Text(theme.fg("muted", selected.model.name), 0, 0));
 			}
@@ -508,6 +530,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (selectableCount === 0) return;
 			this.selectedIndex = this.selectedIndex === selectableCount - 1 ? 0 : this.selectedIndex + 1;
 			this.updateList();
+		} else if (kb.matches(keyData, "tui.select.pageUp") || kb.matches(keyData, "tui.select.pageDown")) {
+			const direction = kb.matches(keyData, "tui.select.pageUp") ? -1 : 1;
+			this.selectedIndex = Math.max(
+				0,
+				Math.min(this.filteredModels.length - 1, this.selectedIndex + direction * this.listLayout.visibleItems),
+			);
+			this.updateList();
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
@@ -519,8 +548,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 		// Pass everything else to search input
 		else {
+			const previousQuery = this.searchInput.getValue();
 			this.searchInput.handleInput(keyData);
-			this.filterModels(this.searchInput.getValue());
+			if (previousQuery !== this.searchInput.getValue()) this.filterModels(this.searchInput.getValue());
 		}
 	}
 
@@ -545,6 +575,30 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private updateResponsiveLayout(): void {
+		if (this.inline) {
+			this.headerHelpContainer.clear();
+			const scopeRows = this.scopeText ? 1 : 0;
+			if (this.scopeText) {
+				this.headerHelpContainer.addChild({
+					render: (width) => [
+						truncateToWidth(theme.fg("muted", `${this.getScopeText()} · ${this.getScopeHintText()}`), width),
+					],
+					invalidate: () => {},
+				});
+			}
+			const detailRows = this.getInlineDetailRows();
+			this.listLayout = getMenuListLayout({
+				getRows: this.viewport.getRows,
+				preferredVisibleItems: 8,
+				totalItems: this.filteredModels.length,
+				reservedRows: this.getHeaderRows() + 3 + scopeRows + detailRows,
+				comfortableItemRows: 1,
+				comfortableListPaddingRows: 0,
+				scrollIndicatorRows: 1,
+			});
+			this.responsiveLayoutKey = `inline:${this.getHeaderRows()}:${detailRows}:${this.listLayout.visibleItems}`;
+			return;
+		}
 		const showHeaderHelp = this.shouldShowHeaderHelp();
 		let headerHelpRows = 0;
 		this.headerHelpContainer.clear();
@@ -588,6 +642,37 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private shouldShowHeaderHelp(): boolean {
 		return this.hasRows(MODEL_HELP_MIN_ROWS);
+	}
+
+	private getInlineDetailRows(): number {
+		const detailRows = this.renderWidth >= 58 ? 5 : 6;
+		return this.hasRows(this.getHeaderRows() + 5 + (this.scopeText ? 1 : 0) + detailRows) ? detailRows : 0;
+	}
+
+	private renderInlineModelDetails(item: ModelItem, width: number): string[] {
+		const price = (value: number | undefined) =>
+			value !== undefined && Number.isFinite(value) && value >= 0 ? `$${value}` : "—";
+		const entries = [
+			["Input", price(item.model.cost?.input)],
+			["Cached input", price(item.model.cost?.cacheRead)],
+			["Output", price(item.model.cost?.output)],
+		];
+		const lines = ["", theme.fg("muted", `${item.provider} · ${item.id}`)];
+		if (width >= 58) {
+			const columnWidth = Math.floor((width - 2) / 3);
+			const row = (index: number) =>
+				entries
+					.map((entry) => {
+						const text = entry[index] ?? "";
+						return text + " ".repeat(Math.max(0, columnWidth - visibleWidth(text)));
+					})
+					.join("");
+			lines.push(theme.fg("muted", row(0)), row(1));
+		} else {
+			lines.push(...entries.map(([label, value]) => `${theme.fg("muted", `${label}:`)} ${value}`));
+		}
+		lines.push(theme.fg("dim", "USD / 1M tokens · catalog rates"));
+		return lines.map((line) => truncateToWidth(` ${line}`, width, "…", true));
 	}
 
 	private shouldShowSelectedDetails(): boolean {

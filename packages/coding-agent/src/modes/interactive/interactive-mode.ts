@@ -1038,6 +1038,7 @@ export class InteractiveMode {
 	private connectionModelsFetchedAt = 0;
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
+	private closeConfigurationMenu: (() => void) | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
 	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
@@ -1799,11 +1800,8 @@ export class InteractiveMode {
 	}
 
 	private async showOnboardingModelSelection(splash: OnboardingSplashHandle): Promise<void> {
-		try {
-			await this.showConfigurationMenu("models");
-		} finally {
-			splash.dismiss();
-		}
+		splash.dismiss();
+		await this.showConfigurationMenu("models");
 	}
 
 	private async runOnboardingFlow(showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash()): Promise<void> {
@@ -3600,6 +3598,7 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		this.closeConfigurationMenu?.();
 		this.cancelActiveConnectionExtensionUiRequests();
 		this.closeHeartbeatManager();
 		if (this.extensionSelector) {
@@ -8103,40 +8102,44 @@ export class InteractiveMode {
 	}
 
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
+		this.closeConfigurationMenu?.();
 		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
 		const providerOptions = authFlows.getLoginProviderOptions();
 
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
 			let settled = false;
 			let hidden = false;
-			let removed = false;
+			let busy = false;
 			let menu: ConfigurationMenuComponent;
-			const hide = () => {
-				if (removed) return;
-				removed = true;
-				hidden = true;
-				handle?.hide();
+			const restoreEditor = () => {
+				if (!this.editorContainer.children.includes(menu)) return;
+				this.editorContainer.clear();
+				this.editorContainer.addChild(this.editor);
+				this.ui.setFocus(this.editor);
 				this.ui.requestRender();
+			};
+			const focus = () => {
+				if (!settled && !hidden && this.editorContainer.children.includes(menu)) this.ui.setFocus(menu);
 			};
 			const conceal = () => {
-				if (hidden || removed) return;
+				if (hidden || settled) return;
 				hidden = true;
-				handle?.setHidden(true);
-				this.ui.requestRender();
+				restoreEditor();
 			};
 			const show = () => {
-				if (!hidden || removed || settled) return;
+				if (!hidden || settled) return;
 				hidden = false;
-				handle?.setHidden(false);
-				handle?.focus();
+				this.editorContainer.clear();
+				this.editorContainer.addChild(menu);
+				focus();
 				this.ui.requestRender();
 			};
 			const finish = () => {
 				if (settled) return;
 				settled = true;
-				hide();
+				restoreEditor();
+				if (this.closeConfigurationMenu === finish) this.closeConfigurationMenu = undefined;
 				resolve();
 			};
 			const refreshModels = (force: boolean) => {
@@ -8151,12 +8154,13 @@ export class InteractiveMode {
 					});
 			};
 			const authenticate = (provider: AuthSelectorProvider, tab: "providers" | "mcp-connections") => {
-				if (settled) return;
+				if (settled || busy) return;
+				busy = true;
 				void authFlows
 					.loginProvider(provider)
 					.then(async (authResult) => {
 						if (settled) return;
-						handle?.focus();
+						focus();
 						menu.refreshAuthentication();
 						if (authResult.status !== "success") return;
 
@@ -8172,6 +8176,7 @@ export class InteractiveMode {
 						}
 
 						await this.prepareForModelSelectionAfterLogin(authResult);
+						if (settled) return;
 						menu.updateModels(
 							this.getCurrentModel(),
 							this.getCachedModelCandidates(),
@@ -8181,8 +8186,11 @@ export class InteractiveMode {
 						refreshModels(true);
 					})
 					.catch((error) => {
-						handle?.focus();
-						this.showError(error instanceof Error ? error.message : String(error));
+						focus();
+						if (!settled) this.showError(error instanceof Error ? error.message : String(error));
+					})
+					.finally(() => {
+						busy = false;
 					});
 			};
 
@@ -8198,37 +8206,45 @@ export class InteractiveMode {
 				configuredProviders: this.connectionConfiguredProviders,
 				recentModels: this.settingsManager.getRecentModels(),
 				initialModelSearch,
-				getRows: () => this.ui.terminal.rows,
+				getRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 				requestRender: () => this.ui.requestRender(),
 				onSelectProvider: (provider) => authenticate(provider, "providers"),
 				onSelectMcpConnection: (provider) => authenticate(provider, "mcp-connections"),
 				onSelectModel: (model) => {
+					if (settled || busy) return;
+					busy = true;
 					void (async () => {
 						let completed = false;
 						try {
 							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions);
-							handle?.focus();
+							if (settled) return;
+							focus();
 							menu.refreshAuthentication();
 							menu.updateModels(
 								this.getCurrentModel(),
 								this.getCachedModelCandidates(),
 								this.connectionConfiguredProviders,
 							);
-							if (!ready || settled) return;
+							if (!ready) return;
 							conceal();
 							await this.completeModelSelection(model);
 							completed = true;
 						} catch (error) {
 							show();
-							this.showError(error instanceof Error ? error.message : String(error));
+							if (!settled) this.showError(error instanceof Error ? error.message : String(error));
 						} finally {
+							busy = false;
 							if (completed) finish();
 						}
 					})();
 				},
 				onCancel: finish,
 			});
-			handle = this.showFullPaneOverlay(menu, 96);
+			this.closeConfigurationMenu = finish;
+			this.editorContainer.clear();
+			this.editorContainer.addChild(menu);
+			focus();
+			this.ui.requestRender();
 			refreshModels(initialModelSearch !== undefined);
 		});
 	}
@@ -10097,6 +10113,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		this.closeConfigurationMenu?.();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
 		this.clearEscapeRepeat();
