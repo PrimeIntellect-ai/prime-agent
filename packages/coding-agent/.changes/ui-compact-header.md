@@ -1,2 +1,3 @@
 - Replaced chat and agents splash logos with a compact solid butterfly beside runtime metadata, with a "prime agent" text heading in narrow terminals.
 - Removed duplicate prompt suggestions from chat and agents headers.
+- Centered runtime metadata vertically beside the compact butterfly and removed the header model line because session rows already show the model.
