@@ -49,7 +49,7 @@ describe("InteractiveMode startup hints", () => {
 		expect(output).toContain("prime agent v0.0.0");
 		expect(output).toMatch(/[▗▙▛▜]/u);
 		expect(stripAnsi(lines[4])).toContain("agents 2 running");
-		expect(stripAnsi(lines[5])).toContain("/tmp/project");
+		expect(stripAnsi(lines[5])).toContain("cwd /tmp/project");
 		expect(output).not.toContain("Try ");
 		expect(output).not.toContain("type to search sessions");
 
@@ -73,7 +73,9 @@ describe("InteractiveMode startup hints", () => {
 			}
 			if (width >= 14) {
 				expect(output).toContain("v0.0.0");
-				expect(output).toContain("/tmp/project");
+			}
+			if (width >= 18) {
+				expect(output).toContain("cwd /tmp/project");
 			}
 		}
 	});

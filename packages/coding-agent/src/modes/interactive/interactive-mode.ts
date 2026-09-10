@@ -478,10 +478,11 @@ export class BrandSplashHeader implements Component {
 		const version = theme.fg("muted", `v${this.version}`);
 		const titleText = "prime agent";
 		const title = theme.fg("text", titleText);
+		const cwdLabel = "cwd ";
 		const metaLines = [
 			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
 			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
-			theme.fg("dim", truncatePathMiddle(formatSplashCwd(this.getCwd()), metaWidth)),
+			`${theme.fg("dim", cwdLabel)}${theme.fg("muted", truncatePathMiddle(formatSplashCwd(this.getCwd()), Math.max(1, metaWidth - visibleWidth(cwdLabel))))}`,
 		];
 		const lines = this.options.topPadding ? [""] : [];
 		const rowCount = Math.max(showLogo ? this.logoRaw.length : 0, metaLines.length);
