@@ -54,12 +54,29 @@ Preserve these distinctions when extending the scheduler:
 
 The abortable promise helper moved unchanged to `utils/wait-for-abort.ts`, shared by commit acquisition and existing session checkpoint waits.
 
-The next extraction should move action preparation and dispatch into a separate owner while preserving their delivery, rollback, and cross-feature ordering rules.
+Action preparation and dispatch still need a separate owner that preserves their delivery, rollback, and cross-feature ordering rules.
+
+## Session shell commands
+
+`session/bash.ts` owns shell-command execution, abort controllers, the user-command slot, abort requests during extension dispatch, and deferred transcript output. Its host supplies current shell settings and working directory, extension interception, event delivery, transcript append, and session scheduling notifications. These callbacks read the current runtime so rebuilding extensions or changing settings does not retain stale dependencies.
+
+`AgentSession` keeps its public shell methods and the cross-feature decision about when to flush deferred output. It also appends messages to agent state before persistence and schedules queued input after the agent becomes idle. The shell owner does not receive the session, kernel, agent loop, or storage manager.
+
+Execution and recording callbacks preserve dispatch through the public session methods, including wrappers installed by callers. They delegate to the shell owner's corresponding operations; they do not duplicate shell state.
+
+- User commands reserve the slot before awaiting extensions. Direct executions may overlap and each remains independently abortable.
+- Release the user slot and notify waiters before publishing `bash_end`; queued work resumes afterward.
+- Extension-provided results take precedence over an abort received during interception. Otherwise, that abort prevents process execution.
+- Transient commands publish their lifecycle events but never enter pending output, transcript storage, or model context. Context-excluded commands remain persisted.
+- Output produced during streaming waits for the same existing prompt-preparation flush points, preserving tool-call/result ordering.
+- Shell event shapes, command options, error behavior, and persisted `bashExecution` messages stay unchanged.
 
 ## Validation
 
 Controller tests live in `test/goals/`. Session integration coverage remains in `test/suite/agent-session-goal.test.ts`, `test/suite/agent-session-compaction-continuation.test.ts`, and `test/goal-continuation-quiescence.test.ts`.
 
 Scheduler and commit-fence tests live in `test/session/`. Existing queue, action-contract, action-race, and compaction suites cover the integration with `AgentSession`, including pause, cancellation, restart, branch navigation, and goal continuation.
+
+Shell-owner tests also live in `test/session/`. Session bash/persistence, prompt, queue, and side-question regression suites retain end-to-end coverage of scheduling and transcript behavior using the faux provider and controlled shell operations.
 
 Run the focused files from the coding-agent package root with the repository's prescribed Vitest command, then run `npm run check` from the repository root. Use faux providers for session tests.
