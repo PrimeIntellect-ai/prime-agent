@@ -71,6 +71,15 @@ Execution and recording callbacks preserve dispatch through the public session m
 - Output produced during streaming waits for the same existing prompt-preparation flush points, preserving tool-call/result ordering.
 - Shell event shapes, command options, error behavior, and persisted `bashExecution` messages stay unchanged.
 
+## Session retry handling
+
+`session/retry.ts` owns retry attempts, backoff cancellation, retry completion, and authentication-failure tracking. The session reports assistant and agent completion at their existing points in event processing. The retry owner receives current settings, model authentication operations, context inspection, and named operations for continuing or ending a turn.
+
+- Reserve retry completion synchronously when receiving `agent_end`, before asynchronous event processing. Callers waiting for retry must observe the same pending work.
+- Resolve completion before notifying waiters and scheduling queued input. Generation checks keep a rejected continuation from terminating a later retry.
+- Preserve provider error classification, retry limits, delay calculation, captured credential identity, and authentication invalidation. Context overflow still belongs to compaction.
+- Public retry events and session methods retain their existing shapes and ordering.
+
 ## Turn preparation and action records
 
 `session/turn-preparation.ts` contains the execution policies for direct, queued, injected, and custom-triggered turns and the ordered preparation pipeline. `TurnPreparer` receives six operations for validation, pending shell output, model selection, compaction, and refinement. The session supplies their implementations and retains transcript dispatch and context rollback.

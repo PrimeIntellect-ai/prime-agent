@@ -1,7 +1,7 @@
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AuthSourceToken } from "../src/core/auth-storage.js";
-import { SessionRetry, type SessionRetryEvent, type SessionRetryHost } from "../src/session/retry.js";
+import type { AuthSourceToken } from "../../src/core/auth-storage.js";
+import { SessionRetry, type SessionRetryEvent, type SessionRetryHost } from "../../src/session/retry.js";
 
 function failure(kind?: string): AssistantMessage {
 	return {
