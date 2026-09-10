@@ -82,15 +82,18 @@ function createStreamingFeed(): StreamingFeed {
 
 /**
  * Deliver one message the way interactive-mode streams it: assistant messages
- * arrive as cumulative content updates, tool calls mount through the grouper,
- * and a turn-ending message closes the segment exactly like message_end.
+ * arrive as cumulative content updates, text blocks close the open run
+ * segment, tool calls mount through the grouper, and results land when their
+ * toolResult message appears.
  */
 async function deliverStreamingMessage(feed: StreamingFeed, message: AgentMessage): Promise<void> {
 	if (message.role === "assistant") {
 		for (let end = 1; end <= message.content.length; end++) {
 			const partial: AssistantMessage = { ...message, content: message.content.slice(0, end) };
 			for (const content of partial.content) {
-				if (content.type === "toolCall" && !feed.tools.has(content.id)) {
+				if (content.type === "text" && content.text.trim()) {
+					feed.grouper.noteAssistantText();
+				} else if (content.type === "toolCall" && !feed.tools.has(content.id)) {
 					const component = new ToolExecutionComponent(
 						content.name,
 						content.id,
@@ -100,14 +103,13 @@ async function deliverStreamingMessage(feed: StreamingFeed, message: AgentMessag
 						uiStub,
 						cwd,
 					);
+					component.markExecutionStarted();
+					component.setArgsComplete();
 					selectLatestToolExpandHint(feed.components, component);
 					feed.grouper.mountToolExecution(component);
 					feed.tools.set(content.id, component);
 				}
 			}
-		}
-		if (message.stopReason !== "toolUse") {
-			feed.grouper.close();
 		}
 	} else if (message.role === "toolResult") {
 		feed.tools.get(message.toolCallId)?.updateResult(message);
@@ -132,18 +134,15 @@ describe("tool run groups", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("formats digit counts and flips to ran when complete", () => {
-		expect(formatToolRunGroupHeader({ bash: 1, ipython: 0 }, false)).toBe("Running 1 shell command");
-		expect(formatToolRunGroupHeader({ bash: 2, ipython: 0 }, false)).toBe("Running 2 shell commands");
-		expect(formatToolRunGroupHeader({ bash: 0, ipython: 1 }, false)).toBe("Running 1 Python cell");
-		expect(formatToolRunGroupHeader({ bash: 0, ipython: 3 }, false)).toBe("Running 3 Python cells");
-		expect(formatToolRunGroupHeader({ bash: 2, ipython: 1 }, false)).toBe("Running 2 shell commands · 1 Python cell");
-		expect(formatToolRunGroupHeader({ bash: 1, ipython: 0 }, true)).toBe("Ran 1 shell command");
-		expect(formatToolRunGroupHeader({ bash: 0, ipython: 3 }, true)).toBe("Ran 3 Python cells");
-		expect(formatToolRunGroupHeader({ bash: 2, ipython: 1 }, true)).toBe("Ran 2 shell commands · 1 Python cell");
+	it("formats singular, plural, and combined headers", () => {
+		expect(formatToolRunGroupHeader({ bash: 1, ipython: 0 })).toBe("Running one shell command");
+		expect(formatToolRunGroupHeader({ bash: 2, ipython: 0 })).toBe("Running two shell commands");
+		expect(formatToolRunGroupHeader({ bash: 0, ipython: 1 })).toBe("Running one Python cell");
+		expect(formatToolRunGroupHeader({ bash: 0, ipython: 3 })).toBe("Running three Python cells");
+		expect(formatToolRunGroupHeader({ bash: 2, ipython: 1 })).toBe("Running two shell commands · one Python cell");
 	});
 
-	it("increments the same group and settles on ran as consecutive cells stream in", async () => {
+	it("increments the same group as consecutive cells stream in", async () => {
 		const feed = createStreamingFeed();
 		const group = (): ToolRunGroupComponent | undefined => groupsOf(feed.components)[0];
 
@@ -155,7 +154,7 @@ describe("tool run groups", () => {
 			}),
 		);
 		expect(feed.components).toHaveLength(1);
-		expect(render(group())).toContain("Running 1 Python cell");
+		expect(render(group())).toContain("Running one Python cell");
 
 		await deliverStreamingMessage(
 			feed,
@@ -164,7 +163,7 @@ describe("tool run groups", () => {
 			}),
 		);
 		expect(feed.components).toHaveLength(1);
-		expect(render(group())).toContain("Running 2 Python cells");
+		expect(render(group())).toContain("Running two Python cells");
 
 		await deliverStreamingMessage(feed, createToolResult("cell-a", "ipython", "ok"));
 		await deliverStreamingMessage(feed, createToolResult("cell-b", "ipython", "ok"));
@@ -178,26 +177,7 @@ describe("tool run groups", () => {
 		const finalGroup = group();
 		if (!finalGroup) throw new Error("Expected a run group");
 		expect(finalGroup.getToolComponents()).toHaveLength(3);
-		expect(render(finalGroup)).toContain("Running 3 Python cells");
-
-		await deliverStreamingMessage(feed, createToolResult("cell-c", "ipython", "ok"));
-		expect(render(group())).toContain("Ran 3 Python cells");
-	});
-
-	it("mounts the group the moment the tool call starts streaming", async () => {
-		const feed = createStreamingFeed();
-		// toolcall_start delivers the block with the name but empty arguments.
-		const cell = fauxToolCall("ipython", { code: "x = 1" }, { id: "cell-partial" });
-		const startMessage = fauxAssistantMessage({ ...cell, arguments: {} }, { stopReason: "toolUse" });
-
-		await deliverStreamingMessage(feed, userMessage);
-		await deliverStreamingMessage(feed, startMessage);
-
-		const groups = groupsOf(feed.components);
-		expect(groups).toHaveLength(1);
-		expect(render(groups[0])).toContain("Running 1 Python cell");
-		// The nested row renders immediately with the partial state.
-		expect(render(groups[0])).toContain("waiting for code");
+		expect(render(finalGroup)).toContain("Running three Python cells");
 	});
 
 	it("renders the identical grouping from the persisted sequence", async () => {
@@ -232,44 +212,7 @@ describe("tool run groups", () => {
 		expect(streamedGroup.getToolComponents()).toHaveLength(reloadedGroup.getToolComponents().length);
 	});
 
-	it("groups cells across the model's mid-run notes and thinking", () => {
-		const messages: AgentMessage[] = [
-			userMessage,
-			fauxAssistantMessage(
-				[
-					fauxThinking("First cell next."),
-					fauxText("Rendering the first frame."),
-					fauxToolCall("ipython", { code: "x = 1" }, { id: "cell-a" }),
-				],
-				{ stopReason: "toolUse" },
-			),
-			createToolResult("cell-a", "ipython", "ok"),
-			fauxAssistantMessage(
-				[
-					fauxText("A spinning torus. Now a second pass."),
-					fauxToolCall("ipython", { code: "y = 2" }, { id: "cell-b" }),
-				],
-				{ stopReason: "toolUse" },
-			),
-			createToolResult("cell-b", "ipython", "ok"),
-			fauxAssistantMessage(
-				[fauxThinking("One more."), fauxToolCall("ipython", { code: "z = 3" }, { id: "cell-c" })],
-				{
-					stopReason: "toolUse",
-				},
-			),
-			createToolResult("cell-c", "ipython", "ok"),
-		];
-
-		const components = reloadBuild(messages);
-		const groups = groupsOf(components);
-		expect(groups).toHaveLength(1);
-		expect(render(groups[0])).toContain("Ran 3 Python cells");
-		// The notes still render as assistant text between the rows.
-		expect(components.some((component) => render(component).includes("A spinning torus."))).toBe(true);
-	});
-
-	it("resets the segment only when the model sends a text answer", () => {
+	it("resets the segment when the model sends text", () => {
 		const messages: AgentMessage[] = [
 			userMessage,
 			fauxAssistantMessage(fauxToolCall("ipython", { code: "a = 1" }, { id: "cell-a" }), {
@@ -280,17 +223,39 @@ describe("tool run groups", () => {
 				stopReason: "toolUse",
 			}),
 			createToolResult("cell-b", "ipython", "ok"),
-			fauxAssistantMessage("Checking the values.", { stopReason: "stop" }),
-			fauxAssistantMessage(fauxToolCall("ipython", { code: "c = 3" }, { id: "cell-c" }), {
-				stopReason: "toolUse",
-			}),
+			fauxAssistantMessage(
+				[fauxText("Checking the values."), fauxToolCall("ipython", { code: "c = 3" }, { id: "cell-c" })],
+				{ stopReason: "toolUse" },
+			),
 			createToolResult("cell-c", "ipython", "ok"),
 		];
 
 		const groups = groupsOf(reloadBuild(messages));
 		expect(groups).toHaveLength(2);
-		expect(render(groups[0])).toContain("Ran 2 Python cells");
-		expect(render(groups[1])).toContain("Ran 1 Python cell");
+		expect(render(groups[0])).toContain("Running two Python cells");
+		expect(render(groups[1])).toContain("Running one Python cell");
+	});
+
+	it("keeps the segment across thinking blocks", async () => {
+		const messages: AgentMessage[] = [
+			userMessage,
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "a = 1" }, { id: "cell-a" }), {
+				stopReason: "toolUse",
+			}),
+			createToolResult("cell-a", "ipython", "ok"),
+			fauxAssistantMessage(
+				[fauxThinking("I should inspect the value."), fauxToolCall("ipython", { code: "b = 2" }, { id: "cell-b" })],
+				{ stopReason: "toolUse" },
+			),
+			createToolResult("cell-b", "ipython", "ok"),
+		];
+
+		const groups = groupsOf(reloadBuild(messages));
+		expect(groups).toHaveLength(1);
+		expect(render(groups[0])).toContain("Running two Python cells");
+
+		const feed = await streamFeed(messages);
+		expect(groupsOf(feed.components)).toHaveLength(1);
 	});
 
 	it("combines both types in one group header", () => {
@@ -313,7 +278,7 @@ describe("tool run groups", () => {
 		expect(groups).toHaveLength(1);
 		const group = groups[0];
 		if (!group) throw new Error("Expected a run group");
-		expect(render(group)).toContain("Ran 2 shell commands · 1 Python cell");
+		expect(render(group)).toContain("Running two shell commands · one Python cell");
 		expect(group.getToolComponents()).toHaveLength(3);
 	});
 
@@ -390,8 +355,8 @@ describe("tool run groups", () => {
 		);
 		expect(groups).toHaveLength(2);
 		expect(directTools).toHaveLength(1);
-		expect(render(groups[0])).toContain("Ran 1 shell command");
-		expect(render(groups[1])).toContain("Ran 1 shell command");
+		expect(render(groups[0])).toContain("Running one shell command");
+		expect(render(groups[1])).toContain("Running one shell command");
 		expect(directTools[0]?.render(120).join("\n")).toContain(theme.fg("toolTitle", "edit"));
 	});
 

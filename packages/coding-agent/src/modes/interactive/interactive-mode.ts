@@ -3045,15 +3045,17 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Feed the streaming message's content blocks through the run-group
-	 * derivation: tool calls nest into the open group or open a new one the
-	 * moment they start streaming. Text and thinking blocks never break the
-	 * run; only a turn-ending message closes the segment (message_end), so live
-	 * and reloaded transcripts group identically.
+	 * Feed the streaming message's content blocks, in block order, through the
+	 * run-group derivation: a visible text block closes the open run segment
+	 * exactly when it arrives, and tool calls nest into the open group or open
+	 * a new one. Mirrors the persisted-sequence walk in renderSessionContext so
+	 * live and reloaded transcripts group identically.
 	 */
 	private async feedRunGroupingFromStreamingMessage(message: AssistantMessage): Promise<void> {
 		for (const content of message.content) {
-			if (content.type === "toolCall") {
+			if (content.type === "text" && content.text.trim()) {
+				this.toolRunGrouper.noteAssistantText();
+			} else if (content.type === "toolCall") {
 				await this.getOrCreatePendingToolComponent(content);
 			}
 		}
@@ -6619,6 +6621,10 @@ export class InteractiveMode {
 				// Walk content blocks in order so run groups derive from the
 				// persisted sequence exactly like the streaming path.
 				for (const content of message.content) {
+					if (content.type === "text" && content.text.trim()) {
+						this.toolRunGrouper.noteAssistantText();
+						continue;
+					}
 					if (content.type !== "toolCall") {
 						continue;
 					}
@@ -6659,9 +6665,7 @@ export class InteractiveMode {
 						renderedPendingTools.set(content.id, component);
 					}
 				}
-				// A turn-ending reply closes the open run segment, matching the
-				// streaming path's message_end close; mid-run notes never do.
-				if (message.stopReason !== "toolUse") {
+				if (message.stopReason === "aborted" || message.stopReason === "error") {
 					this.toolRunGrouper.close();
 				}
 			} else if (message.role === "toolResult") {

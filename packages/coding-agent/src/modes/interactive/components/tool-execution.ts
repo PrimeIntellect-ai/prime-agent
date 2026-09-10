@@ -524,11 +524,6 @@ export class ToolExecutionComponent extends Container {
 		return this.expanded;
 	}
 
-	/** True once a final (non-partial) result has landed. */
-	isRunComplete(): boolean {
-		return this.result !== undefined && !this.isPartial;
-	}
-
 	/**
 	 * One-line dim summary for run-group nesting, mirroring the ipython cell's
 	 * collapsed line. Undefined when the tool has no compact summary row.
