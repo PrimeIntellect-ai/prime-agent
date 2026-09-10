@@ -69,11 +69,7 @@ class ConfigurationMenuTabBar implements Component {
 			const label = `[${tab === activeTab ? "▶" : " "} ${TAB_LABELS[tab]}]`;
 			return tab === activeTab ? theme.bold(theme.fg("accent", label)) : theme.fg("text", label);
 		});
-		const lines = this.wrapItems(
-			[theme.bold(theme.fg("muted", "Tabs:")), ...labels],
-			theme.fg("muted", "  "),
-			safeWidth,
-		);
+		const lines = this.wrapItems([theme.fg("muted", "Tabs:"), ...labels], theme.fg("muted", "  "), safeWidth);
 		const tabKey = keyText("tui.input.tab", { primaryOnly: true });
 		const shiftTabKey = keyText("app.configuration.previousTab", { primaryOnly: true });
 		const closeKey = keyText("tui.select.cancel", { primaryOnly: true });

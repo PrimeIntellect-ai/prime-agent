@@ -100,7 +100,7 @@ export class SideQuestionComponent implements Component {
 				lines.push(...entry.questionBubble.render(width));
 			} else {
 				const question = new Text(
-					`${theme.fg("accent", "/btw")}  ${theme.bold(theme.fg("userMessageText", entry.event.question))}`,
+					`${theme.fg("accent", "/btw")}  ${theme.fg("userMessageText", entry.event.question)}`,
 					this.paddingX,
 					0,
 				).render(width);
