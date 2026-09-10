@@ -5,3 +5,4 @@
 - Added installation and update outcome reporting for download, verification, package installation, restart and runtime readiness, with existing opt-outs and separate dashboard coverage for missing outcomes.
 - Fixed shell installer telemetry missing the internal/test traffic category used to exclude synthetic installations from dashboards.
 - Fixed `/feedback` and `/resume` usage events being dropped from command telemetry.
+- Changed error reporting to prepare PostHog error events in Prime Agent, preserving code grouping, opt-out, and compatibility with older collectors.

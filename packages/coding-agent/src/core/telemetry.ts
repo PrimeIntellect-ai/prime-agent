@@ -52,6 +52,7 @@ import {
 	getCurrentOnboardingTelemetryContext,
 	type OnboardingTelemetryContext,
 } from "./telemetry-journey-state.js";
+import { createPostHogException, type PostHogExceptionEvent } from "./telemetry-posthog.js";
 import {
 	isLegacyTelemetryEvent,
 	isTelemetryUuid,
@@ -89,7 +90,7 @@ export interface TelemetryEvent {
 export interface TelemetryBatch {
 	schema_version?: number;
 	installation_id: string;
-	events: TelemetryEvent[];
+	events: Array<TelemetryEvent | PostHogExceptionEvent>;
 }
 
 export interface TelemetrySink {
@@ -365,7 +366,8 @@ export class TelemetryClient implements TelemetrySink {
 	private readonly flushIntervalMs: number;
 	private readonly requestTimeoutMs: number;
 	private installationId?: string;
-	private queue: Array<{ event: TelemetryEvent; attempts: number; queuedAt: number }> = [];
+	private queue: Array<{ event: TelemetryEvent; attempts: number; queuedAt: number; acknowledgedIds: Set<string> }> =
+		[];
 	private flushTimer?: ReturnType<typeof setTimeout>;
 	private flushInFlight?: Promise<void>;
 	private discovery?: Promise<void>;
@@ -373,6 +375,7 @@ export class TelemetryClient implements TelemetrySink {
 	private supportsV2 = false;
 	private supportsInstallationOutcomes = false;
 	private supportsOriginalErrorMessages = false;
+	private supportsPostHogExceptions = false;
 	private disabled = false;
 	private queueGeneration = 0;
 	private readonly requests = new Set<AbortController>();
@@ -420,6 +423,7 @@ export class TelemetryClient implements TelemetrySink {
 		this.supportsV2 = false;
 		this.supportsInstallationOutcomes = false;
 		this.supportsOriginalErrorMessages = false;
+		this.supportsPostHogExceptions = false;
 		this.nextDiscoveryAt = 0;
 	}
 
@@ -444,7 +448,7 @@ export class TelemetryClient implements TelemetrySink {
 				this.queue.shift();
 				this.delivery.overflow++;
 			}
-			this.queue.push({ event, attempts: 0, queuedAt: this.now() });
+			this.queue.push({ event, attempts: 0, queuedAt: this.now(), acknowledgedIds: new Set() });
 		} catch {
 			this.disabled = true;
 			this.clear();
@@ -503,6 +507,7 @@ export class TelemetryClient implements TelemetrySink {
 		if (this.discovery || this.now() < this.nextDiscoveryAt || !this.enabled()) return;
 		this.nextDiscoveryAt = this.now() + 60_000;
 		this.supportsOriginalErrorMessages = false;
+		this.supportsPostHogExceptions = false;
 		this.supportsInstallationOutcomes = false;
 		this.discovery = (async () => {
 			try {
@@ -528,6 +533,12 @@ export class TelemetryClient implements TelemetrySink {
 					typeof body.schema_revision === "number" &&
 					Number.isInteger(body.schema_revision) &&
 					body.schema_revision >= 3;
+				this.supportsPostHogExceptions =
+					this.supportsV2 &&
+					typeof body === "object" &&
+					body !== null &&
+					"posthog_exception_events" in body &&
+					body.posthog_exception_events === true;
 				this.supportsOriginalErrorMessages =
 					this.supportsV2 &&
 					typeof body === "object" &&
@@ -611,6 +622,7 @@ export class TelemetryClient implements TelemetrySink {
 			this.installationId
 		) {
 			const version2 = this.supportsV2;
+			const installationId = this.installationId;
 			const entries = pending
 				.splice(0, this.batchSize)
 				.filter((entry) =>
@@ -619,24 +631,37 @@ export class TelemetryClient implements TelemetrySink {
 						: version2 || isLegacyTelemetryEvent(entry.event.name),
 				);
 			if (!entries.length) continue;
-			const events = entries.flatMap(({ event }) => {
+			const groups = entries.map((entry) => {
+				const event = entry.event;
 				const properties = sanitizeTelemetryProperties(event.name, event.properties, !version2);
 				if (properties && !this.supportsOriginalErrorMessages)
 					for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES) delete properties[key];
-				return properties ? [{ ...event, properties }] : [];
+				const events: TelemetryBatch["events"] = properties ? [{ ...event, properties }] : [];
+				if (properties && version2 && this.supportsPostHogExceptions) {
+					const exception = createPostHogException(installationId, { ...event, properties });
+					if (exception) events.push(exception);
+				}
+				return { entry, events: events.filter((event) => !entry.acknowledgedIds.has(event.id)) };
 			});
-			if (!events.length) continue;
 			const batch: TelemetryBatch = {
 				installation_id: this.installationId,
-				events,
+				events: groups.flatMap((group) => group.events),
 				...(version2 ? { schema_version: 2 } : {}),
 			};
-			while (Buffer.byteLength(JSON.stringify(batch), "utf8") > 30_000 && events.length > 1) {
-				events.pop();
-				const deferred = entries.pop();
-				if (deferred) pending.unshift(deferred);
+			while (
+				(batch.events.length > 20 || Buffer.byteLength(JSON.stringify(batch), "utf8") > 30_000) &&
+				groups.length > 1
+			) {
+				const deferred = groups.pop();
+				if (deferred) pending.unshift(deferred.entry);
+				batch.events = groups.flatMap((group) => group.events);
 			}
-			for (const entry of entries) entry.attempts++;
+			const events = batch.events;
+			if (!events.length) {
+				this.queue = this.queue.filter((entry) => !groups.some((group) => group.entry === entry));
+				continue;
+			}
+			for (const { entry } of groups) entry.attempts++;
 			const response = await this.request(
 				this.endpoint,
 				{
@@ -651,13 +676,14 @@ export class TelemetryClient implements TelemetrySink {
 				this.supportsV2 = false;
 				this.supportsInstallationOutcomes = false;
 				this.supportsOriginalErrorMessages = false;
+				this.supportsPostHogExceptions = false;
 				this.nextDiscoveryAt = this.now() + 60_000;
-				this.delivery.retries += entries.length;
+				this.delivery.retries += groups.length;
 				return;
 			}
 			if (!response?.ok) {
-				this.delivery.unavailable += entries.length;
-				this.delivery.retries += entries.length;
+				this.delivery.unavailable += groups.length;
+				this.delivery.retries += groups.length;
 				return;
 			}
 			const accepted = new Set<string>();
@@ -685,10 +711,14 @@ export class TelemetryClient implements TelemetrySink {
 				else if (rejected.has(event.id)) this.delivery.rejected++;
 				else this.delivery.retries++;
 			}
+			for (const { entry, events: sent } of groups)
+				for (const event of sent)
+					if (accepted.has(event.id) || rejected.has(event.id)) entry.acknowledgedIds.add(event.id);
 			this.queue = this.queue.filter(
 				(entry) =>
-					!events.some(
-						(event) => event.id === entry.event.id && (accepted.has(event.id) || rejected.has(event.id)),
+					!groups.some(
+						(group) =>
+							group.entry === entry && group.events.every((event) => entry.acknowledgedIds.has(event.id)),
 					),
 			);
 			if (events.some((event) => !accepted.has(event.id) && !rejected.has(event.id))) return;
