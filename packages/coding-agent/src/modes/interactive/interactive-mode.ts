@@ -6104,7 +6104,17 @@ export class InteractiveMode {
 		this.editor.handleInput(data);
 	}
 
+	// Pickers mount either as overlays (model/provider/MCP menu) or in place of
+	// the editor (thinking, settings, and scoped-model selectors); the tray stays
+	// hidden while either surface is up.
+	private isInlinePickerOpen(): boolean {
+		if (this.ui.hasOverlay()) return true;
+		const editorChild = this.editorContainer.children[0];
+		return editorChild !== undefined && editorChild !== this.editor;
+	}
+
 	private getTrayOverrideLabel(): string | undefined {
+		if (this.isInlinePickerOpen()) return undefined;
 		if (this.isCtrlCExitHintVisible()) {
 			const clearKey = keyText("app.clear");
 			return clearKey ? `Press ${clearKey} again to exit` : "Press again to exit";
@@ -6117,12 +6127,15 @@ export class InteractiveMode {
 	}
 
 	private getTrayLocationLabel(): string | undefined {
+		if (this.isInlinePickerOpen()) return undefined;
+		const modelLabel = this.getModelTrayLabel();
 		const hasChildren = this.options.sessionHasChildren === true || (this.subagentSnapshots?.size ?? 0) > 0;
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
 		const shortcutsHint = this.getShortcutsTrayHint();
-		return (
-			[depthLabel, shortcutsHint].filter((label): label is string => label !== undefined).join("  ") || undefined
-		);
+		const agentsHint = this.getAgentsViewTrayHint();
+		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
+			.filter((label): label is string => label !== undefined)
+			.join("  ");
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -6136,6 +6149,23 @@ export class InteractiveMode {
 		return (this.connectionState?.messageCount ?? 0) === 0 && this.connectionState?.isStreaming !== true;
 	}
 
+	private getModelTrayLabel(): string {
+		const model = this.getCurrentModel();
+		if (!model) {
+			return "—";
+		}
+		const name = model.name.trim().replace(/\s+\(internal\)$/i, "");
+		const providerPrefix = `${model.provider}/`;
+		const compactName = name.startsWith(providerPrefix)
+			? name.slice(providerPrefix.length)
+			: name.replace(/^internal\//, "");
+		const parts = [compactName || model.name];
+		if (this.connectionState?.serviceTier === "priority") {
+			parts.push("fast");
+		}
+		return parts.join(" • ");
+	}
+
 	private getPromptEffortLabel(maxWidth: number): string | undefined {
 		if (maxWidth < 1 || !this.getCurrentModel()?.reasoning) return undefined;
 		const level = this.connectionState?.thinkingLevel ?? "off";
@@ -6144,10 +6174,23 @@ export class InteractiveMode {
 		return theme.fg("dim", truncateToWidth(level, maxWidth, ""));
 	}
 
+	private getAgentsViewTrayHint(): string | undefined {
+		if (!this.options.returnToAgentsView) {
+			return undefined;
+		}
+		return keyHint("app.agents.back", "manage");
+	}
+
 	private getTrayContextLabel(): string | undefined {
+		if (this.isInlinePickerOpen()) return undefined;
 		const goalLabel = this.getTrayGoalLabel();
 		const heartbeatLabel = this.getTrayHeartbeatLabel();
-		return [goalLabel, heartbeatLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		const usage = this.getConnectionContextUsage();
+		const contextLabel =
+			usage && typeof usage.tokens === "number" && typeof usage.percent === "number"
+				? `${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`
+				: undefined;
+		return [goalLabel, heartbeatLabel, contextLabel].filter((label) => label !== undefined).join(" · ") || undefined;
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {

@@ -406,5 +406,12 @@ describe("InteractiveMode /effort", () => {
 				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication",
 			);
 		});
+
+		it("keeps Fast mode beside the model while effort moves above the input", () => {
+			const context = makeFastContext();
+			context.connectionState = { sessionId: "session-1", serviceTier: "priority", thinkingLevel: "high" };
+
+			expect(fastInteractiveModePrototype.getModelTrayLabel.call(context)).toBe("gpt-5.5 • fast");
+		});
 	});
 });

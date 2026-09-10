@@ -4265,6 +4265,8 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: TrayUsage | undefined;
 		};
 		uiServices: { getContextUsage(): TrayUsage | undefined };
+		ui: { hasOverlay(): boolean };
+		editorContainer: { children: unknown[] };
 		getTrayContextLabel(): string | undefined;
 	};
 	const getTrayContextLabel = (InteractiveMode.prototype as unknown as TrayLabelHarness).getTrayContextLabel;
@@ -4305,11 +4307,13 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: undefined,
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
 		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
 	});
 
-	test("keeps active goals in the lower tray without context usage", () => {
+	test("combines active goals with token/context usage in one lower-tray label", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
 		fakeThis.heartbeatCatalog = [];
 		fakeThis.subagentSnapshots = new Map<string, never>();
@@ -4327,11 +4331,13 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: { contextWindow: 100_000, tokens: 75_000, percent: 75 },
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 75k (75%)");
 	});
 
-	test("combines active goals and heartbeats in one lower-tray label", () => {
+	test("combines active goals, active heartbeats, and context usage in one lower-tray label", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
 		fakeThis.heartbeatCatalog = [{ job: createHeartbeat("active") }];
 		fakeThis.subagentSnapshots = new Map<string, never>();
@@ -4350,8 +4356,10 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: { contextWindow: 100_000, tokens: 75_000, percent: 75 },
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat · 75k (75%)");
 	});
 
 	test("omits the usage segment when token count is unknown", () => {
@@ -4372,6 +4380,8 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: { contextWindow: 100_000, tokens: null, percent: null },
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
 		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
 	});
