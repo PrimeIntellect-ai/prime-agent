@@ -4574,7 +4574,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(fakeThis.ui.requestRenderPreservingViewport).toHaveBeenCalledTimes(1);
 	});
 
-	test("reveals agent messages only with all output", () => {
+	test("keeps agent message notices visible and reveals bodies only with all output", () => {
 		const toolChild = { setExpanded: vi.fn() };
 		const ipythonChild = { setExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
 		const messageChild = new AgentMessageComponent({
@@ -4587,9 +4587,11 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		});
 		const fakeThis = createExpansionFakeThis([toolChild, ipythonChild, messageChild]);
 
-		expect(messageChild.render(80)).toEqual([]);
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
 		fakeThis.toggleToolOutputExpansion();
-		expect(messageChild.render(80)).toEqual([]);
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
 		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(false);
 		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(false);
 
@@ -4599,7 +4601,8 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(true);
 
 		fakeThis.toggleToolOutputExpansion();
-		expect(messageChild.render(80)).toEqual([]);
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
 		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(false);
 		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(false);
 	});
