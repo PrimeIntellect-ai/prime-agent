@@ -128,6 +128,21 @@ describe("refinement public dispatch preservation", () => {
 		expect(order).toEqual(["microtask", "review"]);
 	});
 
+	it("calls a non-arrow custom reviewer with the public session as its receiver", async () => {
+		let receiver: unknown;
+		const reviewer = vi.fn(function (this: unknown) {
+			receiver = this;
+			return Promise.resolve({ shouldRefine: false, rationale: "custom decline" });
+		});
+		const harness = await createHarness({ autoRefineReviewer: reviewer });
+		harnesses.push(harness);
+		const context = { reason: "turn_interval" as const, turnsSinceLastReview: 1 };
+		const signal = new AbortController().signal;
+		await owner(harness)._auto._reviewAutoRefine(context, signal);
+		expect(receiver === harness.session).toBe(true);
+		expect(reviewer).toHaveBeenCalledExactlyOnceWith(context, signal);
+	});
+
 	it("turns synchronous custom reviewer throws into promise rejections", async () => {
 		const failure = new Error("review failed");
 		const harness = await createHarness({
