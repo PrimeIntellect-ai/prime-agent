@@ -5,7 +5,7 @@ import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
 import { BrandSplashHeader, InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import type { PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
-import { getEditorTheme, getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
+import { getEditorTheme, getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 describe("InteractiveMode startup hints", () => {
 	beforeAll(() => {
@@ -76,34 +76,39 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(label)).toBe("");
 	});
 
-	it("shows the model and current effort above the prompt and omits unsupported effort", () => {
+	it("shows the model ID and current effort in the lower tray and omits unsupported effort", () => {
 		const mode = createMode();
 		const getLabel = (width: number) =>
-			Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, width) as string | undefined;
+			Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode, width) as string | undefined;
 
-		expect(stripAnsi(getLabel(40)!)).toBe("Test Model · high");
-		expect(stripAnsi(getLabel(6)!)).toBe("Test M");
-		expect(stripAnsi(getLabel(3)!)).toBe("Tes");
+		expect(stripAnsi(getLabel(40)!)).toBe("test-model:high");
+		expect(stripAnsi(getLabel(6)!)).toBe("test-m");
+		expect(stripAnsi(getLabel(3)!)).toBe("tes");
 		expect(getLabel(0)).toBeUndefined();
 		mode.connectionState.thinkingLevel = "off";
-		expect(stripAnsi(getLabel(40)!)).toBe("Test Model · off");
+		expect(stripAnsi(getLabel(40)!)).toBe("test-model:off");
 		mode.connectionState.thinkingLevel = "xhigh";
 		mode.connectionState.isStreaming = true;
-		expect(stripAnsi(getLabel(40)!)).toBe("Test Model · xhigh");
+		expect(stripAnsi(getLabel(40)!)).toBe("test-model:xhigh");
 		mode.connectionState.model.reasoning = false;
-		expect(stripAnsi(getLabel(40)!)).toBe("Test Model");
+		expect(stripAnsi(getLabel(40)!)).toBe("test-model");
 	});
 
-	it("shows context usage after model and effort above the prompt without duplicating it below", () => {
+	it("shows context usage after model and effort below without duplicating it above", () => {
 		const mode = createMode(1);
-		mode.connectionState.model.name = "GLM 5.3 Fast (internal)";
+		mode.connectionState.model.id = "glm-5.3";
 		Object.assign(mode.connectionState, {
 			contextUsage: { contextWindow: 400_000, tokens: 175_000, percent: 43.75 },
 		});
-		const label = Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);
+		const label = Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode, 120);
 
-		expect(stripAnsi(label)).toBe("GLM 5.3 Fast · high · 175k (44%)");
-		expect(Reflect.get(InteractiveMode.prototype, "getTrayContextLabel").call(mode)).toBeUndefined();
+		expect(stripAnsi(label)).toBe("glm-5.3:high · 175k (44%)");
+		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayContextLabel").call(mode))).toBe(
+			"glm-5.3:high · 175k (44%)",
+		);
+		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120))).not.toContain(
+			"175k",
+		);
 	});
 
 	it("keeps available context usage visible when the model is unknown", () => {
@@ -112,7 +117,7 @@ describe("InteractiveMode startup hints", () => {
 		Object.assign(mode.connectionState, {
 			contextUsage: { contextWindow: 100_000, tokens: 12_000, percent: 12 },
 		});
-		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);
+		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode, 120);
 
 		expect(stripAnsi(getLabel())).toBe("12k (12%)");
 		Reflect.deleteProperty(mode.connectionState, "contextUsage");
@@ -133,41 +138,63 @@ describe("InteractiveMode startup hints", () => {
 			isStreaming: true,
 		});
 		Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
-		const render = () => stripAnsi(mode.recapContainer.render(100).join("\n"));
+		const render = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode));
 
-		expect(render()).toContain("Test Model · high · 44k (44%)");
+		expect(render()).toContain("test-model:high · 44k (44%)");
 		outputTokens = 8_000;
-		expect(render()).toContain("Test Model · high · 45k (45%)");
+		expect(render()).toContain("test-model:high · 45k (45%)");
 		Object.assign(mode.connectionState, { contextUsage: { contextWindow: 100_000, tokens: null, percent: null } });
-		expect(render()).toContain("Test Model · high");
+		expect(render()).toContain("test-model:high");
 		expect(render()).not.toContain("%");
 		Object.assign(mode.connectionState, {
 			contextUsage: { contextWindow: 100_000, tokens: 0, percent: 0 },
 			isStreaming: false,
 		});
-		expect(render()).toContain("Test Model · high · 0 (0%)");
+		expect(render()).toContain("test-model:high · 0 (0%)");
 	});
 
 	it.each([
-		["GLM 5.3 Fast (internal)", "GLM 5.3 Fast"],
-		["internal/glm-5.3-fast", "GLM 5.3 Fast"],
-		["glm-5.3", "GLM 5.3"],
-		["gpt-5.5", "GPT 5.5"],
-		["test-provider/test-model", "Test Model"],
+		["glm-5.3", "glm-5.3"],
+		["glm-5.3-high", "glm-5.3-high"],
+		["test-provider/glm-5.3", "glm-5.3"],
 		["Qwen/Qwen3-Next-80B-A3B-Instruct", "Qwen/Qwen3-Next-80B-A3B-Instruct"],
-		["custom/fine-tune (thinking)", "custom/fine-tune (thinking)"],
-	])("shortens the prompt model name %s without changing model identity", (name, expected) => {
+	])("shows model ID %s without changing its spelling or identity", (id, expected) => {
 		const mode = createMode();
-		mode.connectionState.model.name = name;
+		mode.connectionState.model.id = id;
 		const before = { ...mode.connectionState.model };
 
-		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120))).toBe(
-			`${expected} · high`,
+		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode, 120))).toBe(
+			`${expected}:high`,
 		);
 		expect(mode.connectionState.model).toEqual(before);
 	});
 
-	it("refreshes effort above the prompt without rebuilding the recap", () => {
+	it("keeps fast mode separate and omits unavailable effort", () => {
+		const mode = createMode();
+		Object.assign(mode.connectionState, { serviceTier: "priority", thinkingLevel: undefined });
+		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode))).toBe(
+			"test-model · fast",
+		);
+	});
+
+	it.each([
+		[false, false, "Showing overview (Ctrl+O to expand)"],
+		[false, true, "Showing details (Ctrl+O to expand)"],
+		[true, true, "Showing all output (Ctrl+O to collapse)"],
+	] as const)("shows a muted detail status above the prompt (%s, %s)", (allOutput, details, expected) => {
+		const mode = Object.assign(createMode(), { toolOutputExpanded: allOutput, editDiffsExpanded: details });
+		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);
+		expect(getLabel()).toBe(theme.fg("dim", expected));
+		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayContextLabel").call(mode))).toBe(
+			"test-model:high",
+		);
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": "ctrl+e" }));
+		expect(stripAnsi(getLabel())).toBe(expected.replace("Ctrl+O", "Ctrl+E"));
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": [] }));
+		expect(stripAnsi(getLabel())).toBe(expected.split(" (")[0]);
+	});
+
+	it("refreshes effort in the lower tray without rebuilding the recap", () => {
 		const mode = {
 			...createMode(),
 			recapContainer: new Container(),
@@ -176,18 +203,18 @@ describe("InteractiveMode startup hints", () => {
 		};
 		Object.setPrototypeOf(mode, InteractiveMode.prototype);
 		Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
-		const render = () => stripAnsi(mode.recapContainer.render(80).join("\n"));
+		const render = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode) ?? "");
 
-		expect(render()).toContain("Test Model · high");
+		expect(render()).toContain("test-model:high");
 		mode.connectionState.thinkingLevel = "low";
-		expect(render()).toContain("Test Model · low");
+		expect(render()).toContain("test-model:low");
 		mode.connectionState.model.reasoning = false;
-		expect(render()).toContain("Test Model");
+		expect(render()).toContain("test-model");
 		expect(render()).not.toContain("low");
 		mode.connectionState.model.reasoning = true;
-		expect(render()).toContain("Test Model · low");
+		expect(render()).toContain("test-model:low");
 		Reflect.deleteProperty(mode.connectionState, "model");
-		expect(mode.recapContainer.render(80)).toEqual([]);
+		expect(render()).toBe("");
 	});
 
 	it.each([false, true])("keeps effort outside custom editors and preserves drafts and headers (%s)", (ownHeader) => {
@@ -222,7 +249,7 @@ describe("InteractiveMode startup hints", () => {
 		if (ownHeader) expect(replacement.render(80)[1]).toContain("extension header");
 		const rows = mode.recapContainer.render(80);
 		expect(rows).toHaveLength(2);
-		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: Updated files\s+Test Model · high $/);
+		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: Updated files\s+Showing overview \(Ctrl\+O to expand\) $/);
 		expect(rows[0]).toBe("");
 		expect(rows[1]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		const promptDock = new Container();
@@ -233,7 +260,9 @@ describe("InteractiveMode startup hints", () => {
 		expect(dockRows[2]).toBe(replacement.render(80)[0]);
 		expect(dockRows[2]).toMatch(/\x1b\[48;/);
 		mode.connectionState.thinkingLevel = "low";
-		expect(stripAnsi(mode.recapContainer.render(80)[1]!)).toContain("Test Model · low");
+		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getModelContextLabel").call(mode))).toContain(
+			"test-model:low",
+		);
 		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, undefined);
 		expect(defaultEditor.getText()).toBe("unfinished draft");
 		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
@@ -444,7 +473,7 @@ describe("InteractiveMode startup hints", () => {
 		Object.assign(mode, { ctrlCExitHintExpiresAt: Date.now() + 60_000 });
 
 		expect(stripAnsi(locationLabel())).toBe("← manage");
-		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s)");
+		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s) · test-model:high · 75k (75%)");
 		expect(stripAnsi(overrideLabel())).toBe("Press Ctrl+C again to exit");
 
 		mode.ui.hasOverlay = () => true;

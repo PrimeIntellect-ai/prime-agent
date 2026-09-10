@@ -207,7 +207,13 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
-import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
+import {
+	formatConversationDetailStatus,
+	formatKeyText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "./components/keybinding-hints.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
@@ -6000,26 +6006,21 @@ export class InteractiveMode {
 
 	private getPromptContextLabel(maxWidth: number): string | undefined {
 		if (maxWidth < 1) return undefined;
+		return theme.fg(
+			"dim",
+			truncateToWidth(formatConversationDetailStatus(this.toolOutputExpanded, this.editDiffsExpanded), maxWidth, ""),
+		);
+	}
+
+	private getModelContextLabel(maxWidth = Number.MAX_SAFE_INTEGER): string | undefined {
+		if (maxWidth < 1) return undefined;
 		const model = this.getCurrentModel();
 		const parts: string[] = [];
 		if (model) {
-			const name = model.name.trim().replace(/\s+\(internal\)$/i, "");
 			const providerPrefix = `${model.provider}/`;
-			const compactName = name.startsWith(providerPrefix)
-				? name.slice(providerPrefix.length)
-				: name.replace(/^internal\//, "");
-			const displayName = /[\s/]/.test(compactName)
-				? compactName
-				: compactName
-						.split("-")
-						.map((part) =>
-							/^(glm|gpt|oss)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
-						)
-						.join(" ");
-			parts.push(displayName || model.name);
-			if (model.reasoning) {
-				parts.push(this.connectionState?.thinkingLevel ?? "off");
-			}
+			const modelId = model.id.startsWith(providerPrefix) ? model.id.slice(providerPrefix.length) : model.id;
+			const effort = model.reasoning ? this.connectionState?.thinkingLevel : undefined;
+			parts.push(effort ? `${modelId}:${effort.toLowerCase()}` : modelId);
 			if (this.connectionState?.serviceTier === "priority") {
 				parts.push("fast");
 			}
@@ -6043,7 +6044,10 @@ export class InteractiveMode {
 		if (this.isInlinePickerOpen()) return undefined;
 		const goalLabel = this.getTrayGoalLabel();
 		const heartbeatLabel = this.getTrayHeartbeatLabel();
-		return [goalLabel, heartbeatLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		return (
+			[goalLabel, heartbeatLabel, this.getModelContextLabel()].filter((label) => label !== undefined).join(" · ") ||
+			undefined
+		);
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {

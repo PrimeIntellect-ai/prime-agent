@@ -13,6 +13,7 @@ import {
 	type TUI,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { formatNoModelsAvailableMessage } from "../src/core/auth-guidance.js";
@@ -4305,7 +4306,7 @@ describe("InteractiveMode tray goal label", () => {
 		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
 	});
 
-	test("keeps context usage out of the lower tray while preserving active goals", () => {
+	test("shows context usage in the lower tray while preserving active goals", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
 		fakeThis.heartbeatCatalog = [];
 		fakeThis.subagentSnapshots = new Map<string, never>();
@@ -4326,10 +4327,10 @@ describe("InteractiveMode tray goal label", () => {
 		fakeThis.ui = { hasOverlay: () => false };
 		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(stripAnsi(getTrayContextLabel.call(fakeThis)!)).toBe("Pursuing goal (1m 05s) · 75k (75%)");
 	});
 
-	test("combines active goals and heartbeats without duplicating context usage below", () => {
+	test("combines active goals, heartbeats, and context usage below", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
 		fakeThis.heartbeatCatalog = [{ job: createHeartbeat("active") }];
 		fakeThis.subagentSnapshots = new Map<string, never>();
@@ -4351,7 +4352,7 @@ describe("InteractiveMode tray goal label", () => {
 		fakeThis.ui = { hasOverlay: () => false };
 		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat");
+		expect(stripAnsi(getTrayContextLabel.call(fakeThis)!)).toBe("Pursuing goal (1m 05s) · 1 heartbeat · 75k (75%)");
 	});
 
 	test("omits the usage segment when token count is unknown", () => {
