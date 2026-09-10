@@ -60,6 +60,11 @@ function injectedMessagePreviewLabel(message: CustomMessage): string | undefined
 	}
 }
 export interface SessionPromptSubmissionHost {
+	queueAgentMessagePrompt(
+		text: string,
+		streamingBehavior: "steer" | "followUp",
+		customMessage?: AgentSessionMessage,
+	): Promise<boolean>;
 	getScheduler(): Pick<SessionInputScheduler, "epoch" | "suspended" | "suspendedForUpdateRestart">;
 	getFence(): Pick<SessionCommitFence, "run">;
 	isStreaming(): boolean;
@@ -392,7 +397,7 @@ export class SessionPromptSubmission {
 			options.streamingBehavior
 		) {
 			admissionCommitted();
-			const queued = await this.queueAgentMessagePrompt(text, options.streamingBehavior, customMessage);
+			const queued = await this.host.queueAgentMessagePrompt(text, options.streamingBehavior, customMessage);
 			options.preflightResult?.(queued, queued);
 			return;
 		}

@@ -451,6 +451,8 @@ export class AgentSession {
 		getUnfinishedCount: () => this.unfinishedActionCount,
 	});
 	private readonly _promptSubmission = new SessionPromptSubmission(this._actionStore, {
+		queueAgentMessagePrompt: (text, streamingBehavior, customMessage) =>
+			this.queueAgentMessagePrompt(text, streamingBehavior, customMessage),
 		getScheduler: () => this._inputScheduler,
 		getFence: () => this._commitFence,
 		isStreaming: () => this.isStreaming,
@@ -1052,6 +1054,7 @@ export class AgentSession {
 		this._childState.initializeParentReply();
 		this._children.setRuntimeHost(config.subagentRuntimeHost);
 		this._autonomousContinuation = new SessionAutonomousContinuation(config.autonomous, {
+			getStatus: () => this.getAutonomousStatus(),
 			getCwd: () => this._cwd,
 			getAgent: () => this.agent,
 			getStore: () => this.sessionManager,
@@ -1070,6 +1073,7 @@ export class AgentSession {
 			new GoalController(goalPersistence, (goal) => this._emit({ type: "goal_update", goal })),
 			this._actionStore,
 			{
+				getGoalState: () => this.goalState,
 				getScheduler: () => this._inputScheduler,
 				isDisposed: () => this._disposed,
 				isDisposing: () => this._disposing,
@@ -2213,7 +2217,7 @@ export class AgentSession {
 	 * @param options.triggerTurn If true and not streaming, triggers a new LLM turn
 	 * @param options.deliverAs Delivery mode: "steer", "followUp", or "nextTurn"
 	 */
-	async sendCustomMessage<T = unknown>(
+	sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: {
 			triggerTurn?: boolean;

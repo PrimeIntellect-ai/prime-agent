@@ -22,6 +22,7 @@ import {
 } from "./prepared-actions.js";
 
 export interface SessionGoalContinuationHost {
+	getGoalState(): GoalState;
 	getScheduler(): Pick<SessionInputScheduler, "admissionPaused" | "suspended">;
 	isDisposed(): boolean;
 	isDisposing(): boolean;
@@ -257,7 +258,7 @@ export class SessionGoalContinuation {
 		}
 		switch (type) {
 			case "goal.get":
-				return goalHostResponse(this.controller.current, false);
+				return goalHostResponse(this.host.getGoalState(), false);
 			case "goal.create": {
 				if (typeof payload.objective !== "string") {
 					throw new Error("goal.create objective must be a string");
