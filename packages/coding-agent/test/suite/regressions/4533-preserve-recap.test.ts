@@ -106,7 +106,7 @@ describe("ENG-4533 recap layout", () => {
 
 		expect(previous).toHaveLength(2);
 		expect(updated).toHaveLength(2);
-		expect(stripAnsi(updated[0] ?? "")).toContain("Recap: Preparing the fix plan");
+		expect(stripAnsi(updated[1] ?? "")).toContain("Recap: Preparing the fix plan");
 	});
 
 	it("does not reserve blank space before the first recap", () => {
@@ -120,8 +120,9 @@ describe("ENG-4533 recap layout", () => {
 		const lines = render(mode, 24);
 
 		expect(lines).toHaveLength(2);
-		expect(visibleWidth(lines[0] ?? "")).toBe(24);
-		expect(stripAnsi(lines[0] ?? "")).toContain("Recap:");
-		expect(lines[1]).toBe("");
+		expect(visibleWidth(lines[1] ?? "")).toBe(24);
+		expect(stripAnsi(lines[1] ?? "")).toContain("Recap:");
+		expect(stripAnsi(lines[1] ?? "").trimEnd()).toMatch(/…$/);
+		expect(lines[0]).toBe("");
 	});
 });
