@@ -190,11 +190,14 @@ describe("InteractiveMode startup hints", () => {
 		expect(replacement.getText()).toBe("unfinished draft");
 		expect(stripAnsi(replacement.render(80).join("\n"))).not.toContain("/effort");
 		if (ownHeader) expect(replacement.render(80)[1]).toContain("extension header");
-		const row = mode.recapContainer.render(80)[0]!;
-		expect(stripAnsi(row)).toMatch(/^ Recap: Updated files\s+high · \/effort $/);
-		expect(row).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
+		const rows = mode.recapContainer.render(80);
+		expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated files *$/);
+		expect(rows[1]).toBe("");
+		expect(stripAnsi(rows[2]!)).toMatch(/^ *high · \/effort $/);
+		expect(rows[3]).toBe("");
+		expect(rows[0]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		mode.connectionState.thinkingLevel = "low";
-		expect(stripAnsi(mode.recapContainer.render(80)[0]!)).toContain("low · /effort");
+		expect(stripAnsi(mode.recapContainer.render(80)[2]!)).toContain("low · /effort");
 		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, undefined);
 		expect(defaultEditor.getText()).toBe("unfinished draft");
 		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
