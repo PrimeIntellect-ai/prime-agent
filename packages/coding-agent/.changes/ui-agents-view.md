@@ -1,0 +1,2 @@
+- Changed the agents view to hide empty saved sessions by default, simplify model labels, and keep secondary metadata quiet.
+- Added a clearer session details view with usage, contextual actions, keyboard browsing, and scrolling.

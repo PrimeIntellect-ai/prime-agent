@@ -424,6 +424,43 @@ export function filterUnifiedSessions(
 	return records.filter((record) => retained.has(record));
 }
 
+/** Hide abandoned empty catalog entries without changing saved sessions or their ancestry. */
+export function filterEmptyAgentsViewSessions(
+	records: readonly UnifiedSessionRecord[],
+	preservedSessionIds: ReadonlySet<string> = new Set(),
+): UnifiedSessionRecord[] {
+	const index = buildUnifiedSessionIndex(records);
+	const retained = new Set<UnifiedSessionRecord>();
+	for (const record of records) {
+		const summary = summaryForUnifiedRecord(record);
+		const firstMessage = summary.firstMessage?.trim();
+		const keep =
+			record.section !== "inactive" ||
+			summary.activeSessionId !== undefined ||
+			summary.isSessionActive ||
+			summary.attachedClients > 0 ||
+			summary.hasActiveHeartbeat ||
+			summary.hasRegisteredHeartbeat ||
+			summary.hasRegisteredCronJob ||
+			(record.heartbeat?.activeCount ?? 0) + (record.heartbeat?.pausedCount ?? 0) > 0 ||
+			!isEmptyAgentsViewSession(summary) ||
+			(record.saved?.messageCount ?? 0) > 0 ||
+			Boolean(summary.sessionName?.trim()) ||
+			Boolean(firstMessage && firstMessage !== "(no messages)") ||
+			Boolean(record.saved?.allMessagesText.trim()) ||
+			(summary.usage?.cost ?? 0) > 0 ||
+			isSubagentSummary(summary) ||
+			preservedSessionIds.has(summary.sessionId);
+		if (!keep) continue;
+		let current: UnifiedSessionRecord | undefined = record;
+		while (current && !retained.has(current)) {
+			retained.add(current);
+			current = findParentRecord(current, index.byKey);
+		}
+	}
+	return records.filter((record) => retained.has(record));
+}
+
 export interface UnifiedSessionIndex {
 	byKey: Map<string, UnifiedSessionRecord>;
 	childrenByParent: Map<UnifiedSessionRecord, UnifiedSessionRecord[]>;

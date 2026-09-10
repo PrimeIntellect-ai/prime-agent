@@ -972,7 +972,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("reveals usage details through actions and closes them before searching", () => {
+	it("keeps session details open until explicitly closed and preserves the selected session", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		try {
 			Reflect.set(view, "lastListedSummaries", [
@@ -981,13 +981,113 @@ describe("AgentsViewMode", () => {
 			invoke("reconcileCatalogs", view);
 			view.handleInput("?");
 			const actions = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-			expect(actions).toContain("1234 in");
+			expect(actions).toContain("Session details");
+			expect(actions).toContain("parent");
+			expect(actions).toContain("1,234 input");
 			expect(actions).toContain("$1.23");
 			view.handleInput("p");
+			expect(Reflect.get(view, "showActions")).toBe(true);
+			view.handleInput("\x1b");
 			expect(Reflect.get(view, "showActions")).toBe(false);
 			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
 			expect(rows).toContain("parent");
-			expect(rows).not.toContain("1234 in");
+			expect(rows).not.toContain("1,234 input");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("browses session details with arrows and scrolls long details in a short terminal", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		try {
+			Reflect.set(view, "lastListedSummaries", [
+				summary({ sessionName: "first", summary: "Progress ".repeat(50) }),
+				summary({
+					id: "second",
+					activeSessionId: "second",
+					sessionId: "second",
+					sessionFile: "/tmp/second.jsonl",
+					sessionName: "second",
+				}),
+			]);
+			Reflect.set(view, "ui", { terminal: { rows: 12 }, requestRender: vi.fn() });
+			invoke("reconcileCatalogs", view);
+			view.handleInput("?");
+			const details = () => (invoke("renderContent", view, 60, 11) as string[]).map(stripAnsi).join("\n");
+			expect(details()).toContain("first");
+			view.handleInput("\x1b[6~");
+			expect(details()).toContain("Directory:");
+			view.handleInput("\x1b[B");
+			expect(Reflect.get(view, "showActions")).toBe(true);
+			expect(details()).toContain("second");
+			expect(details()).toContain("Tokens: not available yet");
+			expect(Reflect.get(view, "detailsScrollOffset")).toBe(0);
+			expect(stripAnsi(invoke("renderHints", view, 120) as string)).toContain("scroll");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("strips provider prefixes in rows but keeps the exact model in details", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		try {
+			Reflect.set(view, "lastListedSummaries", [
+				summary({
+					model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "internal/glm-5.3-fast" },
+					usage: { inputTokens: 100, outputTokens: 10, cost: 0.12 },
+				}),
+			]);
+			invoke("reconcileCatalogs", view);
+			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
+			expect(rows).toContain("glm-5.3-fast");
+			expect(rows).not.toContain("internal/");
+			expect(rows).not.toContain("prime-inference");
+			view.handleInput("?");
+			const details = (invoke("renderContent", view, 120, 24) as string[]).map(stripAnsi).join("\n");
+			expect(details).toContain("Model ID: internal/glm-5.3-fast");
+			expect(details).toContain("Provider: prime-inference");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps search to a quiet single row and reports scope without technical header fields", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		try {
+			const prompt = invoke("renderPrompt", view, 80) as string[];
+			expect(prompt).toHaveLength(1);
+			expect(stripAnsi(prompt[0]!)).toContain("Search sessions");
+			expect(prompt[0]).not.toContain("\x1b[48;");
+			Reflect.set(view, "scopeRootSummary", summary({ sessionName: "Fix authentication", rlmDepth: 3 }));
+			const lines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
+			expect(lines).toContain("← back · Fix authentication › subagents");
+			expect(lines).not.toMatch(/scope\s+|depth\s+3/);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("hides abandoned saved entries by default while keeping them searchable", () => {
+		const abandoned: AgentConnectionSavedSessionInfo = {
+			path: "/tmp/abandoned.jsonl",
+			id: "abandoned-session",
+			cwd: "/tmp/project",
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			firstMessage: "(no messages)",
+			allMessagesText: "",
+		};
+		const persistentState: AgentsViewPersistentState = { savedCatalogLoaded: true, savedSessions: [abandoned] };
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+		try {
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "active", messageCount: 0 })]);
+			invoke("reconcileCatalogs", view);
+			const rowIds = () => (Reflect.get(view, "rows") as AgentsViewRow[]).map((row) => row.summary.sessionId);
+			expect(rowIds()).toEqual(["scope-session"]);
+			invoke("setSearchQuery", view, "abandoned-session");
+			expect(rowIds()).toEqual(["abandoned-session"]);
+			expect(persistentState.savedSessions).toEqual([abandoned]);
 		} finally {
 			stopThemeWatcher();
 		}
