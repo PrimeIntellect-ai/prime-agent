@@ -9,6 +9,7 @@ import type {
 } from "../../../src/modes/agent-connection/index.js";
 import { AgentActivityTracker } from "../../../src/modes/interactive/agent-activity.js";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.js";
+import { ToolRunGrouper } from "../../../src/modes/interactive/components/tool-run-group.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 
@@ -32,6 +33,7 @@ const EMPTY_USAGE: Usage = {
 
 type RenderSessionContextThis = {
 	pendingTools: Map<string, ToolExecutionComponent>;
+	toolRunGrouper: ToolRunGrouper;
 	ipythonToolComponents: Map<string, ToolExecutionComponent>;
 	lateIpythonSentAgentMessages: Map<string, unknown[]>;
 	pendingToolCreations: Set<string>;
@@ -71,6 +73,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const startedToolCalls = new Set<string>();
 	const fakeThis: RenderSessionContextThis = {
 		pendingTools,
+		toolRunGrouper: new ToolRunGrouper((component) => chatContainer.addChild(component)),
 		ipythonToolComponents: new Map(),
 		lateIpythonSentAgentMessages: new Map(),
 		pendingToolCreations,
