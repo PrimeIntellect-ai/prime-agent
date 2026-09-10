@@ -186,6 +186,7 @@ export type ThemeBg =
 type ColorMode = "truecolor" | "256color";
 
 const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = { r: 0, g: 95, b: 135 };
+const SOFT_SELECTION_ALPHA = 0.5;
 const SURFACE_MIN_LUMINANCE_DELTA = 12;
 const SURFACE_CONTRAST_ALPHA = 0.08;
 // Selection rows must stand out clearly, much more than passive surfaces.
@@ -496,6 +497,36 @@ export class Theme {
 		}
 		const ansi = bgAnsi(bestColor, this.mode);
 		return (str: string) => `${ansi}${str}\x1b[49m`;
+	}
+
+	/**
+	 * Row-selection highlight for menu rows: the selection color blended halfway
+	 * toward the editor surface, a softer band than the full selection block.
+	 */
+	getSoftSelectionBackgroundColor(): (str: string) => string {
+		const terminalBg = getDefaultTerminalColors()?.background;
+		const selectedBgValue = this.bgColorValues.get("selectedBg");
+		// Basic ANSI colors (0-15) are terminal-defined; their rendered color is
+		// unknown, so no reliable blend base exists.
+		if (!terminalBg || (typeof selectedBgValue === "number" && selectedBgValue < 16)) {
+			return (str: string) => this.bg("selectedBg", str);
+		}
+		const surfaceRgb = colorValueToRgb(this.bgColorValues.get("userMessageBg"));
+		const selectionRgb = colorValueToRgb(selectedBgValue);
+		if (!surfaceRgb || !selectionRgb) {
+			return (str: string) => this.bg("selectedBg", str);
+		}
+		const surfaceAnsi = bestAnsiColor(surfaceRgb, this.mode);
+		// Half contrast by default; strengthen the blend only when quantization
+		// would collapse the highlight into the editor surface.
+		for (const alpha of [SOFT_SELECTION_ALPHA, 0.75, 1]) {
+			const adjusted = bestAnsiColor(blendColor(selectionRgb, surfaceRgb, alpha), this.mode);
+			if (adjusted !== "" && adjusted !== surfaceAnsi) {
+				const ansi = bgAnsi(adjusted, this.mode);
+				return (str: string) => `${ansi}${str}[49m`;
+			}
+		}
+		return this.getSelectionBackgroundColor();
 	}
 
 	private surfaceBackgroundColor(color: ThemeBg): (str: string) => string {

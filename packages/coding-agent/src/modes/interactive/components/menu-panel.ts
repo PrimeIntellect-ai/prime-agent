@@ -394,8 +394,9 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 			const trailingWidth = visibleWidth(trailing);
 			const gap = trailingWidth > 0 ? 2 : 0;
 			const primaryWidth = Math.max(1, innerWidth - trailingWidth - gap);
+			const primaryText = theme.fg("text", this.options.primary);
 			const primary = truncateToWidth(
-				theme.fg(this.selected ? "accent" : "text", this.options.primary),
+				this.selected ? theme.bold(primaryText) : primaryText,
 				primaryWidth,
 				"…",
 				true,
@@ -403,7 +404,12 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 			const filler = " ".repeat(Math.max(0, innerWidth - visibleWidth(primary) - trailingWidth));
 			const content = `${this.selected ? "›" : " "} ${primary}${filler}${trailing}`;
 			return [
-				paddedBackgroundLine(content, width, 0, this.selected ? theme.getSelectionBackgroundColor() : undefined),
+				paddedBackgroundLine(
+					content,
+					width,
+					0,
+					this.selected ? theme.getSoftSelectionBackgroundColor() : undefined,
+				),
 			];
 		}
 		const safeWidth = Math.max(ROW_PADDING_X * 2 + 1, width);
@@ -436,7 +442,7 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 	}
 
 	private rowLine(text: string, width: number, selected: boolean): string {
-		const background = selected ? theme.getSelectionBackgroundColor() : theme.getEditorBackgroundColor();
+		const background = selected ? theme.getSoftSelectionBackgroundColor() : theme.getEditorBackgroundColor();
 		return paddedBackgroundLine(text, width, ROW_PADDING_X, background);
 	}
 
