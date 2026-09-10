@@ -1290,8 +1290,12 @@ export class AgentsViewMode implements Component, Focusable {
 		this.ui.requestRender();
 	}
 
+	private getSearchQuery(): string {
+		return this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+	}
+
 	private getFilteredRecords(): UnifiedSessionRecord[] {
-		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+		const query = this.getSearchQuery();
 		const preservedSessionIds = new Set([
 			...(this.anchorSessionId ? [this.anchorSessionId] : []),
 			...(this.scopeKey ? [this.scopeKey.sessionId] : []),
@@ -2482,7 +2486,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
 		for (const section of ["running", "idle", "inactive"] as const) {
-			if (counts[section] === 0) continue;
+			if (counts[section] === 0 && this.getSearchQuery().trim()) continue;
 			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {
@@ -2567,7 +2571,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
 		const cells = [
 			formatTableCell(title, layout.nameWidth),
-			formatTableCell(theme.fg("muted", formatSessionModel(row.summary)), layout.modelWidth),
+			formatTableCell(theme.fg("muted", formatSessionModel(row)), layout.modelWidth),
 		];
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
 		cells.push(theme.fg("dim", details));
@@ -2794,10 +2798,7 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
 	const detailsWidth = costWidth + 2 + ageWidth;
 	const available = Math.max(0, width - detailsWidth - 4);
-	const desiredModelWidth = sessions.reduce(
-		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
-		12,
-	);
+	const desiredModelWidth = sessions.reduce((size, row) => Math.max(size, visibleWidth(formatSessionModel(row))), 12);
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
@@ -2835,9 +2836,12 @@ function formatTableCell(value: string, width: number): string {
 	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
-function formatSessionModel(summary: SessionSummary): string {
-	const id = summary.model?.id;
-	return id ? id.replace(/^[^/]+\//, "") || id : "-";
+function formatSessionModel(row: AgentsViewRow): string {
+	const id = row.summary.model?.id ?? row.record?.saved?.model?.modelId;
+	if (!id) return "-";
+	const bare = id.slice(id.lastIndexOf("/") + 1) || id;
+	const level = row.summary.thinkingLevel;
+	return level && level !== "off" ? `${bare}:${level}` : bare;
 }
 
 function formatSessionDuration(summary: SessionSummary): string {

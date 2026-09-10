@@ -1,0 +1,1 @@
+- Added the recorded model to inactive session rows in the agents view instead of showing '-'.

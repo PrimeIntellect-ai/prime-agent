@@ -760,7 +760,10 @@ describe("AgentsViewMode", () => {
 			activeSessionId: "spender",
 			sessionId: "spender-session",
 			sessionName: "spender",
-			model: { ...getModel("openai", "gpt-4o"), id: "gpt-5.6-sol" },
+			// Provider path deliberately mismatches the catalog provider: only the id's
+			// embedded path matters to the column stripper.
+			model: { ...getModel("openai", "gpt-4o"), id: "moonshotai/gpt-5.6-sol" },
+			thinkingLevel: "high",
 			created,
 			summary: "Analyzing runtime composition",
 			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
@@ -773,6 +776,7 @@ describe("AgentsViewMode", () => {
 			runtimeKind: "subagent",
 			parentActiveSessionId: "spender",
 			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
+			thinkingLevel: "off",
 			created,
 			usage: { inputTokens: 500, outputTokens: 50, cost: 0.68 },
 		});
@@ -786,7 +790,8 @@ describe("AgentsViewMode", () => {
 			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
 			usage: { inputTokens: 900, outputTokens: 80, cost: 123.45 },
 		});
-		const rows = buildAgentsViewRows([parent, child, inactive]);
+		// Expand the parent so the child's "off" level renders on a real row.
+		const rows = buildAgentsViewRows([parent, child, inactive], new Set(["file:/tmp/scope.jsonl"]));
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 		Reflect.set(view, "rows", rows);
 		Reflect.set(view, "selectedIndex", -1);
@@ -797,8 +802,14 @@ describe("AgentsViewMode", () => {
 				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
 			const parentLine = render(parentRow, 120);
 			const savedLine = render(savedRow, 120);
-			expect(parentLine).toContain("gpt-5.6-sol");
+			// Provider paths strip to the bare model name; an active thinking level
+			// suffixes it, while absent (saved row) and "off" levels render bare.
+			expect(parentLine).toContain("gpt-5.6-sol:high");
+			expect(parentLine).not.toContain("moonshotai");
 			expect(savedLine).toContain("glm-5.2-fast");
+			expect(savedLine).not.toContain("glm-5.2-fast:");
+			const childRow = rows.find((row) => row.summary.sessionId === child.sessionId)!;
+			expect(render(childRow, 120)).not.toContain("glm-5.2-fast:");
 			expect(parentLine).toContain("$1.10");
 			expect(parentLine).not.toContain("$0.42");
 			expect(parentLine).not.toMatch(/[↑↓]/);
@@ -811,6 +822,37 @@ describe("AgentsViewMode", () => {
 				expect(narrow).toMatch(/2m\s*$/);
 				expect(narrow.length).toBeLessThanOrEqual(width);
 			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("shows the recorded model on inactive saved sessions and keeps '-' without one", () => {
+		const saved = (id: string, model?: { provider: string; modelId: string }) => ({
+			path: `/tmp/${id}.jsonl`,
+			id,
+			cwd: "/tmp",
+			created: new Date("2026-01-01T00:00:00Z"),
+			modified: new Date("2026-01-01T00:00:00Z"),
+			messageCount: 1,
+			firstMessage: "hello",
+			allMessagesText: "hello",
+			...(model ? { model } : {}),
+		});
+		const records = reconcileUnifiedSessions(
+			[],
+			[saved("with-model", { provider: "prime-inference", modelId: "glm-4.7" }), saved("bare")],
+		);
+		const rows = buildAgentsViewRows(records);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		Reflect.set(view, "selectedIndex", -1);
+		try {
+			const render = (id: string) =>
+				stripAnsi(invoke("renderRow", view, rows.find((row) => row.summary.sessionId === id)!, 120) as string);
+			expect(render("with-model")).toContain("glm-4.7");
+			expect(render("bare")).toMatch(/\s-\s/);
+			expect(render("bare")).not.toContain("glm-4.7");
 		} finally {
 			stopThemeWatcher();
 		}
@@ -857,7 +899,7 @@ describe("AgentsViewMode", () => {
 			expect(lines[2]).toBe("Running (1)");
 			expect(rendered[2]).toContain(theme.fg("muted", "Running (1)"));
 			expect(lines).toContain("Idle (1)");
-			expect(lines).not.toContain("Inactive (0)");
+			expect(lines).toContain("Inactive (0)");
 			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
 			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
 			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
@@ -926,13 +968,20 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("omits empty status categories and keeps feedback when no sessions match", () => {
+	it("keeps empty status headers and feedback when no sessions match", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		const finish = vi.fn();
 		Reflect.set(view, "finish", finish);
 		const render = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
-		const expectEmptyList = (message: string) => {
-			expect(render()).toEqual([message]);
+		const expectEmptyList = (message?: string) => {
+			if (message) expect(render()).toEqual([message]);
+			else {
+				expect(render().filter((line) => /^(Running|Idle|Inactive) \(/.test(line))).toEqual([
+					"Running (0)",
+					"Idle (0)",
+					"Inactive (0)",
+				]);
+			}
 			expect(Reflect.get(view, "rows")).toEqual([]);
 			invoke("moveSelection", view, 1);
 			invoke("openSelected", view);
@@ -940,12 +989,12 @@ describe("AgentsViewMode", () => {
 		};
 		try {
 			invoke("reconcileCatalogs", view);
-			expectEmptyList("No sessions yet.");
+			expectEmptyList();
 			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "Review changes" })]);
 			invoke("reconcileCatalogs", view);
-			expect(render()).not.toContain("Running (0)");
+			expect(render()).toContain("Running (0)");
 			expect(render()).toContain("Idle (1)");
-			expect(render()).not.toContain("Inactive (0)");
+			expect(render()).toContain("Inactive (0)");
 			invoke("setSearchQuery", view, "unmatched-session");
 			expectEmptyList("No sessions match your search.");
 			invoke("setSearchQuery", view, "");
@@ -1034,6 +1083,38 @@ describe("AgentsViewMode", () => {
 			expect(rows().some((row) => row.kind === "subagent-summary")).toBe(false);
 			invoke("cycleProgramForSelected", view);
 			expect(rows().some((row) => row.kind === "subagent-code")).toBe(false);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders zero-count section headers unless a search empties them", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const lines = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
+		try {
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "only-idle" })]);
+			invoke("reconcileCatalogs", view);
+			const headers = lines().filter((line) => /^(Running|Idle|Inactive) \(\d+\)/.test(line));
+			expect(headers).toEqual(["Running (0)", "Idle (1)", "Inactive (0)"]);
+			// A filter that empties some sections hides those and keeps the rest.
+			Reflect.set(view, "lastListedSummaries", [
+				summary({ sessionName: "only-idle" }),
+				summary({
+					id: "busy",
+					activeSessionId: "busy",
+					sessionId: "busy-session",
+					sessionName: "busy",
+					activity: "working",
+					isStreaming: true,
+				}),
+			]);
+			invoke("reconcileCatalogs", view);
+			invoke("setSearchQuery", view, "only-idle");
+			expect(lines().filter((line) => /^(Running|Idle|Inactive) \(/.test(line))).toEqual(["Idle (1)"]);
+			// A filter that empties every section keeps the current search behavior.
+			invoke("setSearchQuery", view, "no-such-session");
+			expect(lines().filter((line) => /^(Running|Idle|Inactive) \(/.test(line))).toEqual([]);
+			expect(lines().join("\n")).toContain("No sessions match your search.");
 		} finally {
 			stopThemeWatcher();
 		}
@@ -1161,7 +1242,7 @@ describe("AgentsViewMode", () => {
 			const expectNoAbandonedRows = () => {
 				expect(rowIds()).not.toContain("abandoned-session");
 				const rendered = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-				expect(rendered).not.toContain("Inactive");
+				expect(rendered).not.toMatch(/Inactive \([1-9]\d*\)/);
 				expect(rendered).not.toContain("(no messages)");
 				expect(invoke("getAgentCountsText", view)).toBe(`0 running, ${rowIds().length} idle, 0 inactive`);
 			};

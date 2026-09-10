@@ -1,0 +1,1 @@
+- Changed the agents view to always render every section header with its zero count so the layout stays stable; a search still hides sections it empties.
