@@ -1,2 +1,3 @@
 - Changed model, provider, and MCP pickers to compact inline lists with responsive search and keyboard navigation.
 - Added selected-model catalog prices for input, cached input, and output per million tokens.
+- Split the configuration menu into separate single-purpose pickers and dropped the tab bar and tab navigation; each command opens only its own picker.

@@ -1,19 +1,9 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import {
-	type Component,
-	Container,
-	type Focusable,
-	getKeybindings,
-	type TUI,
-	truncateToWidth,
-	visibleWidth,
-	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+import { Container, type Focusable, getKeybindings, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { AuthStorage } from "../../../core/auth-storage.js";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import { theme } from "../theme/theme.js";
 import { keyText } from "./keybinding-hints.js";
-import { getMenuPanelInnerWidth } from "./menu-panel.js";
 import { ModelSelectorComponent } from "./model-selector.js";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./oauth-selector.js";
 
@@ -46,54 +36,6 @@ export interface ConfigurationMenuOptions {
 	onCancel: () => void;
 }
 
-const TAB_LABELS: Record<ConfigurationMenuTab, string> = {
-	providers: "Providers",
-	models: "Models",
-	"mcp-connections": "MCP",
-};
-
-class ConfigurationMenuTabBar implements Component {
-	constructor(private readonly getActiveTab: () => ConfigurationMenuTab) {}
-
-	render(width: number): string[] {
-		return this.getLines(width);
-	}
-
-	getRowCount(width: number): number {
-		return this.getLines(width).length;
-	}
-
-	private getLines(width: number): string[] {
-		const safeWidth = Math.max(1, width);
-		const activeTab = this.getActiveTab();
-		const labels = CONFIGURATION_MENU_TABS.map((tab) => {
-			const label = `${tab === activeTab ? "› " : ""}${TAB_LABELS[tab]}`;
-			return theme.fg(tab === activeTab ? "accent" : "muted", label);
-		});
-		return this.wrapItems(labels, "  ", safeWidth);
-	}
-
-	private wrapItems(items: string[], separator: string, width: number): string[] {
-		const lines: string[] = [];
-		let line = "";
-		for (const item of items) {
-			const candidate = line ? `${line}${separator}${item}` : item;
-			if (line && visibleWidth(candidate) > width) {
-				lines.push(...wrapTextWithAnsi(line, width));
-				line = item;
-			} else {
-				line = candidate;
-			}
-		}
-		if (line) {
-			lines.push(...wrapTextWithAnsi(line, width));
-		}
-		return lines;
-	}
-
-	invalidate(): void {}
-}
-
 export class ConfigurationMenuComponent extends Container implements Focusable {
 	private readonly bodies: {
 		providers: OAuthSelectorComponent;
@@ -102,13 +44,10 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 	};
 	private activeTab: ConfigurationMenuTab;
 	private _focused = false;
-	private renderWidth = 78;
 
 	constructor(private readonly options: ConfigurationMenuOptions) {
 		super();
 		this.activeTab = options.initialTab;
-		const tabBar = new ConfigurationMenuTabBar(() => this.activeTab);
-		const getHeaderRows = () => tabBar.getRowCount(getMenuPanelInnerWidth(this.renderWidth, true));
 		const getRows = () => Math.max(1, (options.getRows?.() ?? 24) - 1);
 		const providerOptions = options.providerOptions.filter(
 			(provider) => (provider.category ?? "provider") === "provider",
@@ -125,8 +64,6 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			{
 				getRows,
 				inline: true,
-				header: tabBar,
-				getHeaderRows,
 				title: "Providers",
 				subtitle: "Connect with a subscription or API key.",
 				searchPlaceholder: "Search providers",
@@ -143,8 +80,6 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			{
 				availableModels: options.availableModels,
 				configuredProviders: options.configuredProviders,
-				header: tabBar,
-				getHeaderRows,
 				getRows,
 				inline: true,
 				recentModels: options.recentModels,
@@ -160,8 +95,6 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			{
 				getRows,
 				inline: true,
-				header: tabBar,
-				getHeaderRows,
 				title: "MCP Connections",
 				subtitle: "Connect MCP integrations and service credentials.",
 				searchPlaceholder: "Search MCP connections",
@@ -187,16 +120,13 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 	}
 
 	override render(width: number): string[] {
-		this.renderWidth = width;
 		const selectKey = keyText("tui.select.confirm", { primaryOnly: true });
 		const closeKey = keyText("tui.select.cancel", { primaryOnly: true });
-		const tabKey = keyText("tui.input.tab", { primaryOnly: true });
-		const previousTabKey = keyText("app.configuration.previousTab", { primaryOnly: true });
 		const navigate = `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })}`;
 		const hint =
 			width >= 70
-				? `${navigate} navigate · ${selectKey} select · ${closeKey} close · ${tabKey}/${previousTabKey} tabs`
-				: `${selectKey} select · ${closeKey} close${width >= 40 ? ` · ${tabKey} tabs` : ""}`;
+				? `${navigate} navigate · ${selectKey} select · ${closeKey} close`
+				: `${selectKey} select · ${closeKey} close`;
 		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${hint}`), width, "", true)];
 	}
 
@@ -234,14 +164,6 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.input.tab")) {
-			this.switchTab(1);
-			return;
-		}
-		if (kb.matches(keyData, "app.configuration.previousTab")) {
-			this.switchTab(-1);
-			return;
-		}
 		if (
 			this.activeTab === "models" &&
 			(kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.editor.cursorRight"))
@@ -254,11 +176,5 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 
 	private get activeBody(): OAuthSelectorComponent | ModelSelectorComponent {
 		return this.bodies[this.activeTab];
-	}
-
-	private switchTab(direction: 1 | -1): void {
-		const currentIndex = CONFIGURATION_MENU_TABS.indexOf(this.activeTab);
-		const nextIndex = (currentIndex + direction + CONFIGURATION_MENU_TABS.length) % CONFIGURATION_MENU_TABS.length;
-		this.setActiveTab(CONFIGURATION_MENU_TABS[nextIndex] ?? "providers");
 	}
 }

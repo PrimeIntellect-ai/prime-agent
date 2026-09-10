@@ -82,60 +82,54 @@ describe("ConfigurationMenuComponent", () => {
 		}
 	});
 
-	it("uses one clearly delineated three-tab menu and keeps each tab body mounted", async () => {
+	it("renders one single-purpose picker per command without tab chrome", async () => {
 		const requestRender = vi.fn();
 		const selectProvider = vi.fn();
 		const menu = await createMenu({ requestRender, onSelectProvider: selectProvider });
 
 		let output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("› Providers  Models  MCP");
+		expect(output).toContain("Providers");
 		expect(output).toContain("Anthropic");
+		expect(output).not.toContain("Models");
+		expect(output).not.toContain("MCP Connections");
 		expect(output).not.toContain("Serper (web search)");
+
+		const models = await createMenu({ initialTab: "models" });
+		output = stripAnsi(models.render(120).join("\n"));
+		expect(output).toContain("Models");
+		expect(output).toContain("Faux One");
+		expect(output).not.toContain("Providers");
+		expect(output).not.toContain("MCP Connections");
+
+		const mcp = await createMenu({ initialTab: "mcp-connections" });
+		output = stripAnsi(mcp.render(120).join("\n"));
+		expect(output).toContain("MCP Connections");
+		expect(output).toContain("Serper (web search)");
+		expect(output).not.toContain("Anthropic");
 
 		menu.handleInput("a");
 		menu.setActiveTab("models");
-		output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("Providers  › Models  MCP");
-		expect(output).toContain("Faux One");
-
 		menu.setActiveTab("providers");
-		output = stripAnsi(menu.render(120).join("\n"));
 		expect(menu.getSearchValue("providers")).toBe("a");
-		expect(output).toContain("Anthropic");
 		expect(requestRender).toHaveBeenCalled();
-
 		menu.handleInput("\r");
 		expect(selectProvider).toHaveBeenCalledWith(expect.objectContaining({ id: "anthropic" }));
-
-		menu.setActiveTab("mcp-connections");
-		output = stripAnsi(menu.render(120).join("\n"));
-		expect(output).toContain("› MCP");
-		expect(output).toContain("Serper (web search)");
-		expect(output).not.toContain("Anthropic");
 	});
 
-	it("switches tabs with Tab and Shift+Tab while preserving focus and search state", async () => {
-		const menu = await createMenu();
+	it("keeps Tab and Shift+Tab inside the picker without switching bodies", async () => {
+		const menu = await createMenu({ initialTab: "models" });
 		menu.focused = true;
 		const lines = stripAnsi(menu.render(120).join("\n")).split("\n");
-		const tabsLine = lines.findIndex((line) => line.includes("› Providers"));
-		const shortcutsLine = lines.findIndex((line) => line.includes("Tab/Shift+Tab tabs"));
-		expect(shortcutsLine).toBeGreaterThan(tabsLine);
-		expect(lines[shortcutsLine]).toContain("Esc close");
+		expect(lines.some((line) => line.includes("↑/↓ navigate"))).toBe(true);
+		expect(lines.some((line) => line.includes("Esc close"))).toBe(true);
+		expect(lines.some((line) => line.includes("tabs"))).toBe(false);
 
-		menu.handleInput("\t");
-		expect(menu.getActiveTab()).toBe("models");
-		expect(menu.focused).toBe(true);
 		menu.handleInput("f");
 		expect(menu.getSearchValue("models")).toBe("f");
 		menu.handleInput("\t");
-		expect(menu.getActiveTab()).toBe("mcp-connections");
+		expect(menu.getActiveTab()).toBe("models");
+		expect(menu.focused).toBe(true);
 		expect(menu.getSearchValue("models")).toBe("f");
-		menu.handleInput("\t");
-		expect(menu.getActiveTab()).toBe("providers");
-
-		menu.handleInput("\x1b[Z");
-		expect(menu.getActiveTab()).toBe("mcp-connections");
 		menu.handleInput("\x1b[Z");
 		expect(menu.getActiveTab()).toBe("models");
 		expect(menu.getSearchValue("models")).toBe("f");
@@ -200,16 +194,10 @@ describe("ConfigurationMenuComponent", () => {
 		expect(onCancel).toHaveBeenCalledOnce();
 	});
 
-	it("wraps complete tab labels at narrow widths without overflowing the viewport", async () => {
-		const menu = await createMenu({ getRows: () => 24 });
-
+	it("keeps each picker inside narrow viewports without overflowing", async () => {
 		for (const tab of ["providers", "models", "mcp-connections"] as const) {
-			menu.setActiveTab(tab);
+			const menu = await createMenu({ initialTab: tab, getRows: () => 24 });
 			const lines = menu.render(24);
-			const output = stripAnsi(lines.join("\n"));
-			expect(output).toContain("Providers");
-			expect(output).toContain("Models");
-			expect(output).toContain("MCP");
 			expect(lines.length).toBeLessThanOrEqual(24);
 			for (const line of lines) {
 				expect(visibleWidth(line)).toBe(24);
@@ -217,13 +205,13 @@ describe("ConfigurationMenuComponent", () => {
 		}
 	});
 
-	it("keeps the active marker visible across supported themes", async () => {
+	it("keeps the picker title visible across supported themes", async () => {
 		const menu = await createMenu();
 
 		for (const themeName of ["dark", "light", "prime"] as const) {
 			initTheme(themeName);
 			const rendered = menu.render(120).join("\n");
-			expect(stripAnsi(rendered)).toContain("› Providers");
+			expect(stripAnsi(rendered)).toContain("Providers");
 			expect(rendered).not.toBe(stripAnsi(rendered));
 		}
 	});
