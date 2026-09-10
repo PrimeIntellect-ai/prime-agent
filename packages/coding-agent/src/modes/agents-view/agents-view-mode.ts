@@ -110,8 +110,7 @@ const STATUS_MESSAGE_DURATION_MS = 4500;
 const SEARCH_PROMPT_PLACEHOLDER = "Search sessions";
 const REPLY_PROMPT_FALLBACK_PLACEHOLDER = "Write a reply to this agent";
 const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
-const COMPLETED_ROW_ICON = "✓";
-const NEEDS_INPUT_ROW_ICON = "●";
+const STATUS_ROW_ICON = "•";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
 
@@ -2818,9 +2817,8 @@ export class AgentsViewMode implements Component, Focusable {
 			case "running":
 				return workingIconFrame(this.workingIconFrame);
 			case "idle":
-				return NEEDS_INPUT_ROW_ICON;
 			case "inactive":
-				return COMPLETED_ROW_ICON;
+				return STATUS_ROW_ICON;
 			default: {
 				const _exhaustive: never = section;
 				return _exhaustive;

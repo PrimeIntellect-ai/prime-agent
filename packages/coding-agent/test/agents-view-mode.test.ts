@@ -869,6 +869,60 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("renders a shared color-coded status circle for idle and inactive rows", () => {
+		const summaries = [
+			summary({
+				id: "busy",
+				activeSessionId: "busy",
+				sessionId: "busy-session",
+				sessionName: "busy",
+				activity: "working",
+				isStreaming: true,
+			}),
+			summary({
+				id: "idle",
+				activeSessionId: "idle",
+				sessionId: "idle-session",
+				sessionName: "idle",
+				sessionFile: "/tmp/idle.jsonl",
+			}),
+		];
+		const archived: AgentConnectionSavedSessionInfo = {
+			id: "archived",
+			path: "/tmp/archived.jsonl",
+			cwd: "/tmp/project",
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 2,
+			firstMessage: "Fix authentication",
+			allMessagesText: "",
+			name: "archived session",
+		};
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		try {
+			Reflect.set(view, "lastListedSummaries", summaries);
+			Reflect.set(view, "savedSessions", [archived]);
+			invoke("reconcileCatalogs", view);
+			Reflect.set(view, "selectedIndex", -1);
+			Reflect.set(view, "ui", { terminal: { rows: 60 }, requestRender: () => {} });
+			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
+			const output = rendered.map(stripAnsi).join("\n");
+			expect(output).toContain("Running (1)");
+			expect(output).toContain("Idle (1)");
+			expect(output).toContain("Inactive (1)");
+			const runningRow = rendered.find((line) => stripAnsi(line).includes("busy"));
+			const idleRow = rendered.find((line) => stripAnsi(line).includes("idle"));
+			const inactiveRow = rendered.find((line) => stripAnsi(line).includes("archived session"));
+			expect(runningRow).toContain(theme.bold("◇"));
+			expect(idleRow).toContain(theme.fg("warning", "•"));
+			expect(inactiveRow).toContain(theme.fg("dim", "•"));
+			expect(output).not.toContain("●");
+			expect(output).not.toContain("✓");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("omits empty status categories and keeps feedback when no sessions match", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		const finish = vi.fn();
