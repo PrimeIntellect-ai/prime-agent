@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompactionResult } from "../../src/core/compaction/index.js";
 import type { SessionCompaction } from "../../src/session/compaction.js";
 import type { CompactionExecutionOptions } from "../../src/session/compaction-execution.js";
+import type { SessionContinuation } from "../../src/session/continuation.js";
 import type { SessionRetry } from "../../src/session/retry.js";
 import { createHarness, type Harness } from "./harness.js";
 
@@ -58,7 +59,7 @@ type SessionRetryCompactionInternals = {
 	_retry: SessionRetry;
 	_compaction: SessionCompaction;
 	_performCompaction(options: CompactionExecutionOptions): Promise<CompactionResult>;
-	_postCompactionContinuationScheduled: boolean;
+	_continuation: SessionContinuation;
 	_processAgentEvent: (event: AgentEvent) => Promise<void>;
 	_checkCompaction: (message: AssistantMessage) => Promise<boolean>;
 	_schedulePostCompactionContinue: () => void;
@@ -446,12 +447,12 @@ describe("AgentSession retry and event characterization", () => {
 		internals._schedulePostCompactionContinue();
 
 		try {
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(internals._continuation.isScheduled).toBe(true);
 
 			harness.session.abortRetry();
 
 			expect(compactionSignal?.aborted).toBe(true);
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._continuation.isScheduled).toBe(false);
 			expect(harness.session.retryAttempt).toBe(0);
 			expect(harness.session.isRetrying).toBe(false);
 			expect(harness.eventsOfType("auto_retry_end").at(-1)).toMatchObject({

@@ -29,6 +29,7 @@ import {
 	saveHarnessState,
 } from "../../src/core/refinement/index.js";
 import { parseSessionSlashCommand } from "../../src/core/slash-commands.js";
+import type { SessionContinuation } from "../../src/session/continuation.js";
 import {
 	conversationMessages,
 	createHarness,
@@ -63,7 +64,7 @@ type AutoRefineInternals = {
 
 	_cancelPostCompactionContinue(): void;
 
-	_postCompactionContinuationScheduled: boolean;
+	_continuation: Pick<SessionContinuation, "isScheduled">;
 };
 
 type SteeringStopInternals = {
@@ -284,10 +285,10 @@ describe("AgentSession queue characterization", () => {
 			name: "waits until the scheduled post-compaction continuation starts",
 			act: (internals: AutoRefineInternals, expectSchedule: (called: boolean) => void) => {
 				internals._refinement._auto._compactAutoRefinePending = true;
-				internals._postCompactionContinuationScheduled = true;
+				const scheduled = vi.spyOn(internals._continuation, "isScheduled", "get").mockReturnValue(true);
 				internals._refinement._auto._scheduleAutoRefineAfterAgentEnd();
 				expectSchedule(false);
-				internals._postCompactionContinuationScheduled = false;
+				scheduled.mockRestore();
 				internals._refinement._auto._scheduleAutoRefineAfterAgentEnd();
 			},
 		},
@@ -371,11 +372,11 @@ describe("AgentSession queue characterization", () => {
 
 		internals._schedulePostCompactionContinue();
 		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(1));
-		expect(internals._postCompactionContinuationScheduled).toBe(true);
+		expect(internals._continuation.isScheduled).toBe(true);
 
 		activeRunSettled.resolve();
 		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(2));
-		expect(internals._postCompactionContinuationScheduled).toBe(false);
+		expect(internals._continuation.isScheduled).toBe(false);
 	});
 
 	it("does not let a failed cancelled continuation reject its replacement", async () => {
@@ -434,7 +435,7 @@ describe("AgentSession queue characterization", () => {
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).not.toHaveBeenCalled();
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._continuation.isScheduled).toBe(false);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -461,7 +462,7 @@ describe("AgentSession queue characterization", () => {
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).not.toHaveBeenCalled();
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._continuation.isScheduled).toBe(false);
 			expect(harness.session.getFollowUpMessages()).toEqual(["queued across abort"]);
 		} finally {
 			vi.useRealTimers();
@@ -482,7 +483,7 @@ describe("AgentSession queue characterization", () => {
 			"Session is too short to compact",
 		);
 
-		expect(internals._postCompactionContinuationScheduled).toBe(true);
+		expect(internals._continuation.isScheduled).toBe(true);
 		internals._cancelPostCompactionContinue();
 		idle.resolve();
 	});
