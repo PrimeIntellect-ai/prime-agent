@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.js";
 import {
 	captureAgentCommandUsed,
 	captureTelemetryEvent,
@@ -71,6 +72,31 @@ afterEach(() => {
 });
 
 describe("shared telemetry contract and privacy", () => {
+	it.each(BUILTIN_SLASH_COMMANDS.map(({ name }) => name))("retains the built-in command %s", (commandName) => {
+		expect(sanitizeTelemetryProperties("agent command used", { ...base, command_name: commandName })).toMatchObject({
+			command_name: commandName,
+		});
+	});
+	it.each(["feedback", "resume"])("delivers %s command telemetry through the capture helper", async (commandName) => {
+		const batches: TelemetryBatch[] = [];
+		vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
+			if (init?.method === "GET") return capabilities();
+			const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
+			batches.push(batch);
+			return accepted(batch);
+		});
+		await captureAgentCommandUsed({
+			agentDir: directory(),
+			settingsManager: SettingsManager.inMemory(),
+			commandName,
+		});
+		await vi.waitFor(() => expect(batches).toHaveLength(1));
+		expect(batches[0].events).toHaveLength(1);
+		expect(batches[0].events[0]).toMatchObject({
+			name: "agent command used",
+			properties: { command_name: commandName },
+		});
+	});
 	it("keeps the collector descriptor and reviewed diagnostic templates identical", () => {
 		expect(JSON.parse(readFileSync(new URL("../docs/telemetry-contract.json", import.meta.url), "utf8"))).toEqual(
 			TELEMETRY_CONTRACT,

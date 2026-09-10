@@ -78,7 +78,7 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 	if (/sensitive|safety|prohibited_content|blocklist|spii|recitation|content.?filter|guardrail|flagged/.test(type)) {
 		return "safety";
 	}
-	if (type.includes("overloaded") || status === 529) return "overloaded";
+	if (type.includes("overloaded")) return "overloaded";
 	// usage_not_included is Codex's plan-entitlement rejection, not bad credentials.
 	if (/rate_limit|usage_limit|usage_not_included|throttl/.test(type) || status === 429) {
 		return "rate_limit";
@@ -87,17 +87,12 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 	if (status === 403) return "permission";
 	if (/^(invalid_api_key|invalid_token|invalid_grant|token_expired|expired_token)$/.test(type)) return "auth";
 	if (/authentication|unauthorized/.test(type) || status === 401) return "auth";
-	if (/permission|forbidden|access.?denied/.test(type) || status === 403) return "permission";
+	if (/permission|forbidden|access.?denied/.test(type)) return "permission";
 	if (type.includes("invalid_request") || type.includes("not_found_error") || status === 400 || status === 404) {
 		return "invalid_request";
 	}
 	if (type.includes("malformed")) return "malformed_response";
-	if (
-		type.includes("api_error") ||
-		type.includes("server_error") ||
-		type.includes("unavailable") ||
-		(status !== undefined && status >= 500)
-	) {
+	if (type.includes("api_error") || type.includes("server_error") || type.includes("unavailable")) {
 		return "server_error";
 	}
 	return "unknown";

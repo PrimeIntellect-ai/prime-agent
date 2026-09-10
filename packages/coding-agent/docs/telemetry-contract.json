@@ -637,6 +637,7 @@
             "settings",
             "model",
             "effort",
+            "feedback",
             "fast",
             "scoped-models",
             "export",
@@ -667,6 +668,7 @@
             "rlm-max-depth",
             "heartbeat",
             "heartbeats",
+            "resume",
             "reload",
             "fullscreen",
             "quit"
