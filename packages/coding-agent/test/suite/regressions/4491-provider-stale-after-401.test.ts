@@ -335,11 +335,11 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		const event = { type: "agent_end", messages: [message] } as AgentEvent;
 		const session = harness.session as unknown as {
 			_retry: SessionRetry;
-			_processAgentEvent(event: AgentEvent): Promise<void>;
+			_events: { processAgentEvent(event: AgentEvent): Promise<void> };
 		};
 
 		session._retry.observeAgentEnd(event);
-		await session._processAgentEvent(event);
+		await session._events.processAgentEvent(event);
 
 		expect(harness.session.isRetrying).toBe(false);
 		expect(harness.eventsOfType("auto_retry_end").map((retryEvent) => retryEvent.success)).toEqual([false]);

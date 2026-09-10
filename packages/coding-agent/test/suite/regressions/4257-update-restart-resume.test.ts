@@ -649,17 +649,17 @@ describe("issue #4257 update restart resume", () => {
 		});
 		const waitForIdleSpy = vi.spyOn(harness.session.agent, "waitForIdle").mockReturnValue(idlePromise);
 		const agentAbortSpy = vi.spyOn(harness.session.agent, "abort");
-		const internals = harness.session as unknown as { _goalAbortInProgress: boolean };
+		const internals = harness.session as unknown as { _goalContinuation: { abortInProgress: boolean } };
 
 		harness.session.abortForUpdateRestart();
 
 		expect(agentAbortSpy).toHaveBeenCalledOnce();
-		expect(internals._goalAbortInProgress).toBe(true);
+		expect(internals._goalContinuation.abortInProgress).toBe(true);
 
 		releaseIdle?.();
-		await waitForCondition(() => !internals._goalAbortInProgress);
+		await waitForCondition(() => !internals._goalContinuation.abortInProgress);
 
-		expect(internals._goalAbortInProgress).toBe(false);
+		expect(internals._goalContinuation.abortInProgress).toBe(false);
 		waitForIdleSpy.mockRestore();
 		agentAbortSpy.mockRestore();
 	});

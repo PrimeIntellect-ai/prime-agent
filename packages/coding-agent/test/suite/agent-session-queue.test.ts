@@ -69,7 +69,7 @@ type AutoRefineInternals = {
 
 type SteeringStopInternals = {
 	_steeringStopPending: boolean;
-	_clearQueuedGoalContexts(): void;
+	_goalContinuation: { clearQueuedGoalContexts(): void };
 };
 
 function emptyRefinementResult(): RefinementResult {
@@ -1502,7 +1502,7 @@ describe("AgentSession queue characterization", () => {
 		pause.release();
 		await hook.reached;
 
-		(harness.session as unknown as SteeringStopInternals)._clearQueuedGoalContexts();
+		(harness.session as unknown as SteeringStopInternals)._goalContinuation.clearQueuedGoalContexts();
 		hook.release();
 		await harness.session.waitForIdle();
 
@@ -3014,12 +3014,12 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		const initialEvent = createDeferred();
 		const chainedOperation = createDeferred();
-		const internals = harness.session as unknown as { _agentEventQueue: Promise<void> };
+		const internals = harness.session as unknown as { _events: { queue: Promise<void> } };
 		let eventQueue: Promise<void>;
 		eventQueue = initialEvent.promise.then(() => {
-			internals._agentEventQueue = eventQueue.then(() => chainedOperation.promise);
+			internals._events.queue = eventQueue.then(() => chainedOperation.promise);
 		});
-		internals._agentEventQueue = eventQueue;
+		internals._events.queue = eventQueue;
 		let idle = false;
 		const waiting = harness.session.waitForIdle().then(() => {
 			idle = true;

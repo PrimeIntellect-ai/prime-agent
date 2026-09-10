@@ -40,10 +40,10 @@ describe("issue #4435 auth error login guidance", () => {
 		});
 		const event = { type: "agent_end", messages: [message] } as AgentEvent;
 		const session = harness.session as unknown as {
-			_addLoginGuidanceToAuthError(event: AgentEvent): void;
+			_events: { addLoginGuidanceToAuthError(event: AgentEvent): void };
 		};
 
-		session._addLoginGuidanceToAuthError(event);
+		session._events.addLoginGuidanceToAuthError(event);
 
 		expect(message.errorMessage).toContain("Run /login to update credentials.");
 	});

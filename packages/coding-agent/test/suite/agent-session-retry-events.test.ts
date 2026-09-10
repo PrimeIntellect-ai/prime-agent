@@ -60,7 +60,7 @@ type SessionRetryCompactionInternals = {
 	_compaction: SessionCompaction;
 	_performCompaction(options: CompactionExecutionOptions): Promise<CompactionResult>;
 	_continuation: SessionContinuation;
-	_processAgentEvent: (event: AgentEvent) => Promise<void>;
+	_events: { processAgentEvent(event: AgentEvent): Promise<void> };
 	_checkCompaction: (message: AssistantMessage) => Promise<boolean>;
 	_schedulePostCompactionContinue: () => void;
 	_cancelPostCompactionContinue: () => void;
@@ -417,7 +417,7 @@ describe("AgentSession retry and event characterization", () => {
 		internals._checkCompaction = async () => true;
 
 		try {
-			await internals._processAgentEvent({ type: "agent_end", messages: [overflowMessage] } as AgentEvent);
+			await internals._events.processAgentEvent({ type: "agent_end", messages: [overflowMessage] } as AgentEvent);
 
 			expect(harness.session.retryAttempt).toBe(1);
 			expect(harness.session.isRetrying).toBe(true);

@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
+import { createPreparedTurnAction } from "../../src/session/prepared-actions.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 
 type SerializedInternals = {
@@ -58,21 +59,18 @@ type SerializedInternals = {
 		newMessages: unknown[];
 	}): Promise<boolean>;
 
-	_createPreparedTurnAction(
-		schedule: "steer",
-		text: string,
-		images: undefined,
-		options: Record<string, never>,
-	): unknown;
 	_admitSessionInput(action: unknown, options?: { wake?: boolean }): { accepted: boolean };
 
 	_disposing: boolean;
 	_disposed: boolean;
 
 	_checkCompaction(message: unknown): Promise<boolean>;
-	_lastAssistantMessage: unknown;
-	_handleAgentEvent(event: { type: string; messages?: unknown[] }): void;
-	_agentEventQueue: Promise<void>;
+	_events: {
+		lastAssistant: unknown;
+		handleAgentEvent(event: { type: string; messages?: unknown[] }): void;
+		queue: Promise<void>;
+	};
+	_turnPolicy: { shouldStopForThresholdCompaction(ctx: unknown): Promise<boolean> };
 
 	requestAbort(): void;
 	abortCompaction(): void;
@@ -334,12 +332,9 @@ describe("Serialized agent-callable refine", () => {
 		const internals = harness.session as unknown as SerializedInternals;
 		const { applyRefine } = mockSerializedRefine(harness);
 		internals._refinement._pendingRequestedRefine = { instructions: "capture a lesson" };
-		internals._admitSessionInput(internals._createPreparedTurnAction("steer", "steer", undefined, {}));
+		internals._admitSessionInput(createPreparedTurnAction("steer", "steer", undefined, {}));
 		const compactionSpy = vi
-			.spyOn(
-				internals as unknown as { _shouldStopForThresholdCompaction: (ctx: unknown) => Promise<boolean> },
-				"_shouldStopForThresholdCompaction",
-			)
+			.spyOn(internals._turnPolicy, "shouldStopForThresholdCompaction")
 			.mockResolvedValue(false);
 
 		const shouldStop = await internals._shouldStopAfterTurn(makeCtx("turn"));
@@ -820,10 +815,10 @@ describe("Serialized refine review-fix regressions", () => {
 		const refine = vi.spyOn(internals._refinement, "refine").mockResolvedValue(emptyRefinementResult());
 		const schedule = vi.spyOn(internals._refinement._auto, "_scheduleAutoRefineAfterAgentEnd");
 		const assistant = fauxAssistantMessage("done");
-		internals._lastAssistantMessage = assistant;
+		internals._events.lastAssistant = assistant;
 
-		internals._handleAgentEvent({ type: "agent_end", messages: [assistant] });
-		await internals._agentEventQueue;
+		internals._events.handleAgentEvent({ type: "agent_end", messages: [assistant] });
+		await internals._events.queue;
 		await vi.waitFor(() => expect(refine).toHaveBeenCalledOnce());
 
 		expect(schedule).not.toHaveBeenCalled();
@@ -866,7 +861,7 @@ describe("Serialized refine review-fix regressions", () => {
 		// Now simulate the actual agent_end event path.
 		// Set _lastAssistantMessage so agent_end has a non-error assistant to process.
 		const fauxAssistant = fauxAssistantMessage("done");
-		internals._lastAssistantMessage = fauxAssistant;
+		internals._events.lastAssistant = fauxAssistant;
 
 		// Spy on _scheduleAutoRefineAfterAgentEnd — it should NOT be called in serialized mode.
 		const scheduleSpy = vi.spyOn(internals._refinement._auto, "_scheduleAutoRefineAfterAgentEnd");
@@ -874,8 +869,8 @@ describe("Serialized refine review-fix regressions", () => {
 		vi.spyOn(internals, "_checkCompaction").mockResolvedValue(false);
 
 		// Drive the real agent_end event through _handleAgentEvent → _processAgentEvent.
-		internals._handleAgentEvent({ type: "agent_end", messages: [fauxAssistant] });
-		await internals._agentEventQueue;
+		internals._events.handleAgentEvent({ type: "agent_end", messages: [fauxAssistant] });
+		await internals._events.queue;
 		// Flush any setTimeout(0) that _scheduleAutoRefine would have used.
 		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 
@@ -1313,7 +1308,7 @@ describe("Serialized refine review-fix regressions", () => {
 		await vi.waitFor(() => expect(waitForIdle).toHaveBeenCalledOnce());
 
 		let releaseEventQueue: () => void = () => {};
-		internals._agentEventQueue = new Promise<void>((resolve) => {
+		internals._events.queue = new Promise<void>((resolve) => {
 			releaseEventQueue = resolve;
 		});
 		let releaseCompaction: () => void = () => {};
@@ -1681,7 +1676,7 @@ describe("Serialized refine event-ordering integration", () => {
 
 	it("real message_end/turn_end ordering: threshold planning starts and applies before next model turn", async () => {
 		// This test uses real agent.prompt() with faux responses to verify
-		// that _shouldStopAfterTurn's await this._agentEventQueue ensures
+		// that _shouldStopAfterTurn's await this._events.queue ensures
 		// the message_end counter increment and background plan kickoff
 		// happen BEFORE the serialized checkpoint runs.
 		const reviewer = vi.fn(async () => ({
@@ -1765,7 +1760,7 @@ describe("P0 concurrency regressions", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SerializedInternals;
-		internals._admitSessionInput(internals._createPreparedTurnAction("steer", "steer", undefined, {}));
+		internals._admitSessionInput(createPreparedTurnAction("steer", "steer", undefined, {}));
 
 		let planResolved = false;
 		let applyFinished = false;
@@ -1785,10 +1780,7 @@ describe("P0 concurrency regressions", () => {
 		// Spy on _shouldStopForThresholdCompaction: assert apply finished
 		// when compaction check runs, return true to simulate compaction firing.
 		const compactionSpy = vi
-			.spyOn(
-				internals as unknown as { _shouldStopForThresholdCompaction: (ctx: unknown) => Promise<boolean> },
-				"_shouldStopForThresholdCompaction",
-			)
+			.spyOn(internals._turnPolicy, "shouldStopForThresholdCompaction")
 			.mockImplementation(async () => {
 				expect(applyFinished).toBe(true);
 				return true;
@@ -2128,9 +2120,9 @@ describe("P0 concurrency regressions", () => {
 		// Simulate an aborted assistant message arriving at agent_end.
 		// Do NOT mock _checkCompaction — the real aborted path must clear the pending refine.
 		const abortedAssistant = fauxAssistantMessage("aborted turn", { stopReason: "aborted" });
-		internals._lastAssistantMessage = abortedAssistant;
-		internals._handleAgentEvent({ type: "agent_end", messages: [abortedAssistant] });
-		await internals._agentEventQueue;
+		internals._events.lastAssistant = abortedAssistant;
+		internals._events.handleAgentEvent({ type: "agent_end", messages: [abortedAssistant] });
+		await internals._events.queue;
 		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 
 		// _checkCompaction's aborted block cleared _pendingRequestedRefine.
@@ -2164,9 +2156,9 @@ describe("P0 concurrency regressions", () => {
 		const toolUseAssistant = fauxAssistantMessage([fauxToolCall("ipython", { code: "await refine.run()" })], {
 			stopReason: "toolUse",
 		});
-		internals._lastAssistantMessage = toolUseAssistant;
-		internals._handleAgentEvent({ type: "agent_end", messages: [toolUseAssistant] });
-		await internals._agentEventQueue;
+		internals._events.lastAssistant = toolUseAssistant;
+		internals._events.handleAgentEvent({ type: "agent_end", messages: [toolUseAssistant] });
+		await internals._events.queue;
 		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 
 		expect(refineSpy).not.toHaveBeenCalled();
@@ -2437,9 +2429,9 @@ describe("P0 concurrency regressions", () => {
 		// Simulate an aborted assistant message arriving at agent_end.
 		// Do NOT mock _checkCompaction — the real aborted path must clear the pending refine.
 		const abortedAssistant = fauxAssistantMessage("aborted turn", { stopReason: "aborted" });
-		internals._lastAssistantMessage = abortedAssistant;
-		internals._handleAgentEvent({ type: "agent_end", messages: [abortedAssistant] });
-		await internals._agentEventQueue;
+		internals._events.lastAssistant = abortedAssistant;
+		internals._events.handleAgentEvent({ type: "agent_end", messages: [abortedAssistant] });
+		await internals._events.queue;
 		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 
 		// _checkCompaction's aborted block cleared _pendingRequestedRefine.
@@ -2690,7 +2682,7 @@ describe("P0 concurrency regressions", () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SerializedInternals & {
-			_goalAbortInProgress: boolean;
+			_goalContinuation: { abortInProgress: boolean };
 			_cancelActiveRlmChildRuns: () => void;
 		};
 
@@ -2706,6 +2698,6 @@ describe("P0 concurrency regressions", () => {
 
 		expect(requestAbort).not.toHaveBeenCalled();
 		expect(cancelChildRuns).not.toHaveBeenCalled();
-		expect(internals._goalAbortInProgress).toBe(false);
+		expect(internals._goalContinuation.abortInProgress).toBe(false);
 	});
 });
