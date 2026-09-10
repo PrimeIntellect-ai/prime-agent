@@ -16,6 +16,12 @@ import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-erro
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
 import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
+import {
+	type BackgroundShellHandle,
+	formatShellCompletionTime,
+	type ShellCompletion,
+	shellCompletionText,
+} from "./shell-completion.js";
 
 export interface IPythonCellContentBlock {
 	type: string;
@@ -26,6 +32,8 @@ export interface IPythonCellContentBlock {
 
 export interface IPythonCellState {
 	code: string;
+	backgroundShell?: BackgroundShellHandle;
+	shellCompletion?: ShellCompletion;
 	content?: readonly IPythonCellContentBlock[];
 	details?: unknown;
 	isPartial?: boolean;
@@ -385,6 +393,19 @@ export class IPythonCellComponent implements Component {
 		}
 
 		this.renderOutput(lines, safeWidth, details, hasCode);
+		if (this.state.shellCompletion) {
+			this.addBlank(lines, safeWidth);
+			this.addWrapped(
+				lines,
+				OUTPUT_INDENT,
+				theme.fg(
+					"dim",
+					`Shell completion · ${formatShellCompletionTime(this.state.shellCompletion.message.timestamp)}`,
+				),
+				safeWidth,
+			);
+			this.renderOutputText(lines, safeWidth, shellCompletionText(this.state.shellCompletion), "out");
+		}
 		return this.renderCache.set(safeWidth, cacheVersion, lines);
 	}
 
@@ -410,7 +431,7 @@ export class IPythonCellComponent implements Component {
 
 		const duration = formatDuration(details.durationMs);
 		if (duration) {
-			parts.push(theme.fg("dim", duration));
+			parts.push(theme.fg("dim", this.state.backgroundShell ? `cell ${duration}` : duration));
 		}
 
 		const errorName = !this.state.isPartial ? (details.error?.ename ?? details.errorEname) : undefined;
@@ -418,9 +439,8 @@ export class IPythonCellComponent implements Component {
 			parts.push(theme.fg("error", errorName));
 		}
 
-		if (this.state.showExpandHint !== false) {
-			parts.push(expandCollapseHint("app.tools.expand", this.state.expanded === true));
-		}
+		const shellExit = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell?.exitCode;
+		if (shellExit !== undefined && shellExit !== 0) parts.push(theme.fg("error", `exit ${shellExit}`));
 		return parts.join(theme.fg("dim", " · "));
 	}
 
@@ -470,6 +490,10 @@ export class IPythonCellComponent implements Component {
 
 	private statusKind(details: IpythonDetails): "error" | "aborted" | "running" | "queued" | "done" {
 		const status = details.status;
+		if (this.state.backgroundShell && !this.state.isPartial) {
+			const exitCode = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell.exitCode;
+			return exitCode === undefined ? "running" : exitCode === 0 ? "done" : "error";
+		}
 		if (this.state.isError || status === "error") {
 			return "error";
 		}
@@ -699,7 +723,7 @@ export class IPythonCellComponent implements Component {
 		showHint: boolean,
 	): void {
 		const language = getLanguageFromPath(path);
-		// Diff rows align with the summary line's text column (after the `╰─ ` gutter).
+		// The outer inset matches ordinary chat text; renderer gutters stay intact.
 		const indent = FILE_CHANGE_DIFF_INDENT.slice(0, Math.max(0, width - 1));
 		const contentWidth = Math.max(1, width - indent.length);
 		let added = 0;
@@ -722,9 +746,6 @@ export class IPythonCellComponent implements Component {
 			}
 		});
 
-		// Unlike the ctrl+o hint (latest tool row only), the ctrl+j hint renders on
-		// every tool row, matching the thinking and agent-message hints. Within a
-		// row it renders once, on the last file's summary line (showHint).
 		const hint = showHint ? this.state.editDiffsExpanded === true : undefined;
 		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, hint, width));
 

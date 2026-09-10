@@ -11,6 +11,7 @@ import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
+import { type BackgroundShellHandle, readBackgroundShellHandle, type ShellCompletion } from "./shell-completion.js";
 import { ToolPanel } from "./tool-panel.js";
 
 export interface ToolExecutionOptions {
@@ -98,6 +99,8 @@ export class ToolExecutionComponent extends Container {
 		details?: any;
 	};
 	private hideComponent = false;
+	private shellCompletion?: ShellCompletion;
+	private readonly resultListeners = new Set<() => void>();
 
 	constructor(
 		toolName: string,
@@ -259,6 +262,35 @@ export class ToolExecutionComponent extends Container {
 		this.result = sentAgentMessages.length > 0 ? { ...result, details: { ...details, sentAgentMessages } } : result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
+		for (const listener of this.resultListeners) listener();
+	}
+
+	getBackgroundShellHandle(): BackgroundShellHandle | undefined {
+		return this.shouldUseIpythonRenderer() && !this.isPartial && !this.result?.isError
+			? readBackgroundShellHandle(getIpythonCodeFromArgs(this.args), this.result?.details)
+			: undefined;
+	}
+
+	hasRunningBackgroundShell(): boolean {
+		const handle = this.getBackgroundShellHandle();
+		return handle !== undefined && handle.exitCode === undefined && this.shellCompletion === undefined;
+	}
+
+	onResultUpdate(listener: () => void): () => void {
+		this.resultListeners.add(listener);
+		return () => this.resultListeners.delete(listener);
+	}
+
+	isResultPending(): boolean {
+		return this.isPartial;
+	}
+
+	attachShellCompletion(completion: ShellCompletion): boolean {
+		if (this.shellCompletion) return false;
+		this.shellCompletion = completion;
+		this.updateDisplay();
+		this.ui.requestRender();
+		return true;
 	}
 
 	appendSentAgentMessage(message: KernelSentAgentMessage): void {
@@ -351,6 +383,8 @@ export class ToolExecutionComponent extends Container {
 			if (this.shouldUseIpythonRenderer()) {
 				const state = {
 					code: getIpythonCodeFromArgs(this.args),
+					backgroundShell: this.getBackgroundShellHandle(),
+					shellCompletion: this.shellCompletion,
 					content: this.result?.content,
 					details: this.result?.details,
 					isPartial: this.isPartial,

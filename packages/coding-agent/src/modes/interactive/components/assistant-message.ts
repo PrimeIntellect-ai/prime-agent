@@ -10,7 +10,6 @@ import {
 	shouldCollapseErrorDetails,
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
 import type { MermaidMarkdownTransform } from "./mermaid.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -262,16 +261,11 @@ export class AssistantMessageComponent extends Container {
 				// Hidden thinking renders nothing at all; the working loader in the
 				// tray is the activity signal while the rows are hidden.
 				if (!this.hideThinkingBlock) {
-					// Show the label and detail-cycle hint above the quiet trace.
 					// Add spacing only when another visible assistant content block follows.
 					const hasVisibleContentAfter = message.content
 						.slice(i + 1)
 						.some((c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()));
 
-					const thinkingLabel = theme.fg("thinkingText", this.hiddenThinkingLabel);
-					this.contentContainer.addChild(
-						new Text(`${thinkingLabel} ${expandCollapseHint("app.tools.expand", this.expanded)}`, 1, 0),
-					);
 					const markdown = new Markdown(
 						content.thinking.trim(),
 						1,

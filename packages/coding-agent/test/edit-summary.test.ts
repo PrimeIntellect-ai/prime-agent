@@ -150,5 +150,8 @@ describe("formatFileChangeSummaryLine", () => {
 		const collapsed = formatFileChangeSummaryLine(path, undefined, change, false, width);
 		expect(stripAnsi(expanded)).toContain("…");
 		expect(pathPart(expanded)).toBe(pathPart(collapsed));
+		expect(stripAnsi(expanded)).toMatch(/\+3 -1$/);
+		expect(stripAnsi(collapsed)).toMatch(/\+3 -1$/);
+		expect(stripAnsi(expanded)).not.toContain("Ctrl+O");
 	});
 });

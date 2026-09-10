@@ -193,7 +193,7 @@ import {
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
 import { ConfigurationMenuComponent, type ConfigurationMenuTab } from "./components/configuration-menu.js";
 import { formatContextTree } from "./components/context-tree-format.js";
-import { isCompactAgentMessageNeighbor } from "./components/conversation-components.js";
+import { createShellCompletionComponent, isCompactAgentMessageNeighbor } from "./components/conversation-components.js";
 import { CountdownTimer } from "./components/countdown-timer.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { CustomMessageComponent } from "./components/custom-message.js";
@@ -3403,7 +3403,11 @@ export class InteractiveMode {
 	}
 
 	private updateWorkingPulse(): void {
-		const active = this.isAgentStreaming();
+		const active =
+			this.isAgentStreaming() ||
+			this.chatContainer.children.some(
+				(component) => component instanceof ToolExecutionComponent && component.hasRunningBackgroundShell(),
+			);
 		if (!active) {
 			this.stopWorkingPulse();
 			return;
@@ -3415,6 +3419,7 @@ export class InteractiveMode {
 	}
 
 	private tickWorkingPulse(): void {
+		this.updateWorkingPulse();
 		this.pulseFrame += 1;
 		setWorkingPulseFrame(this.pulseFrame);
 		this.ui.requestRender();
@@ -6367,6 +6372,8 @@ export class InteractiveMode {
 				suppressLeadingSpace: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
 			});
 		}
+		const shellCompletion = createShellCompletionComponent(message, this.chatContainer.children);
+		if (shellCompletion) return shellCompletion;
 		if (isInjectedPromptMessage(message)) {
 			return new InjectedPromptMessageComponent(message, this.getMarkdownThemeWithSettings());
 		}
@@ -6650,6 +6657,7 @@ export class InteractiveMode {
 			}
 		}
 
+		this.updateWorkingPulse();
 		for (const [toolCallId, component] of renderedPendingTools) {
 			component.setIncludeImageDimensions(true);
 			this.pendingTools.set(toolCallId, component);

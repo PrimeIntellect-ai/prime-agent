@@ -2,7 +2,9 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Component, MarkdownTheme, TUI } from "@earendil-works/pi-tui";
 import { isAgentSessionMessage } from "../../../core/agent-messages.js";
 import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	type CustomMessage,
 	isCompactionOutcomeMessage,
 	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
@@ -24,6 +26,7 @@ import {
 	MalformedRefinementOutcomeMessageComponent,
 	RefinementOutcomeMessageComponent,
 } from "./refinement-outcome-message.js";
+import { readShellCompletion, ShellCompletionComponent } from "./shell-completion.js";
 import { SlashCommandMessageComponent } from "./slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./slash-command-result-message.js";
 import {
@@ -67,6 +70,32 @@ function readUserText(content: string | Array<{ type: string; text?: string }>):
 		)
 		.map((block) => block.text)
 		.join("");
+}
+
+export function createShellCompletionComponent(
+	message: CustomMessage,
+	previous: readonly Component[],
+): ShellCompletionComponent | undefined {
+	if (message.customType !== ASYNC_BASH_COMPLETION_CUSTOM_TYPE) return undefined;
+	const component = new ShellCompletionComponent(message);
+	const completion = readShellCompletion(message);
+	if (!completion) return component;
+	const tools = previous.filter((entry): entry is ToolExecutionComponent => entry instanceof ToolExecutionComponent);
+	const cleanups: (() => void)[] = [];
+	const attach = () => {
+		// A completion can arrive before its creating cell's final tool result.
+		if (tools.some((tool) => tool.isResultPending())) return;
+		for (const cleanup of cleanups) cleanup();
+		const matches = tools.filter((tool) => {
+			const handle = tool.getBackgroundShellHandle();
+			return handle?.pid === completion.details.pid && handle.command === completion.details.command;
+		});
+		if (matches.length !== 1) return;
+		if (matches[0]!.attachShellCompletion(completion)) component.setAttached();
+	};
+	for (const tool of tools) if (tool.isResultPending()) cleanups.push(tool.onResultUpdate(attach));
+	attach();
+	return component;
 }
 
 /** Build conversation components from a message list, matching tool results to their calls. */
@@ -163,7 +192,9 @@ export function buildConversationComponents(
 			component.setExpanded(agentMessagesExpanded);
 			components.push(component);
 		} else if (isInjectedPromptMessage(message) && message.display) {
-			const component = new InjectedPromptMessageComponent(message, options.markdownTheme);
+			const component =
+				createShellCompletionComponent(message, components) ??
+				new InjectedPromptMessageComponent(message, options.markdownTheme);
 			component.setExpanded(expanded);
 			components.push(component);
 		} else if (message.role === "user") {

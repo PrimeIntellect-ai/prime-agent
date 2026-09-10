@@ -1,7 +1,31 @@
-import { describe, expect, it } from "vitest";
-import { formatKeyText } from "../src/modes/interactive/components/keybinding-hints.js";
+import { setKeybindings } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
+import { beforeEach, describe, expect, it } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.js";
+import { expandCollapseHint, formatKeyText } from "../src/modes/interactive/components/keybinding-hints.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("keybinding hint formatting", () => {
+	beforeEach(() => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+	});
+
+	it("leaves conversation detail hints to the prompt for both expansion states", () => {
+		for (const expanded of [false, true]) {
+			expect(expandCollapseHint("app.tools.expand", expanded)).toBe("");
+		}
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": "ctrl+e" }));
+		expect(expandCollapseHint("app.tools.expand", false)).toBe("");
+	});
+
+	it("preserves configurable message expansion hints", () => {
+		expect(stripAnsi(expandCollapseHint("app.messages.expand", false))).toBe("(Ctrl+P to expand)");
+		expect(stripAnsi(expandCollapseHint("app.messages.expand", true))).toBe("(Ctrl+P to collapse)");
+		setKeybindings(new KeybindingsManager({ "app.messages.expand": "ctrl+e" }));
+		expect(stripAnsi(expandCollapseHint("app.messages.expand", false))).toBe("(Ctrl+E to expand)");
+	});
+
 	it("uses macOS modifier names on darwin but keeps Ctrl literal", () => {
 		expect(formatKeyText("ctrl+p", "darwin")).toBe("Ctrl+P");
 		expect(formatKeyText("alt+enter", "darwin")).toBe("Option+Enter");

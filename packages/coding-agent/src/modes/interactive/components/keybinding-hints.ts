@@ -66,9 +66,10 @@ export function keyHint(keybinding: Keybinding, description: string, options: Ke
 	return theme.fg("dim", keyText(keybinding, options)) + theme.fg("muted", ` ${description}`);
 }
 
-/** Conversation detail cycles in three stages; other controls toggle expansion. */
+/** Conversation detail has one hint near the prompt; other controls keep inline hints. */
 export function expandCollapseHint(keybinding: Keybinding, expanded: boolean): string {
-	const action = keybinding === "app.tools.expand" ? "cycle detail" : expanded ? "to collapse" : "to expand";
+	if (keybinding === "app.tools.expand") return "";
+	const action = expanded ? "to collapse" : "to expand";
 	return theme.fg("dim", `(${keyText(keybinding)} ${action})`);
 }
 

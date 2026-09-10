@@ -8,7 +8,7 @@ import {
 } from "../../../core/tools/truncate.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
-import { expandCollapseHint, keyText } from "./keybinding-hints.js";
+import { keyText } from "./keybinding-hints.js";
 import { truncateToVisualLines } from "./visual-truncate.js";
 
 const PREVIEW_LINES = 20;
@@ -162,14 +162,8 @@ export class BashExecutionComponent extends Container {
 		} else {
 			const statusParts: string[] = [];
 
-			if (hiddenLineCount > 0) {
-				if (this.expanded) {
-					statusParts.push(expandCollapseHint("app.tools.expand", true));
-				} else {
-					statusParts.push(
-						`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} ${expandCollapseHint("app.tools.expand", false)}`,
-					);
-				}
+			if (hiddenLineCount > 0 && !this.expanded) {
+				statusParts.push(theme.fg("muted", `... ${hiddenLineCount} more lines`));
 			}
 
 			if (this.status === "cancelled") {
