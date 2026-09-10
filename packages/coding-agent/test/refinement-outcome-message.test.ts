@@ -11,6 +11,7 @@ import {
 import type { HarnessEntry, RefinementResult } from "../src/core/refinement/refinement.js";
 import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
 import { RefinementOutcomeMessageComponent } from "../src/modes/interactive/components/refinement-outcome-message.js";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 function entry(overrides: Partial<HarnessEntry> = {}): HarnessEntry {
@@ -85,15 +86,14 @@ describe("RefinementOutcomeMessageComponent", () => {
 
 	afterAll(() => vi.unstubAllEnvs());
 
-	test("shows a spaced accent harness header before its semantic summary", () => {
+	test("shows only the purple harness status in overview, then a softer summary and full diffs", () => {
 		const message = createRefinementOutcomeMessage(result());
 		const component = new RefinementOutcomeMessageComponent(message);
 
 		const collapsed = rendered(component);
 		const content = collapsed.split("\n").filter((line) => line.trim());
-		expect(content[0]?.trimEnd()).toBe(" ◆ Harness refined · 1 prompt created");
-		expect(content[1]).toBe(" Added local guidance to make conversational responses rhyme.");
-		expect(component.render(120)[1]).toContain(theme.fg("accent", "◆ Harness refined · 1 prompt created"));
+		expect(content.map((line) => line.trimEnd())).toEqual([" ◆ Harness refined"]);
+		expect(component.render(120)[1]).toContain(theme.fg("customMessageLabel", "◆ Harness refined"));
 		expect(collapsed.split("\n")[0].trim()).toBe("");
 		expect(collapsed.split("\n").at(-1)?.trim()).toBe("");
 		expect(collapsed).not.toContain("Ctrl+O");
@@ -104,6 +104,16 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(collapsed).not.toContain("Rhyme response guidance");
 		expect(collapsed).not.toContain("prompts/rhyme-response-guidance.md");
 		expect(collapsed).not.toContain('"content"');
+
+		component.setEditDiffsExpanded(true);
+		const details = rendered(component);
+		expect(details).toContain("Added local guidance to make conversational responses rhyme.");
+		expect(component.render(120).join("\n")).toContain(
+			theme.fg("mdHeading", " Added local guidance to make conversational responses rhyme."),
+		);
+		expect(details).not.toContain("rhyme-response-guidance");
+		expect(details).not.toContain(" Description");
+		expect(details).not.toContain("1 prompt created");
 
 		component.setExpanded(true);
 		const expanded = rendered(component);
@@ -123,6 +133,8 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(expanded).not.toContain("+1 {");
 
 		component.setExpanded(false);
+		expect(rendered(component)).toBe(details);
+		component.setEditDiffsExpanded(false);
 		expect(rendered(component)).toBe(collapsed);
 	});
 
@@ -132,10 +144,11 @@ describe("RefinementOutcomeMessageComponent", () => {
 			"Created local memory entries for the verifiers project context and running subagent tracking, plus a reusable subagent spec for parallel codebase exploration.";
 		const component = new RefinementOutcomeMessageComponent(createRefinementOutcomeMessage(long));
 
+		component.setEditDiffsExpanded(true);
 		const lines = component.render(80).map((line) => stripAnsi(line));
 		const content = lines.filter((line) => line.trim().length > 0);
 		expect(content).toHaveLength(3);
-		expect(content[0]).toContain("Harness refined · 1 prompt created");
+		expect(content[0].trim()).toBe("◆ Harness refined");
 		expect(content[1]).toContain("Created local memory entries for the verifiers project context");
 		expect(content[2]).toContain("…");
 		expectChatInset(lines);
@@ -274,8 +287,9 @@ describe("RefinementOutcomeMessageComponent", () => {
 		});
 		const original = JSON.stringify(message);
 		const component = new RefinementOutcomeMessageComponent(message);
-		expect(rendered(component)).toContain("◆ Harness refined · 1 memory updated");
+		expect(rendered(component).trim()).toBe("◆ Harness refined");
 		component.setExpanded(true);
+		expect(rendered(component)).toContain("1 memory updated");
 		const rows = component.render(80);
 		const output = rows.map(stripAnsi).join("\n");
 		expect(output).toMatch(/ Title +\n/);
@@ -313,6 +327,8 @@ describe("RefinementOutcomeMessageComponent", () => {
 				}),
 			);
 			expect(rendered(component)).toContain(expected);
+			expect(rendered(component)).not.toContain("No summary was recorded");
+			component.setEditDiffsExpanded(true);
 			expect(rendered(component)).toContain("No summary was recorded");
 			component.setExpanded(true);
 			if (rollbackOf) expect(rendered(component)).toContain(`rollback of ${rollbackOf}`);
@@ -323,18 +339,37 @@ describe("RefinementOutcomeMessageComponent", () => {
 		}
 	});
 
-	test("replays the durable outcome with the saved tool expansion state", () => {
+	test("matches live and replay refinement stages without changing saved messages", () => {
 		const message = createRefinementOutcomeMessage(result());
-		const [component] = buildConversationComponents([message], {
-			ui: {} as TUI,
-			cwd: "/tmp",
-			toolOptions: {},
-			getToolDefinition: () => undefined,
-			toolsExpanded: true,
+		const original = JSON.stringify(message);
+		const live = new RefinementOutcomeMessageComponent(message);
+		const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+			chatContainer: { children: [live] },
+			ui: { isFullscreen: () => true, requestRender: vi.fn() },
 		});
-
-		expect(component).toBeInstanceOf(RefinementOutcomeMessageComponent);
-		expect(stripAnsi(component!.render(120).join("\n"))).toContain("+ Make conversational responses rhyme.");
+		for (const [toolsExpanded, editDiffsExpanded] of [
+			[false, false],
+			[false, true],
+			[true, true],
+			[false, false],
+		]) {
+			const [replay] = buildConversationComponents([message], {
+				ui: {} as TUI,
+				cwd: "/tmp",
+				toolOptions: {},
+				getToolDefinition: () => undefined,
+				toolsExpanded,
+				editDiffsExpanded,
+			});
+			Object.assign(mode, { toolOutputExpanded: toolsExpanded, editDiffsExpanded });
+			Reflect.get(InteractiveMode.prototype, "applyChatExpansion").call(mode);
+			expect(replay).toBeInstanceOf(RefinementOutcomeMessageComponent);
+			expect(live.render(120)).toEqual(replay!.render(120));
+			const output = rendered(live);
+			expect(output.includes(result().summary)).toBe(toolsExpanded || editDiffsExpanded);
+			expect(output.includes("+ Make conversational responses rhyme.")).toBe(toolsExpanded);
+		}
+		expect(JSON.stringify(message)).toBe(original);
 	});
 
 	test("uses a typed, presentation-only custom message", () => {

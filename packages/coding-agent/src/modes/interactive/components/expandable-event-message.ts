@@ -1,10 +1,11 @@
 import { type Component, Container, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { theme } from "../theme/theme.js";
+import { type ThemeColor, theme } from "../theme/theme.js";
 
 class EventSummary implements Component {
 	constructor(
 		private readonly summary: string,
 		private readonly expanded: boolean,
+		private readonly color: ThemeColor,
 	) {}
 
 	render(width: number): string[] {
@@ -17,7 +18,7 @@ class EventSummary implements Component {
 			lines.splice(2);
 			lines[1] = truncateToWidth(`${lines[1]} …`, contentWidth, "…");
 		}
-		return lines.map((line) => theme.fg("customMessageText", ` ${line}`));
+		return lines.map((line) => theme.fg(this.color, ` ${line}`));
 	}
 
 	invalidate(): void {}
@@ -38,8 +39,8 @@ export abstract class ExpandableEventMessage extends Container {
 		this.updateDisplay();
 	}
 
-	protected addSummary(summary: string, metadata?: string): void {
-		this.addChild(new EventSummary(summary, this.expanded));
+	protected addSummary(summary: string, metadata?: string, color: ThemeColor = "customMessageText"): void {
+		this.addChild(new EventSummary(summary, this.expanded, color));
 		if (metadata) this.addChild(new Text(theme.fg("dim", metadata), 1, 0));
 	}
 
