@@ -109,9 +109,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.authStorage = authStorage;
 		this.getAuthStatus = getAuthStatus ?? ((providerId) => this.authStorage.getAuthStatus(providerId));
 		this.viewport = options;
-		this.getHeaderRows = options.header
-			? (options.getHeaderRows ?? (() => TAB_BAR_RESERVED_ROWS))
-			: () => (this.inline ? 1 : 0);
+		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => TAB_BAR_RESERVED_ROWS)) : () => 0;
 		this.allProviders = this.sortProviders(providers);
 		this.filteredProviders = this.allProviders;
 		this.onSelectCallback = onSelect;

@@ -130,7 +130,7 @@ type ModelScope = "all" | "scoped";
 
 const PREFERRED_VISIBLE_MODELS = 10;
 const MODEL_LIST_RESERVED_ROWS = {
-	base: 7,
+	base: 4,
 	detail: 2,
 };
 const MODEL_SCROLL_INDICATOR_ROWS = 1;
@@ -225,11 +225,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.initialThinkingLevel = options.thinkingLevel;
 		this.recentRank = new Map((options.recentModels ?? []).map((key, i) => [key, i]));
 		this.viewport = { getRows: options.getRows };
-		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => 2)) : () => (this.inline ? 1 : 0);
+		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => 2)) : () => 0;
 
 		this.panel = new MenuPanel({
-			title: this.inline && options.header ? "" : "Models",
-			subtitle: options.subtitle ?? "All models across supported providers.",
+			title: "",
+			subtitle: options.subtitle,
 			inline: this.inline,
 		});
 		this.addChild(this.panel);
