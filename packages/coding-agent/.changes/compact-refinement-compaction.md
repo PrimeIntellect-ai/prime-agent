@@ -1,0 +1,1 @@
+- Changed refinement and compaction notices to show readable outcomes with muted metadata and expandable details in a compact layout.

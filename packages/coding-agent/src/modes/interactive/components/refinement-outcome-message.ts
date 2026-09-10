@@ -1,11 +1,10 @@
-import { type Component, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Spacer, Text } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
 import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { theme } from "../theme/theme.js";
 import { renderDiff } from "./diff.js";
-import { customMessageLabel, ExpandableCustomMessageBox } from "./expandable-custom-message.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
+import { ExpandableEventMessage } from "./expandable-event-message.js";
 
 function editableEntry(entry: HarnessEntry): Record<string, unknown> {
 	return {
@@ -60,24 +59,8 @@ function editCount(edits: AppliedRefinementEdit[]): string {
 		: `${applied}/${edits.length} edits applied`;
 }
 
-/** Width-aware collapsed line: truncates the summary so the line never wraps. */
-class CollapsedOutcomeLine implements Component {
-	constructor(
-		private readonly summary: string,
-		private readonly suffix: string,
-	) {}
-
-	render(width: number): string[] {
-		const room = Math.max(20, width - visibleWidth(this.suffix) - 1);
-		const line = `${theme.fg("customMessageText", truncateToWidth(this.summary, room, "…"))} ${this.suffix}`;
-		return [truncateToWidth(line, Math.max(1, width), "")];
-	}
-
-	invalidate(): void {}
-}
-
-/** Durable refinement outcome card: per-edit rows with before/after diffs when expanded. */
-export class RefinementOutcomeMessageComponent extends ExpandableCustomMessageBox {
+/** Durable refinement outcome with per-edit before/after diffs available on demand. */
+export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
 	constructor(private readonly message: RefinementOutcomeMessage) {
 		super();
 		this.updateDisplay();
@@ -87,15 +70,11 @@ export class RefinementOutcomeMessageComponent extends ExpandableCustomMessageBo
 		this.clear();
 
 		const { summary, edits, scope } = this.message.details;
-		this.addChild(new Text(customMessageLabel("refinement"), 0, 0));
 		this.addChild(new Spacer(1));
-		if (!this.expanded) {
-			const suffix = `${theme.fg("customMessageText", `· ${editCount(edits)}`)} ${expandCollapseHint("app.tools.expand", false)}`;
-			this.addChild(new CollapsedOutcomeLine(summary, suffix));
-			return;
-		}
+		this.addSummary(summary, `Refinement · ${editCount(edits)}`);
+		if (!this.expanded) return;
 
-		this.addChild(new Text(theme.fg("customMessageText", `${summary} · ${editCount(edits)}`), 0, 0));
+		this.addChild(new Spacer(1));
 		for (const edit of edits) {
 			this.addChild(new Text(`${theme.fg("dim", "  ╰─ ")}${editLabel(edit, scope)}`, 0, 0));
 			const diff = editDiff(edit);
@@ -104,7 +83,7 @@ export class RefinementOutcomeMessageComponent extends ExpandableCustomMessageBo
 	}
 }
 
-export class MalformedRefinementOutcomeMessageComponent extends ExpandableCustomMessageBox {
+export class MalformedRefinementOutcomeMessageComponent extends ExpandableEventMessage {
 	constructor() {
 		super();
 		this.updateDisplay();
@@ -112,6 +91,7 @@ export class MalformedRefinementOutcomeMessageComponent extends ExpandableCustom
 
 	protected updateDisplay(): void {
 		this.clear();
+		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("error", "[Malformed refinement outcome message]"), 0, 0));
 	}
 }

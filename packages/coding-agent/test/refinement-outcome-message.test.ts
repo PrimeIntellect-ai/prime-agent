@@ -74,12 +74,15 @@ describe("RefinementOutcomeMessageComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	test("collapses to a labeled one-liner and expands through the shared tool toggle", () => {
+	test("shows the outcome before quiet metadata and expands through the shared tool toggle", () => {
 		const message = createRefinementOutcomeMessage(result());
 		const component = new RefinementOutcomeMessageComponent(message);
 
 		const collapsed = rendered(component);
-		expect(collapsed).toContain("[refinement]");
+		const content = collapsed.split("\n").filter((line) => line.trim());
+		expect(content[0]).toBe("Added local guidance to make conversational responses rhyme.");
+		expect(content[1]).toContain("Refinement · 1 edit applied");
+		expect(collapsed).not.toContain("[refinement]");
 		expect(collapsed).toContain("Added local guidance to make conversational responses rhyme.");
 		expect(collapsed).toContain("1 edit applied");
 		expect(collapsed).toContain("Ctrl+O to expand");
@@ -91,9 +94,13 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(expanded).toContain("Created local prompt `rhyme-response-guidance`");
 		expect(expanded).toContain('"content": "Make conversational responses rhyme."');
 		expect(expanded).toContain('"path": "prompts/rhyme-response-guidance.md"');
+		expect(expanded).toContain("Ctrl+O to collapse");
+
+		component.setExpanded(false);
+		expect(rendered(component)).toBe(collapsed);
 	});
 
-	test("truncates the collapsed summary so the line never wraps", () => {
+	test("gives long outcomes two preview lines without sacrificing the edit count and details hint", () => {
 		const long = result();
 		long.summary =
 			"Created local memory entries for the verifiers project context and running subagent tracking, plus a reusable subagent spec for parallel codebase exploration.";
@@ -101,10 +108,11 @@ describe("RefinementOutcomeMessageComponent", () => {
 
 		const lines = component.render(80).map((line) => stripAnsi(line));
 		const content = lines.filter((line) => line.trim().length > 0);
-		expect(content).toHaveLength(2);
+		expect(content).toHaveLength(3);
+		expect(content[0]).toContain("Created local memory entries for the verifiers project context");
 		expect(content[1]).toContain("…");
-		expect(content[1]).toContain("1 edit applied");
-		expect(content[1]).toContain("Ctrl+O to expand");
+		expect(content[2]).toContain("1 edit applied");
+		expect(content[2]).toContain("Ctrl+O to expand");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		}
@@ -114,6 +122,9 @@ describe("RefinementOutcomeMessageComponent", () => {
 				expect(visibleWidth(stripAnsi(line))).toBeLessThanOrEqual(width);
 			}
 		}
+
+		component.setExpanded(true);
+		expect(rendered(component).replace(/\s+/g, " ")).toContain(long.summary);
 	});
 
 	test("renders exact before and after payloads for updates and deletes", () => {
