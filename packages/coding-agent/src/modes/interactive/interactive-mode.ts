@@ -458,7 +458,7 @@ export class BrandSplashHeader implements Component {
 
 	constructor(
 		private readonly version: string,
-		private readonly getCwd: () => string,
+		private readonly getCwd: () => string | undefined,
 		private readonly verboseInstructions?: string,
 		private readonly options: BrandSplashHeaderOptions = {},
 	) {
@@ -482,6 +482,7 @@ export class BrandSplashHeader implements Component {
 		const title = theme.fg("text", titleText);
 		const modelLabel = "model ";
 		const cwdLabel = "cwd ";
+		const cwd = this.getCwd();
 		const metaLines = [
 			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
 			...(this.options.getModelId
@@ -496,7 +497,11 @@ export class BrandSplashHeader implements Component {
 					]
 				: []),
 			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
-			`${theme.fg("dim", cwdLabel)}${theme.fg("muted", truncatePathMiddle(formatSplashCwd(this.getCwd()), Math.max(1, metaWidth - visibleWidth(cwdLabel))))}`,
+			...(cwd === undefined
+				? []
+				: [
+						`${theme.fg("dim", cwdLabel)}${theme.fg("muted", truncatePathMiddle(formatSplashCwd(cwd), Math.max(1, metaWidth - visibleWidth(cwdLabel))))}`,
+					]),
 		];
 		const lines = this.options.topPadding ? [""] : [];
 		const rowCount = Math.max(showLogo ? this.logoRaw.length : 0, metaLines.length);

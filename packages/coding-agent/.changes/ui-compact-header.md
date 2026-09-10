@@ -1,5 +1,3 @@
-- Replaced chat and agents splash logos with a compact solid butterfly beside runtime metadata, with a "prime agent" text heading in narrow terminals.
+- Replaced chat and agents splash logos with a compact solid butterfly beside centered runtime metadata, with a "prime agent" text heading in narrow terminals.
 - Removed duplicate prompt suggestions from chat and agents headers.
-- Centered runtime metadata vertically beside the compact butterfly and removed the header model line because session rows already show the model.
-- Ordered the centered header metadata so contextual lines like the agents count sit above the working directory, and labeled the working directory line with a dim `cwd` prefix and muted path matching the agents count styling.
-- Restored the model line in the chat splash header while keeping the agents-view splash without a model line.
+- Changed chat headers to show the model above the working directory, while agents headers show agent counts above their current context.

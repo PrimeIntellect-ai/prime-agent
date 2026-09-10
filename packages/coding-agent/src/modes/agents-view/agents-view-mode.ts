@@ -843,7 +843,11 @@ export class AgentsViewMode implements Component, Focusable {
 		this.splash = new BrandSplashHeader(VERSION, () => this.getSplashCwd(), undefined, {
 			topPadding: true,
 			getExtraMetadata: () => {
-				return [{ label: "agents", value: this.getAgentCountsText() }];
+				const root = this.scopeRootSummary;
+				return [
+					{ label: "agents", value: this.getAgentCountsText() },
+					...(root ? [{ label: "depth", value: String(getAgentsViewDepth(root)) }] : []),
+				];
 			},
 		});
 	}
@@ -2686,7 +2690,8 @@ export class AgentsViewMode implements Component, Focusable {
 		return Math.max(0, rows - dockHeight);
 	}
 
-	private getSplashCwd(): string {
+	private getSplashCwd(): string | undefined {
+		if (this.scopeRootSummary) return undefined;
 		return this.rows[this.selectedIndex]?.summary.cwd ?? this.options.uiServices.getInitialCwd();
 	}
 
