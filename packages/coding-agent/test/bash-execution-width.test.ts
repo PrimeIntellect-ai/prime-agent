@@ -1,7 +1,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 /** Minimal TUI stub that only exposes terminal.columns */
 function createTuiStub(columns: number): { columns: number; stub: any } {
@@ -86,5 +86,15 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 			.join("\n");
 		expect(rendered).toContain("failed: spawn failure");
 		expect(rendered).not.toContain("Running...");
+	});
+
+	it("renders the command header at normal weight with its color kept", () => {
+		const { stub } = createTuiStub(120);
+		const component = new BashExecutionComponent("npm test", stub);
+		component.setComplete(0, false);
+
+		const raw = component.render(120).join("\n");
+		expect(raw).toContain(theme.fg("bashMode", "$ npm test"));
+		expect(raw).not.toContain("[1m");
 	});
 });

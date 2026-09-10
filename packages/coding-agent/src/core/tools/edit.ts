@@ -203,7 +203,7 @@ function formatEditCall(
 	const rawPath = str(args?.file_path ?? args?.path);
 	const path = rawPath !== null ? shortenPath(rawPath) : null;
 	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
+	return `${theme.fg("toolTitle", "edit")} ${pathDisplay}`;
 }
 
 function formatEditResult(

@@ -9298,13 +9298,13 @@ export class InteractiveMode {
 		const stats = await this.agentConnection.getSessionStats();
 		const sessionName = this.getCurrentSessionName();
 
-		let info = `${theme.bold("Session Info")}\n\n`;
+		let info = `Session Info\n\n`;
 		if (sessionName) {
 			info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
 		}
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
-		info += `${theme.bold("Messages")}\n`;
+		info += `Messages\n`;
 		info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
 		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
 		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
@@ -9319,7 +9319,7 @@ export class InteractiveMode {
 
 	private handleLogsCommand(): void {
 		const logsDir = getLogsDir();
-		let info = `${theme.bold("Logs")}\n\n`;
+		let info = `Logs\n\n`;
 		info += `${theme.fg("dim", "Directory:")} ${logsDir}\n\n`;
 
 		let files: string[] = [];
@@ -9352,7 +9352,7 @@ export class InteractiveMode {
 
 	private async handleSystemPromptCommand(): Promise<void> {
 		const prompt = await this.agentConnection.getSystemPrompt();
-		const header = `${theme.bold("System Prompt")} ${theme.fg("dim", `(${prompt.length} chars)`)}`;
+		const header = `System Prompt ${theme.fg("dim", `(${prompt.length} chars)`)}`;
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(header, 1, 0));
@@ -9424,7 +9424,7 @@ export class InteractiveMode {
 
 	private formatTracePreview(result: Extract<AgentTracePreviewResult, { status: "ready" }>): string {
 		const lines = [
-			theme.bold("Trace Preview"),
+			"Trace Preview",
 			theme.fg("dim", "Nothing has been uploaded by this command."),
 			"",
 			`${theme.fg("dim", "File:")} ${result.sessionFile}`,
@@ -9443,7 +9443,7 @@ export class InteractiveMode {
 		if (result.gitCommit) {
 			lines.push(`${theme.fg("dim", "Git commit:")} ${result.gitCommit}`);
 		}
-		lines.push("", theme.bold("Raw JSONL payload preview"));
+		lines.push("", "Raw JSONL payload preview");
 		if (result.contentPreview) {
 			lines.push(result.contentPreview);
 			if (result.truncated) {
@@ -9485,7 +9485,7 @@ export class InteractiveMode {
 			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
 			const state = await this.agentConnection.getState();
 			const info = [
-				theme.bold("Trace Sharing"),
+				"Trace Sharing",
 				"",
 				`${theme.fg("dim", "Automatic uploads:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
 				`${theme.fg("dim", "Credential:")} ${credential?.label ?? "Not configured"}`,
@@ -9799,7 +9799,7 @@ export class InteractiveMode {
 		const next = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "-";
 		const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : "-";
 		const lines = [
-			theme.bold("Heartbeat"),
+			"Heartbeat",
 			"",
 			`${theme.fg("dim", "Status:")} ${job.status}`,
 			`${theme.fg("dim", "Every:")} ${job.schedule.expression}`,
@@ -9831,7 +9831,7 @@ export class InteractiveMode {
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("accent", "What's New"), 1, 0));
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
 		this.chatContainer.addChild(new DynamicBorder());
