@@ -1,3 +1,4 @@
 - Changed the agents view to hide abandoned empty saved sessions consistently during search, simplify model labels, and keep secondary metadata quiet.
-- Changed the agents list to separate the splash from search and column headings from populated status groups, and omit the global scope label.
+- Changed the agents list to separate the splash from search, bold the shared column headings, mute populated status groups, and omit the global scope label.
+
 - Added a clearer session details view with usage, contextual actions, keyboard browsing, and scrolling.

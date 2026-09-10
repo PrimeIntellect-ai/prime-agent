@@ -850,8 +850,12 @@ describe("AgentsViewMode", () => {
 			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
 			const lines = rendered.map(stripAnsi);
 			expect(lines.filter((line) => /Model/.test(line) && /Age/i.test(line))).toHaveLength(1);
+			expect(rendered[0]).toBe(
+				theme.bold(buildCompactAgentsViewLayout(Reflect.get(view, "rows") as AgentsViewRow[], 120).legend),
+			);
 			expect(lines[1]).toBe("");
 			expect(lines[2]).toBe("Running (1)");
+			expect(rendered[2]).toContain(theme.fg("muted", "Running (1)"));
 			expect(lines).toContain("Idle (1)");
 			expect(lines).not.toContain("Inactive (0)");
 			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
