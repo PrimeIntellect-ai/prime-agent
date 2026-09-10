@@ -2559,10 +2559,9 @@ export class AgentsViewMode implements Component, Focusable {
 			return markRow(formatTableCell(theme.fg("error", title), width));
 		}
 		const icon = this.formatRowIcon(row.section, this.getRowIcon(row.section));
-		const expand = row.descendantCount > 0 ? (this.expandedSubagentParents.has(row.identity) ? "▾ " : "▸ ") : " ";
 		const badge = formatHeartbeatBadge(row.heartbeat);
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
-		const title = `${"  ".repeat(row.depth)}${icon}${expand}${heartbeat}${styleRowTitle(row)}`;
+		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
 		const status =
 			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
 				? row.statusLabel

@@ -1196,7 +1196,9 @@ describe("AgentsViewMode", () => {
 			Reflect.set(view, "lastListedSummaries", [parent, child, secondChild]);
 			invoke("reconcileCatalogs", view);
 			expect(rows()).toHaveLength(1);
-			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▸");
+			const collapsedRow = invoke("renderRow", view, rows()[0], 120) as string;
+			expect(collapsedRow).not.toContain("▸");
+			expect(collapsedRow).not.toContain("▾");
 			const collapsed = lines();
 			const parentIndex = collapsed.findIndex((line) => line.includes("parent"));
 			expect(collapsed[parentIndex + 1]).toBe("  2 subagents running");
@@ -1205,7 +1207,9 @@ describe("AgentsViewMode", () => {
 			view.handleInput("\x1b[1;3C");
 			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent", "subagent"]);
 			expect(lines().join("\n")).not.toContain("subagents running");
-			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▾");
+			const expandedRow = invoke("renderRow", view, rows()[0], 120) as string;
+			expect(expandedRow).not.toContain("▸");
+			expect(expandedRow).not.toContain("▾");
 			view.handleInput("\x1b[1;3C");
 			expect(rows()).toHaveLength(1);
 			expect(lines()).toContain("  2 subagents running");
