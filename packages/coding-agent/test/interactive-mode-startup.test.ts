@@ -49,8 +49,8 @@ describe("InteractiveMode startup hints", () => {
 		expect(lines.length).toBeLessThanOrEqual(8);
 		expect(output).toContain("prime agent v0.0.0");
 		expect(output).toMatch(/[▗▙▛▜]/u);
-		expect(output).toContain("/tmp/project");
-		expect(stripAnsi(lines[5])).toContain("agents 2 running");
+		expect(stripAnsi(lines[4])).toContain("agents 2 running");
+		expect(stripAnsi(lines[5])).toContain("/tmp/project");
 		expect(output).not.toContain("Try ");
 		expect(output).not.toContain("type to search sessions");
 
