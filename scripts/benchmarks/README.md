@@ -98,9 +98,12 @@ The runtime rows show medians across the 10 independent trials. Batch iteration 
 sizes are fixed in `kernel.py`; failures and incomplete output remain failed samples. These are
 subsystem measurements alongside the normal installed CLI benchmarks, not end-to-end tool latency.
 
-The comment shows medians, signed absolute/percentage deltas, successful/attempted counts, and spread.
-`↓` means improvement, bold `↑` means regression, `≈` means no clear change, and `—` means unavailable
-or incomplete. Arrows require a change larger than the metric's absolute floor, relative floor,
+The comment has four columns: metric, main, PR, and signed change with the percentage in parentheses.
+A single summary counts regressions, improvements, metrics with no clear change, and incomplete or
+unavailable comparisons. Improvements are green with `↓`, regressions red with `↑`, and changes within
+the noise threshold remain neutral with `≈`. Colors use GitHub's native MathJax rendering; no external
+badge service is required. Successful/attempted counts and spread appear in the collapsed methodology.
+Arrows require a change larger than the metric's absolute floor, relative floor,
 and observed spread. The initial relative floor is 20% for timings and memory, 0.5% for artifact
 size, and 1% for disk footprint. A same-revision calibration on separate sandboxes showed roughly
 7–18% variation across several timings; the conservative floor avoids labeling that as a code regression.
@@ -109,8 +112,10 @@ raw trials before acting on small changes; sandbox scheduling and filesystem cac
 
 ## Lifecycle and costs
 
-The main workflow posts a single marked comment and updates it in place. The completion workflow
-publishes the final result or a cancellation/failure notice. Publishers serialize by PR and check the
+The main workflow posts a single marked comment and updates it in place. A new push replaces the
+previous table with a short running notice and a link to the latest run. The completion workflow
+fills that same comment with the latest results or a cancellation/failure notice. Previous results
+remain available in workflow artifacts. Publishers serialize by PR and check the
 current head, latest run ID, attempt, and existing comment generation before writing. A rerun of an
 older commit cannot overwrite a newer result, including when the newer run has the same head SHA.
 

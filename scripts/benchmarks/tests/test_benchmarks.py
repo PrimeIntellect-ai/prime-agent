@@ -115,32 +115,78 @@ class ReportTests(unittest.TestCase):
                     observations(*samples["pr"]),
                     len(samples["main"]),
                 )
-                self.assertEqual(result[-1], "no clear change")
+                self.assertEqual(result.outcome, "no clear change")
 
     def test_slower_and_faster_have_consistent_signs_and_arrows(self):
         baseline = observations(*([2.0] * 10))
         slower = comparison(METRICS[0], baseline, observations(*([2.5] * 10)), 10)
         faster = comparison(METRICS[0], baseline, observations(*([1.5] * 10)), 10)
-        self.assertEqual(slower[2:], ("**↑ +500.0 ms**", "+25.00%", "**slower**"))
-        self.assertEqual(faster[2:], ("↓ -500.0 ms", "-25.00%", "faster"))
+        self.assertEqual(slower.outcome, "regressed")
+        self.assertEqual(faster.outcome, "improved")
+        self.assertEqual(slower.change, r"$`\textcolor{#e5534b}{\textsf{↑ +500.0 ms (+25.00\%)}}`$")
+        self.assertEqual(faster.change, r"$`\textcolor{#2da44e}{\textsf{↓ -500.0 ms (-25.00\%)}}`$")
 
     def test_noise_and_partial_results_are_not_regressions(self):
         noisy = observations(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         shifted = observations(1.2, 2.2, 3.2, 4.2, 5.2, 6.2, 7.2, 8.2, 9.2, 10.2)
-        self.assertEqual(comparison(METRICS[0], noisy, shifted, 10)[4], "no clear change")
+        self.assertEqual(comparison(METRICS[0], noisy, shifted, 10).outcome, "no clear change")
         shifted[-1] = Observation(trial=9, error="timed out")
-        self.assertEqual(comparison(METRICS[0], noisy, shifted, 10)[4], "incomplete")
-        self.assertEqual(comparison(METRICS[0], [], shifted, 10)[4], "unavailable")
+        incomplete = comparison(METRICS[0], noisy, shifted, 10)
+        self.assertEqual(incomplete.outcome, "incomplete")
+        self.assertIn("incomplete", incomplete.change)
+        self.assertNotIn("textcolor", incomplete.change)
+        self.assertEqual(comparison(METRICS[0], [], shifted, 10).outcome, "unavailable")
 
     def test_zero_baseline_and_small_bundle_changes(self):
         cells = comparison(METRICS[3], observations(0), observations(65537), 1)
-        self.assertEqual(cells[3], "N/A")
-        self.assertIn("larger", cells[4])
+        self.assertIn("(N/A)", cells.change)
+        self.assertEqual(cells.outcome, "regressed")
         unchanged = comparison(METRICS[3], observations(10_000_000), observations(10_001_000), 1)
-        self.assertEqual(unchanged[4], "no clear change")
+        self.assertEqual(unchanged.outcome, "no clear change")
+        self.assertEqual(unchanged.change, "≈ +0.001 MB (+0.01%)")
+
+    def test_compact_tables_summarize_outcomes_without_treating_missing_samples_as_unchanged(self):
+        report = fixture()
+        report.status = "partial"
+        for definition in (*METRICS, *RUNTIME_METRICS):
+            count = 1 if definition.key in ("bundle", "disk") else (3 if definition.key == "install" else 10)
+            report.main.metrics[definition.key] = observations(*([2.0] * count))
+            report.pr_head.metrics[definition.key] = observations(*([2.0] * count))
+        report.pr_head.metrics["cold"] = observations(*([1.5] * 10))
+        report.pr_head.metrics["warm"] = observations(*([2.5] * 10))
+        report.pr_head.metrics["install"] = observations(2.0, 2.0)
+        report.pr_head.metrics["bundle"] = []
+        text = render(report)
+        self.assertIn(
+            "**Overall: 1 regressed · 1 improved · 13 no clear change · 1 incomplete · 1 unavailable.**",
+            text,
+        )
+        tables = text.split("<details>")[0]
+        self.assertEqual(tables.count("| Metric | Main | This PR | Change |"), 2)
+        for row in tables.splitlines():
+            if row.startswith("|"):
+                self.assertEqual(len(row.strip("|").split("|")), 4)
+        self.assertNotIn("| Change % |", text)
+        self.assertNotIn("| Result |", text)
+        self.assertNotIn("↓ improved", text)
+
+    def test_running_and_pending_comments_hide_previous_results(self):
+        report = fixture()
+        report.main.metrics["cold"] = observations(*([2.0] * 10))
+        report.pr_head.metrics["cold"] = observations(*([1.5] * 10))
+        for status in ("running", "pending-trust"):
+            with self.subTest(status=status):
+                report.status = status
+                text = render(report)
+                self.assertNotIn("| Metric |", text)
+                self.assertNotIn("Overall:", text)
+                self.assertNotIn("1,500.0", text)
+                self.assertIn("/actions/runs/100", text)
+                self.assertIn(f"status:{status}", text)
 
     def test_comment_escapes_untrusted_text_and_reports_failures(self):
         report = fixture()
+        report.status = "failed"
         report.pr_head.error = "<img src=x> | ![click](https://example.test)\n<!-- comment -->"
         text = render(report)
         self.assertTrue(text.startswith(MARKER))
@@ -201,6 +247,32 @@ class FakeGitHub(GitHub):
 
 
 class PublishingTests(unittest.TestCase):
+    def test_new_commit_replaces_the_previous_table_in_the_same_comment(self):
+        previous = fixture()
+        previous.status = "completed"
+        previous.head_sha = previous.pr_head.sha = "c" * 40
+        previous.run_id = 99
+        previous.main.metrics["cold"] = observations(*([2.0] * 10))
+        previous.pr_head.metrics["cold"] = observations(*([1.5] * 10))
+        github = FakeGitHub()
+        github.comments = [{"id": 2, "user": {"login": "github-actions[bot]"}, "body": render(previous)}]
+        current = fixture()
+        self.assertTrue(github.publish(current))
+        method, path, body = github.writes[-1]
+        self.assertEqual((method, path), ("PATCH", "issues/comments/2"))
+        self.assertIn("Benchmarking the latest PR commit", body["body"])
+        self.assertNotIn("| Metric |", body["body"])
+        self.assertNotIn(previous.head_sha[:8], body["body"])
+        github.comments[0]["body"] = body["body"]
+        self.assertFalse(github.publish(previous))
+        self.assertEqual(len(github.writes), 1)
+        current.status = "completed"
+        current.main.metrics = previous.main.metrics
+        current.pr_head.metrics = previous.pr_head.metrics
+        self.assertTrue(github.publish(current))
+        self.assertEqual(github.writes[-1][:2], ("PATCH", "issues/comments/2"))
+        self.assertIn("| Metric | Main | This PR | Change |", github.writes[-1][2]["body"])
+
     def test_superseded_commit_and_same_commit_rerun_do_not_publish(self):
         for case in ("head", "new_run", "attempt", "closed"):
             with self.subTest(case=case):
