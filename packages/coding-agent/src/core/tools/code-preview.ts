@@ -458,30 +458,32 @@ function scanPythonStringLiteral(code: string, start: number, quote: string, raw
 	return { value, end: i, closed: false, unsupportedEscape };
 }
 
-// True when the lines end inside an unterminated triple-quoted string.
-function endsInsideMultilineString(lines: readonly string[]): boolean {
-	const text = lines.join("\n");
+/** Keep source-line positions while excluding lines that begin inside string literals. */
+export function pythonStatementLines(code: string): string[] {
+	const lines = code.split("\n");
+	let line = 0;
 	let i = 0;
-	while (i < text.length) {
-		const char = text[i] ?? "";
+	while (i < code.length) {
+		const char = code[i]!;
 		if (char === "#") {
-			const newline = text.indexOf("\n", i);
-			if (newline < 0) return false;
-			i = newline + 1;
+			const newline = code.indexOf("\n", i);
+			if (newline < 0) break;
+			i = newline;
 			continue;
 		}
 		if (char === '"' || char === "'") {
-			const quote = text.startsWith(char.repeat(3), i) ? char.repeat(3) : char;
-			const scan = scanPythonStringLiteral(text, i + quote.length, quote, true);
-			if (!scan.closed && scan.end >= text.length) {
-				return quote.length === 3;
+			const quote = code.startsWith(char.repeat(3), i) ? char.repeat(3) : char;
+			const scan = scanPythonStringLiteral(code, i + quote.length, quote, true);
+			for (let end = i; end < scan.end; end++) {
+				if (code[end] === "\n") lines[++line] = "";
 			}
 			i = scan.end;
 			continue;
 		}
-		i += 1;
+		if (char === "\n") line++;
+		i++;
 	}
-	return false;
+	return lines;
 }
 
 function extractBashSkillCommand(code: string): string | undefined {
@@ -499,7 +501,8 @@ function extractBashSkillCommand(code: string): string | undefined {
 }
 
 export function previewPythonCode(code: string): CodePreview {
-	const lines = code.split("\n");
+	const rawLines = code.split("\n");
+	const lines = pythonStatementLines(code);
 	const paths = pythonPathVars(lines);
 	let bestIndex: number | undefined;
 	let bestScore = -1;
@@ -514,10 +517,8 @@ export function previewPythonCode(code: string): CodePreview {
 
 	if (bestIndex !== undefined && bestScore >= 0) {
 		const previewIndex = pythonPreviewIndex(lines, bestIndex);
-		// Extract from the full tail (literals may span lines), unless the chosen line is string text.
-		const bashCommand = endsInsideMultilineString(lines.slice(0, previewIndex))
-			? undefined
-			: extractBashSkillCommand(lines.slice(previewIndex).join("\n"));
+		// Extract from the original tail because a literal command may span lines.
+		const bashCommand = extractBashSkillCommand(rawLines.slice(previewIndex).join("\n"));
 		if (bashCommand) {
 			return previewBashCommand(bashCommand);
 		}
