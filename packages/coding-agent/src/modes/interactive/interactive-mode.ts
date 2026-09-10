@@ -6117,14 +6117,12 @@ export class InteractiveMode {
 	}
 
 	private getTrayLocationLabel(): string | undefined {
-		const modelLabel = this.getModelTrayLabel();
 		const hasChildren = this.options.sessionHasChildren === true || (this.subagentSnapshots?.size ?? 0) > 0;
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
 		const shortcutsHint = this.getShortcutsTrayHint();
-		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
-			.filter((label): label is string => label !== undefined)
-			.join("  ");
+		return (
+			[depthLabel, shortcutsHint].filter((label): label is string => label !== undefined).join("  ") || undefined
+		);
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -6138,23 +6136,6 @@ export class InteractiveMode {
 		return (this.connectionState?.messageCount ?? 0) === 0 && this.connectionState?.isStreaming !== true;
 	}
 
-	private getModelTrayLabel(): string {
-		const model = this.getCurrentModel();
-		if (!model) {
-			return "—";
-		}
-		const name = model.name.trim().replace(/\s+\(internal\)$/i, "");
-		const providerPrefix = `${model.provider}/`;
-		const compactName = name.startsWith(providerPrefix)
-			? name.slice(providerPrefix.length)
-			: name.replace(/^internal\//, "");
-		const parts = [compactName || model.name];
-		if (this.connectionState?.serviceTier === "priority") {
-			parts.push("fast");
-		}
-		return parts.join(" • ");
-	}
-
 	private getPromptEffortLabel(maxWidth: number): string | undefined {
 		if (maxWidth < 1 || !this.getCurrentModel()?.reasoning) return undefined;
 		const level = this.connectionState?.thinkingLevel ?? "off";
@@ -6163,22 +6144,10 @@ export class InteractiveMode {
 		return theme.fg("dim", truncateToWidth(level, maxWidth, ""));
 	}
 
-	private getAgentsViewTrayHint(): string | undefined {
-		if (!this.options.returnToAgentsView) {
-			return undefined;
-		}
-		return keyHint("app.agents.back", "manage");
-	}
-
 	private getTrayContextLabel(): string | undefined {
 		const goalLabel = this.getTrayGoalLabel();
 		const heartbeatLabel = this.getTrayHeartbeatLabel();
-		const usage = this.getConnectionContextUsage();
-		const contextLabel =
-			usage && typeof usage.tokens === "number" && typeof usage.percent === "number"
-				? `${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`
-				: undefined;
-		return [goalLabel, heartbeatLabel, contextLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		return [goalLabel, heartbeatLabel].filter((label) => label !== undefined).join(" · ") || undefined;
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {
