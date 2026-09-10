@@ -22,6 +22,13 @@ function record(tracker: ChildUsageTracker, childUsage: Usage, prompt?: AgentMes
 	tracker.record(prompt ? [prompt, assistant] : [assistant], assistant);
 }
 
+function unindexedUsage(owner: SessionChildUsage, parent: AssistantMessage): Usage | undefined {
+	// Exact snapshots distinguish retained zero entries from missing entries and avoid subtraction's token clamp.
+	return (
+		owner as unknown as { _rlmUnindexedChildUsage: WeakMap<AssistantMessage, Usage> }
+	)._rlmUnindexedChildUsage.get(parent);
+}
+
 function setup(appendParent = true) {
 	const manager = SessionManager.inMemory();
 	const parent: AssistantMessage = { ...fauxAssistantMessage("spawn children"), usage: usage(2, 1) };
@@ -57,14 +64,14 @@ describe("SessionChildUsage boundaries", () => {
 		record(second, usage(11, 5));
 
 		expect(parent.usage).toEqual({ ...usage(20, 9), totalTokens: 3 });
-		expect(owner.getUnindexed(parent)).toEqual(usage(18, 8));
+		expect(unindexedUsage(owner, parent)).toEqual(usage(18, 8));
 		const own = cloneUsage(parent.usage);
 		owner.subtractUnindexed(own, manager.getEntries());
 		expect(own).toEqual({ ...usage(2, 1), totalTokens: 0 });
 
 		first.flush();
 		expect(attributions().map((entry) => entry.aggregateUsage)).toEqual([{ ...usage(9, 4), totalTokens: 3 }]);
-		expect(owner.getUnindexed(parent)).toEqual(usage(11, 5));
+		expect(unindexedUsage(owner, parent)).toEqual(usage(11, 5));
 		expect(parent.usage).toEqual({ ...usage(20, 9), totalTokens: 3 });
 
 		second.flush();
@@ -72,7 +79,7 @@ describe("SessionChildUsage boundaries", () => {
 			{ ...usage(9, 4), totalTokens: 3 },
 			{ ...usage(20, 9), totalTokens: 3 },
 		]);
-		expect(owner.getUnindexed(parent)).toEqual(emptyUsage());
+		expect(unindexedUsage(owner, parent)).toEqual(emptyUsage());
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
@@ -85,7 +92,7 @@ describe("SessionChildUsage boundaries", () => {
 		tracker.flush();
 		expect(host.afterParentDrain).toHaveBeenCalledOnce();
 		expect(attributions()).toEqual([]);
-		expect(owner.getUnindexed(parent)).toEqual(usage(7, 3));
+		expect(unindexedUsage(owner, parent)).toEqual(usage(7, 3));
 		expect(vi.getTimerCount()).toBe(0);
 
 		manager.appendMessage(parent);
@@ -96,7 +103,7 @@ describe("SessionChildUsage boundaries", () => {
 			childUsage: usage(7, 3),
 			aggregateUsage: { ...usage(9, 4), totalTokens: 3 },
 		});
-		expect(owner.getUnindexed(parent)).toEqual(emptyUsage());
+		expect(unindexedUsage(owner, parent)).toEqual(emptyUsage());
 	});
 
 	it("does not subtract indexed usage twice when append fails after indexing", () => {
@@ -114,7 +121,7 @@ describe("SessionChildUsage boundaries", () => {
 		expect(attributions()).toHaveLength(1);
 		expect(parent.usage).toBe(liveUsage);
 		expect(parent.usage).toEqual({ ...usage(9, 4), totalTokens: 3 });
-		expect(owner.getUnindexed(parent)).toEqual(emptyUsage());
+		expect(unindexedUsage(owner, parent)).toEqual(emptyUsage());
 		const ownAfterIndexedSubtraction = usage(2, 1);
 		owner.subtractUnindexed(ownAfterIndexedSubtraction, manager.getEntries());
 		expect(ownAfterIndexedSubtraction).toEqual(usage(2, 1));
@@ -132,7 +139,7 @@ describe("SessionChildUsage boundaries", () => {
 		record(tracker, usage(7, 3));
 		expect(() => tracker.flush()).not.toThrow();
 		expect(attributions()).toEqual([]);
-		expect(owner.getUnindexed(parent)).toEqual(usage(7, 3));
+		expect(unindexedUsage(owner, parent)).toEqual(usage(7, 3));
 		const own = cloneUsage(parent.usage);
 		owner.subtractUnindexed(own, manager.getEntries());
 		expect(own.cost.total).toBe(3);
@@ -162,11 +169,11 @@ describe("SessionChildUsage boundaries", () => {
 		if (boundary === "checkpoint") {
 			tracker.flushIfStale();
 			expect(attributions().map((entry) => entry.childUsage.cost.total)).toEqual([10]);
-			expect(owner.getUnindexed(parent)).toEqual(emptyUsage());
+			expect(unindexedUsage(owner, parent)).toEqual(emptyUsage());
 		}
 		record(tracker, usage(11, 5));
 		expect(attributions().map((entry) => entry.aggregateUsage.cost.total)).toEqual([13]);
-		expect(owner.getUnindexed(parent)).toEqual(usage(11, 5));
+		expect(unindexedUsage(owner, parent)).toEqual(usage(11, 5));
 		tracker.flush();
 		expect(attributions().map((entry) => entry.aggregateUsage.cost.total)).toEqual([13, 29]);
 		expect(attributions().map((entry) => entry.childUsage.cost.total)).toEqual([10, 16]);
@@ -197,7 +204,7 @@ describe("SessionChildUsage boundaries", () => {
 		expect(attributions().map((entry) => entry.aggregateUsage.cost.total)).toEqual([13, 29, 33]);
 		expect(attributions().map((entry) => entry.childUsage.cost.total)).toEqual([10, 16, 4]);
 		expect(parent.usage.totalTokens).toBe(3);
-		expect(owner.getUnindexed(parent)).toEqual(emptyUsage());
+		expect(unindexedUsage(owner, parent)).toEqual(emptyUsage());
 		expect(vi.getTimerCount()).toBe(0);
 	});
 });

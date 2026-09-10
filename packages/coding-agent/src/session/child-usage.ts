@@ -159,9 +159,6 @@ export class SessionChildUsage {
 			},
 		};
 	}
-	getUnindexed(message: AssistantMessage): Usage | undefined {
-		return this._rlmUnindexedChildUsage.get(message);
-	}
 	subtractUnindexed(ownUsage: Usage, entries: SessionEntry[]): void {
 		for (const entry of entries) {
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
