@@ -815,7 +815,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			["Cached input", price(item.model.cost?.cacheRead)],
 			["Output", price(item.model.cost?.output)],
 		];
-		const lines = ["", theme.fg("muted", `${item.provider} · ${item.id}`)];
+		const lines = ["", theme.fg("muted", `${item.provider}/${item.id} · USD / 1M tokens`)];
 		if (width >= 58) {
 			const columnWidth = Math.floor((width - 2) / 3);
 			const row = (index: number) =>
@@ -829,7 +829,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		} else {
 			lines.push(...entries.map(([label, value]) => `${theme.fg("muted", `${label}:`)} ${value}`));
 		}
-		lines.push(theme.fg("dim", "USD / 1M tokens"));
+		lines.push("");
 		return lines.map((line) => truncateToWidth(` ${line}`, width, "…", true));
 	}
 
