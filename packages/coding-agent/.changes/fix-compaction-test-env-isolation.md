@@ -1,0 +1,1 @@
+- Fixed the harness-digest compaction characterization test failing on machines with a populated real global harness store: the test now isolates PRIME_AGENT_CODING_AGENT_DIR to an empty temp dir so the digest reflects only the test's own entry.

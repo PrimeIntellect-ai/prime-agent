@@ -1,4 +1,6 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AgentContinueError, type AgentMessage, type ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
@@ -7,7 +9,8 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../../src/config.js";
 import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
@@ -199,6 +202,20 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("prepends the harness digest to the compaction head message on initial and update-merge compactions", async () => {
+		// Empty global store: the digest must reflect only the local test entry
+		// (a populated real global store would truncate the local entry out of the digest).
+		const previousAgentDir = process.env[ENV_AGENT_DIR];
+		const agentDir = join(
+			tmpdir(),
+			`pi-compaction-digest-agent-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		mkdirSync(agentDir, { recursive: true });
+		process.env[ENV_AGENT_DIR] = agentDir;
+		onTestFinished(() => {
+			if (previousAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+			else process.env[ENV_AGENT_DIR] = previousAgentDir;
+			rmSync(agentDir, { recursive: true, force: true });
+		});
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
 			persistSession: true,
