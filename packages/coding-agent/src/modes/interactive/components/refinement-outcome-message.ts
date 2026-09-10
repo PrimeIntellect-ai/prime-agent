@@ -1,7 +1,9 @@
-import { type Component, Spacer, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, Spacer, Text } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
 import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
+import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { theme } from "../theme/theme.js";
+import { renderRichDiff } from "./diff.js";
 import { ExpandableEventMessage } from "./expandable-event-message.js";
 
 type EditFieldKey = (typeof EDIT_FIELDS)[number]["key"];
@@ -9,17 +11,12 @@ type EditFieldKey = (typeof EDIT_FIELDS)[number]["key"];
 /** Editable harness entry fields shown per edit, in display order. */
 const EDIT_FIELDS = [
 	{ key: "title", label: "Title" },
-	{ key: "content", label: "Content" },
+	{ key: "content", label: "Description" },
 	{ key: "path", label: "Path" },
 	{ key: "reference", label: "Reference" },
 	{ key: "arguments", label: "Arguments" },
 	{ key: "metadata", label: "Metadata" },
 ] as const;
-
-/** Column layout of one expanded edit section, measured from the chat edge. */
-const LABEL_INDENT = 4; // aligns field rows under the ` ╰─ ` label text
-const KEY_WIDTH = 9; // "Arguments"/"Reference"
-const VALUE_COLUMN = LABEL_INDENT + KEY_WIDTH + 2;
 
 interface EditFieldRows {
 	label: string;
@@ -27,14 +24,6 @@ interface EditFieldRows {
 	value: string[];
 	/** Changed fields render -/+ rows instead of a plain value. */
 	change?: { removed: string[]; added: string[] };
-}
-
-type FieldColor = "toolDiffRemoved" | "toolDiffAdded" | "customMessageText";
-
-interface FieldRow {
-	text: string;
-	color: FieldColor;
-	marker?: "-" | "+";
 }
 
 function editScope(edit: AppliedRefinementEdit, fallback: "local" | "global"): "local" | "global" {
@@ -51,11 +40,32 @@ function editLabel(edit: AppliedRefinementEdit, fallbackScope: "local" | "global
 	return `${theme.fg("success", verb)} ${scope} ${edit.kind} \`${edit.id}\``;
 }
 
-function editCount(edits: AppliedRefinementEdit[]): string {
-	const applied = edits.filter((edit) => edit.applied).length;
-	return edits.length === applied
-		? `${applied} edit${applied === 1 ? "" : "s"} applied`
-		: `${applied}/${edits.length} edits applied`;
+function refinementHeader(message: RefinementOutcomeMessage): string {
+	const { edits, rollbackOf } = message.details;
+	const applied = edits.filter((edit) => edit.applied);
+	const operation = rollbackOf ? "Harness rollback" : "Harness refinement";
+	if (edits.length === 0)
+		return `${rollbackOf ? "Harness rollback unchanged" : "Harness unchanged"} · no edits applied`;
+	if (applied.length === 0) return `${operation} failed · 0/${edits.length} edits applied`;
+	if (applied.length < edits.length) {
+		return `${rollbackOf ? "Harness partially rolled back" : "Harness partially refined"} · ${applied.length}/${edits.length} edits applied`;
+	}
+	if (rollbackOf)
+		return `Harness rollback completed · ${applied.length} edit${applied.length === 1 ? "" : "s"} applied`;
+	const first = applied[0]!;
+	if (applied.every((edit) => edit.kind === first.kind)) {
+		const kind =
+			first.kind === "memory"
+				? applied.length === 1
+					? "memory"
+					: "memories"
+				: `${first.kind}${applied.length === 1 ? "" : "s"}`;
+		const action = applied.every((edit) => edit.action === first.action)
+			? { create: "created", update: "updated", delete: "deleted" }[first.action]
+			: "changed";
+		return `Harness refined · ${applied.length} ${kind} ${action}`;
+	}
+	return `Harness refined · ${applied.length} edits applied`;
 }
 
 function fieldValueLines(value: unknown): string[] {
@@ -101,10 +111,6 @@ function updateFieldRows(before: HarnessEntry, after: HarnessEntry): EditFieldRo
 		if (removed.length === 0 && added.length === 0) {
 			continue;
 		}
-		if (removed.length === 0 || added.length === 0) {
-			rows.push({ label, value: removed.length > 0 ? removed : added });
-			continue;
-		}
 		if (removed.join("\n") === added.join("\n")) {
 			rows.push({ label, value: added });
 			continue;
@@ -115,26 +121,30 @@ function updateFieldRows(before: HarnessEntry, after: HarnessEntry): EditFieldRo
 }
 
 function editFieldRows(edit: AppliedRefinementEdit): EditFieldRows[] {
+	if (!edit.applied) {
+		const proposed = entryFieldRows(edit.after ?? proposedRecord(edit));
+		if (!edit.before) return proposed;
+		return [
+			...entryFieldRows(edit.before).map((field) => ({ ...field, label: `Before ${field.label}` })),
+			...proposed.map((field) => ({ ...field, label: `Proposed ${field.label}` })),
+		];
+	}
 	if (edit.before && edit.after) {
 		return updateFieldRows(edit.before, edit.after);
 	}
-	return entryFieldRows(edit.after ?? edit.before ?? proposedRecord(edit));
+	const fields = entryFieldRows(edit.after ?? edit.before ?? proposedRecord(edit));
+	if (edit.action === "update") return fields;
+	return fields.map((field) => ({
+		label: field.label,
+		value: [],
+		change: {
+			removed: edit.action === "delete" ? field.value : [],
+			added: edit.action === "create" ? field.value : [],
+		},
+	}));
 }
 
-function fieldRows(field: EditFieldRows): FieldRow[] {
-	if (field.change) {
-		return [
-			...field.change.removed.map((text): FieldRow => ({ text, color: "toolDiffRemoved", marker: "-" })),
-			...field.change.added.map((text): FieldRow => ({ text, color: "toolDiffAdded", marker: "+" })),
-		];
-	}
-	return field.value.map((text): FieldRow => ({ text, color: "customMessageText" }));
-}
-
-/**
- * One refinement edit as a ` ╰─ ` label row plus readable key-value rows for
- * the entry's fields, matching the agent-message layout language.
- */
+/** Expanded fields share the same line gutters and background blocks as file edits. */
 class RefinementEditSection implements Component {
 	constructor(
 		private readonly label: string,
@@ -145,50 +155,22 @@ class RefinementEditSection implements Component {
 
 	render(width: number): string[] {
 		if (width < 1) return [];
-		const lines: string[] = [];
-		for (const [index, line] of wrapTextWithAnsi(this.label, Math.max(1, width - LABEL_INDENT)).entries()) {
-			const prefix = index === 0 ? theme.fg("dim", " ╰─ ") : " ".repeat(LABEL_INDENT);
-			lines.push(`${prefix}${line}`);
-		}
+		const lines = new Text(this.label, 1, 0).render(width);
 		for (const field of this.fields) {
-			if (width >= VALUE_COLUMN) {
-				this.renderWideField(field, width, lines);
+			lines.push(...new Text(theme.fg("muted", field.label), 1, 0).render(width));
+			if (field.change) {
+				const { diff } = generateDiffString(
+					field.change.removed.join("\n"),
+					field.change.added.join("\n"),
+					Number.MAX_SAFE_INTEGER,
+				);
+				const inset = width > 1 ? " " : "";
+				for (const row of renderRichDiff(diff, width - inset.length)) lines.push(`${inset}${row}`);
 			} else {
-				this.renderNarrowField(field, width, lines);
+				for (const row of new Text(field.value.join("\n"), 1, 0).render(width)) lines.push(row);
 			}
 		}
 		return lines;
-	}
-
-	private renderWideField(field: EditFieldRows, width: number, lines: string[]): void {
-		const keyColumn =
-			" ".repeat(LABEL_INDENT) + theme.fg("muted", field.label) + " ".repeat(KEY_WIDTH - field.label.length);
-		const keyIndent = " ".repeat(LABEL_INDENT + KEY_WIDTH);
-		const valueWidth = Math.max(1, width - VALUE_COLUMN);
-		let keyShown = false;
-		for (const row of fieldRows(field)) {
-			for (const [index, segment] of wrapTextWithAnsi(row.text, valueWidth).entries()) {
-				const marker = index === 0 && row.marker ? theme.fg(row.color, `${row.marker} `) : "  ";
-				const prefix = keyShown ? keyIndent : keyColumn;
-				keyShown = true;
-				lines.push(`${prefix}${marker}${theme.fg(row.color, segment)}`);
-			}
-		}
-	}
-
-	// Terminals narrower than the value column fall back to stacked rows.
-	private renderNarrowField(field: EditFieldRows, width: number, lines: string[]): void {
-		const valueWidth = Math.max(1, width - LABEL_INDENT);
-		const indent = " ".repeat(LABEL_INDENT);
-		for (const line of wrapTextWithAnsi(theme.fg("muted", field.label), valueWidth)) {
-			lines.push(`${indent}${line}`);
-		}
-		for (const row of fieldRows(field)) {
-			const marker = row.marker ? `${row.marker} ` : "";
-			for (const line of wrapTextWithAnsi(theme.fg(row.color, `${marker}${row.text}`), valueWidth)) {
-				lines.push(`${indent}${line}`);
-			}
-		}
 	}
 }
 
@@ -202,23 +184,30 @@ export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
 	protected updateDisplay(): void {
 		this.clear();
 
-		const { summary, edits, scope } = this.message.details;
+		const { summary, edits, scope, rollbackOf, refinementId } = this.message.details;
 		this.addChild(new Spacer(1));
-		this.addSummary(summary, `Refinement · ${editCount(edits)}`);
-		if (!this.expanded) {
-			for (const edit of edits) {
-				this.addChild(new RefinementEditSection(editLabel(edit, scope)));
-			}
-			return;
-		}
+		this.addChild(new Text(theme.fg("accent", `◆ ${refinementHeader(this.message)}`), 1, 0));
+		this.addSummary(summary.trim() || "No summary was recorded for this harness change.");
+		if (this.expanded) {
+			this.addChild(new Spacer(1));
+			this.addChild(
+				new Text(
+					theme.fg(
+						"dim",
+						`Refinement ${refinementId} · ${scope}${rollbackOf ? ` · rollback of ${rollbackOf}` : ""}`,
+					),
+					1,
+					0,
+				),
+			);
 
-		this.addChild(new Spacer(1));
-		for (const [index, edit] of edits.entries()) {
-			if (index > 0) {
+			for (const edit of edits) {
 				this.addChild(new Spacer(1));
+				this.addChild(new RefinementEditSection(editLabel(edit, scope), editFieldRows(edit)));
+				if (edit.reason) this.addChild(new Text(theme.fg("muted", `Reason: ${edit.reason}`), 1, 0));
 			}
-			this.addChild(new RefinementEditSection(editLabel(edit, scope), editFieldRows(edit)));
 		}
+		this.addChild(new Spacer(1));
 	}
 }
 
@@ -232,5 +221,6 @@ export class MalformedRefinementOutcomeMessageComponent extends ExpandableEventM
 		this.clear();
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("error", "[Malformed refinement outcome message]"), 1, 0));
+		this.addChild(new Spacer(1));
 	}
 }
