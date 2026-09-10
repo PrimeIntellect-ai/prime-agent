@@ -200,10 +200,13 @@ Goal state records token usage, elapsed time, continuation count, and an optiona
 
 Autonomous mode is a bounded host policy for runs where no human input is expected. Prime Agent adds follow-up continuations until configured quality gates pass or a continuation, turn, token, or wall-clock limit is reached.
 
-Enable it in an interactive session:
+Enable it in an interactive session. `/autonomous on` accepts the same budget
+options as the CLI, so an interactive run can define its own budget instead of
+stopping at the default three continuations:
 
 ```text
-/autonomous on
+/autonomous on --max-continuations 10 --max-turns 40 --max-tokens 500000
+/autonomous on --gate "npm run check" --gate-retries 2
 /autonomous status
 /autonomous off
 ```
@@ -217,6 +220,13 @@ prime-agent \
   --autonomous-max-turns 20 \
   "Implement and verify the requested change"
 ```
+
+The slash-command flags (`--max-continuations`, `--max-turns`, `--max-tokens`,
+`--timeout-ms`, `--gate`, `--gate-retries`, `--gate-timeout-ms`) accept both
+`--flag <value>` and `--flag=<value>`, and the full CLI spellings such as
+`--autonomous-max-continuations` work as aliases. Flags only change the limits
+they name; unspecified limits keep the configured or default values, and
+repeating `--gate` appends another gate.
 
 Autonomous mode supports limits for continuations, assistant turns, tokens, and wall-clock duration. Gate commands run before the session may finish; a failed gate returns its bounded output to the agent for another attempt. Prime Agent avoids rerunning the same failed gate when the workspace has not changed.
 

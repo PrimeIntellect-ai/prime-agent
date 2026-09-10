@@ -173,6 +173,107 @@ describe("AgentSession autonomous mode", () => {
 		expect(getMessageText(statusMessages[1]).startsWith("[autonomous-status: off]\n\n")).toBe(true);
 	});
 
+	it("applies user-defined budget flags when enabling autonomous mode", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			"/autonomous on --max-continuations 5 --max-turns 25 --max-tokens 250000 --timeout-ms 600000",
+		);
+
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			continuationsUsed: 0,
+			turnsUsed: 0,
+			tokensUsed: 0,
+			limits: {
+				maxContinuations: 5,
+				maxTurns: 25,
+				maxTokens: 250_000,
+				timeoutMs: 600_000,
+			},
+		});
+	});
+
+	it("continues through a user-defined continuation budget instead of the default three", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses(
+			Array.from({ length: 8 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
+		);
+
+		await harness.session.prompt("/autonomous on --max-continuations 5");
+		await harness.session.prompt("make the change");
+
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			continuationsUsed: 5,
+			limits: { maxContinuations: 5 },
+		});
+	});
+
+	it("accepts the CLI autonomous flag spellings and inline values", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			'/autonomous on --autonomous-max-continuations=7 --autonomous-gate "npm test" --autonomous-gate-retries=2 --autonomous-gate-timeout-ms 45000',
+		);
+
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			limits: { maxContinuations: 7 },
+			gates: {
+				commands: ["npm test"],
+				maxRetries: 2,
+				timeoutMs: 45_000,
+			},
+		});
+	});
+
+	it("keeps unspecified limits and appends repeated gates", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt('/autonomous on --max-continuations 4 --gate "npm run lint" --gate "npm test"');
+
+		const status = harness.session.getAutonomousStatus();
+		expect(status.limits).toMatchObject({
+			maxContinuations: 4,
+			// Unspecified limits keep their defaults.
+			maxTurns: 12,
+			maxTokens: 80_000,
+			timeoutMs: 1_800_000,
+		});
+		expect(status.gates.commands).toEqual(["npm run lint", "npm test"]);
+	});
+
+	it("rejects invalid budget flags without enabling autonomous mode", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		for (const input of [
+			"/autonomous on --max-continuations 0",
+			"/autonomous on --max-continuations",
+			"/autonomous on --speed 10",
+			"/autonomous off --max-continuations 2",
+		]) {
+			await harness.session.prompt(input);
+		}
+		const commandErrors = harness.session.messages
+			.filter((message) => message.role === "custom" && message.customType === "session_slash_command_result")
+			.map((message) => (message as { content: string }).content);
+		expect(commandErrors).toEqual([
+			expect.stringContaining("--max-continuations must be a positive integer"),
+			expect.stringContaining("Missing value for --max-continuations"),
+			expect.stringContaining("Unknown autonomous budget flag: --speed"),
+			expect.stringContaining("Unexpected autonomous argument: --max-continuations"),
+		]);
+
+		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
+	});
+
 	it("continues when the assistant tries to finish without terminal evidence", async () => {
 		const harness = await createHarness({
 			autonomous: { enabled: true, maxContinuations: 1 },

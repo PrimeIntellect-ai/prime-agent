@@ -259,6 +259,8 @@ prime-agent --no-extensions -e ./my-extension.ts
 
 Autonomous mode is a host policy for unattended work. It starts disabled. `--autonomous` enables it, and supplying any `--autonomous-*` sub-option also enables it. The host starts each enabled run with fresh continuation, turn, token, and elapsed-time counters.
 
+Interactive sessions set the same budget from the `/autonomous` slash command: `/autonomous on` accepts every budget option above using the flag name without the `--autonomous-` prefix (`--max-continuations`, `--max-turns`, `--max-tokens`, `--timeout-ms`, `--gate`, `--gate-retries`, `--gate-timeout-ms`), plus the full CLI spellings as aliases. For example, `/autonomous on --max-continuations 10 --gate "npm run check"` enables a ten-continuation run instead of the default three. Values follow the same positive-integer rules and may use `--flag=<value>` or `--flag <value>`.
+
 | Option | Behavior, units, and default |
 |--------|------------------------------|
 | `--autonomous` | Enable autonomous continuations. With no gates, the host keeps requesting work until a limit prevents another continuation. |
