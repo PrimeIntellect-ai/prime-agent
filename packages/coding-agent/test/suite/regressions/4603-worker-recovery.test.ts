@@ -8,6 +8,7 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
@@ -126,7 +127,14 @@ async function createPaths(): Promise<TestPaths> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
-	linkSync(process.execPath, executablePath);
+	if (process.platform === "darwin") {
+		// A hardlinked copy of a node binary that loads libnode via @loader_path
+		// rpaths (Homebrew) cannot resolve them from the temp dir; a symlink keeps
+		// dyld on the real executable path.
+		symlinkSync(process.execPath, executablePath);
+	} else {
+		linkSync(process.execPath, executablePath);
+	}
 	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
 	socketTempDirs.add(socketTmpDir);
@@ -234,6 +242,9 @@ function registerFixtureProcess(
 	role: FixtureProcessIdentity["role"],
 ): FixtureProcessIdentity | undefined {
 	if (pid === undefined) return undefined;
+	// An ownership record leaked by a failed in-process acquisition names this
+	// test runner; signaling it would SIGSTOP the suite itself and hang forever.
+	if (pid === process.pid) return undefined;
 	if (!Number.isSafeInteger(pid) || pid <= 0) {
 		throw new Error(`Invalid fixture process pid: ${String(pid)}`);
 	}
