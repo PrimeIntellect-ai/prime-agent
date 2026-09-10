@@ -68,6 +68,14 @@ function rendered(component: RefinementOutcomeMessageComponent): string {
 	return stripAnsi(component.render(120).join("\n"));
 }
 
+function expectChatInset(lines: string[]): void {
+	for (const line of lines) {
+		if (line.trim().length > 0) {
+			expect(line.startsWith(" "), `missing left inset: ${JSON.stringify(line)}`).toBe(true);
+		}
+	}
+}
+
 describe("RefinementOutcomeMessageComponent", () => {
 	beforeAll(() => {
 		initTheme("dark");
@@ -80,21 +88,30 @@ describe("RefinementOutcomeMessageComponent", () => {
 
 		const collapsed = rendered(component);
 		const content = collapsed.split("\n").filter((line) => line.trim());
-		expect(content[0]).toBe("Added local guidance to make conversational responses rhyme.");
+		expect(content[0]).toBe(" Added local guidance to make conversational responses rhyme.");
 		expect(content[1]).toContain("Refinement · 1 edit applied");
+		expect(content[1]).toContain("Ctrl+O to expand");
 		expect(collapsed).not.toContain("[refinement]");
-		expect(collapsed).toContain("Added local guidance to make conversational responses rhyme.");
-		expect(collapsed).toContain("1 edit applied");
-		expect(collapsed).toContain("Ctrl+O to expand");
-		expect(collapsed).not.toContain("Created local prompt");
-		expect(collapsed).not.toContain('Make conversational responses rhyme."');
+		expect(collapsed).toContain("╰─ Created local prompt `rhyme-response-guidance`");
+		expectChatInset(collapsed.split("\n"));
+		// Collapsed rows stay compact: entry details only render when expanded.
+		expect(collapsed).not.toContain("Rhyme response guidance");
+		expect(collapsed).not.toContain("prompts/rhyme-response-guidance.md");
+		expect(collapsed).not.toContain('"content"');
 
 		component.setExpanded(true);
 		const expanded = rendered(component);
 		expect(expanded).toContain("Created local prompt `rhyme-response-guidance`");
-		expect(expanded).toContain('"content": "Make conversational responses rhyme."');
-		expect(expanded).toContain('"path": "prompts/rhyme-response-guidance.md"');
+		expect(expanded).toContain("Title      Rhyme response guidance");
+		expect(expanded).toContain("Content    Make conversational responses rhyme.");
+		expect(expanded).toContain("Path       prompts/rhyme-response-guidance.md");
 		expect(expanded).toContain("Ctrl+O to collapse");
+		expectChatInset(expanded.split("\n"));
+		// Structured rows, not a JSON dump.
+		expect(expanded).not.toContain('"content":');
+		expect(expanded).not.toContain('"title":');
+		expect(expanded).not.toContain('"path":');
+		expect(expanded).not.toContain("+1 {");
 
 		component.setExpanded(false);
 		expect(rendered(component)).toBe(collapsed);
@@ -108,11 +125,13 @@ describe("RefinementOutcomeMessageComponent", () => {
 
 		const lines = component.render(80).map((line) => stripAnsi(line));
 		const content = lines.filter((line) => line.trim().length > 0);
-		expect(content).toHaveLength(3);
+		expect(content).toHaveLength(4);
 		expect(content[0]).toContain("Created local memory entries for the verifiers project context");
 		expect(content[1]).toContain("…");
 		expect(content[2]).toContain("1 edit applied");
 		expect(content[2]).toContain("Ctrl+O to expand");
+		expect(content[3]).toContain("╰─ Created local prompt `rhyme-response-guidance`");
+		expectChatInset(lines);
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		}
@@ -127,11 +146,11 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(rendered(component).replace(/\s+/g, " ")).toContain(long.summary);
 	});
 
-	test("renders exact before and after payloads for updates and deletes", () => {
+	test("renders structured before and after rows for updates and deletes", () => {
 		const base = result();
-		const before = entry({ id: "tone-guidance", content: "Respond plainly." });
-		const after = entry({ id: "tone-guidance", content: "Respond in rhyme.", version: 2 });
-		const deleted = entry({ id: "obsolete-guidance", content: "Use prose." });
+		const before = entry({ id: "tone-guidance", title: "Tone guidance", content: "Respond plainly." });
+		const after = entry({ id: "tone-guidance", title: "Tone guidance", content: "Respond in rhyme.", version: 2 });
+		const deleted = entry({ id: "obsolete-guidance", title: "Obsolete guidance", content: "Use prose." });
 		const message = createRefinementOutcomeMessage({
 			...base,
 			appliedEdits: [
@@ -142,12 +161,89 @@ describe("RefinementOutcomeMessageComponent", () => {
 		const component = new RefinementOutcomeMessageComponent(message);
 		component.setExpanded(true);
 		const output = rendered(component);
+		expectChatInset(output.split("\n"));
 
 		expect(output).toContain("Updated local prompt `tone-guidance`");
+		expect(output).toContain("Content  - Respond plainly.");
+		expect(output).toMatch(/ {13}\+ Respond in rhyme\./);
+		expect(output).toContain("Title      Tone guidance");
 		expect(output).toContain("Deleted local prompt `obsolete-guidance`");
-		expect(output).toContain('"content": "Respond plainly."');
-		expect(output).toContain('"content": "Respond in rhyme."');
-		expect(output).toContain('"content": "Use prose."');
+		expect(output).toContain("Content    Use prose.");
+		expect(output).not.toContain('"content":');
+	});
+
+	test("renders create, update, and failed edits as structured sections with the chat inset", () => {
+		const created = entry({
+			id: "linear",
+			kind: "skill",
+			title: "Linear issues",
+			content: "Read and write Linear issues via MCP.",
+			path: "skills/linear/SKILL.md",
+			reference: { type: "python", import: "linear", callable: "run" },
+			arguments: { name: { type: "string", required: true } },
+		});
+		const before = entry({ id: "osint-tips", kind: "memory", title: "OSINT tips", content: "Use blogs." });
+		const after = entry({
+			id: "osint-tips",
+			kind: "memory",
+			title: "OSINT tips",
+			content: "Use blogs and acknowledgements.",
+		});
+		const message = createRefinementOutcomeMessage({
+			...result(),
+			appliedEdits: [
+				{
+					action: "create",
+					kind: "skill",
+					id: created.id,
+					title: created.title,
+					content: created.content,
+					path: created.path,
+					after: created,
+					applied: true,
+				},
+				{ action: "update", kind: "memory", id: before.id, before, after, applied: true },
+				{
+					action: "delete",
+					kind: "prompt",
+					id: "stale-note",
+					title: "Stale note",
+					content: "Old session note.",
+					applied: false,
+					error: "entry not found",
+				},
+			],
+		});
+		const component = new RefinementOutcomeMessageComponent(message);
+
+		const collapsed = rendered(component);
+		expect(collapsed).toContain("Refinement · 2/3 edits applied");
+		expect(collapsed).toContain("╰─ Created local skill `linear`");
+		expect(collapsed).toContain("╰─ Updated local memory `osint-tips`");
+		expect(collapsed).toContain("╰─ Failed to delete local prompt `stale-note`: entry not found");
+		expectChatInset(collapsed.split("\n"));
+
+		component.setExpanded(true);
+		const expanded = rendered(component);
+		expectChatInset(expanded.split("\n"));
+		expect(expanded).toContain("Title      Linear issues");
+		expect(expanded).toContain("Content    Read and write Linear issues via MCP.");
+		expect(expanded).toContain('Reference  {"type":"python","import":"linear","callable":"run"}');
+		expect(expanded).toContain('Arguments  {"name":{"type":"string","required":true}}');
+		expect(expanded).toContain("Content  - Use blogs.");
+		expect(expanded).toMatch(/ {13}\+ Use blogs and acknowledgements\./);
+		expect(expanded).toContain("Failed to delete local prompt `stale-note`: entry not found");
+		expect(expanded).toContain("Title      Stale note");
+		// The raw JSON-diff blob is gone.
+		expect(expanded).not.toContain('"content":');
+		expect(expanded).not.toContain('"title":');
+		expect(expanded).not.toContain("+1 {");
+
+		for (const width of [80, 40, 24, 12]) {
+			for (const line of component.render(width)) {
+				expect(visibleWidth(stripAnsi(line))).toBeLessThanOrEqual(width);
+			}
+		}
 	});
 
 	test("replays the durable outcome with the saved tool expansion state", () => {
@@ -161,9 +257,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		});
 
 		expect(component).toBeInstanceOf(RefinementOutcomeMessageComponent);
-		expect(stripAnsi(component!.render(120).join("\n"))).toContain(
-			'"content": "Make conversational responses rhyme."',
-		);
+		expect(stripAnsi(component!.render(120).join("\n"))).toContain("Content    Make conversational responses rhyme.");
 	});
 
 	test("uses a typed, presentation-only custom message", () => {

@@ -11,12 +11,14 @@ class EventSummary implements Component {
 	render(width: number): string[] {
 		if (width < 1) return [];
 		const text = this.expanded ? this.summary : this.summary.replace(/\s+/g, " ").trim();
-		const lines = wrapTextWithAnsi(text, width);
+		// Keep the standard one-column chat inset on every summary line.
+		const contentWidth = Math.max(1, width - 1);
+		const lines = wrapTextWithAnsi(text, contentWidth);
 		if (!this.expanded && lines.length > 2) {
 			lines.splice(2);
-			lines[1] = truncateToWidth(`${lines[1]} …`, width, "…");
+			lines[1] = truncateToWidth(`${lines[1]} …`, contentWidth, "…");
 		}
-		return lines.map((line) => theme.fg("customMessageText", line));
+		return lines.map((line) => theme.fg("customMessageText", ` ${line}`));
 	}
 
 	invalidate(): void {}
@@ -40,7 +42,7 @@ export abstract class ExpandableEventMessage extends Container {
 	protected addSummary(summary: string, metadata: string): void {
 		this.addChild(new EventSummary(summary, this.expanded));
 		this.addChild(
-			new Text(`${theme.fg("dim", metadata)} ${expandCollapseHint("app.tools.expand", this.expanded)}`, 0, 0),
+			new Text(`${theme.fg("dim", metadata)} ${expandCollapseHint("app.tools.expand", this.expanded)}`, 1, 0),
 		);
 	}
 

@@ -8,7 +8,7 @@ export class CompactionOutcomeMessageComponent extends Container {
 		super();
 		const color = message.details.outcome === "skipped" ? "warning" : "error";
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg(color, message.content), 0, 0));
+		this.addChild(new Text(theme.fg(color, message.content), 1, 0));
 	}
 
 	setExpanded(_expanded: boolean): void {}
@@ -18,7 +18,7 @@ export class MalformedCompactionOutcomeMessageComponent extends Container {
 	constructor() {
 		super();
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("error", "[Malformed compaction outcome message]"), 0, 0));
+		this.addChild(new Text(theme.fg("error", "[Malformed compaction outcome message]"), 1, 0));
 	}
 
 	setExpanded(_expanded: boolean): void {}

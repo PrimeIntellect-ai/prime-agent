@@ -19,7 +19,10 @@ describe("compact compaction messages", () => {
 		);
 		const collapsed = component.render(80).map((line) => stripAnsi(line).trimEnd());
 
-		expect(collapsed).toEqual(["Compacted from 120,480 tokens", "Compaction (Ctrl+O to expand)"]);
+		expect(collapsed).toEqual([" Compacted from 120,480 tokens", " Compaction (Ctrl+O to expand)"]);
+		for (const line of collapsed) {
+			expect(line.startsWith(" ")).toBe(true);
+		}
 
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(80).join("\n"));
@@ -39,7 +42,10 @@ describe("compact compaction messages", () => {
 		);
 		const lines = component.render(80).map((line) => stripAnsi(line).trimEnd());
 		expect(lines).toHaveLength(3);
-		expect(lines[0]).toContain("Compacted from 12,345 tokens · focus:");
+		expect(lines[0]).toContain(" Compacted from 12,345 tokens · focus:");
+		for (const line of lines) {
+			if (line.length > 0) expect(line.startsWith(" ")).toBe(true);
+		}
 		expect(lines[1]).toContain("…");
 		expect(lines[2]).toContain("Ctrl+O to expand");
 
@@ -61,7 +67,15 @@ describe("compact compaction messages", () => {
 			createCompactionOutcomeMessage(content, { outcome, reason: "threshold" }),
 		);
 		const lines = component.render(80).map((line) => stripAnsi(line).trimEnd());
-		expect(lines.join(" ").trim()).toBe(content);
+		expect(
+			lines
+				.map((line) => line.trim())
+				.join(" ")
+				.trim(),
+		).toBe(content);
 		expect(lines.filter((line) => line === "")).toHaveLength(1);
+		for (const line of lines) {
+			if (line.length > 0) expect(line.startsWith(" ")).toBe(true);
+		}
 	});
 });
