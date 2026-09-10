@@ -24,8 +24,14 @@ export class SessionHarnessContext {
 	get digestPending(): boolean {
 		return this._harnessDigestPending;
 	}
-	set digestPending(pending: boolean) {
-		this._harnessDigestPending = pending;
+	consumePendingDigest(): boolean {
+		const pending = this._harnessDigestPending;
+		this._harnessDigestPending = false;
+		return pending;
+	}
+
+	rearmDigest(): void {
+		this._harnessDigestPending = true;
 	}
 	retainOutcome(message: CustomMessage): void {
 		this._unpersistedOutcomes.push(message);

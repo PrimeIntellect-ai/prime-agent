@@ -38,7 +38,7 @@ function harness(overrides: { awaitsChildWork?: boolean } & Partial<SessionGoalC
 		...overrides,
 		admit,
 	});
-	owner.awaitsChildWork = overrides.awaitsChildWork ?? false;
+	if (overrides.awaitsChildWork) owner.deferUntilChildSettlement();
 	return { owner, goals, scheduler, actions, admit };
 }
 

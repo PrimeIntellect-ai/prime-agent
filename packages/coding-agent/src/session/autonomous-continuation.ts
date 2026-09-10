@@ -156,14 +156,22 @@ export class SessionAutonomousContinuation {
 	private suppressionDepth = 0;
 	private readonly suppressedMessages = new WeakSet<AgentMessage>();
 	private readonly thresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
-	readonly snapshots = new WeakMap<AgentMessage, AutonomousRuntimeSnapshot>();
-	pendingThresholdMessages: AgentMessage[] = [];
+	private readonly snapshots = new WeakMap<AgentMessage, AutonomousRuntimeSnapshot>();
+	private pendingThresholdMessages: AgentMessage[] = [];
 	constructor(
 		config: AgentAutonomousConfig | undefined,
 		private readonly host: SessionAutonomousContinuationHost,
 	) {
 		this.state = createAutonomousRuntimeState(config, { cwd: host.getCwd() });
 	}
+	forgetSnapshot(message: AgentMessage): void {
+		this.snapshots.delete(message);
+	}
+
+	takePendingThresholdMessages(): AgentMessage[] {
+		return this.pendingThresholdMessages.splice(0);
+	}
+
 	recordUsage(usage: Usage): void {
 		addAutonomousUsage(this.state, usage);
 	}

@@ -39,16 +39,40 @@ export interface SessionGoalContinuationHost {
 	getAgent(): Pick<Agent, "removeQueuedMessages">;
 }
 export class SessionGoalContinuation {
-	awaitsChildWork = false;
-	abortInProgress = false;
-	thresholdContinuation: AgentMessage | undefined;
+	private _awaitsChildWork = false;
+	private _abortInProgress = false;
+	private _thresholdContinuation: AgentMessage | undefined;
 	constructor(
 		readonly controller: GoalController,
 		private readonly actions: ActionStore<QueuedSessionAction>,
 		private readonly host: SessionGoalContinuationHost,
 	) {}
+	get awaitsChildWork(): boolean {
+		return this._awaitsChildWork;
+	}
+
+	get abortInProgress(): boolean {
+		return this._abortInProgress;
+	}
+
+	get thresholdContinuation(): AgentMessage | undefined {
+		return this._thresholdContinuation;
+	}
+
+	beginAbort(): void {
+		this._abortInProgress = this.controller.state.status === "active";
+	}
+
+	finishAbort(): void {
+		this._abortInProgress = false;
+	}
+
+	deferUntilChildSettlement(): void {
+		this._awaitsChildWork = true;
+	}
+
 	clearQueuedGoalContexts(): void {
-		this.awaitsChildWork = false;
+		this._awaitsChildWork = false;
 		this.host.clearPendingGoalContexts();
 		this.host
 			.getAgent()
@@ -66,7 +90,7 @@ export class SessionGoalContinuation {
 	startGoal(objectiveText: string, tokenBudget: number | undefined): GoalState {
 		const objective = validateGoalObjective(objectiveText);
 		const budget = validateGoalBudget(tokenBudget);
-		this.awaitsChildWork = false;
+		this._awaitsChildWork = false;
 		return this.controller.start(objective, budget);
 	}
 
@@ -92,13 +116,13 @@ export class SessionGoalContinuation {
 		}
 
 		if (message.stopReason === "aborted") {
-			this.abortInProgress = false;
+			this._abortInProgress = false;
 			return;
 		}
 
 		if (message.stopReason === "error") {
-			if (this.abortInProgress) {
-				this.abortInProgress = false;
+			if (this._abortInProgress) {
+				this._abortInProgress = false;
 				return;
 			}
 			this.controller.fail(message.errorMessage || "Assistant response failed");
@@ -118,10 +142,10 @@ export class SessionGoalContinuation {
 	}
 
 	maybeResumeGoalContinuationAfterRlmWork(): void {
-		if (!this.awaitsChildWork) return;
+		if (!this._awaitsChildWork) return;
 		if (this.host.isDisposed() || this.host.isDisposing() || this.host.hasUnsettledChildWork()) return;
 		if (this.controller.state.status !== "active" || !this.controller.state.objective) {
-			this.awaitsChildWork = false;
+			this._awaitsChildWork = false;
 			return;
 		}
 		// Keep the deferral while admission is paused or the pump is suspended
@@ -140,7 +164,7 @@ export class SessionGoalContinuation {
 					resumeIfIdle: true,
 				}),
 			);
-			this.awaitsChildWork = false;
+			this._awaitsChildWork = false;
 		} catch {
 			// Admission can race a new pause; roll back so the retry re-counts.
 			this.controller.restore(goalBeforeResume, { restoreClock: false });
@@ -203,7 +227,7 @@ export class SessionGoalContinuation {
 		if (this.controller.state.status !== "active" || !this.controller.state.objective) {
 			return false;
 		}
-		const alreadyQueued = this.thresholdContinuation;
+		const alreadyQueued = this._thresholdContinuation;
 		if (
 			alreadyQueued !== undefined &&
 			this.actions.unfinishedActions().some((action) => {
@@ -229,7 +253,7 @@ export class SessionGoalContinuation {
 					message: goalMessage,
 				}),
 			);
-			this.thresholdContinuation = goalMessage;
+			this._thresholdContinuation = goalMessage;
 			return true;
 		} catch {
 			return false;
@@ -244,7 +268,7 @@ export class SessionGoalContinuation {
 			(action) => action.payload.kind === "turn" && primaryDeliveryRecord(action).message === queuedGoalContinuation,
 			new Error("Queued goal continuation was cleared before delivery."),
 		);
-		this.thresholdContinuation = undefined;
+		this._thresholdContinuation = undefined;
 		// A stale marker (continuation already consumed) matches no action; only an
 		// actual cancellation may roll back its queue-time continuationsUsed increment.
 		if (cancelled.length === 0) return;
@@ -314,10 +338,10 @@ export class SessionGoalContinuation {
 		// Delegating and ending the turn is correct behavior; hold the continuation
 		// until descendants settle instead of re-prompting a waiting parent.
 		if (this.host.hasUnsettledChildWork()) {
-			this.awaitsChildWork = true;
+			this._awaitsChildWork = true;
 			return [];
 		}
-		this.awaitsChildWork = false;
+		this._awaitsChildWork = false;
 		try {
 			this.host.ensureRuntimeActive(context.context);
 			this.controller.recordContinuation();

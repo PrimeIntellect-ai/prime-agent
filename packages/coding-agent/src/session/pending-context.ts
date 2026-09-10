@@ -32,12 +32,36 @@ export interface SessionPendingContextHost {
 	): QueuedSessionAction[];
 }
 export class SessionPendingContext {
-	messages: CustomMessage[] = [];
-	readonly terminalNoticeActionIds = new Set<string>();
+	private messages: CustomMessage[] = [];
+	private readonly terminalNoticeActionIds = new Set<string>();
 	constructor(
 		private readonly actions: ActionStore<QueuedSessionAction>,
 		private readonly host: SessionPendingContextHost,
 	) {}
+	appendMessages(...messages: CustomMessage[]): void {
+		this.messages.push(...messages);
+	}
+
+	prependMessages(messages: readonly CustomMessage[]): void {
+		this.messages.unshift(...messages);
+	}
+
+	removeMessagesMatching(predicate: (message: CustomMessage) => boolean): void {
+		this.messages = this.messages.filter((message) => !predicate(message));
+	}
+
+	retainTerminalNotice(id: string): void {
+		this.terminalNoticeActionIds.add(id);
+	}
+
+	releaseTerminalNotice(id: string): void {
+		this.terminalNoticeActionIds.delete(id);
+	}
+
+	isRetainedTerminalNotice(id: string): boolean {
+		return this.terminalNoticeActionIds.has(id);
+	}
+
 	dispose(): void {
 		this.messages = [];
 	}
