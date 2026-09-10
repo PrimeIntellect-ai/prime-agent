@@ -24,7 +24,7 @@ describe("InteractiveMode startup hints", () => {
 	function createMode(messageCount = 0, returnToAgentsView = false, getEditorText = () => "") {
 		const mode = {
 			options: { returnToAgentsView },
-			editor: { getText: getEditorText, getTopRightLabel: undefined },
+			editor: { getText: getEditorText },
 			connectionState: {
 				model: { id: "test-model", name: "test-model", provider: "test-provider", reasoning: true },
 				thinkingLevel: "high",
@@ -142,7 +142,8 @@ describe("InteractiveMode startup hints", () => {
 
 		expect(stripAnsi(getLabel(40)!)).toBe("high · /effort");
 		expect(stripAnsi(getLabel(6)!)).toBe("high");
-		expect(getLabel(3)).toBeUndefined();
+		expect(stripAnsi(getLabel(3)!)).toBe("hig");
+		expect(getLabel(0)).toBeUndefined();
 		mode.connectionState.thinkingLevel = "off";
 		expect(stripAnsi(getLabel(40)!)).toBe("off · /effort");
 		mode.connectionState.thinkingLevel = "xhigh";
@@ -167,14 +168,29 @@ describe("InteractiveMode startup hints", () => {
 		expect(mode.connectionState.model).toEqual(before);
 	});
 
-	it("keeps effort visible for extension editors without a top-right label", () => {
-		const mode = { ...createMode(), editor: { getText: () => "" } };
+	it("refreshes effort above the prompt without rebuilding the recap", () => {
+		const mode = {
+			...createMode(),
+			recapContainer: new Container(),
+			agentRunFileChanges: new Map(),
+			ui: { requestRender: vi.fn() },
+		};
 		Object.setPrototypeOf(mode, InteractiveMode.prototype);
+		Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
+		const render = () => stripAnsi(mode.recapContainer.render(80).join("\n"));
 
-		expect(Reflect.get(InteractiveMode.prototype, "getModelTrayLabel").call(mode)).toBe("test-model • high");
+		expect(render()).toContain("high · /effort");
+		mode.connectionState.thinkingLevel = "low";
+		expect(render()).toContain("low · /effort");
+		mode.connectionState.model.reasoning = false;
+		expect(mode.recapContainer.render(80)).toEqual([]);
+		mode.connectionState.model.reasoning = true;
+		expect(render()).toContain("low · /effort");
+		Reflect.deleteProperty(mode.connectionState, "model");
+		expect(mode.recapContainer.render(80)).toEqual([]);
 	});
 
-	it.each([false, true])("preserves prompt drafts and extension labels when swapping editors (%s)", (ownLabel) => {
+	it.each([false, true])("keeps effort outside custom editors and preserves drafts and headers (%s)", (ownHeader) => {
 		const keybindings = new KeybindingsManager();
 		const ui = { terminal: { rows: 24 }, requestRender: vi.fn(), setFocus: vi.fn() } as unknown as TUI;
 		const defaultEditor = new CustomEditor(ui, getEditorTheme(), keybindings);
@@ -186,24 +202,32 @@ describe("InteractiveMode startup hints", () => {
 			defaultEditor,
 			editor: defaultEditor,
 			editorContainer: new Container(),
+			recapContainer: new Container(),
+			agentRunFileChanges: new Map(),
+			sessionRecap: "Updated files",
 			pastedImages: new Map(),
 			queueSelection: { selected: undefined },
 			ctrlCExitHintExpiresAt: 0,
 		};
 		Object.setPrototypeOf(mode, InteractiveMode.prototype);
 		Reflect.get(InteractiveMode.prototype, "setupKeyHandlers").call(mode);
+		Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
 		const replacement = new CustomEditor(ui, getEditorTheme(), keybindings);
-		if (ownLabel) replacement.getTopRightLabel = () => "custom";
+		if (ownHeader) replacement.getHeaderLine = () => "extension header";
 
 		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, () => replacement);
 
 		expect(replacement.getText()).toBe("unfinished draft");
-		expect(stripAnsi(replacement.render(80)[0]!)).toContain(ownLabel ? "custom" : "high · /effort");
+		expect(stripAnsi(replacement.render(80).join("\n"))).not.toContain("/effort");
+		if (ownHeader) expect(replacement.render(80)[1]).toContain("extension header");
+		const row = mode.recapContainer.render(80)[0]!;
+		expect(stripAnsi(row)).toMatch(/^ Recap: Updated files\s+high · \/effort $/);
+		expect(row).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		mode.connectionState.thinkingLevel = "low";
-		expect(stripAnsi(replacement.render(80)[0]!)).toContain(ownLabel ? "custom" : "low · /effort");
+		expect(stripAnsi(mode.recapContainer.render(80)[0]!)).toContain("low · /effort");
 		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, undefined);
 		expect(defaultEditor.getText()).toBe("unfinished draft");
-		expect(stripAnsi(defaultEditor.render(80)[0]!)).toContain("low · /effort");
+		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
 	});
 
 	it("uses the configured keybinding in the manage hint", () => {

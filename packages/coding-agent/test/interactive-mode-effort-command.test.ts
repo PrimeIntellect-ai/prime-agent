@@ -35,7 +35,6 @@ type InteractiveModePrototype = {
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
 
 type FastCommandContext = {
-	editor: { getTopRightLabel?: (maxWidth: number) => string | undefined };
 	connectionState?: { sessionId: string; serviceTier: ServiceTier; thinkingLevel: ThinkingLevel };
 	fastModeToggleQueue: Promise<void>;
 	agentConnection: {
@@ -76,7 +75,6 @@ function testModel(provider: string, id: string, api: Api): Model<Api> {
 
 function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5", "openai-codex-responses")) {
 	const context: FastCommandContext = {
-		editor: { getTopRightLabel: undefined },
 		connectionState: { sessionId: "session-1", serviceTier: "default", thinkingLevel: "high" },
 		fastModeToggleQueue: Promise.resolve(),
 		agentConnection: undefined as never,

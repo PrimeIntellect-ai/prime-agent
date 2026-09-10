@@ -271,6 +271,22 @@ describe("CustomEditor", () => {
 		expect(lines[1]).toContain("...");
 	});
 
+	it("updates placeholder and queue header alignment when editor padding changes", () => {
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager(), {
+			placeholder: "type to start",
+		});
+		editor.getHeaderLine = () => "queued message";
+
+		for (const padding of [5, 1]) {
+			editor.setPaddingX(padding);
+			const lines = editor.render(40).map((line) => stripAnsi(line));
+
+			expect(lines[1]!.indexOf("queued message")).toBe(padding);
+			expect(lines[3]!.indexOf("type to start")).toBe(padding + 3);
+			expect(lines.every((line) => visibleWidth(line) === 40)).toBe(true);
+		}
+	});
+
 	it("keeps the surface background across truncation resets in the header line", () => {
 		const backgroundColor = (text: string) => `<bg>${text}</bg>`;
 		const editor = new CustomEditor(fakeTui, { ...editorTheme, backgroundColor }, new KeybindingsManager());
@@ -280,68 +296,6 @@ describe("CustomEditor", () => {
 		const segments = lines[1]!.split("\x1b[0m");
 		expect(segments.length).toBeGreaterThan(1);
 		for (const segment of segments) {
-			expect(segment.startsWith("<bg>")).toBe(true);
-			expect(segment.endsWith("</bg>")).toBe(true);
-		}
-	});
-
-	it.each([undefined, (text: string) => `\x1b[48;5;234m${text}\x1b[49m`])(
-		"places a label in the top right without moving input or queue headers",
-		(backgroundColor) => {
-			const editor = new CustomEditor(fakeTui, { ...editorTheme, backgroundColor }, new KeybindingsManager(), {
-				paddingX: 2,
-				placeholder: "type to start",
-			});
-			editor.focused = true;
-			for (const text of ["", "draft prompt", "line one\nline two"]) {
-				editor.setText(text);
-				for (const header of [undefined, "steering 1 · browse queued messages"]) {
-					editor.getHeaderLine = () => header;
-					editor.getTopRightLabel = undefined;
-					const before = editor.render(60);
-					editor.getTopRightLabel = () => "high · /effort";
-					const after = editor.render(60);
-
-					expect(after).toHaveLength(before.length);
-					expect(stripAnsi(after[0]!)).toMatch(/high · \/effort {2}$/);
-					expect(after.slice(1)).toEqual(before.slice(1));
-					expect(after[0]).not.toContain(CURSOR_MARKER);
-					expect(editor.getText()).toBe(text);
-				}
-			}
-		},
-	);
-
-	it("preserves the scroll indicator beside the top-right label", () => {
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText(Array.from({ length: 12 }, (_, index) => `line ${index}`).join("\n"));
-		editor.getTopRightLabel = () => "high · /effort";
-
-		const lines = editor.render(80);
-
-		expect(lines[0]).toContain("↑ 5 more");
-		expect(lines[0]).toContain("high · /effort");
-		expect(visibleWidth(lines[0]!)).toBe(80);
-	});
-
-	it("bounds top-right labels and follows changed editor padding", () => {
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.getTopRightLabel = (maxWidth) => (maxWidth >= 4 ? "high" : undefined);
-		for (const padding of [0, 2, 5]) {
-			editor.setPaddingX(padding);
-			for (const width of [1, 2, 3, 4, 8, 16, 40, 120]) {
-				expect(visibleWidth(editor.render(width)[0]!)).toBe(width);
-			}
-			expect(editor.render(40)[0]).toMatch(new RegExp(`high {${padding}}$`));
-		}
-	});
-
-	it("keeps the background after a label's ANSI reset", () => {
-		const backgroundColor = (text: string) => `<bg>${text}</bg>`;
-		const editor = new CustomEditor(fakeTui, { ...editorTheme, backgroundColor }, new KeybindingsManager());
-		editor.getTopRightLabel = () => "\x1b[31mhigh\x1b[0m";
-
-		for (const segment of editor.render(80)[0]!.split("\x1b[0m")) {
 			expect(segment.startsWith("<bg>")).toBe(true);
 			expect(segment.endsWith("</bg>")).toBe(true);
 		}

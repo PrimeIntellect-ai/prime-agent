@@ -211,6 +211,7 @@ import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybin
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
+import { PromptContextLine } from "./components/prompt-context-line.js";
 import { styleArgumentTokens } from "./components/prompt-highlight.js";
 import {
 	MalformedRefinementOutcomeMessageComponent,
@@ -1473,6 +1474,7 @@ export class InteractiveMode {
 		for (const container of this.getPromptContextContainers()) {
 			this.mainContainer.addChild(container);
 		}
+		this.mainContainer.addChild(this.recapContainer);
 		this.mainContainer.addChild(this.editorContainer);
 		this.mainContainer.addChild(this.subagentSummaryLine);
 		this.mainContainer.addChild(this.widgetContainerBelow);
@@ -3643,19 +3645,18 @@ export class InteractiveMode {
 	private renderRecap(): void {
 		if (!this.recapContainer) return;
 		this.recapContainer.clear();
-		const recap = this.sessionRecap?.trim();
 		const showChanges = !this.isAgentStreaming() && this.agentRunFileChanges.size > 0;
 		if (showChanges) {
 			this.recapContainer.addChild(
 				new TruncatedText(formatTotalChangeSummary([...this.agentRunFileChanges.values()]), 1, 0),
 			);
 		}
-		if (recap) {
-			this.recapContainer.addChild(new TruncatedText(theme.fg("dim", `Recap: ${recap}`), 1, 0));
-		}
-		if ((recap || showChanges) && !this.featureHintComponent) {
-			this.recapContainer.addChild(new Spacer(1));
-		}
+		this.recapContainer.addChild(
+			new PromptContextLine(
+				() => this.sessionRecap,
+				(maxWidth) => this.getPromptEffortLabel(maxWidth),
+			),
+		);
 		this.ui.requestRender();
 	}
 
@@ -4035,9 +4036,6 @@ export class InteractiveMode {
 				if (!customEditor.onExtensionShortcut) {
 					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
 				}
-				if ("getTopRightLabel" in customEditor && !customEditor.getTopRightLabel) {
-					customEditor.getTopRightLabel = (maxWidth: number) => this.defaultEditor.getTopRightLabel?.(maxWidth);
-				}
 				// Copy action handlers (clear, suspend, model switching, etc.)
 				for (const [action, handler] of this.defaultEditor.actionHandlers) {
 					(customEditor.actionHandlers as Map<string, () => void>).set(action, handler);
@@ -4179,7 +4177,6 @@ export class InteractiveMode {
 
 	private setupKeyHandlers(): void {
 		this.defaultEditor.getHeaderLine = () => this.getQueueSelectionHeader();
-		this.defaultEditor.getTopRightLabel = (maxWidth) => this.getPromptEffortLabel(maxWidth);
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
@@ -6134,13 +6131,6 @@ export class InteractiveMode {
 			? name.slice(providerPrefix.length)
 			: name.replace(/^internal\//, "");
 		const parts = [compactName || model.name];
-		// Editors supplied by extensions may not support the top-right label.
-		if (!("getTopRightLabel" in this.editor) && model.reasoning) {
-			const level = this.connectionState?.thinkingLevel ?? "off";
-			if (level !== "off") {
-				parts.push(level);
-			}
-		}
 		if (this.connectionState?.serviceTier === "priority") {
 			parts.push("fast");
 		}
@@ -6148,11 +6138,11 @@ export class InteractiveMode {
 	}
 
 	private getPromptEffortLabel(maxWidth: number): string | undefined {
-		if (!this.getCurrentModel()?.reasoning) return undefined;
+		if (maxWidth < 1 || !this.getCurrentModel()?.reasoning) return undefined;
 		const level = this.connectionState?.thinkingLevel ?? "off";
 		const label = `${level} · /effort`;
 		if (visibleWidth(label) <= maxWidth) return theme.fg("dim", label);
-		return visibleWidth(level) <= maxWidth ? theme.fg("dim", level) : undefined;
+		return theme.fg("dim", truncateToWidth(level, maxWidth, ""));
 	}
 
 	private getAgentsViewTrayHint(): string | undefined {
@@ -7288,11 +7278,11 @@ export class InteractiveMode {
 	}
 
 	private getPromptContextContainers(): Container[] {
-		return [this.recapContainer, this.featureHintContainer, this.queuedMessagesContainer, this.sideQuestionContainer];
+		return [this.featureHintContainer, this.queuedMessagesContainer, this.sideQuestionContainer];
 	}
 
 	private getPromptDockComponents(): Component[] {
-		return [this.editorContainer, this.subagentSummaryLine, this.footerSlot];
+		return [this.recapContainer, this.editorContainer, this.subagentSummaryLine, this.footerSlot];
 	}
 
 	/** Enter or leave fullscreen rendering without touching the persisted setting. */
