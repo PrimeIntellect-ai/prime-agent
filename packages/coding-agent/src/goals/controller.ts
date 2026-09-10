@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { emptyGoalState, type GoalState, goalTokenDeltaForUsage, normalizeGoalState } from "../../goals.js";
+import { emptyGoalState, type GoalState, goalTokenDeltaForUsage, normalizeGoalState } from "../core/goals.js";
 import type { GoalPersistence } from "./persistence.js";
 
 export interface GoalCheckpoint {

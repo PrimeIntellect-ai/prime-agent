@@ -1,7 +1,7 @@
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { emptyGoalState, type GoalState } from "../../../src/core/goals.js";
-import { GoalController } from "../../../src/core/session/goals/controller.js";
+import { emptyGoalState, type GoalState } from "../../src/core/goals.js";
+import { GoalController } from "../../src/goals/controller.js";
 
 function createController(initial = emptyGoalState()) {
 	let persisted = initial;

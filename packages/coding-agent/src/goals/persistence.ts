@@ -4,8 +4,8 @@ import {
 	type GoalState,
 	isPersistedGoalState,
 	normalizeGoalState,
-} from "../../goals.js";
-import type { SessionManager } from "../../session-manager.js";
+} from "../core/goals.js";
+import type { SessionManager } from "../core/session-manager.js";
 
 export interface GoalPersistence {
 	load(): GoalState;

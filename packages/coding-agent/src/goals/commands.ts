@@ -1,5 +1,5 @@
-import { validateGoalBudget, validateGoalObjective } from "../../goals.js";
-import { parseSessionSlashCommand } from "../../slash-commands.js";
+import { validateGoalBudget, validateGoalObjective } from "../core/goals.js";
+import { parseSessionSlashCommand } from "../core/slash-commands.js";
 
 type GoalSlashCommand =
 	| { kind: "status" }
