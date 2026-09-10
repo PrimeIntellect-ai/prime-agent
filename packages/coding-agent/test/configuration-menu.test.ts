@@ -27,6 +27,7 @@ describe("ConfigurationMenuComponent", () => {
 			onSelectModel?: (model: { id: string }) => void;
 			modelCount?: number;
 			cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+			noCost?: boolean;
 			onCancel?: () => void;
 		} = {},
 	): Promise<ConfigurationMenuComponent> {
@@ -40,6 +41,7 @@ describe("ConfigurationMenuComponent", () => {
 		const model = harness.getModel("faux-1")!;
 		const models = specifications.map(({ id }) => harness.getModel(id)!);
 		if (options.cost) model.cost = options.cost;
+		if (options.noCost) model.cost = undefined as unknown as typeof model.cost;
 		return new ConfigurationMenuComponent({
 			initialTab: options.initialTab ?? "providers",
 			tui: createFakeTui(),
@@ -217,10 +219,10 @@ describe("ConfigurationMenuComponent", () => {
 		}
 	});
 
-	it("shows exact catalog input, cached-input, and output rates per million tokens", async () => {
+	it("rounds catalog input, cached-input, and output rates per million tokens", async () => {
 		const menu = await createMenu({
 			initialTab: "models",
-			cost: { input: 0.45, cacheRead: 0.1125, output: 2.75, cacheWrite: 3 },
+			cost: { input: 1.1525, cacheRead: 0.0000015, output: 2.75, cacheWrite: 3 },
 		});
 		for (const width of [120, 48]) {
 			const lines = stripAnsi(menu.render(width).join("\n")).split("\n");
@@ -228,9 +230,10 @@ describe("ConfigurationMenuComponent", () => {
 			expect(output).toContain("Input");
 			expect(output).toContain("Cached input");
 			expect(output).toContain("Output");
-			expect(output).toContain("$0.45");
-			expect(output).toContain("$0.1125");
+			expect(output).toContain("$1.153");
+			expect(output).toContain("<0.001");
 			expect(output).toContain("$2.75");
+			expect(output).not.toContain("$1.1525");
 			expect(output).not.toContain("$3");
 			// The unit rides on the provider/model line; the block ends with clear whitespace.
 			const headerLine = lines.find((line) => line.includes("USD / 1M tokens"));
@@ -251,6 +254,12 @@ describe("ConfigurationMenuComponent", () => {
 		expect(output).toContain("Cached input: —");
 		expect(output).toContain("Output: —");
 		expect(output).not.toMatch(/NaN|Infinity/);
+
+		const missingCostMenu = await createMenu({ initialTab: "models", noCost: true });
+		const missingCostOutput = stripAnsi(missingCostMenu.render(48).join("\n"));
+		expect(missingCostOutput).toContain("Input: —");
+		expect(missingCostOutput).toContain("Cached input: —");
+		expect(missingCostOutput).toContain("Output: —");
 	});
 
 	it("keeps navigation and selection usable when an inline picker is resized", async () => {
