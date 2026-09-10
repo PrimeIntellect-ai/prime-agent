@@ -1,8 +1,12 @@
-import { Container, setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Container, setKeybindings, Text, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { emptyUsage } from "../src/core/usage.js";
+import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
+import { RefinementOutcomeMessageComponent } from "../src/modes/interactive/components/refinement-outcome-message.js";
+import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { BrandSplashHeader, InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import type { PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
 import { getEditorTheme, getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.js";
@@ -327,6 +331,98 @@ describe("InteractiveMode startup hints", () => {
 		expect(defaultEditor.getText()).toBe("unfinished draft");
 		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
 	});
+
+	it.each(
+		(["assistant", "tool", "refinement"] as const).flatMap((lastMessage) =>
+			[false, true].flatMap((withWidget) =>
+				[false, true].flatMap((withRecap) =>
+					[false, true].map((pickerOpen) => ({ lastMessage, withWidget, withRecap, pickerOpen })),
+				),
+			),
+		),
+	)(
+		"uses one prompt separator after $lastMessage (widget=$withWidget, recap=$withRecap, picker=$pickerOpen)",
+		({ lastMessage, withWidget, withRecap, pickerOpen }) => {
+			const width = 120;
+			const ui = { terminal: { rows: 24 }, requestRender: vi.fn(), hasOverlay: () => pickerOpen } as unknown as TUI;
+			const editor = new CustomEditor(ui, getEditorTheme(), new KeybindingsManager());
+			editor.setText("Draft prompt");
+			const activeInput = pickerOpen ? new Text("Choose a model", 1, 0) : editor;
+			const editorContainer = new Container();
+			editorContainer.addChild(activeInput);
+			let finalMessage: Component;
+			if (lastMessage === "assistant") {
+				finalMessage = new AssistantMessageComponent({
+					role: "assistant",
+					content: [{ type: "text", text: "Finished the response." }],
+					api: "openai-completions",
+					provider: "test",
+					model: "test-model",
+					usage: emptyUsage(),
+					stopReason: "stop",
+					timestamp: 0,
+				});
+			} else if (lastMessage === "tool") {
+				const tool = new ToolExecutionComponent("test-tool", "tool-1", {}, {}, undefined, ui, "/tmp");
+				tool.updateResult({ content: [{ type: "text", text: "Finished the tool." }], isError: false });
+				finalMessage = tool;
+			} else {
+				finalMessage = new RefinementOutcomeMessageComponent({
+					role: "custom",
+					customType: "refinement_outcome",
+					content: "Refinement complete",
+					display: true,
+					timestamp: 0,
+					details: { refinementId: "refine-1", summary: "Updated the harness", scope: "local", edits: [] },
+				});
+			}
+			const widget = new Text("Extension widget", 1, 0);
+			const mode = Object.assign(createMode(1, true), {
+				ui,
+				editor,
+				editorContainer,
+				widgetContainerAbove: new Container(),
+				widgetContainerBelow: new Container(),
+				extensionWidgetsAbove: new Map<string, Component>(withWidget ? [["test", widget]] : []),
+				extensionWidgetsBelow: new Map<string, Component>(),
+				queuedMessagesContainer: new Container(),
+				sideQuestionContainer: new Container(),
+				recapContainer: new Container(),
+				agentRunFileChanges: new Map(),
+				sessionRecap: withRecap ? "Completed the work" : undefined,
+			});
+			Reflect.get(InteractiveMode.prototype, "renderWidgets").call(mode);
+			Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
+			const layout = new Container();
+			layout.addChild(finalMessage);
+			layout.addChild(mode.widgetContainerAbove);
+			for (const container of Reflect.get(InteractiveMode.prototype, "getPromptContextContainers").call(mode)) {
+				layout.addChild(container);
+			}
+			layout.addChild(mode.recapContainer);
+			layout.addChild(mode.editorContainer);
+			const recapRows = mode.recapContainer.render(width);
+			const precedingRows = [...finalMessage.render(width)];
+			if (withWidget) precedingRows.push("", ...widget.render(width));
+			expect(layout.render(width)).toEqual([...precedingRows, "", recapRows[1], ...activeInput.render(width)]);
+			expect(stripAnsi(recapRows[1]!)).toContain("Showing overview");
+			expect(stripAnsi(recapRows[1]!)).not.toContain("test-model");
+			expect(stripAnsi(recapRows[1]!)).toContain(withRecap ? "Recap: Completed the work" : "Showing overview");
+			if (!withRecap) expect(stripAnsi(recapRows[1]!)).not.toContain("Recap:");
+			expect(mode.widgetContainerBelow.render(width)).toEqual([]);
+			if (!withWidget) expect(mode.widgetContainerAbove.render(width)).toEqual([]);
+			if (withWidget) {
+				mode.extensionWidgetsAbove.clear();
+				Reflect.get(InteractiveMode.prototype, "renderWidgets").call(mode);
+				expect(layout.render(width)).toEqual([
+					...finalMessage.render(width),
+					"",
+					recapRows[1],
+					...activeInput.render(width),
+				]);
+			}
+		},
+	);
 
 	it("uses the configured keybinding in the manage hint", () => {
 		setKeybindings(new KeybindingsManager({ "app.agents.back": "ctrl+g" }));

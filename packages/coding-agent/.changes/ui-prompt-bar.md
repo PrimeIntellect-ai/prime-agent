@@ -4,3 +4,4 @@
 - Hid the tray and subagents summary while pickers are open and showed depth only for subagent sessions.
 - Kept slash command autocomplete completion-only: Tab or Enter completes the command, and pressing Enter again runs it.
 - Removed unsolicited feature-discovery tips during agent runs and example prompts from the startup splash and editor.
+- Removed the extra blank line above recap and detail status when no extension widget is shown.
