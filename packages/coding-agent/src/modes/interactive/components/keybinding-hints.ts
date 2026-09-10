@@ -68,7 +68,7 @@ export function keyHint(keybinding: Keybinding, description: string, options: Ke
 
 /** Conversation detail uses the status bar; transcript rows omit shortcut hints. */
 export function expandCollapseHint(keybinding: Keybinding, expanded: boolean): string {
-	if (keybinding === "app.tools.expand" || keybinding === "app.messages.expand") return "";
+	if (keybinding === "app.tools.expand") return "";
 	const action = expanded ? "to collapse" : "to expand";
 	return theme.fg("dim", `(${keyText(keybinding)} ${action})`);
 }

@@ -129,14 +129,13 @@ Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Cycle overview → thinking and file diffs → all output |
-| `app.messages.expand` | `ctrl+p` | Collapse or expand agent-to-agent messages |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.navigateOlder` | `alt+up` | Select the next older pending message |
 | `app.message.navigateNewer` | `alt+down` | Select the next newer pending message or restore the draft |
 | `app.message.moveEarlier` | `ctrl+alt+up` | Move the selected pending message one place earlier in its queue |
 | `app.message.moveLater` | `ctrl+alt+down` | Move the selected pending message one place later in its queue |
 
-Ctrl+O changes presentation only: the default hides thinking and collapses tools and diffs; the first press reveals thinking and file diffs; the second expands tool output too; the third returns to the default. This also works for restored conversations and new streaming content. Ctrl+J and Ctrl+T no longer control conversation expansion.
+Ctrl+O changes presentation only: the default hides thinking and collapses tools and diffs; the first press reveals thinking and file diffs; the second expands tool output and reveals agent-to-agent messages; the third returns to the default. This also works for restored conversations and new streaming content. Ctrl+J, Ctrl+T, and Ctrl+P no longer control conversation expansion.
 
 ### Tree Navigation
 
@@ -185,7 +184,7 @@ On native Windows, `app.suspend` has no default binding because Windows terminal
 
 ### Emacs Example
 
-Binding `ctrl+p` below releases the conflicting `app.messages.expand` default; shortcuts in other views keep their defaults.
+Binding `ctrl+p` below moves the editor cursor up; shortcuts in other views keep their defaults.
 
 ```json
 {

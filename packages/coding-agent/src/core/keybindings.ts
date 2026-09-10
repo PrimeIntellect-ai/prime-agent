@@ -21,7 +21,6 @@ export interface AppKeybindings {
 	"app.model.toggleScope": true;
 	"app.configuration.previousTab": true;
 	"app.tools.expand": true;
-	"app.messages.expand": true;
 	"app.subagents.focus": true;
 	"app.heartbeats.open": true;
 	"app.heartbeats.openSelected": true;
@@ -87,11 +86,6 @@ export const KEYBINDINGS = {
 	"app.model.toggleScope": { defaultKeys: "alt+s", description: "Toggle model selector scope" },
 	"app.configuration.previousTab": { defaultKeys: "shift+tab", description: "Select previous configuration tab" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Cycle conversation detail", defaultKeyScope: "editor" },
-	"app.messages.expand": {
-		defaultKeys: "ctrl+p",
-		description: "Toggle agent message expansion",
-		defaultKeyScope: "editor",
-	},
 	"app.subagents.focus": {
 		defaultKeys: "alt+a",
 		description: "Open child agents",
