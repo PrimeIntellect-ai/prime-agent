@@ -352,7 +352,7 @@ export class TUI extends Container {
 			previousViewportTop: number;
 		};
 	} | null = null;
-	private static readonly WHEEL_SCROLL_LINES = 3;
+	private static readonly WHEEL_SCROLL_LINES = 1;
 	private static readonly SELECTION_AUTO_SCROLL_DELAY_MS = 150;
 	private static readonly SELECTION_AUTO_SCROLL_INTERVAL_MS = 50;
 	private selectionAutoScrollTimer: NodeJS.Timeout | undefined;

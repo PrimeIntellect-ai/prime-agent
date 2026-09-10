@@ -235,7 +235,7 @@ describe("TUI fullscreen mode", () => {
 		await terminal.waitForRender();
 
 		let viewport = terminal.getViewport();
-		assert.strictEqual(viewport[0], "Line 9", "wheel scrolls up 3 lines");
+		assert.strictEqual(viewport[0], "Line 11", "each wheel step scrolls up one row");
 		assert.strictEqual(tui.getScrollInfo()?.following, false);
 
 		chat.lines = lines(40);
@@ -243,9 +243,9 @@ describe("TUI fullscreen mode", () => {
 		await terminal.waitForRender();
 
 		viewport = terminal.getViewport();
-		assert.strictEqual(viewport[0], "Line 9", "appended content does not move the window");
+		assert.strictEqual(viewport[0], "Line 11", "appended content does not move the window");
 		assert.strictEqual(viewport[8], "> prompt", "dock still visible");
-		assert.strictEqual(tui.getScrollInfo()?.linesBelow, 23);
+		assert.strictEqual(tui.getScrollInfo()?.linesBelow, 21);
 		assert.ok(viewport[7]?.includes("ctrl+shift+down to follow"), "follow hint composited above the dock");
 
 		tui.stop();
