@@ -204,7 +204,6 @@ import { type FileChangeSummary, formatTotalChangeSummary, mergeTurnFileChanges 
 import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
-import { FEATURE_HINT_ANIMATION_INTERVAL_MS, FeatureHintComponent } from "./components/feature-hint.js";
 import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
@@ -242,7 +241,6 @@ import {
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
-import { FeatureHintDeck } from "./feature-hints.js";
 import { scopeHeartbeatsToSession } from "./heartbeat-scope.js";
 import {
 	collectMarkedImages,
@@ -296,20 +294,6 @@ interface PendingToolCallRenderInput {
 const HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS = 15_000;
 const HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS = 120_000;
 const MODEL_CATALOG_REFRESH_TTL_MS = 60_000;
-const FEATURE_HINT_DELAY_MS = 5_000;
-
-export const START_HINTS = [
-	'Try "refactor @<filepath>"',
-	'Try "fix bugs in @<filepath>"',
-	'Try "add tests for @<filepath>"',
-	'Try "explain how @<filepath> works"',
-	'Try "improve performance in @<filepath>"',
-] as const;
-
-export function getRandomStartHint(random = Math.random): (typeof START_HINTS)[number] {
-	return START_HINTS[Math.floor(random() * START_HINTS.length)] ?? START_HINTS[0];
-}
-
 function isLabeledQueuedPreview(message: string): boolean {
 	return (
 		message.startsWith(`${HEARTBEAT_PROMPT_PREVIEW_LABEL}: `) ||
@@ -920,7 +904,6 @@ export class InteractiveMode {
 	private statusContainer: Container;
 	private queuedMessagesContainer: Container;
 	private sideQuestionContainer: Container;
-	private featureHintContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private readonly promptStashStore: ClientPromptStashStore | undefined;
@@ -943,7 +926,6 @@ export class InteractiveMode {
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
 	private keybindings: KeybindingsManager;
 	private version: string;
-	private readonly startHint = getRandomStartHint();
 	private isInitialized = false;
 	private onInputCallback?: (text: string | undefined) => void;
 	private submittedInputBehavior: "steer" | "followUp" = "steer";
@@ -963,14 +945,6 @@ export class InteractiveMode {
 	// Start of the in-flight run; survives loader teardown so the elapsed display doesn't reset on re-entry.
 	private turnStartedAt: number | undefined = undefined;
 	private workingTimer: NodeJS.Timeout | undefined = undefined;
-	private readonly featureHintDeck = new FeatureHintDeck();
-	private currentFeatureHint: string | undefined;
-	private featureHintEligibleAt = 0;
-	private featureHintTimer: NodeJS.Timeout | undefined;
-	private featureHintAnimationTimer: NodeJS.Timeout | undefined;
-	private featureHintComponent: FeatureHintComponent | undefined;
-	private featureHintRunPending = false;
-	private featureHintSuppressedByQueue = false;
 	private pulseTimer: NodeJS.Timeout | undefined = undefined;
 	private pulseFrame = 0;
 	private readonly activityTracker = new AgentActivityTracker();
@@ -1162,7 +1136,6 @@ export class InteractiveMode {
 		this.statusContainer = new Container();
 		this.queuedMessagesContainer = new Container();
 		this.sideQuestionContainer = new Container();
-		this.featureHintContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.recapContainer = new Container();
@@ -1174,8 +1147,6 @@ export class InteractiveMode {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
 			isArgumentCommand: builtinSlashCommandTakesArgument,
-			placeholder: this.startHint,
-			placeholderColor: (text) => theme.fg("dim", text),
 		});
 		this.editor = this.defaultEditor;
 		this.mainContainer = new Container();
@@ -1472,8 +1443,7 @@ export class InteractiveMode {
 				verboseInstructions,
 				{
 					topPadding: true,
-					getHideStartHint: () => !this.isNewChat(),
-					getStartHint: () => this.startHint,
+					getHideStartHint: () => true,
 				},
 			);
 			this.headerContainer.addChild(this.builtInHeader);
@@ -2893,7 +2863,6 @@ export class InteractiveMode {
 	}
 
 	private resetCurrentSessionRenderState(options?: { clearPromptStash?: boolean }): void {
-		this.endFeatureHintRun();
 		this.chatContainer.clear();
 		this.shortcutGuideContainer.clear();
 		this.pendingMessagesContainer.clear();
@@ -2903,7 +2872,6 @@ export class InteractiveMode {
 		// The selection and its stashed draft belong to the previous session;
 		// every editor draft is cleared below, so discard rather than restore.
 		this.queueSelection.reset();
-		this.featureHintSuppressedByQueue = false;
 		if (options?.clearPromptStash) {
 			this.promptStash = undefined;
 			if (this.promptStashState) this.promptStashState.queuedStashes = undefined;
@@ -3287,11 +3255,9 @@ export class InteractiveMode {
 		this.loadingAnimation = this.createWorkingLoader();
 		this.statusContainer.addChild(this.loadingAnimation);
 		this.startWorkingTimer();
-		this.startFeatureHintPresentation();
 	}
 
 	private stopWorkingLoader(): void {
-		this.clearFeatureHintPresentation();
 		if (this.workingTimer) {
 			clearInterval(this.workingTimer);
 			this.workingTimer = undefined;
@@ -3302,112 +3268,6 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.statusContainer.clear();
-	}
-
-	private startFeatureHintPresentation(): void {
-		this.clearFeatureHintPresentation();
-		if (this.shouldSuppressFeatureHint()) {
-			return;
-		}
-		if (this.featureHintEligibleAt === 0) {
-			this.featureHintEligibleAt = Date.now() + FEATURE_HINT_DELAY_MS;
-		}
-		const delay = Math.max(0, this.featureHintEligibleAt - Date.now());
-		if (delay === 0) {
-			this.showFeatureHint();
-			return;
-		}
-		this.featureHintTimer = setTimeout(() => {
-			this.featureHintTimer = undefined;
-			this.showFeatureHint();
-		}, delay);
-		this.featureHintTimer.unref?.();
-	}
-
-	private showFeatureHint(): void {
-		if (
-			this.shouldSuppressFeatureHint() ||
-			!this.loadingAnimation ||
-			!this.shouldShowWorkingLoader() ||
-			!this.statusContainer.children.includes(this.loadingAnimation)
-		) {
-			return;
-		}
-		if (!this.currentFeatureHint) {
-			const hint = this.featureHintDeck.next({
-				getKeybinding: (action) => {
-					const key = keyText(action);
-					return key ? this.capitalizeKey(key) : undefined;
-				},
-				isResidentSession: this.options.returnToAgentsView === true,
-			});
-			this.currentFeatureHint = hint?.text;
-		}
-		if (!this.currentFeatureHint) {
-			return;
-		}
-		this.featureHintComponent = new FeatureHintComponent(this.currentFeatureHint);
-		this.featureHintContainer.addChild(this.featureHintComponent);
-		this.renderRecap();
-		this.featureHintAnimationTimer = setInterval(() => {
-			this.featureHintComponent?.advance();
-			this.ui.requestRender();
-		}, FEATURE_HINT_ANIMATION_INTERVAL_MS);
-		this.featureHintAnimationTimer.unref?.();
-		this.ui.requestRender();
-	}
-
-	private clearFeatureHintPresentation(): void {
-		if (this.featureHintTimer) {
-			clearTimeout(this.featureHintTimer);
-			this.featureHintTimer = undefined;
-		}
-		if (this.featureHintAnimationTimer) {
-			clearInterval(this.featureHintAnimationTimer);
-			this.featureHintAnimationTimer = undefined;
-		}
-		if (this.featureHintComponent) {
-			this.featureHintContainer.removeChild(this.featureHintComponent);
-			this.featureHintComponent = undefined;
-			this.renderRecap();
-		}
-	}
-
-	private resumeFeatureHintPresentation(): void {
-		if (
-			!this.shouldSuppressFeatureHint() &&
-			this.loadingAnimation &&
-			this.shouldShowWorkingLoader() &&
-			this.statusContainer.children.includes(this.loadingAnimation)
-		) {
-			this.startFeatureHintPresentation();
-		}
-	}
-
-	private shouldSuppressFeatureHint(): boolean {
-		const { steering, followUp } = this.getAllQueuedMessages();
-		return steering.length > 0 || followUp.length > 0;
-	}
-
-	private endFeatureHintRun(): void {
-		this.clearFeatureHintPresentation();
-		this.currentFeatureHint = undefined;
-		this.featureHintEligibleAt = 0;
-		this.featureHintRunPending = false;
-	}
-
-	private prepareFeatureHintRun(message: AgentMessage): void {
-		if (!this.featureHintRunPending) return;
-		if (message.role === "assistant") {
-			this.featureHintRunPending = false;
-			return;
-		}
-		if (!startsAgentRun(message)) return;
-
-		this.endFeatureHintRun();
-		if (this.shouldShowWorkingLoader()) {
-			this.startFeatureHintPresentation();
-		}
 	}
 
 	private updateWorkingPulse(): void {
@@ -5407,9 +5267,6 @@ export class InteractiveMode {
 		this.updateConnectionStateFromEvent(event);
 		// A new user message resets the activity tracker to 0, so the in-flight baseline must
 		// reset with it. (agent_start on auto-retry does not reset the tracker.)
-		if (event.type === "message_start") {
-			this.prepareFeatureHintRun(event.message);
-		}
 		if (event.type === "message_start" && (event.message.role === "user" || isAgentSessionMessage(event.message))) {
 			this.contextUsageTokenBaseline = 0;
 			this.clearShortcutGuide();
@@ -5421,7 +5278,6 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
-				this.featureHintRunPending = this.getRetryAttempt() === 0;
 				this.resetPendingToolState();
 				this.renderRecap();
 				if (this.settingsManager.getShowTerminalProgress()) {
@@ -6134,16 +5990,8 @@ export class InteractiveMode {
 		// Depth is subagent-session context: a root session (depth 0) never shows
 		// a depth label, even while its children run.
 		const depthLabel = sessionDepth ? formatAgentDepthLabel(sessionDepth, hasChildren) : undefined;
-		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, shortcutsHint].filter((label): label is string => label !== undefined).join("  ");
-	}
-
-	private getShortcutsTrayHint(): string | undefined {
-		if (!this.isNewChat() || this.editor.getText().length > 0) {
-			return undefined;
-		}
-		return keyText("app.shortcuts") ? keyHint("app.shortcuts", "for shortcuts") : "/hotkeys for shortcuts";
+		return [agentsHint, depthLabel].filter((label): label is string => label !== undefined).join("  ");
 	}
 
 	private isNewChat(): boolean {
@@ -6151,28 +5999,36 @@ export class InteractiveMode {
 	}
 
 	private getPromptContextLabel(maxWidth: number): string | undefined {
+		if (maxWidth < 1) return undefined;
 		const model = this.getCurrentModel();
-		if (maxWidth < 1 || !model) return undefined;
-		const name = model.name.trim().replace(/\s+\(internal\)$/i, "");
-		const providerPrefix = `${model.provider}/`;
-		const compactName = name.startsWith(providerPrefix)
-			? name.slice(providerPrefix.length)
-			: name.replace(/^internal\//, "");
-		const displayName = /[\s/]/.test(compactName)
-			? compactName
-			: compactName
-					.split("-")
-					.map((part) =>
-						/^(glm|gpt|oss)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
-					)
-					.join(" ");
-		const parts = [displayName || model.name];
-		if (model.reasoning) {
-			parts.push(this.connectionState?.thinkingLevel ?? "off");
+		const parts: string[] = [];
+		if (model) {
+			const name = model.name.trim().replace(/\s+\(internal\)$/i, "");
+			const providerPrefix = `${model.provider}/`;
+			const compactName = name.startsWith(providerPrefix)
+				? name.slice(providerPrefix.length)
+				: name.replace(/^internal\//, "");
+			const displayName = /[\s/]/.test(compactName)
+				? compactName
+				: compactName
+						.split("-")
+						.map((part) =>
+							/^(glm|gpt|oss)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
+						)
+						.join(" ");
+			parts.push(displayName || model.name);
+			if (model.reasoning) {
+				parts.push(this.connectionState?.thinkingLevel ?? "off");
+			}
+			if (this.connectionState?.serviceTier === "priority") {
+				parts.push("fast");
+			}
 		}
-		if (this.connectionState?.serviceTier === "priority") {
-			parts.push("fast");
+		const usage = this.getConnectionContextUsage();
+		if (usage && typeof usage.tokens === "number" && typeof usage.percent === "number") {
+			parts.push(`${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`);
 		}
+		if (parts.length === 0) return undefined;
 		return theme.fg("dim", truncateToWidth(parts.join(" · "), maxWidth, ""));
 	}
 
@@ -6187,12 +6043,7 @@ export class InteractiveMode {
 		if (this.isInlinePickerOpen()) return undefined;
 		const goalLabel = this.getTrayGoalLabel();
 		const heartbeatLabel = this.getTrayHeartbeatLabel();
-		const usage = this.getConnectionContextUsage();
-		const contextLabel =
-			usage && typeof usage.tokens === "number" && typeof usage.percent === "number"
-				? `${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`
-				: undefined;
-		return [goalLabel, heartbeatLabel, contextLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		return [goalLabel, heartbeatLabel].filter((label) => label !== undefined).join(" · ") || undefined;
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {
@@ -7310,7 +7161,7 @@ export class InteractiveMode {
 	}
 
 	private getPromptContextContainers(): Container[] {
-		return [this.featureHintContainer, this.queuedMessagesContainer, this.sideQuestionContainer];
+		return [this.queuedMessagesContainer, this.sideQuestionContainer];
 	}
 
 	private getPromptDockComponents(): Component[] {
@@ -7539,13 +7390,6 @@ export class InteractiveMode {
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
 			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
-		}
-		if (hasQueuedMessages && !this.featureHintSuppressedByQueue) {
-			this.featureHintSuppressedByQueue = true;
-			this.clearFeatureHintPresentation();
-		} else if (!hasQueuedMessages && this.featureHintSuppressedByQueue) {
-			this.featureHintSuppressedByQueue = false;
-			this.resumeFeatureHintPresentation();
 		}
 	}
 
@@ -10144,7 +9988,6 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		}
 		this.stopWorkingLoader();
 		this.discardRefineLoader();
-		this.endFeatureHintRun();
 		this.stopWorkingPulse();
 		this.stopGoalTrayTimer();
 		this.closeHeartbeatManager();

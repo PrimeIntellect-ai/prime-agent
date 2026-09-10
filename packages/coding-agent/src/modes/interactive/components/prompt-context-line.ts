@@ -1,7 +1,7 @@
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
 
-/** Plain terminal row immediately above the prompt, shared by recap, model, and effort. */
+/** Plain terminal row immediately above the prompt, shared by recap, model, effort, and context usage. */
 export class PromptContextLine implements Component {
 	constructor(
 		private readonly getRecap: () => string | undefined,
@@ -27,6 +27,6 @@ export class PromptContextLine implements Component {
 	}
 
 	invalidate(): void {
-		// Read live recap, model, and effort values on every render.
+		// Read live recap, model, effort, and context usage values on every render.
 	}
 }
