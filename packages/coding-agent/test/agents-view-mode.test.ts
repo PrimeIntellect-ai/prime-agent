@@ -1079,63 +1079,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("keeps session details open until explicitly closed and preserves the selected session", () => {
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
-		try {
-			Reflect.set(view, "lastListedSummaries", [
-				summary({ sessionName: "parent", usage: { inputTokens: 1234, outputTokens: 56, cost: 1.23 } }),
-			]);
-			invoke("reconcileCatalogs", view);
-			view.handleInput("?");
-			const actions = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-			expect(actions).toContain("Session details");
-			expect(actions).toContain("parent");
-			expect(actions).toContain("1,234 input");
-			expect(actions).toContain("$1.23");
-			view.handleInput("p");
-			expect(Reflect.get(view, "showActions")).toBe(true);
-			view.handleInput("\x1b");
-			expect(Reflect.get(view, "showActions")).toBe(false);
-			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-			expect(rows).toContain("parent");
-			expect(rows).not.toContain("1,234 input");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("browses session details with arrows and scrolls long details in a short terminal", () => {
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
-		try {
-			Reflect.set(view, "lastListedSummaries", [
-				summary({ sessionName: "first", summary: "Progress ".repeat(50) }),
-				summary({
-					id: "second",
-					activeSessionId: "second",
-					sessionId: "second",
-					sessionFile: "/tmp/second.jsonl",
-					sessionName: "second",
-				}),
-			]);
-			Reflect.set(view, "ui", { terminal: { rows: 12 }, requestRender: vi.fn() });
-			invoke("reconcileCatalogs", view);
-			view.handleInput("?");
-			const details = () => (invoke("renderContent", view, 60, 11) as string[]).map(stripAnsi).join("\n");
-			expect(details()).toContain("first");
-			view.handleInput("\x1b[6~");
-			expect(details()).toContain("Directory:");
-			view.handleInput("\x1b[B");
-			expect(Reflect.get(view, "showActions")).toBe(true);
-			expect(details()).toContain("second");
-			expect(details()).toContain("Tokens: not available yet");
-			expect(Reflect.get(view, "detailsScrollOffset")).toBe(0);
-			expect(stripAnsi(invoke("renderHints", view, 120) as string)).toContain("scroll");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("strips provider prefixes in rows but keeps the exact model in details", () => {
+	it("strips provider prefixes from compact row model labels", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		try {
 			Reflect.set(view, "lastListedSummaries", [
@@ -1149,10 +1093,6 @@ describe("AgentsViewMode", () => {
 			expect(rows).toContain("glm-5.3-fast");
 			expect(rows).not.toContain("internal/");
 			expect(rows).not.toContain("prime-inference");
-			view.handleInput("?");
-			const details = (invoke("renderContent", view, 120, 24) as string[]).map(stripAnsi).join("\n");
-			expect(details).toContain("Model ID: internal/glm-5.3-fast");
-			expect(details).toContain("Provider: prime-inference");
 		} finally {
 			stopThemeWatcher();
 		}

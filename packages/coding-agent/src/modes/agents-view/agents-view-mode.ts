@@ -666,8 +666,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private workingIconFrame = 0;
 	private rows: AgentsViewRow[] = [];
 	private allRows: AgentsViewRow[] = [];
-	private showActions = false;
-	private detailsScrollOffset = 0;
 	private lastListedSummaries: SessionSummary[] = [];
 	private lastVisibleSummaries: SessionSummary[] = [];
 	private savedSessions: AgentConnectionSavedSessionInfo[] = [];
@@ -918,7 +916,6 @@ export class AgentsViewMode implements Component, Focusable {
 
 	handleInput(data: string): void {
 		this.clearStickyStatusMessage();
-		if (this.showActions && this.handleDetailsInput(data)) return;
 		if (this.renameTarget) {
 			if (this.keybindings.matches(data, "tui.select.cancel")) {
 				this.exitRenameMode();
@@ -964,12 +961,6 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		if (!this.replyTarget && this.editor.getText().length === 0) {
-			if (this.keybindings.matches(data, "app.shortcuts")) {
-				this.showActions = !this.showActions;
-				this.detailsScrollOffset = 0;
-				this.ui.requestRender();
-				return;
-			}
 			if (this.keybindings.matches(data, "app.agents.expand")) {
 				const row = this.rows[this.selectedIndex];
 				if (row && row.descendantCount > 0) this.toggleSubagentList(row);
@@ -1017,7 +1008,6 @@ export class AgentsViewMode implements Component, Focusable {
 		if (height <= 0) {
 			return [];
 		}
-		if (this.showActions) return this.renderSessionDetails(width, height);
 		const headerLines = this.splash.render(width);
 		const noticeLines = this.renderStartupNotices(width);
 		if (noticeLines.length > 0) {
@@ -1042,51 +1032,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const listRows = Math.max(0, height - lines.length);
 		lines.push(...this.renderSessionRows(width, listRows));
 		return lines;
-	}
-
-	private handleDetailsInput(data: string): boolean {
-		if (
-			this.keybindings.matches(data, "app.shortcuts") ||
-			this.keybindings.matches(data, "tui.select.cancel") ||
-			this.keybindings.matches(data, "app.agents.back") ||
-			this.keybindings.matches(data, "app.clear")
-		) {
-			this.showActions = false;
-			this.ui.requestRender();
-			return true;
-		}
-		if (this.keybindings.matches(data, "tui.select.up") || this.keybindings.matches(data, "tui.select.down")) {
-			this.moveSelection(this.keybindings.matches(data, "tui.select.up") ? -1 : 1);
-			this.detailsScrollOffset = 0;
-			return true;
-		}
-		if (
-			this.keybindings.matches(data, "tui.select.pageUp") ||
-			this.keybindings.matches(data, "tui.select.pageDown")
-		) {
-			const delta = Math.max(1, this.ui.terminal.rows - 4);
-			this.detailsScrollOffset = Math.max(
-				0,
-				this.detailsScrollOffset + (this.keybindings.matches(data, "tui.select.pageUp") ? -delta : delta),
-			);
-			this.ui.requestRender();
-			return true;
-		}
-		const actions = [
-			"tui.select.confirm",
-			"app.agents.open",
-			"app.agents.new",
-			"app.agents.reply",
-			"app.agents.rename",
-			"app.agents.delete",
-			"app.agents.expand",
-			"app.agents.program",
-			"app.exit",
-		] as const;
-		if (!actions.some((action) => this.keybindings.matches(data, action))) return true;
-		this.showActions = false;
-		this.ui.requestRender();
-		return false;
 	}
 
 	private loadStartupNotices(): void {
@@ -2535,7 +2480,6 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private renderSessionRows(width: number, maxRows: number): string[] {
 		if (maxRows <= 0) return [];
-		if (this.showActions) return this.renderSessionDetails(width, maxRows);
 		const layout = buildCompactAgentsViewLayout(this.rows, width);
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
@@ -2633,57 +2577,6 @@ export class AgentsViewMode implements Component, Focusable {
 		return markRow(formatTableCell(cells.join("  "), width));
 	}
 
-	private renderSessionDetails(width: number, maxRows: number): string[] {
-		const body = this.renderActions(width);
-		const bodyRows = Math.max(0, maxRows - 2);
-		this.detailsScrollOffset = Math.min(this.detailsScrollOffset, Math.max(0, body.length - bodyRows));
-		const position = body.length > bodyRows ? ` · ${this.detailsScrollOffset + 1}/${body.length}` : "";
-		return [
-			theme.bold(truncateToWidth(`Session details${position}`, width)),
-			"",
-			...body.slice(this.detailsScrollOffset, this.detailsScrollOffset + bodyRows),
-		].slice(0, maxRows);
-	}
-
-	private renderActions(width: number): string[] {
-		const row = this.rows[this.selectedIndex];
-		if (!row) return [theme.fg("muted", "Select a session to see its details.")];
-		const { model, usage } = row.summary;
-		const lines = [
-			theme.bold(row.title),
-			theme.fg("muted", `${sectionTitle(row.section)} · ${row.statusLabel}`),
-			...(row.summary.summary ? [row.summary.summary] : []),
-			"",
-			`Tokens: ${usage ? `${usage.inputTokens.toLocaleString("en-US")} input · ${usage.outputTokens.toLocaleString("en-US")} output` : "not available yet"}`,
-			`Cost: ${usage ? `$${usage.cost.toFixed(2)} this session` : "not available yet"}${row.descendantCount > 0 ? ` · $${row.recursiveCost.toFixed(2)} including subagents` : ""}`,
-			`Model: ${model ? formatSessionModel(row.summary) : "unknown"}${row.summary.thinkingLevel ? ` · ${row.summary.thinkingLevel}` : ""}`,
-			...(model ? [`Provider: ${model.provider}`, `Model ID: ${model.id}`] : []),
-			`Directory: ${row.summary.cwd}`,
-			...(row.summary.rlmDepth !== undefined ? [`Depth: ${row.summary.rlmDepth}`] : []),
-			...(row.descendantCount > 0 ? [`Subagents: ${row.descendantCount}`] : []),
-			"",
-			"Actions",
-			`${keyText("tui.select.confirm")} open session`,
-			...(row.kind === "agent"
-				? [
-						`${keyText("app.agents.reply")} ${row.summary.activeSessionId ? "reply" : "resume and reply"}`,
-						`${keyText("app.agents.rename")} rename session`,
-					]
-				: []),
-			`${keyText("app.agents.delete")} ${hasLiveWork(row) ? "stop agent" : "remove session"}`,
-			...(row.descendantCount > 0
-				? [
-						`${keyText("app.agents.expand")} ${this.expandedSubagentParents.has(row.identity) ? "collapse" : "expand"} subagents`,
-					]
-				: []),
-			...(this.targetHasSpawnCode(row.kind === "agent" ? row.identity : (row.parentIdentity ?? row.identity))
-				? [`${keyText("app.agents.program")} show/hide spawn program`]
-				: []),
-			`${keyText("app.agents.new")} new session`,
-		];
-		return lines.flatMap((line) => wrapTextWithAnsi(line, width));
-	}
-
 	// Spawn-code rows are read-only context. They render deemphasized — muted
 	// text on a panel background (applied in finalizeRenderedLine) so the program
 	// reads as one quiet segmented block rather than competing with agent rows.
@@ -2763,10 +2656,6 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.statusMessage) {
 			return truncateToWidth(theme.fg(this.statusMessageTone, this.statusMessage), width);
 		}
-		if (this.showActions) {
-			const hints = `${keyText("tui.select.cancel")} back   ${keyText("tui.select.up")}/${keyText("tui.select.down")} session   ${keyText("tui.select.pageUp")}/${keyText("tui.select.pageDown")} scroll   ${keyText("tui.select.confirm")} open`;
-			return truncateToWidth(theme.fg("muted", hints), width);
-		}
 		if (this.renameTarget) {
 			const hint = `${keyText("tui.select.confirm")} save   ${keyText("tui.select.cancel")} cancel`;
 			return truncateToWidth(theme.fg("muted", hint), width);
@@ -2774,7 +2663,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.replyTarget) {
 			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
 		}
-		const hints = `${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate   ${keyText("tui.select.confirm")} open   ${keyText("app.agents.new")} new   ${keyText("app.shortcuts")} details`;
+		const hints = `${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate   ${keyText("tui.select.confirm")} open   ${keyText("app.agents.new")} new`;
 		return truncateToWidth(theme.fg("muted", hints), width);
 	}
 
