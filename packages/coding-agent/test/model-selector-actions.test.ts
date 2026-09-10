@@ -530,22 +530,22 @@ describe("ModelSelectorComponent", () => {
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
 
-		expect(row()).toContain("← ■ ■ □ □ → low");
+		expect(row()).toContain("← ■■□□ → low");
 		// The cluster sits near the row's horizontal center, clear of the name.
-		expect(row()?.search(/[■□]/)).toBe(32);
+		expect(row()?.search(/[■□]/)).toBe(34);
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("■ ■ ■ □");
+		expect(row()).toContain("■■■□");
 		expect(row()).toContain("medium");
 
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("□ □ □ □");
+		expect(row()).toContain("□□□□");
 		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[D");
-		expect(row()).toContain("■ ■ ■ ■");
+		expect(row()).toContain("■■■■");
 		expect(row()).toContain("high");
 	});
 
@@ -624,11 +624,11 @@ describe("ModelSelectorComponent", () => {
 			stripAnsi(selector.render(80).join("\n"))
 				.split("\n")
 				.find((line) => line.includes("Beta One"));
-		expect(row()).toContain("□ □ □ □");
+		expect(row()).toContain("□□□□");
 		expect(row()).toContain("off");
 
 		selector.handleInput("\x1b[C");
-		expect(row()).toContain("■ □ □ □");
+		expect(row()).toContain("■□□□");
 
 		selector.handleInput("\r");
 		expect(selectedId).toBe("beta-one");
@@ -674,7 +674,7 @@ describe("ModelSelectorComponent", () => {
 		expect(shortRow).toContain("→");
 		expect(longRow).not.toContain("←");
 		expect(longRow).not.toContain("→");
-		expect(longRow).toContain("■ ■ □ □");
+		expect(longRow).toContain("■■□□");
 
 		// Purple fills are reserved for the highlighted row; other rows fill light gray.
 		const shortRaw = rawLines.find((line) => line.includes("GLM 5.3"));
