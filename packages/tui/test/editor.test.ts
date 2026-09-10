@@ -2193,7 +2193,7 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
 			editor.handleInput("\r");
-			assert.strictEqual(editor.getText(), "Please use /help ");
+			assert.strictEqual(editor.getText(), "Please use /help");
 			assert.deepStrictEqual(submitted, []);
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
@@ -2212,11 +2212,11 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
 			editor.handleInput("\t");
-			assert.strictEqual(editor.getText(), "First line\nThen /help ");
+			assert.strictEqual(editor.getText(), "First line\nThen /help");
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
-		it("preserves standalone slash command submission", async () => {
+		it("completes a standalone slash command with Enter and submits on the next Enter", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const submitted: string[] = [];
 			editor.onSubmit = (text) => submitted.push(text);
@@ -2230,11 +2230,16 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			editor.handleInput("\r");
 
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.getText(), "/help");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+
+			editor.handleInput("\r");
 			assert.deepStrictEqual(submitted, ["/help"]);
 			assert.strictEqual(editor.getText(), "");
 		});
 
-		it("submits a no-argument slash command accepted with Tab", async () => {
+		it("completes a no-argument slash command with Tab without submitting", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const submitted: string[] = [];
 			editor.onSubmit = (text) => submitted.push(text);
@@ -2249,12 +2254,16 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
 			editor.handleInput("\t");
+			assert.strictEqual(editor.getText(), "/model");
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+
+			editor.handleInput("\r");
 			assert.deepStrictEqual(submitted, ["/model"]);
 			assert.strictEqual(editor.getText(), "");
-			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
-		it("submits a no-argument slash command accepted with Enter", async () => {
+		it("completes a no-argument slash command with Enter without submitting", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const submitted: string[] = [];
 			editor.onSubmit = (text) => submitted.push(text);
@@ -2269,9 +2278,13 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
 			editor.handleInput("\r");
+			assert.strictEqual(editor.getText(), "/model");
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+
+			editor.handleInput("\r");
 			assert.deepStrictEqual(submitted, ["/model"]);
 			assert.strictEqual(editor.getText(), "");
-			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
 		it("completes an argument-taking command with Tab to the parameter position without submitting", async () => {
@@ -2669,7 +2682,7 @@ describe("Editor component", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const provider = new CombinedAutocompleteProvider(
 				[
-					{ name: "help", description: "Show help", takesArgument: true },
+					{ name: "help", description: "Show help" },
 					{
 						name: "model",
 						description: "Switch model",
@@ -2687,7 +2700,7 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
 			editor.handleInput("\t");
-			assert.strictEqual(editor.getText(), "/help ");
+			assert.strictEqual(editor.getText(), "/help");
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 	});
