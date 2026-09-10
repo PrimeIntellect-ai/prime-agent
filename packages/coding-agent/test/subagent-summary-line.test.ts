@@ -42,6 +42,15 @@ describe("SubagentSummaryLine", () => {
 		expect(rendered[1]).toContain("● 1 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
+	it("renders the subagents label without raw bold escapes", () => {
+		const line = new SubagentSummaryLine();
+		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
+
+		const raw = line.render(120).join("\n");
+		expect(raw).toContain("subagents");
+		expect(raw).not.toContain("\x1b[1m");
+	});
+
 	it("hides the info line and the agents tile while a picker is open", () => {
 		let pickerOpen = false;
 		const line = new SubagentSummaryLine(
