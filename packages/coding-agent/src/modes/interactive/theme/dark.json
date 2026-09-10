@@ -39,6 +39,8 @@
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "",
 		"customMessageLabel": "#9575cd",
+		"refinementHeader": "#9575cd",
+		"refinementSummary": "#b7a1d6",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",

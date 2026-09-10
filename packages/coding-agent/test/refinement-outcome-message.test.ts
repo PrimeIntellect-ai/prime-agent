@@ -1,6 +1,12 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { getThemesDir } from "../src/config.js";
+import type { AgentSessionMessage } from "../src/core/agent-messages.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import {
 	convertToLlm,
@@ -12,7 +18,13 @@ import type { HarnessEntry, RefinementResult } from "../src/core/refinement/refi
 import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
 import { RefinementOutcomeMessageComponent } from "../src/modes/interactive/components/refinement-outcome-message.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
+import {
+	initTheme,
+	loadThemeFromPath,
+	preloadThemeValidator,
+	setThemeInstance,
+	theme,
+} from "../src/modes/interactive/theme/theme.js";
 
 function entry(overrides: Partial<HarnessEntry> = {}): HarnessEntry {
 	return {
@@ -93,9 +105,9 @@ describe("RefinementOutcomeMessageComponent", () => {
 		const collapsed = rendered(component);
 		const content = collapsed.split("\n").filter((line) => line.trim());
 		expect(content.map((line) => line.trimEnd())).toEqual([" ◆ Harness refined"]);
-		expect(component.render(120)[1]).toContain(theme.fg("customMessageLabel", "◆ Harness refined"));
+		expect(component.render(120)[1]).toContain(theme.fg("refinementHeader", "◆ Harness refined"));
 		expect(collapsed.split("\n")[0].trim()).toBe("");
-		expect(collapsed.split("\n").at(-1)?.trim()).toBe("");
+		expect(collapsed.split("\n").at(-1)?.trim()).toBe("◆ Harness refined");
 		expect(collapsed).not.toContain("Ctrl+O");
 		expect(collapsed).not.toContain("[refinement]");
 		expect(collapsed).not.toContain("rhyme-response-guidance");
@@ -109,7 +121,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		const details = rendered(component);
 		expect(details).toContain("Added local guidance to make conversational responses rhyme.");
 		expect(component.render(120).join("\n")).toContain(
-			theme.fg("mdHeading", " Added local guidance to make conversational responses rhyme."),
+			theme.fg("refinementSummary", " Added local guidance to make conversational responses rhyme."),
 		);
 		expect(details).not.toContain("rhyme-response-guidance");
 		expect(details).not.toContain(" Description");
@@ -371,6 +383,116 @@ describe("RefinementOutcomeMessageComponent", () => {
 			expect(output.includes("+ Make conversational responses rhyme.")).toBe(toolsExpanded);
 		}
 		expect(JSON.stringify(message)).toBe(original);
+	});
+
+	test("uses purple refinement colors in every built-in theme and both terminal color modes", () => {
+		try {
+			for (const name of ["prime", "dark", "light"]) {
+				for (const mode of ["truecolor", "256color"] as const) {
+					setThemeInstance(loadThemeFromPath(join(getThemesDir(), `${name}.json`), mode));
+					const component = new RefinementOutcomeMessageComponent(createRefinementOutcomeMessage(result()));
+					const expectedHeader = name === "light" ? "113;70;171" : "149;117;205";
+					const expectedSummary = name === "light" ? "138;112;173" : "183;161;214";
+					if (mode === "truecolor") {
+						expect(component.render(120).join("\n")).toContain(`\x1b[38;2;${expectedHeader}m◆ Harness refined`);
+					} else {
+						expect(theme.getFgAnsi("refinementHeader")).toMatch(/^\x1b\[38;5;\d+m$/);
+					}
+					expect(theme.getFgAnsi("refinementHeader")).not.toBe(theme.getFgAnsi("warning"));
+					expect(theme.getFgAnsi("refinementSummary")).not.toBe(theme.getFgAnsi("refinementHeader"));
+					component.setEditDiffsExpanded(true);
+					if (mode === "truecolor")
+						expect(component.render(120).join("\n")).toContain(
+							`\x1b[38;2;${expectedSummary}m Added local guidance`,
+						);
+				}
+			}
+		} finally {
+			initTheme("dark");
+		}
+	});
+
+	test("gives existing custom themes purple defaults rather than inheriting their warning label", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "refinement-theme-"));
+		try {
+			await preloadThemeValidator();
+			const json = JSON.parse(readFileSync(join(getThemesDir(), "prime.json"), "utf8"));
+			delete json.colors.refinementHeader;
+			delete json.colors.refinementSummary;
+			json.name = "existing-custom";
+			const path = join(directory, "custom.json");
+			writeFileSync(path, JSON.stringify(json));
+			const custom = loadThemeFromPath(path, "truecolor");
+			expect(custom.getFgAnsi("refinementHeader")).toBe("\x1b[38;2;149;117;205m");
+			expect(custom.getFgAnsi("refinementSummary")).toBe("\x1b[38;2;183;161;214m");
+			expect(custom.getFgAnsi("customMessageLabel")).toBe(custom.getFgAnsi("warning"));
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("leaves one blank row before following prose through empty and agent-message neighbors in every stage", () => {
+		const assistant = (text: string): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "test",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 0,
+		});
+		const agent: AgentSessionMessage = {
+			role: "custom",
+			customType: "agent_message",
+			content: "Worker finished",
+			display: true,
+			timestamp: 0,
+			details: {
+				id: "worker",
+				message: "Worker finished",
+				from: { sessionId: "worker" },
+				fromRelationship: "child",
+			},
+		};
+		for (const neighbor of [[], [assistant("")], [agent], [agent, assistant("")]]) {
+			for (const [toolsExpanded, editDiffsExpanded] of [
+				[false, false],
+				[false, true],
+				[true, true],
+			]) {
+				const components = buildConversationComponents(
+					[
+						assistant("Before notice"),
+						createRefinementOutcomeMessage(result()),
+						...neighbor,
+						assistant("Following prose"),
+					],
+					{
+						ui: {} as TUI,
+						cwd: "/tmp",
+						toolOptions: {},
+						getToolDefinition: () => undefined,
+						toolsExpanded,
+						editDiffsExpanded,
+					},
+				);
+				const rows = components.flatMap((component) => component.render(120)).map((row) => stripAnsi(row).trim());
+				const following = rows.indexOf("Following prose");
+				expect(rows[following - 1]).toBe("");
+				expect(rows[following - 2]).not.toBe("");
+				const header = rows.indexOf("◆ Harness refined");
+				expect(rows[header - 1]).toBe("");
+				expect(rows[header - 2]).toBe("Before notice");
+			}
+		}
 	});
 
 	test("uses a typed, presentation-only custom message", () => {
