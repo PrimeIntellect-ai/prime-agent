@@ -959,7 +959,8 @@ export class SettingsManager {
 	}
 
 	getHideThinkingBlock(): boolean {
-		return this.settings.hideThinkingBlock ?? false;
+		// Defaults to true: thinking rows stay hidden unless explicitly opted out.
+		return this.settings.hideThinkingBlock ?? true;
 	}
 
 	setHideThinkingBlock(hide: boolean): void {
