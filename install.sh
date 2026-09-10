@@ -1688,6 +1688,14 @@ prime_agent_native_platform() {
 }
 
 prime_agent_native_cleanup() {
+	if [ -n "${prime_agent_native_activation_target:-}" ] && [ -n "${prime_agent_native_activation_previous:-}" ] &&
+		[ "$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)" = "$prime_agent_native_activation_target" ] &&
+		[ "$(readlink "$native_root/bin/previous" 2>/dev/null || :)" != "$prime_agent_native_activation_previous" ]; then
+		prime_agent_native_atomic_link "$prime_agent_native_activation_previous" "$native_root/bin/previous" ||
+			printf 'Could not finish retaining the previous release; recover it from %s/releases.\n' "$native_root" >&2
+	fi
+	prime_agent_native_activation_target=
+	prime_agent_native_activation_previous=
 	if [ -n "${prime_agent_native_stage:-}" ]; then
 		rm -rf "$prime_agent_native_stage"
 		prime_agent_native_stage=
@@ -1779,6 +1787,17 @@ prime_agent_native_atomic_link() {
 	# The destination is an executable link, never a directory link.
 	mv -f "$native_link_stage/link" "$2"
 	rmdir "$native_link_stage"
+}
+
+prime_agent_native_activate() {
+	prime_agent_native_activation_target="$1"
+	prime_agent_native_activation_previous="$2"
+	prime_agent_native_atomic_link "$1" "$native_root/bin/prime-agent"
+	if [ -n "$2" ] && [ "$1" != "$2" ]; then
+		prime_agent_native_atomic_link "$2" "$native_root/bin/previous"
+	fi
+	prime_agent_native_activation_target=
+	prime_agent_native_activation_previous=
 }
 
 prime_agent_release_is_node_only() {
@@ -1877,13 +1896,11 @@ prime_agent_install_native() {
 		ln -sn "$native_root/bin/prime-agent" "$native_public_bin/$prime_agent_cmd"
 	fi
 	native_target="../releases/$native_release_name/prime-agent"
+	native_previous=
 	if [ -L "$native_root/bin/prime-agent" ]; then
 		native_previous=$(readlink "$native_root/bin/prime-agent")
-		if [ "$native_previous" != "$native_target" ]; then
-			prime_agent_native_atomic_link "$native_previous" "$native_root/bin/previous"
-		fi
 	fi
-	prime_agent_native_atomic_link "$native_target" "$native_root/bin/prime-agent"
+	prime_agent_native_activate "$native_target" "$native_previous"
 	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" != 0 ]; then
 		prime_agent_native_configure_path || printf 'Add %s to PATH to run Prime Agent.\n' "$native_public_bin" >&2
 	fi

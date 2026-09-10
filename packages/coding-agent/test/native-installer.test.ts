@@ -239,6 +239,30 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(previous);
 	});
 
+	it.each(["HUP", "TERM", "KILL"])("retains a rollback target after %s interrupts activation", async (signal) => {
+		for (const version of ["1.0.0", "1.0.1", "1.0.2"]) publish(version);
+		expect((await install("1.0.0")).code).toBe(0);
+		const retained = readlinkSync(command());
+		expect((await install("1.0.1")).code).toBe(0);
+		const replaced = readlinkSync(command());
+		const shim = mkdtempSync(join(root, "interrupt-activation-"));
+		writeFileSync(
+			join(shim, "mv"),
+			'#!/bin/sh\n/bin/mv "$@" || exit $?\nfor destination in "$@"; do :; done\ncase "$destination" in "$INTERRUPT_BIN/prime-agent"|"$INTERRUPT_BIN/previous") if [ ! -f "$0.sent" ]; then touch "$0.sent"; kill -"$INTERRUPT_SIGNAL" "$PPID"; fi ;; esac\n',
+			{ mode: 0o755 },
+		);
+		const result = await install("1.0.2", {
+			PATH: `${shim}:/usr/bin:/bin`,
+			INTERRUPT_BIN: realpathSync(dirname(command())),
+			INTERRUPT_SIGNAL: signal,
+		});
+		expect(result.code, result.output).not.toBe(0);
+		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(signal === "KILL" ? retained : replaced);
+		expect(readlinkSync(command())).not.toBe(retained);
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.2\n");
+		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(signal === "KILL");
+	});
+
 	it("does not steal another installation's lock", async () => {
 		publish("1.0.0");
 		const first = await install("1.0.0");

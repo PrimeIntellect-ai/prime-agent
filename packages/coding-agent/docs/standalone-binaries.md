@@ -72,6 +72,8 @@ Each release keeps its executable and assets together under `releases/`. The sta
 
 Reinstalling the same archive creates a fresh release directory with a unique suffix, so it can repair missing or changed assets without modifying files used by existing processes. Old release directories are retained; there is no automatic garbage collection yet.
 
+Activation replaces the current launcher before refreshing the previous launcher. Normal interruption finishes retaining the replaced release during cleanup. A forced kill between those operations keeps the earlier rollback target intact; it may therefore point to an older retained release rather than the release that was just replaced. A forced kill still requires confirming and clearing the stale installation lock.
+
 The installer still shows download and verification progress and can prepare Python. Compilation removes JavaScript dependency installation; Python and external tools still need preparation. Set `PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0` to defer Python setup.
 
 Existing npm installations and the in-app updater are handled by the next layers of the rollout. Homebrew packaging remains separate work.

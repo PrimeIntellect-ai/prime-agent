@@ -4,3 +4,4 @@
 - Fixed installation to preserve a public command replaced by another installer during download.
 - Fixed terminal hangups leaving an installation lock behind.
 - Fixed installing older releases that only provide npm packages through the default installer.
+- Fixed interrupted compiled updates discarding the existing rollback target.
