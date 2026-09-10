@@ -467,10 +467,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			});
 			matches.sort(
 				(a, b) =>
-					a.quality - b.quality ||
-					a.score - b.score ||
 					Number(this.isProviderConfigured(b.item)) - Number(this.isProviderConfigured(a.item)) ||
 					Number(this.isPinnedProvider(b.item)) - Number(this.isPinnedProvider(a.item)) ||
+					a.quality - b.quality ||
+					a.score - b.score ||
 					Number(modelsAreEqual(this.currentModel, b.item.model)) -
 						Number(modelsAreEqual(this.currentModel, a.item.model)) ||
 					this.recentRankOf(a.item) - this.recentRankOf(b.item) ||
