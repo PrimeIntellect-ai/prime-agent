@@ -1100,13 +1100,26 @@ describe("AgentsViewMode", () => {
 	it("keeps search to a quiet single row and reports scope without technical header fields", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		try {
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "Review changes" })]);
+			invoke("reconcileCatalogs", view);
 			const prompt = invoke("renderPrompt", view, 80) as string[];
 			expect(prompt).toHaveLength(1);
 			expect(stripAnsi(prompt[0]!)).toContain("Search sessions");
 			expect(prompt[0]).not.toContain("\x1b[48;");
-			const globalLines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
-			expect(globalLines).not.toContain("All sessions");
-			expect(globalLines).not.toContain("back ·");
+			const globalLines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi);
+			const searchIndex = globalLines.findIndex((line) => line.includes("Search sessions"));
+			expect(globalLines[searchIndex - 1]).toBe("");
+			expect(globalLines[searchIndex - 2]!.trim()).not.toBe("");
+			expect(globalLines[searchIndex + 1]).toBe("");
+			expect(globalLines[searchIndex + 2]).toMatch(/Session\s+Model/);
+			expect(globalLines.join("\n")).not.toContain("All sessions");
+			expect(globalLines.join("\n")).not.toContain("back ·");
+			for (let height = 1; height <= 6; height += 1) {
+				const shortLines = (invoke("renderContent", view, 80, height) as string[]).map(stripAnsi);
+				expect(shortLines.length).toBeLessThanOrEqual(height);
+				expect(shortLines.join("\n")).toContain("Search sessions");
+				if (height > 1) expect(shortLines.join("\n")).toContain("Review changes");
+			}
 			Reflect.set(view, "scopeRootSummary", summary({ sessionName: "Fix authentication", rlmDepth: 3 }));
 			const lines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
 			expect(lines).toContain("← back · Fix authentication › subagents");
@@ -1116,7 +1129,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("hides abandoned saved entries by default while keeping them searchable", () => {
+	it("keeps abandoned saved entries out of rows and section counts before, during, and after search", () => {
 		const abandoned: AgentConnectionSavedSessionInfo = {
 			path: "/tmp/abandoned.jsonl",
 			id: "abandoned-session",
@@ -1133,9 +1146,23 @@ describe("AgentsViewMode", () => {
 			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "active", messageCount: 0 })]);
 			invoke("reconcileCatalogs", view);
 			const rowIds = () => (Reflect.get(view, "rows") as AgentsViewRow[]).map((row) => row.summary.sessionId);
+			const expectNoAbandonedRows = () => {
+				expect(rowIds()).not.toContain("abandoned-session");
+				const rendered = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
+				expect(rendered).not.toContain("Inactive");
+				expect(rendered).not.toContain("(no messages)");
+				expect(invoke("getAgentCountsText", view)).toBe(`0 running, ${rowIds().length} idle, 0 inactive`);
+			};
 			expect(rowIds()).toEqual(["scope-session"]);
-			invoke("setSearchQuery", view, "abandoned-session");
-			expect(rowIds()).toEqual(["abandoned-session"]);
+			expectNoAbandonedRows();
+			for (const query of ["abandoned-session", "(no messages)", "project", "active"]) {
+				invoke("setSearchQuery", view, query);
+				expectNoAbandonedRows();
+			}
+			expect(rowIds()).toEqual(["scope-session"]);
+			invoke("setSearchQuery", view, "");
+			expect(rowIds()).toEqual(["scope-session"]);
+			expectNoAbandonedRows();
 			expect(persistentState.savedSessions).toEqual([abandoned]);
 		} finally {
 			stopThemeWatcher();

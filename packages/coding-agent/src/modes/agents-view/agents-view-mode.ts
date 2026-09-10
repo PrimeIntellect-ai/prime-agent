@@ -1029,6 +1029,7 @@ export class AgentsViewMode implements Component, Focusable {
 			const scopeLabel = `${keyText("app.agents.back")} back · ${getAgentsViewSessionTitle(root)} › subagents`;
 			headerLines.push("", truncateToWidth(theme.fg("dim", scopeLabel), width));
 		}
+		headerLines.push("");
 
 		// The prompt belongs to the scroll pane rather than the fullscreen dock, but
 		// it must remain usable when a short viewport or wrapped notices exhaust the
@@ -1349,13 +1350,13 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private getFilteredRecords(): UnifiedSessionRecord[] {
 		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
-		if (query.trim()) return filterUnifiedSessions(this.scopedRecords, (text) => matchesSearchText(text, query));
 		const preservedSessionIds = new Set([
 			...(this.anchorSessionId ? [this.anchorSessionId] : []),
 			...(this.scopeKey ? [this.scopeKey.sessionId] : []),
 			...this.heartbeats.map((heartbeat) => heartbeat.job.sessionId),
 		]);
-		return filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds);
+		const records = filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds);
+		return query.trim() ? filterUnifiedSessions(records, (text) => matchesSearchText(text, query)) : records;
 	}
 
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */

@@ -1,7 +1,10 @@
 import stripAnsi from "strip-ansi";
 import { describe, expect, test, vi } from "vitest";
 import { AgentsViewMode } from "../../../src/modes/agents-view/agents-view-mode.js";
-import { buildUnifiedSessionIndex } from "../../../src/modes/agents-view/agents-view-state.js";
+import {
+	buildUnifiedSessionIndex,
+	reconcileUnifiedSessions,
+} from "../../../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createDeferred as deferred } from "../scheduling.js";
@@ -405,15 +408,19 @@ describe("#502 unified session view regressions", () => {
 			renameTarget: mode === "rename" ? { identity: "target" } : undefined,
 			actionModeSearchQuery: "needle",
 			editor: { getText: () => "action editor text" },
-			scopedRecords: [
-				{ identity: "match", identityAliases: [], section: "idle", searchableText: "needle session" },
-				{ identity: "other", identityAliases: [], section: "idle", searchableText: "other session" },
-			],
+			heartbeats: [],
+			scopedRecords: reconcileUnifiedSessions(
+				[
+					{ ...summary("match"), sessionName: "needle session" },
+					{ ...summary("other"), sessionName: "other session" },
+				],
+				[],
+			),
 		};
 
 		const filtered =
 			privateMethod<(this: typeof harness) => Array<{ identity: string }>>("getFilteredRecords").call(harness);
-		expect(filtered.map((record) => record.identity)).toEqual(["match"]);
+		expect(filtered.map((record) => record.identity)).toEqual(["session:session-match"]);
 	});
 
 	test("inactive rows keep total cost and age visible in a narrow row", () => {
