@@ -4599,6 +4599,8 @@ describe("InteractiveMode.setToolsExpanded", () => {
 			toolOutputExpanded: false,
 			agentMessagesExpanded: false,
 			editDiffsExpanded: false,
+			hideThinkingBlock: true,
+			pendingBashComponents: [],
 			customHeader: undefined,
 			builtInHeader: { setExpanded: vi.fn() },
 			chatContainer: { children: chatChildren },
@@ -4655,26 +4657,49 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenLastCalledWith(true);
 		expect(fakeThis.agentMessagesExpanded).toBe(true);
+
+		fakeThis.toggleAgentMessageExpansion();
+
+		expect(fakeThis.agentMessagesExpanded).toBe(false);
+		expect(fakeThis.toolOutputExpanded).toBe(true);
+		expect(messageSetExpanded).toHaveBeenLastCalledWith(false);
+		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenLastCalledWith(false);
+		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(true);
 	});
 
-	test("toggles edit diffs separately from tools and agent messages", () => {
+	test("cycles from overview through details and all back to overview", () => {
 		const child = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
 		const fakeThis = createExpansionFakeThis([child]);
 
-		fakeThis.toggleEditDiffExpansion();
+		fakeThis.toggleToolOutputExpansion();
 
 		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(fakeThis.hideThinkingBlock).toBe(false);
 		expect(fakeThis.toolOutputExpanded).toBe(false);
 		expect(fakeThis.agentMessagesExpanded).toBe(false);
 		expect(child.setEditDiffsExpanded).toHaveBeenCalledWith(true);
 		expect(child.setExpanded).toHaveBeenCalledWith(false);
 		expect(child.setAgentMessagesExpanded).toHaveBeenCalledWith(false);
 
-		fakeThis.setToolsExpanded(true);
+		fakeThis.toggleToolOutputExpansion();
 
 		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(fakeThis.hideThinkingBlock).toBe(false);
+		expect(fakeThis.toolOutputExpanded).toBe(true);
+		expect(fakeThis.agentMessagesExpanded).toBe(true);
 		expect(child.setEditDiffsExpanded).toHaveBeenLastCalledWith(true);
 		expect(child.setExpanded).toHaveBeenLastCalledWith(true);
+		expect(child.setAgentMessagesExpanded).toHaveBeenLastCalledWith(true);
+
+		fakeThis.toggleToolOutputExpansion();
+
+		expect(fakeThis.editDiffsExpanded).toBe(false);
+		expect(fakeThis.hideThinkingBlock).toBe(true);
+		expect(fakeThis.toolOutputExpanded).toBe(false);
+		expect(fakeThis.agentMessagesExpanded).toBe(false);
+		expect(child.setEditDiffsExpanded).toHaveBeenLastCalledWith(false);
+		expect(child.setExpanded).toHaveBeenLastCalledWith(false);
+		expect(child.setAgentMessagesExpanded).toHaveBeenLastCalledWith(false);
 	});
 });
 

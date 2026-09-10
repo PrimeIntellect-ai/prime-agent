@@ -102,7 +102,7 @@ describe("AssistantMessageComponent", () => {
 		const rendered = stripAnsi(component.render(100).join("\n"));
 
 		expect(rendered).toContain("/tmp/internal.py");
-		expect(rendered).not.toContain("Ctrl+O to expand");
+		expect(rendered).not.toContain("Ctrl+O cycle detail");
 	});
 
 	test("renders auth recovery guidance inline for simple provider errors", () => {
@@ -118,7 +118,7 @@ describe("AssistantMessageComponent", () => {
 		const rendered = stripAnsi(raw);
 
 		expect(rendered).toContain("Error: 401 status code (no body) · Run /login to update credentials.");
-		expect(rendered).not.toContain("Ctrl+O to expand");
+		expect(rendered).not.toContain("Ctrl+O cycle detail");
 		expect(raw).toContain(theme.getFgAnsi("error"));
 	});
 
@@ -140,7 +140,7 @@ describe("AssistantMessageComponent", () => {
 		const rendered = stripAnsi(raw);
 
 		expect(rendered).toContain("Error: Provider request failed");
-		expect(rendered).toContain("to expand");
+		expect(rendered).toContain("cycle detail");
 		expect(raw).toContain(theme.getFgAnsi("error"));
 	});
 });
@@ -242,10 +242,10 @@ describe("AssistantMessageComponent streaming identity", () => {
 		expect(hidden).not.toContain("Some detail");
 		expect(hiddenRaw).not.toContain(theme.getFgAnsi("thinkingText"));
 
-		// Revealed: the label row with the hide hint, then the dim trace.
+		// Revealed: the label row with the detail cycle hint, then the dim trace.
 		const revealedRaw = new AssistantMessageComponent(message, false).render(120).join("\n");
 		const revealed = stripAnsi(revealedRaw);
-		expect(revealed).toContain("Thinking: (Ctrl+T to hide)");
+		expect(revealed).toContain("Thinking: (Ctrl+O cycle detail)");
 		expect(revealed).toContain("Some detail about the options.");
 		expect(revealedRaw).toContain(theme.getFgAnsi("thinkingText"));
 		expect(revealedRaw).toContain(theme.getFgAnsi("dim"));
@@ -272,7 +272,7 @@ describe("AssistantMessageComponent streaming identity", () => {
 
 		component.setHideThinkingBlock(false);
 		const revealed = stripAnsi(component.render(120).join("\n"));
-		expect(revealed).toContain("Thinking: (Ctrl+T to hide)");
+		expect(revealed).toContain("Thinking: (Ctrl+O cycle detail)");
 		expect(revealed).toContain("Trace.");
 
 		component.setHideThinkingBlock(true);

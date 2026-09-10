@@ -450,17 +450,17 @@ describe("ToolExecutionComponent parity", () => {
 		const collapsed = stripAnsi(component.render(120).join("\n"));
 		expect(collapsed).not.toContain("-1 before");
 		expect(collapsed).toContain("+1 -1");
-		// The collapsed `╰─ path +N -M` summary line carries the ctrl+j hint —
+		// The collapsed `╰─ path +N -M` summary line carries the Ctrl+O detail hint —
 		// and it is the only carrier: the header must not duplicate it.
-		expect(collapsed.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
-		expect(collapsed.split("to expand").length - 1).toBe(1);
+		expect(collapsed.split("\n").find((line) => line.includes("╰─"))).toContain("cycle detail");
+		expect(collapsed.split("cycle detail").length - 1).toBe(1);
 
 		component.setEditDiffsExpanded(true);
 		const withDiffLines = stripAnsi(component.render(120).join("\n")).split("\n");
 		// The summary line stays put; the diff renders under it, indented to its text column.
 		const summaryIndex = withDiffLines.findIndex((line) => line.includes("╰─ README.md +1 -1"));
 		expect(summaryIndex).toBeGreaterThanOrEqual(0);
-		expect(withDiffLines[summaryIndex]).toContain("to collapse");
+		expect(withDiffLines[summaryIndex]).toContain("cycle detail");
 		const textColumn = withDiffLines[summaryIndex].indexOf("README.md");
 		const removed = withDiffLines.find((line) => line.includes("-1 before"));
 		const added = withDiffLines.find((line) => line.includes("+1 after"));
@@ -537,7 +537,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(summaryLines.length).toBe(1);
 		expect(summaryLines[0]).toContain("…");
 		expect(summaryLines[0]).toContain("+1 -1");
-		expect(summaryLines[0]).toContain("to expand");
+		expect(summaryLines[0]).toContain("cycle detail");
 		for (const line of lines) {
 			expect(line.length).toBeLessThanOrEqual(40);
 		}
@@ -577,7 +577,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(diffRows.join(" ")).toContain("tau");
 	});
 
-	test("renders exactly one ctrl+j hint before and after the result lands", async () => {
+	test("renders exactly one Ctrl+O detail hint before and after the result lands", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "edit-hint-"));
 		const filePath = join(dir, "sample.txt");
 		writeFileSync(filePath, "before\n");
@@ -595,12 +595,12 @@ describe("ToolExecutionComponent parity", () => {
 			component.render(120);
 			// The preview computes asynchronously; poll until it lands.
 			await vi.waitFor(() => {
-				expect(stripAnsi(component.render(120).join("\n"))).toContain("to expand");
+				expect(stripAnsi(component.render(120).join("\n"))).toContain("cycle detail");
 			});
 			// Pre-result: the preview's summary line already carries the hint.
 			const preResult = stripAnsi(component.render(120).join("\n"));
-			expect(preResult.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
-			expect(preResult.split("to expand").length - 1).toBe(1);
+			expect(preResult.split("\n").find((line) => line.includes("╰─"))).toContain("cycle detail");
+			expect(preResult.split("cycle detail").length - 1).toBe(1);
 
 			// A successful result keeps a single hint on the summary line.
 			component.updateResult(
@@ -608,8 +608,8 @@ describe("ToolExecutionComponent parity", () => {
 				false,
 			);
 			const settled = stripAnsi(component.render(120).join("\n"));
-			expect(settled.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
-			expect(settled.split("to expand").length - 1).toBe(1);
+			expect(settled.split("\n").find((line) => line.includes("╰─"))).toContain("cycle detail");
+			expect(settled.split("cycle detail").length - 1).toBe(1);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -881,7 +881,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(collapsed).not.toMatch(/1 - before/);
 		expect(collapsed).not.toMatch(/1 \+ after/);
 
-		// Tool expansion shows the full source but never the diff; that belongs to ctrl+j.
+		// The source and diff flags are independent at the component level.
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain('hidden_side_effect = "only in full source"');

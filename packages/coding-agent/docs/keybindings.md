@@ -115,7 +115,6 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 |--------|---------|-------------|
 | `app.model.select` | `ctrl+l` | Open model selector |
 | `app.model.toggleScope` | `alt+s` | Toggle between all and scoped models |
-| `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
 
 ### Configuration Menu
 
@@ -129,14 +128,15 @@ Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, 
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
+| `app.tools.expand` | `ctrl+o` | Cycle overview → thinking and file diffs → all output |
 | `app.messages.expand` | `ctrl+p` | Collapse or expand agent-to-agent messages |
-| `app.edits.expand` | `ctrl+j` | Collapse or expand edit diffs |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.navigateOlder` | `alt+up` | Select the next older pending message |
 | `app.message.navigateNewer` | `alt+down` | Select the next newer pending message or restore the draft |
 | `app.message.moveEarlier` | `ctrl+alt+up` | Move the selected pending message one place earlier in its queue |
 | `app.message.moveLater` | `ctrl+alt+down` | Move the selected pending message one place later in its queue |
+
+Ctrl+O changes presentation only: the default hides thinking and collapses tools and diffs; the first press reveals thinking and file diffs; the second expands tool output too; the third returns to the default. This also works for restored conversations and new streaming content. Ctrl+J and Ctrl+T no longer control conversation expansion.
 
 ### Tree Navigation
 

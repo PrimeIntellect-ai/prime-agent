@@ -90,7 +90,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		const content = collapsed.split("\n").filter((line) => line.trim());
 		expect(content[0]).toBe(" Added local guidance to make conversational responses rhyme.");
 		expect(content[1]).toContain("Refinement · 1 edit applied");
-		expect(content[1]).toContain("Ctrl+O to expand");
+		expect(content[1]).toContain("Ctrl+O cycle detail");
 		expect(collapsed).not.toContain("[refinement]");
 		expect(collapsed).toContain("╰─ Created local prompt `rhyme-response-guidance`");
 		expectChatInset(collapsed.split("\n"));
@@ -105,7 +105,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(expanded).toContain("Title      Rhyme response guidance");
 		expect(expanded).toContain("Content    Make conversational responses rhyme.");
 		expect(expanded).toContain("Path       prompts/rhyme-response-guidance.md");
-		expect(expanded).toContain("Ctrl+O to collapse");
+		expect(expanded).toContain("Ctrl+O cycle detail");
 		expectChatInset(expanded.split("\n"));
 		// Structured rows, not a JSON dump.
 		expect(expanded).not.toContain('"content":');
@@ -129,7 +129,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(content[0]).toContain("Created local memory entries for the verifiers project context");
 		expect(content[1]).toContain("…");
 		expect(content[2]).toContain("1 edit applied");
-		expect(content[2]).toContain("Ctrl+O to expand");
+		expect(content[2]).toContain("Ctrl+O cycle detail");
 		expect(content[3]).toContain("╰─ Created local prompt `rhyme-response-guidance`");
 		expectChatInset(lines);
 		for (const line of lines) {

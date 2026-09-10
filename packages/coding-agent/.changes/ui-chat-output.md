@@ -1,6 +1,7 @@
 - Changed assistant message body text to a new dimmed `mdBody` theme color, easing the wall of bright default-foreground text while headings, links, and code keep their styling.
-- Changed the thinking block styling: the "Thinking..." label is no longer bold, and the visible reasoning trace renders one step dimmer while the label and recap keep the thinkingText color.
-- Changed collapsed tool-call previews to render plain and dim instead of green or syntax-highlighted code while expanded blocks keep full highlighting, and moved prime-theme inline code to a darker neutral so it stays distinct from body text.
-- Changed decorative bold text in the conversation surface to normal weight — tool-call labels, bash command headers, section and panel titles, picker headers, startup notices, and the /btw question — keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
-- Changed the conversation row hierarchy: the thinking label reads "Thinking:" without bold or a separator dot, thinking recaps and traces render in the dim tone, and trailing detail on event rows (agent-message participant and previews, tool command previews, line counts, durations) renders dim while leading labels keep their colors.
-- Changed thinking rows to stay hidden by default: no thinking summary renders while the agent works, and the thinking keybinding now reveals every thinking block in the conversation on demand and hides them again.
+- Changed prime-theme inline code to a darker neutral (#c8c8cd) so it stays distinct from the dimmed body text.
+- Added a three-stage Ctrl+O cycle for overview, thinking and file diffs, and all output, replacing the separate Ctrl+J and Ctrl+T conversation shortcuts without changing saved traces.
+- Changed thinking rows to stay hidden in overview and appear in a dim tone under a quiet "Thinking:" label in the other detail modes, including newly streamed thinking.
+- Changed collapsed tool-call previews to render plain and dim instead of green or syntax-highlighted code, with dim line counts and durations, while expanded blocks keep full highlighting.
+- Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
+- Changed the conversation row hierarchy: event-row trailing detail (agent-message participant and previews, tool command previews, line counts, durations) renders dim while leading labels keep their colors.

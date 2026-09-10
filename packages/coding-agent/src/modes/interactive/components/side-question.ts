@@ -13,13 +13,14 @@ interface SideQuestionTurnState {
 /** A ! / !! run inside the pane, rendered by the same component the main thread uses. */
 interface SideQuestionBashState {
 	kind: "bash";
-	component: Component;
+	component: Component & { setExpanded?(expanded: boolean): void };
 	running: boolean;
 }
 
 export class SideQuestionComponent implements Component {
 	private readonly paddingX: number;
 	private readonly entries: (SideQuestionTurnState | SideQuestionBashState)[] = [];
+	private expanded = false;
 
 	constructor(event: AgentConnectionSideQuestionEvent, paddingX = 2) {
 		this.paddingX = Math.max(2, paddingX);
@@ -45,8 +46,16 @@ export class SideQuestionComponent implements Component {
 		this.entries.push({ kind: "turn", event, questionBubble, answer });
 	}
 
-	addBash(component: Component): void {
+	addBash(component: SideQuestionBashState["component"]): void {
+		component.setExpanded?.(this.expanded);
 		this.entries.push({ kind: "bash", component, running: true });
+	}
+
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+		for (const entry of this.entries) {
+			if (entry.kind === "bash") entry.component.setExpanded?.(expanded);
+		}
 	}
 
 	finishBash(): void {

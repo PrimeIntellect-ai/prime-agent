@@ -19,7 +19,7 @@ describe("compact compaction messages", () => {
 		);
 		const collapsed = component.render(80).map((line) => stripAnsi(line).trimEnd());
 
-		expect(collapsed).toEqual([" Compacted from 120,480 tokens", " Compaction (Ctrl+O to expand)"]);
+		expect(collapsed).toEqual([" Compacted from 120,480 tokens", " Compaction (Ctrl+O cycle detail)"]);
 		for (const line of collapsed) {
 			expect(line.startsWith(" ")).toBe(true);
 		}
@@ -28,7 +28,7 @@ describe("compact compaction messages", () => {
 		const expanded = stripAnsi(component.render(80).join("\n"));
 		expect(expanded).toContain("Next steps");
 		expect(expanded).toContain("Finish the authentication fixes.");
-		expect(expanded).toContain("Ctrl+O to collapse");
+		expect(expanded).toContain("Ctrl+O cycle detail");
 
 		component.setExpanded(false);
 		expect(component.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual(collapsed);
@@ -47,7 +47,7 @@ describe("compact compaction messages", () => {
 			if (line.length > 0) expect(line.startsWith(" ")).toBe(true);
 		}
 		expect(lines[1]).toContain("…");
-		expect(lines[2]).toContain("Ctrl+O to expand");
+		expect(lines[2]).toContain("Ctrl+O cycle detail");
 
 		for (const width of [12, 24, 40, 80]) {
 			for (const line of component.render(width)) {
