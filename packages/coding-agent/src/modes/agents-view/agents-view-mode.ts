@@ -2540,6 +2540,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
 		for (const section of ["running", "idle", "inactive"] as const) {
+			if (counts[section] === 0) continue;
 			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {
@@ -2553,14 +2554,8 @@ export class AgentsViewMode implements Component, Focusable {
 				}
 			}
 		}
-		if (this.rows.length === 0) {
-			displayItems.push(
-				{ type: "spacer" },
-				{
-					type: "message",
-					text: this.editor.getText().trim() ? "No sessions match your search." : "No sessions yet.",
-				},
-			);
+		if (displayItems.length === 0) {
+			return [theme.fg("dim", this.editor.getText().trim() ? "No sessions match your search." : "No sessions yet.")];
 		}
 		// Reserve the column header and its spacer, leaving at least one session row visible.
 		const headerRows = Math.min(2, maxRows - 1);
@@ -2579,7 +2574,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
 		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
 			if (item.type === "spacer") return "";
-			if (item.type === "message") return theme.fg("dim", truncateToWidth(item.text, width));
 			if (item.type === "running-subagents") {
 				const count = item.row.runningSubagentCount;
 				const indent = "  ".repeat(item.row.depth + 1);
@@ -2851,7 +2845,6 @@ export class AgentsViewMode implements Component, Focusable {
 
 type DisplayItem =
 	| { type: "spacer" }
-	| { type: "message"; text: string }
 	| { type: "heading"; section: AgentsViewSection }
 	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };

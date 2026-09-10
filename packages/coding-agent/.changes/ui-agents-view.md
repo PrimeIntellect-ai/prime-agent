@@ -1,3 +1,3 @@
 - Changed the agents view to hide empty saved sessions by default, simplify model labels, and keep secondary metadata quiet.
-- Changed the agents list to always show every status category, separate column headings from the list, and omit the global scope label.
+- Changed the agents list to separate column headings from populated status groups and omit the global scope label.
 - Added a clearer session details view with usage, contextual actions, keyboard browsing, and scrolling.
