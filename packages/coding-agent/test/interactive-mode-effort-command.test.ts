@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ThinkingSelectorComponent } from "../src/modes/interactive/components/thinking-selector.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
@@ -53,7 +54,7 @@ type FastCommandContext = {
 type FastInteractiveModePrototype = {
 	currentModelSupportsFastMode(this: FastCommandContext): boolean;
 	handleFastCommand(this: FastCommandContext): void;
-	getModelTrayLabel(this: FastCommandContext): string;
+	getPromptContextLabel(this: FastCommandContext, maxWidth: number): string;
 };
 
 const fastInteractiveModePrototype = InteractiveMode.prototype as unknown as FastInteractiveModePrototype;
@@ -407,11 +408,13 @@ describe("InteractiveMode /effort", () => {
 			);
 		});
 
-		it("keeps Fast mode beside the model while effort moves above the input", () => {
+		it("keeps Fast mode with model and effort above the input", () => {
 			const context = makeFastContext();
 			context.connectionState = { sessionId: "session-1", serviceTier: "priority", thinkingLevel: "high" };
 
-			expect(fastInteractiveModePrototype.getModelTrayLabel.call(context)).toBe("gpt-5.5 • fast");
+			expect(stripAnsi(fastInteractiveModePrototype.getPromptContextLabel.call(context, 80))).toBe(
+				"GPT 5.5 · high · fast",
+			);
 		});
 	});
 });

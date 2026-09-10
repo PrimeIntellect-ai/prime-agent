@@ -1,11 +1,11 @@
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
 
-/** Plain terminal row immediately above the prompt, shared by recap and effort. */
+/** Plain terminal row immediately above the prompt, shared by recap, model, and effort. */
 export class PromptContextLine implements Component {
 	constructor(
 		private readonly getRecap: () => string | undefined,
-		private readonly getEffortLabel: (maxWidth: number) => string | undefined,
+		private readonly getModelLabel: (maxWidth: number) => string | undefined,
 	) {}
 
 	render(width: number): string[] {
@@ -15,7 +15,7 @@ export class PromptContextLine implements Component {
 		const recap = this.getRecap()?.replace(/\s+/g, " ").trim();
 		const left = recap ? `Recap: ${recap}` : "";
 		const maxRightWidth = left ? Math.max(1, Math.floor(contentWidth / 2)) : contentWidth;
-		const right = truncateToWidth(this.getEffortLabel(maxRightWidth) ?? "", maxRightWidth, "");
+		const right = truncateToWidth(this.getModelLabel(maxRightWidth) ?? "", maxRightWidth, "");
 		if (!left && !right) return [];
 		const gap = left && right ? 2 : 0;
 		const leftWidth = Math.max(0, contentWidth - visibleWidth(right) - gap);
@@ -27,6 +27,6 @@ export class PromptContextLine implements Component {
 	}
 
 	invalidate(): void {
-		// Read live recap and effort values on every render.
+		// Read live recap, model, and effort values on every render.
 	}
 }

@@ -31,7 +31,7 @@ describe("InteractiveMode startup hints", () => {
 			heartbeatCatalog: [],
 			subagentSnapshots: new Map(),
 			connectionState: {
-				model: { id: "test-model", name: "test-model", provider: "test-provider", reasoning: true },
+				model: { id: "test-model", name: "Test Model", provider: "test-provider", reasoning: true },
 				thinkingLevel: "high",
 				messageCount,
 				isStreaming: false,
@@ -144,35 +144,37 @@ describe("InteractiveMode startup hints", () => {
 		}
 	});
 
-	it("places the fresh-chat shortcut hint after the model", () => {
+	it("keeps the fresh-chat shortcut hint below the prompt without duplicating the model", () => {
 		const mode = createMode();
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model  ? for shortcuts");
+		expect(stripAnsi(label)).toBe("? for shortcuts");
 	});
 
-	it("shows current effort in a compact prompt label and hides it for non-reasoning models", () => {
+	it("shows the model and current effort above the prompt and omits unsupported effort", () => {
 		const mode = createMode();
 		const getLabel = (width: number) =>
-			Reflect.get(InteractiveMode.prototype, "getPromptEffortLabel").call(mode, width) as string | undefined;
+			Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, width) as string | undefined;
 
-		expect(stripAnsi(getLabel(40)!)).toBe("high · /effort");
-		expect(stripAnsi(getLabel(6)!)).toBe("high");
-		expect(stripAnsi(getLabel(3)!)).toBe("hig");
+		expect(stripAnsi(getLabel(40)!)).toBe("Test Model · high");
+		expect(stripAnsi(getLabel(6)!)).toBe("Test M");
+		expect(stripAnsi(getLabel(3)!)).toBe("Tes");
 		expect(getLabel(0)).toBeUndefined();
 		mode.connectionState.thinkingLevel = "off";
-		expect(stripAnsi(getLabel(40)!)).toBe("off · /effort");
+		expect(stripAnsi(getLabel(40)!)).toBe("Test Model · off");
 		mode.connectionState.thinkingLevel = "xhigh";
 		mode.connectionState.isStreaming = true;
-		expect(stripAnsi(getLabel(40)!)).toBe("xhigh · /effort");
+		expect(stripAnsi(getLabel(40)!)).toBe("Test Model · xhigh");
 		mode.connectionState.model.reasoning = false;
-		expect(getLabel(40)).toBeUndefined();
+		expect(stripAnsi(getLabel(40)!)).toBe("Test Model");
 	});
 
 	it.each([
 		["GLM 5.3 Fast (internal)", "GLM 5.3 Fast"],
-		["internal/glm-5.3-fast", "glm-5.3-fast"],
-		["test-provider/test-model", "test-model"],
+		["internal/glm-5.3-fast", "GLM 5.3 Fast"],
+		["glm-5.3", "GLM 5.3"],
+		["gpt-5.5", "GPT 5.5"],
+		["test-provider/test-model", "Test Model"],
 		["Qwen/Qwen3-Next-80B-A3B-Instruct", "Qwen/Qwen3-Next-80B-A3B-Instruct"],
 		["custom/fine-tune (thinking)", "custom/fine-tune (thinking)"],
 	])("shortens the prompt model name %s without changing model identity", (name, expected) => {
@@ -180,7 +182,9 @@ describe("InteractiveMode startup hints", () => {
 		mode.connectionState.model.name = name;
 		const before = { ...mode.connectionState.model };
 
-		expect(Reflect.get(InteractiveMode.prototype, "getModelTrayLabel").call(mode)).toBe(expected);
+		expect(stripAnsi(Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120))).toBe(
+			`${expected} · high`,
+		);
 		expect(mode.connectionState.model).toEqual(before);
 	});
 
@@ -195,13 +199,14 @@ describe("InteractiveMode startup hints", () => {
 		Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
 		const render = () => stripAnsi(mode.recapContainer.render(80).join("\n"));
 
-		expect(render()).toContain("high · /effort");
+		expect(render()).toContain("Test Model · high");
 		mode.connectionState.thinkingLevel = "low";
-		expect(render()).toContain("low · /effort");
+		expect(render()).toContain("Test Model · low");
 		mode.connectionState.model.reasoning = false;
-		expect(mode.recapContainer.render(80)).toEqual([]);
+		expect(render()).toContain("Test Model");
+		expect(render()).not.toContain("low");
 		mode.connectionState.model.reasoning = true;
-		expect(render()).toContain("low · /effort");
+		expect(render()).toContain("Test Model · low");
 		Reflect.deleteProperty(mode.connectionState, "model");
 		expect(mode.recapContainer.render(80)).toEqual([]);
 	});
@@ -238,11 +243,11 @@ describe("InteractiveMode startup hints", () => {
 		if (ownHeader) expect(replacement.render(80)[1]).toContain("extension header");
 		const rows = mode.recapContainer.render(80);
 		expect(rows).toHaveLength(2);
-		expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated files\s+high · \/effort $/);
+		expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated files\s+Test Model · high $/);
 		expect(rows[1]).toBe("");
 		expect(rows[0]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		mode.connectionState.thinkingLevel = "low";
-		expect(stripAnsi(mode.recapContainer.render(80)[0]!)).toContain("low · /effort");
+		expect(stripAnsi(mode.recapContainer.render(80)[0]!)).toContain("Test Model · low");
 		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, undefined);
 		expect(defaultEditor.getText()).toBe("unfinished draft");
 		expect(stripAnsi(defaultEditor.render(80).join("\n"))).not.toContain("/effort");
@@ -404,10 +409,10 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("← manage  test-model  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("← manage  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("← manage  test-model");
+		expect(stripAnsi(getLabel())).toBe("← manage");
 	});
 
 	it("hides the fresh-chat shortcut hint while the prompt has text", () => {
@@ -415,23 +420,23 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, false, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("test-model");
+		expect(stripAnsi(getLabel())).toBe("");
 
 		editorText = " ";
-		expect(stripAnsi(getLabel())).toBe("test-model");
+		expect(stripAnsi(getLabel())).toBe("");
 
 		editorText = "";
-		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
 	});
 
 	it("hides the tray shortcut guidance for chats with history", () => {
 		const mode = createMode(1);
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model");
+		expect(stripAnsi(label)).toBe("");
 	});
 
 	it("hides the tray while an inline picker is open", () => {
@@ -452,7 +457,7 @@ describe("InteractiveMode startup hints", () => {
 		});
 		Object.assign(mode, { ctrlCExitHintExpiresAt: Date.now() + 60_000 });
 
-		expect(stripAnsi(locationLabel())).toBe("← manage  test-model  ? for shortcuts");
+		expect(stripAnsi(locationLabel())).toBe("← manage  ? for shortcuts");
 		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s) · 75k (75%)");
 		expect(stripAnsi(overrideLabel())).toBe("Press Ctrl+C again to exit");
 
@@ -477,8 +482,8 @@ describe("InteractiveMode startup hints", () => {
 		const getLabel = (mode: ReturnType<typeof createMode>) =>
 			stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
 
-		expect(getLabel(root)).toBe("test-model  ? for shortcuts");
-		expect(getLabel(subagent)).toBe("depth 1  test-model");
+		expect(getLabel(root)).toBe("? for shortcuts");
+		expect(getLabel(subagent)).toBe("depth 1");
 	});
 
 	it("keeps the question-mark shortcut guide compact", () => {
