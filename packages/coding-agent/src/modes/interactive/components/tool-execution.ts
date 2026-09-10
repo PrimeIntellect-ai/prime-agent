@@ -1,8 +1,9 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type Component, Container, Image, Text, type TUI } from "@earendil-works/pi-tui";
+import { type Component, Container, Image, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.js";
 import type { KernelSentAgentMessage } from "../../../core/kernel/index.js";
 import { createBashToolDefinition } from "../../../core/tools/bash.js";
+import { previewBashCommand } from "../../../core/tools/code-preview.js";
 import { createEditToolDefinition } from "../../../core/tools/edit.js";
 import { createAllToolDefinitions } from "../../../core/tools/index.js";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
@@ -10,7 +11,9 @@ import type { AgentConnectionToolDefinition } from "../../agent-connection/index
 import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 import { ToolPanel } from "./tool-panel.js";
+import { ToolRunGroupComponent, type ToolRunGroupKind } from "./tool-run-group.js";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -64,6 +67,10 @@ function createReplayBuiltInToolDefinition(
 		default:
 			return undefined;
 	}
+}
+
+function formatRunGroupDuration(ms: number): string {
+	return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export class ToolExecutionComponent extends Container {
@@ -499,6 +506,72 @@ export class ToolExecutionComponent extends Container {
 		return theme.fg("muted", "queued");
 	}
 
+	/**
+	 * The run-group kind for "Running N ..." grouping. Only the standard bash
+	 * and ipython renderings group; custom-rendered tools mount directly.
+	 */
+	getRunGroupKind(): ToolRunGroupKind | undefined {
+		if (this.toolName === "bash") {
+			return "bash";
+		}
+		if (this.shouldUseIpythonRenderer()) {
+			return "ipython";
+		}
+		return undefined;
+	}
+
+	isExpanded(): boolean {
+		return this.expanded;
+	}
+
+	/**
+	 * One-line dim summary for run-group nesting, mirroring the ipython cell's
+	 * collapsed line. Undefined when the tool has no compact summary row.
+	 */
+	renderRunGroupSummary(width: number): string[] | undefined {
+		if (this.toolName === "ipython") {
+			return this.ipythonCellComponent ? this.ipythonCellComponent.render(Math.max(1, width)) : undefined;
+		}
+		if (this.toolName === "bash") {
+			return [this.renderBashRunGroupSummary(Math.max(1, width))];
+		}
+		return undefined;
+	}
+
+	private renderBashRunGroupSummary(width: number): string {
+		const args = this.args as { command?: unknown } | undefined;
+		const command = typeof args?.command === "string" ? args.command : "";
+		const preview = previewBashCommand(command);
+		const parts = [`${this.runGroupStatusMarker()} ${theme.fg("dim", `$ ${preview.text || command || "..."}`)}`];
+		const startedAt = this.rendererState.startedAt;
+		if (typeof startedAt === "number") {
+			const endedAt = this.rendererState.endedAt;
+			const end = typeof endedAt === "number" ? endedAt : Date.now();
+			parts.push(theme.fg("dim", formatRunGroupDuration(end - startedAt)));
+		}
+		if (this.result?.isError) {
+			parts.push(theme.fg("error", "error"));
+		}
+		if (this.showExpandHint !== false) {
+			parts.push(expandCollapseHint("app.tools.expand", this.expanded === true));
+		}
+		return truncateToWidth(` ${parts.join(theme.fg("dim", " · "))}`, width, "");
+	}
+
+	// Glyph form of panelStatus(): color carries running/done/error.
+	private runGroupStatusMarker(): string {
+		if (this.result && !this.isPartial) {
+			return this.result.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+		}
+		if (this.result?.isError) {
+			return theme.fg("error", "✗");
+		}
+		if (this.executionStarted) {
+			return theme.fg("bashMode", workingIconFrame(getWorkingPulseFrame()));
+		}
+		return theme.fg("muted", "◇");
+	}
+
 	private getTextOutput(): string {
 		return getRenderedTextOutput(this.result, this.showImages, {
 			includeImageDimensions: this.includeImageDimensions,
@@ -525,6 +598,14 @@ export function selectLatestToolExpandHint(
 ): void {
 	for (let index = existingComponents.length - 1; index >= 0; index--) {
 		const component = existingComponents[index];
+		if (component instanceof ToolRunGroupComponent) {
+			const last = component.getToolComponents().at(-1);
+			if (last) {
+				last.setShowExpandHint(false);
+				break;
+			}
+			continue;
+		}
 		if (component instanceof ToolExecutionComponent) {
 			component.setShowExpandHint(false);
 			break;
