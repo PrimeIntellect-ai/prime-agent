@@ -671,7 +671,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		} else {
 			lines.push(...entries.map(([label, value]) => `${theme.fg("muted", `${label}:`)} ${value}`));
 		}
-		lines.push(theme.fg("dim", "USD / 1M tokens · catalog rates"));
+		lines.push(theme.fg("dim", "USD / 1M tokens"));
 		return lines.map((line) => truncateToWidth(` ${line}`, width, "…", true));
 	}
 
