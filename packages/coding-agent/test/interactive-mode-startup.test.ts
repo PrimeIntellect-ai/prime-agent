@@ -52,9 +52,9 @@ describe("InteractiveMode startup hints", () => {
 		const output = stripAnsi(lines.join("\n"));
 
 		expect(lines[0]).toBe("");
-		expect(lines.length).toBeLessThanOrEqual(7);
+		expect(lines.length).toBeLessThanOrEqual(8);
 		expect(output).toContain("prime agent v0.0.0");
-		expect(output).toMatch(/[▀▄█]/);
+		expect(output).toMatch(/[\u2801-\u28ff]/u);
 		expect(output).toContain("test-model");
 		expect(output).toContain("/tmp/project");
 		expect(stripAnsi(lines[4])).toContain("agents 2 running");
@@ -76,15 +76,15 @@ describe("InteractiveMode startup hints", () => {
 			() => "/tmp/project",
 		);
 
-		for (const width of [1, 2, 12, 14, 20, 24, 39, 40, 48, 49, 80]) {
+		for (const width of [1, 2, 12, 14, 20, 24, 39, 40, 46, 47, 80]) {
 			const lines = header.render(width);
 			const output = stripAnsi(lines.join("\n"));
 			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-			if (width < 49) {
-				expect(output).not.toMatch(/[▀▄█]/);
+			if (width < 47) {
+				expect(output).not.toMatch(/[\u2801-\u28ff]/u);
 				if (width >= 14) expect(output).toContain("prime agent");
 			} else {
-				expect(output).toMatch(/[▀▄█]/);
+				expect(output).toMatch(/[\u2801-\u28ff]/u);
 				expect(output).toContain("agent v0.0.0");
 			}
 			if (width >= 14) {
