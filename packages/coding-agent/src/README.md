@@ -88,6 +88,32 @@ Preserve the policy differences: direct prompts flush shell output before valida
 
 `session/prepared-actions.ts` contains prepared action types, delivery records, recovery contracts, input copying, action factories, and queue projections. It has no session dependency. Primary messages retain their identity for durable-delivery checks; separately stored input blocks and prefix messages retain their existing copy behavior. Recovery format version 1 and the public exports from `AgentSession` stay unchanged.
 
+## Session input and turns
+
+| File | Responsibility |
+| --- | --- |
+| `session/submission-normalization.ts` | Copying and validating submission content, options, and provenance. |
+| `session/prompt-submission.ts` | Prompt preparation and admission, steering, follow-ups, custom/user messages, and background shell completion messages. |
+| `session/message-delivery.ts` | Accepted agent-message receipts, completion settlement, and restoration of late Python messages. |
+| `session/input-admission.ts` | Readiness checks and admission predicates. |
+| `session/input-checkpoints.ts` | Checkpoint waiters, notification, cancellation, input-dispatch barriers, and headless waiting. |
+| `session/action-queue.ts` | Queue operations and projections over the existing ActionStore. |
+| `session/action-recovery.ts` | Capturing and restoring pending input when the session runtime changes. |
+| `session/turn-execution.ts` | Executing direct, queued, injected, and custom-triggered turns. |
+| `session/command-execution.ts` | Executing queued session commands and recording their outcomes. |
+| `session/events.ts` | Ordered agent-event processing, listener delivery, and transcript/accounting coordination. |
+| `session/pending-context.ts` | Pending messages, notices, and retention for the next turn. |
+| `session/goal-continuation.ts` | Goal continuation admission, budget notices, child-wait coordination, and rollback. |
+| `session/autonomous-continuation.ts` | Autonomous continuation messages, snapshots, and rollback. |
+| `session/turn-policy.ts` | Turn stopping, threshold compaction, and continuation decisions from current session state. |
+
+Input has one durable ActionStore, one scheduling pump, one commit fence, and one ordered event queue. Queue operations, admission, preparation, execution, and recovery use these same owners; they do not maintain parallel queues or transcripts. Dependencies are named operations and small state views. Callbacks read the current model, controllers, and runtime where the original operation did.
+
+- Pending-context state changes through named synchronous operations. Raw rollback restores the same messages without waking input; recovery restores copied envelopes and flushes deferred work. Message identity, shared details, and the existing copy boundaries matter for delivery and rollback.
+- Goal and autonomous continuation state stays with its owner. Consuming a threshold message or harness digest and rearming it are explicit transitions. Preserve the existing Boolean abort/child-wait timing and message-keyed snapshot identity.
+- Public session entry points remain live dispatch boundaries for extensions and callers. Delegates retain callback receivers and their existing synchronous or asynchronous return behavior.
+- Session startup, abort, disposal, pause release, and work after compaction remain coordinated in `AgentSession` because they span several owners. Keep those operation sequences visible instead of introducing a general lifecycle framework.
+
 ## Session context
 
 | File | Responsibility |
@@ -143,6 +169,29 @@ The root kernel directory belongs to `session/kernel-environment.ts`. Child dire
 The session coordinates these owners with children, models, and input admission. A kernel replacement uses the previous kernel's disposal promise as its readiness gate. First-build restoration notices and snapshot-directory ownership stay with the kernel owner. Host handlers read the current runtime when invoked, including after replacement.
 
 ACP resource cleanup retains its input pause until queued work and cleanup finish, and releases the pause on failure. Extension bindings preserve public session dispatch and callback receivers, including shutdown and partial rebinding. Pure facade delegates do not add asynchronous wrappers around already asynchronous owner operations.
+
+## Models, history, and host requests
+
+| File | Responsibility |
+| --- | --- |
+| `session/model-selection.ts` | Model and thinking preferences, authenticated availability, preflight checks, cycling, and child-model selection. |
+| `session/history-navigation.ts` | Switching sessions, forking, and navigating branches with their existing barriers. |
+| `session/context-view.ts` | Context usage, session statistics, and tree views over live transcript and child usage. |
+| `session/harness-context.ts` | Harness changes, digest consumption, and context for subsequent turns. |
+| `session/export.ts` | Session export using current model and extension rendering dependencies. |
+| `session/heartbeat-host-requests.ts` | Heartbeat request validation and controller operations. |
+| `session/message-host-requests.ts` | Message request validation and controller operations. |
+| `session/observe-host-requests.ts` | Observation request validation, controller operations, and result encoding. |
+
+The three host-request modules are stateless adapters. Kernel handler composition still calls the public session methods. Heartbeat and observation requests capture their controller on entry; messaging reads its controller at each operation. Compaction request interpretation belongs to the compaction owner.
+
+Model selection captures the parent model before awaiting authenticated availability. Preserve the unauthenticated parent-model fast path, expired-credential filtering, original validation errors, and public model/thinking getter dispatch. Context and export read existing records; neither owns a second transcript.
+
+Context views own aggregation and derived usage memos. Child usage owns the adjustment for child spend not yet indexed in the transcript. The view calls that existing operation with the same usage object and entries.
+
+Feature contracts live with their owner, including prompt options and session events. The facade re-exports the existing public types and retains session construction configuration. Constructor-only references are readonly; replaceable runtime bindings stay mutable. A host interface should expose only the state and operations its consumer needs.
+
+Integration regressions in `test/suite/regressions/` cover model/history boundaries, prompt and message dispatch, host-controller capture, callback receivers, and admission behavior. `test/session/pending-context.test.ts` covers pending-context identities and recovery. Existing queue, action, goal, autonomous, branch, extension, and kernel suites cover composition through the public session API.
 
 ## Validation
 
