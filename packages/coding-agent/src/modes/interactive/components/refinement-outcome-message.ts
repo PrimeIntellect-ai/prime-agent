@@ -195,9 +195,13 @@ export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
 		this.addChild(new Spacer(1));
 		const outcome = refinementHeader(this.message);
 		const header = outcome.startsWith("Harness refined ·") ? "Harness refined" : outcome;
-		this.addChild(new Text(theme.fg("customMessageLabel", `◆ ${header}`), 1, 0));
+		this.addChild(new Text(theme.fg("refinementHeader", `◆ ${header}`), 1, 0));
 		if (this.summaryExpanded || this.expanded) {
-			this.addSummary(summary.trim() || "No summary was recorded for this harness change.", undefined, "mdHeading");
+			this.addSummary(
+				summary.trim() || "No summary was recorded for this harness change.",
+				undefined,
+				"refinementSummary",
+			);
 		}
 		if (this.expanded) {
 			this.addChild(new Spacer(1));
@@ -218,7 +222,6 @@ export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
 				if (edit.reason) this.addChild(new Text(theme.fg("muted", `Reason: ${edit.reason}`), 1, 0));
 			}
 		}
-		this.addChild(new Spacer(1));
 	}
 }
 
@@ -232,6 +235,5 @@ export class MalformedRefinementOutcomeMessageComponent extends ExpandableEventM
 		this.clear();
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("error", "[Malformed refinement outcome message]"), 1, 0));
-		this.addChild(new Spacer(1));
 	}
 }

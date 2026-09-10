@@ -55,6 +55,8 @@ const ThemeJsonSchema = Type.Object({
 		customMessageBg: ColorValueSchema,
 		customMessageText: ColorValueSchema,
 		customMessageLabel: ColorValueSchema,
+		refinementHeader: Type.Optional(ColorValueSchema),
+		refinementSummary: Type.Optional(ColorValueSchema),
 		toolPendingBg: ColorValueSchema,
 		toolSuccessBg: ColorValueSchema,
 		toolErrorBg: ColorValueSchema,
@@ -139,6 +141,8 @@ export type ThemeColor =
 	| "userMessageText"
 	| "customMessageText"
 	| "customMessageLabel"
+	| "refinementHeader"
+	| "refinementSummary"
 	| "toolTitle"
 	| "toolOutput"
 	| "mdHeading"
@@ -184,6 +188,13 @@ export type ThemeBg =
 	| "toolPanelBg";
 
 type ColorMode = "truecolor" | "256color";
+type RefinementColor = "refinementHeader" | "refinementSummary";
+
+function refinementColors(light: boolean): Record<RefinementColor, string> {
+	return light
+		? { refinementHeader: "#7146ab", refinementSummary: "#8a70ad" }
+		: { refinementHeader: "#9575cd", refinementSummary: "#b7a1d6" };
+}
 
 const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = { r: 0, g: 95, b: 135 };
 const SURFACE_MIN_LUMINANCE_DELTA = 12;
@@ -375,7 +386,8 @@ export class Theme {
 	private mode: ColorMode;
 
 	constructor(
-		fgColors: Record<ThemeColor, string | number>,
+		fgColors: Record<Exclude<ThemeColor, RefinementColor>, string | number> &
+			Partial<Record<RefinementColor, string | number>>,
 		bgColors: Record<ThemeBg, string | number>,
 		mode: ColorMode,
 		options: { name?: string; sourcePath?: string; sourceInfo?: SourceInfo } = {},
@@ -385,6 +397,9 @@ export class Theme {
 		this.sourceInfo = options.sourceInfo;
 		this.mode = mode;
 		this.fgColors = new Map();
+		for (const [key, value] of Object.entries(refinementColors(options.name === "light"))) {
+			this.fgColors.set(key as RefinementColor, fgAnsi(value, mode));
+		}
 		for (const [key, value] of Object.entries(fgColors) as [ThemeColor, string | number][]) {
 			this.fgColors.set(key, fgAnsi(value, mode));
 		}
@@ -757,7 +772,10 @@ function loadThemeJson(name: string): ThemeJson {
 
 function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string): Theme {
 	const colorMode = mode ?? detectColorMode();
-	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
+	const resolvedColors = resolveThemeColors(
+		{ ...refinementColors(themeJson.name === "light"), ...themeJson.colors },
+		themeJson.vars,
+	);
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
 	const bgColorKeys: Set<string> = new Set([
@@ -1093,7 +1111,10 @@ export function getResolvedThemeColors(themeName?: string): Record<string, strin
 	const name = themeName ?? currentThemeName ?? getDefaultTheme();
 	const isLight = name === "light";
 	const themeJson = loadThemeJson(name);
-	const resolved = resolveThemeColors(themeJson.colors, themeJson.vars);
+	const resolved = resolveThemeColors(
+		{ ...refinementColors(themeJson.name === "light"), ...themeJson.colors },
+		themeJson.vars,
+	);
 
 	// Default text color for empty values (terminal uses default fg color)
 	const defaultText = isLight ? "#000000" : "#e5e5e7";
