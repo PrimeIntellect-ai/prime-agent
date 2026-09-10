@@ -1,0 +1,1 @@
+- Fixed the source launcher failing to start when run from another directory.

@@ -78,4 +78,5 @@ if [[ ! -x "$TSX_BIN" ]]; then
   exit 1
 fi
 
+export TSX_TSCONFIG_PATH="$SCRIPT_DIR/tsconfig.json"
 "$TSX_BIN" "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
