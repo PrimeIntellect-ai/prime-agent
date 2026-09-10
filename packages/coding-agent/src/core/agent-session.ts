@@ -38,6 +38,7 @@ import { parseGoalSlashCommand } from "../goals/commands.js";
 import { GoalController } from "../goals/controller.js";
 import { createGoalPersistence } from "../goals/persistence.js";
 import { theme } from "../modes/interactive/theme/theme.js";
+import { SessionInputScheduler } from "../session/input-scheduler.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
 import {
@@ -1117,17 +1118,11 @@ export class AgentSession {
 
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
 	private readonly _actionStore = new ActionStore<QueuedSessionAction>();
-	private _sessionInputPump: Promise<void> = Promise.resolve();
-	private _sessionInputPumpRequested = false;
-	// Invalidates preparation when a branch pause starts and finishes before its next await resumes.
-	private _sessionInputPumpEpoch = 0;
+	private readonly _inputScheduler = new SessionInputScheduler({
+		canSchedule: () => !this._disposed && !this._disposing && this._hasSelectableSessionInput(),
+		run: (epoch) => this._pumpSessionInputs(epoch),
+	});
 	private _sessionInputArrivalEpoch = 0;
-	// Persists abort/restart suspension after the initiating call returns.
-	private _sessionInputPumpSuspended = false;
-	private _sessionInputSuspendedForUpdateRestart = false;
-	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
-	private readonly _queuedWorkPauses = new Set<symbol>();
-	private readonly _sessionInputAdmissionPauses = new Set<symbol>();
 	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
 	private _sessionActionCommitOwner: symbol | undefined;
@@ -1979,7 +1974,7 @@ export class AgentSession {
 		}
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
-		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
+		if (this._inputScheduler.admissionPaused || this._inputScheduler.suspended) return;
 		const goalBeforeResume = this._goals.checkpoint();
 		try {
 			this._ensureGoalRuntimeActive();
@@ -4349,8 +4344,8 @@ export class AgentSession {
 			!this.isCompacting &&
 			!this.isRetrying &&
 			!this.isBashRunning &&
-			!this._sessionInputPumpSuspended &&
-			this._queuedWorkPauses.size === 0 &&
+			!this._inputScheduler.suspended &&
+			this._inputScheduler.queuedWorkPauseCount === 0 &&
 			!this._disposed &&
 			!this._disposing
 		);
@@ -4421,7 +4416,7 @@ export class AgentSession {
 			}
 		};
 		if (
-			this._sessionInputPumpSuspended &&
+			this._inputScheduler.suspended &&
 			this._isBusyForSessionInput("preflight") &&
 			options?.queueIfBusy === true &&
 			options.streamingBehavior
@@ -4521,9 +4516,9 @@ export class AgentSession {
 
 	private _flushDeferredRlmTerminalNotices(): void {
 		if (
-			this._sessionInputAdmissionPauses.size > 0 ||
-			this._sessionInputPumpSuspended ||
-			this._queuedWorkPauses.size > 0 ||
+			this._inputScheduler.admissionPaused ||
+			this._inputScheduler.suspended ||
+			this._inputScheduler.queuedWorkPauseCount > 0 ||
 			this._disposed ||
 			this._disposing
 		) {
@@ -4546,7 +4541,7 @@ export class AgentSession {
 	private async _acquireRlmTerminalNoticeRetentionFence(): Promise<{ owner: symbol; release(): void } | undefined> {
 		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
 		while (!this._disposed && !this._disposing && !disposeSignal.aborted) {
-			if (this._queuedWorkPauses.size > 0) {
+			if (this._inputScheduler.queuedWorkPauseCount > 0) {
 				let wake = () => {};
 				const pauseReleased = new Promise<void>((resolve) => {
 					wake = resolve;
@@ -4567,7 +4562,7 @@ export class AgentSession {
 			} catch {
 				return undefined;
 			}
-			if (this._queuedWorkPauses.size === 0 && !this._disposed && !this._disposing) return fence;
+			if (this._inputScheduler.queuedWorkPauseCount === 0 && !this._disposed && !this._disposing) return fence;
 			fence.release();
 		}
 		return undefined;
@@ -4611,7 +4606,7 @@ export class AgentSession {
 		options?: InternalPromptOptions & { executionPolicy?: TurnExecutionPolicy },
 	): Promise<void> {
 		if (!this.isStreaming && options?.resumeIfIdle) this._resumeSessionInputAdmission();
-		const admissionEpoch = this._sessionInputPumpEpoch;
+		const admissionEpoch = this._inputScheduler.epoch;
 		const admissionFence = await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
 			throwIfPromptAdmissionCancelled(options?.signal);
 			throw error;
@@ -4619,7 +4614,7 @@ export class AgentSession {
 		const reportPreflight = oncePreflight(options?.preflightResult);
 		try {
 			throwIfPromptAdmissionCancelled(options?.signal);
-			if (admissionEpoch !== this._sessionInputPumpEpoch) {
+			if (admissionEpoch !== this._inputScheduler.epoch) {
 				throw new Error("Injected session input was invalidated before admission");
 			}
 			options?.admissionCommitted?.();
@@ -4687,7 +4682,7 @@ export class AgentSession {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
 			this._assertSessionActionAdmissionAvailable();
 		}
-		const admissionEpoch = this._sessionInputPumpEpoch;
+		const admissionEpoch = this._inputScheduler.epoch;
 		const commitFence = this.isStreaming
 			? undefined
 			: await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
@@ -4698,7 +4693,7 @@ export class AgentSession {
 		const run = async () => {
 			try {
 				throwIfPromptAdmissionCancelled(options?.signal);
-				if (!resumeSuspendedInput && admissionEpoch !== this._sessionInputPumpEpoch) {
+				if (!resumeSuspendedInput && admissionEpoch !== this._inputScheduler.epoch) {
 					throw new Error("Session input was invalidated before admission");
 				}
 				options?.admissionCommitted?.();
@@ -5389,12 +5384,12 @@ export class AgentSession {
 		if (this._disposed || this._disposing) {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
-		if (this._sessionInputAdmissionPauses.size > 0) {
+		if (this._inputScheduler.admissionPaused) {
 			throw new SessionInputAdmissionPausedError(
 				"Cannot admit a session action while session input admission is paused.",
 			);
 		}
-		if (this._sessionInputPumpSuspended) {
+		if (this._inputScheduler.suspended) {
 			throw new Error("Cannot admit a session action while queued session input is suspended.");
 		}
 	}
@@ -5415,7 +5410,7 @@ export class AgentSession {
 		if (this._disposed || this._disposing) {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
-		if (this._sessionInputAdmissionPauses.size > 0) {
+		if (this._inputScheduler.admissionPaused) {
 			throw new SessionInputAdmissionPausedError(
 				"Cannot admit a session action while session input admission is paused.",
 			);
@@ -5502,7 +5497,7 @@ export class AgentSession {
 			bash: this.isBashRunning,
 			refinementApply: this._refineInFlight !== undefined,
 			branchMutation: this._branchSummaryOperation !== undefined,
-			schedulerPauseCount: this._queuedWorkPauses.size + (this._sessionInputPumpSuspended ? 1 : 0),
+			schedulerPauseCount: this._inputScheduler.queuedWorkPauseCount + (this._inputScheduler.suspended ? 1 : 0),
 			disposing: this._disposed || this._disposing,
 		};
 	}
@@ -5535,18 +5530,7 @@ export class AgentSession {
 	}
 
 	private _scheduleSessionInputPump(): void {
-		if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) return;
-		if (this._disposed || this._disposing || this._sessionInputPumpRequested || !this._hasSelectableSessionInput()) {
-			return;
-		}
-		this._sessionInputPumpRequested = true;
-		const epoch = this._sessionInputPumpEpoch;
-		const pump = async () => {
-			this._sessionInputPumpRequested = false;
-			await this._pumpSessionInputs(epoch);
-		};
-		this._sessionInputPump = this._sessionInputPump.then(pump, pump);
-		this._sessionInputPump.catch(() => {});
+		this._inputScheduler.schedule();
 	}
 
 	private async _pumpSessionInputs(epoch: number): Promise<void> {
@@ -5557,7 +5541,7 @@ export class AgentSession {
 				const preselected = this._actionStore
 					.activeActions()
 					.find((action) => action.lifecycle.state === "selected");
-				if (epoch !== this._sessionInputPumpEpoch) {
+				if (epoch !== this._inputScheduler.epoch) {
 					if (preselected) {
 						this._actionStore.rollback(preselected);
 						this._notifySessionInputCheckpointChange();
@@ -5599,7 +5583,7 @@ export class AgentSession {
 					this._actionStore.selectFirst();
 					actions.push(next);
 				}
-				if (epoch !== this._sessionInputPumpEpoch) {
+				if (epoch !== this._inputScheduler.epoch) {
 					for (const action of actions) this._actionStore.rollback(action);
 					return;
 				}
@@ -5651,7 +5635,7 @@ export class AgentSession {
 							}
 						}
 						if (undelivered.length > 0) this._emitQueueUpdate();
-						blocked = epoch !== this._sessionInputPumpEpoch || this._isBusyForSessionInput("pump");
+						blocked = epoch !== this._inputScheduler.epoch || this._isBusyForSessionInput("pump");
 						if (blocked) return;
 						continue;
 					}
@@ -5694,10 +5678,10 @@ export class AgentSession {
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
 				}
-				if (epoch !== this._sessionInputPumpEpoch || blocked) return;
+				if (epoch !== this._inputScheduler.epoch || blocked) return;
 			}
 		} finally {
-			if (!blocked && epoch === this._sessionInputPumpEpoch && this._hasSelectableSessionInput()) {
+			if (!blocked && epoch === this._inputScheduler.epoch && this._hasSelectableSessionInput()) {
 				this._scheduleSessionInputPump();
 			}
 		}
@@ -5761,8 +5745,8 @@ export class AgentSession {
 				externalBusy ||
 				this._disposed ||
 				this._disposing ||
-				this._sessionInputPumpSuspended ||
-				this._queuedWorkPauses.size > 0 ||
+				this._inputScheduler.suspended ||
+				this._inputScheduler.queuedWorkPauseCount > 0 ||
 				this._branchSummaryOperation !== undefined
 			);
 		}
@@ -5770,7 +5754,7 @@ export class AgentSession {
 	}
 
 	private _isSessionInputHandoffDeferred(epoch: number): boolean {
-		return epoch !== this._sessionInputPumpEpoch || this._isBusyForSessionInput("pump");
+		return epoch !== this._inputScheduler.epoch || this._isBusyForSessionInput("pump");
 	}
 
 	private _asError(error: unknown): Error {
@@ -5779,7 +5763,7 @@ export class AgentSession {
 
 	private _isDeferredSessionInputError(error: unknown, epoch: number): boolean {
 		if (error instanceof DeferredSessionInputError) return true;
-		if (epoch !== this._sessionInputPumpEpoch) return true;
+		if (epoch !== this._inputScheduler.epoch) return true;
 		if (this._isBusyForSessionInput("pump")) {
 			this._surfaceSessionInputError(error);
 			return true;
@@ -6100,7 +6084,7 @@ export class AgentSession {
 				});
 			}
 		} else if (options?.triggerTurn) {
-			if (!this._sessionInputSuspendedForUpdateRestart) this._resumeSessionInputAdmission();
+			if (!this._inputScheduler.suspendedForUpdateRestart) this._resumeSessionInputAdmission();
 			const admissionFence = await this._acquireDirectTurnAdmissionFence();
 			try {
 				const normalized = normalizeMessageContent(message.content);
@@ -6175,7 +6159,7 @@ export class AgentSession {
 			.clearableActions()
 			.filter((action) => action.payload.kind === "session_command" || action.payload.queueVisible);
 		if (clearable.some((action) => action.payload.kind === "turn" && action.lifecycle.state === "preparing")) {
-			this._sessionInputPumpEpoch++;
+			this._inputScheduler.invalidatePreparation();
 		}
 		const steering = clearable
 			.filter((action) => action.delivery === "next_turn_boundary")
@@ -6349,7 +6333,7 @@ export class AgentSession {
 	}
 
 	get isQueuedWorkSuspended(): boolean {
-		return this._sessionInputPumpSuspended;
+		return this._inputScheduler.suspended;
 	}
 
 	get isSessionActive(): boolean {
@@ -6575,41 +6559,20 @@ export class AgentSession {
 	}
 
 	acquireSessionInputPause(): { release(): void } {
-		const token = Symbol("session-input-admission-pause");
-		this._sessionInputAdmissionPauses.add(token);
-		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
-		let released = false;
-		return {
-			release: () => {
-				if (released) return;
-				released = true;
-				this._sessionInputAdmissionPauses.delete(token);
-				this._sessionInputPumpEpoch++;
-				this._notifySessionInputCheckpointChange();
-				this._flushDeferredRlmTerminalNotices();
-				this._maybeResumeGoalContinuationAfterRlmWork();
-				this._scheduleSessionInputPump();
-			},
-		};
+		return this._inputScheduler.acquireAdmissionPause(() => {
+			this._notifySessionInputCheckpointChange();
+			this._flushDeferredRlmTerminalNotices();
+			this._maybeResumeGoalContinuationAfterRlmWork();
+			this._scheduleSessionInputPump();
+		});
 	}
 
 	acquireQueuedWorkPause(): { release(): void } {
-		const token = Symbol("queued-work-pause");
-		this._queuedWorkPauses.add(token);
-		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
-		let released = false;
-		return {
-			release: () => {
-				if (released) return;
-				released = true;
-				this._queuedWorkPauses.delete(token);
-				this._notifySessionInputCheckpointChange();
-				this._flushDeferredRlmTerminalNotices();
-				this._scheduleSessionInputPump();
-			},
-		};
+		return this._inputScheduler.acquireQueuedWorkPause(() => {
+			this._notifySessionInputCheckpointChange();
+			this._flushDeferredRlmTerminalNotices();
+			this._scheduleSessionInputPump();
+		});
 	}
 
 	private async _acquireDirectTurnAdmissionFence(signal?: AbortSignal): Promise<{ owner: symbol; release(): void }> {
@@ -6622,7 +6585,7 @@ export class AgentSession {
 		const waitSignal = signal ? AbortSignal.any([signal, disposeSignal]) : disposeSignal;
 		while (true) {
 			this._assertSessionActionAdmissionAvailable();
-			if (this._queuedWorkPauses.size > 0) {
+			if (this._inputScheduler.queuedWorkPauseCount > 0) {
 				let wake = () => {};
 				const pauseReleased = new Promise<void>((resolve) => {
 					wake = resolve;
@@ -6642,7 +6605,7 @@ export class AgentSession {
 			}
 			const fence = await this._acquireSessionActionCommitFence(signal);
 			try {
-				if (this._queuedWorkPauses.size === 0) {
+				if (this._inputScheduler.queuedWorkPauseCount === 0) {
 					this._assertSessionActionAdmissionAvailable();
 					return fence;
 				}
@@ -6694,10 +6657,7 @@ export class AgentSession {
 	}
 
 	private _resumeSessionInputAdmission(): void {
-		if (!this._sessionInputPumpSuspended) return;
-		this._sessionInputPumpSuspended = false;
-		this._sessionInputSuspendedForUpdateRestart = false;
-		this._sessionInputPumpEpoch++;
+		if (!this._inputScheduler.resume()) return;
 		this._notifySessionInputCheckpointChange();
 		this._flushDeferredRlmTerminalNotices();
 	}
@@ -6710,12 +6670,8 @@ export class AgentSession {
 		return this._hasSelectableSessionInput();
 	}
 
-	async waitForSessionInputIdle(): Promise<void> {
-		while (true) {
-			const pump = this._sessionInputPump;
-			await pump;
-			if (pump === this._sessionInputPump && !this._sessionInputPumpRequested) return;
-		}
+	waitForSessionInputIdle(): Promise<void> {
+		return this._inputScheduler.waitForIdle();
 	}
 
 	async waitForIdle(): Promise<void> {
@@ -6731,7 +6687,7 @@ export class AgentSession {
 	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
 		while (settlement === undefined || this._postCompactionContinuationSettlement === settlement) {
 			if (this._actionStore.queuedActions().length > 0) {
-				if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) {
+				if (this._inputScheduler.suspended || this._inputScheduler.queuedWorkPauseCount > 0) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;
@@ -6746,15 +6702,15 @@ export class AgentSession {
 				}
 				this._scheduleSessionInputPump();
 			}
-			const pump = this._sessionInputPump;
+			const pump = this._inputScheduler.pendingPump;
 			await pump;
 			await this.agent.waitForIdle();
 			const agentEventQueue = this._agentEventQueue;
 			await agentEventQueue;
 			if (
-				pump === this._sessionInputPump &&
+				pump === this._inputScheduler.pendingPump &&
 				agentEventQueue === this._agentEventQueue &&
-				!this._sessionInputPumpRequested &&
+				!this._inputScheduler.requested &&
 				!this.agent.state.isStreaming &&
 				this.unfinishedActionCount === 0
 			) {
@@ -6824,10 +6780,7 @@ export class AgentSession {
 			if (run.status === "cancelled") this._abandonRlmRunForQuiescence(run);
 		}
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
-		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
-		this._sessionInputPumpSuspended = true;
-		this._sessionInputSuspendedForUpdateRestart = false;
+		this._inputScheduler.suspend("abort");
 		this._demoteRlmTerminalNoticeActions();
 		this._cancelSessionActions(
 			(action) =>
@@ -6869,10 +6822,7 @@ export class AgentSession {
 	abortForUpdateRestart(): void {
 		// Cancel scheduled pumps and suspend new ones: queued inputs must survive
 		// into the restart manifest instead of starting a turn during teardown.
-		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
-		this._sessionInputPumpSuspended = true;
-		this._sessionInputSuspendedForUpdateRestart = true;
+		this._inputScheduler.suspend("update-restart");
 		this._cancelPostCompactionContinue();
 		this.abortRetry();
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
@@ -7668,7 +7618,10 @@ export class AgentSession {
 	}
 
 	private async _waitForQueuedWorkResume(settlement: PostCompactionContinuationSettlement): Promise<void> {
-		while (this._queuedWorkPauses.size > 0 && this._postCompactionContinuationSettlement === settlement) {
+		while (
+			this._inputScheduler.queuedWorkPauseCount > 0 &&
+			this._postCompactionContinuationSettlement === settlement
+		) {
 			let resume = () => {};
 			const resumed = new Promise<void>((resolve) => {
 				resume = resolve;
@@ -7707,7 +7660,7 @@ export class AgentSession {
 					return;
 				}
 
-				if (this._queuedWorkPauses.size > 0 || this._compactionOperation || this._refineInFlight) {
+				if (this._inputScheduler.queuedWorkPauseCount > 0 || this._compactionOperation || this._refineInFlight) {
 					continue;
 				}
 
@@ -7717,7 +7670,7 @@ export class AgentSession {
 					this._scheduleAutoRefineAfterAgentEnd();
 					return;
 				}
-				if (this.unfinishedActionCount > 0 || this._sessionInputPumpRequested) {
+				if (this.unfinishedActionCount > 0 || this._inputScheduler.requested) {
 					this._scheduleSessionInputPump();
 					waitForSessionInput = true;
 				} else {
@@ -9273,7 +9226,7 @@ export class AgentSession {
 						return;
 					} catch (error) {
 						if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
-						while (this._sessionInputAdmissionPauses.size > 0 && !disposeSignal.aborted) {
+						while (this._inputScheduler.admissionPaused && !disposeSignal.aborted) {
 							await this._waitForSessionActivityChange(disposeSignal);
 						}
 					}
@@ -9653,7 +9606,7 @@ export class AgentSession {
 			return false;
 		}
 		run.status = "cancelled";
-		if (this._sessionInputPumpSuspended) this._abandonRlmRunForQuiescence(run);
+		if (this._inputScheduler.suspended) this._abandonRlmRunForQuiescence(run);
 		run.error = reason;
 		run.publication.reject(new Error(reason));
 		run.abort();
@@ -10346,7 +10299,7 @@ export class AgentSession {
 			const run = session._activeRlmChildRuns.get(childId);
 			if (run) {
 				if (run.status !== "running" && run.status !== "queued" && !run.settled) {
-					if (session._sessionInputPumpSuspended) session._abandonRlmRunForQuiescence(run);
+					if (session._inputScheduler.suspended) session._abandonRlmRunForQuiescence(run);
 					else run.suppressTerminalNotice = true;
 					return true;
 				}

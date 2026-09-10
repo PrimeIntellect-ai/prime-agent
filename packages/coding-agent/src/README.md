@@ -29,10 +29,26 @@ The shared goal types and message formatting remain in `core/goals.ts` during th
 
 Use the same ownership rule for the next extraction: move a responsibility's fields, transitions, and cleanup together. Keep request parsing and storage adapters separate when they have independent dependencies. Avoid generic helper folders, modules that receive the entire session, and duplicate copies of feature state.
 
-The next design review should cover input admission and turn lifecycle. The existing `SessionActionStore` already owns action transitions and tickets; build around that ownership when extracting queue dispatch, pause/cancel, and continuation decisions. Do not migrate all callers in the same change as the goal extraction.
+## Session input scheduling
+
+`session/input-scheduler.ts` owns the serialized pump, its preparation epoch, pause leases, and abort/restart suspension. It receives two callbacks: whether the session has work eligible for scheduling, and the operation that runs that work. The scheduler exposes read-only state and named operations; callers cannot change its pause sets or scheduling flags.
+
+The existing `ActionStore` in `core/session-action-store.ts` owns queued actions, their transitions, and delivery/completion tickets. `AgentSession` still prepares and dispatches those actions, serializes transcript commits, and coordinates goals, child agents, and compaction. These responsibilities can move separately without making the scheduler depend on the session's storage, kernel, or extension APIs.
+
+Preserve these distinctions when extending the scheduler:
+
+- An admission pause blocks new input. A queued-work pause blocks dispatch of already admitted input. They have separate leases and release behavior.
+- Starting either pause invalidates asynchronous preparation. Releasing an admission pause also advances the epoch; releasing a queued-work pause retains it. A runner must check its captured epoch after asynchronous work.
+- Abort and update restart suspend future scheduling until explicitly resumed. Resume does not release outstanding pause leases. Update restart additionally prevents a custom trigger from implicitly resuming input.
+- Pause-release callbacks run once, after the lease is removed. The session retains notification, deferred-message, goal-resumption, and scheduling order.
+- Waiting for the pump to settle differs from waiting for the entire session to be idle. Session idle also includes the agent run, event queue, and unfinished actions.
+
+The next design review should cover action preparation and dispatch as a separate owner, including its commit fence and rollback behavior.
 
 ## Validation
 
 Controller tests live in `test/goals/`. Session integration coverage remains in `test/suite/agent-session-goal.test.ts`, `test/suite/agent-session-compaction-continuation.test.ts`, and `test/goal-continuation-quiescence.test.ts`.
+
+Scheduler tests live in `test/session/`. Existing queue, action-contract, action-race, and compaction suites cover the integration with `AgentSession`, including pause, cancellation, restart, branch navigation, and goal continuation.
 
 Run the focused files from the coding-agent package root with the repository's prescribed Vitest command, then run `npm run check` from the repository root. Use faux providers for session tests.
