@@ -135,6 +135,7 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
+import { PRIME_WORDMARK } from "../../themes/prime-wordmark.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -452,7 +453,7 @@ export interface BrandSplashHeaderOptions {
 export class BrandSplashHeader implements Component {
 	private readonly logoRaw: string[];
 	private readonly logoCanvasWidth: number;
-	private readonly gutter = 2;
+	private readonly gutter = 3;
 
 	constructor(
 		private readonly version: string,
@@ -461,7 +462,7 @@ export class BrandSplashHeader implements Component {
 		private readonly verboseInstructions?: string,
 		private readonly options: BrandSplashHeaderOptions = {},
 	) {
-		this.logoRaw = options.logo?.split("\n") ?? [];
+		this.logoRaw = (options.logo ?? PRIME_WORDMARK).split("\n");
 		this.logoCanvasWidth = this.logoRaw.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 	}
 
@@ -477,7 +478,7 @@ export class BrandSplashHeader implements Component {
 		const metaWidth = showLogo ? contentWidth - this.logoCanvasWidth - this.gutter : contentWidth;
 		const extraMetadata = this.options.getExtraMetadata?.() ?? [];
 		const version = theme.fg("muted", `v${this.version}`);
-		const titleText = "prime agent";
+		const titleText = showLogo && this.options.logo === undefined ? "agent" : "prime agent";
 		const title = theme.fg("text", titleText);
 		const metaLines = [
 			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
@@ -1419,7 +1420,7 @@ export class InteractiveMode {
 
 		this.ui.addChild(this.headerContainer);
 
-		// Compact text header with runtime metadata.
+		// Compact wordmark beside runtime metadata.
 		// The model/cwd are read through live getters, so they fill in once the
 		// connection state loads (rebindCurrentSession below). Onboarding, when
 		// required, renders as a full-screen overlay on top of this header.
