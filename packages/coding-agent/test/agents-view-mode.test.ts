@@ -850,14 +850,49 @@ describe("AgentsViewMode", () => {
 			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
 			const lines = rendered.map(stripAnsi);
 			expect(lines.filter((line) => /Model/.test(line) && /Age/i.test(line))).toHaveLength(1);
-			expect(lines.some((line) => line.startsWith("Running"))).toBe(true);
-			expect(lines.some((line) => line.startsWith("Idle"))).toBe(true);
+			expect(lines[1]).toBe("");
+			expect(lines[2]).toBe("Running (1)");
+			expect(lines).toContain("Idle (1)");
+			expect(lines).toContain("Inactive (0)");
 			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
 			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
 			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
 			for (const line of rendered) {
 				expect(invoke("finalizeRenderedLine", view, line, 120)).not.toContain("\x1b[48");
 			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps all status categories when empty and after a search returns no matches", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		const finish = vi.fn();
+		Reflect.set(view, "finish", finish);
+		const render = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
+		const expectEmptyGroups = (message: string) => {
+			expect(render().slice(1)).toEqual(["", "Running (0)", "", "Idle (0)", "", "Inactive (0)", "", message]);
+			expect(Reflect.get(view, "rows")).toEqual([]);
+			invoke("moveSelection", view, 1);
+			invoke("openSelected", view);
+			expect(finish).not.toHaveBeenCalled();
+		};
+		try {
+			invoke("reconcileCatalogs", view);
+			expectEmptyGroups("No sessions yet.");
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "Review changes" })]);
+			invoke("reconcileCatalogs", view);
+			expect(render()).toContain("Running (0)");
+			expect(render()).toContain("Idle (1)");
+			expect(render()).toContain("Inactive (0)");
+			invoke("setSearchQuery", view, "unmatched-session");
+			expectEmptyGroups("No sessions match your search.");
+			invoke("setSearchQuery", view, "");
+			invoke("moveSelection", view, 1);
+			invoke("openSelected", view);
+			expect(finish).toHaveBeenCalledWith(
+				expect.objectContaining({ summary: expect.objectContaining({ sessionName: "Review changes" }) }),
+			);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -963,10 +998,21 @@ describe("AgentsViewMode", () => {
 			Reflect.set(view, "selectedIndex", rows.length - 1);
 			Reflect.set(view, "ui", { terminal: { rows: 13 }, requestRender: () => {} });
 			const lines = (invoke("renderSessionRows", view, 120, 4) as string[]).map(stripAnsi);
-			expect(lines[1]).toContain("...");
+			expect(lines[1]).toBe("");
+			expect(lines[2]).toContain("...");
 			expect(lines).toHaveLength(4);
 			const lastTitle = rows.at(-1)!.title;
 			expect(lines.some((line) => line.includes(lastTitle))).toBe(true);
+			for (let maxRows = 1; maxRows <= 10; maxRows += 1) {
+				for (let selectedIndex = 0; selectedIndex < rows.length; selectedIndex += 1) {
+					Reflect.set(view, "selectedIndex", selectedIndex);
+					const viewport = invoke("renderSessionRows", view, 120, maxRows) as string[];
+					const selected = viewport.filter((line) => line.includes("\0agents-view-selected-row\0"));
+					expect(viewport.length).toBeLessThanOrEqual(maxRows);
+					expect(selected).toHaveLength(1);
+					expect(selected[0]).toContain(rows[selectedIndex]!.title);
+				}
+			}
 		} finally {
 			stopThemeWatcher();
 		}
@@ -1058,6 +1104,9 @@ describe("AgentsViewMode", () => {
 			expect(prompt).toHaveLength(1);
 			expect(stripAnsi(prompt[0]!)).toContain("Search sessions");
 			expect(prompt[0]).not.toContain("\x1b[48;");
+			const globalLines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
+			expect(globalLines).not.toContain("All sessions");
+			expect(globalLines).not.toContain("back ·");
 			Reflect.set(view, "scopeRootSummary", summary({ sessionName: "Fix authentication", rlmDepth: 3 }));
 			const lines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
 			expect(lines).toContain("← back · Fix authentication › subagents");

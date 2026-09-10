@@ -1025,10 +1025,10 @@ export class AgentsViewMode implements Component, Focusable {
 			headerLines.push("", ...noticeLines);
 		}
 		const root = this.scopeRootSummary;
-		const scopeLabel = root
-			? `${keyText("app.agents.back")} back · ${getAgentsViewSessionTitle(root)} › subagents`
-			: "All sessions";
-		headerLines.push("", truncateToWidth(theme.fg("dim", scopeLabel), width));
+		if (root) {
+			const scopeLabel = `${keyText("app.agents.back")} back · ${getAgentsViewSessionTitle(root)} › subagents`;
+			headerLines.push("", truncateToWidth(theme.fg("dim", scopeLabel), width));
+		}
 
 		// The prompt belongs to the scroll pane rather than the fullscreen dock, but
 		// it must remain usable when a short viewport or wrapped notices exhaust the
@@ -2540,7 +2540,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
 		for (const section of ["running", "idle", "inactive"] as const) {
-			if (counts[section] === 0) continue;
 			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {
@@ -2554,11 +2553,17 @@ export class AgentsViewMode implements Component, Focusable {
 				}
 			}
 		}
-		if (displayItems.length === 0) {
-			return [theme.fg("dim", this.editor.getText().trim() ? "No sessions match your search." : "No sessions yet.")];
+		if (this.rows.length === 0) {
+			displayItems.push(
+				{ type: "spacer" },
+				{
+					type: "message",
+					text: this.editor.getText().trim() ? "No sessions match your search." : "No sessions yet.",
+				},
+			);
 		}
-		// Reserve the shared column header before calculating the selection viewport.
-		const headerRows = maxRows > 1 ? 1 : 0;
+		// Reserve the column header and its spacer, leaving at least one session row visible.
+		const headerRows = Math.min(2, maxRows - 1);
 		const visibleRows = maxRows - headerRows;
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
@@ -2574,6 +2579,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
 		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
 			if (item.type === "spacer") return "";
+			if (item.type === "message") return theme.fg("dim", truncateToWidth(item.text, width));
 			if (item.type === "running-subagents") {
 				const count = item.row.runningSubagentCount;
 				const indent = "  ".repeat(item.row.depth + 1);
@@ -2589,6 +2595,7 @@ export class AgentsViewMode implements Component, Focusable {
 		});
 		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
 		if (showTrailingEllipsis) lines.push(theme.fg("dim", "  ..."));
+		if (headerRows > 1) lines.unshift("");
 		if (headerRows > 0) lines.unshift(theme.fg("muted", layout.legend));
 		return lines;
 	}
@@ -2844,6 +2851,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 type DisplayItem =
 	| { type: "spacer" }
+	| { type: "message"; text: string }
 	| { type: "heading"; section: AgentsViewSection }
 	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };
