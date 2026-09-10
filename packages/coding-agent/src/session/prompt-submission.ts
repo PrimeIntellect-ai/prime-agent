@@ -123,7 +123,7 @@ export interface SessionPromptSubmissionHost {
 }
 export class SessionPromptSubmission {
 	constructor(
-		private readonly actions: ActionStore<QueuedSessionAction>,
+		private readonly actions: Pick<ActionStore<QueuedSessionAction>, "unfinishedActions">,
 		private readonly host: SessionPromptSubmissionHost,
 	) {}
 	async handleKernelBashCompletion(details: AsyncBashCompletionDetails): Promise<void> {
