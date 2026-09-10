@@ -983,10 +983,7 @@ stale post-hook extension instructions`,
 			{ customType: "next-turn", content: "queued context", display: true, details: {} },
 			{ deliverAs: "nextTurn" },
 		);
-		const sessionInternals = harness.session as unknown as {
-			_compactionAbortController?: AbortController;
-		};
-		sessionInternals._compactionAbortController = new AbortController();
+		const compacting = vi.spyOn(harness.session, "isCompacting", "get").mockReturnValue(true);
 
 		await harness.session.acceptAgentMessagePrompt(agentPrompt, {
 			expandPromptTemplates: false,
@@ -995,7 +992,7 @@ stale post-hook extension instructions`,
 		});
 		expect(harness.session.getFollowUpMessages()).toEqual([agentPrompt]);
 
-		sessionInternals._compactionAbortController = undefined;
+		compacting.mockRestore();
 		let queuedTurnSawSeparateNextTurnContext = false;
 		harness.setResponses([
 			fauxAssistantMessage("first turn"),
@@ -1461,10 +1458,7 @@ stale post-hook extension instructions`,
 	it("does not run built-in slash commands immediately while queueIfBusy backpressure is active", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_compactionAbortController?: AbortController;
-		};
-		sessionInternals._compactionAbortController = new AbortController();
+		const compacting = vi.spyOn(harness.session, "isCompacting", "get").mockReturnValue(true);
 
 		await harness.session.prompt("/autonomous on", {
 			queueIfBusy: true,
@@ -1473,7 +1467,7 @@ stale post-hook extension instructions`,
 
 		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
 		expect(harness.session.getFollowUpMessages()).toEqual(["/autonomous on"]);
-		sessionInternals._compactionAbortController = undefined;
+		compacting.mockRestore();
 		expect(harness.session.resumeQueuedWork()).toBe(true);
 		await harness.session.waitForSessionInputIdle();
 		expect(harness.session.getAutonomousStatus().enabled).toBe(true);

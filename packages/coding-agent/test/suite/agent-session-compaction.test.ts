@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
+import type { SessionCompaction } from "../../src/session/compaction.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
@@ -22,11 +23,7 @@ type SessionWithCompactionInternals = {
 	) => Promise<void>;
 	_runAutoCompaction: (reason: "overflow" | "threshold" | "requested", willRetry: boolean) => Promise<void>;
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
-	_persistCompactionOutcome: (
-		reason: "overflow" | "threshold" | "requested",
-		outcome: "skipped" | "cancelled" | "failed",
-		message: string,
-	) => void;
+	_compaction: SessionCompaction;
 };
 
 function createUsage(totalTokens: number) {
@@ -1569,7 +1566,7 @@ describe("AgentSession compaction characterization", () => {
 		});
 
 		expect(() =>
-			internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed"),
+			internals._compaction.endUnsuccessfully("requested", "failed", "Requested compaction failed"),
 		).not.toThrow();
 		// The live outcome message discloses that it was not saved.
 		expect(harness.session.messages.at(-1)).toMatchObject({
@@ -1641,7 +1638,7 @@ describe("AgentSession compaction characterization", () => {
 		vi.spyOn(harness.sessionManager, "_persist").mockImplementationOnce(() => {
 			throw new Error("disk full");
 		});
-		internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed");
+		internals._compaction.endUnsuccessfully("requested", "failed", "Requested compaction failed");
 
 		// Compaction reloads agent.state.messages from the session file; the
 		// memory-only disclosure must survive.
