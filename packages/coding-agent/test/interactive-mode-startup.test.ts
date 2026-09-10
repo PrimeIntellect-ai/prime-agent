@@ -36,7 +36,7 @@ describe("InteractiveMode startup hints", () => {
 		return mode;
 	}
 
-	it("shows a compact wordmark beside metadata without a repeated input hint", () => {
+	it("shows a compact butterfly beside metadata without a repeated input hint", () => {
 		const header = new BrandSplashHeader(
 			"0.0.0",
 			() => "test-model",
@@ -52,9 +52,8 @@ describe("InteractiveMode startup hints", () => {
 		const output = stripAnsi(lines.join("\n"));
 
 		expect(lines[0]).toBe("");
-		expect(lines.length).toBeLessThanOrEqual(5);
-		expect(output).toContain("agent v0.0.0");
-		expect(output).not.toContain("prime agent");
+		expect(lines.length).toBeLessThanOrEqual(7);
+		expect(output).toContain("prime agent v0.0.0");
 		expect(output).toMatch(/[▀▄█]/);
 		expect(output).toContain("test-model");
 		expect(output).toContain("/tmp/project");
@@ -77,11 +76,11 @@ describe("InteractiveMode startup hints", () => {
 			() => "/tmp/project",
 		);
 
-		for (const width of [1, 2, 12, 14, 20, 24, 39, 40, 57, 58, 80]) {
+		for (const width of [1, 2, 12, 14, 20, 24, 39, 40, 48, 49, 80]) {
 			const lines = header.render(width);
 			const output = stripAnsi(lines.join("\n"));
 			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-			if (width < 58) {
+			if (width < 49) {
 				expect(output).not.toMatch(/[▀▄█]/);
 				if (width >= 14) expect(output).toContain("prime agent");
 			} else {
