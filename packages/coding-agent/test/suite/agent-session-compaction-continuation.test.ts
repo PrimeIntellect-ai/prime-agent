@@ -28,7 +28,7 @@ type SessionInternals = {
 		customInstructions?: string;
 		signal: AbortSignal;
 	}) => Promise<unknown>;
-	_compaction: SessionCompaction;
+	_compaction: Pick<SessionCompaction, "requestContinuation"> & { readonly continueAfterThreshold: boolean };
 };
 
 function createUsage(totalTokens: number): Usage {
@@ -129,7 +129,7 @@ describe("compaction continuation", () => {
 		// toolResult-last makes the session stop the loop for compaction AND continue afterwards.
 		const shouldStop = await internals._shouldStopAfterTurn(context);
 		expect(shouldStop).toBe(true);
-		expect(internals._compaction.shouldContinueAfterThreshold).toBe(true);
+		expect(internals._compaction.continueAfterThreshold).toBe(true);
 
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
@@ -336,7 +336,7 @@ describe("compaction continuation", () => {
 
 		const shouldStop = await internals._shouldStopAfterTurn(context);
 		expect(shouldStop).toBe(true);
-		expect(internals._compaction.shouldContinueAfterThreshold).toBe(true);
+		expect(internals._compaction.continueAfterThreshold).toBe(true);
 
 		expect(harness.session.queuedActionCount).toBe(1);
 		expect(harness.session.goalState.continuationsUsed).toBe(1);

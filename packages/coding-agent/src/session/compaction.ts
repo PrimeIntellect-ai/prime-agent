@@ -90,9 +90,6 @@ export class SessionCompaction {
 	get overflowRecovery(): "idle" | "attempted" | "reported" {
 		return this.overflowStage;
 	}
-	get shouldContinueAfterThreshold(): boolean {
-		return this.continueAfterThreshold;
-	}
 
 	request(customInstructions?: string): void {
 		this.pendingRequest = { customInstructions };
