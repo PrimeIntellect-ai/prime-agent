@@ -1,8 +1,9 @@
-import { Container, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_TITLE } from "../src/config.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
 import {
 	BrandSplashHeader,
 	getRandomStartHint,
@@ -10,7 +11,7 @@ import {
 	START_HINTS,
 } from "../src/modes/interactive/interactive-mode.js";
 import type { PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
-import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
+import { getEditorTheme, getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("InteractiveMode startup hints", () => {
 	beforeAll(() => {
@@ -24,9 +25,9 @@ describe("InteractiveMode startup hints", () => {
 	function createMode(messageCount = 0, returnToAgentsView = false, getEditorText = () => "") {
 		const mode = {
 			options: { returnToAgentsView },
-			editor: { getText: getEditorText },
+			editor: { getText: getEditorText, getTopRightLabel: undefined },
 			connectionState: {
-				model: { name: "test-model", reasoning: true },
+				model: { id: "test-model", name: "test-model", provider: "test-provider", reasoning: true },
 				thinkingLevel: "high",
 				messageCount,
 				isStreaming: false,
@@ -126,11 +127,89 @@ describe("InteractiveMode startup hints", () => {
 		}
 	});
 
-	it("places the fresh-chat shortcut hint after the model and effort", () => {
+	it("places the fresh-chat shortcut hint after the model", () => {
 		const mode = createMode();
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model • high  ? for shortcuts");
+		expect(stripAnsi(label)).toBe("test-model  ? for shortcuts");
+	});
+
+	it("shows current effort in a compact prompt label and hides it for non-reasoning models", () => {
+		const mode = createMode();
+		const getLabel = (width: number) =>
+			Reflect.get(InteractiveMode.prototype, "getPromptEffortLabel").call(mode, width) as string | undefined;
+
+		expect(stripAnsi(getLabel(40)!)).toBe("high · /effort");
+		expect(stripAnsi(getLabel(6)!)).toBe("high");
+		expect(getLabel(3)).toBeUndefined();
+		mode.connectionState.thinkingLevel = "off";
+		expect(stripAnsi(getLabel(40)!)).toBe("off · /effort");
+		mode.connectionState.thinkingLevel = "xhigh";
+		mode.connectionState.isStreaming = true;
+		expect(stripAnsi(getLabel(40)!)).toBe("xhigh · /effort");
+		mode.connectionState.model.reasoning = false;
+		expect(getLabel(40)).toBeUndefined();
+	});
+
+	it.each([
+		["GLM 5.3 Fast (internal)", "GLM 5.3 Fast"],
+		["internal/glm-5.3-fast", "glm-5.3-fast"],
+		["test-provider/test-model", "test-model"],
+		["Qwen/Qwen3-Next-80B-A3B-Instruct", "Qwen/Qwen3-Next-80B-A3B-Instruct"],
+		["custom/fine-tune (thinking)", "custom/fine-tune (thinking)"],
+	])("shortens the prompt model name %s without changing model identity", (name, expected) => {
+		const mode = createMode();
+		mode.connectionState.model.name = name;
+		const before = { ...mode.connectionState.model };
+
+		expect(Reflect.get(InteractiveMode.prototype, "getModelTrayLabel").call(mode)).toBe(expected);
+		expect(mode.connectionState.model).toEqual(before);
+	});
+
+	it("keeps effort visible for extension editors without a top-right label", () => {
+		const mode = { ...createMode(), editor: { getText: () => "" } };
+		Object.setPrototypeOf(mode, InteractiveMode.prototype);
+
+		expect(Reflect.get(InteractiveMode.prototype, "getModelTrayLabel").call(mode)).toBe("test-model • high");
+	});
+
+	it.each([false, true])("preserves prompt drafts and extension labels when swapping editors (%s)", (ownLabel) => {
+		const keybindings = new KeybindingsManager();
+		const ui = { terminal: { rows: 24 }, requestRender: vi.fn(), setFocus: vi.fn() } as unknown as TUI;
+		const defaultEditor = new CustomEditor(ui, getEditorTheme(), keybindings);
+		defaultEditor.setText("unfinished draft");
+		const mode = {
+			...createMode(),
+			ui,
+			keybindings,
+			defaultEditor,
+			editor: defaultEditor,
+			editorContainer: new Container(),
+			pastedImages: new Map(),
+			queueSelection: { selected: undefined },
+			ctrlCExitHintExpiresAt: 0,
+		};
+		Object.setPrototypeOf(mode, InteractiveMode.prototype);
+		Reflect.get(InteractiveMode.prototype, "setupKeyHandlers").call(mode);
+		const replacement = new CustomEditor(ui, getEditorTheme(), keybindings);
+		if (ownLabel) replacement.getTopRightLabel = () => "custom";
+
+		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, () => replacement);
+
+		expect(replacement.getText()).toBe("unfinished draft");
+		expect(stripAnsi(replacement.render(80)[0]!)).toContain(ownLabel ? "custom" : "high · /effort");
+		mode.connectionState.thinkingLevel = "low";
+		expect(stripAnsi(replacement.render(80)[0]!)).toContain(ownLabel ? "custom" : "low · /effort");
+		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, undefined);
+		expect(defaultEditor.getText()).toBe("unfinished draft");
+		expect(stripAnsi(defaultEditor.render(80)[0]!)).toContain("low · /effort");
+	});
+
+	it("uses the configured keybinding in the manage hint", () => {
+		setKeybindings(new KeybindingsManager({ "app.agents.back": "ctrl+g" }));
+		const label = Reflect.get(InteractiveMode.prototype, "getAgentsViewTrayHint").call(createMode(0, true));
+
+		expect(stripAnsi(label)).toBe("Ctrl+G manage");
 	});
 
 	it("keeps fresh-chat guidance hidden when a mid-turn snapshot still has no committed messages", () => {
@@ -277,15 +356,15 @@ describe("InteractiveMode startup hints", () => {
 		expect(shutdown).not.toHaveBeenCalled();
 	});
 
-	it("keeps the lowercase agents hint while typing", () => {
+	it("keeps the manage hint while typing", () => {
 		let editorText = "";
 		const mode = createMode(0, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("← manage  test-model  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high");
+		expect(stripAnsi(getLabel())).toBe("← manage  test-model");
 	});
 
 	it("hides the fresh-chat shortcut hint while the prompt has text", () => {
@@ -293,23 +372,23 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, false, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("test-model • high  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("test-model • high");
+		expect(stripAnsi(getLabel())).toBe("test-model");
 
 		editorText = " ";
-		expect(stripAnsi(getLabel())).toBe("test-model • high");
+		expect(stripAnsi(getLabel())).toBe("test-model");
 
 		editorText = "";
-		expect(stripAnsi(getLabel())).toBe("test-model • high  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("test-model  ? for shortcuts");
 	});
 
 	it("hides the tray shortcut guidance for chats with history", () => {
 		const mode = createMode(1);
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("test-model • high");
+		expect(stripAnsi(label)).toBe("test-model");
 	});
 
 	it("keeps the question-mark shortcut guide compact", () => {
