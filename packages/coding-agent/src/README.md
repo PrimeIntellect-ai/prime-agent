@@ -71,6 +71,14 @@ Execution and recording callbacks preserve dispatch through the public session m
 - Output produced during streaming waits for the same existing prompt-preparation flush points, preserving tool-call/result ordering.
 - Shell event shapes, command options, error behavior, and persisted `bashExecution` messages stay unchanged.
 
+## Turn preparation and action records
+
+`session/turn-preparation.ts` contains the execution policies for direct, queued, injected, and custom-triggered turns and the ordered preparation pipeline. `TurnPreparer` receives six operations for validation, pending shell output, model selection, compaction, and refinement. The session supplies their implementations and retains transcript dispatch and context rollback.
+
+Preserve the policy differences: direct prompts flush shell output before validation and compact after model selection; queued turns validate before flushing and compact before model selection. Conditional refinement barriers are checked when reached, so a refinement started during preparation is still awaited. Withdrawing prepared work skips the final barrier and commit. The exported `TurnExecutionPolicy` shape remains available from the session facade.
+
+`session/prepared-actions.ts` contains prepared action types, delivery records, recovery contracts, input copying, action factories, and queue projections. It has no session dependency. Primary messages retain their identity for durable-delivery checks; separately stored input blocks and prefix messages retain their existing copy behavior. Recovery format version 1 and the public exports from `AgentSession` stay unchanged.
+
 ## Validation
 
 Controller tests live in `test/goals/`. Session integration coverage remains in `test/suite/agent-session-goal.test.ts`, `test/suite/agent-session-compaction-continuation.test.ts`, and `test/goal-continuation-quiescence.test.ts`.
