@@ -8,7 +8,6 @@ import type { AssistantMessageComponent } from "../src/modes/interactive/compone
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
 import { createMermaidMarkdownTransform } from "../src/modes/interactive/components/mermaid.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
-import { ToolRunGrouper } from "../src/modes/interactive/components/tool-run-group.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -32,7 +31,6 @@ type HandleEventThis = {
 	settingsManager: { getShowTerminalProgress(): boolean };
 	connectionState: { isStreaming: boolean };
 	toolOutputExpanded: boolean;
-	toolRunGrouper: ToolRunGrouper;
 	footer: { invalidate(): void };
 	ui: TUI;
 	chatContainer: Container;
@@ -75,17 +73,15 @@ type HandleSubagentSummaryChatAction = (
 ) => void;
 
 function createFakeInteractiveModeThis(): HandleEventThis {
-	const chatContainer = new Container();
 	const fakeThis = {
 		isInitialized: true,
 		settingsManager: { getShowTerminalProgress: () => false },
 		connectionState: { isStreaming: false },
 		toolOutputExpanded: false,
-		toolRunGrouper: new ToolRunGrouper((component) => chatContainer.addChild(component)),
 		footer: { invalidate: vi.fn() },
 		activityTracker: new AgentActivityTracker(),
 		ui: { requestRender: vi.fn() } as unknown as TUI,
-		chatContainer,
+		chatContainer: new Container(),
 		recapContainer: new Container(),
 		sessionRecap: "Updated files",
 		hideThinkingBlock: false,

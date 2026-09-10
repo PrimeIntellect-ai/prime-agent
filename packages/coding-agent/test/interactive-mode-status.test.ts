@@ -49,7 +49,6 @@ import { BashExecutionComponent } from "../src/modes/interactive/components/bash
 import type { ConfigurationMenuComponent } from "../src/modes/interactive/components/configuration-menu.js";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
-import { ToolRunGrouper } from "../src/modes/interactive/components/tool-run-group.js";
 import { formatSplashCwd, InteractiveMode, truncatePathMiddle } from "../src/modes/interactive/interactive-mode.js";
 import { ClientPromptStashStore, type PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
 import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
@@ -208,7 +207,6 @@ describe("InteractiveMode.showStatus", () => {
 
 type RenderSessionContextHarness = {
 	pendingTools: Map<string, ToolExecutionComponent>;
-	toolRunGrouper: ToolRunGrouper;
 	ipythonToolComponents: Map<string, unknown>;
 	lateIpythonSentAgentMessages: Map<string, unknown[]>;
 	toolOutputExpanded: boolean;
@@ -257,7 +255,6 @@ function createRenderSessionContextHarness(overrides: Partial<RenderSessionConte
 	const addToHistory = vi.fn();
 	const harness: RenderSessionContextHarness = {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
-		toolRunGrouper: new ToolRunGrouper((component) => chatContainer.addChild(component)),
 		ipythonToolComponents: new Map<string, unknown>(),
 		lateIpythonSentAgentMessages: new Map<string, unknown[]>(),
 		toolOutputExpanded: false,
@@ -332,7 +329,6 @@ describe("InteractiveMode.renderSessionContext", () => {
 				ipythonToolComponents,
 				lateIpythonSentAgentMessages,
 				toolOutputExpanded: false,
-				toolRunGrouper: new ToolRunGrouper((component) => chatContainer.addChild(component)),
 				chatContainer,
 				footer: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
@@ -387,7 +383,6 @@ describe("InteractiveMode.renderSessionContext", () => {
 				ipythonToolComponents: new Map(),
 				lateIpythonSentAgentMessages: new Map(),
 				toolOutputExpanded: false,
-				toolRunGrouper: new ToolRunGrouper((component) => chatContainer.addChild(component)),
 				chatContainer,
 				footer: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
@@ -2048,7 +2043,6 @@ describe("InteractiveMode tool event rendering", () => {
 		const definitionPromise = new Promise<undefined>((resolve) => {
 			resolveDefinition = () => resolve(undefined);
 		});
-		const chatContainer = new Container();
 		const fakeThis = Object.assign(Object.create(InteractiveMode.prototype), {
 			isInitialized: true,
 			init: vi.fn(async () => {}),
@@ -2057,8 +2051,7 @@ describe("InteractiveMode tool event rendering", () => {
 			activityTracker: new AgentActivityTracker(),
 			streamingComponent: { updateContent: vi.fn() },
 			streamingMessage: undefined,
-			chatContainer,
-			toolRunGrouper: new ToolRunGrouper((component) => chatContainer.addChild(component)),
+			chatContainer: new Container(),
 			pendingTools: new Map<string, ToolExecutionComponent>(),
 			pendingToolCreations: new Set<string>(),
 			startedToolCalls: new Set<string>(),
