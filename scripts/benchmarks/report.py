@@ -155,6 +155,13 @@ def number(value: float, definition: Definition, signed: bool = False) -> str:
     return f"{scaled:+,.{precision}f}" if signed else f"{scaled:,.{precision}f}"
 
 
+def change_color(relative_change: float | None, regressed: bool) -> str:
+    muted, vivid = ((170, 106, 101), (229, 72, 77)) if regressed else ((102, 129, 109), (31, 146, 78))
+    intensity = min(abs(relative_change), 1.0) if relative_change is not None else 0.0
+    channels = (round(start + (end - start) * intensity) for start, end in zip(muted, vivid, strict=True))
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
 def comparison(
     definition: Definition, baseline: list[Observation], candidate: list[Observation], expected: int
 ) -> Comparison:
@@ -166,14 +173,16 @@ def comparison(
     if main is None or head is None:
         return Comparison(main_text, head_text, "—", "unavailable")
     delta = head - main
-    percentage = f"{delta / main * 100:+.2f}%" if main else "N/A"
+    relative_change = delta / main if main else None
+    percentage = f"{relative_change * 100:+.2f}%" if relative_change is not None else "N/A"
     change = f"{number(delta, definition, True)} {definition.unit} ({percentage})"
     if len(left) != expected or len(right) != expected:
         return Comparison(main_text, head_text, f"{change}; incomplete", "incomplete")
     threshold = max(definition.absolute, main * definition.relative, spread(left), spread(right))
     if abs(delta) <= threshold:
         return Comparison(main_text, head_text, f"≈ {change}", "no clear change")
-    signal, color = ("↑", "#e5534b") if delta > 0 else ("↓", "#2da44e")
+    signal = "↑" if delta > 0 else "↓"
+    color = change_color(relative_change, regressed=delta > 0)
     text = f"{signal} {change}".replace("%", r"\%")
     colored = rf"$`\textcolor{{{color}}}{{\textsf{{{text}}}}}`$"
     return Comparison(main_text, head_text, colored, "regressed" if delta > 0 else "improved")
