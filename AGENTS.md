@@ -20,6 +20,12 @@
 - Never hardcode key checks with, eg. `matchesKey(keyData, "ctrl+x")`. All keybindings must be configurable. Add default to matching object (`DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS`)
 - NEVER modify `packages/ai/src/models.generated.ts` directly. Update `packages/ai/scripts/generate-models.ts` instead.
 
+## Source Organization
+
+- Follow the [source ownership rules](packages/coding-agent/docs/architecture.md#source-ownership-and-module-boundaries) when adding or extracting modules. The [source map](packages/coding-agent/src/README.md) documents current owners and ordering invariants.
+- Before a structural change, identify the feature owner, its state and lifecycle, its public API, and its allowed dependencies. Update the source map when ownership changes.
+- Group complete feature responsibilities into reviewable PRs. File size alone does not justify an abstraction or a separate PR.
+
 ## Commands
 
 - After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.

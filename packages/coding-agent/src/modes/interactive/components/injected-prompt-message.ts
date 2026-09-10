@@ -8,7 +8,6 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { GOAL_CONTEXT_CUSTOM_TYPE, type GoalContextDetails } from "../../../core/goals.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
@@ -23,6 +22,7 @@ import {
 	type RlmChildFailureDetails,
 	type RlmChildTerminalNoticeDetails,
 } from "../../../core/messages.js";
+import { GOAL_CONTEXT_CUSTOM_TYPE, type GoalContextDetails } from "../../../session/goals/contracts.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { agentMessageSummaryLine } from "./agent-message.js";
 import { expandCollapseHint } from "./keybinding-hints.js";

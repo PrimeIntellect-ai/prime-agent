@@ -1,6 +1,6 @@
 # Source organization
 
-`src/` contains application source; tests, scripts, docs, examples, and build output stay at the package root. Top-level features such as `goals/` sit beside `session/`. Session owners are grouped below `session/` by shared state, dependencies, and lifecycle.
+`src/` contains application source; tests, scripts, docs, examples, and build output stay at the package root. Follow the [source ownership rules](../docs/architecture.md#source-ownership-and-module-boundaries) when choosing module boundaries. Session features, including goals, live below `session/`; each feature groups its state, dependencies, and lifecycle.
 
 `core/` currently contains most execution logic. Migrate responsibilities into their owning feature folders as their boundaries are established. `AgentSession` remains the public entry point and coordinates work across features. Each feature owner keeps its state and transitions together and receives only the dependencies it uses.
 
@@ -8,10 +8,11 @@
 
 | File | Responsibility |
 | --- | --- |
-| `goals/controller.ts` | Goal transitions, token and time accounting, continuation counts, and rollback checkpoints. |
-| `goals/persistence.ts` | Reading the selected branch, flushing goal records, and deciding whether a branch can receive an initial goal. |
-| `goals/commands.ts` | Parsing `/goal` arguments into typed commands. |
-| `core/goals.ts` | Shared goal types, validation, serialization, and context-message formatting used by session clients. |
+| `session/goals/controller.ts` | Goal transitions, token and time accounting, continuation counts, and rollback checkpoints. |
+| `session/goals/persistence.ts` | Reading the selected branch, flushing goal records, and deciding whether a branch can receive an initial goal. |
+| `session/goals/commands.ts` | Parsing `/goal` arguments into typed commands. |
+| `session/goals/continuation.ts` | Goal continuation admission, budget notices, child-wait coordination, and rollback. |
+| `session/goals/contracts.ts` | Lightweight goal types, validation, serialization, and context-message formatting used by session clients. |
 
 The controller depends on a load/save interface, an update callback, and a clock. It does not receive `AgentSession`, the agent loop, a kernel, or a UI object. Its state is read-only to callers; mutations go through named operations.
 
@@ -23,18 +24,19 @@ Three ordering rules matter during future extractions:
 - Capture completion usage, clear stale queued goal context, and then persist and publish completion. The explicit completion callback preserves this order.
 - A continuation rejected by new input restores both goal state and the accounting clock. Deferred child-work admission preserves the existing clock while restoring goal state.
 
-The shared goal types and message formatting remain in `core/goals.ts` during this extraction; their existing consumers can migrate together in a later change. The public goal payload and persisted `thread_goal_state` format remain shared contracts. Internal organization does not require a new daemon command or schema.
+Goal state belongs to a session branch, so the controller, persistence adapter, and continuation owner share `session/goals/`. UI and protocol consumers import the lightweight contracts without loading the controller. The public goal payload and persisted `thread_goal_state` format remain unchanged; the internal move does not require a new daemon command or schema.
 
 ## Extending this structure
 
-Use the same ownership rule for the next extraction: move a responsibility's fields, transitions, and cleanup together. Keep request parsing and storage adapters separate when they have independent dependencies. Avoid generic helper folders, modules that receive the entire session, and duplicate copies of feature state.
+Apply the architecture guide's placement and dependency rules to each extraction. This document records the resulting owners and ordering invariants; update it when those boundaries change.
 
 ## Session feature folders
 
 | Folder | Ownership |
 | --- | --- |
 | `session/input/` | Submission normalization, admission, scheduling, commit fencing, action queues, delivery, and recovery. |
-| `session/turns/` | Turn preparation and execution, session commands, ordered events, retry, and goal/autonomous/shared continuation. |
+| `session/goals/` | Goal state and contracts, accounting, persistence, command parsing, and goal-specific continuation. |
+| `session/turns/` | Turn preparation and execution, session commands, ordered events, retry, and autonomous/shared continuation. |
 | `session/compaction/` | Session compaction lifecycle and execution. |
 | `session/refinement/` | Refinement planning/application lifecycle, automatic review, and execution. |
 | `session/context/` | Pending context, harness context, transcript views, branch navigation, and export. |
@@ -120,7 +122,7 @@ Preserve the policy differences: direct prompts flush shell output before valida
 | `session/turns/command-execution.ts` | Executing queued session commands and recording their outcomes. |
 | `session/turns/events.ts` | Ordered agent-event processing, listener delivery, and transcript/accounting coordination. |
 | `session/context/pending-context.ts` | Pending messages, notices, and retention for the next turn. |
-| `session/turns/goal-continuation.ts` | Goal continuation admission, budget notices, child-wait coordination, and rollback. |
+| `session/goals/continuation.ts` | Goal continuation admission, budget notices, child-wait coordination, and rollback. |
 | `session/turns/autonomous-continuation.ts` | Autonomous continuation messages, snapshots, and rollback. |
 | `session/turns/turn-policy.ts` | Turn stopping, threshold compaction, and continuation decisions from current session state. |
 
@@ -212,7 +214,7 @@ Integration regressions in `test/suite/regressions/` cover model/history boundar
 
 ## Validation
 
-Controller tests live in `test/goals/`. Session integration coverage remains in `test/suite/agent-session-goal.test.ts`, `test/suite/agent-session-compaction-continuation.test.ts`, and `test/goal-continuation-quiescence.test.ts`.
+Controller tests live in `test/session/goals/`. Session integration coverage remains in `test/suite/agent-session-goal.test.ts`, `test/suite/agent-session-compaction-continuation.test.ts`, and `test/goal-continuation-quiescence.test.ts`.
 
 Scheduler and commit-fence tests live in `test/session/`. Existing queue, action-contract, action-race, and compaction suites cover the integration with `AgentSession`, including pause, cancellation, restart, branch navigation, and goal continuation.
 

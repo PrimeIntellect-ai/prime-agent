@@ -6,7 +6,6 @@ import {
 	parseAgentSessionMessagePromptId,
 } from "../../core/agent-messages.js";
 import type { InputSource } from "../../core/extensions/index.js";
-import { GOAL_CONTEXT_CUSTOM_TYPE, GOAL_CONTEXT_PREVIEW_LABEL } from "../../core/goals.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
@@ -19,6 +18,7 @@ import {
 import { throwIfPromptAdmissionCancelled } from "../../core/prompt-admission.js";
 import { type ActionStore, canSelectSessionAction, type RuntimeActivity } from "../../core/session-action-store.js";
 import type { SessionManager } from "../../core/session-manager.js";
+import { GOAL_CONTEXT_CUSTOM_TYPE, GOAL_CONTEXT_PREVIEW_LABEL } from "../goals/contracts.js";
 import {
 	buildPromptContent,
 	cloneCustomMessage,

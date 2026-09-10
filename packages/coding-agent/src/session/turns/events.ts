@@ -13,7 +13,6 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "../../core/extensions/index.js";
-import type { GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import {
@@ -24,6 +23,7 @@ import {
 import type { SessionManager } from "../../core/session-manager.js";
 import type { RlmChildAgentSnapshot } from "../children/child-types.js";
 import type { SessionCompaction, SessionCompactionEvent } from "../compaction/compaction.js";
+import type { GoalState } from "../goals/contracts.js";
 import { primaryDeliveryRecord, type QueuedSessionAction } from "../prepared-actions.js";
 import type { SessionRefinement } from "../refinement/refinement.js";
 import type { SessionBashEvent } from "../tools/bash.js";

@@ -1,17 +1,6 @@
 import type { Agent, AgentContext, AgentMessage, GetContinuationMessagesContext } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
-import {
-	createGoalContextMessage,
-	GOAL_CONTEXT_CUSTOM_TYPE,
-	type GoalHostResponse,
-	type GoalState,
-	goalHostResponse,
-	validateGoalBudget,
-	validateGoalObjective,
-} from "../../core/goals.js";
 import type { ActionStore } from "../../core/session-action-store.js";
-import { parseGoalSlashCommand } from "../../goals/commands.js";
-import type { GoalController } from "../../goals/controller.js";
 import type { SessionInputAdmission } from "../input/input-admission.js";
 import type { SessionInputScheduler } from "../input/input-scheduler.js";
 import {
@@ -20,6 +9,17 @@ import {
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
 } from "../prepared-actions.js";
+import { parseGoalSlashCommand } from "./commands.js";
+import {
+	createGoalContextMessage,
+	GOAL_CONTEXT_CUSTOM_TYPE,
+	type GoalHostResponse,
+	type GoalState,
+	goalHostResponse,
+	validateGoalBudget,
+	validateGoalObjective,
+} from "./contracts.js";
+import type { GoalController } from "./controller.js";
 
 export interface SessionGoalContinuationHost {
 	getGoalState(): GoalState;

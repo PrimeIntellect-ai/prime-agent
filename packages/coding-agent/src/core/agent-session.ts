@@ -8,8 +8,6 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Model, ServiceTier } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, cleanupSessionResources, supportsFastMode } from "@earendil-works/pi-ai";
-import { GoalController } from "../goals/controller.js";
-import { createGoalPersistence } from "../goals/persistence.js";
 import { createChildSessionDir, createInlineChildRuntime } from "../session/children/child-runtime.js";
 import { SessionChildState } from "../session/children/child-state.js";
 import {
@@ -36,6 +34,15 @@ import {
 	installExtensionToolHooks,
 	SessionExtensions,
 } from "../session/extensions/extensions.js";
+import { SessionGoalContinuation } from "../session/goals/continuation.js";
+import {
+	createGoalContextMessage,
+	GOAL_CONTEXT_CUSTOM_TYPE,
+	GOAL_SKILL_NAME,
+	type GoalState,
+} from "../session/goals/contracts.js";
+import { GoalController } from "../session/goals/controller.js";
+import { createGoalPersistence } from "../session/goals/persistence.js";
 import { SessionActionQueue } from "../session/input/action-queue.js";
 import { SessionActionRecovery } from "../session/input/action-recovery.js";
 import { SessionCommitFence, type SessionCommitLease } from "../session/input/commit-fence.js";
@@ -61,7 +68,6 @@ import { SessionAutonomousContinuation } from "../session/turns/autonomous-conti
 import { SessionCommandExecution } from "../session/turns/command-execution.js";
 import { SessionContinuation } from "../session/turns/continuation.js";
 import { SessionEvents } from "../session/turns/events.js";
-import { SessionGoalContinuation } from "../session/turns/goal-continuation.js";
 import { SessionRetry } from "../session/turns/retry.js";
 import { SessionTurnExecution } from "../session/turns/turn-execution.js";
 import { SessionTurnPolicy } from "../session/turns/turn-policy.js";
@@ -90,7 +96,6 @@ import type {
 	ToolDefinition,
 	ToolInfo,
 } from "./extensions/index.js";
-import { createGoalContextMessage, GOAL_CONTEXT_CUSTOM_TYPE, GOAL_SKILL_NAME, type GoalState } from "./goals.js";
 import type { HostRequestHandlers } from "./kernel/index.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
@@ -125,6 +130,7 @@ export type {
 export { compactRlmText, rlmChildLabel } from "../session/children/child-types.js";
 export type { CompactionReason } from "../session/compaction/compaction.js";
 export { CompactionSkippedError } from "../session/compaction/compaction-execution.js";
+export type { GoalState, GoalStatus } from "../session/goals/contracts.js";
 export {
 	SESSION_ACTION_RECOVERY_FORMAT_VERSION,
 	type SessionActionRecoveryAction,
@@ -135,7 +141,6 @@ export {
 export { RefineSkippedError } from "../session/refinement/refinement.js";
 export type { AgentSessionEvent, AgentSessionEventListener } from "../session/turns/events.js";
 export type { TurnExecutionPolicy } from "../session/turns/turn-preparation.js";
-export type { GoalState, GoalStatus } from "./goals.js";
 export type { SessionStats } from "./session-stats.js";
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-blocks.js";
 

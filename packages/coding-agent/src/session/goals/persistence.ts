@@ -1,11 +1,11 @@
+import type { SessionManager } from "../../core/session-manager.js";
 import {
 	emptyGoalState,
 	GOAL_STATE_CUSTOM_TYPE,
 	type GoalState,
 	isPersistedGoalState,
 	normalizeGoalState,
-} from "../core/goals.js";
-import type { SessionManager } from "../core/session-manager.js";
+} from "./contracts.js";
 
 export interface GoalPersistence {
 	load(): GoalState;
