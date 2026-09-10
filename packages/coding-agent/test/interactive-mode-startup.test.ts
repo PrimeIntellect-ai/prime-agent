@@ -3,12 +3,7 @@ import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
-import {
-	BrandSplashHeader,
-	getRandomStartHint,
-	InteractiveMode,
-	START_HINTS,
-} from "../src/modes/interactive/interactive-mode.js";
+import { BrandSplashHeader, InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import type { PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
 import { getEditorTheme, getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -134,21 +129,11 @@ describe("InteractiveMode startup hints", () => {
 		expect(updated).toContain("/tmp/second");
 	});
 
-	it("randomly selects from five concise filepath prompts", () => {
-		expect(START_HINTS).toHaveLength(5);
-		expect(new Set(START_HINTS).size).toBe(5);
-
-		for (const [index, hint] of START_HINTS.entries()) {
-			expect(getRandomStartHint(() => index / START_HINTS.length)).toBe(hint);
-			expect(hint).toMatch(/^Try ".*@<filepath>.*"$/);
-		}
-	});
-
-	it("keeps the fresh-chat shortcut hint below the prompt without duplicating the model", () => {
+	it("keeps fresh-chat shortcut instructions out of the lower tray", () => {
 		const mode = createMode();
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(label)).toBe("? for shortcuts");
+		expect(stripAnsi(label)).toBe("");
 	});
 
 	it("shows the model and current effort above the prompt and omits unsupported effort", () => {
@@ -167,6 +152,60 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(getLabel(40)!)).toBe("Test Model · xhigh");
 		mode.connectionState.model.reasoning = false;
 		expect(stripAnsi(getLabel(40)!)).toBe("Test Model");
+	});
+
+	it("shows context usage after model and effort above the prompt without duplicating it below", () => {
+		const mode = createMode(1);
+		mode.connectionState.model.name = "GLM 5.3 Fast (internal)";
+		Object.assign(mode.connectionState, {
+			contextUsage: { contextWindow: 400_000, tokens: 175_000, percent: 43.75 },
+		});
+		const label = Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);
+
+		expect(stripAnsi(label)).toBe("GLM 5.3 Fast · high · 175k (44%)");
+		expect(Reflect.get(InteractiveMode.prototype, "getTrayContextLabel").call(mode)).toBeUndefined();
+	});
+
+	it("keeps available context usage visible when the model is unknown", () => {
+		const mode = createMode(1);
+		Reflect.deleteProperty(mode.connectionState, "model");
+		Object.assign(mode.connectionState, {
+			contextUsage: { contextWindow: 100_000, tokens: 12_000, percent: 12 },
+		});
+		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);
+
+		expect(stripAnsi(getLabel())).toBe("12k (12%)");
+		Reflect.deleteProperty(mode.connectionState, "contextUsage");
+		expect(getLabel()).toBeUndefined();
+	});
+
+	it("refreshes context usage during streaming and omits unknown post-compaction counts", () => {
+		let outputTokens = 7_000;
+		const mode = Object.assign(createMode(1), {
+			recapContainer: new Container(),
+			agentRunFileChanges: new Map(),
+			activityTracker: { getStatus: () => ({ tokens: outputTokens }) },
+			contextUsageTokenBaseline: 5_000,
+			ui: { requestRender: vi.fn() },
+		});
+		Object.assign(mode.connectionState, {
+			contextUsage: { contextWindow: 100_000, tokens: 42_000, percent: 42 },
+			isStreaming: true,
+		});
+		Reflect.get(InteractiveMode.prototype, "renderRecap").call(mode);
+		const render = () => stripAnsi(mode.recapContainer.render(100).join("\n"));
+
+		expect(render()).toContain("Test Model · high · 44k (44%)");
+		outputTokens = 8_000;
+		expect(render()).toContain("Test Model · high · 45k (45%)");
+		Object.assign(mode.connectionState, { contextUsage: { contextWindow: 100_000, tokens: null, percent: null } });
+		expect(render()).toContain("Test Model · high");
+		expect(render()).not.toContain("%");
+		Object.assign(mode.connectionState, {
+			contextUsage: { contextWindow: 100_000, tokens: 0, percent: 0 },
+			isStreaming: false,
+		});
+		expect(render()).toContain("Test Model · high · 0 (0%)");
 	});
 
 	it.each([
@@ -409,18 +448,18 @@ describe("InteractiveMode startup hints", () => {
 		const mode = createMode(0, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("← manage  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("← manage");
 
 		editorText = "draft prompt";
 		expect(stripAnsi(getLabel())).toBe("← manage");
 	});
 
-	it("hides the fresh-chat shortcut hint while the prompt has text", () => {
+	it("keeps shortcut instructions out of the tray for blank and nonempty prompts", () => {
 		let editorText = "";
 		const mode = createMode(0, false, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("");
 
 		editorText = "draft prompt";
 		expect(stripAnsi(getLabel())).toBe("");
@@ -429,7 +468,7 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(getLabel())).toBe("");
 
 		editorText = "";
-		expect(stripAnsi(getLabel())).toBe("? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("");
 	});
 
 	it("hides the tray shortcut guidance for chats with history", () => {
@@ -457,8 +496,8 @@ describe("InteractiveMode startup hints", () => {
 		});
 		Object.assign(mode, { ctrlCExitHintExpiresAt: Date.now() + 60_000 });
 
-		expect(stripAnsi(locationLabel())).toBe("← manage  ? for shortcuts");
-		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s) · 75k (75%)");
+		expect(stripAnsi(locationLabel())).toBe("← manage");
+		expect(stripAnsi(contextLabel())).toBe("Pursuing goal (1m 05s)");
 		expect(stripAnsi(overrideLabel())).toBe("Press Ctrl+C again to exit");
 
 		mode.ui.hasOverlay = () => true;
@@ -482,7 +521,7 @@ describe("InteractiveMode startup hints", () => {
 		const getLabel = (mode: ReturnType<typeof createMode>) =>
 			stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
 
-		expect(getLabel(root)).toBe("? for shortcuts");
+		expect(getLabel(root)).toBe("");
 		expect(getLabel(subagent)).toBe("depth 1");
 	});
 

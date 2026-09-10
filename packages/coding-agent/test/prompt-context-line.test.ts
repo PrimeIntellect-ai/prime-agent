@@ -11,32 +11,32 @@ describe("PromptContextLine", () => {
 	});
 
 	it.each(["dark", "light"])(
-		"shares one plain row between recap and model/effort with one blank line above the prompt in the %s theme",
+		"shares one plain row between recap and model/effort/context with one blank line above the prompt in the %s theme",
 		(name) => {
 			initTheme(name);
 			const line = new PromptContextLine(
 				() => "Updated the prompt layout",
-				() => theme.fg("dim", "GLM 5.3 · high"),
+				() => theme.fg("dim", "GLM 5.3 · high · 175k (44%)"),
 			);
 			const rows = line.render(80);
 
 			expect(rows).toHaveLength(2);
-			expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated the prompt layout\s{2,}GLM 5.3 · high $/);
+			expect(stripAnsi(rows[0]!)).toMatch(/^ Recap: Updated the prompt layout\s{2,}GLM 5.3 · high · 175k \(44%\) $/);
 			expect(rows[1]).toBe("");
 			expect(visibleWidth(rows[0]!)).toBe(80);
 			expect(rows[0]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		},
 	);
 
-	it("keeps model and effort aligned right above the prompt", () => {
+	it("keeps model, effort, and context usage aligned right above the prompt", () => {
 		const line = new PromptContextLine(
 			() => undefined,
-			() => "GLM 5.3 · high",
+			() => "GLM 5.3 · high · 175k (44%)",
 		);
 
 		const rows = line.render(40);
 		expect(rows).toHaveLength(2);
-		expect(stripAnsi(rows[0]!)).toBe(`${"GLM 5.3 · high".padStart(39)} `);
+		expect(stripAnsi(rows[0]!)).toBe(`${"GLM 5.3 · high · 175k (44%)".padStart(39)} `);
 		expect(rows[1]).toBe("");
 	});
 
@@ -69,6 +69,22 @@ describe("PromptContextLine", () => {
 			if (width >= 40) {
 				expect(plain).toMatch(/^ Recap: .+ {2,}GLM 5.3 · xhigh $/);
 			}
+		}
+	});
+
+	it("fits context usage beside the model while preserving the recap and narrow widths", () => {
+		const line = new PromptContextLine(
+			() => "Updated the interface",
+			() => theme.fg("dim", "GLM 5.3 Fast · high · 175k (44%)"),
+		);
+		expect(stripAnsi(line.render(100)[0]!)).toMatch(
+			/^ Recap: Updated the interface\s{2,}GLM 5.3 Fast · high · 175k \(44%\) $/,
+		);
+		for (const width of [1, 2, 3, 8, 24, 40, 80]) {
+			const rows = line.render(width);
+			expect(rows).toHaveLength(2);
+			expect(visibleWidth(rows[0]!)).toBe(width);
+			expect(rows[1]).toBe("");
 		}
 	});
 

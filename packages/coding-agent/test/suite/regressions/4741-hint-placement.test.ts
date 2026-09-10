@@ -15,14 +15,12 @@ function callPrivate(mode: object, name: string, ...args: unknown[]): unknown {
 	return Reflect.get(InteractiveMode.prototype, name).call(mode, ...args);
 }
 
-function createFeatureHintMode() {
+function createQueuedMessageMode() {
 	const loader = new FakeLoader();
 	const statusContainer = new Container();
 	statusContainer.addChild(loader);
-	const featureHintContainer = new Container();
 	const mode = Object.assign(Object.create(InteractiveMode.prototype), {
 		statusContainer,
-		featureHintContainer,
 		pendingMessagesContainer: new Container(),
 		pendingBashComponents: [],
 		queuedMessagesContainer: new Container(),
@@ -33,19 +31,11 @@ function createFeatureHintMode() {
 			isStreaming: true,
 			sessionActions: { queuedCount: 0, steering: [] as string[], followUps: [] as string[] },
 		},
-		featureHintDeck: { next: vi.fn(() => ({ id: "test", text: "A useful feature hint." })) },
-		currentFeatureHint: undefined,
-		featureHintEligibleAt: 0,
-		featureHintTimer: undefined,
-		featureHintAnimationTimer: undefined,
-		featureHintComponent: undefined,
-		featureHintRunPending: false,
-		featureHintSuppressedByQueue: false,
 		options: { returnToAgentsView: true },
 		getAppKeyDisplay: () => "Ctrl+Q",
 		ui: { requestRender: vi.fn() },
 	});
-	return { mode, featureHintContainer };
+	return { mode };
 }
 
 describe("ENG-4741 hint placement", () => {
@@ -62,9 +52,8 @@ describe("ENG-4741 hint placement", () => {
 		vi.useRealTimers();
 	});
 
-	it("keeps hints above queued messages and side questions, with recap and effort in the prompt dock", () => {
+	it("keeps queued messages and side questions above the prompt without a discovery-tip row", () => {
 		const recapContainer = new Container();
-		const featureHintContainer = new Container();
 		const queuedMessagesContainer = new Container();
 		const sideQuestionContainer = new Container();
 		const editorContainer = new Container();
@@ -72,7 +61,6 @@ describe("ENG-4741 hint placement", () => {
 		const footerSlot = new Container();
 		const mode = Object.assign(Object.create(InteractiveMode.prototype), {
 			recapContainer,
-			featureHintContainer,
 			queuedMessagesContainer,
 			sideQuestionContainer,
 			editorContainer,
@@ -80,11 +68,7 @@ describe("ENG-4741 hint placement", () => {
 			footerSlot,
 		});
 
-		expect(callPrivate(mode, "getPromptContextContainers")).toEqual([
-			featureHintContainer,
-			queuedMessagesContainer,
-			sideQuestionContainer,
-		]);
+		expect(callPrivate(mode, "getPromptContextContainers")).toEqual([queuedMessagesContainer, sideQuestionContainer]);
 		expect(callPrivate(mode, "getPromptDockComponents")).toEqual([
 			recapContainer,
 			editorContainer,
@@ -93,7 +77,7 @@ describe("ENG-4741 hint placement", () => {
 		]);
 	});
 
-	it("keeps hints in the fullscreen transcript instead of the prompt dock", () => {
+	it("keeps queued messages in the fullscreen transcript and the prompt dock free of discovery tips", () => {
 		const previousIsTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		try {
@@ -101,7 +85,6 @@ describe("ENG-4741 hint placement", () => {
 			const mainViewContainer = new Container();
 			const widgetContainerAbove = new Container();
 			const recapContainer = new Container();
-			const featureHintContainer = new Container();
 			const queuedMessagesContainer = new Container();
 			const sideQuestionContainer = new Container();
 			const widgetContainerBelow = new Container();
@@ -112,7 +95,6 @@ describe("ENG-4741 hint placement", () => {
 				mainViewContainer,
 				widgetContainerAbove,
 				recapContainer,
-				featureHintContainer,
 				queuedMessagesContainer,
 				sideQuestionContainer,
 				widgetContainerBelow,
@@ -128,7 +110,6 @@ describe("ENG-4741 hint placement", () => {
 					headerContainer,
 					mainViewContainer,
 					widgetContainerAbove,
-					featureHintContainer,
 					queuedMessagesContainer,
 					sideQuestionContainer,
 					widgetContainerBelow,
@@ -136,7 +117,6 @@ describe("ENG-4741 hint placement", () => {
 				dock: promptDock,
 				mouse: true,
 			});
-			expect(promptDock.children).not.toContain(featureHintContainer);
 		} finally {
 			if (previousIsTTY) {
 				Object.defineProperty(process.stdout, "isTTY", previousIsTTY);
@@ -146,23 +126,17 @@ describe("ENG-4741 hint placement", () => {
 		}
 	});
 
-	it("hides a visible hint while messages are queued and restores it when the queue clears", () => {
-		const { mode, featureHintContainer } = createFeatureHintMode();
-
-		callPrivate(mode, "startFeatureHintPresentation");
-		vi.advanceTimersByTime(5_000);
-		expect(featureHintContainer.children).toHaveLength(1);
-
+	it("shows queued messages without adding discovery tips when the queue clears", () => {
+		const { mode } = createQueuedMessageMode();
 		mode.connectionState.sessionActions.followUps = ["Continue after this turn"];
 		callPrivate(mode, "updatePendingMessagesDisplay");
-		expect(featureHintContainer.children).toHaveLength(0);
+		expect(mode.queuedMessagesContainer.render(100).join("\n")).toContain("Continue after this turn");
 
 		mode.connectionState.sessionActions.followUps = [];
 		callPrivate(mode, "updatePendingMessagesDisplay");
-		expect(featureHintContainer.children).toHaveLength(1);
-
-		const restoredHint = featureHintContainer.children[0];
-		callPrivate(mode, "updatePendingMessagesDisplay");
-		expect(featureHintContainer.children).toEqual([restoredHint]);
+		vi.advanceTimersByTime(60_000);
+		expect(mode.queuedMessagesContainer.children).toHaveLength(0);
+		expect(mode.statusContainer.children).toHaveLength(1);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });
