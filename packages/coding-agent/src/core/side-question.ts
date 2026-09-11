@@ -99,9 +99,8 @@ export function startSideQuestion(
 			messages: [...structuredClone(parent.state.messages), ...previousTurnMessages],
 			thinkingLevel: getAuxiliaryThinkingLevel(model, parent.state.thinkingLevel),
 			serviceTier: parent.state.serviceTier,
-			// Providers serialize the tool declarations ahead of the system prompt and
-			// messages, so an empty list here would miss the main thread's cache entirely.
-			// Execution is blocked in beforeToolCall instead.
+			// Providers serialize tool declarations ahead of the cached prefix, so an
+			// empty list would miss the main cache; execution is blocked in beforeToolCall.
 			tools: parent.state.tools,
 		},
 		convertToLlm: parent.convertToLlm,

@@ -115,18 +115,19 @@ describe("ENG-4509 side questions", () => {
 		}
 	});
 
+	let probeExecutions = 0;
+	const probe: AgentTool = {
+		name: "probe",
+		label: "Probe",
+		description: "Records executions",
+		parameters: Type.Object({}),
+		execute: async () => {
+			probeExecutions += 1;
+			return { content: [{ type: "text", text: "executed" }], details: {} };
+		},
+	};
+
 	it("sends the session's tool declarations but blocks their execution", async () => {
-		let executions = 0;
-		const probe: AgentTool = {
-			name: "probe",
-			label: "Probe",
-			description: "Records executions",
-			parameters: Type.Object({}),
-			execute: async () => {
-				executions += 1;
-				return { content: [{ type: "text", text: "executed" }], details: {} };
-			},
-		};
 		const harness = await createHarness({ tools: [probe] });
 		try {
 			let mainTools: unknown;
@@ -141,8 +142,6 @@ describe("ENG-4509 side questions", () => {
 			let secondTurnTexts: string[] = [];
 			harness.setResponses([
 				(context) => {
-					// Providers serialize the tools ahead of the cached prefix, so the side
-					// request must declare the main thread's tools unchanged.
 					expect(context.tools).toEqual(mainTools);
 					return fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" });
 				},
@@ -158,7 +157,7 @@ describe("ENG-4509 side questions", () => {
 			});
 			await run.done;
 
-			expect(executions).toBe(0);
+			expect(probeExecutions).toBe(0);
 			expect(secondTurnTexts.some((text) => text.includes("Tools are deactivated in this side thread"))).toBe(true);
 			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "answered from context" });
 		} finally {
@@ -167,13 +166,6 @@ describe("ENG-4509 side questions", () => {
 	});
 
 	it("stops after three turns when the model keeps calling tools", async () => {
-		const probe: AgentTool = {
-			name: "probe",
-			label: "Probe",
-			description: "Never executes",
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [{ type: "text", text: "executed" }], details: {} }),
-		};
 		const harness = await createHarness({ tools: [probe] });
 		try {
 			harness.setResponses([fauxAssistantMessage("main answer")]);
@@ -186,7 +178,6 @@ describe("ENG-4509 side questions", () => {
 				}),
 				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
 				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
-				fauxAssistantMessage("unreachable fourth turn"),
 			]);
 
 			const events: SideQuestionEvent[] = [];
