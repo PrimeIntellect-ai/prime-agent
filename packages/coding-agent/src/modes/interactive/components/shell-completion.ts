@@ -125,24 +125,10 @@ export class ShellCompletionComponent implements Component {
 		const completion = readShellCompletion(this.message);
 		const color = completion?.details.exitCode ? "error" : "muted";
 		const label = shellCompletionLabel(completion);
-		if (this.attached) {
-			// Keep the completion's chronological position visible in the full trace.
-			return [
-				truncateToWidth(
-					theme.fg(
-						color,
-						` ${label} · pid ${completion?.details.pid} · ${formatShellCompletionTime(this.message.timestamp)}`,
-					),
-					width,
-					"",
-				),
-			];
-		}
-		const header = truncateToWidth(
-			theme.fg(color, ` ${completion?.details.exitCode ? "✗" : "✓"} ${label}`),
-			width,
-			"",
-		);
+		const heading = this.attached
+			? `${label} · pid ${completion?.details.pid} · ${formatShellCompletionTime(this.message.timestamp)}`
+			: `${completion?.details.exitCode ? "✗" : "✓"} ${label}`;
+		const header = truncateToWidth(theme.fg(color, ` ${heading}`), width, "");
 		if (!this.expanded) return [header];
 		const raw = completion
 			? shellCompletionText(completion)
