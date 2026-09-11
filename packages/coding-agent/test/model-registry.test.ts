@@ -610,6 +610,7 @@ describe("ModelRegistry", () => {
 
 	describe("live Prime Inference models", () => {
 		test("loads the cache without replacing external providers and applies local overrides", () => {
+			const externalModels = getModelsForProvider(ModelRegistry.inMemory(authStorage), "openrouter");
 			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
 			const catalogEntries = bundled.map((model) => ({
 				id: model.id,
@@ -656,7 +657,7 @@ describe("ModelRegistry", () => {
 				contextWindow: 123_456,
 				cost: { input: 1, output: 2 },
 			});
-			expect(getModelsForProvider(registry, "openrouter")).toHaveLength(getModels("openrouter").length);
+			expect(getModelsForProvider(registry, "openrouter")).toEqual(externalModels);
 		});
 
 		test("restores cached authorized deployment metadata without waiting for the network", async () => {

@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { Value } from "typebox/value";
+import { Compile } from "typebox/schema";
 
 const PercentileCutoffsSchema = Type.Object({
 	p50: Type.Optional(Type.Number()),
@@ -101,15 +101,19 @@ export const ProviderCompatSchema = Type.Union([
 	AnthropicMessagesCompatSchema,
 ]);
 
+const openAICompletionsCompatValidator = Compile({ ...OpenAICompletionsCompatSchema, additionalProperties: false });
+const openAIResponsesCompatValidator = Compile({ ...OpenAIResponsesCompatSchema, additionalProperties: false });
+const anthropicMessagesCompatValidator = Compile({ ...AnthropicMessagesCompatSchema, additionalProperties: false });
+
 export function isModelCompat(api: string, value: unknown): boolean {
 	if (value === undefined) return true;
-	const schema =
+	const validator =
 		api === "openai-completions"
-			? OpenAICompletionsCompatSchema
+			? openAICompletionsCompatValidator
 			: api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses"
-				? OpenAIResponsesCompatSchema
+				? openAIResponsesCompatValidator
 				: api === "anthropic-messages"
-					? AnthropicMessagesCompatSchema
+					? anthropicMessagesCompatValidator
 					: undefined;
-	return schema !== undefined && Value.Check({ ...schema, additionalProperties: false }, value);
+	return validator !== undefined && validator.Check(value);
 }

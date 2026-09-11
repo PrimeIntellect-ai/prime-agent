@@ -501,6 +501,22 @@ export async function resolveCliModelFromCatalog(options: {
 	return resolved;
 }
 
+/** Resolve an explicit selection from local state, waiting for discovery only on a miss. */
+export async function resolveModelForSelection(
+	provider: string,
+	modelId: string,
+	modelRegistry: ModelRegistry,
+): Promise<Model<Api> | undefined> {
+	const find = (availableModels: Model<Api>[]) =>
+		availableModels.find((candidate) => candidate.provider === provider && candidate.id === modelId) ??
+		// Stale-auth lookup must not clear the lockout; session.setModel validates and commits recovery.
+		(modelRegistry.getProviderAuthStatus(provider).source === "stale"
+			? modelRegistry.find(provider, modelId)
+			: undefined);
+	const local = find(await modelRegistry.refreshAvailableModels());
+	return local ?? find(await modelRegistry.refreshAvailableModels({ background: false }));
+}
+
 export interface InitialModelResult {
 	model: Model<Api> | undefined;
 	thinkingLevel: ThinkingLevel;

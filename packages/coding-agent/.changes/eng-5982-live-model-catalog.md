@@ -6,3 +6,5 @@
 - Fixed saved private-model restoration on cold starts and with command-backed credentials.
 - Retried failed credential commands on the next request instead of retaining failed results.
 - Reduced memory and CPU overhead when creating multiple model registries.
+- Refreshed missing models before selection after login or team changes without delaying warm selections.
+- Added four newly available OpenRouter models to the curated catalog.

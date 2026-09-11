@@ -1,5 +1,5 @@
 import { type TProperties, Type } from "typebox";
-import { Value } from "typebox/value";
+import { Compile } from "typebox/schema";
 import { isModelCompat } from "./model-compat-schema.js";
 import type { Api, Model } from "./types.js";
 
@@ -51,6 +51,10 @@ const ModelCatalogEnvelopeSchema = Type.Object({
 	models: Type.Array(Type.Unknown(), { minItems: 1, maxItems: MAX_MODEL_CATALOG_MODELS }),
 });
 
+// Bundle loading checks thousands of models synchronously during process startup.
+const catalogModelValidator = Compile(CatalogModelSchema);
+const catalogEnvelopeValidator = Compile(ModelCatalogEnvelopeSchema);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -75,12 +79,12 @@ export function parseModelCatalog(value: unknown, options: { skipInvalidModels?:
 	if (!Array.isArray(value.models) || value.models.length === 0 || value.models.length > MAX_MODEL_CATALOG_MODELS) {
 		throw new Error("Invalid model catalog model count");
 	}
-	if (!Value.Check(ModelCatalogEnvelopeSchema, value)) throw new Error("Invalid model catalog entry");
+	if (!catalogEnvelopeValidator.Check(value)) throw new Error("Invalid model catalog entry");
 
 	const models: Model<Api>[] = [];
 	const seen = new Set<string>();
 	for (const candidate of value.models) {
-		if (!Value.Check(CatalogModelSchema, candidate)) {
+		if (!catalogModelValidator.Check(candidate)) {
 			if (options.skipInvalidModels) continue;
 			throw new Error("Invalid model catalog entry");
 		}

@@ -83,6 +83,7 @@ interface FixtureProcessSnapshot {
 
 interface TestPaths {
 	agentDir: string;
+	homeDir: string;
 	descriptorDir: string;
 	executablePath: string;
 	registryDir: string;
@@ -127,6 +128,9 @@ async function createPaths(): Promise<TestPaths> {
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
 	linkSync(process.execPath, executablePath);
+	const homeDir = join(harness.tempDir, "home");
+	mkdirSync(join(homeDir, ".prime"), { recursive: true });
+	writeFileSync(join(homeDir, ".prime", "config.json"), "{}");
 	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
 	socketTempDirs.add(socketTmpDir);
@@ -134,6 +138,7 @@ async function createPaths(): Promise<TestPaths> {
 	fixtureRegistryDirs.add(join(harness.tempDir, "registry"));
 	return {
 		agentDir: harness.tempDir,
+		homeDir,
 		descriptorDir: join(harness.tempDir, "workers"),
 		executablePath,
 		registryDir: join(harness.tempDir, "registry"),
@@ -145,12 +150,28 @@ async function createPaths(): Promise<TestPaths> {
 	};
 }
 
+function fixtureEnvironment(paths: TestPaths): NodeJS.ProcessEnv {
+	// Offline mode blocks catalog requests, not inference. Never inherit real provider auth or user config.
+	const environment: NodeJS.ProcessEnv = {};
+	for (const key of ["PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"]) {
+		if (process.env[key] !== undefined) environment[key] = process.env[key];
+	}
+	return {
+		...environment,
+		HOME: paths.homeDir,
+		USERPROFILE: paths.homeDir,
+		XDG_CONFIG_HOME: join(paths.homeDir, ".config"),
+		RLM_DEPTH: "0",
+		DO_NOT_TRACK: "1",
+	};
+}
+
 function spawnSupervisor(paths: TestPaths): ProcessHandle {
 	return trackProcess(
 		spawn(paths.executablePath, [tsxPath, fixturePath], {
 			cwd: paths.agentDir,
 			env: {
-				...process.env,
+				...fixtureEnvironment(paths),
 				[supervisorRegistryDirEnv]: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
 				ENG_4600_AGENT_DIR: paths.agentDir,
@@ -181,7 +202,7 @@ function spawnStandaloneWorker(
 			{
 				cwd: paths.agentDir,
 				env: {
-					...process.env,
+					...fixtureEnvironment(paths),
 					...extraEnv,
 					[supervisorRegistryDirEnv]: paths.registryDir,
 					[ENV_AGENT_DIR]: paths.agentDir,
@@ -680,7 +701,7 @@ async function runCli(
 		spawn(process.execPath, [tsxPath, cliPath, ...args], {
 			cwd: paths.agentDir,
 			env: {
-				...process.env,
+				...fixtureEnvironment(paths),
 				...extraEnv,
 				[supervisorRegistryDirEnv]: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
@@ -759,6 +780,14 @@ describe("ENG-4603 worker recovery convergence", () => {
 		await waitForType(predecessor, "ready", 60_000);
 		const predecessorClient = await connectEventually(paths.socketPath);
 		const summary = await createResidentSession(predecessorClient, paths.agentDir);
+		const initialState = await predecessorClient.request({
+			type: "get_connection_state",
+			activeSessionId: summary.activeSessionId ?? summary.id,
+		});
+		expect(initialState, predecessor.stderr).toMatchObject({
+			success: true,
+			data: { model: { provider: "faux", id: "faux" } },
+		});
 		const originalWorkerPid = summary.workerPid;
 		if (!originalWorkerPid || !summary.sessionFile) throw new Error("Resident worker did not expose its identity");
 		const originalWorkerStartId = getProcessStartId(originalWorkerPid);
@@ -835,7 +864,8 @@ describe("ENG-4603 worker recovery convergence", () => {
 			recoveredSummary.activeSessionId ?? recoveredSummary.id,
 			{ recoverDaemon: async () => {} },
 		);
-		await connection.getInitialSnapshot();
+		const snapshot = await connection.getInitialSnapshot();
+		expect(snapshot.state.model).toMatchObject({ provider: "faux", id: "faux" });
 		await connection.prompt("after recovery");
 		await connection.waitForIdle();
 		expect(await connection.getMessages()).toContainEqual(
