@@ -17,6 +17,15 @@ import {
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
+
+/** Close a fake supervisor and destroy lingering worker connections (persistent supervisor links keep sockets open). */
+function closeFakeSupervisor(server: Server, sockets: Set<Socket>): Promise<void> {
+	return new Promise<void>((resolveClose) => {
+		server.close(() => resolveClose());
+		for (const socket of sockets) socket.destroy();
+	});
+}
+
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -1867,7 +1876,10 @@ describe("daemon mode helpers", () => {
 			const tempDir = mkdtempSync(join(tmpdir(), "pa-root-session-"));
 			const socketPath = join(tempDir, "supervisor.sock");
 			const commands: Array<Record<string, unknown>> = [];
+			const sockets = new Set<Socket>();
 			const server: Server = createServer((socket) => {
+				sockets.add(socket);
+				socket.on("close", () => sockets.delete(socket));
 				socket.on("error", () => undefined);
 				socket.write(
 					`${JSON.stringify({
@@ -2022,7 +2034,7 @@ describe("daemon mode helpers", () => {
 				vi.unstubAllEnvs();
 				if (previousSupervisorSocket === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 				else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
-				await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+				await closeFakeSupervisor(server, sockets);
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		},
@@ -2032,7 +2044,10 @@ describe("daemon mode helpers", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-root-timeout-"));
 		const socketPath = join(tempDir, "supervisor.sock");
 		const commands: Array<Record<string, unknown>> = [];
+		const sockets = new Set<Socket>();
 		const server = createServer((socket) => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
 			socket.on("error", () => {});
 			socket.write(
 				`${JSON.stringify({
@@ -2098,7 +2113,7 @@ describe("daemon mode helpers", () => {
 			requestSpy.mockRestore();
 			if (previousSocket === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSocket;
-			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+			await closeFakeSupervisor(server, sockets);
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -2279,7 +2294,10 @@ describe("daemon mode helpers", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-"));
 		const socketPath = join(tempDir, "d.sock");
 		let connectionCount = 0;
+		const sockets = new Set<Socket>();
 		const server: Server = createServer((socket) => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
 			connectionCount++;
 			socket.on("error", () => undefined);
 			socket.write(
@@ -2345,7 +2363,7 @@ describe("daemon mode helpers", () => {
 			} else {
 				process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
 			}
-			await new Promise<void>((resolve) => server.close(() => resolve()));
+			await closeFakeSupervisor(server, sockets);
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -2354,7 +2372,10 @@ describe("daemon mode helpers", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-disconnect-"));
 		const socketPath = join(tempDir, "d.sock");
 		let requestCount = 0;
+		const sockets = new Set<Socket>();
 		const server: Server = createServer((socket) => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
 			socket.on("error", () => undefined);
 			socket.write(
 				`${JSON.stringify({
@@ -2424,7 +2445,7 @@ describe("daemon mode helpers", () => {
 			} else {
 				process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
 			}
-			await new Promise<void>((resolve) => server.close(() => resolve()));
+			await closeFakeSupervisor(server, sockets);
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -2437,7 +2458,10 @@ describe("daemon mode helpers", () => {
 		const responseGate = new Promise<void>((resolve) => {
 			releaseResponse = resolve;
 		});
+		const sockets = new Set<Socket>();
 		const server = createServer((socket) => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
 			socket.write(
 				`${JSON.stringify({
 					type: "daemon_hello",
@@ -2505,7 +2529,7 @@ describe("daemon mode helpers", () => {
 		} finally {
 			if (previousSocketPath === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSocketPath;
-			await new Promise<void>((resolve) => server.close(() => resolve()));
+			await closeFakeSupervisor(server, sockets);
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -2514,7 +2538,10 @@ describe("daemon mode helpers", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-ambiguous-"));
 		const socketPath = join(tempDir, "s");
 		let requestCount = 0;
+		const sockets = new Set<Socket>();
 		const server = createServer((socket) => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
 			socket.write(
 				`${JSON.stringify({
 					type: "daemon_hello",
@@ -2563,7 +2590,7 @@ describe("daemon mode helpers", () => {
 		} finally {
 			if (previousSocketPath === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSocketPath;
-			await new Promise<void>((resolve) => server.close(() => resolve()));
+			await closeFakeSupervisor(server, sockets);
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
