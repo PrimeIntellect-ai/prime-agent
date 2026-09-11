@@ -1,7 +1,13 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { isAgentSessionMessage, isAgentSessionMessagePrompt } from "../../core/agent-messages.js";
-import { ASYNC_BASH_COMPLETION_CUSTOM_TYPE, type AsyncBashCompletionDetails, type CustomMessage, HARNESS_DIGEST_CUSTOM_TYPE, isSessionSlashCommandMessage } from "../../core/messages.js";
+import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	type AsyncBashCompletionDetails,
+	type CustomMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
+	isSessionSlashCommandMessage,
+} from "../../core/messages.js";
 import {
 	type ActionStore,
 	type DeliveryPolicy,
@@ -196,7 +202,6 @@ export class SessionActionQueue {
 		const completion = message.details as AsyncBashCompletionDetails | undefined;
 		return completion?.pid === details.pid && completion.command === details.command;
 	}
-
 
 	restoreSessionCommand(
 		text: string,
