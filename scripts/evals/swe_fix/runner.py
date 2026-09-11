@@ -27,15 +27,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scorer  # noqa: E402
 
 
-def run_command(command: str, cwd: Path) -> dict:
-    completed = subprocess.run(
-        command,
-        shell=True,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+def run_command(command: str, cwd: Path, timeout: int = 300) -> dict:
+    try:
+        completed = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A hanging command must still score as a failure, not abort the eval.
+        return {
+            "exit_code": 124,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+        }
     return {
         "exit_code": completed.returncode,
         "stdout": completed.stdout,
@@ -43,22 +51,40 @@ def run_command(command: str, cwd: Path) -> dict:
     }
 
 
-def fixture_outcome(fixture: dict, workdir: Path, agent_log: str) -> dict:
-    test_result = run_command(fixture["test_command"], workdir)
-    diff_names = subprocess.run(
-        ["git", "diff", "--name-only"],
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    changed_files = [name for name in diff_names.splitlines() if name]
+def repo_changed_files(repo_dir: Path, initial_sha: str) -> list[str]:
+    """Files the agent changed: committed, staged, unstaged, or new."""
+    names: list[str] = []
+    commands = (
+        ["git", "diff", "--name-only", initial_sha],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    )
+    for command in commands:
+        output = subprocess.run(command, cwd=repo_dir, capture_output=True, text=True, check=True).stdout
+        names.extend(line for line in output.splitlines() if line)
+    return sorted(set(names))
+
+
+def restore_test_files(fixture: dict, fixture_dir: Path, repo_dir: Path) -> None:
+    """Reset fixture tests to pristine so edited tests cannot mask a failed fix."""
+    for rel_path in fixture.get("test_files", []):
+        source = fixture_dir / rel_path
+        if source.is_file():
+            shutil.copy2(source, repo_dir / rel_path)
+
+
+def fixture_outcome(
+    fixture: dict, fixture_dir: Path, workdir: Path, initial_sha: str, agent_log: str
+) -> dict:
+    # Record the diff before restoring tests so edited tests stay visible.
+    changed_files = repo_changed_files(workdir, initial_sha)
+    restore_test_files(fixture, fixture_dir, workdir)
+    suite_result = run_command(fixture["test_command"], workdir)
+    target_result = run_command(fixture["target_test_command"], workdir)
     session_text = read_session_text(agent_log)
-    tests_passing = test_result["exit_code"] == 0
     return {
         "changed_files": changed_files,
-        "target_test_passes": tests_passing,
-        "pre_existing_tests_pass": tests_passing,
+        "target_test_passes": target_result["exit_code"] == 0,
+        "pre_existing_tests_pass": suite_result["exit_code"] == 0,
         "test_run_evidence": scorer.test_run_evidence(session_text, fixture["test_command"]),
         "usage": scorer.summarize_usage(session_text),
     }
@@ -90,6 +116,15 @@ def first_agent_error(agent_log: str) -> str | None:
             error = message.get("errorMessage")
             if isinstance(error, str) and error:
                 return error
+    return None
+
+
+def first_stderr_error(stderr: str) -> str | None:
+    """The first stderr line, where launch and auth failures surface."""
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
     return None
 
 
@@ -135,51 +170,73 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copytree(
         fixture_dir, repo_dir, ignore=shutil.ignore_patterns("fixture.json", "task.txt", "golden.patch")
     )
+    git_env = {
+        "GIT_AUTHOR_NAME": "eval",
+        "GIT_AUTHOR_EMAIL": "eval@eval",
+        "GIT_COMMITTER_NAME": "eval",
+        "GIT_COMMITTER_EMAIL": "eval@eval",
+    }
     for command in (
         ["git", "init", "-q"],
         ["git", "add", "-A"],
         ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
     ):
-        git_env = {
-            "GIT_AUTHOR_NAME": "eval",
-            "GIT_AUTHOR_EMAIL": "eval@eval",
-            "GIT_COMMITTER_NAME": "eval",
-            "GIT_COMMITTER_EMAIL": "eval@eval",
-        }
-        subprocess.run(command, cwd=repo_dir, check=True, env={**git_env})
-
-    prompt = f"{task}\n\nWork in this repository, fix the bug, and make the full test suite pass."
-    completed = subprocess.run(
-        [
-            args.agent_bin,
-            "--mode",
-            "json",
-            "--daemon-socket",
-            str(workdir / "daemon.sock"),
-            "--cwd",
-            str(repo_dir),
-            "--session-dir",
-            str(sessions_dir),
-            "--model",
-            args.model,
-            "--",
-            prompt,
-        ],
-        env=agent_env(workdir / "agent-home"),
+        # Extend the ambient environment rather than replacing it: the git
+        # identity vars describe the commit author, not a new environment.
+        subprocess.run(command, cwd=repo_dir, check=True, env={**os.environ, **git_env})
+    initial_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
         capture_output=True,
         text=True,
-        timeout=args.timeout,
-    )
-    agent_log = completed.stdout
+        check=True,
+    ).stdout.strip()
+
+    prompt = f"{task}\n\nWork in this repository, fix the bug, and make the full test suite pass."
+    try:
+        completed = subprocess.run(
+            [
+                args.agent_bin,
+                "--mode",
+                "json",
+                "--daemon-socket",
+                str(workdir / "daemon.sock"),
+                "--cwd",
+                str(repo_dir),
+                "--session-dir",
+                str(sessions_dir),
+                "--model",
+                args.model,
+                "--",
+                prompt,
+            ],
+            env=agent_env(workdir / "agent-home"),
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+        )
+        agent_log = completed.stdout
+        stderr_text = completed.stderr
+        exit_code = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        # A timed-out run still scores; keep whatever transcript exists.
+        agent_log = exc.stdout or ""
+        stderr_text = exc.stderr or ""
+        exit_code = None
+    except OSError as exc:
+        # A missing or non-executable agent binary still produces a result.
+        agent_log = ""
+        stderr_text = str(exc)
+        exit_code = None
     (workdir / "agent.log").write_text(agent_log)
     # stderr is where launch and auth failures land; keep it with the result.
-    (workdir / "agent.stderr").write_text(completed.stderr)
+    (workdir / "agent.stderr").write_text(stderr_text)
 
-    outcome = fixture_outcome(fixture, repo_dir, agent_log)
+    outcome = fixture_outcome(fixture, fixture_dir, repo_dir, initial_sha, agent_log)
     result = scorer.score_fixture(fixture, outcome)
-    result["exit_code"] = completed.returncode
+    result["exit_code"] = exit_code
     result["workdir"] = str(workdir)
-    result["agent_error"] = first_agent_error(agent_log)
+    result["agent_error"] = first_agent_error(agent_log) or first_stderr_error(stderr_text)
     print(json.dumps(result, indent=2))
     return 0 if result["resolved"] else 1
 

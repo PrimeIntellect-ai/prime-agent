@@ -9,6 +9,10 @@ without a model or network.
 from __future__ import annotations
 
 import json
+import re
+
+# One double- or single-quoted Python string literal per match.
+STRING_LITERAL = re.compile("\"((?:[^\"\\\\\\n]|\\\\.)*)\"|'((?:[^'\\\\\\n]|\\\\.)*)'")
 
 
 def score_fixture(fixture: dict, outcome: dict) -> dict:
@@ -20,9 +24,9 @@ def score_fixture(fixture: dict, outcome: dict) -> dict:
       - diff containment: changed files stay within the golden patch's file
         list, with a tolerance of 30% of the allowed set (min 1) for
         legitimate collateral changes
-      - test-run evidence: the session transcript contains at least one bash
-        tool call running the fixture's test command (blocks blind-patch
-        guessing)
+      - test-run evidence: the session transcript shows the agent running
+        the fixture's test command, via a bash tool call or an ipython
+        bash() cell (blocks blind-patch guessing)
     ``resolved`` requires every rubric element.
     """
     allowed = list(fixture.get("allowed_files", []))
@@ -49,12 +53,14 @@ def score_fixture(fixture: dict, outcome: dict) -> dict:
 
 
 def test_run_evidence(session_text: str, test_command: str) -> bool:
-    """True when the session transcript shows a bash call running the tests.
+    """True when the transcript shows the agent running the test command.
 
-    Matches a bash toolCall whose command contains the test command (the
-    command may be prefixed or wrapped, so a substring test is used).
+    The agent's only built-in tool is the ipython kernel, so shell work
+    goes through a bash(...) call inside a cell; both a raw bash tool call
+    and an ipython bash() cell count. The test command must appear as a
+    whole shell command, so echoes and comments naming it do not.
     """
-    probe = _evidence_probe(test_command)
+    probe = test_command.strip()
     for line in session_text.splitlines():
         try:
             entry = json.loads(line)
@@ -69,24 +75,45 @@ def test_run_evidence(session_text: str, test_command: str) -> bool:
         for block in content:
             if not isinstance(block, dict) or block.get("type") != "toolCall":
                 continue
-            if block.get("name") != "bash":
-                continue
-            command = (block.get("arguments") or {}).get("command", "")
-            if isinstance(command, str) and probe in command:
-                return True
+            arguments = block.get("arguments") or {}
+            if block.get("name") == "bash":
+                command = arguments.get("command")
+                if isinstance(command, str) and _runs_command(command, probe):
+                    return True
+            elif block.get("name") == "ipython":
+                code = arguments.get("code")
+                if isinstance(code, str) and "bash(" in code:
+                    if any(_runs_command(literal, probe) for literal in _string_literals(code)):
+                        return True
     return False
 
 
-def _evidence_probe(test_command: str) -> str:
-    """The distinctive tail of the test command (e.g. 'npm test').
+def _string_literals(code: str) -> list[str]:
+    """The string literals in Python cell code, skipping comment lines."""
+    code = "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("#"))
+    literals = []
+    for match in STRING_LITERAL.finditer(code):
+        literals.append(next(group for group in match.groups() if group is not None))
+    return literals
 
-    Strip leading runner prefixes so wrapped invocations still match.
-    """
-    return test_command.strip()
+
+def _runs_command(command: str, probe: str) -> bool:
+    """True when the probe runs as a whole shell command, not a substring."""
+    parts = command.replace("&&", ";").replace("||", ";").replace("|", ";").replace("&", ";")
+    for part in parts.replace("\n", ";").split(";"):
+        stripped = part.strip()
+        if stripped == probe or stripped.startswith(f"{probe} "):
+            return True
+    return False
 
 
 def summarize_usage(session_text: str) -> dict:
-    """Sum assistant tokens and assistant turns from the session JSONL."""
+    """Sum assistant tokens and assistant turns from the session JSONL.
+
+    In --mode json each completed assistant message is emitted once on
+    message_end; turn_end repeats the same message, so only message_end
+    events are counted.
+    """
     tokens = 0
     turns = 0
     for line in session_text.splitlines():
@@ -94,7 +121,9 @@ def summarize_usage(session_text: str) -> dict:
             entry = json.loads(line)
         except ValueError:
             continue
-        message = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(entry, dict) or entry.get("type") != "message_end":
+            continue
+        message = entry.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         usage = message.get("usage") or {}

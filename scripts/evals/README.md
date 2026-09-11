@@ -16,12 +16,16 @@ Measures the inner software-engineering loop on seeded-bug fixtures:
    prompt names the failing behavior, never the location.
 2. **Runner** (`swe_fix/runner.py`) copies a fixture to a temp dir, runs
    the agent headless (`--mode json`, `--cwd` at the fixture, task prompt
-   from the fixture), then records the post-state.
+   from the fixture), then records the post-state. Fixture tests are
+   restored to pristine before the post-run suites, so an agent that
+   edits tests cannot mask a failed fix.
 3. **Scorer** (`swe_fix/scorer.py`) applies the rubric: target test
    passes; pre-existing tests still pass (no regressions); diff stays
    within the golden patch's file list (30% collateral tolerance); the
-   transcript shows a bash call running the test command (blocks
-   blind-patch guessing); plus token/turn efficiency from the transcript.
+   transcript shows the agent running the test command (a bash tool call
+   or an ipython bash() cell, as a whole shell command, not a substring
+   or comment); plus token/turn efficiency from the transcript, counted
+   once per assistant message.
 
 A fixture counts as resolved only when every rubric element passes.
 
@@ -39,10 +43,10 @@ uv run --locked python runner.py --fixture fixtures/py-budget --model anthropic/
 The runner prints the scored outcome as JSON and exits 0 only when the
 fixture is resolved. `--timeout` (default 1200s) bounds the agent run.
 
-### CI
+### Self-tests
 
-CI runs the harness self-tests only (fixture integrity, golden patches,
-scorer rubric) - never a model call:
+Validate the harness with the model-free self-tests (fixture integrity,
+golden patches, scorer rubric) - never a model call:
 
 ```
 uv run --locked ruff check .
@@ -55,4 +59,5 @@ uv run --locked python -m unittest discover -s tests -v
 Copy an existing fixture directory, keep the shape: sources + tests
 (3 passing, 1 seeded failing), `task.txt` (symptom only), `golden.patch`
 (diff from the buggy tree, generated with `git diff`), and
-`fixture.json` (test command, target test name, allowed files).
+`fixture.json` (test command, target test command, test files,
+allowed files).

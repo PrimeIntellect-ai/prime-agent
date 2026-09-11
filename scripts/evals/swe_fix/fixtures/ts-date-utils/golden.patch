@@ -1,12 +1,12 @@
 diff --git a/src/dates.js b/src/dates.js
-index 9d5f4fa..61b8b87 100644
+index e4b528a..61b8b87 100644
 --- a/src/dates.js
 +++ b/src/dates.js
 @@ -7,7 +7,7 @@ export function daysInMonth(year, month) {
  		throw new RangeError("month must be between 1 and 12");
  	}
  	if (month === 2) {
--		const leap = year % 4 === 0 && (year % 100 === 0 || year % 400 === 0);
+-		const leap = year % 4 === 0;
 +		const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
  		return leap ? 29 : 28;
  	}
