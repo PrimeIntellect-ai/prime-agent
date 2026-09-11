@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { execEnvForSession, filterClientEnv, withClientEnv } from "../src/modes/daemon/daemon-client-env.js";
+import { collectDaemonClientEnv } from "../src/modes/daemon/daemon-protocol.js";
 
 describe("filterClientEnv", () => {
 	it("keeps only allowlisted keys", () => {
@@ -96,6 +98,7 @@ describe("withClientEnv", () => {
 				HERDR_SOCKET_PATH: undefined,
 				HERDR_TAB_ID: undefined,
 				HERDR_WORKSPACE_ID: undefined,
+				PI_SLACK_CONSENT_MODE: undefined,
 			});
 		});
 	});
@@ -113,5 +116,59 @@ describe("withClientEnv", () => {
 		await Promise.all([envless, windowed]);
 		expect(order).toEqual(["envless:undefined", "windowed:b"]);
 		expect(process.env.HERDR_PANE_ID).toBeUndefined();
+	});
+});
+
+describe("session consent environment", () => {
+	afterEach(() => vi.unstubAllEnvs());
+
+	it.each(["local-auto-approve", "slack", "", undefined])(
+		"transports explicit mode %s without a default",
+		async (mode) => {
+			const source = mode === undefined ? {} : { PI_SLACK_CONSENT_MODE: mode };
+			const env = filterClientEnv(collectDaemonClientEnv(source));
+			vi.stubEnv("PI_SLACK_CONSENT_MODE", "daemon-ambient");
+			await withClientEnv(env, async () => {
+				expect(process.env.PI_SLACK_CONSENT_MODE).toBe(mode);
+				const output = execFileSync(
+					process.execPath,
+					["-e", "console.log(JSON.stringify(process.env.PI_SLACK_CONSENT_MODE ?? null))"],
+					{
+						env: { ...process.env, ...execEnvForSession(env) },
+						encoding: "utf8",
+					},
+				);
+				expect(JSON.parse(output)).toBe(mode ?? null);
+			});
+			expect(process.env.PI_SLACK_CONSENT_MODE).toBe("daemon-ambient");
+			expect(execEnvForSession().PI_SLACK_CONSENT_MODE).toBeUndefined();
+		},
+	);
+
+	it("isolates concurrent explicit and absent sessions and restores failures", async () => {
+		vi.stubEnv("PI_SLACK_CONSENT_MODE", "daemon-ambient");
+		const modes = ["local-auto-approve", undefined, "slack"];
+		await Promise.all(
+			modes.map((mode) =>
+				withClientEnv(mode === undefined ? undefined : { PI_SLACK_CONSENT_MODE: mode }, async () => {
+					await new Promise((resolve) => setTimeout(resolve, 5));
+					expect(process.env.PI_SLACK_CONSENT_MODE).toBe(mode);
+				}),
+			),
+		);
+		await expect(
+			withClientEnv({ PI_SLACK_CONSENT_MODE: "local-auto-approve" }, async () => {
+				throw new Error("fail");
+			}),
+		).rejects.toThrow("fail");
+		expect(process.env.PI_SLACK_CONSENT_MODE).toBe("daemon-ambient");
+	});
+
+	it("rejects unrelated, malformed and inherited socket environment fields", () => {
+		expect(
+			filterClientEnv(JSON.parse('{"PI_SLACK_CONSENT_MODE":true,"NODE_OPTIONS":"--inspect","PATH":"/evil"}')),
+		).toBeUndefined();
+		const inherited = Object.create({ PI_SLACK_CONSENT_MODE: "local-auto-approve" });
+		expect(filterClientEnv(inherited)).toBeUndefined();
 	});
 });

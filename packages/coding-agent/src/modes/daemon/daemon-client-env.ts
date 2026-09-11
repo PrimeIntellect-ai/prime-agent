@@ -7,7 +7,7 @@ export function filterClientEnv(env?: Record<string, string>): Record<string, st
 	}
 	const filtered: Record<string, string> = {};
 	for (const key of DAEMON_CLIENT_ENV_KEYS) {
-		if (env[key] !== undefined) {
+		if (Object.hasOwn(env, key) && typeof env[key] === "string") {
 			filtered[key] = env[key];
 		}
 	}
@@ -18,7 +18,7 @@ export function filterClientEnv(env?: Record<string, string>): Record<string, st
 // can mutate process.env.
 const baseClientEnv: Record<string, string | undefined> = {};
 for (const key of DAEMON_CLIENT_ENV_KEYS) {
-	baseClientEnv[key] = process.env[key];
+	baseClientEnv[key] = key === "PI_SLACK_CONSENT_MODE" ? undefined : process.env[key];
 }
 
 /**
@@ -49,6 +49,15 @@ const activeShared = new Set<Promise<unknown>>();
  * this window the session's exec env covers subprocess reads.
  */
 export async function withClientEnv<T>(env: Record<string, string> | undefined, fn: () => Promise<T>): Promise<T> {
+	// Consent is session-owned, never inherited from the daemon. Use an exclusive
+	// window when ambient consent must be cleared; ordinary env-less loads stay shared.
+	if (!env && process.env.PI_SLACK_CONSENT_MODE !== undefined) {
+		env = {};
+		for (const key of DAEMON_CLIENT_ENV_KEYS) {
+			const value = baseClientEnv[key];
+			if (value !== undefined) env[key] = value;
+		}
+	}
 	if (!env) {
 		const gate = lastExclusive;
 		const run = (async () => {

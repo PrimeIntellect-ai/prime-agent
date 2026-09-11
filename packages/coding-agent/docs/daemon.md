@@ -164,3 +164,35 @@ PRIME_AGENT_STRESS_WORKERS=50 npx tsx ../../node_modules/vitest/dist/cli.js --ru
 ```
 
 The benchmark compares fanout and attach paths, including serialization count, throughput, elapsed time, and sampled RSS. The stress case starts many resident roots and verifies that their schedules advance independently while sessions are busy.
+
+
+## Session consent environment
+
+The local daemon client forwards the explicitly configured `PI_SLACK_CONSENT_MODE`
+through the existing allowlisted `create.env` payload. Prime transports this string;
+it does not interpret it or enable an approval mode by default. Unknown environment
+keys and non-string values are not accepted by this allowlist.
+
+The session captures its client environment. Active nested workers and hydrated
+children inherit their parent's captured environment. Extension loading and reloads
+run under that session environment; `pi.exec` receives an explicit per-session
+overlay. An absent consent value is never filled from the daemon's launch environment.
+
+Extension callbacks do not have exclusive ownership of `process.env`. Extensions
+that use this setting must capture it **inside their per-session factory**, then use
+the captured value in later tool or command callbacks. Reading it dynamically in a
+callback can see daemon ambient state or another extension-load window. Prime does
+not serialize long-running callbacks or consent waits to fake process isolation.
+
+Existing client-environment adoption rules are unchanged: an existing session with
+a captured environment does not refresh it on reconnect. To revoke an old mode,
+stop the old session and its children, then create a session with the desired mode.
+Creating a new session alone does not revoke the old session. Installing this change
+does not refresh already running code or existing session captures.
+
+The local daemon socket is an owner-level command interface, not an untrusted-client
+security sandbox. An authorized socket client can explicitly supply the consent
+string, just as it can create sessions and run commands. Filtering rejects malformed
+or unrelated environment fields; it does not authenticate an owner decision. Do not
+expose the socket to untrusted users. Extension approval policy remains the authority
+for interpreting a supplied mode.

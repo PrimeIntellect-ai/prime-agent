@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Fixed daemon sessions and nested workers losing an explicitly configured Slack consent mode, without inheriting consent from the daemon environment.
+
 ## [0.9.4] - 2026-09-08
 
 - A Python kernel that dies after a successful startup is restarted on the next use instead of every call being handed the dead kernel forever, and skill-MCP tools advertise their real input schemas again under mcp>=2 (the SDK renamed the field to input_schema).

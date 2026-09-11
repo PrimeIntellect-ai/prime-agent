@@ -1082,67 +1082,79 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("plumbs semantic-edge ancestry into daemon-hosted child session options", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-lineage-ancestry-"));
-		try {
-			const sessionDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			const parentSessionFile = parentManager.getSessionFile();
-			if (!parentSessionFile) throw new Error("Missing parent session file");
-			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
-				session: makeRuntimeSession(options.sessionManager),
-				extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
-					ReturnType<CreateAgentSessionRuntimeFactory>
-				>["extensionsResult"],
-				services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
-					ReturnType<CreateAgentSessionRuntimeFactory>
-				>["services"],
-				diagnostics: [],
-			}));
-			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
-				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
-				createRuntime,
-			});
-			const internals = daemon as unknown as {
-				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-				createRlmSubagentRuntime(
-					parentState: ActiveSessionState,
-					options: CreateRlmSubagentRuntimeOptions,
-				): Promise<ActiveSessionState["runtime"]>;
-			};
-			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentSessionFile });
-			const spawnedByRequestId = "b".repeat(32);
-			await internals.createRlmSubagentRuntime(parentState, {
-				parentSession: parentState.runtime.session,
-				id: "lineage-child",
-				prompt: "carry ancestry",
-				sessionName: "lineage-worker",
-				sessionDir: join(parentManager.getSessionArtifactDir()!, "lineage-child"),
-				model: { provider: "test", id: "model" } as Model<Api>,
-				thinkingLevel: "off",
-				serviceTier: null,
-				scopedModels: [],
-				activeToolNames: [],
-				customTools: [],
-				includeGoals: false,
-				includeCompactSkill: false,
-				rlmDepth: 1,
-				rlmMaxDepth: 4,
-				rlmParentNodeId: "lineage-child",
-				spawnedByRequestId,
-			});
+	it.each(["local-auto-approve", "slack", undefined])(
+		"plumbs ancestry and consent %s into daemon-hosted child session options",
+		async (mode) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-lineage-ancestry-"));
+			try {
+				const sessionDir = join(tempDir, "sessions");
+				const parentManager = SessionManager.create(tempDir, sessionDir);
+				parentManager.newSession();
+				parentManager.appendSessionInfo("parent");
+				const parentSessionFile = parentManager.getSessionFile();
+				if (!parentSessionFile) throw new Error("Missing parent session file");
+				const seen: Array<string | undefined> = [];
+				const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+					seen.push(process.env.PI_SLACK_CONSENT_MODE);
+					return {
+						session: makeRuntimeSession(options.sessionManager),
+						extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+							ReturnType<CreateAgentSessionRuntimeFactory>
+						>["extensionsResult"],
+						services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+							ReturnType<CreateAgentSessionRuntimeFactory>
+						>["services"],
+						diagnostics: [],
+					};
+				});
+				const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+					defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+					createRuntime,
+				});
+				const internals = daemon as unknown as {
+					createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+					createRlmSubagentRuntime(
+						parentState: ActiveSessionState,
+						options: CreateRlmSubagentRuntimeOptions,
+					): Promise<ActiveSessionState["runtime"]>;
+				};
+				const parentState = await internals.createRuntime({
+					type: "create",
+					sessionPath: parentSessionFile,
+					env: mode === undefined ? undefined : { PI_SLACK_CONSENT_MODE: mode },
+				});
+				const spawnedByRequestId = "b".repeat(32);
+				await internals.createRlmSubagentRuntime(parentState, {
+					parentSession: parentState.runtime.session,
+					id: "lineage-child",
+					prompt: "carry ancestry",
+					sessionName: "lineage-worker",
+					sessionDir: join(parentManager.getSessionArtifactDir()!, "lineage-child"),
+					model: { provider: "test", id: "model" } as Model<Api>,
+					thinkingLevel: "off",
+					serviceTier: null,
+					scopedModels: [],
+					activeToolNames: [],
+					customTools: [],
+					includeGoals: false,
+					includeCompactSkill: false,
+					rlmDepth: 1,
+					rlmMaxDepth: 4,
+					rlmParentNodeId: "lineage-child",
+					spawnedByRequestId,
+				});
 
-			const childCreate = createRuntime.mock.calls.at(-1)?.[0];
-			expect(childCreate?.sessionOptions).toMatchObject({
-				semanticParentSessionId: parentState.runtime.session.sessionId,
-				semanticSpawnedByRequestId: spawnedByRequestId,
-			});
-		} finally {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
+				expect(seen).toEqual([mode, mode]);
+				const childCreate = createRuntime.mock.calls.at(-1)?.[0];
+				expect(childCreate?.sessionOptions).toMatchObject({
+					semanticParentSessionId: parentState.runtime.session.sessionId,
+					semanticSpawnedByRequestId: spawnedByRequestId,
+				});
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 	it("discovers a non-resident child left running in the persisted registry", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-orphan-running-child-"));
 		try {
@@ -5907,6 +5919,42 @@ describe("daemon mode helpers", () => {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it.each(["local-auto-approve", "slack", undefined])(
+		"inherits session consent %s when hydrating a nested worker",
+		async (mode) => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-consent-"));
+			const original = process.env.PI_SLACK_CONSENT_MODE;
+			process.env.PI_SLACK_CONSENT_MODE = "daemon-ambient";
+			try {
+				const fixture = makePersistedRlmDaemonFixture(tempDir);
+				const seen: Array<string | undefined> = [];
+				const factory = fixture.createRuntime.getMockImplementation();
+				if (!factory) throw new Error("Missing fixture runtime factory");
+				fixture.createRuntime.mockImplementation(async (options) => {
+					seen.push(process.env.PI_SLACK_CONSENT_MODE);
+					return factory(options);
+				});
+				const internals = fixture.daemon as unknown as {
+					createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				};
+				const parent = await internals.createRuntime({
+					type: "create",
+					sessionPath: fixture.parentSessionFile,
+					env: mode === undefined ? undefined : { PI_SLACK_CONSENT_MODE: mode },
+				});
+				const child = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+				expect(parent.clientEnv?.PI_SLACK_CONSENT_MODE).toBe(mode);
+				expect(child.clientEnv?.PI_SLACK_CONSENT_MODE).toBe(mode);
+				expect(seen).toEqual([mode, mode]);
+				expect(process.env.PI_SLACK_CONSENT_MODE).toBe("daemon-ambient");
+			} finally {
+				if (original === undefined) delete process.env.PI_SLACK_CONSENT_MODE;
+				else process.env.PI_SLACK_CONSENT_MODE = original;
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("loads a passive child under the create command client env", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-create-env-"));

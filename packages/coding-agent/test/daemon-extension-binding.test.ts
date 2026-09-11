@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import {
@@ -13,9 +14,10 @@ import {
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import { SessionManager } from "../src/core/session-manager.js";
-import type { ExtensionAPI, ExtensionFactory } from "../src/index.js";
+import type { ExtensionAPI, ExtensionFactory, ToolDefinition } from "../src/index.js";
 import { createAgentConnectionState } from "../src/modes/agent-connection/snapshot.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
+import { withClientEnv } from "../src/modes/daemon/daemon-client-env.js";
 import { bindActiveSessionState } from "../src/modes/daemon/daemon-extension-binding.js";
 import type { DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
 import { conversationMessages } from "./suite/harness.js";
@@ -112,6 +114,65 @@ describe("daemon extension binding", () => {
 
 		return runtime;
 	}
+
+	it.each(["local-auto-approve", "slack", undefined])(
+		"preserves load-captured consent %s through extension commands and subprocesses",
+		async (mode) => {
+			const original = process.env.PI_SLACK_CONSENT_MODE;
+			process.env.PI_SLACK_CONSENT_MODE = "daemon-ambient";
+			try {
+				const seen: Array<string | undefined> = [];
+				const env = mode === undefined ? undefined : { PI_SLACK_CONSENT_MODE: mode };
+				const runtime = await withClientEnv(env, () =>
+					createRuntimeForTest((pi) => {
+						const capturedMode = process.env.PI_SLACK_CONSENT_MODE;
+						const tool = {
+							name: "consent_probe",
+							label: "Consent probe",
+							description: "test consent scope",
+							parameters: Type.Object({}),
+							execute: async () => {
+								seen.push(capturedMode);
+								// Callbacks do not own process.env: session-specific values must be captured at load.
+								expect(process.env.PI_SLACK_CONSENT_MODE).toBe("daemon-ambient");
+								const result = await pi.exec(process.execPath, [
+									"-e",
+									"console.log(JSON.stringify(process.env.PI_SLACK_CONSENT_MODE ?? null))",
+								]);
+								expect(result.code).toBe(0);
+								expect(JSON.parse(result.stdout)).toBe(mode ?? null);
+								return { content: [{ type: "text", text: "checked" }], details: {} };
+							},
+						} satisfies ToolDefinition;
+						pi.registerTool(tool);
+						pi.registerCommand("consent-probe", {
+							description: "run the registered tool without a model",
+							handler: async () => {
+								await tool.execute();
+							},
+						});
+					}, []),
+				);
+				const state: ActiveSessionState = {
+					activeSessionId: "consent-test",
+					runtime,
+					clients: new Set(),
+					pendingAttaches: 0,
+					extensionUiRequests: new Map(),
+					eventGeneration: "consent-generation",
+					lastEventSequence: 0,
+					clientEnv: mode === undefined ? undefined : { PI_SLACK_CONSENT_MODE: mode },
+				};
+				await bindActiveSessionState(state, { broadcast: () => {}, shutdown: () => {} });
+				await runtime.session.prompt("/consent-probe");
+				expect(seen).toEqual([mode]);
+				expect(process.env.PI_SLACK_CONSENT_MODE).toBe("daemon-ambient");
+			} finally {
+				if (original === undefined) delete process.env.PI_SLACK_CONSENT_MODE;
+				else process.env.PI_SLACK_CONSENT_MODE = original;
+			}
+		},
+	);
 
 	it("strips the duplicated partial message from broadcast message_update events", async () => {
 		const runtime = await createRuntimeForTest(() => {}, ["streamed reply"]);
