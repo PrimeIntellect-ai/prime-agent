@@ -144,8 +144,8 @@ Each trial stops all benchmark-user processes first, then measures:
 - **Switch into large session:** in a running TUI, `/resume <id>` keystroke to rendered tail plus
   echoed marker. Measures the in-place session switch with a ~40 MB transcript.
 - **Open agents view from a session:** the left-arrow keystroke to the rendered agents-view splash.
-- **Full agents roster, many sessions:** from the same keystroke until the roster's saved-session
-  count stops growing. Saved sessions stream in, so this isolates catalog scanning, spawn-ledger
+- **Full agents roster, many sessions:** after the agents-view splash is rendered, until the
+  roster's saved-session count stops growing. Saved sessions stream in, so this isolates catalog scanning, spawn-ledger
   replay, and hydration across 200 session files.
 - **Open another session from agents view:** typing the target's unique session-id prefix,
   right-arrow to open, until the target transcript renders and echoes. This is the full

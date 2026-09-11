@@ -458,6 +458,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
     runuser = "/usr/sbin/runuser"
     try:
         # Cold resume of a large session from the CLI, from process spawn to usable editor.
+        cpu_start = cpu_total()
         terminal = Terminal(
             [runuser, "-u", user, "--", "prime-agent", "--resume", spec.resume_id],
             workspace,
@@ -467,7 +468,6 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
         try:
             metric = "resume_large"
             bytes_start = terminal.bytes
-            cpu_start = cpu_total()
             input_ready(terminal, tail_marker("large", 2))
             elapsed = time.perf_counter() - terminal.started
             cpu = cpu_total() - cpu_start
