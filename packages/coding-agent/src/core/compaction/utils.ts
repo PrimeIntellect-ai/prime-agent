@@ -19,9 +19,14 @@ export function createFileOps(): FileOperations {
 }
 
 /**
- * Extract file operations from tool calls in an assistant message.
+ * Extract file operations from tool calls in an assistant message and from
+ * structured tool results.
  */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role === "toolResult") {
+		extractFileOpsFromToolResult(message, fileOps);
+		return;
+	}
 	if (message.role !== "assistant") return;
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
@@ -41,6 +46,30 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 				fileOps.edited.add(path);
 				break;
 		}
+	}
+}
+
+/**
+ * Extract file operations from a tool result message.
+ *
+ * The default toolset routes file edits through the ipython kernel: the
+ * kernel's edit skill reports structured diff displays (path, oldStr, newStr)
+ * that ride on the tool result's details, and no assistant-side tool call
+ * ever carries the path. Without this branch, compaction summaries never
+ * learn about kernel-performed edits and <modified-files> stays empty in the
+ * default configuration.
+ */
+function extractFileOpsFromToolResult(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role !== "toolResult" || message.toolName !== "ipython") return;
+	const details =
+		typeof message.details === "object" && message.details !== null && !Array.isArray(message.details)
+			? (message.details as Record<string, unknown>)
+			: {};
+	const diffs = Array.isArray(details.diffs) ? details.diffs : [];
+	for (const diff of diffs) {
+		if (typeof diff !== "object" || diff === null || Array.isArray(diff)) continue;
+		const path = (diff as Record<string, unknown>).path;
+		if (typeof path === "string" && path) fileOps.edited.add(path);
 	}
 }
 

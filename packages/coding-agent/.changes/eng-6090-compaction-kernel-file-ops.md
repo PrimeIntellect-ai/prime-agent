@@ -1,0 +1,1 @@
+- Fixed compaction summaries never recording kernel-performed file edits: ipython tool results now contribute their structured edit diffs to the tracked file operations, so `<modified-files>` reflects the default toolset's edits.
