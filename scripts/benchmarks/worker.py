@@ -467,7 +467,7 @@ def runtime(side: Side, trial: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("prepare", "install", "measure", "runtime"))
+    parser.add_argument("phase", choices=("prepare", "install", "measure", "runtime", "ui"))
     parser.add_argument("--trial", type=int, default=0)
     args = parser.parse_args()
     RESULTS.mkdir(exist_ok=True)
@@ -488,6 +488,17 @@ def main() -> None:
             install(request, result.side, args.trial)
         elif args.phase == "measure":
             measure(request, result.side, args.trial)
+        elif args.phase == "ui":
+            from ui import ui_measure
+
+            ui_measure(
+                request,
+                result.side,
+                args.trial,
+                results=RESULTS,
+                homes=HOMES,
+                user="benchmark1",
+            )
         else:
             runtime(result.side, args.trial)
     except Exception as error:

@@ -7,7 +7,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
 
-from schema import Metric, Observation, Report
+from schema import UI_METRIC_KEYS, Metric, Observation, Report
 
 MARKER = "<!-- prime-agent-benchmark:v1 -->"
 PERFORMANCE_NOISE_FLOOR = 0.2
@@ -107,6 +107,43 @@ RUNTIME_METRICS = (
         PERFORMANCE_NOISE_FLOOR,
     ),
 )
+UI_METRICS = (
+    Definition("resume_large", "Resume large session (cold)", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR),
+    Definition("resume_large_cpu", "CPU, resume large session", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition("switch_large", "Switch into large session", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "switch_large_cpu", "CPU, switch into large session", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition("agents_view", "Open agents view from a session", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_view_cpu", "CPU, open agents view", 1000, "ms", 0.01, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_roster", "Full agents roster, many sessions", 1, "s", 0.1, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_roster_cpu", "CPU, full agents roster", 1, "s", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "agents_open", "Open another session from agents view", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition("agents_open_cpu", "CPU, open from agents view", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "subagent_open",
+        "Open subagent session at depth 6",
+        1000,
+        "ms",
+        0.1,
+        PERFORMANCE_NOISE_FLOOR,
+    ),
+    Definition(
+        "subagent_open_cpu", "CPU, open subagent at depth 6", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition(
+        "parent_open",
+        "Open chain parent from agents view",
+        1000,
+        "ms",
+        0.1,
+        PERFORMANCE_NOISE_FLOOR,
+    ),
+    Definition("parent_open_cpu", "CPU, open chain parent", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition("ui_rss", "UI memory after interactions", 1e-6, "MB", 10485760, PERFORMANCE_NOISE_FLOOR),
+)
 
 
 def escape(text: str) -> str:
@@ -190,10 +227,12 @@ def comparison(
 
 def comparisons(report: Report) -> dict[Metric, Comparison]:
     results = {}
-    for definition in (*METRICS, *RUNTIME_METRICS):
+    for definition in (*METRICS, *RUNTIME_METRICS, *UI_METRICS):
         expected = report.config.install_trials if definition.key == "install" else report.config.trials
         if definition.key in ("bundle", "disk"):
             expected = 1
+        if definition.key in UI_METRIC_KEYS:
+            expected = report.config.ui_trials
         results[definition.key] = comparison(
             definition,
             report.main.metrics.get(definition.key, []),
@@ -240,12 +279,22 @@ def render(report: Report) -> str:
             "| --- | ---: | ---: | ---: |",
         ]
     )
-    for definition in (*METRICS, *RUNTIME_METRICS):
+    for definition in (*METRICS, *RUNTIME_METRICS, *UI_METRICS):
         if definition == RUNTIME_METRICS[0]:
             lines.extend(
                 [
                     "",
                     "**Python runtime**",
+                    "",
+                    "| Metric | Main | This PR | Change |",
+                    "| --- | ---: | ---: | ---: |",
+                ]
+            )
+        if definition == UI_METRICS[0]:
+            lines.extend(
+                [
+                    "",
+                    "**UI interactions**",
                     "",
                     "| Metric | Main | This PR | Change |",
                     "| --- | ---: | ---: | ---: |",
@@ -287,6 +336,15 @@ def render(report: Report) -> str:
             "State fixture: a 10,000-row × 8-column integer DataFrame and a 10,000-integer list.",
             "Restore runs in a fresh kernel, including pandas imports; kernel startup is excluded.",
             "Kernel RSS covers the isolated Python process; loaded RSS follows the pandas workload.",
+            "UI trials use a fresh fixture set: 280 top-level sessions including one ~40 MB transcript,",
+            "40 ledger fan-out children, and a 6-deep subagent chain (~46 spawn edges).",
+            "Large fixtures hold 2,000 message triples (~5 MB JSONL); medium 120; subagents 400 each.",
+            "Interactions: cold --resume of a large session, warm /resume switch, left-arrow to agents view,",
+            "roster settle with many saved sessions, search-and-open of another large session, and opening",
+            "the chain parent, then a clear-expand-step drill into the live chain to depth 6.",
+            "Readiness is the rendered transcript tail plus a confirmed editor echo.",
+            "CPU metrics sum utime+stime across the whole benchmark-user process tree per interaction.",
+            "UI memory sums RSS after the interactions; PTY byte counts are in the raw results.",
             "Costs estimate full sandbox lifetimes at configured rates, including setup and build.",
             f"Budget target: ${report.config.budget_usd:g}; not a billing cap. Checks are informational.",
             "",
@@ -294,7 +352,7 @@ def render(report: Report) -> str:
             "| --- | ---: | ---: | ---: | ---: |",
         ]
     )
-    for definition in (*METRICS, *RUNTIME_METRICS):
+    for definition in (*METRICS, *RUNTIME_METRICS, *UI_METRICS):
         left = report.main.metrics.get(definition.key, [])
         right = report.pr_head.metrics.get(definition.key, [])
         lines.append(
