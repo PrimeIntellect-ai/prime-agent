@@ -193,7 +193,7 @@ describe("InteractiveMode startup hints", () => {
 	it.each([
 		[false, false, "Collapsed mode (Ctrl+O to expand)"],
 		[false, true, "Details mode (Ctrl+O to expand)"],
-		[true, true, "All output mode (Ctrl+O to collapse)"],
+		[true, true, "Expanded mode (Ctrl+O to collapse)"],
 	] as const)("shows a muted detail status above the prompt (%s, %s)", (allOutput, details, expected) => {
 		const mode = Object.assign(createMode(), { toolOutputExpanded: allOutput, editDiffsExpanded: details });
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);

@@ -77,10 +77,10 @@ describe("PromptContextLine", () => {
 	it("fits detail status beside recap while preserving the recap and narrow widths", () => {
 		const line = new PromptContextLine(
 			() => "Updated the interface",
-			() => theme.fg("dim", "All output mode (Ctrl+O to collapse)"),
+			() => theme.fg("dim", "Expanded mode (Ctrl+O to collapse)"),
 		);
 		expect(stripAnsi(line.render(100)[1]!)).toMatch(
-			/^ Recap: Updated the interface\s{2,}All output mode \(Ctrl\+O to collapse\) $/,
+			/^ Recap: Updated the interface\s{2,}Expanded mode \(Ctrl\+O to collapse\) $/,
 		);
 		for (const width of [1, 2, 3, 8, 24, 40, 80]) {
 			const rows = line.render(width);
@@ -91,7 +91,7 @@ describe("PromptContextLine", () => {
 	});
 
 	it("reserves the full detail status before ellipsizing the recap", () => {
-		const metadata = "All output mode (Ctrl+O to collapse)";
+		const metadata = "Expanded mode (Ctrl+O to collapse)";
 		const line = new PromptContextLine(
 			() => "Updated the interface and verified all of the layout changes",
 			(maxWidth) => {
@@ -102,7 +102,7 @@ describe("PromptContextLine", () => {
 
 		const rows = line.render(56);
 		expect(rows[0]).toBe("");
-		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: .+… {2}All output mode \(Ctrl\+O to collapse\) $/);
+		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: .+… {2}Expanded mode \(Ctrl\+O to collapse\) $/);
 		expect(visibleWidth(rows[1]!)).toBe(56);
 	});
 
