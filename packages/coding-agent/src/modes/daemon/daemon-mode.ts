@@ -25,8 +25,8 @@ import {
 	AGENT_FAMILY_REACH_ERROR,
 	AGENT_MESSAGE_SOURCE,
 	type AgentFamilyCatalogEntry,
+	type AgentFamilyMember,
 	type AgentFamilyRelationship,
-	type AgentFamilyRosterResult,
 	type AgentSessionMessageAgentSummary,
 	type AgentSessionMessageController,
 	type AgentSessionMessageDeliveryStatus,
@@ -40,7 +40,6 @@ import {
 	assertAgentFamilyReach,
 	assertAgentSessionNameAvailable,
 	assertDirectAgentMessageTarget,
-	buildAgentFamilyRoster,
 	createAgentSessionMessage,
 	createAgentSessionMessageId,
 	createAgentSessionMessageReceipt,
@@ -50,9 +49,11 @@ import {
 	DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
 	formatAgentSessionNameUnavailable,
 	normalizeAgentSessionMessage,
+	selectAgentFamily,
 	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
 import {
+	AGENT_OBSERVE_PREVIEW_MAX_CHARS,
 	type AgentObserveAgentSnapshot,
 	type AgentObserveAgentSummary,
 	type AgentObserveController,
@@ -3327,7 +3328,7 @@ export class AgentDaemon {
 		};
 		return {
 			listAgents: () => this.createAgentMessageListResult(requireCurrentState()),
-			roster: () => this.createAgentFamilyRoster(requireCurrentState()),
+			family: () => this.createAgentFamily(requireCurrentState()),
 			assertSessionNameAvailable: (input) => this.assertFamilySessionNameAvailable(input),
 			setSessionName: (name) => this.setStateSessionNameViaSupervisor(requireCurrentState(), name),
 			sendAgentMessage: (input) =>
@@ -3356,49 +3357,54 @@ export class AgentDaemon {
 	}
 
 	private async createAgentObserveListResult(currentState: ActiveSessionState): Promise<AgentObserveListResult> {
-		const agents = this.listTargetableSessionStates(currentState)
-			.filter(
-				(state) =>
-					state.activeSessionId === currentState.activeSessionId ||
-					this.isAgentFamilyReachable(currentState, state),
-			)
-			.map((state) => this.createAgentObserveSummary(state, currentState));
-		const residentIds = new Set(agents.map((agent) => agent.activeSessionId));
-		for (const passive of await this.listPassiveRlmSubagents()) {
-			if (residentIds.has(passive.info.id)) continue;
-			try {
-				assertAgentFamilyReach(this.agentFamilyEntry(currentState), this.passiveAgentFamilyEntry(passive));
-			} catch (error) {
-				if (error instanceof Error && error.message === AGENT_FAMILY_REACH_ERROR) continue;
-				throw error;
-			}
-			agents.push({
-				activeSessionId: passive.info.id,
-				sessionId: passive.info.id,
-				sessionName: passive.info.name ?? passive.entry.sessionName,
-				runtimeKind: "subagent",
-				cwd: passive.info.cwd,
-				status: "idle",
-				isCurrent: false,
-				isStreaming: false,
-				isCompacting: false,
-				attachedClients: 0,
-				messageCount: passive.info.messageCount,
-				queuedCount: 0,
-				isSessionActive: false,
-				...(passive.chain.length === 1 && passive.rootParentState
-					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
-					: {}),
-				parentSessionId: passive.entry.parentSessionId,
-				rlmChildId: passive.entry.childId,
-				...(passive.entry.rlmParentNodeId ? { rlmParentNodeId: passive.entry.rlmParentNodeId } : {}),
-				...(passive.info.firstMessage ? { firstMessage: passive.info.firstMessage } : {}),
-			});
-			residentIds.add(passive.info.id);
-		}
+		const family = await this.createAgentFamily(currentState);
+		const residentBySessionId = new Map(
+			this.listTargetableSessionStates(currentState).map((state) => [state.runtime.session.sessionId, state]),
+		);
+		const agents = family.map((member) => {
+			const state = residentBySessionId.get(member.entry.id);
+			return state
+				? {
+						...this.createAgentObserveSummary(state, currentState),
+						relationship: member.relationship,
+						...(member.entry.repliedSinceTask !== undefined
+							? { repliedSinceTask: member.entry.repliedSinceTask }
+							: {}),
+					}
+				: this.createPersistedAgentObserveSummary(member);
+		});
 		return {
 			current: this.createAgentObserveSummary(currentState, currentState),
 			agents,
+		};
+	}
+
+	/**
+	 * Family member with no live session in this daemon: only catalog facts are known,
+	 * so the runtime flags stay false. A peer working in another worker keeps its
+	 * `activeSessionId` and its live status; everything else is absent or inactive.
+	 */
+	private createPersistedAgentObserveSummary(member: AgentFamilyMember): AgentObserveAgentSummary {
+		const entry = member.entry;
+		return {
+			...(entry.activeSessionId ? { activeSessionId: entry.activeSessionId } : {}),
+			sessionId: entry.id,
+			...(entry.name ? { sessionName: entry.name } : {}),
+			relationship: member.relationship,
+			runtimeKind: entry.depth > 0 ? "subagent" : "top-level",
+			...(entry.cwd ? { cwd: entry.cwd } : {}),
+			status: entry.status,
+			isCurrent: false,
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			...(entry.messageCount !== undefined ? { messageCount: entry.messageCount } : {}),
+			queuedCount: 0,
+			isSessionActive: entry.status === "running",
+			...(entry.repliedSinceTask !== undefined ? { repliedSinceTask: entry.repliedSinceTask } : {}),
+			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
+			...(entry.rlmChildId ? { rlmChildId: entry.rlmChildId } : {}),
+			...(entry.firstMessage ? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) } : {}),
 		};
 	}
 
@@ -3474,7 +3480,11 @@ export class AgentDaemon {
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 			...(latest
 				? {
-						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, 240),
+						latestMessage: createAgentObserveMessagePreview(
+							latest,
+							messages.length - 1,
+							AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+						),
 					}
 				: {}),
 		};
@@ -5796,10 +5806,14 @@ export class AgentDaemon {
 					depth: info.rlmDepth ?? 0,
 					status: "inactive",
 					sessionPath: canonicalSessionPath(info.path),
+					cwd: info.cwd,
+					messageCount: info.messageCount,
 				}),
 			);
 		const byId = new Map<string, AgentFamilyCatalogEntry>(savedRoots.map((entry) => [entry.id, entry]));
-		const addAgent = (agent: AgentSessionMessageAgentSummary) => {
+		// `remote` peers live in another worker: their active id stays routable, while a
+		// local summary's stand-in id for a passive child does not.
+		const addAgent = (agent: AgentSessionMessageAgentSummary, remote = false) => {
 			const depth = agent.rlmDepth ?? 0;
 			byId.set(agent.sessionId, {
 				id: agent.sessionId,
@@ -5818,9 +5832,12 @@ export class AgentDaemon {
 					? { parentSessionPath: canonicalSessionPath(agent.parentSessionPath) }
 					: {}),
 				...(agent.sessionPath ? { sessionPath: canonicalSessionPath(agent.sessionPath) } : {}),
+				...(agent.rlmChildId ? { rlmChildId: agent.rlmChildId } : {}),
+				...(remote ? { activeSessionId: agent.activeSessionId } : {}),
+				cwd: agent.cwd,
 			});
 		};
-		for (const peer of remotePeers) addAgent(peer);
+		for (const peer of remotePeers) addAgent(peer, true);
 		for (const agent of localAgents) addAgent(agent);
 		for (const state of this.sessions.values()) {
 			const entry = byId.get(state.runtime.session.sessionId);
@@ -5829,16 +5846,19 @@ export class AgentDaemon {
 		}
 		for (const passive of await this.listPassiveRlmSubagents()) {
 			const entry = byId.get(passive.info.id);
-			if (entry) entry.sessionPath = canonicalSessionPath(passive.entry.sessionFile);
+			if (!entry) continue;
+			entry.sessionPath = canonicalSessionPath(passive.entry.sessionFile);
+			entry.messageCount = passive.info.messageCount;
+			entry.firstMessage = passive.info.firstMessage;
 		}
 		return [...byId.values()];
 	}
 
-	private async createAgentFamilyRoster(currentState: ActiveSessionState): Promise<AgentFamilyRosterResult> {
+	private async createAgentFamily(currentState: ActiveSessionState): Promise<AgentFamilyMember[]> {
 		const catalog = await this.createAgentFamilyCatalog(currentState);
 		const current = catalog.find((entry) => entry.id === currentState.runtime.session.sessionId);
 		if (!current) throw new Error("Current agent is missing from the family catalog");
-		return buildAgentFamilyRoster(current, catalog);
+		return selectAgentFamily(current, catalog);
 	}
 
 	private async assertFamilySessionNameAvailable(

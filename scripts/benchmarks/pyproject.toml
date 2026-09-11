@@ -1,0 +1,25 @@
+[project]
+name = "prime-agent-benchmarks"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx==0.28.1",
+  "pexpect==4.9.0",
+  "prime-sandboxes==0.2.40",
+  "pydantic==2.13.5",
+  "pyte==0.8.2",
+]
+
+[dependency-groups]
+dev = ["ruff==0.16.5"]
+
+[tool.uv]
+package = false
+exclude-newer = "2026-09-02T00:00:00Z"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

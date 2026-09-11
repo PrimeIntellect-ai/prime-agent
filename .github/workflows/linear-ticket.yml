@@ -20,7 +20,7 @@ jobs:
           script: |
             const pr = context.payload.pull_request;
             const text = `${pr.title}\n${pr.body ?? ""}\n${pr.head.ref}`;
-            const ticket = /\b(?:eng|res)-\d+\b|linear\.app\/[\w-]+\/issue\/(?:eng|res)-\d+\b/i;
+            const ticket = /\b(?:eng|res)-\d+\b/i;
             const optOut = /^\s*No-Ticket:\s*\S.*$/im;
             if (ticket.test(text)) {
               core.info("Linear ticket reference found.");

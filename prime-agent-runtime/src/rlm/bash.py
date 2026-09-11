@@ -158,6 +158,18 @@ def _creating_cell_waits_for(
     return _completion_reaches(awaiter, targets)
 
 
+def _live_cell_owner() -> asyncio.Task[Any] | None:
+    """Body task of the cell executing right now, ignoring detached context copies."""
+    try:
+        from . import repl
+
+        if repl.is_active():
+            return repl.active_cell_task()
+    except (ImportError, RuntimeError):
+        pass
+    return None
+
+
 @dataclass(frozen=True)
 class BashResult:
     exit_code: int
@@ -242,6 +254,8 @@ class BashHandle:
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
+        self._result_consumed = False
+        self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
         self._kill_lock = threading.Lock()
@@ -364,14 +378,17 @@ class BashHandle:
 
     def output(self) -> str:
         self._released = True
+        self._note_result_consumed()
         return self._buffer.text()
 
     def tail(self, n: int = 50) -> str:
         self._released = True
+        self._note_result_consumed()
         return "\n".join(self._buffer.text().splitlines()[-n:])
 
     def poll(self) -> BashResult | None:
         self._released = True
+        self._note_result_consumed()
         return self._result if self._done.is_set() else None
 
     def kill(self, sig: int = signal.SIGTERM, grace: float = 5.0) -> None:
@@ -633,6 +650,26 @@ class BashHandle:
                 return
         callback()
 
+    def _note_result_consumed(self, awaiter: asyncio.Task[Any] | None = None) -> None:
+        """Record a result read that reaches the model: only reads during a live
+        cell count (a detached reader between turns must keep the notice — it is
+        the idle session's only wake-up), and an awaiting reader must be one the
+        live cell waits for."""
+        if not self._done.is_set():
+            return
+        owner = _live_cell_owner()
+        if owner is None:
+            return
+        if awaiter is not None and not _creating_cell_waits_for(owner, awaiter):
+            return
+        with self._callback_lock:
+            if self._result_consumed:
+                return
+            self._result_consumed = True
+            notice, self._consumed_notice = self._consumed_notice, None
+        if notice is not None:
+            notice()
+
     def _schedule_background_completion_notice(self) -> None:
         cell_finished = self._creating_cell_finished
         if cell_finished is None:
@@ -667,7 +704,7 @@ class BashHandle:
             # The cell may do other work before awaiting this handle. Do not classify
             # it as detached until that whole cell has crossed its completion barrier.
             await cell_finished.wait()
-            if self._awaited_by_creating_cell or not repl.is_active():
+            if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
                 return
             command = self.command
             if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
@@ -680,7 +717,10 @@ class BashHandle:
                     "exitCode": result.exit_code,
                 }
             )
-            if not isinstance(reply, dict) or reply.get("status") != "ok":
+            if isinstance(reply, dict) and reply.get("status") == "ok":
+                # Notice accepted by the host; later reads must ask it to withdraw.
+                self._arm_consumed_notice(command)
+            else:
                 sys.stderr.write(
                     f"Background bash completion follow-up for pid {self._pid} was not accepted. "
                     "Inspect the saved handle with poll(), output(), or tail().\n"
@@ -692,6 +732,38 @@ class BashHandle:
         finally:
             # Reap and deliver (or report rejection) before releasing kernel residency.
             repl.emit({"application/vnd.prime-agent.bash-activity+json": {**activity, "active": False}})
+
+    def _arm_consumed_notice(self, command: str) -> None:
+        # Armed only post-acceptance: the withdrawal can never overtake its notice.
+        loop = asyncio.get_running_loop()
+
+        def dispatch() -> None:
+            def start() -> None:
+                task = loop.create_task(self._notify_result_consumed(command))
+                task.add_done_callback(_consume_notice_task)
+
+            try:
+                loop.call_soon_threadsafe(start)
+            except RuntimeError:
+                pass  # notifying loop already closed
+
+        with self._callback_lock:
+            if not self._result_consumed:
+                self._consumed_notice = dispatch
+                return
+        dispatch()
+
+    async def _notify_result_consumed(self, command: str) -> None:
+        from . import repl
+
+        if not repl.is_active():
+            return
+        try:
+            await repl.host_request(
+                {"type": "bash.consumed", "pid": self._pid, "command": command}
+            )
+        except (OSError, RuntimeError):
+            return  # bridge closed at teardown; old hosts error-reply — both fine
 
     async def _wait_reaped(self) -> None:
         loop = asyncio.get_running_loop()
@@ -857,6 +929,8 @@ class BashHandle:
                 or _creating_cell_waits_for(self._creating_cell_task, current_task)
             ):
                 self._awaited_by_creating_cell = True
+            if completed:
+                self._note_result_consumed(current_task)
 
     def __repr__(self) -> str:
         state = f"exit_code={self._result.exit_code}" if self._result else "running"
