@@ -88,8 +88,8 @@ interface TracebackParts {
 
 const MAGIC_LINE_PATTERN = /^\s*!/;
 
-// Two columns, matching the code body's "› "/"  " gutter so output aligns under it.
-const OUTPUT_INDENT = "  ";
+// Match the agent-message tree gutter; input and output text share the same column.
+const OUTPUT_INDENT = "   ";
 
 const SGR_PATTERN = /\x1b\[([0-9;]*)m/g;
 
@@ -509,12 +509,10 @@ export class IPythonCellComponent implements Component {
 	private renderCode(lines: string[], width: number): boolean {
 		const code = this.state.code.trimEnd();
 		if (!code) {
-			this.addBlank(lines, width);
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for code"), width);
+			this.addWrapped(lines, theme.fg("dim", "╰─ "), theme.fg("muted", "waiting for code"), width);
 			return false;
 		}
 
-		this.addBlank(lines, width);
 		const isBashCell = parseIpythonBashCell(code) !== undefined;
 		const rawLines = code.split("\n");
 		// Reopen inherited ANSI styles on each source line before gutters reset them.
@@ -524,7 +522,7 @@ export class IPythonCellComponent implements Component {
 			: wrapTextWithAnsi(highlightCode(code, "python").join("\n"), sourceWidth);
 		const statementLines = isBashCell ? rawLines : pythonStatementLines(code);
 		for (const [index, rawLine] of rawLines.entries()) {
-			const prefix = index === 0 ? theme.fg("dim", "› ") : theme.fg("dim", "  ");
+			const prefix = index === 0 ? theme.fg("dim", "╰─ ") : OUTPUT_INDENT;
 			const highlighted =
 				isBashCell ||
 				MAGIC_LINE_PATTERN.test(statementLines[index] ?? "") ||
@@ -553,6 +551,12 @@ export class IPythonCellComponent implements Component {
 				: undefined;
 		let outputStarted = false;
 		let renderedTextOutput = false;
+		let outputMarkerPending = true;
+		const outputPrefix = (): string => {
+			if (!outputMarkerPending) return OUTPUT_INDENT;
+			outputMarkerPending = false;
+			return theme.fg("dim", " › ");
+		};
 
 		const diffs = details.diffs ?? [];
 		const sentMessages = details.sentAgentMessages ?? [];
@@ -571,12 +575,12 @@ export class IPythonCellComponent implements Component {
 			if (details.stdout?.trim() && !isEditConfirmation(details.stdout, diffs)) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, normalizeErrorDetails(details.stdout), "out");
+				this.renderOutputText(lines, width, normalizeErrorDetails(details.stdout), "out", outputPrefix);
 			}
 			if (details.stderr?.trim()) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, normalizeErrorDetails(details.stderr), "err");
+				this.renderOutputText(lines, width, normalizeErrorDetails(details.stderr), "err", outputPrefix);
 			}
 			if (
 				details.result?.trim() &&
@@ -585,18 +589,24 @@ export class IPythonCellComponent implements Component {
 			) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, normalizeErrorDetails(details.result), "out");
+				this.renderOutputText(lines, width, normalizeErrorDetails(details.result), "out", outputPrefix);
 			}
 		} else if (traceback) {
 			if (traceback.output) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, traceback.output, "out");
+				this.renderOutputText(lines, width, traceback.output, "out", outputPrefix);
 			}
 		} else if (text.trim() && !isAgentMessageReceipt(text, sentMessages)) {
 			startOutput();
 			renderedTextOutput = true;
-			this.renderOutputText(lines, width, normalizeErrorDetails(text), this.state.isError ? "err" : "out");
+			this.renderOutputText(
+				lines,
+				width,
+				normalizeErrorDetails(text),
+				this.state.isError ? "err" : "out",
+				outputPrefix,
+			);
 		}
 
 		// Without structured fields the fallback content text above already contains the appended background block.
@@ -609,10 +619,10 @@ export class IPythonCellComponent implements Component {
 
 		if (!renderedTextOutput && this.state.isPartial) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for output..."), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "waiting for output..."), width);
 		} else if (!renderedTextOutput && this.state.executionStarted && !this.state.argsComplete) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for output..."), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "waiting for output..."), width);
 		} else if (
 			!renderedTextOutput &&
 			!traceback &&
@@ -623,7 +633,7 @@ export class IPythonCellComponent implements Component {
 			imageCount === 0
 		) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "no output"), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "no output"), width);
 		}
 
 		if (details.error) {
@@ -632,16 +642,17 @@ export class IPythonCellComponent implements Component {
 				lines,
 				width,
 				details.error.traceback.join("\n") || formatIpythonErrorSummary(details.error),
+				outputPrefix,
 			);
 		} else if (traceback) {
 			startOutput();
-			this.renderTraceback(lines, width, traceback.traceback);
+			this.renderTraceback(lines, width, traceback.traceback, outputPrefix);
 		}
 
 		if (backgroundOutput) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "background output (unattributed)"), width);
-			this.renderOutputText(lines, width, normalizeErrorDetails(backgroundOutput), "err");
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "background output (unattributed)"), width);
+			this.renderOutputText(lines, width, normalizeErrorDetails(backgroundOutput), "err", outputPrefix);
 		}
 
 		if (imageCount > 0) {
@@ -649,7 +660,7 @@ export class IPythonCellComponent implements Component {
 			const text = this.state.showImages
 				? `${imageCount} image${imageCount === 1 ? "" : "s"} rendered below`
 				: `${imageCount} image${imageCount === 1 ? "" : "s"} hidden`;
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", text), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", text), width);
 		}
 	}
 
@@ -720,16 +731,22 @@ export class IPythonCellComponent implements Component {
 		}
 	}
 
-	private renderOutputText(lines: string[], width: number, text: string, label: "out" | "err"): void {
+	private renderOutputText(
+		lines: string[],
+		width: number,
+		text: string,
+		label: "out" | "err",
+		outputPrefix: () => string,
+	): void {
 		const color = label === "err" ? "muted" : "toolOutput";
 		for (const line of text.split("\n")) {
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg(color, line || " "), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg(color, line || " "), width);
 		}
 	}
 
-	private renderTraceback(lines: string[], width: number, traceback: string): void {
+	private renderTraceback(lines: string[], width: number, traceback: string, outputPrefix: () => string): void {
 		for (const line of traceback.split("\n")) {
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", line || " "), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", line || " "), width);
 		}
 	}
 

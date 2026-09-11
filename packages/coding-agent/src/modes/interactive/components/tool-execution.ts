@@ -20,6 +20,7 @@ import {
 import { ToolPanel } from "./tool-panel.js";
 
 export interface ToolExecutionOptions {
+	shouldAddLeadingSpace?: () => boolean;
 	showImages?: boolean;
 	/** Whether image metadata may parse dimensions from base64 data. */
 	includeImageDimensions?: boolean;
@@ -89,6 +90,7 @@ export class ToolExecutionComponent extends Container {
 	private showExpandHint = true;
 	private showImages: boolean;
 	private includeImageDimensions: boolean;
+	private readonly shouldAddLeadingSpace?: () => boolean;
 	private isPartial = true;
 	private toolDefinition?: ToolExecutionDefinition;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
@@ -123,6 +125,7 @@ export class ToolExecutionComponent extends Container {
 		this.builtInToolDefinition = createReplayBuiltInToolDefinition(toolName, cwd, toolDefinition);
 		this.showImages = options.showImages ?? true;
 		this.includeImageDimensions = options.includeImageDimensions ?? true;
+		this.shouldAddLeadingSpace = options.shouldAddLeadingSpace;
 		this.ui = ui;
 		this.cwd = cwd;
 
@@ -358,7 +361,10 @@ export class ToolExecutionComponent extends Container {
 		if (this.isStatusAnimating() && !this.usesSelfRenderShell()) {
 			this.contentPanel.setHeader(this.panelHeader());
 		}
-		return super.render(width);
+		const lines = super.render(width);
+		return this.expanded && this.shouldUseIpythonRenderer() && this.shouldAddLeadingSpace?.()
+			? ["", ...lines]
+			: lines;
 	}
 
 	private isStatusAnimating(): boolean {
