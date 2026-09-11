@@ -238,6 +238,7 @@ import {
 	type CreateRlmSubagentRuntimeOptions,
 	createAsyncBashCompletionHostHandler,
 	createDefaultRlmSubagentSessionName,
+	createRlmCollectHostHandler,
 	createRlmCreateSessionHostHandler,
 	createRlmDeleteSubagentHostHandler,
 	createRlmFindModelsHostHandler,
@@ -247,6 +248,8 @@ import {
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	type RlmCollectResult,
+	type RlmCollectResultEntry,
 	type RlmCreateSessionResult,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
@@ -9711,6 +9714,9 @@ export class AgentSession {
 			}),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
+			"rlm.collect": createRlmCollectHostHandler((targets, timeoutMs) =>
+				this.collectRlmChildren(targets, timeoutMs),
+			),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
 			"model.info": async () => ({
 				id: this.model?.id ?? null,
@@ -10202,6 +10208,92 @@ export class AgentSession {
 			});
 		}
 		return { subagents };
+	}
+
+	/**
+	 * Typed fan-in for direct RLM children: wait (bounded) for the selected
+	 * runs to settle and return result envelopes. Never steers the parent and
+	 * never rejects on timeout — a timeout returns the current snapshots so
+	 * the caller can end its turn, poll, or retry. `targets` are child ids or
+	 * session names; an empty list means every direct child that is not being
+	 * deleted.
+	 */
+	async collectRlmChildren(targets: string[], timeoutMs: number): Promise<RlmCollectResult> {
+		const runs = new Map<string, RlmChildRun>();
+		if (targets.length === 0) {
+			for (const run of this._activeRlmChildRuns.values()) {
+				if (!run.detachedDeletion && !this._deletingRlmChildren.has(run.id)) {
+					runs.set(run.id, run);
+				}
+			}
+		} else {
+			for (const target of targets) {
+				const matches = [...this._activeRlmChildRuns.values()].filter(
+					(run) =>
+						!run.detachedDeletion &&
+						!this._deletingRlmChildren.has(run.id) &&
+						this._rlmChildRunMatchesTarget(run, target),
+				);
+				if (matches.length === 0) {
+					throw new Error(`No direct RLM child matches "${target}" in the current parent session`);
+				}
+				if (matches.length > 1) {
+					throw new Error(`RLM child selector "${target}" is ambiguous in the current parent session`);
+				}
+				runs.set(matches[0].id, matches[0]);
+			}
+		}
+		if (timeoutMs > 0) {
+			const deadline = Date.now() + timeoutMs;
+			await Promise.all(
+				[...runs.values()].map((run) => {
+					if (run.settled) return undefined;
+					const remainingMs = deadline - Date.now();
+					if (remainingMs <= 0) return undefined;
+					let timer: NodeJS.Timeout | undefined;
+					const timeout = new Promise<void>((resolve) => {
+						timer = setTimeout(resolve, remainingMs);
+						timer.unref?.();
+					});
+					return Promise.race([
+						// A settled failure is terminal state, not a collect error.
+						run.settlement.promise.then(
+							() => undefined,
+							() => undefined,
+						),
+						timeout,
+					]).finally(() => {
+						clearTimeout(timer);
+					});
+				}),
+			);
+		}
+		return { results: [...runs.values()].map((run) => this._rlmCollectEntryForRun(run)) };
+	}
+
+	private _rlmChildRunMatchesTarget(run: RlmChildRun, target: string): boolean {
+		return (
+			run.id === target ||
+			run.sessionName === target ||
+			run.session?.sessionId === target ||
+			run.session?.sessionName === target
+		);
+	}
+
+	private _rlmCollectEntryForRun(run: RlmChildRun): RlmCollectResultEntry {
+		const snapshot = this._rlmChildSnapshotForRun(run);
+		return {
+			rlm_child_id: snapshot.id,
+			session_name: snapshot.sessionName,
+			session_dir: snapshot.sessionDir,
+			status: snapshot.status,
+			settled: run.settled,
+			answer_preview: snapshot.answerPreview,
+			error: snapshot.error,
+			duration_ms: snapshot.durationMs,
+			tool_use_count: snapshot.toolUseCount,
+			replied_since_task: snapshot.repliedSinceTask,
+		};
 	}
 
 	private _rlmSubagentMatchesTarget(entry: RlmSubagentRegistryEntry, target: string): boolean {

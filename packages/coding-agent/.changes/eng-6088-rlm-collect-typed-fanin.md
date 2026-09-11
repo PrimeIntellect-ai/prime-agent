@@ -1,0 +1,1 @@
+- Added `rlm.collect`, a typed non-steering fan-in for subagent results: it awaits direct children's runs with a bounded timeout and returns per-child result envelopes (status, settled, answer preview, error, duration, tool count) without growing the parent's message queue.
