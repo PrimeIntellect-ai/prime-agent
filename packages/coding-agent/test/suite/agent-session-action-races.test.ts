@@ -9,7 +9,6 @@ type ActionKind = "turn" | "command";
 
 interface CommitFenceInternals {
 	_actionStore: ActionStore<SessionAction>;
-	_pendingSessionActionFenceWaiters: number;
 	_refineInFlight?: Promise<void>;
 	_scheduleSessionInputPump(): void;
 	_acquireDirectTurnAdmissionFence(signal?: AbortSignal): Promise<{ release(): void }>;
@@ -132,7 +131,6 @@ describe("AgentSession action commit-fence races", () => {
 		const internals = harness.session as unknown as CommitFenceInternals;
 		const heldFence = await internals._acquireSessionActionCommitFence();
 		const nextFencePromise = internals._acquireSessionActionCommitFence();
-		await vi.waitFor(() => expect(internals._pendingSessionActionFenceWaiters).toBe(1));
 
 		heldFence.release();
 		expect(harness.session.hasPendingAdmissionWaiters).toBe(true);

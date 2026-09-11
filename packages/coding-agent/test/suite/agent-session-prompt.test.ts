@@ -1067,7 +1067,6 @@ stale post-hook extension instructions`,
 		});
 		const sessionInternals = harness.session as unknown as {
 			_refineInFlight?: Promise<void>;
-			_userBashRunning?: boolean;
 		};
 		sessionInternals._refineInFlight = refineGate;
 
@@ -1076,12 +1075,26 @@ stale post-hook extension instructions`,
 			{ expandPromptTemplates: false, queueIfBusy: true },
 		);
 		await vi.waitFor(() => expect(harness.session.getPendingNextTurnMessageSnapshots()).toEqual([]));
-		sessionInternals._userBashRunning = true;
+		const bashGate = createDeferred();
+		const bashRun = harness.session.executeBash("hold handoff", undefined, {
+			transient: true,
+			operations: {
+				exec: async () => {
+					await bashGate.promise;
+					return { exitCode: 0 };
+				},
+			},
+		});
+		expect(harness.session.isBashRunning).toBe(true);
 		sessionInternals._refineInFlight = undefined;
 		releaseRefine?.();
 
-		await expect(accepted).rejects.toThrow("Agent became busy before prompt delivery");
-		sessionInternals._userBashRunning = false;
+		try {
+			await expect(accepted).rejects.toThrow("Agent became busy before prompt delivery");
+		} finally {
+			bashGate.resolve();
+			await bashRun;
+		}
 
 		let sawRestoredContext = false;
 		harness.setResponses([
