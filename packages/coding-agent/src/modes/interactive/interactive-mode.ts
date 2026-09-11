@@ -7603,8 +7603,16 @@ export class InteractiveMode {
 			return;
 		}
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		this.applyModelSwitchUiState(state, model);
+	}
+
+	/** Patch model-derived connection state and refresh the UI that reads it. */
+	private applyModelSwitchUiState(
+		state: Pick<AgentConnectionState, "model" | "serviceTier" | "availableThinkingLevels">,
+		fallbackModel: AgentConnectionModel,
+	): void {
 		this.patchConnectionState({
-			model: state.model ?? model,
+			model: state.model ?? fallbackModel,
 			serviceTier: state.serviceTier,
 			availableThinkingLevels: state.availableThinkingLevels,
 		});
@@ -7961,11 +7969,22 @@ export class InteractiveMode {
 	private handleModelCycle(direction: "forward" | "backward"): void {
 		void this.agentConnection
 			.cycleModel(direction)
-			.then((result) => {
+			.then(async (result) => {
 				if (!result) {
 					this.showStatus("No scoped models available to cycle (see /scoped-models)");
 					return;
 				}
+				const connection = this.agentConnection;
+				const sessionId = this.connectionState?.sessionId;
+				const state = await connection.getState();
+				if (
+					this.agentConnection !== connection ||
+					this.connectionState?.sessionId !== sessionId ||
+					(sessionId !== undefined && state.sessionId !== sessionId)
+				) {
+					return;
+				}
+				this.applyModelSwitchUiState(state, result.model);
 				this.showStatus(`Model: ${result.model.provider}/${result.model.id}`);
 			})
 			.catch((error) => {

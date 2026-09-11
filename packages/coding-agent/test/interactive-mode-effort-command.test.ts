@@ -278,17 +278,18 @@ describe("InteractiveMode /effort", () => {
 					getState: () => Promise<ModelState>;
 				};
 				settingsManager: { setDefaultModelAndProvider: (provider: string, id: string) => void };
+				applyModelSwitchUiState: (state: ModelState, model: unknown) => void;
 				patchConnectionState: (patch: Record<string, unknown>) => void;
 				footer: { invalidate: () => void };
 				subagentSummaryLine: { invalidate: () => void };
 				updateEditorBorderColor: () => void;
 				setupAutocompleteProvider: () => void;
 			};
-			const applySelectedModel = (
-				InteractiveMode.prototype as unknown as {
-					applySelectedModel(this: ModelContext, model: unknown): Promise<void>;
-				}
-			).applySelectedModel;
+			const prototype = InteractiveMode.prototype as unknown as {
+				applySelectedModel(this: ModelContext, model: unknown): Promise<void>;
+				applyModelSwitchUiState(this: ModelContext, state: ModelState, model: unknown): void;
+			};
+			const applySelectedModel = prototype.applySelectedModel;
 			const patchConnectionState = vi.fn();
 			const setupAutocompleteProvider = vi.fn();
 			const model = { provider: "openai-codex", id: "gpt-5.5", reasoning: true };
@@ -306,6 +307,8 @@ describe("InteractiveMode /effort", () => {
 					),
 				},
 				settingsManager: { setDefaultModelAndProvider: vi.fn() },
+				applyModelSwitchUiState: (state, selectedModel) =>
+					prototype.applyModelSwitchUiState.call(context, state, selectedModel),
 				patchConnectionState,
 				footer: { invalidate: vi.fn() },
 				subagentSummaryLine: { invalidate: vi.fn() },
@@ -321,6 +324,81 @@ describe("InteractiveMode /effort", () => {
 			expect(patch.availableThinkingLevels).toContain("high");
 			expect(patch.availableThinkingLevels.length).toBeGreaterThan(1);
 			expect(setupAutocompleteProvider).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe("model cycling refresh", () => {
+		it("refreshes model-dependent state after a successful cycle", async () => {
+			type ModelState = {
+				sessionId: string;
+				model: unknown;
+				serviceTier: ServiceTier;
+				availableThinkingLevels: ThinkingLevel[];
+			};
+			type CycleContext = {
+				connectionState: { sessionId: string };
+				agentConnection: {
+					cycleModel: (direction: "forward" | "backward") => Promise<unknown>;
+					getState: () => Promise<ModelState>;
+				};
+				applyModelSwitchUiState: (state: ModelState, model: unknown) => void;
+				patchConnectionState: (patch: Record<string, unknown>) => void;
+				footer: { invalidate: () => void };
+				subagentSummaryLine: { invalidate: () => void };
+				showStatus: (message: string) => void;
+				showError: (message: string) => void;
+				updateEditorBorderColor: () => void;
+				setupAutocompleteProvider: () => void;
+			};
+			const prototype = InteractiveMode.prototype as unknown as {
+				handleModelCycle(this: CycleContext, direction: "forward" | "backward"): void;
+				applyModelSwitchUiState(this: CycleContext, state: ModelState, model: unknown): void;
+			};
+			const handleModelCycle = prototype.handleModelCycle;
+			const nextModel = { provider: "openai-codex", id: "gpt-5.5-mini", reasoning: true };
+			const patchConnectionState = vi.fn();
+			const setupAutocompleteProvider = vi.fn();
+			const showStatus = vi.fn();
+			const context: CycleContext = {
+				connectionState: { sessionId: "session-1" },
+				agentConnection: {
+					cycleModel: vi.fn(async () => ({
+						model: nextModel,
+						thinkingLevel: "high",
+						serviceTier: "priority",
+						isScoped: true,
+					})),
+					getState: vi.fn(
+						async (): Promise<ModelState> => ({
+							sessionId: "session-1",
+							model: nextModel,
+							serviceTier: "priority",
+							availableThinkingLevels: ["off", "low", "medium", "high"],
+						}),
+					),
+				},
+				applyModelSwitchUiState: (state, cycledModel) =>
+					prototype.applyModelSwitchUiState.call(context, state, cycledModel),
+				patchConnectionState,
+				footer: { invalidate: vi.fn() },
+				subagentSummaryLine: { invalidate: vi.fn() },
+				showStatus,
+				showError: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				setupAutocompleteProvider,
+			};
+
+			handleModelCycle.call(context, "forward");
+			await vi.waitFor(() => expect(showStatus).toHaveBeenCalledWith("Model: openai-codex/gpt-5.5-mini"));
+
+			const patch = patchConnectionState.mock.calls[0][0];
+			expect(patch.model).toBe(nextModel);
+			expect(patch.serviceTier).toBe("priority");
+			expect(patch.availableThinkingLevels).toContain("high");
+			expect(setupAutocompleteProvider).toHaveBeenCalledTimes(1);
+			expect(context.footer.invalidate).toHaveBeenCalled();
+			expect(context.subagentSummaryLine.invalidate).toHaveBeenCalled();
+			expect(context.updateEditorBorderColor).toHaveBeenCalled();
 		});
 	});
 

@@ -204,6 +204,34 @@ describe("ExtensionRunner", () => {
 			warnSpy.mockRestore();
 		});
 
+		it("blocks extension overrides of model cycling keys", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerShortcut("alt+m", {
+						description: "Steals cycle forward",
+						handler: async () => {},
+					});
+					pi.registerShortcut("shift+alt+m", {
+						description: "Steals cycle backward",
+						handler: async () => {},
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "cycle-steal.ts"), extCode);
+
+			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const shortcuts = runner.getShortcuts(defaultKeybindings);
+
+			expect(shortcuts.has("alt+m")).toBe(false);
+			expect(shortcuts.has("shift+alt+m")).toBe(false);
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
+
+			warnSpy.mockRestore();
+		});
+
 		it("blocks shortcuts when reserved action has multiple keys", async () => {
 			const extCode = `
 				export default function(pi) {
