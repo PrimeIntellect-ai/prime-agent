@@ -7,15 +7,18 @@ import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "..
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import type { KernelClient } from "../src/core/kernel/index.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
 describe("createAgentSessionFromServices", () => {
 	const cleanupPaths: string[] = [];
 	const unregisters: Array<() => void> = [];
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
 		while (unregisters.length > 0) {
 			unregisters.pop()?.();
@@ -172,8 +175,8 @@ describe("createAgentSessionFromServices", () => {
 			expect(initialPrompt).not.toContain("Enabled generic MCP servers: `linear`");
 
 			const rebuildRuntime = vi.spyOn(
-				session as unknown as { _rebuildRuntimeForAcpMcpServers(): void },
-				"_rebuildRuntimeForAcpMcpServers",
+				session as unknown as { _buildRuntime(options: { activeToolNames?: string[] }): void },
+				"_buildRuntime",
 			);
 			session.replaceAcpMcpServers(
 				[
@@ -194,11 +197,12 @@ describe("createAgentSessionFromServices", () => {
 			const waitForIdle = vi.spyOn(session.agent, "waitForIdle");
 			await session.releaseAcpMcpServers("unknown-owner", ["task"]);
 			expect(waitForIdle).not.toHaveBeenCalled();
-			const originalProvisioner = Reflect.get(session, "_ipythonKernelProvisioner");
 			const execute = vi.fn(async (_code: string) => ({ status: "ok" }));
-			Reflect.set(session, "_ipythonKernelProvisioner", { manager: { isRunning: true, execute } });
+			const managerGetter = vi
+				.spyOn(IpythonKernelProvisioner.prototype, "manager", "get")
+				.mockReturnValue({ isRunning: true, execute } as unknown as KernelClient);
 			await session.releaseAcpMcpServers("owner-a", ["task"]);
-			Reflect.set(session, "_ipythonKernelProvisioner", originalProvisioner);
+			managerGetter.mockRestore();
 			expect(rebuildRuntime).not.toHaveBeenCalled();
 			expect(execute).toHaveBeenCalledOnce();
 			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");

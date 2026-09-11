@@ -12,6 +12,7 @@ import {
 import { ASYNC_BASH_COMPLETION_CUSTOM_TYPE } from "../../../src/core/messages.js";
 import { canEvictWorker, canPassivateSession } from "../../../src/core/session-action-store.js";
 import { IpythonKernelProvisioner } from "../../../src/core/tools/ipython.js";
+import type { SessionKernel } from "../../../src/session/kernel.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const runtimeDir = resolve(__dirname, "../../../../../prime-agent-runtime");
@@ -19,7 +20,7 @@ const python = resolve(runtimeDir, ".venv/bin/python");
 const describeRuntime = existsSync(python) ? describe : describe.skip;
 
 interface KernelSession {
-	_ipythonKernelProvisioner?: IpythonKernelProvisioner;
+	_kernel: SessionKernel;
 	_createKernelHostHandlers(): HostRequestHandlers;
 }
 
@@ -76,7 +77,7 @@ describeRuntime("#2053 background kernel bash residency", () => {
 		});
 		const provisioner = new IpythonKernelProvisioner(harness.tempDir);
 		vi.spyOn(provisioner, "manager", "get").mockReturnValue(manager);
-		internals._ipythonKernelProvisioner = provisioner;
+		internals._kernel.provisioner = provisioner;
 		return { session, kernel: manager };
 	}
 
