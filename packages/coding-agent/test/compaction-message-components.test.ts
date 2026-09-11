@@ -81,6 +81,7 @@ describe("compact compaction messages", () => {
 		const createMode = (expanded: boolean) =>
 			Object.assign(Object.create(InteractiveMode.prototype), {
 				chatContainer: new Container(),
+				pendingBashComponents: [],
 				toolOutputExpanded: expanded,
 				editDiffsExpanded: false,
 				getMarkdownThemeWithSettings: getMarkdownTheme,
