@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionMessage } from "../src/core/agent-messages.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { cloneUsage, emptyUsage } from "../src/core/usage.js";
-import { type ChildUsageHost, type ChildUsageTracker, SessionChildUsage } from "../src/session/child-usage.js";
+import { type ChildUsageHost, type ChildUsageTracker, SessionChildUsage } from "../src/session/children/child-usage.js";
 
 function usage(input: number, output: number): Usage {
 	return {

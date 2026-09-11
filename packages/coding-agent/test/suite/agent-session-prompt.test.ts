@@ -1059,7 +1059,7 @@ stale post-hook extension instructions`,
 		const agentPrompt =
 			"Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: agentmsg_handoff_busy\n\nqueue at handoff";
 		const sessionInternals = harness.session as unknown as {
-			_sessionInputCheckpointWaiters: Set<() => void>;
+			_inputCheckpoints: { hasWaiters: boolean };
 		};
 		const pause = harness.session.acquireQueuedWorkPause();
 		let acceptedSettled = false;
@@ -1076,7 +1076,7 @@ stale post-hook extension instructions`,
 
 		expect(harness.session.getFollowUpMessages()).toEqual([]);
 		expect(acceptedSettled).toBe(false);
-		expect(sessionInternals._sessionInputCheckpointWaiters.size).toBe(1);
+		expect(sessionInternals._inputCheckpoints.hasWaiters).toBe(true);
 
 		harness.setResponses([fauxAssistantMessage("delivered")]);
 		pause.release();
@@ -1084,7 +1084,7 @@ stale post-hook extension instructions`,
 		await harness.session.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual([agentPrompt]);
-		expect(sessionInternals._sessionInputCheckpointWaiters.size).toBe(0);
+		expect(sessionInternals._inputCheckpoints.hasWaiters).toBe(false);
 	});
 
 	it("restores nextTurn context when handoff busy rejection cannot queue", async () => {
@@ -1453,7 +1453,7 @@ stale post-hook extension instructions`,
 			},
 			fauxAssistantMessage("second done"),
 		]);
-		const internals = harness.session as unknown as { _agentMessageOutcomes: Map<string, unknown> };
+		const internals = harness.session as unknown as { _messageDelivery: { outcomes: Map<string, unknown> } };
 
 		const first = harness.session.prompt("first");
 		await vi.waitFor(() => expect(harness.session.isStreaming).toBe(true));
@@ -1464,7 +1464,7 @@ stale post-hook extension instructions`,
 		releaseFirst?.();
 		await Promise.all([first, queued]);
 
-		const keys = [...internals._agentMessageOutcomes.keys()];
+		const keys = [...internals._messageDelivery.outcomes.keys()];
 		expect(keys.filter((key) => key.startsWith("prompt-wait:"))).toEqual([]);
 	});
 
@@ -1934,7 +1934,7 @@ stale post-hook extension instructions`,
 		harness.setResponses([fauxAssistantMessage("done")]);
 		const prompt = harness.session.prompt("pending extension event");
 		await extensionReached.promise;
-		const eventQueue = (harness.session as unknown as { _agentEventQueue: Promise<void> })._agentEventQueue;
+		const eventQueue = (harness.session as unknown as { _events: { queue: Promise<void> } })._events.queue;
 		let queueDrained = false;
 		void eventQueue.then(() => {
 			queueDrained = true;
@@ -1958,9 +1958,10 @@ stale post-hook extension instructions`,
 	it("propagates a snapshotted event queue rejection without flushing", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		(harness.session as unknown as { _agentEventQueue: Promise<void> })._agentEventQueue = Promise.reject(
-			new Error("event queue failed"),
-		);
+		const internals = harness.session as unknown as { _events: { enqueue(work: () => void): void } };
+		internals._events.enqueue(() => {
+			throw new Error("event queue failed");
+		});
 		const flushNow = vi.spyOn(harness.sessionManager, "flushNow");
 
 		await expect(harness.session.waitForSessionInputCheckpoint()).rejects.toThrow("event queue failed");
@@ -2113,7 +2114,7 @@ stale post-hook extension instructions`,
 		await expect(accepted).rejects.toThrow("cleared before delivery");
 		await expect(delivery).rejects.toThrow("cleared before delivery");
 		await harness.session.agent.waitForIdle();
-		await (harness.session as unknown as { _agentEventQueue: Promise<void> })._agentEventQueue;
+		await (harness.session as unknown as { _events: { queue: Promise<void> } })._events.queue;
 		const persistedAfter = harness.sessionManager.getEntries().filter((entry) => entry.type === "message").length;
 		expect(persistedAfter).toBe(persistedBefore);
 		expect(getUserTexts(harness)).not.toContain(clearedAgentPrompt);

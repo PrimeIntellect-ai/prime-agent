@@ -53,8 +53,8 @@ function render(component: AgentMessageComponent): string {
 
 type LateSentAgentMessageHost = {
 	_recordLateIpythonSentAgentMessage: (toolCallId: string, message: KernelSentAgentMessage) => void;
-	_agentEventQueue: Promise<void>;
-	_lateIpythonSentAgentMessages: Map<string, KernelSentAgentMessage[]>;
+	_events: { queue: Promise<void> };
+	_messageDelivery: { lateMessages: Map<string, KernelSentAgentMessage[]> };
 	_restoreLateIpythonSentAgentMessages: () => void;
 };
 
@@ -201,7 +201,7 @@ describe("ENG-4531 agent message UI", () => {
 		const host = harness.session as unknown as LateSentAgentMessageHost;
 
 		host._recordLateIpythonSentAgentMessage(toolResult.toolCallId, lateMessage);
-		await host._agentEventQueue;
+		await host._events.queue;
 		unsubscribe();
 
 		expect(toolResult.details).toMatchObject({ sentAgentMessages: [lateMessage] });
@@ -225,11 +225,11 @@ describe("ENG-4531 agent message UI", () => {
 		expect(toolResult.details).toMatchObject({ sentAgentMessages: [lateMessage] });
 
 		toolResult.details = { status: "ok" };
-		host._lateIpythonSentAgentMessages = new Map();
+		host._messageDelivery.lateMessages = new Map();
 		host._restoreLateIpythonSentAgentMessages();
 		expect(toolResult.details).toMatchObject({ sentAgentMessages: [lateMessage] });
 
-		host._lateIpythonSentAgentMessages.set("ipython_other_branch", [
+		host._messageDelivery.lateMessages.set("ipython_other_branch", [
 			{
 				id: "agentmsg_other_branch",
 				message: "Stale branch receipt.",
@@ -238,7 +238,7 @@ describe("ENG-4531 agent message UI", () => {
 			},
 		]);
 		host._restoreLateIpythonSentAgentMessages();
-		expect(host._lateIpythonSentAgentMessages.has("ipython_other_branch")).toBe(false);
+		expect(host._messageDelivery.lateMessages.has("ipython_other_branch")).toBe(false);
 	});
 
 	it("preserves the custom message when direct delivery races with active work", async () => {

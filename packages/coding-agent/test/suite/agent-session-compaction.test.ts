@@ -12,8 +12,9 @@ import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
-import type { SessionCompaction } from "../../src/session/compaction.js";
-import type { SessionContinuation } from "../../src/session/continuation.js";
+import type { SessionCompaction } from "../../src/session/compaction/compaction.js";
+import { createPreparedTurnAction } from "../../src/session/prepared-actions.js";
+import type { SessionContinuation } from "../../src/session/turns/continuation.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
@@ -506,7 +507,7 @@ describe("AgentSession compaction characterization", () => {
 		const internals = session as unknown as {
 			_schedulePostCompactionContinue(): void;
 			_cancelPostCompactionContinue(): void;
-			_sessionInputCheckpointWaiters: Set<() => void>;
+			_inputCheckpoints: { hasWaiters: boolean };
 		};
 		// A queued follow-up held back by a pause, then a pump suspension (the
 		// requestAbort teardown state): the queue stays populated but undispatchable.
@@ -522,7 +523,7 @@ describe("AgentSession compaction characterization", () => {
 		// parks in the session idle wait on a checkpoint waiter.
 		internals._schedulePostCompactionContinue();
 		await vi.waitFor(() => {
-			expect(internals._sessionInputCheckpointWaiters.size).toBeGreaterThan(0);
+			expect(internals._inputCheckpoints.hasWaiters).toBe(true);
 		});
 		expect(session.hasPendingAdmissionWaiters).toBe(true);
 
@@ -533,7 +534,7 @@ describe("AgentSession compaction characterization", () => {
 		internals._cancelPostCompactionContinue();
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		try {
-			expect(internals._sessionInputCheckpointWaiters.size).toBe(0);
+			expect(internals._inputCheckpoints.hasWaiters).toBe(false);
 			expect(session.hasPendingAdmissionWaiters).toBe(false);
 		} finally {
 			session.clearQueue();
@@ -1125,12 +1126,6 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as {
 			_schedulePostCompactionContinue(continueAfterSessionInput?: boolean): void;
 			_continuation: SessionContinuation;
-			_createPreparedTurnAction(
-				schedule: "followUp",
-				text: string,
-				images: undefined,
-				options: { message?: AgentMessage; resumeIfIdle: boolean },
-			): unknown;
 			_admitSessionInput(action: unknown, options?: { wake?: boolean }): { accepted: boolean };
 		};
 		const continuation = {
@@ -1141,7 +1136,7 @@ describe("AgentSession compaction characterization", () => {
 		if (tracked) sessionInternals._continuation.track(continuation);
 		harness.setResponses([fauxAssistantMessage(response)]);
 		sessionInternals._admitSessionInput(
-			sessionInternals._createPreparedTurnAction("followUp", text, undefined, {
+			createPreparedTurnAction("followUp", text, undefined, {
 				...(tracked && { message: continuation }),
 				resumeIfIdle: tracked,
 			}),

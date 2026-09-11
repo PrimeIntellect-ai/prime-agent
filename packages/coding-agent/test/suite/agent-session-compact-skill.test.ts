@@ -1,7 +1,7 @@
 import type { ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionCompaction } from "../../src/session/compaction.js";
+import type { SessionCompaction } from "../../src/session/compaction/compaction.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionInternals = {

@@ -19,7 +19,6 @@ import { formatNoModelsAvailableMessage } from "../src/core/auth-guidance.js";
 import { type AuthStatus, AuthStorage } from "../src/core/auth-storage.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
-import { emptyGoalState, type GoalState } from "../src/core/goals.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { createSessionSlashCommandMessage, createSessionSlashCommandResultMessage } from "../src/core/messages.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
@@ -53,6 +52,7 @@ import { formatSplashCwd, InteractiveMode, truncatePathMiddle } from "../src/mod
 import { ClientPromptStashStore, type PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
 import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
+import { emptyGoalState, type GoalState } from "../src/session/goals/contracts.js";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];

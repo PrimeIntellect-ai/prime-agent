@@ -209,9 +209,9 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		harnesses.push(harness);
 		const state = (
 			harness.session as unknown as {
-				_autonomousState: AutonomousRuntimeState;
+				_autonomousContinuation: { state: AutonomousRuntimeState };
 			}
-		)._autonomousState;
+		)._autonomousContinuation.state;
 		state.gateAttempts[gate] = 1;
 		state.lastGateFailure = {
 			command: gate,

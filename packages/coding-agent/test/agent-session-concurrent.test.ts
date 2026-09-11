@@ -21,7 +21,7 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
-import type { SessionRefinement } from "../src/session/refinement.js";
+import type { SessionRefinement } from "../src/session/refinement/refinement.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {

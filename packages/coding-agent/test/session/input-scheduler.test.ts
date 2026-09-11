@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SessionInputScheduler } from "../../src/session/input-scheduler.js";
+import { SessionInputScheduler } from "../../src/session/input/input-scheduler.js";
 
 function deferred() {
 	let resolve = () => {};

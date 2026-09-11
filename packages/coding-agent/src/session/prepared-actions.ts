@@ -18,7 +18,7 @@ import type {
 	WakePolicy,
 } from "../core/session-action-store.js";
 import type { SessionSlashCommand } from "../core/slash-commands.js";
-import { createTurnExecutionPolicy, type TurnExecutionPolicy } from "./turn-preparation.js";
+import { createTurnExecutionPolicy, type TurnExecutionPolicy } from "./turns/turn-preparation.js";
 
 export type QueuedAgentMessage = UserMessage | CustomMessage;
 export type SessionInputSchedule = "steer" | "followUp";

@@ -12,7 +12,7 @@ import {
 	isInjectedPromptMessage,
 } from "../../../src/modes/interactive/components/injected-prompt-message.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
-import type { SessionKernel } from "../../../src/session/kernel.js";
+import type { SessionKernel } from "../../../src/session/kernel/kernel.js";
 import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type StateRestoreHost = {

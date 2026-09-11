@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it, vi } from "vitest";
 import { ActionStore, transitionSessionAction } from "../../src/core/session-action-store.js";
-import { SessionInputDispatcher, type SessionInputDispatcherHost } from "../../src/session/input-dispatcher.js";
+import { SessionInputDispatcher, type SessionInputDispatcherHost } from "../../src/session/input/input-dispatcher.js";
 import {
 	createDeliveryRecord,
 	createPreparedTurnAction,
@@ -9,7 +9,7 @@ import {
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
 } from "../../src/session/prepared-actions.js";
-import { createTurnExecutionPolicy } from "../../src/session/turn-preparation.js";
+import { createTurnExecutionPolicy } from "../../src/session/turns/turn-preparation.js";
 
 function createFixture() {
 	const actions = new ActionStore<QueuedSessionAction>();

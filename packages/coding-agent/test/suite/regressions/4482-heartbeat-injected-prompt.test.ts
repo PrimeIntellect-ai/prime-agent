@@ -4,7 +4,6 @@ import { Container, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type AgentCronJob, shouldDeferHeartbeatCronJob } from "../../../src/core/cron-jobs.js";
-import { createGoalContextMessage, type GoalState } from "../../../src/core/goals.js";
 import {
 	type CustomMessage,
 	createHeartbeatPromptMessage,
@@ -17,7 +16,8 @@ import {
 } from "../../../src/modes/interactive/components/injected-prompt-message.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../../../src/modes/interactive/theme/theme.js";
-import type { SessionCompaction } from "../../../src/session/compaction.js";
+import type { SessionCompaction } from "../../../src/session/compaction/compaction.js";
+import { createGoalContextMessage, type GoalState } from "../../../src/session/goals/contracts.js";
 import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type AddMessageToChatHost = {
