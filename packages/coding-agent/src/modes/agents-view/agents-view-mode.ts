@@ -2496,7 +2496,9 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		if (displayItems.length === 0) {
-			return [theme.fg("dim", this.editor.getText().trim() ? "No sessions match your search." : "No sessions yet.")];
+			const query =
+				this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+			return [theme.fg("dim", query.trim() ? "No sessions match your search." : "No sessions yet.")];
 		}
 		// Reserve the column header and its spacer, leaving at least one session row visible.
 		const headerRows = Math.min(2, maxRows - 1);

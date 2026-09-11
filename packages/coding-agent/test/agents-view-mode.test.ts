@@ -1002,6 +1002,23 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it.each(["replyTarget", "renameTarget"])("uses the preserved search for empty-state copy during %s", (target) => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		try {
+			Reflect.set(view, target, { summary: summary() });
+			Reflect.set(view, "actionModeSearchQuery", "");
+			Reflect.set(view, "editor", { getText: () => "a reply or new name" });
+			expect((invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi)).toEqual(["No sessions yet."]);
+			Reflect.set(view, "actionModeSearchQuery", "missing session");
+			Reflect.set(view, "editor", { getText: () => "" });
+			expect((invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi)).toEqual([
+				"No sessions match your search.",
+			]);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("always renders inactive sessions; search is the only filter", () => {
 		const live = summary({ sessionName: "live" });
 		const saved = summary({

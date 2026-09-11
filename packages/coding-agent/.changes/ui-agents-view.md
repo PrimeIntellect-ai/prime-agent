@@ -4,3 +4,4 @@
 - Replaced chat and agents splash logos with a compact solid butterfly beside centered runtime metadata, with a text heading in narrow terminals.
 - Changed the agents header to show three metadata lines: title and version, agent counts, and the working directory globally or numeric depth in nested views; retained the nested back breadcrumb and chat model line.
 - Removed duplicate prompt suggestions from chat and agents headers.
+- Fixed empty-state search feedback while replying to or renaming an agent.
