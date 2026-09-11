@@ -138,4 +138,82 @@ describe("Windows kernel orphan cleanup", () => {
 		callbacks[0]!(new Error("process already exited"), "", "");
 		await Promise.resolve();
 	});
+
+	it("waits for asynchronous orphan cleanup before graceful teardown resolves", async () => {
+		record("win:77");
+		const manager = new ReplKernelManager({ cwd: directory });
+		const kill = vi.fn(() => true);
+		Object.assign(manager, { state: "running", child: { pid: kernelPid, kill } });
+
+		let settled = false;
+		const shutdown = manager.shutdown().then(() => {
+			settled = true;
+		});
+		expect(callbacks).toHaveLength(1);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		callbacks[0]!(null, "77\n", "");
+		await vi.waitFor(() => expect(callbacks).toHaveLength(2));
+		expect(settled).toBe(false);
+		callbacks[1]!(null, "", "");
+		await shutdown;
+
+		expect(kill).toHaveBeenCalledWith("SIGTERM");
+		expect(readActiveOrphanProcesses(journal, process.pid)).toEqual([]);
+	});
+
+	it("joins orphan cleanup already started by a concurrent kernel kill", async () => {
+		record("win:77");
+		const manager = new ReplKernelManager({ cwd: directory });
+		const kill = vi.fn(() => true);
+		Object.assign(manager, { state: "running", child: { pid: kernelPid, kill } });
+
+		const killing = manager.kill();
+		expect(callbacks).toHaveLength(1);
+		let shutdownSettled = false;
+		const shutdown = manager.shutdown().then(() => {
+			shutdownSettled = true;
+		});
+		await Promise.resolve();
+		expect(shutdownSettled).toBe(false);
+
+		callbacks[0]!(null, "77\n", "");
+		await vi.waitFor(() => expect(callbacks).toHaveLength(2));
+		expect(shutdownSettled).toBe(false);
+		callbacks[1]!(null, "", "");
+		await Promise.all([killing, shutdown]);
+
+		expect(kill).toHaveBeenCalledWith("SIGKILL");
+		expect(readActiveOrphanProcesses(journal, process.pid)).toEqual([]);
+	});
+
+	it("completes identity-checked orphan cleanup synchronously during process exit", () => {
+		record("win:77");
+		vi.mocked(childProcess.execFileSyncHidden).mockReturnValue("77\n" as never);
+		vi.mocked(childProcess.spawnSyncHidden).mockReturnValue({ status: 0 } as ReturnType<
+			typeof childProcess.spawnSyncHidden
+		>);
+		const manager = new ReplKernelManager({ cwd: directory });
+		const kill = vi.fn(() => true);
+		Object.assign(manager, { state: "running", child: { pid: kernelPid, kill } });
+
+		manager.disposeSync();
+
+		expect(kill).toHaveBeenCalledWith("SIGTERM");
+		expect(childProcess.execFileHidden).not.toHaveBeenCalled();
+		expect(childProcess.execFileSyncHidden).toHaveBeenCalledOnce();
+		expect(childProcess.execFileSyncHidden).toHaveBeenCalledWith(
+			expect.stringMatching(/\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/),
+			expect.any(Array),
+			expect.objectContaining({ encoding: "utf8", timeout: 10_000 }),
+		);
+		expect(childProcess.spawnSyncHidden).toHaveBeenCalledOnce();
+		expect(childProcess.spawnSyncHidden).toHaveBeenCalledWith(
+			expect.stringMatching(/\\System32\\taskkill\.exe$/),
+			["/F", "/T", "/PID", String(orphanPid)],
+			expect.objectContaining({ timeout: 10_000 }),
+		);
+		expect(readActiveOrphanProcesses(journal, process.pid)).toEqual([]);
+	});
 });
