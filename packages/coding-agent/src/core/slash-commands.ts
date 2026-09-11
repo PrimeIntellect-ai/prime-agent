@@ -280,3 +280,40 @@ export function parseSessionSlashCommand(text: string): SessionSlashCommand | un
 	if (command?.execution !== "session" || !isSessionSlashCommandName(name)) return undefined;
 	return { name, args: parsed.args, text };
 }
+
+/**
+ * Closest command-name suggestion for an unrecognized slash command, or
+ * undefined when nothing is near enough. Shared by the CLI's unknown-
+ * command notice and the session's typo guard.
+ */
+export function findSlashCommandSuggestion(input: string, candidates: readonly string[]): string | undefined {
+	let closest: { candidate: string; distance: number } | undefined;
+	for (const candidate of candidates) {
+		const distance = slashCommandEditDistance(input, candidate);
+		if (!closest || distance < closest.distance) {
+			closest = { candidate, distance };
+		}
+	}
+	if (!closest || closest.distance > Math.max(2, Math.floor(input.length / 3))) {
+		return undefined;
+	}
+	return closest.candidate;
+}
+
+function slashCommandEditDistance(left: string, right: string): number {
+	const previous = new Array<number>(right.length + 1);
+	const current = new Array<number>(right.length + 1);
+	for (let j = 0; j <= right.length; j++) previous[j] = j;
+	for (let i = 1; i <= left.length; i++) {
+		current[0] = i;
+		for (let j = 1; j <= right.length; j++) {
+			current[j] = Math.min(
+				previous[j] + 1,
+				current[j - 1] + 1,
+				previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
+			);
+		}
+		for (let j = 0; j <= right.length; j++) previous[j] = current[j];
+	}
+	return previous[right.length];
+}
