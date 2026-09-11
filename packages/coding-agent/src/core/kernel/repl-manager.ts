@@ -453,7 +453,7 @@ export class ReplKernelManager {
 			// ready timeout. cleanupResources clears readyDeferred, so reject first;
 			// a late error after ready resolved is a no-op on the settled promise.
 			this.readyDeferred?.reject(err);
-			void this.cleanupResources().finally(() => liveKernels.delete(this));
+			this.cleanupExitedChild();
 		});
 
 		child.on("exit", (code, signal) => {
@@ -466,7 +466,16 @@ export class ReplKernelManager {
 			// teardown and runs cleanupResources itself. Cleaning up here would bump the
 			// generation and misread the owning shutdown as superseded.
 			if (this.gracefulShutdownGeneration === this.startGeneration) return;
-			void this.cleanupResources().finally(() => liveKernels.delete(this));
+			this.cleanupExitedChild();
+		});
+	}
+
+	private cleanupExitedChild(): void {
+		const cleanupGeneration = this.startGeneration + 1;
+		void this.cleanupResources().finally(() => {
+			// A replacement start re-adds this manager before spawning and advances
+			// the generation. Its live child must stay tracked for process-exit cleanup.
+			if (this.startGeneration === cleanupGeneration) liveKernels.delete(this);
 		});
 	}
 

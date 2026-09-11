@@ -1,9 +1,11 @@
 import type { ChildProcess, ExecFileException } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/repl-manager.js";
+import { liveKernels } from "../src/core/kernel/shared.js";
 import {
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
@@ -186,6 +188,39 @@ describe("Windows kernel orphan cleanup", () => {
 
 		expect(kill).toHaveBeenCalledWith("SIGKILL");
 		expect(readActiveOrphanProcesses(journal, process.pid)).toEqual([]);
+	});
+
+	it("keeps a replacement kernel tracked when stale exit cleanup finishes", async () => {
+		record("win:77");
+		const manager = new ReplKernelManager({ cwd: directory });
+		const createChild = (pid: number) =>
+			Object.assign(new EventEmitter(), {
+				pid,
+				exitCode: null,
+				signalCode: null,
+				stdin: { destroy: vi.fn() },
+				stdout: Object.assign(new EventEmitter(), { destroy: vi.fn() }),
+				stderr: Object.assign(new EventEmitter(), { destroy: vi.fn() }),
+				kill: vi.fn(() => true),
+			}) as unknown as ChildProcess;
+		const oldChild = createChild(kernelPid);
+		Object.assign(manager, { state: "running", child: oldChild });
+		(manager as unknown as { wireChild(child: ChildProcess): void }).wireChild(oldChild);
+		liveKernels.add(manager);
+
+		oldChild.emit("exit", 1, null);
+		expect(callbacks).toHaveLength(1);
+		const replacement = createChild(kernelPid + 1);
+		const replacementGeneration = (manager as unknown as { startGeneration: number }).startGeneration + 1;
+		Object.assign(manager, { state: "running", startGeneration: replacementGeneration, child: replacement });
+
+		callbacks[0]!(new Error("process already exited"), "", "");
+		try {
+			await new Promise<void>((resolve) => globalThis.setImmediate(resolve));
+			expect(liveKernels.has(manager)).toBe(true);
+		} finally {
+			liveKernels.delete(manager);
+		}
 	});
 
 	it("completes identity-checked orphan cleanup synchronously during process exit", () => {
