@@ -72,6 +72,26 @@ def read_session_text(agent_log: str) -> str:
     return agent_log
 
 
+def first_agent_error(agent_log: str) -> str | None:
+    """The first error message the agent reported, for quick diagnosis.
+
+    A zero-token unresolved run almost always means a launch or auth
+    failure; surfacing the error in the result JSON saves the
+    workdir-digging this field was created for.
+    """
+    for line in agent_log.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        message = entry.get("message") if isinstance(entry, dict) else None
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            error = message.get("errorMessage")
+            if isinstance(error, str) and error:
+                return error
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", required=True, help="Fixture directory (contains fixture.json)")
@@ -124,10 +144,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     agent_log = completed.stdout
     (workdir / "agent.log").write_text(agent_log)
+    # stderr is where launch and auth failures land; keep it with the result.
+    (workdir / "agent.stderr").write_text(completed.stderr)
 
     outcome = fixture_outcome(fixture, repo_dir, agent_log)
     result = scorer.score_fixture(fixture, outcome)
     result["exit_code"] = completed.returncode
+    result["workdir"] = str(workdir)
+    result["agent_error"] = first_agent_error(agent_log)
     print(json.dumps(result, indent=2))
     return 0 if result["resolved"] else 1
 
