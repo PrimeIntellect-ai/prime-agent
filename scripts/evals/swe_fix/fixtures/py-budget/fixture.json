@@ -1,0 +1,9 @@
+{
+  "name": "py-budget",
+  "language": "python",
+  "test_command": "python3 -m unittest -v",
+  "target_test": "test_shares_sum_exactly_to_income",
+  "pre_passing_tests": 3,
+  "golden_patch": "golden.patch",
+  "allowed_files": ["budget.py"]
+}
