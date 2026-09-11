@@ -1323,7 +1323,8 @@ export class InteractiveMode {
 					? { telemetryInput: attempt.metadata }
 					: {}),
 			});
-			if (this.pendingInputStatus === attempt && this.getQueuedActionCount() > 0) attempt?.firstStatus(false);
+			if (attempt && this.pendingInputStatus === attempt && this.getQueuedActionCount() > 0)
+				attempt.firstStatus(false);
 			attempt?.admission("completed");
 		} catch (error) {
 			const uncertain =
