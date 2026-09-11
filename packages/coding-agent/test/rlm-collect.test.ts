@@ -121,6 +121,28 @@ describe("rlm.collect typed fan-in", () => {
 		expect(results.results.every((entry) => entry.settled && entry.status === "done")).toBe(true);
 	});
 
+	it("re-collects a settled child after terminal cleanup", async () => {
+		session = makeSession();
+		const handle = await session.runRlmChild("compute the answer", { name: "worker-a" });
+		// Wait for settlement: the terminal path removes the settled run from
+		// _activeRlmChildRuns while its envelope stays retained until deleted.
+		const settled = await session.collectRlmChildren([handle.rlm_child_id], 10_000);
+		expect(settled.results[0]?.settled).toBe(true);
+
+		const byId = await session.collectRlmChildren([handle.rlm_child_id], 0);
+		expect(byId.results).toHaveLength(1);
+		expect(byId.results[0]?.rlm_child_id).toBe(handle.rlm_child_id);
+		expect(byId.results[0]?.status).toBe("done");
+		expect(byId.results[0]?.settled).toBe(true);
+		expect(byId.results[0]?.answer_preview).toContain("child answer");
+
+		const byName = await session.collectRlmChildren(["worker-a"], 0);
+		expect(byName.results[0]?.rlm_child_id).toBe(handle.rlm_child_id);
+
+		const all = await session.collectRlmChildren([], 0);
+		expect(all.results.map((entry) => entry.rlm_child_id)).toContain(handle.rlm_child_id);
+	});
+
 	it("returns current snapshots on timeout without rejecting", async () => {
 		session = makeSession();
 		const handle = await session.runRlmChild("slow task", { name: "worker-a" });
@@ -145,6 +167,9 @@ describe("rlm.collect typed fan-in", () => {
 		await expect(handler({ targets: [""] })).rejects.toThrow("non-empty strings");
 		await expect(handler({ timeout_ms: -1 })).rejects.toThrow("non-negative integer");
 		await expect(handler({ timeout_ms: "soon" })).rejects.toThrow("non-negative integer");
+		// Node clamps setTimeout delays above 2^31-1 to 1ms, so an oversized
+		// timeout must be rejected instead of returning an immediate snapshot.
+		await expect(handler({ timeout_ms: 2_147_483_648 })).rejects.toThrow("2147483647");
 		const ok = await handler({ targets: ["worker-a"], timeout_ms: 5 });
 		expect(ok).toEqual({ results: [] });
 		const defaults = await handler({});

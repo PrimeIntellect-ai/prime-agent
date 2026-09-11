@@ -309,8 +309,13 @@ export function createRlmCollectHostHandler(handler: RlmCollectHandler): HostReq
 			const { results } = await handler(targets, 0);
 			return { results };
 		}
-		if (typeof rawTimeout !== "number" || !Number.isSafeInteger(rawTimeout) || rawTimeout < 0) {
-			throw new Error("rlm.collect timeout_ms must be a non-negative integer");
+		if (
+			typeof rawTimeout !== "number" ||
+			!Number.isSafeInteger(rawTimeout) ||
+			rawTimeout < 0 ||
+			rawTimeout > 2_147_483_647
+		) {
+			throw new Error("rlm.collect timeout_ms must be a non-negative integer up to 2147483647");
 		}
 		const { results } = await handler(targets, rawTimeout);
 		return { results };

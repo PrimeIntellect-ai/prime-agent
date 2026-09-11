@@ -10220,15 +10220,26 @@ export class AgentSession {
 	 */
 	async collectRlmChildren(targets: string[], timeoutMs: number): Promise<RlmCollectResult> {
 		const runs = new Map<string, RlmChildRun>();
+		for (const run of this._activeRlmChildRuns.values()) {
+			runs.set(run.id, run);
+		}
+		// Terminal cleanup moves settled runs out of _activeRlmChildRuns while their
+		// envelope stays retained in _rlmChildSessions until deleted; collect must see
+		// both or a completed child can no longer be re-collected.
+		for (const [childId, retained] of this._rlmChildSessions) {
+			if (retained.run && !runs.has(childId)) {
+				runs.set(childId, retained.run);
+			}
+		}
 		if (targets.length === 0) {
-			for (const run of this._activeRlmChildRuns.values()) {
-				if (!run.detachedDeletion && !this._deletingRlmChildren.has(run.id)) {
-					runs.set(run.id, run);
+			for (const [childId, run] of runs) {
+				if (run.detachedDeletion || this._deletingRlmChildren.has(run.id)) {
+					runs.delete(childId);
 				}
 			}
 		} else {
 			for (const target of targets) {
-				const matches = [...this._activeRlmChildRuns.values()].filter(
+				const matches = [...runs.values()].filter(
 					(run) =>
 						!run.detachedDeletion &&
 						!this._deletingRlmChildren.has(run.id) &&
@@ -10272,11 +10283,12 @@ export class AgentSession {
 	}
 
 	private _rlmChildRunMatchesTarget(run: RlmChildRun, target: string): boolean {
+		const session = run.session ?? this._rlmChildSessions.get(run.id)?.session;
 		return (
 			run.id === target ||
 			run.sessionName === target ||
-			run.session?.sessionId === target ||
-			run.session?.sessionName === target
+			session?.sessionId === target ||
+			session?.sessionName === target
 		);
 	}
 
