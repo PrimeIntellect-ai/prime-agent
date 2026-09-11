@@ -168,7 +168,7 @@ Every theme must define the color tokens below except `mdBody`, which defaults t
 | `text` | Default text (usually `""`) |
 | `thinkingText` | Thinking block text |
 
-### Backgrounds & Content (12 colors)
+### Backgrounds & Content (14 colors)
 
 | Token | Purpose |
 |-------|---------|
@@ -181,6 +181,8 @@ Every theme must define the color tokens below except `mdBody`, which defaults t
 | `toolPendingBg` | Tool box (pending) |
 | `toolSuccessBg` | Tool box (success) |
 | `toolErrorBg` | Tool box (error) |
+| `toolDiffAddedBg` | Added-line background in tool diffs |
+| `toolDiffRemovedBg` | Removed-line background in tool diffs |
 | `toolPanelBg` | Tool panel background |
 | `toolTitle` | Tool title |
 | `toolOutput` | Tool output text |
@@ -201,12 +203,13 @@ Every theme must define the color tokens below except `mdBody`, which defaults t
 | `mdHr` | Horizontal rule |
 | `mdListBullet` | List bullets |
 
-### Tool Diffs (3 colors)
+### Tool Diffs (4 colors)
 
 | Token | Purpose |
 |-------|---------|
 | `toolDiffAdded` | Added lines |
 | `toolDiffRemoved` | Removed lines |
+| `toolDiffText` | Text on added and removed diff backgrounds |
 | `toolDiffContext` | Context lines |
 
 ### Syntax Highlighting (9 colors)

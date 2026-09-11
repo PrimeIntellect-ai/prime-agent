@@ -182,7 +182,6 @@ See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json
 | Escape | Clear the input without interrupting active work |
 | Escape twice | Open `/tree` |
 | Ctrl+L | Open model selector |
-| Ctrl+P | Collapse/expand agent-to-agent messages |
 | Ctrl+O | Cycle overview → thinking and file diffs → all output |
 
 ### Message Queue

@@ -28,6 +28,7 @@ export interface IPythonCellState {
 	code: string;
 	backgroundShell?: BackgroundShellHandle;
 	shellCompletion?: ShellCompletion;
+	shellCompletionAmbiguous?: boolean;
 	content?: readonly IPythonCellContentBlock[];
 	details?: unknown;
 	isPartial?: boolean;
@@ -421,6 +422,8 @@ export class IPythonCellComponent implements Component {
 			parts.push(theme.fg("error", errorName));
 		}
 
+		if (this.state.shellCompletionAmbiguous) parts.push(theme.fg("dim", "completion unmatched"));
+
 		const shellExit = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell?.exitCode;
 		if (shellExit !== undefined && shellExit !== 0) parts.push(theme.fg("error", `exit ${shellExit}`));
 		return parts.join(theme.fg("dim", " · "));
@@ -472,6 +475,7 @@ export class IPythonCellComponent implements Component {
 
 	private statusKind(details: IpythonDetails): "error" | "aborted" | "running" | "queued" | "done" {
 		const status = details.status;
+		if (this.state.shellCompletionAmbiguous) return "queued";
 		if ((this.state.backgroundShell || this.state.shellCompletion) && !this.state.isPartial) {
 			const exitCode = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell?.exitCode;
 			return exitCode === undefined ? "running" : exitCode === 0 ? "done" : "error";

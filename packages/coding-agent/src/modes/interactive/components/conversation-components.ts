@@ -140,7 +140,11 @@ export function createShellCompletionComponent(
 			(tool) => tool.getBackgroundShellHandle()?.pid === completion.details.pid,
 		);
 		const matches = pidMatches.length > 0 ? pidMatches : commandMatches;
-		if (matches.length !== 1) return;
+		if (matches.length !== 1) {
+			// An observed PID/command has ended, but its result cannot be assigned to one duplicate call.
+			for (const tool of pidMatches) tool.markShellCompletionAmbiguous();
+			return;
+		}
 		const match = matches[0]!;
 		const handle = match.getBackgroundShellHandle();
 		if (handle && handle.pid !== completion.details.pid) return;

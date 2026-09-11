@@ -158,6 +158,45 @@ describe("#2193 shell completion presentation", () => {
 			"Background shell command finished",
 		);
 	});
+	it("stops ambiguous duplicate handles from pulsing without assigning their result or stopping unrelated shells", () => {
+		const first = tool("first");
+		first.updateResult(result);
+		const second = tool("second");
+		second.updateResult(result);
+		const unrelated = tool("unrelated");
+		unrelated.updateResult({
+			...result,
+			details: { ...result.details, result: result.details.result.replace("pid=42", "pid=43") },
+		});
+		const notice = completion(7);
+		const event = createShellCompletionComponent(notice, [first, second, unrelated])!;
+		for (const candidate of [first, second]) {
+			expect(candidate.hasRunningBackgroundShell()).toBe(false);
+			expect(render([candidate])).toContain("completion unmatched");
+			expect(render([candidate])).not.toContain("exit 7");
+		}
+		expect(unrelated.hasRunningBackgroundShell()).toBe(true);
+		expect(render([event])).toContain("Background shell command failed · exit 7");
+		const messages: AgentMessage[] = [
+			fauxAssistantMessage(
+				[fauxToolCall("ipython", { code }, { id: "first" }), fauxToolCall("ipython", { code }, { id: "second" })],
+				{ stopReason: "toolUse" },
+			),
+			{ role: "toolResult", toolCallId: "first", toolName: "ipython", ...result, timestamp: 1 },
+			{ role: "toolResult", toolCallId: "second", toolName: "ipython", ...result, timestamp: 2 },
+			notice,
+		];
+		const serialized = JSON.stringify(messages);
+		const replay = buildConversationComponents(messages, options);
+		for (const expanded of [true, false]) {
+			for (const component of [...replay, first, second, event])
+				if ("setExpanded" in component && typeof component.setExpanded === "function")
+					component.setExpanded(expanded);
+			expect(render(replay).match(/completion unmatched/g)).toHaveLength(2);
+			expect(render(replay).match(/\[bash-done /g)?.length ?? 0).toBe(expanded ? 1 : 0);
+		}
+		expect(JSON.stringify(messages)).toBe(serialized);
+	});
 	it.each([0, 9])("matches unique assignment-only launches by their full command for exit %i", (exitCode) => {
 		const source = "h = bash('printf done')";
 		const assignedResult = {
