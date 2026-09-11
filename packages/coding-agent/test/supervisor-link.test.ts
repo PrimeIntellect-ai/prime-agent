@@ -136,6 +136,34 @@ describe("SupervisorLink", () => {
 		link.close();
 	});
 
+	it("closes a client still mid-handshake when close() runs", async () => {
+		const clients: MockClient[] = [];
+		const link = new SupervisorLink({
+			socketPath: "/tmp/unused.sock",
+			factory: () => {
+				const client = makeMockClient();
+				let rejectHello: ((error: Error) => void) | undefined;
+				client.waitForHello = () =>
+					new Promise((_, reject) => {
+						rejectHello = reject;
+					});
+				const closeClient = client.close.bind(client);
+				client.close = () => {
+					// Socket death surfaces the pending handshake as a failure.
+					closeClient();
+					rejectHello?.(new Error("socket closed during handshake"));
+				};
+				clients.push(client);
+				return client;
+			},
+		});
+		const pending = link.ensureConnected();
+		await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+		link.close();
+		expect(clients[0].closeCount).toBe(1);
+		await expect(pending).rejects.toThrow();
+	});
+
 	it("stops reconnecting after close()", async () => {
 		const clients: MockClient[] = [];
 		const link = makeLink(clients);

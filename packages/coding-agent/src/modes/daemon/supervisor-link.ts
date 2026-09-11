@@ -32,6 +32,8 @@ export interface SupervisorLinkOptions {
 
 export class SupervisorLink {
 	private client?: DaemonClientLike;
+	/** Client mid-handshake; teardown must close it too (close() during connect). */
+	private pendingClient?: DaemonClientLike;
 	private connecting?: Promise<DaemonClientLike>;
 	private closed = false;
 	private readonly disposers = new Set<() => void>();
@@ -74,19 +76,30 @@ export class SupervisorLink {
 			const client = (
 				this.options.factory ?? ((socketPath: string) => new DaemonClient(socketPath) as DaemonClientLike)
 			)(this.options.socketPath);
+			this.pendingClient = client;
 			const detach = client.onClose(() => this.teardown());
 			this.disposers.add(detach);
-			try {
-				await client.connect(this.options.connectTimeoutMs ?? 1000);
-				await client.waitForHello();
-			} catch (error) {
+			const cleanup = () => {
 				// DaemonClient fires onClose only after a successful connect,
 				// so a failed handshake must close its own socket here.
 				this.disposers.delete(detach);
 				detach();
+				if (this.pendingClient === client) this.pendingClient = undefined;
 				client.close();
+			};
+			try {
+				await client.connect(this.options.connectTimeoutMs ?? 1000);
+				await client.waitForHello();
+			} catch (error) {
+				cleanup();
 				throw error;
 			}
+			if (this.closed || this.client !== undefined) {
+				// Teardown ran mid-handshake or another coroutine won the race.
+				cleanup();
+				throw new Error("Supervisor link was closed during handshake");
+			}
+			this.pendingClient = undefined;
 			this.client = client;
 			return client;
 		})();
@@ -99,12 +112,13 @@ export class SupervisorLink {
 
 	/** Drop the cached connection; the next request reconnects. */
 	teardown(): void {
-		const client = this.client;
+		const clients = [this.client, this.pendingClient];
 		this.client = undefined;
+		this.pendingClient = undefined;
 		this.connecting = undefined;
 		for (const detach of this.disposers) detach();
 		this.disposers.clear();
-		client?.close();
+		for (const client of clients) client?.close();
 	}
 
 	/** Stop the link permanently; further requests fail fast without reconnecting. */
