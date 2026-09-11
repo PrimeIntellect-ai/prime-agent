@@ -8425,10 +8425,8 @@ export class AgentSession {
 
 	/**
 	 * Relevance signal for the harness digest: terms from the active goal
-	 * objective (strongest) and the last few user/assistant messages
-	 * (weaker, recency-weighted). Term overlap is cheap; the point is not
-	 * retrieval quality but replacing alphabetical truncation, which has no
-	 * relation to the current task. Capped so scoring stays trivial.
+	 * objective (strongest) and the last few user/assistant messages,
+	 * newest first. Term overlap is cheap and capped so scoring stays trivial.
 	 */
 	private _buildHarnessDigestQueryTerms(): HarnessQueryTerms {
 		const terms = new Map<string, number>();
@@ -8446,7 +8444,8 @@ export class AgentSession {
 				(message): message is UserMessage | AssistantMessage =>
 					message.role === "user" || message.role === "assistant",
 			)
-			.slice(-4);
+			.slice(-4)
+			.reverse();
 		let recencyWeight = 2;
 		for (const message of recent) {
 			const text =

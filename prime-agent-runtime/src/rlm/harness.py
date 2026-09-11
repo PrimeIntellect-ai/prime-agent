@@ -798,10 +798,8 @@ class HarnessState:
     ) -> list[HarnessEntry]:
         """Return harness entries ranked by weighted term overlap with *query*.
 
-        Mirrors the digest's relevance ranking (refinement.ts): terms are
-        scored against an entry's title, content, path, and id; matches in
-        more distinct fields count more. Use this to pull ranked entries on
-        demand instead of reading the whole overview.
+        Terms are scored against an entry's title, content, path, and id;
+        matches in more distinct fields count more.
         """
         if target := self._global_target(global_, kwargs):
             return target.search(query, kind=kind, limit=limit)
@@ -828,7 +826,11 @@ class HarnessState:
             return total
 
         entries = self.list(kind, **kwargs) if kind is not None else self.list(None, **kwargs)
-        ranked = sorted(entries, key=lambda e: (score(e), e.updated_at), reverse=True)
+
+        def recency(entry: HarnessEntry) -> str:
+            return entry.updated_at if isinstance(entry.updated_at, str) else ""
+
+        ranked = sorted(entries, key=lambda e: (score(e), recency(e)), reverse=True)
         ranked = [e for e in ranked if score(e) > 0]
         return ranked[:limit]
 

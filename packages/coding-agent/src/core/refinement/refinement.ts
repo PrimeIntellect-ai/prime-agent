@@ -467,20 +467,24 @@ export function formatRefinementNoticeBody(result: RefinementResult): string {
 
 /**
  * Query terms for relevance-ranked harness digests: term -> weight.
- * Built by the caller from task signal (goal objective, recent messages,
- * working files). Weights decide how strongly a term match counts; the
- * ranking itself is a pure weighted-term overlap over the entry's
- * searchable fields, so no embeddings or model calls are involved.
+ * Built by the caller from task signal (goal objective, recent
+ * messages). The ranking is a pure weighted-term overlap over the
+ * entry's searchable fields.
  */
 export type HarnessQueryTerms = Map<string, number>;
+
+/** Lowercase a possibly malformed persisted field. */
+function searchableField(value: unknown): string {
+	return typeof value === "string" ? value.toLowerCase() : "";
+}
 
 /** Score one harness entry against query terms: weighted term overlap. */
 export function scoreHarnessEntryForQuery(entry: HarnessEntry, terms: HarnessQueryTerms): number {
 	if (terms.size === 0) return 0;
-	const title = entry.title.toLowerCase();
-	const content = entry.content.toLowerCase();
-	const path = entry.path.toLowerCase();
-	const id = entry.id.toLowerCase();
+	const title = searchableField(entry.title);
+	const content = searchableField(entry.content);
+	const path = searchableField(entry.path);
+	const id = searchableField(entry.id);
 	let score = 0;
 	for (const [term, weight] of terms) {
 		// One match per field counts once per term: coverage over distinct
@@ -512,8 +516,8 @@ export function formatHarnessStateForPrompt(
 		includeIpythonExamples?: boolean;
 		includeShellExamples?: boolean;
 		includeRefineExamples?: boolean;
-		/** When provided, entries are selected by relevance to these terms
-		 * (weighted term overlap) instead of alphabetical truncation. */
+		/** Select entries by relevance to these terms instead of
+		 * alphabetical order. */
 		queryTerms?: HarnessQueryTerms;
 	} = {},
 ): string {

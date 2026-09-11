@@ -1585,6 +1585,14 @@ describe("harness digest relevance ranking", () => {
 		expect(alphabetical).not.toContain("(entries ranked by relevance");
 	});
 
+	it("tolerates non-string persisted fields", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h3"), "local");
+		const malformed = makeEntry("bad", "Worktree policy", "Worktree guidance.", "2026-08-01T00:00:00.000Z");
+		(malformed as unknown as { title: null }).title = null;
+		state.entries.memory.bad = malformed;
+		expect(() => formatHarnessStateForPrompt(state, { queryTerms: new Map([["worktree", 1]]) })).not.toThrow();
+	});
+
 	it("breaks score ties by recency", () => {
 		const state = loadHarnessState(join(makeTempDir(), "h2"), "local");
 		const older = makeEntry("older", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z");
