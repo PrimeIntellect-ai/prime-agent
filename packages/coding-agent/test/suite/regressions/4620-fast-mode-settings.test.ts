@@ -50,6 +50,67 @@ describe("ENG-4620 fast mode settings", () => {
 		expect(nextSession.serviceTier).toBe("default");
 	});
 
+	it("keeps the saved default when a requested tier is clamped for the current model", async () => {
+		harness = await createHarness({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			models: [{ id: "gpt-5.4" }],
+		});
+
+		harness.session.setServiceTier("priority");
+		expect(harness.settingsManager.getDefaultServiceTier()).toBe("priority");
+
+		// Codex OAuth has no flex tier: the session clamps to default, but the
+		// saved default must not be stomped by the clamped value.
+		harness.session.setServiceTier("flex");
+		expect(harness.session.serviceTier).toBe("default");
+		expect(harness.settingsManager.getDefaultServiceTier()).toBe("priority");
+	});
+
+	it("keeps a requested tier as the preference while the current model cannot honor it", async () => {
+		harness = await createHarness({
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }, { id: "gpt-4-turbo" }],
+		});
+
+		await harness.session.setModel(harness.getModel("gpt-4-turbo")!);
+		harness.session.setServiceTier("flex");
+
+		expect(harness.session.serviceTier).toBe("default");
+		expect(harness.settingsManager.getDefaultServiceTier()).toBe("default");
+
+		await harness.session.setModel(harness.getModel("gpt-5.5")!);
+		expect(harness.session.serviceTier).toBe("flex");
+	});
+
+	it("persists a flex tier session entry and restores it on resume", async () => {
+		harness = await createHarness({
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }],
+			persistSession: true,
+		});
+		const currentHarness = harness;
+
+		harness.session.setServiceTier("flex");
+		expect(harness.session.serviceTier).toBe("flex");
+		harness.session.dispose();
+
+		const { session } = await createAgentSession({
+			cwd: currentHarness.tempDir,
+			authStorage: currentHarness.authStorage,
+			model: currentHarness.getModel(),
+			resourceLoader: createTestResourceLoader(),
+			sessionManager: currentHarness.sessionManager,
+			settingsManager: currentHarness.settingsManager,
+		});
+		sessions.push(session);
+
+		expect(session.serviceTier).toBe("flex");
+		expect(session.sessionManager.buildSessionContext().serviceTier).toBe("flex");
+	});
+
 	it("persists the preference across settings manager restarts", async () => {
 		harness = await createHarness();
 		const agentDir = join(harness.tempDir, "agent");

@@ -26,13 +26,14 @@ import type {
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import {
+	clampServiceTier,
 	clampThinkingLevel,
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	resetApiProviders,
-	supportsFastMode,
+	supportsServiceTier,
 } from "@earendil-works/pi-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -7529,16 +7530,21 @@ export class AgentSession {
 
 	setServiceTier(serviceTier: ServiceTier): void {
 		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
-		const preferenceChanged = effectiveServiceTier !== this._serviceTierPreference;
+		const preferenceChanged = serviceTier !== this._serviceTierPreference;
 		const effectiveTierChanged = effectiveServiceTier !== this.agent.state.serviceTier;
 		if (!preferenceChanged && !effectiveTierChanged) {
 			return;
 		}
-		this._serviceTierPreference = effectiveServiceTier;
+		// The preference and the session entry keep the REQUESTED tier (only the
+		// active state clamps), so switching to or resuming on a capable model
+		// re-activates it instead of a clamped "default" shadowing it.
+		this._serviceTierPreference = serviceTier;
 		if (preferenceChanged) {
-			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			if (this.model && supportsFastMode(this.model)) {
-				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
+			this.sessionManager.appendServiceTierChange(serviceTier);
+			// Persist only when the model honors the requested tier; a clamped-to-default
+			// request must not stomp the user's saved default.
+			if (this.model && supportsServiceTier(this.model, serviceTier)) {
+				this.settingsManager.setDefaultServiceTier(serviceTier);
 			}
 		}
 		if (effectiveTierChanged) {
@@ -7551,7 +7557,7 @@ export class AgentSession {
 	}
 
 	private _getEffectiveServiceTier(serviceTier: ServiceTier): ServiceTier {
-		return serviceTier === "priority" && (!this.model || !supportsFastMode(this.model)) ? "default" : serviceTier;
+		return clampServiceTier(this.model, serviceTier);
 	}
 
 	private _getServiceTierForModelSwitch(): ServiceTier {
@@ -9974,8 +9980,7 @@ export class AgentSession {
 			model: options.model,
 			thinkingLevel:
 				options.thinkingLevel ?? (clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel),
-			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+			serviceTier: clampServiceTier(options.model, this.serviceTier),
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,

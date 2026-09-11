@@ -31,7 +31,6 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
-	Usage,
 } from "../types.js";
 import {
 	appendAssistantMessageDiagnostic,
@@ -42,6 +41,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseRetryAfterMs, recordStreamFailure } from "../utils/stream-failure.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import { applyServiceTierPricing } from "./service-tier-pricing.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
@@ -315,36 +315,6 @@ function buildRequestBody(
 	return body;
 }
 
-// Multipliers per https://developers.openai.com/api/docs/pricing (retrieved 2026-08-21)
-function getServiceTierCostMultiplier(
-	model: Pick<Model<"openai-codex-responses">, "id">,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): number {
-	switch (serviceTier) {
-		case "flex":
-			return 0.5;
-		case "priority":
-			return model.id.startsWith("gpt-5.5") ? 2.5 : 2;
-		default:
-			return 1;
-	}
-}
-
-function applyServiceTierPricing(
-	usage: Usage,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	model: Pick<Model<"openai-codex-responses">, "id">,
-) {
-	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
-	if (multiplier === 1) return;
-
-	usage.cost.input *= multiplier;
-	usage.cost.output *= multiplier;
-	usage.cost.cacheRead *= multiplier;
-	usage.cost.cacheWrite *= multiplier;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
-}
-
 function resolveCodexServiceTier(
 	responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -380,7 +350,7 @@ async function processStream(
 	await processResponsesStream(mapCodexEvents(parseSSE(response)), output, stream, model, {
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
-		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model.id),
 	});
 }
 
@@ -1131,7 +1101,7 @@ async function processWebSocketStream(
 			{
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
-				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model.id),
 			},
 		);
 		if (options?.signal?.aborted) {

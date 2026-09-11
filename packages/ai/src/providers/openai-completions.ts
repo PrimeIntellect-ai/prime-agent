@@ -39,6 +39,7 @@ import { recordStreamFailure } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { withOpenCodeHeaders } from "./opencode-headers.js";
+import { applyServiceTierPricing } from "./service-tier-pricing.js";
 import { buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -305,12 +306,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				return block;
 			};
 
+			let responseServiceTier: ChatCompletionChunk["service_tier"] | undefined;
 			for await (const chunk of openaiStream) {
 				if (!chunk || typeof chunk !== "object") continue;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
 				output.responseId ||= chunk.id;
+				if (typeof chunk.service_tier === "string") {
+					responseServiceTier = chunk.service_tier;
+				}
 				if (typeof chunk.model === "string" && chunk.model.length > 0 && chunk.model !== model.id) {
 					output.responseModel ||= chunk.model;
 				}
@@ -455,6 +460,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						}
 					}
 				}
+			}
+
+			// The multiplier table is authoritative only for OpenAI's own rates, and
+			// providers may serve a tier request off-tier, so multiply only when this
+			// is OpenAI's surface AND it echoed the tier that actually served. OpenRouter
+			// costs come from its reported usage.cost instead (see parseChunkUsage).
+			if (model.provider === "openai") {
+				applyServiceTierPricing(output.usage, responseServiceTier, model.id);
 			}
 
 			for (const block of blocks) {
@@ -677,6 +690,14 @@ function buildParams(
 		if (offValue !== null) {
 			(params as any).reasoning_effort = offValue ?? "none";
 		}
+	}
+
+	// OpenAI and OpenRouter accept a top-level service_tier (OpenRouter: flex and
+	// priority, https://openrouter.ai/docs/guides/features/service-tiers). Prime
+	// Inference tolerates but ignores the field (probed 2026-09-01), so it is not
+	// forwarded; other OpenAI-compatible gateways may reject unknown fields.
+	if (options?.serviceTier != null && (model.provider === "openai" || model.provider === "openrouter")) {
+		params.service_tier = options.serviceTier;
 	}
 
 	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
@@ -1099,6 +1120,9 @@ function parseChunkUsage(
 		completion_tokens?: number;
 		prompt_cache_hit_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+		cost?: number;
+		is_byok?: boolean;
+		cost_details?: { upstream_inference_cost?: number };
 	},
 	model: Model<"openai-completions">,
 	cacheWriteCost?: number,
@@ -1127,7 +1151,51 @@ function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage, cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost });
+	// OpenRouter reports billing truth in usage, already priced by the endpoint
+	// and service tier that served the request
+	// (https://openrouter.ai/docs/api-reference/overview). Trust it over the
+	// catalog-rate estimate, scaling the component breakdown to match.
+	const reportedCost = model.provider === "openrouter" ? openRouterReportedCost(rawUsage) : undefined;
+	if (reportedCost !== undefined) {
+		if (usage.cost.total > 0) {
+			const scale = reportedCost / usage.cost.total;
+			usage.cost.input *= scale;
+			usage.cost.output *= scale;
+			usage.cost.cacheRead *= scale;
+			usage.cost.cacheWrite *= scale;
+		} else if (usage.totalTokens > 0) {
+			// No catalog rates to apportion by: attribute by token counts instead.
+			usage.cost.input = (reportedCost * usage.input) / usage.totalTokens;
+			usage.cost.output = (reportedCost * usage.output) / usage.totalTokens;
+			usage.cost.cacheRead = (reportedCost * usage.cacheRead) / usage.totalTokens;
+			usage.cost.cacheWrite = (reportedCost * usage.cacheWrite) / usage.totalTokens;
+		} else {
+			usage.cost.input = reportedCost;
+		}
+		usage.cost.total = reportedCost;
+	}
 	return usage;
+}
+
+/**
+ * The user's real spend for an OpenRouter request, or undefined to keep the
+ * catalog estimate. usage.cost only carries what OpenRouter charged the
+ * account's credits: for BYOK requests that is just OpenRouter's fee, so real
+ * spend is the upstream provider's bill plus that fee. A cost of 0 can mean
+ * not-billed-via-credits (e.g. :free endpoints) rather than free, so it keeps
+ * the catalog estimate.
+ */
+function openRouterReportedCost(rawUsage: {
+	cost?: number;
+	is_byok?: boolean;
+	cost_details?: { upstream_inference_cost?: number };
+}): number | undefined {
+	const credits = typeof rawUsage.cost === "number" && rawUsage.cost > 0 ? rawUsage.cost : undefined;
+	if (rawUsage.is_byok === true) {
+		const upstream = rawUsage.cost_details?.upstream_inference_cost;
+		return typeof upstream === "number" && upstream > 0 ? upstream + (credits ?? 0) : undefined;
+	}
+	return credits;
 }
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {

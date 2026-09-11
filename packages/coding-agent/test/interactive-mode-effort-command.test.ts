@@ -36,7 +36,7 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as Interac
 
 type FastCommandContext = {
 	connectionState?: { sessionId: string; serviceTier: ServiceTier; thinkingLevel: ThinkingLevel };
-	fastModeToggleQueue: Promise<void>;
+	serviceTierChangeQueue: Promise<void>;
 	agentConnection: {
 		setServiceTier: (serviceTier: ServiceTier) => Promise<void>;
 		getState: () => Promise<{ sessionId: string; serviceTier: ServiceTier }>;
@@ -48,11 +48,23 @@ type FastCommandContext = {
 	patchConnectionState: (patch: Record<string, unknown>) => void;
 	getCurrentModel: () => Model<Api> | undefined;
 	currentModelSupportsFastMode: () => boolean;
+	getAvailableServiceTiers: () => ServiceTier[];
+	enqueueServiceTierChange: (
+		computeTier: () => ServiceTier | undefined,
+		formatStatus: (serviceTier: ServiceTier) => string,
+	) => void;
 };
 
 type FastInteractiveModePrototype = {
 	currentModelSupportsFastMode(this: FastCommandContext): boolean;
 	handleFastCommand(this: FastCommandContext): void;
+	handleTierCommand(this: FastCommandContext, arg: string): void;
+	getAvailableServiceTiers(this: FastCommandContext): ServiceTier[];
+	enqueueServiceTierChange(
+		this: FastCommandContext,
+		computeTier: () => ServiceTier | undefined,
+		formatStatus: (serviceTier: ServiceTier) => string,
+	): void;
 	getModelTrayLabel(this: FastCommandContext): string;
 };
 
@@ -76,7 +88,7 @@ function testModel(provider: string, id: string, api: Api): Model<Api> {
 function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5", "openai-codex-responses")) {
 	const context: FastCommandContext = {
 		connectionState: { sessionId: "session-1", serviceTier: "default", thinkingLevel: "high" },
-		fastModeToggleQueue: Promise.resolve(),
+		serviceTierChangeQueue: Promise.resolve(),
 		agentConnection: undefined as never,
 		footer: { invalidate: vi.fn() },
 		subagentSummaryLine: { invalidate: vi.fn() },
@@ -87,6 +99,9 @@ function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5"
 		}),
 		getCurrentModel: () => model,
 		currentModelSupportsFastMode: () => fastInteractiveModePrototype.currentModelSupportsFastMode.call(context),
+		getAvailableServiceTiers: () => fastInteractiveModePrototype.getAvailableServiceTiers.call(context),
+		enqueueServiceTierChange: (computeTier, formatStatus) =>
+			fastInteractiveModePrototype.enqueueServiceTierChange.call(context, computeTier, formatStatus),
 	};
 	context.agentConnection = {
 		setServiceTier: vi.fn(async (serviceTier) => {
@@ -343,7 +358,7 @@ describe("InteractiveMode /effort", () => {
 			let releaseQueue!: () => void;
 			const context = makeFastContext();
 			const originalConnection = context.agentConnection;
-			context.fastModeToggleQueue = new Promise<void>((resolve) => {
+			context.serviceTierChangeQueue = new Promise<void>((resolve) => {
 				releaseQueue = resolve;
 			});
 
@@ -359,7 +374,7 @@ describe("InteractiveMode /effort", () => {
 			};
 			context.connectionState = { sessionId: "session-2", serviceTier: "default", thinkingLevel: "high" };
 			releaseQueue();
-			await context.fastModeToggleQueue;
+			await context.serviceTierChangeQueue;
 
 			expect(originalConnection.setServiceTier).not.toHaveBeenCalled();
 			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
@@ -390,7 +405,7 @@ describe("InteractiveMode /effort", () => {
 			};
 			context.connectionState = { sessionId: "session-2", serviceTier: "default", thinkingLevel: "high" };
 			finishToggle();
-			await context.fastModeToggleQueue;
+			await context.serviceTierChangeQueue;
 
 			expect(context.patchConnectionState).not.toHaveBeenCalled();
 			expect(context.showStatus).not.toHaveBeenCalled();
@@ -402,9 +417,7 @@ describe("InteractiveMode /effort", () => {
 			fastInteractiveModePrototype.handleFastCommand.call(context);
 
 			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
-			expect(context.showStatus).toHaveBeenCalledWith(
-				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication",
-			);
+			expect(context.showStatus).toHaveBeenCalledWith("Current model does not support fast mode (priority tier)");
 		});
 
 		it("shows Fast mode beside the model and effort level", () => {
@@ -412,6 +425,48 @@ describe("InteractiveMode /effort", () => {
 			context.connectionState = { sessionId: "session-1", serviceTier: "priority", thinkingLevel: "high" };
 
 			expect(fastInteractiveModePrototype.getModelTrayLabel.call(context)).toBe("gpt-5.5 • high • fast");
+		});
+
+		it("shows a non-default tier badge beside the model and effort level", () => {
+			const context = makeFastContext(testModel("openai", "gpt-5.5", "openai-responses"));
+			context.connectionState = { sessionId: "session-1", serviceTier: "flex", thinkingLevel: "high" };
+
+			expect(fastInteractiveModePrototype.getModelTrayLabel.call(context)).toBe("gpt-5.5 • high • flex");
+		});
+	});
+
+	describe("/tier", () => {
+		it("applies an available tier through the connection and reports it", async () => {
+			const context = makeFastContext(testModel("openai", "gpt-5.5", "openai-responses"));
+
+			fastInteractiveModePrototype.handleTierCommand.call(context, "flex");
+			await vi.waitFor(() => expect(context.showStatus).toHaveBeenCalledWith("Service tier: flex"));
+
+			expect(context.agentConnection.setServiceTier).toHaveBeenCalledWith("flex");
+			expect(context.patchConnectionState).toHaveBeenCalledWith({ serviceTier: "flex" });
+			expect(context.showError).not.toHaveBeenCalled();
+		});
+
+		it("rejects a tier the model does not support without touching the connection", () => {
+			const context = makeFastContext(testModel("openai-codex", "gpt-5.5", "openai-codex-responses"));
+
+			fastInteractiveModePrototype.handleTierCommand.call(context, "flex");
+
+			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
+			expect(context.showError).toHaveBeenCalledWith(
+				"Service tier 'flex' is not available for the current model. Available: default, priority, auto",
+			);
+		});
+
+		it("shows the current tier and the available choices without an argument", () => {
+			const context = makeFastContext(testModel("openai", "gpt-5.5", "openai-responses"));
+
+			fastInteractiveModePrototype.handleTierCommand.call(context, "");
+
+			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
+			expect(context.showStatus).toHaveBeenCalledWith(
+				"Service tier: default (available: default, flex, priority, auto)",
+			);
 		});
 	});
 });
