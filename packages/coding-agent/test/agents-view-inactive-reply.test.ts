@@ -625,7 +625,7 @@ describe("agents view slash commands", () => {
 			persistentState: {},
 			lastListedSummaries: [live],
 			savedSessions: [],
-			pendingRenames: new Map<string, string>(),
+			pendingRenames: new Map<string, { name: string }>(),
 			reconcileCatalogs: vi.fn(),
 			refreshSessions: vi.fn(async () => true),
 			refreshSavedSessions: vi.fn(async () => true),
@@ -638,8 +638,11 @@ describe("agents view slash commands", () => {
 			applyOptimisticSessionName(s: unknown, n: string) {
 				return invoke("applyOptimisticSessionName", self, s, n);
 			},
-			completeRename(s: unknown, n: string) {
-				return invoke("completeRename", self, s, n);
+			completeRename(s: unknown, pending: unknown) {
+				return invoke("completeRename", self, s, pending);
+			},
+			writeRename(s: unknown, n: string) {
+				return invoke("writeRename", self, s, n);
 			},
 		};
 		self.replyTarget = { key: "active-1", summary: live };
@@ -648,7 +651,7 @@ describe("agents view slash commands", () => {
 		await expect(invoke("runAgentsViewCommand", self, { name: "name", args: "Fresh Name" }, live)).resolves.toBe(
 			true,
 		);
-		expect((self.pendingRenames as Map<string, string>).get(live.sessionId)).toBe("Fresh Name");
+		expect((self.pendingRenames as Map<string, { name: string }>).get(live.sessionId)?.name).toBe("Fresh Name");
 		expect(self.reconcileCatalogs).toHaveBeenCalled();
 		expect(setReplyTarget).toHaveBeenCalledWith(undefined);
 		expect(self.refreshSessions).not.toHaveBeenCalled();
@@ -659,8 +662,8 @@ describe("agents view slash commands", () => {
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
 		// Success keeps the overlay until truth confirms (real-view pin elsewhere).
-		expect((self.pendingRenames as Map<string, string>).get(live.sessionId)).toBe("Fresh Name");
-		(self.pendingRenames as Map<string, string>).clear();
+		expect((self.pendingRenames as Map<string, { name: string }>).get(live.sessionId)?.name).toBe("Fresh Name");
+		(self.pendingRenames as Map<string, { name: string }>).clear();
 
 		(self.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
 		self.requireClient = () => ({ request: vi.fn(async () => ({ success: false, error: "name taken" })) });
@@ -668,7 +671,7 @@ describe("agents view slash commands", () => {
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(self.setStatusMessage).toHaveBeenCalledWith(expect.stringContaining("Failed to rename agent: name taken"));
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
-		expect((self.pendingRenames as Map<string, string>).size).toBe(0);
+		expect((self.pendingRenames as Map<string, { name: string }>).size).toBe(0);
 	});
 
 	it("arms the saved-search fetch once and lets only the current fetch re-arm the latch", async () => {

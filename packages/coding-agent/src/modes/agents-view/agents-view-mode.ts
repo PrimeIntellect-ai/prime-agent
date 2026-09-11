@@ -189,6 +189,11 @@ type PendingKillSubagent = {
 	rootActiveSessionId: string;
 	childId: string;
 };
+/** Newest name the user asked for, plus the single in-flight writer for that session. */
+type PendingRename = {
+	name: string;
+	write: Promise<void> | undefined;
+};
 
 export async function resolveAgentsViewSessionUiServices(
 	options: Pick<AgentsViewModeOptions, "createUiServicesForSession" | "uiServices">,
@@ -703,8 +708,8 @@ export class AgentsViewMode implements Component, Focusable {
 	private pendingKillSubagent: PendingKillSubagent | undefined;
 	private renameTarget: { activeSessionId?: string; sessionFile?: string; summary: SessionSummary } | undefined;
 	private actionModeSearchQuery: string | undefined;
-	/** In-flight optimistic renames (sessionId -> name), overlaid on every catalog reconcile until the RPC settles. */
-	private readonly pendingRenames = new Map<string, string>();
+	/** Optimistic renames per session (sessionId -> newest name + its writer), overlaid on every catalog reconcile until truth confirms. */
+	private readonly pendingRenames = new Map<string, PendingRename>();
 	/** Session the view was entered from; exempt from the empty-session sort demotion. */
 	private readonly anchorSessionId: string | undefined;
 	private readonly inactiveAgentIdentities = new Set<string>();
@@ -1663,33 +1668,67 @@ export class AgentsViewMode implements Component, Focusable {
 			this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
 			return false;
 		}
+		const idle = this.pendingRenames.get(summary.sessionId)?.write === undefined;
 		this.applyOptimisticSessionName(summary, name);
 		this.setStatusMessage(`Renaming to ${name}...`);
-		void this.completeRename(summary, name);
+		// One writer per session: two concurrent writes can land in either order, so
+		// an older name could overwrite the newest one the user asked for.
+		if (idle) {
+			const pending = this.pendingRenames.get(summary.sessionId)!;
+			pending.write = this.completeRename(summary, pending);
+		}
 		return true;
 	}
 
 	private applyOptimisticSessionName(summary: SessionSummary, name: string): void {
-		this.pendingRenames.set(summary.sessionId, name);
+		const pending = this.pendingRenames.get(summary.sessionId);
+		if (pending) {
+			pending.name = name;
+		} else {
+			this.pendingRenames.set(summary.sessionId, { name, write: undefined });
+		}
 		this.reconcileCatalogs();
 	}
 
 	private withPendingRenames(summaries: readonly SessionSummary[]): SessionSummary[] {
 		if (this.pendingRenames.size === 0) return [...summaries];
 		return summaries.map((summary) => {
-			const name = this.pendingRenames.get(summary.sessionId);
-			if (name === undefined) return summary;
-			// Truth matching the overlay value confirms it: self-clear, never earlier.
-			if (summary.sessionName === name) {
+			const pending = this.pendingRenames.get(summary.sessionId);
+			if (pending === undefined) return summary;
+			// Truth matching the overlay confirms it only once no write is in flight:
+			// renaming back to a still-stale name also matches, and dropping the overlay
+			// there would let the earlier in-flight name win the row.
+			if (summary.sessionName === pending.name && pending.write === undefined) {
 				this.pendingRenames.delete(summary.sessionId);
 				return summary;
 			}
-			return { ...summary, sessionName: name };
+			return { ...summary, sessionName: pending.name };
 		});
 	}
 
-	private async completeRename(summary: SessionSummary, name: string): Promise<void> {
-		let failed = false;
+	/** Writes the newest requested name until none is left; the only rename writer for this session. */
+	private async completeRename(summary: SessionSummary, pending: PendingRename): Promise<void> {
+		let written: string | undefined;
+		try {
+			while (pending.name !== written && this.pendingRenames.get(summary.sessionId) === pending) {
+				const name = pending.name;
+				if (!(await this.writeRename(summary, name))) {
+					// Only the failing owner clears its entry; success waits for truth to match.
+					if (this.pendingRenames.get(summary.sessionId) === pending) {
+						this.pendingRenames.delete(summary.sessionId);
+					}
+					return;
+				}
+				written = name;
+			}
+		} finally {
+			pending.write = undefined;
+			await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
+		}
+	}
+
+	private async writeRename(summary: SessionSummary, name: string): Promise<boolean> {
 		try {
 			if (summary.activeSessionId) {
 				requireDaemonData(
@@ -1704,20 +1743,15 @@ export class AgentsViewMode implements Component, Focusable {
 				);
 			}
 			this.setStatusMessage(`Renamed to ${name}`);
+			return true;
 		} catch (error) {
-			failed = true;
 			this.setStatusMessage(
 				isUnknownDaemonCommandError(error, "rename")
 					? "Failed to rename: the daemon is running an older build; restart the daemon and try again"
 					: formatError("Failed to rename agent", error),
 			);
+			return false;
 		}
-		// Only the failing owner clears its entry; success waits for truth to match.
-		if (failed && this.pendingRenames.get(summary.sessionId) === name) {
-			this.pendingRenames.delete(summary.sessionId);
-		}
-		await this.refreshSessions();
-		this.refreshSavedSessionsIfLoaded();
 	}
 
 	private findSummaryByActiveSessionId(activeSessionId: string): SessionSummary | undefined {
@@ -1923,6 +1957,9 @@ export class AgentsViewMode implements Component, Focusable {
 			if (this.pendingDeleteAgent?.identity === identity && this.isDeleteConfirmationVisible()) {
 				this.clearDeleteConfirmation({ render: false });
 				try {
+					// A rename write that lands after the file is gone recreates the session,
+					// so let this session's rename finish before removing the file.
+					await this.pendingRenames.get(row.summary.sessionId)?.write;
 					// Authoritative liveness check; its narrower plain-list verdict stays local.
 					const latest = expectSessionList(
 						requireDaemonData(await this.requireClient().request(createAgentsViewListCommand())),
@@ -2198,14 +2235,14 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.pendingRenames.size > 0) {
 			const rosterSessionIds = new Set(this.lastListedSummaries.map((summary) => summary.sessionId));
 			savedSessions = this.savedSessions.map((session) => {
-				const name = this.pendingRenames.get(session.id);
-				if (name === undefined) return session;
-				if (session.name === name) {
+				const pending = this.pendingRenames.get(session.id);
+				if (pending === undefined) return session;
+				if (session.name === pending.name && pending.write === undefined) {
 					// Rows display daemon-first, so a roster-resident session confirms there.
 					if (!rosterSessionIds.has(session.id)) this.pendingRenames.delete(session.id);
 					return session;
 				}
-				return { ...session, name };
+				return { ...session, name: pending.name };
 			});
 		}
 		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, savedSessions, this.heartbeats);

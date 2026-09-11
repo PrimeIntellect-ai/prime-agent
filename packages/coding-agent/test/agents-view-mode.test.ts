@@ -530,7 +530,7 @@ describe("AgentsViewMode", () => {
 			setStatusMessage: vi.fn(),
 			withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
 			withPendingRenames: (sessions: SessionSummary[]) => sessions,
-			pendingRenames: new Map<string, string>(),
+			pendingRenames: new Map<string, unknown>(),
 		});
 		self.reconcileCatalogs = () => invoke("reconcileCatalogs", self);
 		invoke("reconcileCatalogs", self);
@@ -586,7 +586,7 @@ describe("AgentsViewMode", () => {
 			setStatusMessage: vi.fn(),
 			withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
 			withPendingRenames: (sessions: SessionSummary[]) => sessions,
-			pendingRenames: new Map<string, string>(),
+			pendingRenames: new Map<string, unknown>(),
 		};
 		invoke("reconcileCatalogs", self);
 		expect(persistentState.scopeRootSummary).toMatchObject({ sessionId: root.sessionId });
@@ -674,7 +674,7 @@ describe("AgentsViewMode", () => {
 				setStatusMessage: vi.fn(),
 				withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
 				withPendingRenames: (sessions: SessionSummary[]) => sessions,
-				pendingRenames: new Map<string, string>(),
+				pendingRenames: new Map<string, unknown>(),
 			};
 			invoke("reconcileCatalogs", self);
 			if (expand) {
@@ -1108,7 +1108,7 @@ describe("AgentsViewMode", () => {
 			});
 			await new Promise((resolve) => setImmediate(resolve));
 			expect(rowName()).toBe("Fresh Name");
-			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
+			expect((Reflect.get(view, "pendingRenames") as Map<string, unknown>).size).toBe(0);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -1169,12 +1169,12 @@ describe("AgentsViewMode", () => {
 			});
 			await new Promise((resolve) => setImmediate(resolve));
 			expect(rowName()).toBe("Fresh Name");
-			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(1);
+			expect((Reflect.get(view, "pendingRenames") as Map<string, unknown>).size).toBe(1);
 			// The roster push lands with the name; the overlay self-clears.
 			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Fresh Name" }] });
 			await invoke("refreshSessions", view);
 			expect(rowName()).toBe("Fresh Name");
-			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
+			expect((Reflect.get(view, "pendingRenames") as Map<string, unknown>).size).toBe(0);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -1204,20 +1204,130 @@ describe("AgentsViewMode", () => {
 			expect(rowName()).toBe("Fresh Name");
 			await invoke("renameSession", view, live, "Second Name");
 			expect(rowName()).toBe("Second Name");
+			// One writer per session: the older name is not still racing the newer one,
+			// so the daemon cannot persist them out of order.
+			expect(request).toHaveBeenCalledTimes(1);
 			// The first settle must not kill or confirm the newer name.
 			settles.shift()?.({ success: true, data: {} });
 			await new Promise((resolve) => setImmediate(resolve));
 			expect(rowName()).toBe("Second Name");
+			expect(request).toHaveBeenLastCalledWith({
+				type: "rename",
+				activeSessionId: live.activeSessionId,
+				name: "Second Name",
+			});
 			settles.shift()?.({ success: true, data: {} });
 			await new Promise((resolve) => setImmediate(resolve));
 			expect(rowName()).toBe("Second Name");
 			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Second Name" }] });
 			await invoke("refreshSessions", view);
-			expect((Reflect.get(view, "pendingRenames") as Map<string, string>).size).toBe(0);
+			expect((Reflect.get(view, "pendingRenames") as Map<string, unknown>).size).toBe(0);
 			expect(rowName()).toBe("Second Name");
 		} finally {
 			stopThemeWatcher();
 		}
+	});
+
+	it("keeps the overlay when the user renames back to a name truth has not caught up with", async () => {
+		const live = summary({ sessionName: "Old Name" });
+		const settles: Array<(value: { success: boolean; data: unknown }) => void> = [];
+		const request = vi.fn(
+			() =>
+				new Promise((resolve) => {
+					settles.push(resolve);
+				}),
+		);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		const rowName = () =>
+			(Reflect.get(view, "rows") as AgentsViewRow[]).find((row) => row.summary.sessionId === live.sessionId)?.summary
+				.sessionName;
+		try {
+			Reflect.set(view, "client", { request, isConnected: true });
+			Reflect.set(view, "rosterStore", { summaries: () => [live] });
+			invoke("applySessionList", view, [live], true);
+			await invoke("renameSession", view, live, "Fresh Name");
+			// Renaming back matches the still-stale catalog name while the first write is
+			// in flight: treating that as confirmation would hand the row to that write.
+			await invoke("renameSession", view, live, "Old Name");
+			settles.shift()?.({ success: true, data: {} });
+			await new Promise((resolve) => setImmediate(resolve));
+			Reflect.set(view, "rosterStore", { summaries: () => [{ ...live, sessionName: "Fresh Name" }] });
+			await invoke("refreshSessions", view);
+			expect(rowName()).toBe("Old Name");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("lets an in-flight rename land before deleting the same saved session", async () => {
+		const saved = summary({
+			id: "saved",
+			activeSessionId: undefined,
+			sessionId: "saved-session",
+			sessionName: "Old Name",
+			sessionFile: "/tmp/saved.jsonl",
+			lifecycle: "archived",
+		});
+		const sent: string[] = [];
+		let settleRename!: (value: { success: boolean; data: unknown }) => void;
+		const request = vi.fn((command: { type: string }) => {
+			sent.push(command.type);
+			if (command.type === "rename_saved_session") {
+				return new Promise<{ success: boolean; data: unknown }>((resolve) => {
+					settleRename = resolve;
+				});
+			}
+			return Promise.resolve(
+				command.type === "list"
+					? { success: true, data: { sessions: [] } }
+					: { success: true, data: { ok: true, method: "delete" } },
+			);
+		});
+		const self: Record<string, unknown> = {
+			rows: [{ kind: "agent", section: "inactive", summary: saved, selectable: true, identity: "saved-row" }],
+			selectedIndex: 0,
+			pendingDeleteAgent: undefined,
+			pendingKillSubagent: undefined,
+			deleteConfirmExpiresAt: 0,
+			deleteConfirmTimer: undefined,
+			pendingRenames: new Map<string, unknown>(),
+			persistentState: {},
+			ui: { requestRender: vi.fn() },
+			requireClient: () => ({ request }),
+			getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
+			setStatusMessage: vi.fn(),
+			reconcileCatalogs: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+			refreshSavedSessionsIfLoaded: vi.fn(),
+			isDeleteConfirmationVisible() {
+				return invoke("isDeleteConfirmationVisible", self);
+			},
+			showDeleteConfirmation() {
+				return invoke("showDeleteConfirmation", self);
+			},
+			clearDeleteConfirmation(options: unknown) {
+				return invoke("clearDeleteConfirmation", self, options);
+			},
+			applyOptimisticSessionName(s: unknown, n: string) {
+				return invoke("applyOptimisticSessionName", self, s, n);
+			},
+			completeRename(s: unknown, pending: unknown) {
+				return invoke("completeRename", self, s, pending);
+			},
+			writeRename(s: unknown, n: string) {
+				return invoke("writeRename", self, s, n);
+			},
+		};
+
+		await invoke("renameSession", self, saved, "Fresh Name");
+		await invoke("handleDeleteSelected", self);
+		const deleting = invoke("handleDeleteSelected", self) as Promise<void>;
+		await new Promise((resolve) => setImmediate(resolve));
+		// Removing the file now would let the pending rename write recreate it.
+		expect(sent).toEqual(["rename_saved_session"]);
+		settleRename({ success: true, data: {} });
+		await deleting;
+		expect(sent).toEqual(["rename_saved_session", "list", "delete_saved_session"]);
 	});
 
 	it("shows running-subagent counts only while collapsed and work remains", () => {

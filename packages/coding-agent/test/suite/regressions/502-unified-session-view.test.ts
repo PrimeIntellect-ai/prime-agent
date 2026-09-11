@@ -345,7 +345,7 @@ describe("#502 unified session view regressions", () => {
 			rows: [],
 			lastListedSummaries: [captured],
 			savedSessions: [],
-			pendingRenames: new Map<string, string>(),
+			pendingRenames: new Map<string, unknown>(),
 			persistentState: {},
 			exitRenameMode: vi.fn(),
 			reconcileCatalogs: vi.fn(),
@@ -356,6 +356,7 @@ describe("#502 unified session view regressions", () => {
 			renameSession: Reflect.get(AgentsViewMode.prototype, "renameSession"),
 			applyOptimisticSessionName: Reflect.get(AgentsViewMode.prototype, "applyOptimisticSessionName"),
 			completeRename: Reflect.get(AgentsViewMode.prototype, "completeRename"),
+			writeRename: Reflect.get(AgentsViewMode.prototype, "writeRename"),
 		};
 
 		await privateMethod<(this: typeof harness, value: string) => Promise<void>>("confirmRename").call(
