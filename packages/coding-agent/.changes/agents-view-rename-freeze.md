@@ -1,0 +1,1 @@
+- Fixed the agents view freezing on rename: the row now shows the new name immediately and the rename completes in the background, with failures surfaced and reverted. Repeat renames of one session are written one at a time so the newest name wins, and deleting a session waits for its own rename to land.

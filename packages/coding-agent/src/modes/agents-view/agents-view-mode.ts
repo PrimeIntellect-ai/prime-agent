@@ -189,6 +189,11 @@ type PendingKillSubagent = {
 	rootActiveSessionId: string;
 	childId: string;
 };
+/** Newest name the user asked for, plus the single in-flight writer for that session. */
+type PendingRename = {
+	name: string;
+	write: Promise<void> | undefined;
+};
 
 export async function resolveAgentsViewSessionUiServices(
 	options: Pick<AgentsViewModeOptions, "createUiServicesForSession" | "uiServices">,
@@ -703,6 +708,8 @@ export class AgentsViewMode implements Component, Focusable {
 	private pendingKillSubagent: PendingKillSubagent | undefined;
 	private renameTarget: { activeSessionId?: string; sessionFile?: string; summary: SessionSummary } | undefined;
 	private actionModeSearchQuery: string | undefined;
+	/** Optimistic renames per session (sessionId -> newest name + its writer), overlaid on every catalog reconcile until truth confirms. */
+	private readonly pendingRenames = new Map<string, PendingRename>();
 	/** Session the view was entered from; exempt from the empty-session sort demotion. */
 	private readonly anchorSessionId: string | undefined;
 	private readonly inactiveAgentIdentities = new Set<string>();
@@ -1654,27 +1661,87 @@ export class AgentsViewMode implements Component, Focusable {
 		await this.renameSession(target.summary, name);
 	}
 
-	/** Shared by rename mode and /name: rename, refresh both catalogs, report. */
+	// Optimistic: the daemon validates renames against a full disk scan, so the
+	// view must never block input on the round-trip.
 	private async renameSession(summary: SessionSummary, name: string): Promise<boolean> {
-		this.setStatusMessage("Renaming agent...");
+		if (!summary.activeSessionId && !summary.sessionFile) {
+			this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
+			return false;
+		}
+		const idle = this.pendingRenames.get(summary.sessionId)?.write === undefined;
+		this.applyOptimisticSessionName(summary, name);
+		this.setStatusMessage(`Renaming to ${name}...`);
+		// One writer per session: two concurrent writes can land in either order, so
+		// an older name could overwrite the newest one the user asked for.
+		if (idle) {
+			const pending = this.pendingRenames.get(summary.sessionId)!;
+			pending.write = this.completeRename(summary, pending);
+		}
+		return true;
+	}
+
+	private applyOptimisticSessionName(summary: SessionSummary, name: string): void {
+		const pending = this.pendingRenames.get(summary.sessionId);
+		if (pending) {
+			pending.name = name;
+		} else {
+			this.pendingRenames.set(summary.sessionId, { name, write: undefined });
+		}
+		this.reconcileCatalogs();
+	}
+
+	private withPendingRenames(summaries: readonly SessionSummary[]): SessionSummary[] {
+		if (this.pendingRenames.size === 0) return [...summaries];
+		return summaries.map((summary) => {
+			const pending = this.pendingRenames.get(summary.sessionId);
+			if (pending === undefined) return summary;
+			// Truth matching the overlay confirms it only once no write is in flight:
+			// renaming back to a still-stale name also matches, and dropping the overlay
+			// there would let the earlier in-flight name win the row.
+			if (summary.sessionName === pending.name && pending.write === undefined) {
+				this.pendingRenames.delete(summary.sessionId);
+				return summary;
+			}
+			return { ...summary, sessionName: pending.name };
+		});
+	}
+
+	/** Writes the newest requested name until none is left; the only rename writer for this session. */
+	private async completeRename(summary: SessionSummary, pending: PendingRename): Promise<void> {
+		let written: string | undefined;
+		try {
+			while (pending.name !== written && this.pendingRenames.get(summary.sessionId) === pending) {
+				const name = pending.name;
+				if (!(await this.writeRename(summary, name))) {
+					// Only the failing owner clears its entry; success waits for truth to match.
+					if (this.pendingRenames.get(summary.sessionId) === pending) {
+						this.pendingRenames.delete(summary.sessionId);
+					}
+					return;
+				}
+				written = name;
+			}
+		} finally {
+			pending.write = undefined;
+			await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
+		}
+	}
+
+	private async writeRename(summary: SessionSummary, name: string): Promise<boolean> {
 		try {
 			if (summary.activeSessionId) {
 				requireDaemonData(
 					await this.requireClient().request({ type: "rename", activeSessionId: summary.activeSessionId, name }),
 				);
-			} else if (summary.sessionFile) {
+			} else {
 				await renameDaemonSavedSession(
 					this.requireClient(),
 					this.getSavedSessionCatalogContext(),
-					summary.sessionFile,
+					summary.sessionFile!,
 					name,
 				);
-			} else {
-				this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
-				return false;
 			}
-			await this.refreshSessions();
-			this.refreshSavedSessionsIfLoaded();
 			this.setStatusMessage(`Renamed to ${name}`);
 			return true;
 		} catch (error) {
@@ -1890,6 +1957,9 @@ export class AgentsViewMode implements Component, Focusable {
 			if (this.pendingDeleteAgent?.identity === identity && this.isDeleteConfirmationVisible()) {
 				this.clearDeleteConfirmation({ render: false });
 				try {
+					// A rename write that lands after the file is gone recreates the session,
+					// so let this session's rename finish before removing the file.
+					await this.pendingRenames.get(row.summary.sessionId)?.write;
 					// Authoritative liveness check; its narrower plain-list verdict stays local.
 					const latest = expectSessionList(
 						requireDaemonData(await this.requireClient().request(createAgentsViewListCommand())),
@@ -2157,11 +2227,25 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private reconcileCatalogs(): void {
-		const visibleSessions = this.lastListedSummaries.filter((summary) =>
+		const visibleSessions = this.withPendingRenames(this.lastListedSummaries).filter((summary) =>
 			shouldShowAgentsViewSession(summary, this.inactiveAgentIdentities.has(getSummaryIdentity(summary))),
 		);
 		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
-		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.heartbeats);
+		let savedSessions = this.savedSessions;
+		if (this.pendingRenames.size > 0) {
+			const rosterSessionIds = new Set(this.lastListedSummaries.map((summary) => summary.sessionId));
+			savedSessions = this.savedSessions.map((session) => {
+				const pending = this.pendingRenames.get(session.id);
+				if (pending === undefined) return session;
+				if (session.name === pending.name && pending.write === undefined) {
+					// Rows display daemon-first, so a roster-resident session confirms there.
+					if (!rosterSessionIds.has(session.id)) this.pendingRenames.delete(session.id);
+					return session;
+				}
+				return { ...session, name: pending.name };
+			});
+		}
+		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, savedSessions, this.heartbeats);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
 		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
 		migrateAgentsViewIdentitySet(this.programShownParents, this.unifiedIndex.byKey);

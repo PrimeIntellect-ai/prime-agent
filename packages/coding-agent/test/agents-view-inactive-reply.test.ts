@@ -605,9 +605,15 @@ describe("agents view slash commands", () => {
 		expect(openSelected).toHaveBeenCalledTimes(2);
 	});
 
-	it("renames a live target via the rename RPC and reapplies the pushed roster", async () => {
-		const live = summary({ activeSessionId: "active-1", lifecycle: "live" });
-		const request = vi.fn(async () => ({ success: true, data: {} }));
+	it("renames optimistically without blocking submit on the daemon round-trip", async () => {
+		const live = summary({ activeSessionId: "active-1", lifecycle: "live", sessionName: "Old Name" });
+		let settle!: (value: { success: boolean; data: unknown }) => void;
+		const request = vi.fn(
+			() =>
+				new Promise((resolve) => {
+					settle = resolve;
+				}),
+		);
 		const editor = editorWithText("/name Fresh Name");
 		const setReplyTarget = vi.fn();
 		const self: Record<string, unknown> = {
@@ -617,6 +623,10 @@ describe("agents view slash commands", () => {
 			setStatusMessage: vi.fn(),
 			setReplyTarget,
 			persistentState: {},
+			lastListedSummaries: [live],
+			savedSessions: [],
+			pendingRenames: new Map<string, { name: string }>(),
+			reconcileCatalogs: vi.fn(),
 			refreshSessions: vi.fn(async () => true),
 			refreshSavedSessions: vi.fn(async () => true),
 			refreshSavedSessionsIfLoaded() {
@@ -625,23 +635,43 @@ describe("agents view slash commands", () => {
 			renameSession(s: unknown, n: string) {
 				return invoke("renameSession", self, s, n);
 			},
+			applyOptimisticSessionName(s: unknown, n: string) {
+				return invoke("applyOptimisticSessionName", self, s, n);
+			},
+			completeRename(s: unknown, pending: unknown) {
+				return invoke("completeRename", self, s, pending);
+			},
+			writeRename(s: unknown, n: string) {
+				return invoke("writeRename", self, s, n);
+			},
 		};
 		self.replyTarget = { key: "active-1", summary: live };
 
+		// Submit resolves while the round-trip is still pending.
 		await expect(invoke("runAgentsViewCommand", self, { name: "name", args: "Fresh Name" }, live)).resolves.toBe(
 			true,
 		);
-
-		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
-		// As in /kill: the completed command returns the composer to the list.
+		expect((self.pendingRenames as Map<string, { name: string }>).get(live.sessionId)?.name).toBe("Fresh Name");
+		expect(self.reconcileCatalogs).toHaveBeenCalled();
 		expect(setReplyTarget).toHaveBeenCalledWith(undefined);
-		// The push carries renames to the live catalog; the saved catalog refreshes only once it has loaded.
+		expect(self.refreshSessions).not.toHaveBeenCalled();
+		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
+
+		settle({ success: true, data: {} });
+		await new Promise((resolve) => setImmediate(resolve));
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
+		// Success keeps the overlay until truth confirms (real-view pin elsewhere).
+		expect((self.pendingRenames as Map<string, { name: string }>).get(live.sessionId)?.name).toBe("Fresh Name");
+		(self.pendingRenames as Map<string, { name: string }>).clear();
 
 		(self.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
+		self.requireClient = () => ({ request: vi.fn(async () => ({ success: false, error: "name taken" })) });
 		await expect(invoke("renameSession", self, live, "Fresher Name")).resolves.toBe(true);
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(self.setStatusMessage).toHaveBeenCalledWith(expect.stringContaining("Failed to rename agent: name taken"));
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
+		expect((self.pendingRenames as Map<string, { name: string }>).size).toBe(0);
 	});
 
 	it("arms the saved-search fetch once and lets only the current fetch re-arm the latch", async () => {
