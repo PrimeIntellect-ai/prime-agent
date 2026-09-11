@@ -766,7 +766,10 @@ describe("AgentsViewMode", () => {
 			activeSessionId: "spender",
 			sessionId: "spender-session",
 			sessionName: "spender",
-			model: { ...getModel("openai", "gpt-4o"), id: "gpt-5.6-sol" },
+			// Provider path deliberately mismatches the catalog provider: only the id's
+			// embedded path matters to the column stripper.
+			model: { ...getModel("openai", "gpt-4o"), id: "moonshotai/gpt-5.6-sol" },
+			thinkingLevel: "high",
 			created,
 			summary: "Analyzing runtime composition",
 			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
@@ -779,6 +782,7 @@ describe("AgentsViewMode", () => {
 			runtimeKind: "subagent",
 			parentActiveSessionId: "spender",
 			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
+			thinkingLevel: "off",
 			created,
 			usage: { inputTokens: 500, outputTokens: 50, cost: 0.68 },
 		});
@@ -792,7 +796,8 @@ describe("AgentsViewMode", () => {
 			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
 			usage: { inputTokens: 900, outputTokens: 80, cost: 123.45 },
 		});
-		const rows = buildAgentsViewRows([parent, child, inactive]);
+		// Expand the parent so the child's "off" level renders on a real row.
+		const rows = buildAgentsViewRows([parent, child, inactive], new Set(["file:/tmp/scope.jsonl"]));
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 		Reflect.set(view, "rows", rows);
 		Reflect.set(view, "selectedIndex", -1);
@@ -803,8 +808,14 @@ describe("AgentsViewMode", () => {
 				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
 			const parentLine = render(parentRow, 120);
 			const savedLine = render(savedRow, 120);
-			expect(parentLine).toContain("gpt-5.6-sol");
+			// Provider paths strip to the bare model name; an active thinking level
+			// suffixes it, while absent (saved row) and "off" levels render bare.
+			expect(parentLine).toContain("gpt-5.6-sol:high");
+			expect(parentLine).not.toContain("moonshotai");
 			expect(savedLine).toContain("glm-5.2-fast");
+			expect(savedLine).not.toContain("glm-5.2-fast:");
+			const childRow = rows.find((row) => row.summary.sessionId === child.sessionId)!;
+			expect(render(childRow, 120)).not.toContain("glm-5.2-fast:");
 			expect(parentLine).toContain("$1.10");
 			expect(parentLine).not.toContain("$0.42");
 			expect(parentLine).not.toMatch(/[↑↓]/);
@@ -817,6 +828,45 @@ describe("AgentsViewMode", () => {
 				expect(narrow).toMatch(/2m\s*$/);
 				expect(narrow.length).toBeLessThanOrEqual(width);
 			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("shows the recorded model on inactive saved sessions and keeps '-' without one", () => {
+		const saved = (id: string, model?: { provider: string; modelId: string }) => ({
+			path: `/tmp/${id}.jsonl`,
+			id,
+			cwd: "/tmp",
+			created: new Date("2026-01-01T00:00:00Z"),
+			modified: new Date("2026-01-01T00:00:00Z"),
+			messageCount: 1,
+			firstMessage: "hello",
+			allMessagesText: "hello",
+			...(model ? { model } : {}),
+		});
+		const records = reconcileUnifiedSessions(
+			[],
+			[saved("with-model", { provider: "prime-inference", modelId: "glm-4.7" }), saved("bare")],
+		);
+		const rows = buildAgentsViewRows(records);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		Reflect.set(view, "selectedIndex", -1);
+		try {
+			const render = (id: string) =>
+				stripAnsi(invoke("renderRow", view, rows.find((row) => row.summary.sessionId === id)!, 120) as string);
+			expect(render("with-model")).toContain("glm-4.7");
+			expect(render("bare")).toMatch(/\s-\s/);
+			expect(render("bare")).not.toContain("glm-4.7");
+			// The actions panel shows the same recorded model instead of "unknown".
+			Reflect.set(
+				view,
+				"selectedIndex",
+				rows.findIndex((row) => row.summary.sessionId === "with-model"),
+			);
+			const actions = (invoke("renderActions", view, 120) as string[]).map(stripAnsi).join("\n");
+			expect(actions).toContain("Model: prime-inference/glm-4.7");
 		} finally {
 			stopThemeWatcher();
 		}
@@ -1027,10 +1077,7 @@ describe("AgentsViewMode", () => {
 					settles.push(resolve);
 				}),
 		);
-		const view = new AgentsViewMode(
-			{ config: {}, uiServices: createUiServices() },
-			{ savedCatalogLoaded: true, inactiveExpanded: true },
-		);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		const rowName = () =>
 			(Reflect.get(view, "rows") as AgentsViewRow[]).find((row) => row.summary.sessionId === savedSummary.sessionId)
 				?.summary.sessionName;

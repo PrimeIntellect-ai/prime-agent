@@ -508,22 +508,23 @@ describe("#502 unified session view regressions", () => {
 			);
 
 		const full = render(160);
-		expect(full).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+Investigate a variable background status/);
+		// The active thinking level rides the compact id; both must stay visible.
+		expect(full).toMatch(/Inspect agents view\s+gpt-5\.6-terra:high\s+Investigate a variable background status/);
 		for (const width of [60, 80, 120]) {
-			expect(render(width)).toContain("gpt-5.6-terra");
+			expect(render(width)).toContain("gpt-5.6-terra:high");
 			expect(render(width)).toHaveLength(width);
 		}
 		const narrow = render(100);
-		expect(narrow).toContain("gpt-5.6-terra");
+		expect(narrow).toContain("gpt-5.6-terra:high");
 		expect(narrow).not.toContain("prime-inference/");
 
 		subagent.summary.summary = "";
-		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra:high/);
 
 		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
 		subagent.summary.runtimeKind = undefined;
 		subagent.summary.rlmChildId = "effort-child";
-		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra:high/);
 
 		subagent.summary.thinkingLevel = "off";
 		subagent.summary.summary = "A later summary";

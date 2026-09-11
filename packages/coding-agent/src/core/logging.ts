@@ -10,6 +10,10 @@ export function setLogContext(fields: Record<string, unknown>): void {
 	Object.assign(context, fields);
 }
 
+export function writeFileLogEntry(entry: LogEntry): void {
+	appendRotatingLog(getAgentLogPath(), stringifyLogEntry({ ...entry, ...context }), AGENT_LOG_MAX_BYTES);
+}
+
 /**
  * Route all structured logging (coding-agent and pi-ai) to the shared JSONL
  * log at ~/.prime/agent/logs/agent.jsonl. One master file, filterable by the
@@ -17,7 +21,5 @@ export function setLogContext(fields: Record<string, unknown>): void {
  */
 export function installFileLogSink(fields?: Record<string, unknown>): void {
 	context = { pid: process.pid, ...fields };
-	setLogSink((entry: LogEntry) => {
-		appendRotatingLog(getAgentLogPath(), stringifyLogEntry({ ...entry, ...context }), AGENT_LOG_MAX_BYTES);
-	});
+	setLogSink(writeFileLogEntry);
 }
