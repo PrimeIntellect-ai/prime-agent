@@ -48,6 +48,15 @@ export function buildPrimeInferenceModels(
 		if (!template && (!entry.contextWindow || !entry.maxTokens || entry.reasoning === undefined)) continue;
 		const contextWindow = entry.contextWindow ?? template?.contextWindow ?? 0;
 		const maxTokens = Math.min(entry.maxTokens ?? template?.maxTokens ?? 0, contextWindow);
+		const compat = structuredClone(template?.compat ?? DEFAULT_COMPAT);
+		// Anthropic models cache with explicit breakpoints, not automatic
+		// server-side prefix caching; cacheControlFormat makes the provider add
+		// anthropic-style cache_control markers for these entries. The catalog
+		// already prices anthropic/* with Anthropic cache economics (10% cache
+		// reads, 125% cache writes), so the wire format follows the pricing.
+		if (entry.id.toLowerCase().startsWith("anthropic/")) {
+			compat.cacheControlFormat = "anthropic";
+		}
 		models.push({
 			id: entry.id,
 			name: entry.name ?? template?.name ?? entry.id,
@@ -61,7 +70,7 @@ export function buildPrimeInferenceModels(
 			contextWindow,
 			maxTokens,
 			...(template?.featured ? { featured: true } : {}),
-			compat: structuredClone(template?.compat ?? DEFAULT_COMPAT),
+			compat,
 		});
 	}
 	const minimumModels = options.minimumModels ?? Math.ceil(bundledModels.length * MIN_CATALOG_COVERAGE);

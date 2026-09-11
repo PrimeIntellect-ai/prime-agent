@@ -134,6 +134,11 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
+	// "provider/id" for background LLM passes (refinement review and planning);
+	// unset falls back to the session model. Routing these to a different model
+	// keeps their different prompt prefixes from evicting the session's provider
+	// prefix-cache entry.
+	auxiliaryModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 2
@@ -726,6 +731,20 @@ export class SettingsManager {
 		this.markModified("defaultModel");
 		this.recordModelUseInternal(provider, modelId);
 		this.markModified("recentModels");
+		this.save();
+	}
+
+	getAuxiliaryModel(): string | undefined {
+		return this.settings.auxiliaryModel;
+	}
+
+	setAuxiliaryModel(selector: string | undefined): void {
+		if (selector === undefined || selector.length === 0) {
+			delete this.globalSettings.auxiliaryModel;
+		} else {
+			this.globalSettings.auxiliaryModel = selector;
+		}
+		this.markModified("auxiliaryModel");
 		this.save();
 	}
 
