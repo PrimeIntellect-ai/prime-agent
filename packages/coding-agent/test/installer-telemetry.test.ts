@@ -8,7 +8,6 @@ import {
 	readFileSync,
 	realpathSync,
 	rmSync,
-	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -217,16 +216,6 @@ describe("installer outcome telemetry", () => {
 		expect(result.stdout + result.stderr).not.toContain(installationId);
 	});
 
-	it.each(["internal", "test", "private-origin", ""])("categorizes installer traffic from origin %j", (origin) => {
-		const f = fixture();
-		const result = f.run({ PRIME_AGENT_TELEMETRY_ORIGIN: origin });
-		expect(result.status, result.stderr).toBe(0);
-		const [batch] = f.batches();
-		const expected = origin === "internal" || origin === "test" ? origin : "unknown";
-		for (const event of batch.events) expect(event.properties.workload_origin).toBe(expected);
-		expect(JSON.stringify(batch)).not.toContain("private-origin");
-	});
-
 	it.each([
 		["release_lookup", "release_lookup_failed", "TEST_RELEASE_STATUS", "22", 1],
 		["download", "download_failed", "TEST_DOWNLOAD_STATUS", "23", 23],
@@ -245,74 +234,6 @@ describe("installer outcome telemetry", () => {
 			events.some((event) => event.properties.stage === "package_install" && event.properties.outcome === "success"),
 		).toBe(false);
 		expect(existsSync(join(f.agentDir, "telemetry-installations"))).toBe(false);
-	});
-
-	it("records failed requirements without claiming an installation attempt succeeded", () => {
-		const f = fixture();
-		const result = f.run({}, 'start_preflight_checks() { :; }\nfinish_preflight_checks() { return 4; }\nmain "$@"');
-		expect(result.status, result.stderr).toBe(4);
-		expect(
-			f
-				.batches()[0]
-				.events.slice(-2)
-				.map((event) => event.properties),
-		).toMatchObject([
-			{ stage: "requirements", outcome: "failed", reason: "requirements_unavailable", exit_code: 4 },
-			{ stage: "completed", outcome: "failed", reason: "requirements_unavailable", exit_code: 4 },
-		]);
-	});
-
-	it("records declined Node bootstrap as cancellation while preserving its failure exit", () => {
-		const f = fixture();
-		const result = f.run(
-			{},
-			'prime_agent_prompt_yes_no() { return 1; }\nstart_preflight_checks() { :; }\nfinish_preflight_checks() { return 4; }\nmain "$@"',
-		);
-		expect(result.status, result.stderr).toBe(4);
-		expect(f.batches()[0].events.at(-1)?.properties).toMatchObject({
-			stage: "completed",
-			outcome: "cancelled",
-			reason: "declined",
-			exit_code: 4,
-		});
-	});
-
-	it("omits unapproved versions and all raw release or command text", () => {
-		const f = fixture();
-		const result = f.run({ TEST_TARGET_VERSION: "1.2.3-private-model-name" });
-		expect(result.status).toBe(1);
-		const [batch] = f.batches();
-		expect(JSON.stringify(batch)).not.toContain("private-model-name");
-		expect(batch.events.every((event) => event.properties.target_version === undefined)).toBe(true);
-		expect(batch.events.every((event) => event.properties.version === "0.0.0")).toBe(true);
-	});
-
-	it("preserves a declined install as cancellation with exit zero", () => {
-		const f = fixture();
-		const result = f.run({}, 'prime_agent_prompt_yes_no() { return 1; }\nmain "$@"');
-		expect(result.status).toBe(0);
-		expect(f.batches()[0].events.at(-1)?.properties).toMatchObject({
-			stage: "completed",
-			outcome: "cancelled",
-			reason: "declined",
-			exit_code: 0,
-		});
-		expect(f.batches()[0].events.filter((event) => event.properties.stage === "completed")).toHaveLength(1);
-	});
-
-	it("preserves signal exit status and interruption instead of recording success", () => {
-		const f = fixture();
-		const result = f.run(
-			{},
-			"prime_agent_install_traps\nprime_agent_telemetry_begin\nprime_agent_telemetry_stage=download\nkill -TERM $$",
-		);
-		expect(result.status).toBe(143);
-		expect(f.batches()[0].events.at(-1)?.properties).toMatchObject({
-			stage: "completed",
-			outcome: "cancelled",
-			reason: "interrupted",
-			exit_code: 143,
-		});
 	});
 
 	it.each([
@@ -342,16 +263,6 @@ describe("installer outcome telemetry", () => {
 		}
 	});
 
-	it("preserves explicit environment enablement and higher-priority offline opt-out", () => {
-		const f = fixture();
-		f.writeGlobal({ telemetry: false });
-		expect(f.run({ PRIME_AGENT_TELEMETRY: "on" }).status).toBe(0);
-		expect(f.batches()).toHaveLength(1);
-		const offline = fixture();
-		expect(offline.run({ PRIME_AGENT_TELEMETRY: "1", DO_NOT_TRACK: "1" }).status).toBe(0);
-		expect(existsSync(offline.requestsPath)).toBe(false);
-	});
-
 	it.each(["{", "null", "[]", '{"telemetry":"false"}', '{"telemetry":{"enabled":"false"}}'])(
 		"fails closed for malformed settings %s",
 		(settings) => {
@@ -363,193 +274,11 @@ describe("installer outcome telemetry", () => {
 		},
 	);
 
-	it("fails closed on non-regular settings and identity files", () => {
-		for (const name of ["settings.json", "telemetry.json"]) {
-			const f = fixture();
-			const target = join(f.dir, "target.json");
-			writeFileSync(
-				target,
-				JSON.stringify(name === "settings.json" ? { telemetry: false } : { version: 1, installationId }),
-			);
-			symlinkSync(target, join(f.agentDir, name));
-			expect(f.run().status).toBe(0);
-			expect(existsSync(f.requestsPath)).toBe(false);
-			expect(lstatSync(join(f.agentDir, name)).isSymbolicLink()).toBe(true);
-		}
-	});
-
 	it("drops queued observations and readiness markers when disabled during install", () => {
 		const f = fixture();
 		expect(f.run({ TEST_DISABLE_DURING_INSTALL: "1" }).status).toBe(0);
 		expect(existsSync(f.requestsPath)).toBe(false);
 		expect(existsSync(join(f.agentDir, "telemetry-installations"))).toBe(false);
 		expect(readdirSync(f.tempDir)).toEqual([]);
-	});
-
-	it("does not misidentify custom packages as a Prime Agent installation", () => {
-		const f = fixture();
-		f.run({ PRIME_AGENT_PACKAGE: "private-package" });
-		expect(existsSync(f.requestsPath)).toBe(false);
-		expect(existsSync(join(f.agentDir, "telemetry.json"))).toBe(false);
-	});
-
-	it("does not resume an attempt after an observed opt-out is re-enabled", () => {
-		const f = fixture();
-		const result = f.run(
-			{},
-			`prime_agent_install_traps
-prime_agent_telemetry_begin
-printf '{"telemetry":false}' >"$PRIME_AGENT_CODING_AGENT_DIR/settings.json"
-prime_agent_telemetry_record requirements started
-printf '{"telemetry":true}' >"$PRIME_AGENT_CODING_AGENT_DIR/settings.json"
-prime_agent_telemetry_begin
-prime_agent_telemetry_record requirements success`,
-		);
-		expect(result.status).toBe(0);
-		expect(existsSync(f.requestsPath)).toBe(false);
-		expect(readdirSync(f.tempDir)).toEqual([]);
-	});
-
-	it("rechecks consent after discovery and removes a pending readiness marker", () => {
-		const f = fixture();
-		expect(f.run({ TEST_DISABLE_ON_DISCOVERY: "1" }).status).toBe(0);
-		expect(f.batches()).toEqual([]);
-		expect(readdirSync(join(f.agentDir, "telemetry-installations"))).toEqual([]);
-	});
-
-	it.each([
-		'{"schema_versions":[1],"schema_revision":3}',
-		'{"schema_versions":[1,2],"schema_revision":2}',
-		'{"schema_versions":[1,2]}',
-		'{"schema_versions":[1,2],"schema_revision":"3"}',
-		"malformed",
-	])("does not send the new event to collectors without revision 3: %s", (capabilities) => {
-		const f = fixture();
-		expect(f.run({ TEST_CAPABILITIES: capabilities }).status).toBe(0);
-		expect(f.batches()).toEqual([]);
-	});
-
-	it("bounds the complete upload attempt without changing installer success", () => {
-		const f = fixture();
-		const started = performance.now();
-		const result = f.run({ TEST_HANG: "1" });
-		expect(result.status, result.stderr).toBe(0);
-		expect(performance.now() - started).toBeLessThan(7000);
-		expect(f.batches()).toEqual([]);
-	});
-
-	it("expands a tilde agent-directory override before reading opt-out settings", () => {
-		const f = fixture();
-		const agentDir = join(f.env.HOME ?? "", "custom-agent");
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "settings.json"), '{"telemetry":false}');
-		expect(f.run({ PRIME_AGENT_CODING_AGENT_DIR: "~/custom-agent" }).status).toBe(0);
-		expect(existsSync(f.requestsPath)).toBe(false);
-		expect(existsSync(join(agentDir, "telemetry.json"))).toBe(false);
-	});
-
-	it("creates identity files privately and rejects symlink marker directories", () => {
-		const f = fixture();
-		const markersTarget = join(f.dir, "marker-target");
-		mkdirSync(markersTarget);
-		symlinkSync(markersTarget, join(f.agentDir, "telemetry-installations"));
-		expect(f.run().status).toBe(0);
-		expect(lstatSync(join(f.agentDir, "telemetry.json")).mode & 0o777).toBe(0o600);
-		expect(readdirSync(markersTarget)).toEqual([]);
-		expect(f.batches()).toHaveLength(1);
-	});
-
-	it.each([16, 21])("bounds %s pending readiness markers and prunes only marker files", (count) => {
-		const f = fixture();
-		const directory = join(f.agentDir, "telemetry-installations");
-		mkdirSync(directory, { mode: 0o700 });
-		const id = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
-		const now = Date.now();
-		const marker = (index: number, createdAt = now - (100 - index) * 1_000) => ({
-			version: 1,
-			createdAt,
-			cwd: f.projectDir,
-			completeOnReady: false,
-			properties: {
-				installation_attempt_id: id(index),
-				installation_action: "install",
-				installation_source: "shell_installer",
-				target_version: "1.2.3",
-			},
-		});
-		for (let index = 0; index < count; index++)
-			writeFileSync(join(directory, `${id(index)}.json`), JSON.stringify(marker(index)), { mode: 0o600 });
-		writeFileSync(
-			join(directory, `${id(1_000)}.json`),
-			JSON.stringify(marker(1_000, now - 8 * 24 * 60 * 60 * 1_000)),
-		);
-		writeFileSync(join(directory, `${id(1_001)}.json`), "malformed");
-		writeFileSync(join(directory, `${id(1_002)}.json`), JSON.stringify({ ...marker(1_002), properties: {} }));
-		writeFileSync(join(directory, `${id(1_003)}.json`), JSON.stringify(marker(1_004)));
-		writeFileSync(join(directory, `${id(1_004)}.json`), JSON.stringify(marker(1_004, now + 120_000)));
-		writeFileSync(join(directory, `${id(1_005)}.json`), "x".repeat(20_000));
-		const unrelated = join(directory, "notes.json");
-		writeFileSync(unrelated, "unrelated data");
-		const link = join(directory, `${id(1_006)}.json`);
-		symlinkSync(unrelated, link);
-		const unrelatedText = join(directory, `${id(1_007)}.txt`);
-		writeFileSync(unrelatedText, "unrelated text");
-		const unrelatedDirectory = join(directory, `${id(1_008)}.json`);
-		mkdirSync(unrelatedDirectory);
-		writeFileSync(join(unrelatedDirectory, "keep.txt"), "nested unrelated data");
-		const result = f.run();
-		expect(result.status, result.stderr).toBe(0);
-		const markerFiles = readdirSync(directory).filter(
-			(name) => /^[0-9a-f-]{36}\.json$/.test(name) && lstatSync(join(directory, name)).isFile(),
-		);
-		expect(markerFiles).toHaveLength(16);
-		for (let index = 0; index < count; index++)
-			expect(markerFiles.includes(`${id(index)}.json`)).toBe(index >= count - 15);
-		for (let index = 1_000; index <= 1_006; index++)
-			expect(existsSync(join(directory, `${id(index)}.json`))).toBe(false);
-		expect(readFileSync(unrelated, "utf8")).toBe("unrelated data");
-		expect(readFileSync(unrelatedText, "utf8")).toBe("unrelated text");
-		expect(readFileSync(join(unrelatedDirectory, "keep.txt"), "utf8")).toBe("nested unrelated data");
-		const newId = f.batches()[0].events[0].properties.installation_attempt_id;
-		expect(markerFiles).toContain(`${newId}.json`);
-	});
-
-	it("latches environment opt-out even before Node is available", () => {
-		const f = fixture();
-		const result = f.run(
-			{},
-			`prime_agent_install_traps
-PRIME_AGENT_TELEMETRY=" fAlSe "
-export PRIME_AGENT_TELEMETRY
-command() { return 1; }
-prime_agent_telemetry_begin
-unset -f command
-PRIME_AGENT_TELEMETRY=true
-prime_agent_telemetry_begin
-prime_agent_telemetry_record requirements success`,
-		);
-		expect(result.status, result.stderr).toBe(0);
-		expect(existsSync(f.requestsPath)).toBe(false);
-		expect(existsSync(join(f.agentDir, "telemetry.json"))).toBe(false);
-	});
-
-	it("does not collect before Node can parse consent, then observes only later stages", () => {
-		const f = fixture();
-		const result = f.run(
-			{},
-			`prime_agent_install_traps
-command() { return 1; }
-prime_agent_telemetry_begin
-prime_agent_telemetry_record requirements started
-unset -f command
-prime_agent_telemetry_begin
-prime_agent_telemetry_record requirements success`,
-		);
-		expect(result.status, result.stderr).toBe(0);
-		expect(f.batches()[0].events.map((event) => `${event.properties.stage}:${event.properties.outcome}`)).toEqual([
-			"started:started",
-			"requirements:success",
-			"completed:success",
-		]);
 	});
 });

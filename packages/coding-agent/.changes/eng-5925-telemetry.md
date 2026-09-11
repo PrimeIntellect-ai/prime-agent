@@ -1,8 +1,8 @@
 - Added more detailed error reports grouped by stable codes, reviewed Prime Agent messages without prompt content, run lifecycle measurements, setup stages, feature outcomes, and optional `/feedback` choices while retaining existing telemetry opt-outs.
 - Fixed queued telemetry and unfinished analytics surviving a settings opt-out, and added bounded retries with collector version negotiation.
 - Fixed credential recovery advice for billing, quota, permission, and provider availability failures.
-- Added daemon and pre-run failure observations, scoped recovery, input queue and preparation timings, actual worker request context, and version-aware dashboard and alert definitions.
-- Added installation and update outcome reporting for download, verification, package installation, restart and runtime readiness, with existing opt-outs and separate dashboard coverage for missing outcomes.
+- Added daemon and pre-run failure observations, scoped recovery, input queue and preparation timings, and actual worker request context.
+- Added installation and update outcome reporting for download, verification, package installation, restart and runtime readiness, with existing opt-outs.
 - Fixed shell installer telemetry missing the internal/test traffic category used to exclude synthetic installations from dashboards.
 - Fixed `/feedback` and `/resume` usage events being dropped from command telemetry.
 - Changed error reporting to prepare PostHog error events in Prime Agent, preserving code grouping, opt-out, and compatibility with older collectors.

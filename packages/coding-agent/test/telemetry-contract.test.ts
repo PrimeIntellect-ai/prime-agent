@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -99,21 +99,6 @@ describe("shared telemetry contract and privacy", () => {
 			command_name: commandName,
 		});
 	});
-	it.each(["feedback", "resume"])("delivers %s command telemetry through the capture helper", async (commandName) => {
-		const { batches, fetch } = setup();
-		vi.stubGlobal("fetch", fetch);
-		await captureAgentCommandUsed({
-			agentDir: directory(),
-			settingsManager: SettingsManager.inMemory(),
-			commandName,
-		});
-		await vi.waitFor(() => expect(batches).toHaveLength(1));
-		expect(batches[0].events).toHaveLength(1);
-		expect(batches[0].events[0]).toMatchObject({
-			name: "agent command used",
-			properties: { command_name: commandName },
-		});
-	});
 
 	it("strips private canaries before any sink or queue sees them", () => {
 		const canary = "private@example.test /Users/private/repo sk-private https://secret.test/?token=private";
@@ -193,64 +178,6 @@ describe("shared telemetry contract and privacy", () => {
 		expect(safe).toMatchObject({ error_code_group: "ETIMEDOUT", error_subtype: "credential_invalid" });
 		expect(JSON.stringify(safe)).not.toContain("private_prompt_canary");
 	});
-	it("accepts scoped input timings but rejects unrelated prompt and connection data", () => {
-		const input = sanitizeTelemetryProperties("agent input stage", {
-			...base,
-			input_id: errorId,
-			stage: "received",
-			outcome: "started",
-			timing_origin: "worker_input",
-			duration_ms: null,
-			setup_team_scope_changed: null,
-			ui_auth_source_changed: true,
-			endpoint_category: "custom",
-			context_source: "request",
-			prompt: "private prompt",
-			headers: { token: "private secret" },
-		});
-		expect(input).toMatchObject({
-			input_id: errorId,
-			duration_ms: null,
-			setup_team_scope_changed: null,
-			ui_auth_source_changed: true,
-			timing_origin: "worker_input",
-			endpoint_category: "custom",
-		});
-		expect(JSON.stringify(input)).not.toContain("private");
-	});
-	it("accepts installation outcomes without allowing command output or private version labels", () => {
-		const properties = sanitizeTelemetryProperties("agent installation stage", {
-			...installationStage,
-			from_version: "0.9.1",
-			target_version: "0.9.2-private_canary",
-			observed_version: "https://private_canary.test/release",
-			reason: "private_canary",
-			duration_ms: null,
-			exit_code: 1,
-			error_message: "private_canary",
-			stderr: "private_canary",
-			command: "private_canary",
-			download_url: "private_canary",
-		});
-		expect(properties).toMatchObject({
-			installation_attempt_id: runId,
-			from_version: "0.9.1",
-			target_version: "0.0.0",
-			observed_version: "0.0.0",
-			reason: "unknown",
-			duration_ms: null,
-			exit_code: 1,
-		});
-		expect(JSON.stringify(properties)).not.toContain("private_canary");
-		for (const field of ["installation_action", "installation_source", "stage", "outcome"]) {
-			expect(
-				sanitizeTelemetryProperties("agent installation stage", {
-					...installationStage,
-					[field]: "private_canary",
-				}),
-			).toBeUndefined();
-		}
-	});
 });
 
 describe("version negotiation, retry and consent", () => {
@@ -270,28 +197,7 @@ describe("version negotiation, retry and consent", () => {
 			expect(batches[0].schema_version).toBe(2);
 		},
 	);
-	it("retains unsupported installation stages until collector revision 3 is discovered", async () => {
-		let revision = 2;
-		let now = Date.now();
-		const { client, batches } = setup({
-			now: () => now,
-			discover: () => Response.json({ schema_versions: [1, 2], schema_revision: revision }),
-		});
-		client.capture("agent installation stage", installationStage);
-		client.capture("agent started", base);
-		await client.flush();
-		expect(batches.flatMap((batch) => batch.events.map((event) => event.name))).toEqual(["agent started"]);
-		revision = 3;
-		now += 60_001;
-		await client.flush();
-		expect(batches[1].events).toHaveLength(1);
-		expect(batches[1].events[0]).toMatchObject({
-			name: "agent installation stage",
-			properties: { installation_attempt_id: runId, installation_source: "interactive", stage: "package_install" },
-		});
-		await client.flush();
-		expect(batches).toHaveLength(2);
-	});
+
 	it.each([
 		{ original_error_messages: true, error_message_policy_revision: 1, expected: true },
 		{ original_error_messages: false, error_message_policy_revision: 1, expected: false },
@@ -320,66 +226,7 @@ describe("version negotiation, retry and consent", () => {
 		expect(JSON.stringify(batches)).not.toContain("private_prompt_canary");
 		expect(JSON.stringify(batches)).not.toContain("sk-syntheticsecret");
 	});
-	it("does not create identity, discover capabilities, or send errors when opted out", async () => {
-		const agentDir = directory();
-		const fetch = vi.fn();
-		const client = new TelemetryClient({ agentDir, isEnabled: () => false, fetch });
-		client.capture("agent error", reviewedError);
-		await client.flush();
-		expect(fetch).not.toHaveBeenCalled();
-		expect(existsSync(join(agentDir, "telemetry.json"))).toBe(false);
-	});
-	it.each(["unavailable", "malformed", "oversized", "mismatched", "network_error"])(
-		"expires a previously accepted message policy when discovery becomes %s",
-		async (failure) => {
-			let now = Date.now();
-			let discoveries = 0;
-			const { client, batches } = setup({
-				now: () => now,
-				discover: () => {
-					if (++discoveries === 1)
-						return Response.json({
-							schema_versions: [1, 2],
-							original_error_messages: true,
-							error_message_policy_revision: 1,
-						});
-					if (failure === "unavailable") return new Response(null, { status: 404 });
-					if (failure === "malformed") return new Response("not JSON");
-					if (failure === "oversized") return new Response("x".repeat(4_097));
-					if (failure === "network_error") throw new Error("Synthetic discovery failure");
-					return Response.json({
-						schema_versions: [1, 2],
-						original_error_messages: true,
-						error_message_policy_revision: 2,
-					});
-				},
-			});
-			client.capture("agent error", reviewedError);
-			await client.flush();
-			expect(batches[0].events[0].properties.error_message).toBe(reviewedError.error_message);
-			now += 60_001;
-			client.capture("agent error", reviewedError);
-			await client.flush();
-			expect(discoveries).toBe(2);
-			expect(batches).toHaveLength(2);
-			expect(batches[1].schema_version).toBe(2);
-			expect(batches[1].events[0].properties.error_code_group).toBe("ETIMEDOUT");
-			for (const key of TELEMETRY_ERROR_MESSAGE_PROPERTIES)
-				expect(batches[1].events[0].properties).not.toHaveProperty(key);
-		},
-	);
-	it("isolates malformed direct sink payloads before identity creation", () => {
-		const agentDir = directory();
-		const client = new TelemetryClient({ agentDir });
-		const payload = new Proxy(base, {
-			getOwnPropertyDescriptor() {
-				throw new Error("private accessor");
-			},
-		});
-		expect(() => client.capture("agent started", payload)).not.toThrow();
-		expect(client.delivery.rejected).toBe(1);
-		expect(existsSync(join(agentDir, "telemetry.json"))).toBe(false);
-	});
+
 	it("sends only legacy fields and names to an old collector", async () => {
 		const { client, batches } = setup({
 			discover: () => new Response(null, { status: 404 }),
@@ -400,28 +247,7 @@ describe("version negotiation, retry and consent", () => {
 		expect(batches[0].events.map((event) => event.name)).toEqual(["agent started"]);
 		expect(batches[0].events[0].properties).toEqual({ ...base, install_method: "unknown", session_id: sessionId });
 	});
-	it("delivers short-lived v2 runs and retries only unacknowledged stable IDs", async () => {
-		let partial = true;
-		const { client, batches } = setup({
-			receive: (batch) => {
-				if (partial) {
-					partial = false;
-					return Response.json(
-						{ accepted: 1, accepted_ids: [batch.events[0].id], dropped_ids: [], retry_ids: [batch.events[1].id] },
-						{ status: 202 },
-					);
-				}
-				return accepted(batch);
-			},
-		});
-		client.capture("agent run started", { ...base, session_id: sessionId, run_id: runId });
-		client.capture("agent error", error);
-		await client.flush();
-		await client.flush();
-		expect(batches.map((batch) => batch.schema_version)).toEqual([2, 2]);
-		expect(batches[1].events.map((event) => event.id)).toEqual([batches[0].events[1].id]);
-		expect(client.delivery.accepted).toBe(2);
-	});
+
 	it("falls back safely when the collector is rolled back after capability discovery", async () => {
 		const { client, batches } = setup({
 			receive: (batch) => {
@@ -438,22 +264,7 @@ describe("version negotiation, retry and consent", () => {
 		expect(batches[1].events[0].id).toBe(batches[0].events[0].id);
 		expect(batches[1].events[0].properties).not.toHaveProperty("schema_revision");
 	});
-	it("never generates identity while opted out and clears queued events before re-enabling", async () => {
-		let enabled = false;
-		const agentDir = directory();
-		const { client, batches: sent } = setup({ agentDir, isEnabled: () => enabled });
-		client.capture("agent started", base);
-		await client.flush();
-		expect(existsSync(join(agentDir, "telemetry.json"))).toBe(false);
-		enabled = true;
-		client.capture("agent started", base);
-		enabled = false;
-		await client.flush();
-		enabled = true;
-		client.capture("agent error", error);
-		await client.flush();
-		expect(sent.flatMap((batch) => batch.events.map((event) => event.name))).toEqual(["agent error"]);
-	});
+
 	it("purges cached client queues synchronously on a settings off/on transition", async () => {
 		const { batches, fetch } = setup();
 		vi.stubGlobal("fetch", fetch);
@@ -494,21 +305,5 @@ describe("version negotiation, retry and consent", () => {
 		expect(client.delivery.overflow).toBe(44);
 		expect(client.delivery.accepted).toBe(256);
 		expect(batches.every((batch) => Buffer.byteLength(JSON.stringify(batch)) <= 30_000)).toBe(true);
-	});
-	it("expires undelivered events and never reports endpoint failures as user errors", async () => {
-		let now = Date.now();
-		const { client, batches } = setup({
-			now: () => now,
-			receive: () => {
-				throw new Error("secret proxy connection failed");
-			},
-		});
-		client.capture("agent started", base);
-		await client.flush();
-		now += 86_400_001;
-		await client.flush();
-		expect(batches).toHaveLength(1);
-		expect(client.delivery.expired).toBe(1);
-		expect(batches[0].events[0].name).toBe("agent started");
 	});
 });

@@ -64,17 +64,8 @@ Requirements, release lookup, download, verification, package completion, daemon
 
 After package success, at most 16 private markers remain for seven days so a newer runtime can report readiness. Their local working-directory field is used only to recheck the originating project's opt-out and is never uploaded. Current-project consent is checked independently. Readiness consumes its marker even if delivery fails; this is not a durable event queue. Telemetry never waits before presenting the UI or starting headless work.
 
-## Delivery and dashboards
+## Delivery
 
 Capture is asynchronous. Each client holds at most 256 sanitized reports in memory, sends batches of at most 20 events/30 KB, and expires reports after five attempts or 24 hours. Retries retain IDs and back off up to 60 seconds. Background flush has a seven-second budget; controlled shutdown waits at most 1.5 seconds. Delivery failures never recursively report themselves. Hard kills, offline operation, overflow, and endpoint failures can lose reports. The exception monitor preserves normal process exit behavior.
 
-The [dashboard definitions](telemetry-dashboards.json) contain seven historical count corrections and 30 views, including three proposed alerts. From the repository root:
-
-```sh
-npx tsx scripts/publish-telemetry-dashboards.mjs --check
-npx tsx scripts/publish-telemetry-dashboards.mjs --preflight
-```
-
-`--check` is local; `--preflight` uses `POSTHOG_PERSONAL_API_KEY` to validate the project, saved charts, queries, and observed schema revisions without writes. `--apply` explicitly publishes after those checks. Views without eligible data remain pending; installation views require revision 3. `--legacy-only` limits work to historical corrections. `--include-alerts` creates disabled alerts without subscribers; thresholds and recipients need separate review. Percentiles must show sample counts and missing-value coverage.
-
-Deploy the compatible collector before the client. Verify retained synthetic events, opt-out, and old/new daemon combinations, then run dashboard preflight. Proxy/access logs, shared PostHog retention settings, representative workload coverage, and abrupt-exit loss require deployment-level checks. Unit tests do not establish production coverage or dashboard publication.
+Deploy the compatible collector before the client. Verify retained synthetic events, opt-out, and old/new daemon combinations. Dashboard configuration and alert policies are managed separately from the open-source agent. Unit tests do not establish production coverage.
