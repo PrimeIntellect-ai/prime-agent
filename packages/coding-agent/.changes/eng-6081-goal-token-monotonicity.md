@@ -1,0 +1,1 @@
+- Fixed goal token accounting regressing across compaction context rebuilds: the same goal's usage counter can no longer move backwards when a summary navigation reloads a stale persisted state.
