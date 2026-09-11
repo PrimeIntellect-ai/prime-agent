@@ -39,6 +39,16 @@ function lastUserText(context: Context): string {
 	return "";
 }
 
+function makeSkill(name: string) {
+	return {
+		name,
+		description: `Test skill ${name}`,
+		filePath: `/tmp/skills/${name}/SKILL.md`,
+		baseDir: "/tmp/skills",
+		disableModelInvocation: false,
+	};
+}
+
 function makeTemplate(name: string): PromptTemplate {
 	return {
 		name,
@@ -142,6 +152,57 @@ describe("AgentSession slash-command typo guard", () => {
 		try {
 			await session.prompt("/etc/hosts is where hostname lookups start");
 			expect(promptCalls).toEqual(["/etc/hosts is where hostname lookups start"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("suggests registered skills for typo'd skill commands", async () => {
+		const { agent, resourceLoader } = createSession();
+		const loader = resourceLoader as unknown as {
+			getSkills: () => { skills: ReturnType<typeof makeSkill>[]; diagnostics: unknown[] };
+		};
+		loader.getSkills = () => ({ skills: [makeSkill("python")], diagnostics: [] });
+		const authStorage = AuthStorage.create(join(tempDir, "auth5.json"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const { SessionManager } = await import("../src/core/session-manager.js");
+		const { SettingsManager } = await import("../src/core/settings-manager.js");
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions5")),
+			settingsManager: SettingsManager.create(tempDir, tempDir),
+			cwd: tempDir,
+			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models5.json")),
+			resourceLoader,
+		});
+		try {
+			await expect(session.prompt("/skill:pythno fix the bug")).rejects.toThrow(
+				"Unknown command: /skill:pythno. Did you mean /skill:python?",
+			);
+			expect(promptCalls).toEqual([]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("passes through oversized /-prefixed prompts without fuzzy matching", async () => {
+		const { agent, resourceLoader } = createSession();
+		const authStorage = AuthStorage.create(join(tempDir, "auth6.json"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const { SessionManager } = await import("../src/core/session-manager.js");
+		const { SettingsManager } = await import("../src/core/settings-manager.js");
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions6")),
+			settingsManager: SettingsManager.create(tempDir, tempDir),
+			cwd: tempDir,
+			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models6.json")),
+			resourceLoader,
+		});
+		try {
+			const longPath = `/very/long/${"a".repeat(500)}/path`;
+			await session.prompt(`${longPath} is the file to inspect`);
+			expect(promptCalls).toEqual([`${longPath} is the file to inspect`]);
 		} finally {
 			session.dispose();
 		}

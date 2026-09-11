@@ -4690,6 +4690,10 @@ export class AgentSession {
 	private _throwIfUnknownSlashCommand(text: string): void {
 		const parsed = parseSlashCommand(text);
 		if (!parsed) return;
+		// No registered command name is anywhere near this long; oversized
+		// /-prefixed inputs are prompts, and fuzzy-matching them would be
+		// quadratic work on the event loop.
+		if (parsed.name.length > 64) return;
 		if (isBuiltinSlashCommandName(parsed.name)) return;
 		if (this.promptTemplates.some((template) => template.name === parsed.name)) return;
 		if (
@@ -4698,11 +4702,13 @@ export class AgentSession {
 		) {
 			return;
 		}
+		const skills = this.resourceLoader.getSkills().skills.map((skill) => skill.name);
 		const candidates = [
 			...BUILTIN_SLASH_COMMANDS.flatMap((command) => [command.name, ...(command.aliases ?? [])]),
 			...SESSION_SLASH_COMMAND_NAMES,
 			...this.promptTemplates.map((template) => template.name),
 			...this._extensionRunner.getRegisteredCommands().map((command) => command.invocationName),
+			...skills.map((skill) => `skill:${skill}`),
 		];
 		const suggestion = findSlashCommandSuggestion(parsed.name, candidates);
 		if (!suggestion) return;
