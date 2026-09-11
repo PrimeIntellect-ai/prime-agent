@@ -1876,8 +1876,29 @@ export class AgentSession {
 		return true;
 	}
 
-	private _reloadGoalStateFromBranch(): void {
-		this._goalState = this._loadPersistedGoalState();
+	private _reloadGoalStateFromBranch(options: { monotonicTokens?: boolean } = {}): void {
+		const previous = this._goalState;
+		const reloaded = this._loadPersistedGoalState();
+		if (
+			options.monotonicTokens &&
+			previous.status === "active" &&
+			reloaded.status === "active" &&
+			reloaded.goalId === previous.goalId
+		) {
+			// A context rebuild continues the same timeline, but the rebuilt branch's
+			// last persisted goal entry can lag the in-memory counter (queue/flush
+			// races; child-usage attribution landing late). Accounting for the same
+			// logical goal must never regress across the cold boundary. Tree
+			// navigation keeps faithful branch semantics by calling without the flag.
+			this._goalState = {
+				...reloaded,
+				tokensUsed: Math.max(previous.tokensUsed, reloaded.tokensUsed),
+				continuationsUsed: Math.max(previous.continuationsUsed, reloaded.continuationsUsed),
+				timeUsedSeconds: Math.max(previous.timeUsedSeconds, reloaded.timeUsedSeconds),
+			};
+		} else {
+			this._goalState = reloaded;
+		}
 		this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
 		this._emitGoalUpdate();
 	}
@@ -12285,8 +12306,11 @@ export class AgentSession {
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
 			// Context rebuild = cold boundary: refresh the digest like resume.
+			// Summary navigation continues the same timeline (compaction), so the
+			// same goal's accounting must never regress; a plain branch move is
+			// time travel and keeps faithful branch semantics.
 			this._ensureHarnessDigestContext();
-			this._reloadGoalStateFromBranch();
+			this._reloadGoalStateFromBranch({ monotonicTokens: summaryText !== undefined });
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();
 

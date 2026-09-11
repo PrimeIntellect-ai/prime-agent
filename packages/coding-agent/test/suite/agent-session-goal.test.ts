@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
-import type { GoalHostResponse } from "../../src/core/goals.js";
+import { GOAL_STATE_CUSTOM_TYPE, type GoalHostResponse } from "../../src/core/goals.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
@@ -474,6 +474,57 @@ describe("AgentSession goals", () => {
 			active: false,
 			status: "idle",
 		});
+	});
+
+	it("keeps goal token accounting monotonic across summary context rebuilds", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.handleGoalHostRequest("goal.create", { objective: "do work" });
+
+		const goalId = harness.session.goalState.goalId;
+		expect(harness.session.goalState.status).toBe("active");
+
+		// Bill usage to the active goal through the same path a real assistant
+		// message_end uses.
+		const billed = assistantWithUsage("working", { input: 40, output: 10, totalTokens: 50 });
+		const accounted = (
+			harness.session as unknown as {
+				_accountGoalUsageForAssistantMessage(message: AssistantMessage): boolean;
+			}
+		)._accountGoalUsageForAssistantMessage(billed);
+		// The method returns true only when accounting hits the token budget;
+		// normal accounting returns false.
+		expect(accounted).toBe(false);
+		expect(harness.session.goalState.tokensUsed).toBeGreaterThanOrEqual(50);
+
+		// Simulate a stale persisted snapshot for the SAME goal: an older
+		// accounting entry re-persisted after newer usage (queue/flush race,
+		// or child-usage attribution landing after the branch was written).
+		harness.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, {
+			...harness.session.goalState,
+			tokensUsed: 1,
+			continuationsUsed: 0,
+			timeUsedSeconds: 0,
+		});
+
+		const reload = (options?: { monotonicTokens?: boolean }) =>
+			(
+				harness.session as unknown as {
+					_reloadGoalStateFromBranch(options?: { monotonicTokens?: boolean }): void;
+				}
+			)._reloadGoalStateFromBranch(options);
+
+		// Summary navigation (compaction) continues the same timeline: the same
+		// goal's accounting must not regress to the stale snapshot.
+		reload({ monotonicTokens: true });
+		expect(harness.session.goalState.status).toBe("active");
+		expect(harness.session.goalState.goalId).toBe(goalId);
+		expect(harness.session.goalState.tokensUsed).toBeGreaterThanOrEqual(50);
+
+		// Plain branch moves are time travel and stay faithful to the branch's
+		// last persisted entry, even when it is lower.
+		reload();
+		expect(harness.session.goalState.tokensUsed).toBe(1);
 	});
 
 	it("normalizes queued goal context text and images", async () => {
