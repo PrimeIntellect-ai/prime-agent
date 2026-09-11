@@ -116,13 +116,9 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `app.model.select` | `ctrl+l` | Open model selector |
 | `app.model.toggleScope` | `alt+s` | Toggle between all and scoped models |
 
-### Configuration Menu
+### Configuration Pickers
 
-Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, Models, and MCP Connections. Use `escape` to close the menu. Left and right move the cursor in the active search field.
-
-| Keybinding id | Default | Description |
-|--------|---------|-------------|
-| `app.configuration.previousTab` | `shift+tab` | Select the previous configuration tab |
+Models, Providers, and MCP Connections open as separate pickers. Use `escape` to close a picker. Left and right edit a nonempty search field; with an empty model search, they adjust the highlighted model's effort.
 
 ### Display and Message Queue
 

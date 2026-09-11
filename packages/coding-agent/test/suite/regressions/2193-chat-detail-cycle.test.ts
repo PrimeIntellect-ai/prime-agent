@@ -96,7 +96,11 @@ function assertMode(mode: ModeControls, detail: "overview" | "details" | "all"):
 }
 describe("conversation detail cycle", () => {
 	test("cycles a reopened saved chat without changing messages or JSONL", async () => {
-		harness = await createHarness({ tools, persistSession: true, settings: { hideThinkingBlock: false } });
+		harness = await createHarness({
+			tools,
+			persistSession: true,
+			settings: { theme: "dark", ...{ hideThinkingBlock: false } },
+		});
 		harness.setResponses([
 			fauxAssistantMessage(
 				[
@@ -141,7 +145,7 @@ describe("conversation detail cycle", () => {
 		assertMode(mode, "overview");
 		expect(JSON.stringify(context.messages)).toBe(source);
 		expect(readFileSync(sessionFile, "utf8")).toBe(savedTrace);
-		expect(harness.settingsManager.getHideThinkingBlock()).toBe(false);
+		expect(harness.settingsManager.getGlobalSettings()).toMatchObject({ hideThinkingBlock: false });
 	});
 	test("keeps full shell notifications at their arrival position through live and reopened detail cycles", async () => {
 		const code = "h = bash('printf done')\nh";

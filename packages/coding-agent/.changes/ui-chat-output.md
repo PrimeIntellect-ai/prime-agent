@@ -14,3 +14,6 @@
 - Changed expanded Python cells to nest input directly under the summary, align marked output beneath it, and separate full tool and message blocks.
 - Fixed unwanted gaps between compact tool and agent-message rows when empty assistant messages or hidden thinking appear between them.
 - Fixed missing separation between refinement notices and subsequent collapsed background shell completions.
+- Fixed custom themes without `mdBody`, large expanded agent messages, and slow or unmatched shell completions caused by malformed launch arguments or blank lines.
+- Removed obsolete thinking-visibility settings and unused transcript heading and hint state.
+- Fixed indefinitely animated shell rows after ambiguous completion notifications while keeping unmatched results at their original timeline position.

@@ -88,7 +88,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 	}
 
 	isSelectable(): boolean {
-		return this.counts.total > 0 && this.openable;
+		return !this.getPickerOpen() && this.counts.total > 0 && this.openable;
 	}
 
 	handleInput(data: string): void {

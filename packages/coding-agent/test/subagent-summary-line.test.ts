@@ -67,11 +67,18 @@ describe("SubagentSummaryLine", () => {
 		expect(closed[0]).toContain("75k (75%)");
 		expect(closed[1]).toContain("╭─ subagents ─");
 
+		expect(line.isSelectable()).toBe(true);
+		const onOpen = vi.fn();
+		line.onOpen = onOpen;
 		pickerOpen = true;
 		expect(line.render(120)).toEqual([]);
+		expect(line.isSelectable()).toBe(false);
+		line.handleInput("\r");
+		expect(onOpen).not.toHaveBeenCalled();
 
 		pickerOpen = false;
 		expect(line.render(120).map(stripAnsi)).toHaveLength(4);
+		expect(line.isSelectable()).toBe(true);
 	});
 
 	it("hints ↓ select when unfocused and Enter/→ open when focused", () => {
@@ -85,6 +92,27 @@ describe("SubagentSummaryLine", () => {
 		const focused = stripAnsi(line.render(120)[1]);
 		expect(focused).toContain("open");
 		expect(focused).not.toContain("↓ select");
+	});
+
+	it("does not transfer editor focus to the hidden summary while a picker is open", () => {
+		let pickerOpen = true;
+		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode;
+		const setFocus = vi.fn();
+		const summaryLine = { isSelectable: () => true };
+		Object.assign(mode, {
+			isInlinePickerOpen: () => pickerOpen,
+			getTrayOverrideLabel: () => undefined,
+			subagentSummaryLine: summaryLine,
+			ui: { setFocus, requestRender: vi.fn() },
+		});
+		const focus = Reflect.get(InteractiveMode.prototype, "focusSubagentSummary") as (
+			this: InteractiveMode,
+		) => boolean;
+		expect(focus.call(mode)).toBe(false);
+		expect(setFocus).not.toHaveBeenCalled();
+		pickerOpen = false;
+		expect(focus.call(mode)).toBe(true);
+		expect(setFocus).toHaveBeenCalledWith(summaryLine);
 	});
 
 	it("keeps the selection background across truncation resets when focused", () => {

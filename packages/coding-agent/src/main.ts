@@ -1478,7 +1478,6 @@ export async function main(args: string[], options?: MainOptions) {
 				migratedProviders,
 				modelFallbackMessage: startupModel.modelFallbackMessage,
 				promptStashStore,
-				startupModelId: startupModel.model?.id,
 				initialSession,
 				initialScopeKey,
 				verbose: parsed.verbose,

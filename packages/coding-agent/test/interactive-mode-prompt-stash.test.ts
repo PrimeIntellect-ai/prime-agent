@@ -1,4 +1,5 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
+import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, it, type Mock, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
@@ -73,7 +74,7 @@ type ResetHarness = PromptStashLiveMarkerHarness & {
 	activityTracker: { reset: Mock };
 	contextUsageTokenBaseline: number;
 	agentRunFileChanges: Map<string, unknown>;
-	recapContainer: { clear: Mock };
+	recapContainer: Container;
 	ui: { requestRender: Mock };
 	ipythonToolComponents: Map<string, unknown>;
 	lateIpythonSentAgentMessages: Map<string, unknown>;
@@ -649,7 +650,7 @@ describe("InteractiveMode prompt stash", () => {
 			activityTracker: { reset: vi.fn() },
 			contextUsageTokenBaseline: 1,
 			agentRunFileChanges: new Map(),
-			recapContainer: { clear: vi.fn() },
+			recapContainer: new Container(),
 			ui: { requestRender: vi.fn() },
 			ipythonToolComponents: new Map(),
 			lateIpythonSentAgentMessages: new Map(),
@@ -684,7 +685,7 @@ describe("InteractiveMode prompt stash", () => {
 			activityTracker: { reset: vi.fn() },
 			contextUsageTokenBaseline: 1,
 			agentRunFileChanges: new Map(),
-			recapContainer: { clear: vi.fn() },
+			recapContainer: new Container(),
 			ui: { requestRender: vi.fn() },
 			ipythonToolComponents: new Map(),
 			lateIpythonSentAgentMessages: new Map(),

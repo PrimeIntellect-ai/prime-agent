@@ -98,7 +98,7 @@ describe("AssistantMessageComponent", () => {
 				"RuntimeError: backend crashed",
 			].join("\n"),
 		};
-		const component = new AssistantMessageComponent(message, false, undefined, "Thinking...", { expanded: true });
+		const component = new AssistantMessageComponent(message, false, undefined, { expanded: true });
 		const rendered = stripAnsi(component.render(100).join("\n"));
 
 		expect(rendered).toContain("/tmp/internal.py");
@@ -263,11 +263,9 @@ describe("AssistantMessageComponent streaming identity", () => {
 			{ type: "thinking", thinking: "Second trace." },
 			{ type: "text", text: "Answer." },
 		]);
-		const component = new AssistantMessageComponent(message, false, undefined, "Custom thinking header");
+		const component = new AssistantMessageComponent(message, false);
 		const render = () => component.render(80).map((line) => stripAnsi(line).trim());
 
-		expect(render()).toEqual(["", "First trace.", "", "Second trace.", "", "Answer."]);
-		component.setHiddenThinkingLabel("Updated thinking header");
 		expect(render()).toEqual(["", "First trace.", "", "Second trace.", "", "Answer."]);
 		component.setHideThinkingBlock(true);
 		expect(render()).toEqual(["", "Answer."]);

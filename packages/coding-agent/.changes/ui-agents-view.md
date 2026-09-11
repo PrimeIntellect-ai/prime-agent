@@ -5,3 +5,4 @@
 
 - Removed the sub-agent expand/collapse caret from agent rows, giving every row the same icon prefix; the expand keybinding still shows and hides sub-agent rows.
 - Changed the agents header to show three metadata lines: title and version, agent counts, and the working directory globally or numeric depth in nested views; retained the nested back breadcrumb.
+- Fixed empty-state search feedback while replying to or renaming an agent.

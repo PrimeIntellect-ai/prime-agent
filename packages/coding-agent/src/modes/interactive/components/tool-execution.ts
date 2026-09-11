@@ -106,6 +106,7 @@ export class ToolExecutionComponent extends Container {
 	};
 	private hideComponent = false;
 	private shellCompletion?: ShellCompletion;
+	private shellCompletionAmbiguous = false;
 	private readonly resultListeners = new Set<() => void>();
 
 	constructor(
@@ -286,7 +287,19 @@ export class ToolExecutionComponent extends Container {
 
 	hasRunningBackgroundShell(): boolean {
 		const handle = this.getBackgroundShellHandle();
-		return handle !== undefined && handle.exitCode === undefined && this.shellCompletion === undefined;
+		return (
+			handle !== undefined &&
+			handle.exitCode === undefined &&
+			this.shellCompletion === undefined &&
+			!this.shellCompletionAmbiguous
+		);
+	}
+
+	markShellCompletionAmbiguous(): void {
+		if (!this.hasRunningBackgroundShell()) return;
+		this.shellCompletionAmbiguous = true;
+		this.updateDisplay();
+		this.ui.requestRender();
 	}
 
 	onResultUpdate(listener: () => void): () => void {
@@ -301,6 +314,7 @@ export class ToolExecutionComponent extends Container {
 	attachShellCompletion(completion: ShellCompletion): boolean {
 		if (this.shellCompletion) return false;
 		this.shellCompletion = completion;
+		this.shellCompletionAmbiguous = false;
 		this.updateDisplay();
 		this.ui.requestRender();
 		return true;
@@ -393,6 +407,7 @@ export class ToolExecutionComponent extends Container {
 					code: getIpythonCodeFromArgs(this.args),
 					backgroundShell: this.getBackgroundShellHandle(),
 					shellCompletion: this.shellCompletion,
+					shellCompletionAmbiguous: this.shellCompletionAmbiguous,
 					content: this.result?.content,
 					details: this.result?.details,
 					isPartial: this.isPartial,

@@ -2352,6 +2352,7 @@ describe("InteractiveMode model selection persistence", () => {
 			modelRegistry: ModelRegistry;
 			settingsManager: {
 				getRecentModels(): string[];
+				getDefaultThinkingLevel(): undefined;
 				setDefaultModelAndProvider(provider: string, modelId: string): void;
 			};
 		};
@@ -2467,6 +2468,7 @@ describe("InteractiveMode model selection persistence", () => {
 			modelRegistry,
 			settingsManager: {
 				getRecentModels: vi.fn(() => []),
+				getDefaultThinkingLevel: vi.fn(() => undefined),
 				setDefaultModelAndProvider: vi.fn(),
 			},
 		};
@@ -2795,7 +2797,7 @@ describe("InteractiveMode model selection persistence", () => {
 		await expect(result).resolves.toBeUndefined();
 	});
 
-	test("closes the model selector before the selected model finishes applying", async () => {
+	test("keeps the model selector focused until the selected model finishes applying", async () => {
 		const model = createModel("openai", "gpt-5.5");
 		const apply = createDeferred<void>();
 		const { fakeThis, getSelector } = createSelectorHarness({
@@ -2814,7 +2816,8 @@ describe("InteractiveMode model selection persistence", () => {
 		getSelector().handleInput("\r");
 		await flushAsyncWork();
 
-		expect(fakeThis.editorContainer.children).toEqual([fakeThis.editor]);
+		expect(fakeThis.editorContainer.children).toEqual([getSelector()]);
+		expect(fakeThis.ui.setFocus).toHaveBeenLastCalledWith(getSelector());
 		expect(fakeThis.closeConfigurationMenu).toBeDefined();
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Switching model: gpt-5.5");
 		expect(resolved).toBe(false);

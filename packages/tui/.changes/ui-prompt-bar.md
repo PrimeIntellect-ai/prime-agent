@@ -1,0 +1,2 @@
+- Kept slash-command completion separate from execution so Tab and partial Enter complete without submitting.
+- Fixed the argument separator when completing extension commands with custom argument suggestions.

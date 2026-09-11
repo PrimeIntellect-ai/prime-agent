@@ -67,7 +67,6 @@ export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
-	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private expanded = false;
@@ -85,14 +84,12 @@ export class AssistantMessageComponent extends Container {
 		message?: AssistantMessage,
 		hideThinkingBlock = false,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		hiddenThinkingLabel = "Thinking:",
 		options: AssistantMessageComponentOptions = {},
 	) {
 		super();
 
 		this.hideThinkingBlock = hideThinkingBlock;
 		this.markdownTheme = markdownTheme;
-		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.expanded = options.expanded ?? false;
 		this.precededByToolActivity = options.precededByToolActivity ?? false;
 		this.mermaidTransform = options.mermaidTransform;
@@ -116,16 +113,6 @@ export class AssistantMessageComponent extends Container {
 
 	setHideThinkingBlock(hide: boolean): void {
 		this.hideThinkingBlock = hide;
-		this.dirty = true;
-	}
-
-	/** True when the message carries a non-empty thinking block. */
-	hasThinkingContent(): boolean {
-		return (this.lastMessage?.content ?? []).some((c) => c?.type === "thinking" && c.thinking.trim());
-	}
-
-	setHiddenThinkingLabel(label: string): void {
-		this.hiddenThinkingLabel = label;
 		this.dirty = true;
 	}
 
@@ -218,7 +205,6 @@ export class AssistantMessageComponent extends Container {
 		}
 		parts.push(
 			`hide:${this.hideThinkingBlock}`,
-			`label:${this.hiddenThinkingLabel}`,
 			`expanded:${this.expanded}`,
 			// In the signature so the streaming->final transition rebuilds (mermaid renders differently).
 			`streaming:${this.isStreaming}`,

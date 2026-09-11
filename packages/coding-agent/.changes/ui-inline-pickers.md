@@ -16,3 +16,5 @@
 - Dropped the provider/model-id line from the inline model detail block; the prices now follow the list row directly.
 - Settled the effort marks on the filled ■ and empty □ squares, the largest square pair the terminal fonts cover.
 - Tightened the effort square spacing; the squares now render edge to edge and the cluster stays centered.
+- Fixed model selection retaining focus until the model and explicitly selected effort finish applying, preserving the default effort when it is untouched.
+- Fixed arrow keys editing model searches and removed the unused configuration-tab binding.

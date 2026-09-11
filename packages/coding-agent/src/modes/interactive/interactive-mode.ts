@@ -82,6 +82,7 @@ import {
 	DEFAULT_HEARTBEAT_DELIVERY_MODE,
 	parseHeartbeatCommand,
 } from "../../core/cron-jobs.js";
+import { DEFAULT_THINKING_LEVEL } from "../../core/defaults.js";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -963,8 +964,6 @@ export class InteractiveMode {
 	private contextUsageTokenBaseline = 0;
 	// Refresh ordering: a stale failure must never clobber a newer success.
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
-	private readonly defaultHiddenThinkingLabel = "Thinking:";
-	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private ctrlCExitHintExpiresAt = 0;
 	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -1038,6 +1037,7 @@ export class InteractiveMode {
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
+	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
 	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
@@ -1318,7 +1318,7 @@ export class InteractiveMode {
 			aliases: command.aliases,
 			description: command.description,
 			argumentHint: command.argumentHint,
-			takesArgument: command.takesArgument,
+			takesArgument: command.takesArgument === true,
 		}));
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
@@ -3421,17 +3421,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private setHiddenThinkingLabel(label?: string): void {
-		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-			}
-		}
-		if (this.streamingComponent) {
-			this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-		}
-		this.ui.requestRender();
+	private setHiddenThinkingLabel(_label?: string): void {
+		// Retain the extension/daemon UI hook; conversation thinking no longer has a heading.
 	}
 
 	private setExtensionWidget(
@@ -3517,15 +3508,14 @@ export class InteractiveMode {
 		if (this.loadingAnimation) {
 			this.updateWorkingLoaderMessage();
 		}
-		this.setHiddenThinkingLabel();
 	}
 
 	private static readonly MAX_WIDGET_LINES = 10;
 
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, false, true);
-		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
+		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true);
+		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false);
 		this.ui.requestRender();
 	}
 
@@ -3550,15 +3540,11 @@ export class InteractiveMode {
 	private renderWidgetContainer(
 		container: Container,
 		widgets: Map<string, Component & { dispose?(): void }>,
-		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
 		container.clear();
 
 		if (widgets.size === 0) {
-			if (spacerWhenEmpty) {
-				container.addChild(new Spacer(1));
-			}
 			return;
 		}
 
@@ -5692,7 +5678,6 @@ export class InteractiveMode {
 			undefined,
 			this.hideThinkingBlock,
 			this.getMarkdownThemeWithSettings(),
-			this.hiddenThinkingLabel,
 			{
 				expanded: this.toolOutputExpanded,
 				precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,
@@ -5929,7 +5914,8 @@ export class InteractiveMode {
 	}
 
 	private focusSubagentSummary(): boolean {
-		if (!this.subagentSummaryLine.isSelectable() || this.getTrayOverrideLabel()) return false;
+		if (this.isInlinePickerOpen() || !this.subagentSummaryLine.isSelectable() || this.getTrayOverrideLabel())
+			return false;
 		this.ui.setFocus(this.subagentSummaryLine);
 		this.ui.requestRender();
 		return true;
@@ -6344,7 +6330,6 @@ export class InteractiveMode {
 					message,
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
-					this.hiddenThinkingLabel,
 					{
 						expanded: this.toolOutputExpanded,
 						precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,
@@ -7933,17 +7918,19 @@ export class InteractiveMode {
 		});
 	}
 
-	private applyThinkingLevel(level: ThinkingLevel): void {
-		void this.agentConnection
+	private applyThinkingLevel(level: ThinkingLevel): Promise<boolean> {
+		return this.agentConnection
 			.setThinkingLevel(level)
 			.then(() => {
 				this.patchConnectionState({ thinkingLevel: level });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
 				this.showStatus(`Thinking level: ${level}`);
+				return true;
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
+				return false;
 			});
 	}
 
@@ -7952,6 +7939,7 @@ export class InteractiveMode {
 	}
 
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
+		if (this.configurationModelSelection) return this.configurationModelSelection;
 		this.closeConfigurationMenu?.();
 		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
@@ -7959,7 +7947,6 @@ export class InteractiveMode {
 
 		return new Promise((resolve) => {
 			let settled = false;
-			let hidden = false;
 			let busy = false;
 			let menu: ConfigurationMenuComponent;
 			const restoreEditor = () => {
@@ -7970,20 +7957,7 @@ export class InteractiveMode {
 				this.ui.requestRender();
 			};
 			const focus = () => {
-				if (!settled && !hidden && this.editorContainer.children.includes(menu)) this.ui.setFocus(menu);
-			};
-			const conceal = () => {
-				if (hidden || settled) return;
-				hidden = true;
-				restoreEditor();
-			};
-			const show = () => {
-				if (!hidden || settled) return;
-				hidden = false;
-				this.editorContainer.clear();
-				this.editorContainer.addChild(menu);
-				focus();
-				this.ui.requestRender();
+				if (!settled && this.editorContainer.children.includes(menu)) this.ui.setFocus(menu);
 			};
 			const finish = () => {
 				if (settled) return;
@@ -8056,7 +8030,9 @@ export class InteractiveMode {
 				configuredProviders: this.connectionConfiguredProviders,
 				recentModels: this.settingsManager.getRecentModels(),
 				initialModelSearch,
-				thinkingLevel: this.connectionState?.thinkingLevel,
+				thinkingLevel: this.getCurrentModel()?.reasoning
+					? this.connectionState?.thinkingLevel
+					: (this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL),
 				getRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 				requestRender: () => this.ui.requestRender(),
 				onSelectProvider: (provider) => authenticate(provider, "providers"),
@@ -8066,6 +8042,7 @@ export class InteractiveMode {
 					busy = true;
 					void (async () => {
 						let completed = false;
+						let selectionInFlight: Promise<void> | undefined;
 						try {
 							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions);
 							if (settled) return;
@@ -8077,17 +8054,26 @@ export class InteractiveMode {
 								this.connectionConfiguredProviders,
 							);
 							if (!ready) return;
-							conceal();
-							await this.completeModelSelection(model);
-							if (thinkingLevel !== undefined) {
-								this.applyThinkingLevel(thinkingLevel);
-							}
-							completed = true;
+							menu.setBusy(true);
+							const selection = (async () => {
+								await this.completeModelSelection(model);
+								if (settled) return false;
+								return thinkingLevel === undefined || (await this.applyThinkingLevel(thinkingLevel));
+							})();
+							selectionInFlight = selection.then(
+								() => {},
+								() => {},
+							);
+							this.configurationModelSelection = selectionInFlight;
+							completed = await selection;
 						} catch (error) {
-							show();
+							focus();
 							if (!settled) this.showError(error instanceof Error ? error.message : String(error));
 						} finally {
 							busy = false;
+							if (this.configurationModelSelection === selectionInFlight)
+								this.configurationModelSelection = undefined;
+							menu.setBusy(false);
 							if (completed) finish();
 						}
 					})();
