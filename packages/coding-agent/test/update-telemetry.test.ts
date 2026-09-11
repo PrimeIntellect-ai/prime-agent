@@ -39,6 +39,7 @@ import type * as VersionCheckModule from "../src/utils/version-check.js";
 const mocks = vi.hoisted(() => ({
 	events: [] as { name: TelemetryEventName; properties: TelemetryProperties }[],
 	flush: vi.fn(async () => {}),
+	capture: (name: TelemetryEventName, properties: TelemetryProperties) => mocks.events.push({ name, properties }),
 	spawn: vi.fn(),
 	spawnSync: vi.fn(),
 	getSelfUpdateCommand: vi.fn(),
@@ -81,10 +82,7 @@ vi.mock("../src/cli/daemon-update-restart.js", async (importOriginal) => ({
 
 vi.mock("../src/core/telemetry.js", async (importOriginal) => {
 	const original = await importOriginal<typeof TelemetryModule>();
-	const sink: TelemetrySink = {
-		capture: (name, properties) => mocks.events.push({ name, properties }),
-		flush: mocks.flush,
-	};
+	const sink: TelemetrySink = mocks;
 	return {
 		...original,
 		captureTelemetryEvent: (options: CaptureTelemetryEventOptions) =>
@@ -96,10 +94,7 @@ vi.mock("../src/core/telemetry.js", async (importOriginal) => {
 
 vi.mock("../src/core/telemetry-errors.js", async (importOriginal) => {
 	const original = await importOriginal<typeof TelemetryErrorsModule>();
-	const sink: TelemetrySink = {
-		capture: (name, properties) => mocks.events.push({ name, properties }),
-		flush: mocks.flush,
-	};
+	const sink: TelemetrySink = mocks;
 	return {
 		...original,
 		captureTelemetryError: (options: CaptureTelemetryErrorOptions) =>
@@ -331,86 +326,54 @@ describe("CLI update outcome telemetry", () => {
 	);
 
 	it.each([
-		{ phase: "failed" as const, total: 0, failed: 0, expectedRestart: "failed" },
-		{ phase: "complete" as const, total: 3, failed: 1, expectedRestart: "success" },
+		{
+			phase: "failed" as const,
+			total: 0,
+			failed: 0,
+			incomplete: 0,
+			restoreOutcome: undefined,
+			restoreFailed: undefined,
+		},
+		{ phase: "complete" as const, total: 3, failed: 1, incomplete: 0, restoreOutcome: "failed", restoreFailed: 1 },
+		{ phase: "complete" as const, total: 3, failed: 1, incomplete: 1, restoreOutcome: "failed", restoreFailed: 2 },
+		{
+			phase: "complete" as const,
+			total: 2,
+			failed: 0,
+			incomplete: undefined,
+			restoreOutcome: "unavailable",
+			restoreFailed: undefined,
+		},
 	])(
-		"keeps successful package update distinct from $phase restart with $failed failed restorations",
-		async ({ phase, total, failed, expectedRestart }) => {
+		"keeps package success separate from restart/restoration: %j",
+		async ({ phase, total, failed, incomplete, restoreOutcome, restoreFailed }) => {
 			mocks.launchCoordinator.mockResolvedValue(
 				coordinatorStatus({
 					phase,
 					counts: { total, restored: total - failed, resumed: 0, failed },
+					incompleteRestores: incomplete,
 					message: "private coordinator details should remain local",
 					failures: failed
 						? [{ sessionFile: "/private/user/session.jsonl", message: "private session prompt" }]
 						: [],
 				}),
 			);
-
 			await handlePackageCommand(["update", "--self"]);
-
 			expect(installationEvents().filter((event) => event.stage === "completed")).toEqual([
 				expect.objectContaining({ outcome: "success" }),
 			]);
-			expect(installationEvents()).toContainEqual(
-				expect.objectContaining({ stage: "daemon_restart", outcome: expectedRestart }),
-			);
-			if (total > 0)
-				expect(installationEvents()).toContainEqual(
-					expect.objectContaining({
-						stage: "session_restore",
-						outcome: "failed",
-						reason: "session_restore_failed",
-						session_restore_total: total,
-						session_restore_failed: failed,
-					}),
-				);
+			expect(stages()).toContain(`daemon_restart:${phase === "failed" ? "failed" : "success"}`);
+			const restore = installationEvents().find((event) => event.stage === "session_restore");
+			if (total > 0) {
+				expect(restore).toMatchObject({ outcome: restoreOutcome, session_restore_total: total });
+				expect(restore?.session_restore_failed).toBe(restoreFailed);
+				expect(restore?.reason).toBe(restoreFailed ? "session_restore_failed" : undefined);
+			} else expect(restore).toBeUndefined();
 			expect(stages()).not.toContain("ready:success");
 			expect(JSON.stringify(mocks.events)).not.toContain("private");
 			expect(process.exitCode).toBeUndefined();
 		},
 	);
-
-	it("includes recreated sessions whose pending work did not restore in the failure count", async () => {
-		mocks.launchCoordinator.mockResolvedValue(
-			coordinatorStatus({
-				counts: { total: 3, restored: 2, resumed: 1, failed: 1 },
-				incompleteRestores: 1,
-			}),
-		);
-
-		await handlePackageCommand(["update", "--self"]);
-
-		expect(installationEvents()).toContainEqual(
-			expect.objectContaining({
-				stage: "session_restore",
-				outcome: "failed",
-				reason: "session_restore_failed",
-				session_restore_total: 3,
-				session_restore_failed: 2,
-			}),
-		);
-		expect(installationEvents()).toContainEqual(expect.objectContaining({ stage: "completed", outcome: "success" }));
-		expect(process.exitCode).toBeUndefined();
-	});
-
-	it("marks full restoration as unmeasured for an older coordinator that only counted recreated sessions", async () => {
-		mocks.launchCoordinator.mockResolvedValue(
-			coordinatorStatus({
-				counts: { total: 2, restored: 2, resumed: 0, failed: 0 },
-				incompleteRestores: undefined,
-			}),
-		);
-
-		await handlePackageCommand(["update", "--self"]);
-
-		expect(installationEvents()).toContainEqual(
-			expect.objectContaining({ stage: "session_restore", outcome: "unavailable" }),
-		);
-		expect(stages()).not.toContain("session_restore:success");
-		expect(stages()).toContain("daemon_restart:success");
-		expect(process.exitCode).toBeUndefined();
-	});
 
 	it("reports coordinator launch failures without changing successful package command exit status", async () => {
 		mocks.launchCoordinator.mockRejectedValue(Object.assign(new Error("daemon start failed"), { code: "ENOENT" }));

@@ -36,6 +36,7 @@ import {
 	type TelemetryErrorComponent,
 	type TelemetryErrorOperation,
 	type TelemetryErrorStage,
+	telemetryLegacyErrorCategory,
 } from "./telemetry-error-classification.js";
 import { getTelemetryErrorRecoveryTracker } from "./telemetry-error-recovery.js";
 import { captureTelemetryError } from "./telemetry-errors.js";
@@ -224,7 +225,7 @@ function newUsageTotals(): UsageTotals {
 	return structuredClone(EMPTY_USAGE_TOTALS);
 }
 
-function addUsage(target: UsageTotals, usage: Usage): void {
+function addUsage(target: UsageTotals, usage: Usage, modelCallCount = 1): void {
 	target.input += usage.input;
 	target.output += usage.output;
 	target.cacheRead += usage.cacheRead;
@@ -235,21 +236,7 @@ function addUsage(target: UsageTotals, usage: Usage): void {
 	target.cost.cacheRead += usage.cost.cacheRead;
 	target.cost.cacheWrite += usage.cost.cacheWrite;
 	target.cost.total += usage.cost.total;
-	target.modelCallCount++;
-}
-
-function mergeUsage(target: UsageTotals, usage: UsageTotals): void {
-	target.input += usage.input;
-	target.output += usage.output;
-	target.cacheRead += usage.cacheRead;
-	target.cacheWrite += usage.cacheWrite;
-	target.totalTokens += usage.totalTokens;
-	target.cost.input += usage.cost.input;
-	target.cost.output += usage.cost.output;
-	target.cost.cacheRead += usage.cost.cacheRead;
-	target.cost.cacheWrite += usage.cost.cacheWrite;
-	target.cost.total += usage.cost.total;
-	target.modelCallCount += usage.modelCallCount;
+	target.modelCallCount += modelCallCount;
 }
 
 function parseBooleanOverride(value: string | undefined): boolean | undefined {
@@ -280,17 +267,10 @@ export function isTelemetryEnabled(settingsManager: SettingsManager): boolean {
 	return settingsManager.getTelemetryEnabled();
 }
 
-function isInstallationId(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
-	);
-}
-
 function readInstallationId(path: string): string | undefined {
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<TelemetryState>;
-		return parsed.version === TELEMETRY_STATE_VERSION && isInstallationId(parsed.installationId)
+		return parsed.version === TELEMETRY_STATE_VERSION && isTelemetryUuid(parsed.installationId)
 			? parsed.installationId
 			: undefined;
 	} catch {
@@ -326,7 +306,7 @@ export function getOrCreateTelemetryInstallationId(agentDir: string, randomId: (
 	}
 
 	const installationId = randomId();
-	if (!isInstallationId(installationId)) {
+	if (!isTelemetryUuid(installationId)) {
 		throw new Error("Telemetry installation ID generator returned an invalid UUID");
 	}
 	mkdirSync(agentDir, { recursive: true });
@@ -519,30 +499,20 @@ export class TelemetryClient implements TelemetrySink {
 				const text = await response.text();
 				if (text.length > 4096 || !this.enabled()) return;
 				const body: unknown = JSON.parse(text);
+				this.supportsV2 = false;
+				if (typeof body !== "object" || body === null) return;
 				this.supportsV2 =
-					typeof body === "object" &&
-					body !== null &&
-					"schema_versions" in body &&
-					Array.isArray(body.schema_versions) &&
-					body.schema_versions.includes(2);
+					"schema_versions" in body && Array.isArray(body.schema_versions) && body.schema_versions.includes(2);
 				this.supportsInstallationOutcomes =
 					this.supportsV2 &&
-					typeof body === "object" &&
-					body !== null &&
 					"schema_revision" in body &&
 					typeof body.schema_revision === "number" &&
 					Number.isInteger(body.schema_revision) &&
 					body.schema_revision >= 3;
 				this.supportsPostHogExceptions =
-					this.supportsV2 &&
-					typeof body === "object" &&
-					body !== null &&
-					"posthog_exception_events" in body &&
-					body.posthog_exception_events === true;
+					this.supportsV2 && "posthog_exception_events" in body && body.posthog_exception_events === true;
 				this.supportsOriginalErrorMessages =
 					this.supportsV2 &&
-					typeof body === "object" &&
-					body !== null &&
 					"original_error_messages" in body &&
 					body.original_error_messages === true &&
 					"error_message_policy_revision" in body &&
@@ -843,14 +813,7 @@ export async function captureOnboardingCompleted(options: CaptureOnboardingCompl
 			provider_category: telemetryProviderCategory(options.provider),
 		},
 	});
-	try {
-		if (isTelemetryEnabled(options.settingsManager))
-			void telemetryClient(options)
-				.flush()
-				.catch(() => {});
-	} catch {
-		// Optional telemetry delivery must not interrupt onboarding.
-	}
+	void flushTelemetry(options, DEFAULT_REQUEST_TIMEOUT_MS);
 }
 
 export async function captureAgentCommandUsed(options: CaptureAgentCommandUsedOptions): Promise<void> {
@@ -863,40 +826,7 @@ export async function captureAgentCommandUsed(options: CaptureAgentCommandUsedOp
 			command_name: resolveBuiltinSlashCommandName(options.commandName),
 		},
 	});
-	try {
-		if (isTelemetryEnabled(options.settingsManager))
-			void telemetryClient(options)
-				.flush()
-				.catch(() => {});
-	} catch {
-		// Optional telemetry delivery must not interrupt the command.
-	}
-}
-
-function errorCategory(message: AssistantMessage | undefined): string | null {
-	if (!message || message.stopReason !== "error") {
-		return null;
-	}
-	const error = message.errorMessage?.toLowerCase() ?? "";
-	if (/\b401\b|\b403\b|auth|api.?key|credential|unauthori[sz]ed|forbidden/.test(error)) {
-		return "authentication";
-	}
-	if (/\b429\b|rate.?limit|quota/.test(error)) {
-		return "rate_limit";
-	}
-	if (/timeout|timed out/.test(error)) {
-		return "timeout";
-	}
-	if (/context|token.*limit|too long|maximum.*length/.test(error)) {
-		return "context_limit";
-	}
-	if (/network|socket|connection|fetch/.test(error)) {
-		return "network";
-	}
-	if (/\b5\d\d\b|overload|unavailable/.test(error)) {
-		return "provider_unavailable";
-	}
-	return "other";
+	void flushTelemetry(options, DEFAULT_REQUEST_TIMEOUT_MS);
 }
 
 function runOutcome(message: AssistantMessage | undefined): "success" | "error" | "aborted" {
@@ -1150,13 +1080,14 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 			timing("compaction", now() - run.compactionStartedAt, shutdown ? "shutdown_interrupted" : "unknown");
 		}
 		const lastAssistant = run.lastAssistant;
+		const error = lastAssistant?.stopReason === "error" ? classifyTelemetryError(lastAssistant) : undefined;
 		sessionTotals.runCount++;
 		sessionTotals.toolCallCount += run.toolCallCount;
 		sessionTotals.compactionCount += run.compactionCount;
 		if (outcome === "success") sessionTotals.successfulRunCount++;
 		else if (outcome === "aborted") sessionTotals.abortedRunCount++;
 		else sessionTotals.failedRunCount++;
-		mergeUsage(sessionTotals.usage, run.usage);
+		addUsage(sessionTotals.usage, run.usage, run.usage.modelCallCount);
 		const costKnown = run.pricingComplete && run.usageComplete && run.usage.modelCallCount > 0;
 		capture("agent run completed", {
 			...context,
@@ -1198,9 +1129,8 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 			retry_count: run.retryCount,
 			provider_category: telemetryProviderCategory(lastAssistant?.provider),
 			model_category: lastAssistant ? modelCategory(lastAssistant.model) : "unknown",
-			error_category: errorCategory(lastAssistant),
-			error_subtype:
-				lastAssistant?.stopReason === "error" ? classifyTelemetryError(lastAssistant).error_subtype : "unknown",
+			error_category: error ? telemetryLegacyErrorCategory(lastAssistant?.errorMessage ?? "") : null,
+			error_subtype: error?.error_subtype ?? "unknown",
 			stop_reason: lastAssistant?.stopReason ?? "unknown",
 		});
 		for (const [category, tool] of run.tools)

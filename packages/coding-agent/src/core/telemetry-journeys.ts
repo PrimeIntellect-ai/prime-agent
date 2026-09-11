@@ -8,6 +8,7 @@ import {
 	telemetryAuthCategory,
 	telemetryProviderCategory,
 } from "./telemetry.js";
+import type { TELEMETRY_ENUMS } from "./telemetry-contract.js";
 import {
 	sanitizeTelemetryExecutionContext,
 	type TelemetryExecutionContextCategories,
@@ -20,70 +21,15 @@ import {
 	saveOnboardingTelemetryContext,
 } from "./telemetry-journey-state.js";
 
-export type TelemetryFeature =
-	| "model"
-	| "login"
-	| "logout"
-	| "effort"
-	| "goal"
-	| "new"
-	| "resume"
-	| "fork"
-	| "clone"
-	| "tree"
-	| "feedback";
+export type TelemetryFeature = (typeof TELEMETRY_ENUMS.feature)[number];
 export type TelemetryFeatureOutcome = "completed" | "failed" | "canceled" | "unavailable";
-export type TelemetryConfigurationChoice =
-	| "off"
-	| "minimal"
-	| "low"
-	| "medium"
-	| "high"
-	| "xhigh"
-	| "max"
-	| "create"
-	| "status"
-	| "pause"
-	| "resume"
-	| "clear"
-	| "unknown";
-export type TelemetryTaskFeedback = "helpful" | "partly_helpful" | "not_helpful";
-export type TelemetryAcquisitionMethod =
-	| "existing_configuration"
-	| "prime_browser"
-	| "prime_key_entry"
-	| "oauth"
-	| "api_key_entry"
-	| "external_credentials"
-	| "unknown";
-export type TelemetryValidationScope =
-	| "configuration"
-	| "identity_scope"
-	| "selected_context"
-	| "inference"
-	| "unchecked";
-export type TelemetryOnboardingStage =
-	| "entry"
-	| "provider_selection"
-	| "credential_discovery"
-	| "credential_validation"
-	| "model_access"
-	| "ready"
-	| "exit";
-export type TelemetryStageOutcome =
-	| "initiated"
-	| "completed"
-	| "failed"
-	| "canceled"
-	| "skipped"
-	| "configured"
-	| "unavailable"
-	| "provider_switched";
-export type TelemetryOnboardingEntryReason =
-	| "first_setup"
-	| "existing_configuration"
-	| "previously_shown"
-	| "reentered";
+export type TelemetryConfigurationChoice = (typeof TELEMETRY_ENUMS.configurationChoice)[number];
+export type TelemetryTaskFeedback = (typeof TELEMETRY_ENUMS.feedback)[number];
+export type TelemetryAcquisitionMethod = (typeof TELEMETRY_ENUMS.acquisitionMethod)[number];
+export type TelemetryValidationScope = (typeof TELEMETRY_ENUMS.validationScope)[number];
+export type TelemetryOnboardingStage = (typeof TELEMETRY_ENUMS.onboardingStage)[number];
+export type TelemetryStageOutcome = (typeof TELEMETRY_ENUMS.onboardingOutcome)[number];
+export type TelemetryOnboardingEntryReason = (typeof TELEMETRY_ENUMS.onboardingEntryReason)[number];
 
 export interface TelemetryFeatureAttempt {
 	finish(outcome: TelemetryFeatureOutcome, choice?: TelemetryConfigurationChoice): void;

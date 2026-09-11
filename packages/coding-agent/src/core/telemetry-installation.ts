@@ -12,6 +12,7 @@ import {
 	type TelemetryProperties,
 	type TelemetrySink,
 } from "./telemetry.js";
+import type { TELEMETRY_ENUMS } from "./telemetry-contract.js";
 import { captureTelemetryError } from "./telemetry-errors.js";
 import {
 	clearInstallationTelemetryState,
@@ -23,34 +24,9 @@ import {
 
 export const INSTALLATION_TELEMETRY_CONTEXT_ENV = "PRIME_AGENT_TELEMETRY_INSTALLATION_CONTEXT";
 
-type InstallationStage =
-	| "started"
-	| "requirements"
-	| "release_lookup"
-	| "download"
-	| "verification"
-	| "package_install"
-	| "daemon_restart"
-	| "session_restore"
-	| "relaunch"
-	| "ready"
-	| "completed";
-type InstallationOutcome = "started" | "success" | "failed" | "cancelled" | "skipped" | "unavailable";
-type InstallationReason =
-	| "up_to_date"
-	| "unsupported_install"
-	| "declined"
-	| "requirements_unavailable"
-	| "release_lookup_failed"
-	| "download_failed"
-	| "verification_failed"
-	| "install_failed"
-	| "daemon_restart_failed"
-	| "session_restore_failed"
-	| "relaunch_failed"
-	| "version_mismatch"
-	| "interrupted"
-	| "unknown";
+type InstallationStage = (typeof TELEMETRY_ENUMS.installationStage)[number];
+type InstallationOutcome = (typeof TELEMETRY_ENUMS.installationOutcome)[number];
+type InstallationReason = (typeof TELEMETRY_ENUMS.installationReason)[number];
 
 interface InstallationTelemetryOptions {
 	agentDir: string;

@@ -39,15 +39,20 @@ const support = {
 function accepted(batch: TelemetryBatch) {
 	return Response.json({ accepted_ids: batch.events.map((event) => event.id), dropped_ids: [], retry_ids: [] });
 }
-function setup(capabilities: object = support, respond = accepted) {
+function setup(
+	capabilities: object = support,
+	respond = accepted,
+	options: { discover?: () => Response | Promise<Response>; now?: () => number } = {},
+) {
 	const batches: TelemetryBatch[] = [];
 	let id = 0;
 	const client = new TelemetryClient({
 		agentDir: mkdtempSync(join(tmpdir(), "telemetry-posthog-")),
 		batchSize: 20,
+		now: options.now,
 		randomId: () => `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`,
 		fetch: async (_url, init) => {
-			if (init?.method === "GET") return Response.json(capabilities);
+			if (init?.method === "GET") return options.discover?.() ?? Response.json(capabilities);
 			const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
 			batches.push(batch);
 			return respond(batch);
@@ -96,13 +101,11 @@ describe("client-owned PostHog errors", () => {
 		{ native_error_tracking: true },
 		{ posthog_exception_events: false },
 		{ posthog_exception_events: "true" },
-	])("does not send native events to collectors without explicit support: %j", (capability) => {
-		return (async () => {
-			const { client, batches } = setup({ schema_versions: [1, 2], ...capability });
-			client.capture(source.name, source.properties);
-			await client.flush();
-			expect(batches[0].events.map((event) => event.name)).toEqual(["agent error"]);
-		})();
+	])("does not send native events to collectors without explicit support: %j", async (capability) => {
+		const { client, batches } = setup({ schema_versions: [1, 2], ...capability });
+		client.capture(source.name, source.properties);
+		await client.flush();
+		expect(batches[0].events.map((event) => event.name)).toEqual(["agent error"]);
 	});
 	it("builds native errors only after sanitization and message-policy negotiation", async () => {
 		const { client, batches } = setup({ ...support, original_error_messages: false });
@@ -119,11 +122,11 @@ describe("client-owned PostHog errors", () => {
 		expect(properties.$exception_list).toMatchObject([{ value: batches[0].events[0].properties.diagnostic_message }]);
 		expect(JSON.stringify(batches)).not.toContain("private_canary");
 	});
-	it("retries only the unacknowledged member of an error pair with its original ID", async () => {
+	it.each([0, 1])("retries only the unacknowledged member of an error pair (accepted: %s)", async (index) => {
 		let calls = 0;
 		const { client, batches } = setup(support, (batch) =>
 			++calls === 1
-				? Response.json({ accepted_ids: [batch.events[0].id], retry_ids: [batch.events[1].id] })
+				? Response.json({ accepted_ids: [batch.events[index].id], retry_ids: [batch.events[1 - index].id] })
 				: accepted(batch),
 		);
 		client.capture(source.name, source.properties);
@@ -131,20 +134,8 @@ describe("client-owned PostHog errors", () => {
 		await client.flush();
 		await client.flush();
 		expect(batches).toHaveLength(2);
-		expect(batches[1].events).toEqual([batches[0].events[1]]);
+		expect(batches[1].events).toEqual([batches[0].events[1 - index]]);
 		expect(client.delivery.accepted).toBe(2);
-	});
-	it("retains the source when only its exception is acknowledged", async () => {
-		let calls = 0;
-		const { client, batches } = setup(support, (batch) =>
-			++calls === 1
-				? Response.json({ accepted_ids: [batch.events[1].id], retry_ids: [batch.events[0].id] })
-				: accepted(batch),
-		);
-		client.capture(source.name, source.properties);
-		await client.flush();
-		await client.flush();
-		expect(batches[1].events).toEqual([batches[0].events[0]]);
 	});
 	it.each([false, true])("retains error pairs during slow discovery (retry: %s)", async (retry) => {
 		let now = Date.now();
@@ -153,19 +144,17 @@ describe("client-owned PostHog errors", () => {
 		const delayed = new Promise<Response>((resolve) => {
 			finishDiscovery = resolve;
 		});
-		const batches: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir: mkdtempSync(join(tmpdir(), "telemetry-posthog-discovery-")),
-			now: () => now,
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return retry && ++discoveries === 1 ? Response.json(support) : delayed;
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
-				return retry && batches.length === 1
+		const { client, batches } = setup(
+			support,
+			(batch) =>
+				retry && batches.length === 1
 					? Response.json({ accepted_ids: [batch.events[0].id], retry_ids: [batch.events[1].id] })
-					: accepted(batch);
+					: accepted(batch),
+			{
+				now: () => now,
+				discover: () => (retry && ++discoveries === 1 ? Response.json(support) : delayed),
 			},
-		});
+		);
 		client.capture(source.name, source.properties);
 		if (retry) {
 			await client.flush();
@@ -217,17 +206,9 @@ describe("client-owned PostHog errors", () => {
 	it("stops sending native events if support disappears at rediscovery", async () => {
 		let now = Date.now();
 		let discoveries = 0;
-		const batches: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir: mkdtempSync(join(tmpdir(), "telemetry-posthog-rollback-")),
+		const { client, batches } = setup(support, accepted, {
 			now: () => now,
-			fetch: async (_url, init) => {
-				if (init?.method === "GET")
-					return ++discoveries === 1 ? Response.json(support) : new Response(null, { status: 404 });
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
-				return accepted(batch);
-			},
+			discover: () => (++discoveries === 1 ? Response.json(support) : new Response(null, { status: 404 })),
 		});
 		client.capture(source.name, source.properties);
 		await client.flush();

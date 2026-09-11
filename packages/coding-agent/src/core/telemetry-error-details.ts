@@ -36,7 +36,7 @@ export const TELEMETRY_ERROR_TYPES = [
 	"unknown",
 ] as const;
 
-function read(value: unknown, key: string): unknown {
+export function readTelemetryErrorField(value: unknown, key: string): unknown {
 	if (!value || typeof value !== "object") return undefined;
 	try {
 		return (value as Record<string, unknown>)[key];
@@ -118,20 +118,24 @@ function errorNodes(error: unknown): unknown[] {
 		if (!node || typeof node !== "object" || seen.has(node)) continue;
 		seen.add(node);
 		for (const key of ["cause", "info", "error", "$metadata", "response"]) {
-			const nested = read(node, key);
+			const nested = readTelemetryErrorField(node, key);
 			if (nested && typeof nested === "object" && !nodes.includes(nested)) nodes.push(nested);
 		}
-		const diagnostics = read(node, "diagnostics");
+		const diagnostics = readTelemetryErrorField(node, "diagnostics");
 		if (Array.isArray(diagnostics)) {
 			for (const diagnostic of diagnostics.slice(-20))
-				if (read(diagnostic, "type") === "provider_stream_failure") nodes.push(read(diagnostic, "details"));
+				if (readTelemetryErrorField(diagnostic, "type") === "provider_stream_failure")
+					nodes.push(readTelemetryErrorField(diagnostic, "details"));
 		}
 	}
 	return nodes.slice(0, 24);
 }
 
 export function telemetryOriginalErrorDetails(error: unknown): Record<string, string | number | boolean | null> {
-	const message = typeof error === "string" ? error : (read(error, "errorMessage") ?? read(error, "message"));
+	const message =
+		typeof error === "string"
+			? error
+			: (readTelemetryErrorField(error, "errorMessage") ?? readTelemetryErrorField(error, "message"));
 	let messageDetails =
 		typeof message === "string"
 			? sanitizeTelemetryErrorMessage(message, findTelemetrySafeErrorMessageId(message))
@@ -140,16 +144,18 @@ export function telemetryOriginalErrorDetails(error: unknown): Record<string, st
 	let type: string = "unknown";
 	let fallbackCode = "unknown";
 	for (const node of errorNodes(error)) {
-		const candidate = sanitizeTelemetryErrorCode(read(node, "code") ?? read(node, "providerErrorType"));
+		const candidate = sanitizeTelemetryErrorCode(
+			readTelemetryErrorField(node, "code") ?? readTelemetryErrorField(node, "providerErrorType"),
+		);
 		if (candidate !== "unknown") {
 			if (["authentication_error", "api_error", "server_error", "error"].includes(candidate))
 				fallbackCode = candidate;
 			else if (code === "unknown") code = candidate;
 		}
-		const name = read(node, "name");
+		const name = readTelemetryErrorField(node, "name");
 		if (typeof name === "string" && type === "unknown")
 			type = TELEMETRY_ERROR_TYPES.includes(name as (typeof TELEMETRY_ERROR_TYPES)[number]) ? name : "custom";
-		const exitCode = read(node, "exitCode");
+		const exitCode = readTelemetryErrorField(node, "exitCode");
 		if (
 			code === "unknown" &&
 			typeof exitCode === "number" &&
@@ -158,7 +164,7 @@ export function telemetryOriginalErrorDetails(error: unknown): Record<string, st
 			exitCode <= 255
 		)
 			code = `process_exit_${exitCode}`;
-		const signal = read(node, "signal");
+		const signal = readTelemetryErrorField(node, "signal");
 		if (code === "unknown" && typeof signal === "string" && safeSignals.has(signal)) code = `signal_${signal}`;
 	}
 	if (code === "unknown") code = fallbackCode;

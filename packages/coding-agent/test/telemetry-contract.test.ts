@@ -100,13 +100,8 @@ describe("shared telemetry contract and privacy", () => {
 		});
 	});
 	it.each(["feedback", "resume"])("delivers %s command telemetry through the capture helper", async (commandName) => {
-		const batches: TelemetryBatch[] = [];
-		vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
-			if (init?.method === "GET") return capabilities();
-			const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-			batches.push(batch);
-			return accepted(batch);
-		});
+		const { batches, fetch } = setup();
+		vi.stubGlobal("fetch", fetch);
 		await captureAgentCommandUsed({
 			agentDir: directory(),
 			settingsManager: SettingsManager.inMemory(),
@@ -446,17 +441,7 @@ describe("version negotiation, retry and consent", () => {
 	it("never generates identity while opted out and clears queued events before re-enabling", async () => {
 		let enabled = false;
 		const agentDir = directory();
-		const sent: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir,
-			isEnabled: () => enabled,
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return capabilities();
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				sent.push(batch);
-				return accepted(batch);
-			},
-		});
+		const { client, batches: sent } = setup({ agentDir, isEnabled: () => enabled });
 		client.capture("agent started", base);
 		await client.flush();
 		expect(existsSync(join(agentDir, "telemetry.json"))).toBe(false);
@@ -470,13 +455,8 @@ describe("version negotiation, retry and consent", () => {
 		expect(sent.flatMap((batch) => batch.events.map((event) => event.name))).toEqual(["agent error"]);
 	});
 	it("purges cached client queues synchronously on a settings off/on transition", async () => {
-		const batches: TelemetryBatch[] = [];
-		vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
-			if (init?.method === "GET") return capabilities();
-			const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-			batches.push(batch);
-			return accepted(batch);
-		});
+		const { batches, fetch } = setup();
+		vi.stubGlobal("fetch", fetch);
 		const options = { agentDir: directory(), settingsManager: SettingsManager.inMemory() };
 		captureTelemetryEvent({ ...options, name: "agent error", properties: error });
 		options.settingsManager.setTelemetryEnabled(false);
@@ -508,21 +488,12 @@ describe("version negotiation, retry and consent", () => {
 	});
 
 	it("bounds memory and request bytes for a burst of rich errors", async () => {
-		const sizes: number[] = [];
-		const client = new TelemetryClient({
-			agentDir: directory(),
-			batchSize: 20,
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return capabilities();
-				sizes.push(Buffer.byteLength(String(init?.body)));
-				return accepted(JSON.parse(String(init?.body)) as TelemetryBatch);
-			},
-		});
+		const { client, batches } = setup({ batchSize: 20 });
 		for (let i = 0; i < 300; i++) client.capture("agent error", error);
 		await client.flush();
 		expect(client.delivery.overflow).toBe(44);
 		expect(client.delivery.accepted).toBe(256);
-		expect(sizes.every((size) => size <= 30_000)).toBe(true);
+		expect(batches.every((batch) => Buffer.byteLength(JSON.stringify(batch)) <= 30_000)).toBe(true);
 	});
 	it("expires undelivered events and never reports endpoint failures as user errors", async () => {
 		let now = Date.now();

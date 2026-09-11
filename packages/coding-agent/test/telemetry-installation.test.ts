@@ -101,16 +101,17 @@ function savedSettings(directory: string, value: unknown): void {
 	writeFileSync(join(directory, "settings.json"), JSON.stringify(value));
 }
 
-function ready(version = "1.2.3", currentCwd = cwd): void {
-	observeInstalledRuntimeReady({
+function ready(overrides: Partial<Parameters<typeof observeInstalledRuntimeReady>[0]> = {}): Promise<void> {
+	return observeInstalledRuntimeReady({
 		agentDir,
-		cwd: currentCwd,
+		cwd,
 		settingsManager,
 		sink,
 		readyKind: "interactive",
 		executionMode: "interactive",
-		version,
+		version: "1.2.3",
 		runtimeStartedAt: Date.now(),
+		...overrides,
 	});
 }
 
@@ -264,16 +265,6 @@ describe("installation consent", () => {
 		expect(readInstallationTelemetryState(agentDir)).toEqual([]);
 	});
 
-	it("rechecks the original project consent even when startup happens elsewhere", () => {
-		writeInstallationTelemetryState(agentDir, marker());
-		savedSettings(join(cwd, ".prime", "agent"), { telemetry: false });
-		const otherCwd = join(root, "other");
-		mkdirSync(otherCwd);
-		ready("1.2.3", otherCwd);
-		expect(sink.events).toEqual([]);
-		expect(readInstallationTelemetryState(agentDir)).toEqual([]);
-	});
-
 	it("rechecks saved opt-out before automatic delivery during a long update", async () => {
 		vi.useFakeTimers();
 		const fetch = vi.fn<typeof globalThis.fetch>(async () =>
@@ -292,11 +283,12 @@ describe("installation consent", () => {
 		expect(attempt?.environment().PRIME_AGENT_TELEMETRY).toBe("0");
 	});
 
-	it("rechecks current project consent independently of the originating project", () => {
+	it.each(["original", "current"])("rechecks the %s project's saved consent", (project) => {
 		writeInstallationTelemetryState(agentDir, marker());
 		const otherCwd = join(root, "other");
-		savedSettings(join(otherCwd, ".prime", "agent"), { telemetry: false });
-		ready("1.2.3", otherCwd);
+		mkdirSync(otherCwd);
+		savedSettings(join(project === "original" ? cwd : otherCwd, ".prime", "agent"), { telemetry: false });
+		ready({ cwd: otherCwd });
 		expect(sink.events).toEqual([]);
 		expect(readInstallationTelemetryState(agentDir)).toEqual([]);
 	});
@@ -314,14 +306,7 @@ describe("private readiness markers", () => {
 			return Response.json({ accepted_ids: batch.events.map((event) => event.id) });
 		});
 		vi.stubGlobal("fetch", fetch);
-		await observeInstalledRuntimeReady({
-			agentDir,
-			cwd,
-			settingsManager,
-			readyKind: "headless",
-			version: "1.2.3",
-			runtimeStartedAt: Date.now(),
-		});
+		await ready({ sink: undefined, readyKind: "headless" });
 		expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 		expect(readInstallationTelemetryState(agentDir)).toEqual([]);
 	});
@@ -337,54 +322,26 @@ describe("private readiness markers", () => {
 			});
 		});
 		vi.stubGlobal("fetch", fetch);
-		const delivery = observeInstalledRuntimeReady({
-			agentDir,
-			cwd,
-			settingsManager,
-			readyKind: "headless",
-			runtimeStartedAt: Date.now(),
-		});
+		const delivery = ready({ sink: undefined, readyKind: "headless" });
 		await vi.waitFor(() => expect(postSignal).toBeDefined());
 		settingsManager.setTelemetryEnabled(false);
 		expect(postSignal?.aborted).toBe(true);
 		settingsManager.setTelemetryEnabled(true);
 		await delivery;
-		await observeInstalledRuntimeReady({
-			agentDir,
-			cwd,
-			settingsManager,
-			readyKind: "headless",
-			runtimeStartedAt: Date.now(),
-		});
+		await ready({ sink: undefined, readyKind: "headless" });
 		expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 	});
 
 	it("clears pending readiness when a runtime explicitly opts out", async () => {
 		writeInstallationTelemetryState(agentDir, marker());
-		await observeInstalledRuntimeReady({
-			agentDir,
-			cwd,
-			settingsManager,
-			sink,
-			telemetryDisabled: true,
-			readyKind: "interactive",
-			runtimeStartedAt: Date.now(),
-		});
+		await ready({ telemetryDisabled: true });
 		expect(sink.events).toEqual([]);
 		expect(readInstallationTelemetryState(agentDir)).toEqual([]);
 	});
 
 	it("keeps new markers for a new runtime instead of letting an older process consume them", () => {
 		writeInstallationTelemetryState(agentDir, marker());
-		observeInstalledRuntimeReady({
-			agentDir,
-			cwd,
-			settingsManager,
-			sink,
-			readyKind: "interactive",
-			version: "1.2.2",
-			runtimeStartedAt: Date.now() - 10000,
-		});
+		ready({ version: "1.2.2", runtimeStartedAt: Date.now() - 10000 });
 		expect(sink.events).toEqual([]);
 		expect(readInstallationTelemetryState(agentDir)).toHaveLength(1);
 		ready();
@@ -405,7 +362,7 @@ describe("private readiness markers", () => {
 
 	it("reports the observed version mismatch separately", () => {
 		writeInstallationTelemetryState(agentDir, marker());
-		ready("1.2.2");
+		ready({ version: "1.2.2" });
 		expect(sink.events[0].properties).toMatchObject({
 			stage: "ready",
 			outcome: "failed",
@@ -426,7 +383,7 @@ describe("private readiness markers", () => {
 
 	it("keeps version comparison unknown for unrecognized running version labels", () => {
 		writeInstallationTelemetryState(agentDir, marker());
-		ready("1.2.3-private-canary");
+		ready({ version: "1.2.3-private-canary" });
 		expect(sink.events[0].properties).toMatchObject({ outcome: "success", observed_version: "0.0.0" });
 		expect(sink.events[0].properties).not.toHaveProperty("reason");
 	});

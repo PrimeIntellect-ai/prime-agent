@@ -1,4 +1,4 @@
-import { telemetryOriginalErrorDetails } from "./telemetry-error-details.js";
+import { readTelemetryErrorField as read, telemetryOriginalErrorDetails } from "./telemetry-error-details.js";
 
 export const TELEMETRY_ERROR_CLASSIFIER_REVISION = 1;
 
@@ -189,15 +189,6 @@ export interface TelemetryErrorClassification {
 	retryable: boolean | null;
 }
 
-function read(value: unknown, key: string): unknown {
-	if (!value || typeof value !== "object") return undefined;
-	try {
-		return (value as Record<string, unknown>)[key];
-	} catch {
-		return undefined;
-	}
-}
-
 function safeStatus(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value >= 400 && value <= 599 ? value : undefined;
 }
@@ -209,7 +200,7 @@ function safeCode(value: unknown): keyof typeof CODE_SUBTYPES | undefined {
 	return Object.hasOwn(CODE_SUBTYPES, normalized) ? (normalized as keyof typeof CODE_SUBTYPES) : undefined;
 }
 
-function legacyCategory(message: string): TelemetryLegacyErrorCategory {
+export function telemetryLegacyErrorCategory(message: string): TelemetryLegacyErrorCategory {
 	const error = message.toLowerCase();
 	if (/\b401\b|\b403\b|auth|api.?key|credential|unauthori[sz]ed|forbidden/.test(error)) return "authentication";
 	if (/\b429\b|rate.?limit|quota/.test(error)) return "rate_limit";
@@ -343,7 +334,7 @@ export function classifyTelemetryError(error: unknown): TelemetryErrorClassifica
 		}
 	}
 	return {
-		error_category: legacyCategory(message),
+		error_category: telemetryLegacyErrorCategory(message),
 		error_subtype: subtype,
 		error_code: code ?? "unknown",
 		http_status: status ?? null,

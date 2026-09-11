@@ -19,6 +19,7 @@ import {
 	telemetryErrorProperties,
 } from "./telemetry-error-classification.js";
 import { getTelemetryErrorRecoveryTracker, type TelemetryErrorRecoveryTracker } from "./telemetry-error-recovery.js";
+import { isTelemetryUuid } from "./telemetry-schema.js";
 
 export interface TelemetryErrorContext {
 	agentDir: string;
@@ -54,7 +55,6 @@ type ErrorReporter = (properties: ErrorReport) => void;
 
 const DEDUPLICATION_WINDOW_MS = 1_000;
 const MAX_COUNTER = 1_000_000;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const seenErrors = new WeakMap<object, { id: string; scope: string; capturedAt: number }>();
 const watchedSettings = new WeakMap<SettingsManager, Set<TelemetryErrorRecoveryTracker>>();
 const scopedContext = new AsyncLocalStorage<TelemetryErrorContext>();
@@ -73,7 +73,7 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], fall
 }
 
 function analyticsId(value: unknown): string | null {
-	return typeof value === "string" && UUID.test(value) ? value : null;
+	return isTelemetryUuid(value) ? value : null;
 }
 
 function errorKeys(details: TelemetryErrorDetails): object[] {
