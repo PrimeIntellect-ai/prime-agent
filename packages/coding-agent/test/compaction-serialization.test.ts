@@ -4,8 +4,8 @@ import { serializeConversation } from "../src/core/compaction/utils.js";
 
 describe("serializeConversation", () => {
 	it("should truncate long tool results keeping head and tail", () => {
-		const head = "A".repeat(1500);
-		const middle = "B".repeat(3000);
+		const head = "A".repeat(1431);
+		const middle = "B".repeat(3069);
 		const tail = "T".repeat(500);
 		const longContent = head + middle + tail;
 		const messages: Message[] = [
@@ -27,8 +27,10 @@ describe("serializeConversation", () => {
 		// ...the tail survives (errors and log tails live at the end)...
 		expect(result).toContain(tail);
 		// ...and the marker records exactly how much was elided.
-		expect(result).toContain("[... 3000 characters truncated; first 1500 and last 500 kept ...]");
+		expect(result).toContain("[... 3069 characters truncated; first 1431 and last 500 kept ...]");
 		expect(result).not.toContain("B".repeat(10));
+		// ...and the truncated result stays within the summary budget.
+		expect(result.length).toBeLessThanOrEqual("[Tool result]: ".length + 2000);
 	});
 
 	it("should not truncate short tool results", () => {

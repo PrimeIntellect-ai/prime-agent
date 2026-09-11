@@ -84,7 +84,12 @@ const TOOL_RESULT_TAIL_CHARS = 500;
  */
 function truncateForSummary(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
-	const headChars = maxChars - TOOL_RESULT_TAIL_CHARS;
+	// The marker's digit counts are largest when the elided and kept sizes hit
+	// the text and budget maxima, so reserve space for that worst case to keep
+	// the result within maxChars.
+	const markerMaxLength =
+		`[... ${text.length} characters truncated; first ${maxChars} and last ${TOOL_RESULT_TAIL_CHARS} kept ...]`.length;
+	const headChars = maxChars - TOOL_RESULT_TAIL_CHARS - markerMaxLength - 4;
 	const elided = text.length - headChars - TOOL_RESULT_TAIL_CHARS;
 	return `${text.slice(0, headChars)}\n\n[... ${elided} characters truncated; first ${headChars} and last ${TOOL_RESULT_TAIL_CHARS} kept ...]\n\n${text.slice(text.length - TOOL_RESULT_TAIL_CHARS)}`;
 }
