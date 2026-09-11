@@ -1,17 +1,16 @@
 import type { DaemonCommandBody } from "./daemon-client.js";
-import { DaemonClient } from "./daemon-client.js";
+import { DaemonClient, DaemonSocketClosedError } from "./daemon-client.js";
 import type { DaemonResponse } from "./daemon-protocol.js";
 
 /**
  * Long-lived supervisor connection for a daemon worker.
  *
- * daemon-mode.ts used to open a fresh DaemonClient - connect, hello,
- * request, close - on every cross-worker interaction (agent messages,
- * roster reads, root-session creation, renames). SupervisorLink holds
- * one persistent connection instead and multiplexes requests over it.
- * Socket death is expected (supervisor restarts): the link tears down
- * on close, the next request reconnects, and one in-flight retry
- * preserves the old per-call-fresh-connection resilience.
+ * Holds one persistent connection and multiplexes cross-worker requests
+ * (agent messages, roster reads, root-session creation, renames) over
+ * it. Socket death is expected during supervisor restarts: teardown
+ * happens on close or handshake failure, and the next request
+ * reconnects. Requests are never retried (daemon commands are not
+ * idempotent).
  */
 
 export interface DaemonClientLike {
@@ -55,7 +54,10 @@ export class SupervisorLink {
 		try {
 			return await client.request(command, timeoutMs);
 		} catch (error) {
-			this.teardown();
+			// A command-level failure (timeout, rejection) leaves a healthy
+			// socket serving other in-flight requests; only socket death
+			// invalidates the shared connection.
+			if (error instanceof DaemonSocketClosedError) this.teardown();
 			throw error;
 		}
 	}
@@ -74,8 +76,17 @@ export class SupervisorLink {
 			)(this.options.socketPath);
 			const detach = client.onClose(() => this.teardown());
 			this.disposers.add(detach);
-			await client.connect(this.options.connectTimeoutMs ?? 1000);
-			await client.waitForHello();
+			try {
+				await client.connect(this.options.connectTimeoutMs ?? 1000);
+				await client.waitForHello();
+			} catch (error) {
+				// DaemonClient fires onClose only after a successful connect,
+				// so a failed handshake must close its own socket here.
+				this.disposers.delete(detach);
+				detach();
+				client.close();
+				throw error;
+			}
 			this.client = client;
 			return client;
 		})();

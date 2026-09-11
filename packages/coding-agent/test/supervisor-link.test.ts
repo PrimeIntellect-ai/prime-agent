@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DaemonCommandBody } from "../src/modes/daemon/daemon-client.js";
+import { DaemonSocketClosedError } from "../src/modes/daemon/daemon-client.js";
 import type { DaemonResponse } from "../src/modes/daemon/daemon-protocol.js";
 import { type DaemonClientLike, SupervisorLink } from "../src/modes/daemon/supervisor-link.js";
 
@@ -80,7 +81,7 @@ describe("SupervisorLink", () => {
 		link.close();
 	});
 
-	it("does not retry a failed request; the next request reconnects", async () => {
+	it("does not retry a failed request; a healthy socket survives, a dead one reconnects", async () => {
 		const clients: MockClient[] = [];
 		const link = new SupervisorLink({
 			socketPath: "/tmp/unused.sock",
@@ -90,9 +91,45 @@ describe("SupervisorLink", () => {
 				return client;
 			},
 		});
+		// Command-level failure: the shared socket stays up for the next request.
 		await expect(link.request({ type: "send_message" } as DaemonCommandBody)).rejects.toThrow(
 			"socket died mid-request",
 		);
+		const response = await link.request({ type: "send_message" } as DaemonCommandBody);
+		expect(response.success).toBe(true);
+		expect(clients).toHaveLength(1);
+
+		// Socket-level failure: the link tears down, the next request reconnects.
+		const closed = new DaemonSocketClosedError("/tmp/unused.sock", "shutdown");
+		clients[0].request = async () => {
+			throw closed;
+		};
+		await expect(link.request({ type: "send_message" } as DaemonCommandBody)).rejects.toThrow();
+		const response2 = await link.request({ type: "send_message" } as DaemonCommandBody);
+		expect(response2.success).toBe(true);
+		expect(clients).toHaveLength(2);
+		expect(clients[0].closeCount).toBe(1);
+		link.close();
+	});
+
+	it("closes the client when the handshake fails", async () => {
+		const clients: MockClient[] = [];
+		const link = new SupervisorLink({
+			socketPath: "/tmp/unused.sock",
+			factory: () => {
+				const client = makeMockClient();
+				// First candidate fails the hello; the next connects cleanly.
+				if (clients.length === 0) {
+					client.waitForHello = async () => {
+						throw new Error("hello timeout");
+					};
+				}
+				clients.push(client);
+				return client;
+			},
+		});
+		await expect(link.request({ type: "send_message" } as DaemonCommandBody)).rejects.toThrow("hello timeout");
+		expect(clients[0].closeCount).toBe(1);
 		const response = await link.request({ type: "send_message" } as DaemonCommandBody);
 		expect(response.success).toBe(true);
 		expect(clients).toHaveLength(2);
