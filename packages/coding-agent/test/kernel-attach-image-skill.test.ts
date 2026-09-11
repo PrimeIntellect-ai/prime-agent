@@ -57,6 +57,25 @@ describe("attach-image skill over the kernel host bridge", () => {
 		expect(blocks).toEqual([{ type: "image", data: PNG_BASE64, mimeType: "image/png" }]);
 	});
 
+	it("accepts the attach_image.attach_image(...) spelling instead of returning the submodule", async () => {
+		const imagePath = join(tempDir, "sample.png");
+		writeFileSync(imagePath, Buffer.from(PNG_BASE64, "base64"));
+
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledAttachImageSkill()],
+			hostHandlers: {
+				"model.info": async () => ({ id: "anthropic/claude-haiku-4.5", input: ["text", "image"] }),
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`print(await attach_image.attach_image(${JSON.stringify(imagePath)}))`);
+
+		expect(result.status).toBe("ok");
+		expect(result.stdout.trim()).toContain("Loaded 1 image(s) into context");
+		expect(result.attachments).toHaveLength(1);
+	});
+
 	it("compresses large attached images before storing them in the tool result", { retry: 1 }, async () => {
 		const imagePath = join(tempDir, "large.png");
 

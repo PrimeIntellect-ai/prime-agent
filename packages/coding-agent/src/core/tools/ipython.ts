@@ -123,6 +123,11 @@ def _prime_agent_wrap_skill_module(module):
     doc = getattr(run, "__doc__", None)
     if doc:
         wrapped.__doc__ = doc
+    # Packages laid out as <skill>/<skill>.py expose the submodule under the
+    # skill name, so <skill>.<skill>(...) raised "'module' object is not callable".
+    short_name = module.__name__.rsplit(".", 1)[-1]
+    if not callable(getattr(wrapped, short_name, None)):
+        setattr(wrapped, short_name, run)
     _prime_agent_sys.modules[module.__name__] = wrapped
     return wrapped
 
