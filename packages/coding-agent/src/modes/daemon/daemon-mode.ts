@@ -770,6 +770,12 @@ export class AgentDaemon {
 		// saw it so the orphan window below stays bounded.
 		this.supervisorAbsentSince ??= Date.now();
 		await this.launchReplacementSupervisor(supervisorSocketPath);
+		if (await this.canConnectToSupervisor(supervisorSocketPath)) {
+			// A replacement came up during the launch: recovery succeeded, so
+			// the orphan window must restart instead of exiting the worker.
+			this.supervisorAbsentSince = undefined;
+			return;
+		}
 		await this.exitIfSupervisorOrphanedForTooLong(supervisorSocketPath);
 		if (!this.shuttingDown && !this.hasAuthenticatedSupervisorConnection()) {
 			this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 5000);
