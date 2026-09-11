@@ -5028,7 +5028,11 @@ export class DaemonSupervisor {
 				: command.type === "rename" || command.type === "set_session_name"
 					? this.roster().byActiveSessionId(command.activeSessionId)
 					: undefined;
-		const response = await client.request(withoutCommandId(command), timeoutMs);
+		const workerCommand: DaemonCommandBody =
+			command.type === "set_session_name"
+				? { type: "rename", activeSessionId: command.activeSessionId, name: command.name }
+				: withoutCommandId(command);
+		const response = await client.request(workerCommand, timeoutMs);
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
@@ -5040,7 +5044,9 @@ export class DaemonSupervisor {
 			// same session's current row before releasing its name reservation.
 			await worker.rosterApplyChain;
 			const renamedSummary =
-				command.type === "rename" && isSessionSummary(response.data) ? response.data : renameTarget?.summary;
+				(command.type === "rename" || command.type === "set_session_name") && isSessionSummary(response.data)
+					? response.data
+					: renameTarget?.summary;
 			const entry =
 				command.type === "rename_saved_session"
 					? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
@@ -5054,7 +5060,7 @@ export class DaemonSupervisor {
 					entry.summary.sessionId === renamedSummary.sessionId)
 			) {
 				const name =
-					command.type === "rename" && isSessionSummary(response.data)
+					(command.type === "rename" || command.type === "set_session_name") && isSessionSummary(response.data)
 						? (response.data.sessionName ?? command.name.trim())
 						: command.name.trim();
 				this.writeRosterEntry({ ...entry, summary: { ...entry.summary, sessionName: name } }, worker);
@@ -5062,6 +5068,11 @@ export class DaemonSupervisor {
 			if (command.type === "rename" && isSessionSummary(response.data)) {
 				return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 			}
+		}
+		if (command.type === "set_session_name") {
+			return response.success
+				? success(command.id, command.type)
+				: { ...response, id: command.id, command: command.type };
 		}
 		return responseWithId(response, command.id);
 	}

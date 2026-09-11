@@ -477,6 +477,43 @@ describe("ENG-6013: saved-session names survive live worker activity", () => {
 		).rejects.toThrow(/already/);
 	});
 
+	it("records set_session_name accepted after a switch when the worker disconnects before publishing it", async () => {
+		const first = await createFixture();
+		const second = await createFixture(first.supervisor);
+		const { harness, supervisor, worker, client, request, activeSessionId } = first;
+		const originalSessionId = harness.session.sessionId;
+		const handleRequest = request.getMockImplementation()!;
+		request.mockImplementationOnce(async (command) => {
+			harness.sessionManager.newSession();
+			harness.setResponses([fauxAssistantMessage("New session answer")]);
+			await harness.session.prompt("New session task");
+			harness.session.setSessionName("Replacement session");
+			await first.flushRoster();
+			const response = await handleRequest(command);
+			worker.client = undefined;
+			worker.descriptor.lifecycle = "recovering";
+			return response;
+		});
+
+		await expect(
+			supervisor.handleCommand(client, {
+				type: "set_session_name",
+				activeSessionId,
+				name: "Acknowledged before disconnect",
+			}),
+		).resolves.toMatchObject({ success: true, command: "set_session_name" });
+		expect(harness.session.sessionId).not.toBe(originalSessionId);
+		expect((await first.row())?.sessionName).toBe("Acknowledged before disconnect");
+		await expect(
+			supervisor.handleCommand(client, {
+				type: "rename_saved_session",
+				sessionPath: second.sessionPath,
+				name: "Acknowledged before disconnect",
+			}),
+		).rejects.toThrow(/already/);
+		expect(second.request).not.toHaveBeenCalled();
+	});
+
 	it.each(["rename_saved_session", "set_session_name", "rename"] as const)(
 		"keeps %s reserved through the saved catalog when its roster row disappears",
 		async (type) => {
