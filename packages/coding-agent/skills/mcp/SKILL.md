@@ -21,9 +21,14 @@ page = await mcp.list_plugins()                       # default: first 50 entrie
 connections = await mcp.list_connections()
 ```
 
-Catalog entries carry `connectionStatus` (`connected`, `not_connected`,
-`setup_required`, `disabled`, `error`), `connectable`, and when connected the
-`connectionIds` you dispatch on. Entries with `setup_required` need a developer
+Catalog entries carry `connectionStatus` (`connected`, `pending`,
+`not_connected`, `setup_required`, `disabled`, `error`), `connectable`, and
+when connected the `connectionIds` you dispatch on. `connected` means a
+verified MCP handshake, not just stored credentials; `pending` means
+credentials exist but verification hasn't run or succeeded yet. Entries may
+also carry `setupHint` (why a service isn't connectable yet), `unverified`
+(imported but not vetted), `verifiedAt`/`toolCount`, and `connectionIds`
+(empty when not dispatchable). Entries with `setup_required` need a developer
 app or API key first — say so honestly instead of promising one-click.
 
 ## Recommend, never connect

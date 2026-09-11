@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sys
+import traceback
 import socket
 import subprocess
 import tempfile
@@ -789,12 +790,16 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     run(mcp.list_connections())
 
-    def test_inventory_wraps_host_failures(self):
+    def test_inventory_wraps_host_failures_without_echoing_them(self):
         with self._patch_host({"mcp.list_connections": RuntimeError("bridge is down")}):
             with self.assertRaises(RuntimeError) as caught:
                 run(mcp.list_connections())
-        self.assertIn("bridge is down", str(caught.exception))
-        self.assertIn("mcp.list_connections", str(caught.exception))
+        error = caught.exception
+        self.assertEqual(str(error), "MCP mcp.list_connections request failed")
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        formatted = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        self.assertNotIn("bridge is down", formatted)
 
     def test_list_plugins_forwards_filters_limit_and_cursor(self):
         captured = {}
@@ -1028,8 +1033,11 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         for leaked in ("hunter2", "abc123", "tok-123-secret", "evil.test", "Bearer"):
             self.assertNotIn(leaked, error)
 
-    def test_host_inventory_redacts_credential_bearing_host_errors(self):
-        raw = "GET https://user:hunter2@sync.test/mcp?token=tok-123-secret failed"
+    def test_host_inventory_failures_never_expose_the_original_exception(self):
+        raw = (
+            "GET https://user:hunter2@sync.test/mcp?token=tok-123-secret failed; "
+            "Authorization: Bearer tok-123-secret; body password=hunter2"
+        )
 
         async def host_request(request_type, payload):
             raise RuntimeError(raw)
@@ -1037,11 +1045,26 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         with mock.patch.object(mcp, "host_request", host_request):
             with self.assertRaises(RuntimeError) as caught:
                 run(mcp.list_connections())
-        message = str(caught.exception)
-        self.assertIn("mcp.list_connections", message)
-        self.assertIn("[REDACTED]", message)
-        for leaked in ("hunter2", "tok-123-secret"):
-            self.assertNotIn(leaked, message)
+        error = caught.exception
+        self.assertEqual(str(error), "MCP mcp.list_connections request failed")
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        # The full formatted chain (not just str(exc)) must stay secret-free.
+        formatted = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        for leaked in ("hunter2", "tok-123-secret", "sync.test", "Authorization", "Bearer", "password"):
+            self.assertNotIn(leaked, formatted)
+
+    def test_host_inventory_timeouts_report_a_fixed_message(self):
+        async def slow_host_request(request_type, payload):
+            await asyncio.sleep(0.05)
+            return {"connections": []}
+
+        with mock.patch.object(mcp, "host_request", slow_host_request), mock.patch.object(
+            mcp, "_INVENTORY_TIMEOUT", 0.01
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                run(mcp.list_connections())
+        self.assertEqual(str(caught.exception), "MCP mcp.list_connections request timed out")
 
     # -- tools/list pagination ----------------------------------------------
 

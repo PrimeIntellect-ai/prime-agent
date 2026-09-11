@@ -69,7 +69,6 @@ _MAX_TOOL_PAGES = 25
 _DEFAULT_TOOL_SEARCH_LIMIT = 20
 _MAX_TOOL_SEARCH_LIMIT = 50
 _MAX_TOOL_SEARCH_SERVERS = 8
-_INVENTORY_ERROR_CHARS = 200
 # Defensive only: the host must already whitelist safe metadata in inventory
 # entries. Never applied to live tool schemas or results — argument names there
 # are server-defined and legitimately credential-like.
@@ -729,18 +728,20 @@ async def describe_tool(connection_id: str, tool: str) -> dict[str, Any]:
 
 
 async def _host_inventory(request_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    outcome: str | None = None
     try:
         async with asyncio.timeout(_INVENTORY_TIMEOUT):
             result = await host_request(request_type, payload)
-    except TimeoutError as exc:
-        raise RuntimeError(f"MCP {request_type} request timed out") from exc
-    except Exception as exc:
-        # Host/bridge error text is echoed only after scrubbing credential-
-        # bearing URLs, query strings and headers, and bounded to a tail.
-        detail = _sanitize_diagnostic(
-            _redact_sensitive_text(str(exc)), (), (), byte_limit=_INVENTORY_ERROR_CHARS
-        )
-        raise RuntimeError(f"MCP {request_type} request failed: {detail or type(exc).__name__}") from exc
+    except TimeoutError:
+        outcome = "timed out"
+    except Exception:
+        outcome = "failed"
+    if outcome is not None:
+        # Raised outside the handler so the original exception is not chained:
+        # arbitrary host/bridge error text (which can embed credential-bearing
+        # URLs, query strings, headers and HTTP bodies) is never echoed, and
+        # not even reachable through __cause__/__context__.
+        raise RuntimeError(f"MCP {request_type} request {outcome}")
     if not isinstance(result, dict):
         raise RuntimeError(f"MCP {request_type} returned a malformed response")
     return result
@@ -826,21 +827,6 @@ def _bounded_error(exc: BaseException) -> str:
             break
     return f"{type(exc).__name__}: {hint}"
 
-
-_URL_CREDENTIALS = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@")
-_SENSITIVE_QUERY = re.compile(
-    r"([?&](?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|authorization|code|state)=)[^&\s]+",
-    re.I,
-)
-_AUTH_HEADER = re.compile(r"(Authorization:\s*(?:Bearer|Basic|token)\s+)[^\s]+", re.I)
-
-
-def _redact_sensitive_text(value: str) -> str:
-    """Scrub credential-bearing URLs, query strings and auth headers from text."""
-    value = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", value)
-    value = _SENSITIVE_QUERY.sub(r"\1[REDACTED]", value)
-    value = _AUTH_HEADER.sub(r"\1[REDACTED]", value)
-    return value
 
 
 def _validate_limit(value: Any, label: str, maximum: int) -> None:
