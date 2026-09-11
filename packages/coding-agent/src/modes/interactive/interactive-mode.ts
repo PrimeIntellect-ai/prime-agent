@@ -1316,7 +1316,7 @@ export class InteractiveMode {
 			aliases: command.aliases,
 			description: command.description,
 			argumentHint: command.argumentHint,
-			takesArgument: command.takesArgument,
+			takesArgument: command.takesArgument === true,
 		}));
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");

@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
+import type { AutocompleteItem, AutocompleteProvider, Component } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ThinkingSelectorComponent } from "../src/modes/interactive/components/thinking-selector.js";
@@ -131,6 +131,39 @@ describe("InteractiveMode /effort", () => {
 	});
 
 	describe("argument autocomplete", () => {
+		it("completes built-in picker commands bare while retaining their optional argument suggestions", async () => {
+			const mode = Object.create(InteractiveMode.prototype) as InteractiveMode;
+			Object.assign(mode, {
+				currentModelSupportsFastMode: () => false,
+				getCachedModelCandidates: () => [],
+				getAvailableThinkingLevels: () => ["low", "high"],
+				getThinkingLevelCompletions: () => [{ value: "high", label: "high" }],
+				connectionCommands: [],
+				skillCommands: new Map(),
+				uiServices: { settingsManager: { getEnableSkillCommands: () => false } },
+				getCurrentCwd: () => process.cwd(),
+				fdPath: null,
+			});
+			const create = Reflect.get(InteractiveMode.prototype, "createBaseAutocompleteProvider") as (
+				this: InteractiveMode,
+			) => AutocompleteProvider;
+			const provider = create.call(mode);
+			const options = { signal: new AbortController().signal };
+			for (const name of ["model", "effort"]) {
+				const text = `/${name}`;
+				const result = await provider.getSuggestions([text], 0, text.length, options);
+				const item = result!.items.find((candidate) => candidate.value === name)!;
+				expect(item.takesArgument).not.toBe(true);
+				expect(provider.applyCompletion([text], 0, text.length, item, result!.prefix)).toEqual({
+					lines: [text],
+					cursorLine: 0,
+					cursorCol: text.length,
+				});
+			}
+			const effort = await provider.getSuggestions(["/effort h"], 0, 9, options);
+			expect(effort?.items[0]?.value).toBe("high");
+		});
+
 		it("lists every supported level for an empty prefix and marks the current one", () => {
 			const context = makeContext();
 
