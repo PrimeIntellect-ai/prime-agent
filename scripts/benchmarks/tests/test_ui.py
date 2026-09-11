@@ -14,6 +14,7 @@ import ui
 from report import UI_METRICS, render
 from schema import UI_METRIC_KEYS, Config, Metric, Observation, ProcessMemory, Report, Side
 from ui import (
+    expand_subagents,
     fixture_spec,
     session_id,
     session_name,
@@ -170,6 +171,25 @@ class ProbeLogicTests(unittest.TestCase):
                 FakeTerminal(["agents   0 running, 1 idle, 1 inactive"] * 8), settle=3.0, timeout=0.05
             )
 
+    def test_expand_subagents_requires_a_newly_expanded_row(self):
+        # An ancestor already shows "▾", so only a growing count proves the selected row expanded;
+        # the first expand keystroke is eaten and the retry lands.
+        frames = [
+            "▾ ui-bench-sub-00",
+            "▾ ui-bench-sub-00",
+            "▾ ui-bench-sub-00\n▾ ui-bench-sub-01",
+        ]
+        terminal = FakeTerminal(frames)
+        expand_subagents(terminal)
+        self.assertEqual(terminal.sent, [ui.EXPAND_ARROW, ui.EXPAND_ARROW])
+
+    def test_expand_subagents_times_out_when_nothing_expands(self):
+        frames = ["▸ ui-bench-sub-00"] * 8
+        terminal = FakeTerminal(frames)
+        with self.assertRaises(TimeoutError):
+            expand_subagents(terminal)
+        self.assertEqual(terminal.sent, [ui.EXPAND_ARROW] * 4)
+
 
 class FakeDisplay:
     def __init__(self, text: str = ""):
@@ -182,13 +202,24 @@ class FakeDisplay:
         self._text = text
 
 
+class FakeChild:
+    """Records sent keystrokes the way pexpect.spawn.send would receive them."""
+
+    def __init__(self, sent: list[str]):
+        self.sent = sent
+
+    def send(self, data: str) -> None:
+        self.sent.append(data)
+
+
 class FakeTerminal:
-    """Scripted terminal: until() consumes frames, quiet() pumps them one at a time."""
+    """Scripted terminal: until() and settle() advance the frames one at a time."""
 
     def __init__(self, frames: list[str]):
         self.display = FakeDisplay(frames[0] if frames else "")
         self.frames = list(frames[1:])
         self.sent: list[str] = []
+        self.child = FakeChild(self.sent)
         self.bytes = 0
 
     def pump(self) -> bool:
@@ -204,11 +235,7 @@ class FakeTerminal:
                 raise TimeoutError("Timed out waiting for the expected terminal state")
 
     def settle(self, seconds: float) -> None:
-        while self.pump():
-            pass
-
-    def child(self):
-        raise NotImplementedError
+        self.pump()
 
 
 class SchemaTests(unittest.TestCase):

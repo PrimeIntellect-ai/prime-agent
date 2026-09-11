@@ -126,7 +126,7 @@ A separate probe drives the interactive TUI over a PTY with the same `pexpect`/`
 startup metrics use, against a deterministic on-disk fixture set. Every UI trial regenerates the
 sessions directory, session artifacts, and spawn ledger from scratch, so trials cannot inherit state.
 
-The fixture set is fixed and mirrors a long-lived install: 280 top-level sessions (3 large —
+The fixture set is fixed and mirrors a long-lived install: 194 top-level sessions (3 large —
 one of them a very large ~40 MB transcript — 150 medium, 40 small fan-out children of the chain
 root, and the root itself) plus a chain of 6 nested subagent sessions. Large sessions hold 2,000
 user/assistant/toolResult triples (~5 MB of JSONL each), the very large one 16,000 (~40 MB),
@@ -146,7 +146,7 @@ Each trial stops all benchmark-user processes first, then measures:
 - **Open agents view from a session:** the left-arrow keystroke to the rendered agents-view splash.
 - **Full agents roster, many sessions:** from the same keystroke until the roster's saved-session
   count stops growing. Saved sessions stream in, so this isolates catalog scanning, spawn-ledger
-  replay, and hydration across 280+ session files.
+  replay, and hydration across 200 session files.
 - **Open another session from agents view:** typing the target's unique session-id prefix,
   right-arrow to open, until the target transcript renders and echoes. This is the full
   "session → agents view → another session" round trip with many sessions on disk.

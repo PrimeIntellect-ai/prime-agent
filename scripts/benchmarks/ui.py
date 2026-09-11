@@ -401,11 +401,11 @@ def type_query(terminal: Terminal, query: str, *, attempts: int = 3) -> None:
 
 def expand_subagents(terminal: Terminal, *, attempts: int = 4) -> None:
     """Expand the selected row's subagent list; the toggle retries to survive eaten keystrokes."""
+    expanded = terminal.display.text().count("▾")
     for _ in range(attempts):
         terminal.child.send(EXPAND_ARROW)
         terminal.settle(1.0)
-        text = terminal.display.text()
-        if "▾" in text:
+        if terminal.display.text().count("▾") > expanded:
             return
     raise TimeoutError("Selected agent subagents did not expand")
 
@@ -479,6 +479,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
         stop_processes(user)
 
         # Warm navigation scenario in a single TUI process.
+        metric = "switch_large"
         terminal = Terminal(
             [runuser, "-u", user, "--", "prime-agent"], workspace, env, results / f"ui-scenario-{trial}"
         )
@@ -486,7 +487,6 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             terminal.ready()
 
             # Warm switch into a different large session from the running editor.
-            metric = "switch_large"
             started = time.perf_counter()
             cpu_start = cpu_total()
             bytes_start = terminal.bytes
@@ -513,6 +513,8 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
 
             # Full roster with many sessions: saved sessions and ledger children stream in.
             metric = "agents_roster"
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
             roster_seconds = wait_for_roster(terminal)
             cpu = cpu_total() - cpu_start
             record(side, "agents_roster", trial, roster_seconds)  # type: ignore[arg-type]

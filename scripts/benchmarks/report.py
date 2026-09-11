@@ -336,7 +336,7 @@ def render(report: Report) -> str:
             "State fixture: a 10,000-row × 8-column integer DataFrame and a 10,000-integer list.",
             "Restore runs in a fresh kernel, including pandas imports; kernel startup is excluded.",
             "Kernel RSS covers the isolated Python process; loaded RSS follows the pandas workload.",
-            "UI trials use a fresh fixture set: 280 top-level sessions including one ~40 MB transcript,",
+            "UI trials use a fresh fixture set: 194 top-level sessions including one ~40 MB transcript,",
             "40 ledger fan-out children, and a 6-deep subagent chain (~46 spawn edges).",
             "Large fixtures hold 2,000 message triples (~5 MB JSONL); medium 120; subagents 400 each.",
             "Interactions: cold --resume of a large session, warm /resume switch, left-arrow to agents view,",
