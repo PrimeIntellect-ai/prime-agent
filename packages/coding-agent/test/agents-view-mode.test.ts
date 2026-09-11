@@ -1129,7 +1129,7 @@ describe("AgentsViewMode", () => {
 			expect(hints()).toBe("↑/↓ navigate   Enter/→ collapse   Ctrl+N new");
 			// Only a scoped view has a parent to return to.
 			Reflect.set(view, "scopeRootSummary", parent);
-			expect(hints()).toBe("↑/↓ navigate   Enter/→ collapse   Ctrl+N new   ← parent");
+			expect(hints()).toBe("↑/↓ navigate   Enter/→ collapse   ← parent   Ctrl+N new");
 		} finally {
 			stopThemeWatcher();
 		}

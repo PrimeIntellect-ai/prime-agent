@@ -2695,8 +2695,8 @@ export class AgentsViewMode implements Component, Focusable {
 		const hints = [
 			`${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate`,
 			`${keyText("tui.select.confirm")}/${keyText("app.agents.open")} ${rightAction}`,
-			`${keyText("app.agents.new")} new`,
 			this.scopeRootSummary ? `${keyText("app.agents.back")} parent` : undefined,
+			`${keyText("app.agents.new")} new`,
 		]
 			.filter((hint): hint is string => hint !== undefined)
 			.join("   ");
