@@ -409,21 +409,22 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(state_path.read_text(encoding="utf-8"), raw)
 
     def test_unrepresentable_decimal_token_is_read_only(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state_path = Path(temp_dir) / "harness_state.json"
-            state = HarnessState(state_path)
-            state.create_memory("Preserved", "Must survive.", id="preserved")
-            payload = state_path.read_text(encoding="utf-8").replace(
-                '"metadata": {}', '"metadata": {"value": 9007199254740991.1}', 1
-            )
-            state_path.write_text(payload, encoding="utf-8")
+        for token in ("9007199254740991.1", "1e-9999999999999999999", "-0", "-0.0"):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as temp_dir:
+                state_path = Path(temp_dir) / "harness_state.json"
+                state = HarnessState(state_path)
+                state.create_memory("Preserved", "Must survive.", id="preserved")
+                payload = state_path.read_text(encoding="utf-8").replace(
+                    '"metadata": {}', f'"metadata": {{"value": {token}}}', 1
+                )
+                state_path.write_text(payload, encoding="utf-8")
 
-            loaded = HarnessState(state_path)
+                loaded = HarnessState(state_path)
 
-            self.assertEqual(loaded.list(), [])
-            with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
-                loaded.create_memory("Rejected", "Must not rewrite rounded data.", id="rejected")
-            self.assertEqual(state_path.read_text(encoding="utf-8"), payload)
+                self.assertEqual(loaded.list(), [])
+                with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
+                    loaded.create_memory("Rejected", "Must not rewrite rounded data.", id="rejected")
+                self.assertEqual(state_path.read_text(encoding="utf-8"), payload)
 
     def test_shared_instance_serializes_concurrent_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

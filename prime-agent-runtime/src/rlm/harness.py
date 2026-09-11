@@ -16,7 +16,7 @@ import time
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from functools import wraps
 from math import isfinite
@@ -96,9 +96,20 @@ def _now() -> str:
 
 def _finite_json_float(value: str) -> float:
     number = float(value)
-    if not isfinite(number) or Decimal(value) != Decimal(repr(number)):
+    if not isfinite(number) or (number == 0 and value.startswith("-")):
         raise ValueError("unrepresentable JSON number")
+    try:
+        if Decimal(value) != Decimal(repr(number)):
+            raise ValueError("unrepresentable JSON number")
+    except InvalidOperation as error:
+        raise ValueError("unrepresentable JSON number") from error
     return number
+
+
+def _lossless_json_int(value: str) -> int:
+    if value == "-0":
+        raise ValueError("unrepresentable JSON number")
+    return int(value)
 
 
 def _reject_json_constant(value: str) -> None:
@@ -394,7 +405,12 @@ class HarnessState:
         self._load_error = None
         try:
             with self.file_path.open("r", encoding="utf-8") as f:
-                data = json.load(f, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
+                data = json.load(
+                    f,
+                    parse_constant=_reject_json_constant,
+                    parse_float=_finite_json_float,
+                    parse_int=_lossless_json_int,
+                )
         except (OSError, ValueError):
             # Reads remain available, but writes must not replace data this runtime
             # could not parse.

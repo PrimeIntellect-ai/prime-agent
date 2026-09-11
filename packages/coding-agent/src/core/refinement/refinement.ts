@@ -292,7 +292,7 @@ function normalizeJsonNumberToken(token: string): string | undefined {
 	if (!match) return undefined;
 	const fraction = match[3] ?? "";
 	let digits = `${match[2]}${fraction}`.replace(/^0+/, "");
-	if (!digits) return "0e0";
+	if (!digits) return `${match[1]}0e0`;
 	let exponent = BigInt(match[4] ?? "0") - BigInt(fraction.length);
 	while (digits.endsWith("0")) {
 		digits = digits.slice(0, -1);

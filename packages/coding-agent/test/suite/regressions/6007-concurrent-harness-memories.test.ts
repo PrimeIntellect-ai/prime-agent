@@ -302,6 +302,10 @@ describe("concurrent harness memory persistence", () => {
 		["host", "9007199254740991.1"],
 		["Python", "9007199254740992"],
 		["host", "9007199254740992"],
+		["Python", "1e-9999999999999999999"],
+		["host", "1e-9999999999999999999"],
+		["Python", "-0"],
+		["host", "-0"],
 	] as const)(
 		"keeps known data readable but refuses an unsafe persisted number from the %s writer (%s)",
 		async (writer, number) => {
