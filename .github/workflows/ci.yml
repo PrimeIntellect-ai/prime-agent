@@ -50,10 +50,11 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          # These packages only need Ubuntu's indexes, not preinstalled vendor repositories.
-          apt_args=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
-          sudo apt-get "${apt_args[@]}" update
-          sudo apt-get "${apt_args[@]}" install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          # These dependencies come from Ubuntu, not the runner's third-party repositories.
+          test -f /etc/apt/sources.list.d/ubuntu.sources
+          apt_sources=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          sudo apt-get "${apt_sources[@]}" update
+          sudo apt-get "${apt_sources[@]}" install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
       - name: Install dependencies
@@ -125,10 +126,11 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          # These packages only need Ubuntu's indexes, not preinstalled vendor repositories.
-          apt_args=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
-          sudo apt-get "${apt_args[@]}" update
-          sudo apt-get "${apt_args[@]}" install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          # These dependencies come from Ubuntu, not the runner's third-party repositories.
+          test -f /etc/apt/sources.list.d/ubuntu.sources
+          apt_sources=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          sudo apt-get "${apt_sources[@]}" update
+          sudo apt-get "${apt_sources[@]}" install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
       - name: Install dependencies
@@ -146,6 +148,14 @@ jobs:
       - name: Test
         working-directory: ${{ matrix.package }}
         run: ${{ matrix.command }}
+
+      - name: Test benchmark harness
+        if: matrix.name == 'runtime python'
+        working-directory: scripts/benchmarks
+        run: |
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked python -m unittest discover -s tests -v
 
   build-check-test:
     name: build-check-test

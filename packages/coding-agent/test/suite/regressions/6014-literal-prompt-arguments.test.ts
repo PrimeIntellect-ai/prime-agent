@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, test } from "vitest";
+import { HARNESS_DIGEST_PREFIX } from "../../../src/core/messages.js";
 import {
 	expandPromptTemplate,
 	loadPromptTemplates,
@@ -63,7 +64,12 @@ describe("ENG-6014 literal prompt arguments", () => {
 			const providerTexts: string[] = [];
 			harness.setResponses([
 				(context) => {
-					providerTexts.push(...context.messages.filter((message) => message.role === "user").map(getMessageText));
+					providerTexts.push(
+						...context.messages
+							.filter((message) => message.role === "user")
+							.map(getMessageText)
+							.filter((text) => !text.startsWith(HARNESS_DIGEST_PREFIX)),
+					);
 					return fauxAssistantMessage("ok");
 				},
 			]);

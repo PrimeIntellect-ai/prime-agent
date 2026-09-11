@@ -1,0 +1,1 @@
+- Changed the subagents bar to count running, idle, and inactive agents across the whole subagent subtree instead of only direct children.
