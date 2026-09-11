@@ -1,11 +1,11 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
-import type { ActionStore } from "../../core/session-action-store.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { waitForPromiseOrAbort } from "../../utils/wait-for-abort.js";
-import { primaryDeliveryRecord, type QueuedSessionAction } from "../prepared-actions.js";
 import type { ContinuationToken, SessionContinuation } from "../turns/continuation.js";
+import type { ActionStore } from "./action-store.js";
 import type { SessionCommitFence, SessionCommitLease } from "./commit-fence.js";
 import type { SessionInputScheduler } from "./input-scheduler.js";
+import { primaryDeliveryRecord, type QueuedSessionAction } from "./prepared-actions.js";
 
 export interface SessionInputCheckpointsHost {
 	getFence(): Pick<SessionCommitFence, "isHeldByCurrentContext" | "disposeSignal">;

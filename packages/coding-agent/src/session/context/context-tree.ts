@@ -1,7 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import type { RlmChildAgentStatus } from "../../core/agent-session.js";
 import type { ContextUsage } from "../../core/extensions/index.js";
 import {
 	buildSessionContext,
@@ -9,6 +8,7 @@ import {
 	loadEntriesFromFile,
 	type SessionEntry,
 } from "../../core/session-manager.js";
+import type { RlmChildAgentStatus } from "../agent-session.js";
 import { calculateContextTokens, estimateContextTokens } from "./token-estimate.js";
 import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } from "./usage.js";
 

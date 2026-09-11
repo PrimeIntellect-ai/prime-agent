@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AgentSessionEvent, PromptOptions } from "../../core/agent-session.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
-import type { ActionStore } from "../../core/session-action-store.js";
 import type { SessionManager } from "../../core/session-manager.js";
-import type { QueuedSessionAction } from "../prepared-actions.js";
+import type { AgentSessionEvent, PromptOptions } from "../agent-session.js";
+import type { ActionStore } from "./action-store.js";
+import type { QueuedSessionAction } from "./prepared-actions.js";
 
 interface AgentMessageDeferred {
 	promise: Promise<void>;

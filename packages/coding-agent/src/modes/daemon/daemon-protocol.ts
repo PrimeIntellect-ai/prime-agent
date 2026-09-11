@@ -5,10 +5,8 @@ import type {
 	AgentSessionMessageReceipt,
 	AgentSessionMessageSafetyStatus,
 } from "../../core/agent-messages.js";
-import type { SessionActionRecoverySnapshot } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
-import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type {
 	AgentCronJob,
@@ -18,11 +16,13 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
-import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import type { SessionActionRecoverySnapshot } from "../../session/agent-session.js";
+import type { AgentAutonomousStatus } from "../../session/autonomy/autonomous.js";
 import type { CustomMessage } from "../../session/context/messages.js";
 import type { SessionUsageSummary } from "../../session/context/usage.js";
+import type { QueuedMessageLane, QueuedMessageMutation } from "../../session/input/action-store.js";
 import type {
 	AgentConnectionAgentStatus,
 	AgentConnectionHeartbeat,

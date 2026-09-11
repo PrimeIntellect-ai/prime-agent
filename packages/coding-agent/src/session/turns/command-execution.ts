@@ -1,14 +1,8 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { AgentSessionEvent } from "../../core/agent-session.js";
-import {
-	type ActionStore,
-	canSelectSessionAction,
-	type RuntimeActivity,
-	transitionSessionAction,
-} from "../../core/session-action-store.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { parseRefineCommandOptions, type SessionSlashCommand } from "../../core/slash-commands.js";
+import type { AgentSessionEvent } from "../agent-session.js";
 import { CompactionSkippedError } from "../compaction/execution.js";
 import type { CompactionResult } from "../compaction/types.js";
 import {
@@ -17,8 +11,14 @@ import {
 	createSessionSlashCommandResultMessage,
 } from "../context/messages.js";
 import type { GoalState } from "../goals/contracts.js";
+import {
+	type ActionStore,
+	canSelectSessionAction,
+	type RuntimeActivity,
+	transitionSessionAction,
+} from "../input/action-store.js";
 import type { SessionCommitFence, SessionCommitLease } from "../input/commit-fence.js";
-import type { QueuedSessionAction } from "../prepared-actions.js";
+import type { QueuedSessionAction } from "../input/prepared-actions.js";
 import type { SessionRefinement } from "../refinement/controller.js";
 import type { RefinementResult } from "../refinement/types.js";
 

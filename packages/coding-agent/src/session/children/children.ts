@@ -9,22 +9,8 @@ import {
 	assertDirectAgentMessageTarget,
 	formatAgentSessionNameUnavailable,
 } from "../../core/agent-messages.js";
-import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.js";
-import {
-	type CreateRlmSubagentRuntimeOptions,
-	createDefaultRlmSubagentSessionName,
-	normalizeRequestedRlmSubagentModel,
-	normalizeRequestedRlmSubagentSessionName,
-	normalizeRequestedRlmSubagentThinkingLevel,
-	type RlmCreateSessionResult,
-	type RlmDeleteSubagentResult,
-	type RlmListSubagentsResult,
-	type RlmSpawnHandle,
-	type RlmSubagentRegistryEntry,
-	type RlmSubagentRuntime,
-	type SubagentRuntimeHost,
-} from "../../core/rlm-runtime.js";
 import type { SemanticEdgeRecorder } from "../../core/semantic-edges.js";
+import type { AgentSession, AgentSessionEvent } from "../agent-session.js";
 import type { CustomMessage } from "../context/messages.js";
 import { buildChildList, snapshotChildRun, snapshotRetainedChild } from "./child-projection.js";
 import { launchChildTask } from "./child-run.js";
@@ -38,6 +24,22 @@ import {
 	type RlmChildRun,
 } from "./child-types.js";
 import type { ChildUsageTracker } from "./child-usage.js";
+import type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmCreateSessionResult,
+	RlmDeleteSubagentResult,
+	RlmListSubagentsResult,
+	RlmSpawnHandle,
+	RlmSubagentRegistryEntry,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "./runtime-contracts.js";
+import {
+	createDefaultRlmSubagentSessionName,
+	normalizeRequestedRlmSubagentModel,
+	normalizeRequestedRlmSubagentSessionName,
+	normalizeRequestedRlmSubagentThinkingLevel,
+} from "./spawn-options.js";
 
 export interface ChildRuntimeRequest {
 	id: string;

@@ -1,5 +1,5 @@
-import type { ActionStore, DeliveryRecord } from "../../core/session-action-store.js";
 import { waitForPromiseOrAbort } from "../../utils/wait-for-abort.js";
+import type { ActionStore, DeliveryRecord } from "../input/action-store.js";
 import type { SessionCommitFence, SessionCommitLease } from "../input/commit-fence.js";
 import type { SessionInputScheduler } from "../input/input-scheduler.js";
 import {
@@ -7,7 +7,7 @@ import {
 	createPreparedTurnAction,
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
-} from "../prepared-actions.js";
+} from "../input/prepared-actions.js";
 import { createTurnExecutionPolicy } from "../turns/turn-preparation.js";
 import {
 	type CustomMessage,

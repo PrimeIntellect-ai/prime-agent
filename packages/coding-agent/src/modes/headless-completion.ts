@@ -1,11 +1,11 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { AgentSession } from "../core/agent-session.js";
+import type { AgentSession } from "../session/agent-session.js";
 import {
 	type AgentAutonomousStatus,
 	autonomousLimitReason,
 	buildAutonomousGateFailureContinuation,
-} from "../core/autonomous.js";
+} from "../session/autonomy/autonomous.js";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CompactionOutcomeMessage,

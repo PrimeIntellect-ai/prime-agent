@@ -2,14 +2,6 @@
 
 // Config paths
 export { getAgentDir, VERSION } from "./config.js";
-export {
-	AgentSession,
-	type AgentSessionConfig,
-	type AgentSessionEvent,
-	type AgentSessionEventListener,
-	type ModelCycleResult,
-	type PromptOptions,
-} from "./core/agent-session.js";
 // Auth and model registry
 export {
 	type ApiKeyCredential,
@@ -158,7 +150,6 @@ export {
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./core/sdk.js";
-export type { SessionActionSnapshot } from "./core/session-action-store.js";
 export { SessionImportFileNotFoundError } from "./core/session-import-errors.js";
 export {
 	type BranchSummaryEntry,
@@ -369,6 +360,14 @@ export {
 	type ThemeColor,
 } from "./modes/interactive/theme/theme.js";
 export {
+	AgentSession,
+	type AgentSessionConfig,
+	type AgentSessionEvent,
+	type AgentSessionEventListener,
+	type ModelCycleResult,
+	type PromptOptions,
+} from "./session/agent-session.js";
+export {
 	compact,
 	findCutPoint,
 	findTurnStartIndex,
@@ -391,6 +390,7 @@ export type { FileOperations } from "./session/context/file-tracking.js";
 export { convertToLlm } from "./session/context/messages.js";
 export type { SessionStats } from "./session/context/session-stats.js";
 export { calculateContextTokens, estimateTokens, getLastAssistantUsage } from "./session/context/token-estimate.js";
+export type { SessionActionSnapshot } from "./session/input/action-store.js";
 export type { HarnessState, RefinementEdit, RefinementProposal, RefinementResult } from "./session/refinement/types.js";
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.js";

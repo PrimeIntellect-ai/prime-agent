@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AgentAutonomousConfig } from "./autonomous.js";
+import type { AgentAutonomousConfig } from "../session/autonomy/autonomous.js";
 
 export type AgentExecutionMode = "interactive" | "print" | "json" | "rpc" | "acp";
 

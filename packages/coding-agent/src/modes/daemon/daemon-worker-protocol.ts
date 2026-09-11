@@ -1,6 +1,6 @@
 import { closeSync, readFileSync } from "node:fs";
 import type { AgentSessionMessageDeliveryMode, AgentSessionMessageSender } from "../../core/agent-messages.js";
-import type { IdleEvictionMinutes } from "../../core/session-action-store.js";
+import type { IdleEvictionMinutes } from "./workers/residency-policy.js";
 
 export { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../core/session-lease.js";
 

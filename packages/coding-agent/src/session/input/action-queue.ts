@@ -1,6 +1,14 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { isAgentSessionMessage, isAgentSessionMessagePrompt } from "../../core/agent-messages.js";
+import { parseSessionSlashCommand } from "../../core/slash-commands.js";
+import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	type AsyncBashCompletionDetails,
+	type CustomMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
+	isSessionSlashCommandMessage,
+} from "../context/messages.js";
 import {
 	type ActionStore,
 	type DeliveryPolicy,
@@ -11,15 +19,8 @@ import {
 	queuedMessageLaneDeliveryPolicy,
 	type SessionAction,
 	type SessionActionSnapshot,
-} from "../../core/session-action-store.js";
-import { parseSessionSlashCommand } from "../../core/slash-commands.js";
-import {
-	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-	type AsyncBashCompletionDetails,
-	type CustomMessage,
-	HARNESS_DIGEST_CUSTOM_TYPE,
-	isSessionSlashCommandMessage,
-} from "../context/messages.js";
+} from "./action-store.js";
+import type { SessionInputScheduler } from "./input-scheduler.js";
 import {
 	cloneCustomMessage,
 	type createPreparedTurnAction,
@@ -31,8 +32,7 @@ import {
 	type RestoredPromptInput,
 	type SessionInputSchedule,
 	visibleSessionActionProjection,
-} from "../prepared-actions.js";
-import type { SessionInputScheduler } from "./input-scheduler.js";
+} from "./prepared-actions.js";
 
 export interface SessionActionQueueHost {
 	formatLabel(text: string): string;

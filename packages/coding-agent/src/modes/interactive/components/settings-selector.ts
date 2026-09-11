@@ -10,8 +10,8 @@ import {
 	Spacer,
 	Text,
 } from "@earendil-works/pi-tui";
-import type { IdleEvictionMinutes } from "../../../core/session-action-store.js";
 import type { MermaidRenderingMode, WarningSettings } from "../../../core/settings-manager.js";
+import type { IdleEvictionMinutes } from "../../daemon/workers/residency-policy.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 

@@ -15,10 +15,10 @@ import type {
 	AgentHeartbeatManagementAction,
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
-import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { CompactionResult } from "../../session/compaction/types.js";
 import type { SessionStats } from "../../session/context/session-stats.js";
 import type { GoalState } from "../../session/goals/contracts.js";
+import type { SessionActionSnapshot } from "../../session/input/action-store.js";
 import type { RefinementResult } from "../../session/refinement/types.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSourceInfo } from "../agent-connection/types.js";
 

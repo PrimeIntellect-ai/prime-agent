@@ -2,9 +2,6 @@
  * Core modules shared between all run modes.
  */
 
-export type { CompactionResult } from "../session/compaction/types.js";
-export type { SessionStats } from "../session/context/session-stats.js";
-export type { RefinementResult } from "../session/refinement/types.js";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -12,7 +9,15 @@ export {
 	type AgentSessionEventListener,
 	type ModelCycleResult,
 	type PromptOptions,
-} from "./agent-session.js";
+} from "../session/agent-session.js";
+export type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "../session/children/runtime-contracts.js";
+export type { CompactionResult } from "../session/compaction/types.js";
+export type { SessionStats } from "../session/context/session-stats.js";
+export type { RefinementResult } from "../session/refinement/types.js";
 export type { AgentSessionRuntimeConfig } from "./agent-session-config.js";
 export {
 	AgentSessionRuntime,
@@ -79,6 +84,5 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.js";
-export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";
 export { createSyntheticSourceInfo } from "./source-info.js";

@@ -14,22 +14,25 @@ import {
 } from "../../core/agent-observe.js";
 import type { HostRequestHandlers } from "../../core/kernel/index.js";
 import type { McpManager } from "../../core/mcp/mcp-manager.js";
+import type { Skill } from "../../core/skills.js";
+import {
+	createRlmCreateSessionHostHandler,
+	createRlmDeleteSubagentHostHandler,
+	createRlmListSubagentsHostHandler,
+	createRlmRunHostHandler,
+} from "../children/host-requests.js";
+import type {
+	RlmCreateSessionResult,
+	RlmDeleteSubagentResult,
+	RlmListSubagentsResult,
+	RlmSpawnHandle,
+} from "../children/runtime-contracts.js";
+import type { AsyncBashCompletionDetails } from "../context/messages.js";
 import {
 	createAsyncBashCompletionHostHandler,
 	createAsyncBashConsumedHostHandler,
-	createRlmCreateSessionHostHandler,
-	createRlmDeleteSubagentHostHandler,
-	createRlmFindModelsHostHandler,
-	createRlmListSubagentsHostHandler,
-	createRlmRunHostHandler,
-	type RlmCreateSessionResult,
-	type RlmDeleteSubagentResult,
-	type RlmFindModelsResult,
-	type RlmListSubagentsResult,
-	type RlmSpawnHandle,
-} from "../../core/rlm-runtime.js";
-import type { Skill } from "../../core/skills.js";
-import type { AsyncBashCompletionDetails } from "../context/messages.js";
+} from "../input/bash-host-requests.js";
+import { createRlmFindModelsHostHandler, type RlmFindModelsResult } from "../models/model-search.js";
 
 type ObserveResult = AgentObserveListResult | AgentObserveAgentSnapshot | AgentObserveRecentMessagesResult;
 export interface SessionKernelOperations {

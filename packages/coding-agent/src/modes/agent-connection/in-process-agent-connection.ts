@@ -3,7 +3,6 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
-import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type {
 	AgentCronJob,
@@ -17,6 +16,7 @@ import { providerRetryPolicy } from "../../core/provider-retry.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import type { AgentAutonomousStatus } from "../../session/autonomy/autonomous.js";
 import type { CompactionResult } from "../../session/compaction/types.js";
 import type { ContextTreeNode } from "../../session/context/context-tree.js";
 import type { SessionStats } from "../../session/context/session-stats.js";

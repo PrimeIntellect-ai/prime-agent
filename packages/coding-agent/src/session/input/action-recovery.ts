@@ -1,4 +1,4 @@
-import type { ActionStore } from "../../core/session-action-store.js";
+import type { ActionStore } from "./action-store.js";
 import {
 	cloneCustomMessage,
 	cloneQueuedAgentMessage,
@@ -7,7 +7,7 @@ import {
 	type QueuedSessionAction,
 	SESSION_ACTION_RECOVERY_FORMAT_VERSION,
 	type SessionActionRecoverySnapshot,
-} from "../prepared-actions.js";
+} from "./prepared-actions.js";
 
 export interface SessionActionRecoveryHost {
 	isTerminalNoticeAction(action: QueuedSessionAction): boolean;
