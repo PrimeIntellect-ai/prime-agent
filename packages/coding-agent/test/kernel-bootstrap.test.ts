@@ -12,6 +12,7 @@ import {
 	kernelVenvPython,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
+import * as childProcess from "../src/utils/child-process.js";
 
 let tempDir = "";
 let originalEnv: NodeJS.ProcessEnv;
@@ -86,6 +87,9 @@ function writeFakePython(filePath: string, importableModules: readonly string[])
 		[
 			"#!/bin/sh",
 			'if [ "$1" = "-c" ]; then',
+			'  if [ "$2" = "import importlib, sys; importlib.import_module(sys.argv[1])" ]; then',
+			'    set -- "$1" "import $3"',
+			"  fi",
 			'  case "$2" in',
 			cases,
 			runtimeCase,
@@ -120,6 +124,9 @@ function installFakeUv(): string {
 			"  cat > \"$venv/bin/python\" <<'PY'",
 			"#!/bin/sh",
 			'if [ "$1" = "-c" ]; then',
+			'  if [ "$2" = "import importlib, sys; importlib.import_module(sys.argv[1])" ]; then',
+			'    set -- "$1" "import $3"',
+			"  fi",
 			'  case "$2" in',
 			'    "import rlm") exit 0 ;;',
 			...extraImportCases,
@@ -504,6 +511,29 @@ dependencies = ["httpx"]
 		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
 
 		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(overridePython);
+	});
+
+	it("passes library-provided skill import names as data instead of Python source", async () => {
+		const overridePython = join(tempDir, "override-python");
+		const pythonSkill = createPythonSkill();
+		pythonSkill.importName = "os; raise SystemExit(0)";
+		writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+		const spawn = vi.spyOn(childProcess, "spawnHidden");
+		const progress: string[] = [];
+		try {
+			await expect(
+				ensureKernelPython({ pythonSkills: [pythonSkill], onProgress: (message) => progress.push(message) }),
+			).resolves.toBe(overridePython);
+			expect(spawn).toHaveBeenCalledWith(
+				overridePython,
+				["-c", "import importlib, sys; importlib.import_module(sys.argv[1])", pythonSkill.importName],
+				expect.objectContaining({ stdio: "ignore" }),
+			);
+			expect(progress).toEqual([expect.stringContaining(`Python skills unavailable in PRIME_AGENT_KERNEL_PYTHON`)]);
+		} finally {
+			spawn.mockRestore();
+		}
 	});
 
 	it("rejects PRIME_AGENT_KERNEL_PYTHON missing default extra packages", async () => {

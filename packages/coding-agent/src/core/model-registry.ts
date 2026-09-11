@@ -390,7 +390,9 @@ function readOpenAICodexAccountId(token: string): string | undefined {
 const OPENAI_CODEX_CLIENT_VERSION = "0.153.4";
 
 function openAICodexModelsUrl(baseUrl: string): string {
-	const normalized = baseUrl.replace(/\/+$/, "");
+	let end = baseUrl.length;
+	while (end > 0 && baseUrl[end - 1] === "/") end--;
+	const normalized = baseUrl.slice(0, end);
 	let path: string;
 	if (normalized.endsWith("/codex/responses")) {
 		path = `${normalized.slice(0, -"/responses".length)}/models`;
