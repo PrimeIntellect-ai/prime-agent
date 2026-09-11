@@ -193,7 +193,7 @@ import {
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
 import { ConfigurationMenuComponent, type ConfigurationMenuTab } from "./components/configuration-menu.js";
 import { formatContextTree } from "./components/context-tree-format.js";
-import { createShellCompletionComponent, isCompactAgentMessageNeighbor } from "./components/conversation-components.js";
+import { createConversationSpacing, createShellCompletionComponent } from "./components/conversation-components.js";
 import { CountdownTimer } from "./components/countdown-timer.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { CustomMessageComponent } from "./components/custom-message.js";
@@ -3052,12 +3052,14 @@ export class InteractiveMode {
 				return componentAfterLoad;
 			}
 
+			const spacing = createConversationSpacing(this.chatContainer.children);
 			const component = new ToolExecutionComponent(
 				latestToolCall.name,
 				latestToolCall.id,
 				latestToolCall.arguments,
 				{
 					showImages: this.settingsManager.getShowImages(),
+					shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
 				},
 				toolDefinition,
 				this.ui,
@@ -5819,7 +5821,7 @@ export class InteractiveMode {
 			this.hiddenThinkingLabel,
 			{
 				expanded: this.toolOutputExpanded,
-				precededByToolActivity: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
+				precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,
 				mermaidTransform: this.mermaidMarkdownTransform,
 				cwd: this.getCurrentCwd(),
 			},
@@ -6341,7 +6343,7 @@ export class InteractiveMode {
 		}
 		if (isAgentSessionMessage(message)) {
 			return new AgentMessageComponent(message, this.getMarkdownThemeWithSettings(), {
-				suppressLeadingSpace: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
+				shouldAddLeadingSpace: createConversationSpacing(this.chatContainer.children).shouldAddLeadingSpace,
 			});
 		}
 		const shellCompletion = createShellCompletionComponent(message, this.chatContainer.children);
@@ -6465,7 +6467,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					{
 						expanded: this.toolOutputExpanded,
-						precededByToolActivity: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
+						precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,
 						mermaidTransform: this.mermaidMarkdownTransform,
 						cwd: this.getCurrentCwd(),
 					},
@@ -6576,6 +6578,7 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
+						const spacing = createConversationSpacing(this.chatContainer.children);
 						const component = new ToolExecutionComponent(
 							content.name,
 							content.id,
@@ -6583,6 +6586,7 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								includeImageDimensions: false,
+								shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
 							},
 							this.getCachedToolDefinition(content.name),
 							this.ui,

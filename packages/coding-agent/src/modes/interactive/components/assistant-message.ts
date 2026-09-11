@@ -20,7 +20,7 @@ const LOGIN_RECOVERY_SUFFIX = `\n\n${LOGIN_RECOVERY_MESSAGE}`;
 export interface AssistantMessageComponentOptions {
 	cwd?: string;
 	expanded?: boolean;
-	precededByToolActivity?: boolean;
+	precededByToolActivity?: boolean | (() => boolean);
 	/** Replaces Mermaid code blocks in assistant text (never thinking) with Unicode diagrams. */
 	mermaidTransform?: MermaidMarkdownTransform;
 }
@@ -75,7 +75,8 @@ export class AssistantMessageComponent extends Container {
 	private lastSignature?: string;
 	private blockMarkdowns = new Map<number, Markdown>();
 	private lastBlockTexts = new Map<number, string>();
-	private precededByToolActivity: boolean;
+	private precededByToolActivity: boolean | (() => boolean);
+	private lastPrecededByToolActivity?: boolean;
 	private mermaidTransform?: MermaidMarkdownTransform;
 	private baseUrl?: string;
 	private isStreaming = false;
@@ -136,6 +137,12 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
+		const precededByToolActivity = this.isPrecededByToolActivity();
+		if (this.lastPrecededByToolActivity !== precededByToolActivity) {
+			this.lastPrecededByToolActivity = precededByToolActivity;
+			this.lastSignature = undefined;
+			this.dirty = true;
+		}
 		if (this.dirty) {
 			if (this.lastMessage) {
 				this.reconcile(this.lastMessage);
@@ -150,6 +157,40 @@ export class AssistantMessageComponent extends Container {
 		lines[0] = OSC133_ZONE_START + lines[0];
 		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
 		return lines;
+	}
+
+	private isPrecededByToolActivity(): boolean {
+		return typeof this.precededByToolActivity === "function"
+			? this.precededByToolActivity()
+			: this.precededByToolActivity;
+	}
+
+	private hasVisibleBody(): boolean {
+		return (this.lastMessage?.content ?? []).some(
+			(content) =>
+				(content?.type === "text" && content.text.trim()) ||
+				(content?.type === "thinking" && !this.hideThinkingBlock && content.thinking.trim()),
+		);
+	}
+
+	/** Mirrors the trailing separator rendered before this message's tool calls. */
+	hasTrailingSpace(): boolean {
+		return (
+			!!this.lastMessage?.content.some((content) => content?.type === "toolCall") &&
+			(this.hasVisibleBody() || this.lastMessage.stopReason === "aborted" || !this.isPrecededByToolActivity())
+		);
+	}
+
+	getSpacingContent(): "visible" | "tool-only" | "hidden" {
+		const message = this.lastMessage;
+		const hasToolCalls = message?.content.some((content) => content?.type === "toolCall");
+		if (
+			this.hasVisibleBody() ||
+			message?.stopReason === "aborted" ||
+			(message?.stopReason === "error" && !hasToolCalls)
+		)
+			return "visible";
+		return hasToolCalls ? "tool-only" : "hidden";
 	}
 
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
@@ -301,7 +342,7 @@ export class AssistantMessageComponent extends Container {
 			this.contentContainer.addChild(this.createErrorComponent(errorMsg, "Error"));
 		}
 
-		if (hasToolCalls && (hasVisibleContent || message.stopReason === "aborted" || !this.precededByToolActivity)) {
+		if (hasToolCalls && (hasVisibleContent || message.stopReason === "aborted" || !this.isPrecededByToolActivity())) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 	}
