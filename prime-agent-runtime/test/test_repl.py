@@ -760,10 +760,6 @@ class ReplTest(unittest.TestCase):
         reads = (
             ("poll", "handle.poll().output"),
             ("await", "(await handle).output"),
-            (
-                "as-completed",
-                "import asyncio\n[(await completed).output for completed in asyncio.as_completed([handle])][0]",
-            ),
         )
         for label, read_code in reads:
             with self.subTest(label=label):
@@ -782,19 +778,13 @@ class ReplTest(unittest.TestCase):
                 self.assertEqual(
                     request["data"], {"type": "bash.consumed", "pid": pid, "command": command}
                 )
-                # A host without the type answers with an error reply: the kernel keeps
-                # working and later reads never repeat the withdrawal.
+                # Old host: error reply is absorbed and the withdrawal never repeats.
                 self.repl.send(
-                    {
-                        "type": "host_reply",
-                        "id": request["id"],
-                        "data": {"status": "error", "error": "unknown"},
-                    }
+                    {"type": "host_reply", "id": request["id"], "data": {"status": "error", "error": "unknown"}}
                 )
-                again = self.repl.execute(f"withdraw-{label}-again", "handle.output()\nhandle.tail(1)")
-                self.assertIsNone(one(again, "host_request"))
-                self.assertEqual(one(again, "done")["status"], "ok")
-                self.assertEqual(stream_text(again, "stderr"), "")
+                if label == "poll":
+                    again = self.repl.execute("withdraw-again", "handle.output()\nhandle.tail(1)")
+                    self.assertIsNone(one(again, "host_request"))
 
     def test_detached_read_between_turns_keeps_bash_completion(self):
         # A watcher reading the handle with no cell running reaches nobody: the

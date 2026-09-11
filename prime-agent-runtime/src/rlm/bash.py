@@ -651,15 +651,10 @@ class BashHandle:
         callback()
 
     def _note_result_consumed(self, awaiter: asyncio.Task[Any] | None = None) -> None:
-        """Record a read of the finished result; an awaiting read passes its task.
-
-        A read only reaches the model from inside a cell: the value, and anything
-        the reader prints, ride that cell's turn. Between turns nothing is
-        delivered, so a detached reader leaves the completion notice in place --
-        that notice is the only wake-up an idle session gets. An awaiting reader
-        must also be one the live cell waits for, because a discarded or detached
-        wrapper task awaits a value the model never sees.
-        """
+        """Record a result read that reaches the model: only reads during a live
+        cell count (a detached reader between turns must keep the notice — it is
+        the idle session's only wake-up), and an awaiting reader must be one the
+        live cell waits for."""
         if not self._done.is_set():
             return
         owner = _live_cell_owner()
@@ -723,8 +718,7 @@ class BashHandle:
                 }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
-                # The notice now sits on the host side, so a later result read can
-                # only be answered by asking the host to withdraw it.
+                # Notice accepted by the host; later reads must ask it to withdraw.
                 self._arm_consumed_notice(command)
             else:
                 sys.stderr.write(
@@ -740,8 +734,7 @@ class BashHandle:
             repl.emit({"application/vnd.prime-agent.bash-activity+json": {**activity, "active": False}})
 
     def _arm_consumed_notice(self, command: str) -> None:
-        # Armed only after the host accepted the completion notice, so the
-        # withdrawal request can never overtake the notice it withdraws.
+        # Armed only post-acceptance: the withdrawal can never overtake its notice.
         loop = asyncio.get_running_loop()
 
         def dispatch() -> None:
@@ -770,9 +763,7 @@ class BashHandle:
                 {"type": "bash.consumed", "pid": self._pid, "command": command}
             )
         except (OSError, RuntimeError):
-            # Teardown can close the bridge before this lands; a host that does not
-            # know the type answers with an error reply, which needs no action.
-            return
+            return  # bridge closed at teardown; old hosts error-reply — both fine
 
     async def _wait_reaped(self) -> None:
         loop = asyncio.get_running_loop()
