@@ -63,7 +63,7 @@ and other missing tools. Their setup time and disk usage are outside the install
   The controller, PTY harness, artifact server, and build user are excluded. RSS can double-count
   shared pages.
 
-Startup and memory use 10 trials per revision. Installation uses three; sizes are measured once.
+Startup and memory use 10 trials per revision. Installation uses three; sizes are measured once. UI interactions use 3 trials per revision (`ui_trials`).
 Stock tools, skills, daemon, persistence, and Python bootstrap remain enabled. Homes contain no
 credentials, extensions, MCP servers, or personal skills. The onboarding splash is marked as already
 shown before timing, so startup measures the editor rather than waiting for a person to sign in.
@@ -120,6 +120,54 @@ size, and 1% for disk footprint. A same-revision calibration on separate sandbox
 Smaller signed differences remain visible. Revisit these floors after collecting more control runs. This is a practical noise filter, not a statistical significance test. Inspect
 raw trials before acting on small changes; sandbox scheduling and filesystem caches still introduce noise.
 
+### UI interactions
+
+A separate probe drives the interactive TUI over a PTY with the same `pexpect`/`pyte` harness the
+startup metrics use, against a deterministic on-disk fixture set. Every UI trial regenerates the
+sessions directory, session artifacts, and spawn ledger from scratch, so trials cannot inherit state.
+
+The fixture set is fixed and mirrors a long-lived install: 194 top-level sessions (3 large —
+one of them a very large ~40 MB transcript — 150 medium, 40 small fan-out children of the chain
+root, and the root itself) plus a chain of 6 nested subagent sessions. Large sessions hold 1,999
+user/assistant/toolResult triples (~5 MB of JSONL each), the very large one 15,999 (~40 MB),
+medium sessions 119, and each subagent 399. Content is synthetic but shaped like real transcripts
+(thinking, tool calls, tool output). The subagent chain and the fan-out are linked through the
+same spawn-ledger records the daemon replays (~46 edges), so roster hydration, catalog scanning,
+and saved-session paths are exercised at a scale where regressions are visible. No inference is
+called at any point.
+
+Each trial stops all benchmark-user processes first, then measures:
+
+- **Resume large session (cold):** `prime-agent --resume <id>` from process spawn until the resumed
+  transcript tail is rendered and the editor echoes a typed marker. This is the "switch into a large
+  session" path including daemon and session-worker startup.
+- **Switch into large session:** in a running TUI, `/resume <id>` keystroke to rendered tail plus
+  echoed marker. Measures the in-place session switch with a ~40 MB transcript.
+- **Open agents view from a session:** the left-arrow keystroke to the rendered agents-view splash.
+- **Full agents roster, many sessions:** after the agents-view splash is rendered, until the
+  roster's saved-session count stops growing. Saved sessions stream in, so this isolates catalog scanning, spawn-ledger
+  replay, and hydration across 200 session files.
+- **Open another session from agents view:** typing the target's unique session-id prefix,
+  right-arrow to open, until the target transcript renders and echoes. This is the full
+  "session → agents view → another session" round trip with many sessions on disk.
+- **Open chain parent from agents view:** back to the agents view, search the subagent chain's
+  root session by id prefix, right-arrow to open. The parent becomes live.
+- **Open subagent session at depth 6:** back to the agents view, then drill into the live chain:
+  filter by the deepest subagent's id prefix, clear the search (expansion needs an empty query),
+  expand the parent, refilter past the fan-out siblings, and repeat clear-expand-step for each of
+  the six levels until the deepest subagent row is selected, then right-arrow to open. This is the
+  exact manual flow the product requires today, so the metric includes its real cost.
+- **CPU per interaction:** summed `utime+stime` across the whole benchmark-user process tree
+  (TUI client, daemon, session workers, Python kernels) between two instants around each interaction.
+- **UI memory after interactions:** summed RSS across the same tree after the scenario settles.
+  Per-process snapshots with PSS and CPU are saved as raw artifacts, as for idle memory.
+
+Readiness is never a spinner or a status line: a trial only counts when the target session's
+final transcript line is visible and the editor echoes a marker, so half-rendered states fail
+loudly instead of measuring fast. Raw results also record PTY bytes per interaction, a proxy for
+how much the renderer redraws. UI trials default to 3 per revision (`ui_trials` in `config.json`)
+to bound sandbox cost; the scenario takes roughly 60–90 s per trial.
+
 ## Lifecycle and costs
 
 The main workflow posts a single marked comment and updates it in place. A new push replaces the
@@ -134,13 +182,14 @@ SHAs, environment details, installed dependency inventory, transcripts, raw obse
 and estimated sandbox costs. The publisher validates schema, identity, finite numbers, and report
 size and escapes sandbox-provided text.
 
-The controller stops scheduling work at 20 minutes or its $1 estimated budget target. Every sandbox
+The controller stops scheduling work at 25 minutes or its $1 estimated budget target. Every sandbox
 has a 30-minute TTL. Teardown runs in `finally`; the independent completion workflow deletes any
 remaining sandboxes with the exact repository/run/attempt labels, including after cancellation.
 Cleanup enumerates all pages before deleting so pagination cannot skip a sandbox.
 
 At the configured list rates, two sandboxes cost about $0.01/minute together. A 10-minute run costs
-about $0.10 in sandbox compute. There are no inference charges. Full sandbox lifetimes are recorded,
+about $0.10 in sandbox compute. There are no inference charges. UI-interaction trials add roughly
+3–6 minutes per run at the default 3 trials per revision. Full sandbox lifetimes are recorded,
 including provisioning, setup, building, measurements, and cleanup. The $1 target is an estimate,
 not a hard billing cap; scheduling and deletion latency can increase the final bill.
 

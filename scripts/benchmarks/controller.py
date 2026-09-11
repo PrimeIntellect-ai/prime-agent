@@ -25,7 +25,7 @@ from schema import (
 
 REMOTE = "/opt/prime-benchmark"
 OWNER_LABEL = "prime-agent-benchmarks-v1"
-FILES = ("schema.py", "terminal.py", "kernel.py", "worker.py", "pyproject.toml", "uv.lock")
+FILES = ("schema.py", "terminal.py", "kernel.py", "worker.py", "ui.py", "pyproject.toml", "uv.lock")
 
 
 def elapsed_seconds(start: datetime) -> float:
@@ -274,6 +274,7 @@ class Controller:
                 ("install", self.report.config.install_trials),
                 ("measure", self.report.config.trials),
                 ("runtime", self.report.config.trials),
+                ("ui", self.report.config.ui_trials),
             ):
                 for trial in range(count):
                     for role in ready if trial % 2 == 0 else list(reversed(ready)):
@@ -292,7 +293,12 @@ class Controller:
                         if compute >= self.report.config.budget_usd:
                             raise TimeoutError("Reached the estimated run budget")
             complete = all(
-                side_complete(side, self.report.config.trials, self.report.config.install_trials)
+                side_complete(
+                    side,
+                    self.report.config.trials,
+                    self.report.config.install_trials,
+                    self.report.config.ui_trials,
+                )
                 for side in (self.report.main, self.report.pr_head)
             )
             self.report.status = "completed" if complete and not self.report.errors else "partial"
@@ -343,7 +349,7 @@ def cancel(_signum: int, _frame: object) -> None:
     raise Canceled("Workflow was canceled")
 
 
-def side_complete(side: Side, trials: int, installs: int) -> bool:
+def side_complete(side: Side, trials: int, installs: int, ui_trials: int) -> bool:
     expected = {
         "cold": trials,
         "warm": trials,
@@ -362,6 +368,21 @@ def side_complete(side: Side, trials: int, installs: int) -> bool:
         "install": installs,
         "disk": 1,
         "bundle": 1,
+        "resume_large": ui_trials,
+        "resume_large_cpu": ui_trials,
+        "switch_large": ui_trials,
+        "switch_large_cpu": ui_trials,
+        "agents_view": ui_trials,
+        "agents_view_cpu": ui_trials,
+        "agents_roster": ui_trials,
+        "agents_roster_cpu": ui_trials,
+        "agents_open": ui_trials,
+        "agents_open_cpu": ui_trials,
+        "subagent_open": ui_trials,
+        "subagent_open_cpu": ui_trials,
+        "parent_open": ui_trials,
+        "parent_open_cpu": ui_trials,
+        "ui_rss": ui_trials,
     }
     return not side.error and all(
         len(side.metrics.get(metric, [])) == count

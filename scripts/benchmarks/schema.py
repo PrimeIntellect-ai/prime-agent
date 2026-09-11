@@ -27,7 +27,41 @@ Metric = Literal[
     "restore",
     "kernel_rss",
     "loaded_rss",
+    "resume_large",
+    "resume_large_cpu",
+    "switch_large",
+    "switch_large_cpu",
+    "agents_view",
+    "agents_view_cpu",
+    "agents_roster",
+    "agents_roster_cpu",
+    "agents_open",
+    "agents_open_cpu",
+    "subagent_open",
+    "subagent_open_cpu",
+    "parent_open",
+    "parent_open_cpu",
+    "ui_rss",
 ]
+UI_METRIC_KEYS = frozenset(
+    {
+        "resume_large",
+        "resume_large_cpu",
+        "switch_large",
+        "switch_large_cpu",
+        "agents_view",
+        "agents_view_cpu",
+        "agents_roster",
+        "agents_roster_cpu",
+        "agents_open",
+        "agents_open_cpu",
+        "subagent_open",
+        "subagent_open_cpu",
+        "parent_open",
+        "parent_open_cpu",
+        "ui_rss",
+    }
+)
 NonNegative = Annotated[float, Field(ge=0, le=1e15, allow_inf_nan=False)]
 ROOT = Path(__file__).resolve().parent
 UV_VERSION = "0.12.9"
@@ -45,6 +79,7 @@ class Config(StrictModel):
     disk_gb: Annotated[float, Field(gt=0, le=1000)]
     trials: Annotated[int, Field(ge=3, le=50)]
     install_trials: Annotated[int, Field(ge=1, le=10)]
+    ui_trials: Annotated[int, Field(ge=1, le=50)] = 3
     debounce_seconds: Annotated[int, Field(ge=0, le=300)]
     timeout_seconds: Annotated[int, Field(ge=60, le=3600)]
     ttl_minutes: Annotated[int, Field(ge=1, le=120)]
@@ -88,6 +123,7 @@ class ProcessMemory(StrictModel):
     name: Annotated[str, Field(max_length=80)]
     rss: NonNegative
     pss: NonNegative | None = None
+    cpu: NonNegative = 0.0
 
 
 class Side(StrictModel):
@@ -153,6 +189,8 @@ class Report(StrictModel):
                 expected = self.config.install_trials if metric == "install" else self.config.trials
                 if metric in ("bundle", "disk"):
                     expected = 1
+                if metric in UI_METRIC_KEYS:
+                    expected = self.config.ui_trials
                 if (
                     len(samples) > expected
                     or len({s.trial for s in samples}) != len(samples)
