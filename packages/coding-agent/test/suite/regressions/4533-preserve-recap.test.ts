@@ -113,7 +113,7 @@ describe("ENG-4533 recap layout", () => {
 		const mode = createRenderMode();
 
 		expect(render(mode)).toHaveLength(2);
-		expect(stripAnsi(render(mode)[1] ?? "")).toContain("Showing overview");
+		expect(stripAnsi(render(mode)[1] ?? "")).toContain("Collapsed mode");
 	});
 
 	it("keeps long recaps to one row on narrow terminals", () => {

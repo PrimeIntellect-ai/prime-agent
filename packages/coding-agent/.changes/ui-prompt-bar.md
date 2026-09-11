@@ -6,3 +6,4 @@
 - Removed unsolicited feature-discovery tips during agent runs and example prompts from the startup splash and editor.
 - Removed the extra blank line above recap and detail status when no extension widget is shown.
 - Kept the tray and subagent summary visible during slash-command autocomplete while hiding them for actual pickers.
+- Renamed conversation detail states to Collapsed mode, Details mode, and All output mode.
