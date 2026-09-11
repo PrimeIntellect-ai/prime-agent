@@ -21,9 +21,12 @@ export async function resolveConfigValueAsync(
 	if (!config.startsWith("!")) return resolveEnvOrLiteral(config);
 	const pending = pendingCommands.get(config);
 	if (pending) return pending;
-	if (!options.force && commandResultCache.has(config)) return commandResultCache.get(config);
+	const cached = commandResultCache.get(config);
+	if (!options.force && cached !== undefined) return cached;
 	const promise = executeCommandAsync(config.slice(1)).then((value) => {
-		commandResultCache.set(config, value);
+		// A failed refresh must not reuse an old key or prevent the next request from retrying.
+		if (value === undefined) commandResultCache.delete(config);
+		else commandResultCache.set(config, value);
 		return value;
 	});
 	pendingCommands.set(config, promise);

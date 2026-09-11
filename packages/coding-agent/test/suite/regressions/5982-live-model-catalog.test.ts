@@ -197,10 +197,9 @@ describe("ENG-5982 live model catalogs", () => {
 		}
 	});
 
-	test.each([
-		["openai", "catalog-new"],
-		["prime-inference", "internal/new-private"],
-	])("does not wait or substitute metadata for an uncached saved %s model", async (provider, id) => {
+	test("does not wait or substitute metadata for an uncached saved public model", async () => {
+		const provider = "openai";
+		const id = "catalog-new";
 		const complete: Array<() => void> = [];
 		fetchFn.mockImplementation(
 			(url) =>

@@ -3,3 +3,6 @@
 - Kept startup and model selection responsive during catalog refreshes and reported missing saved-model metadata without substituting another model's limits.
 - Refreshed catalogs after credential or team changes without running credential commands in model availability checks.
 - Added a bundled JSON model catalog so first-run onboarding shows models and providers without waiting for network discovery.
+- Fixed saved private-model restoration on cold starts and with command-backed credentials.
+- Retried failed credential commands on the next request instead of retaining failed results.
+- Reduced memory and CPU overhead when creating multiple model registries.

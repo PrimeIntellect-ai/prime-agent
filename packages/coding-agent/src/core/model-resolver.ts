@@ -580,9 +580,11 @@ export async function findInitialModel(options: {
 	}
 	const availableModels = await getAvailableModels();
 	if (defaultProvider && defaultModelId) {
-		const found = availableModels.find(
-			(candidate) => candidate.provider === defaultProvider && candidate.id === defaultModelId,
-		);
+		const savedPrivateModel = isPrivatePrimeInferenceModel({ provider: defaultProvider, id: defaultModelId });
+		const found =
+			availableModels.find(
+				(candidate) => candidate.provider === defaultProvider && candidate.id === defaultModelId,
+			) ?? (savedPrivateModel ? await modelRegistry.resolveSavedPrivateModel(defaultModelId) : undefined);
 		if (found) {
 			model = found;
 			if (defaultThinkingLevel) {
@@ -590,11 +592,13 @@ export async function findInitialModel(options: {
 			}
 			return { model, thinkingLevel, fallbackMessage: undefined };
 		}
-		if (!modelRegistry.find(defaultProvider, defaultModelId)) {
+		if (savedPrivateModel || !modelRegistry.find(defaultProvider, defaultModelId)) {
 			return {
 				model: undefined,
 				thinkingLevel,
-				fallbackMessage: missingSavedModelMessage(defaultProvider, defaultModelId),
+				fallbackMessage: savedPrivateModel
+					? unavailableSavedPrivateModelMessage(defaultProvider, defaultModelId)
+					: missingSavedModelMessage(defaultProvider, defaultModelId),
 			};
 		}
 	}
@@ -612,6 +616,10 @@ function missingSavedModelMessage(provider: string, modelId: string): string {
 	return `Saved model ${provider}/${modelId} has no local catalog metadata. Catalogs refresh in the background; use /model to select it when available.`;
 }
 
+function unavailableSavedPrivateModelMessage(provider: string, modelId: string): string {
+	return `Could not restore saved model ${provider}/${modelId} (model is not available yet). Check authentication or use /model to retry or select another model.`;
+}
+
 /**
  * Restore model from session, with fallback to available models
  */
@@ -623,15 +631,21 @@ export async function restoreModelFromSession(
 	modelRegistry: ModelRegistry,
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
 	const availableModels = await modelRegistry.refreshAvailableModels();
-	const restoredModel = availableModels.find(
-		(candidate) => candidate.provider === savedProvider && candidate.id === savedModelId,
-	);
+	const savedPrivateModel = isPrivatePrimeInferenceModel({ provider: savedProvider, id: savedModelId });
+	const restoredModel =
+		availableModels.find((candidate) => candidate.provider === savedProvider && candidate.id === savedModelId) ??
+		(savedPrivateModel ? await modelRegistry.resolveSavedPrivateModel(savedModelId) : undefined);
 
 	if (restoredModel) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Restored model: ${savedProvider}/${savedModelId}`));
 		}
 		return { model: restoredModel, fallbackMessage: undefined };
+	}
+	if (savedPrivateModel) {
+		const fallbackMessage = unavailableSavedPrivateModelMessage(savedProvider, savedModelId);
+		if (shouldPrintMessages) console.error(chalk.yellow(fallbackMessage));
+		return { model: undefined, fallbackMessage };
 	}
 	const registeredModel = modelRegistry.find(savedProvider, savedModelId);
 	if (!registeredModel) {

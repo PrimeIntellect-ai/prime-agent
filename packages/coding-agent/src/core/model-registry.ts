@@ -484,7 +484,7 @@ export class ModelRegistry {
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
 			const cred = this.authStorage.get(oauthProvider.id);
 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
-				combined = oauthProvider.modifyModels(combined, cred);
+				combined = oauthProvider.modifyModels(structuredClone(combined), cred);
 			}
 		}
 
@@ -731,6 +731,19 @@ export class ModelRegistry {
 		if (options.background === false) await refresh;
 		else void refresh.catch(() => {});
 		return this.getAvailable();
+	}
+
+	/** Saved private selections may wait for credentials/discovery; picker reads never do. */
+	async resolveSavedPrivateModel(modelId: string): Promise<Model<Api> | undefined> {
+		const findAvailable = () =>
+			this.getAvailable().find((model) => model.provider === PRIME_INFERENCE_PROVIDER_ID && model.id === modelId);
+		const auth = await this.authStorage.getApiKeyWithSourceToken(PRIME_INFERENCE_PROVIDER_ID);
+		// A command-backed key must resolve before its credential-scoped disk cache can be read.
+		this.reloadModelsAfterCatalogChange();
+		const cached = findAvailable();
+		if (cached || !auth.apiKey) return cached;
+		await this.refreshPrimeCatalog(false);
+		return findAvailable();
 	}
 
 	private getPrimeCatalogScope(): string {
@@ -1455,7 +1468,7 @@ export class ModelRegistry {
 			if (config.oauth?.modifyModels) {
 				const cred = this.authStorage.get(providerName);
 				if (cred?.type === "oauth") {
-					this.models = config.oauth.modifyModels(this.models, cred);
+					this.models = config.oauth.modifyModels(structuredClone(this.models), cred);
 				}
 			}
 		} else if (config.baseUrl || config.headers) {
