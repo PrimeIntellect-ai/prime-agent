@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -92,6 +93,30 @@ def first_agent_error(agent_log: str) -> str | None:
     return None
 
 
+def agent_env(agent_home: Path) -> dict:
+    """A clean, isolated environment for the agent subprocess.
+
+    The eval agent must be an independent root session: every PRIME_AGENT_INTERNAL_*
+    variable an embedding session might leak is stripped (a child inheriting
+    them would try to attach to the parent's worker), the agent runs under
+    its own PRIME_AGENT_CODING_AGENT_DIR / PI_CODING_AGENT_DIR (the workspace
+    launcher's env prefix derives from the package config name) so it never
+    touches a production agent dir, and the credential file is copied in so
+    model auth works without sharing any state.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PRIME_AGENT_INTERNAL_")}
+    for key in ("PRIME_AGENT_BASH_SHELL", "PRIME_AGENT_BASH_COMMAND_PREFIX"):
+        env.pop(key, None)
+    source_agent_dir = Path(env.get("PRIME_AGENT_CODING_AGENT_DIR") or Path.home() / ".prime" / "agent")
+    source_auth = source_agent_dir / "auth.json"
+    if source_auth.is_file():
+        agent_home.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_auth, agent_home / "auth.json")
+    env["PRIME_AGENT_CODING_AGENT_DIR"] = str(agent_home)
+    env["PI_CODING_AGENT_DIR"] = str(agent_home)
+    return env
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", required=True, help="Fixture directory (contains fixture.json)")
@@ -129,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
             args.agent_bin,
             "--mode",
             "json",
+            "--daemon-socket",
+            str(workdir / "daemon.sock"),
             "--cwd",
             str(repo_dir),
             "--session-dir",
@@ -138,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
             "--",
             prompt,
         ],
+        env=agent_env(workdir / "agent-home"),
         capture_output=True,
         text=True,
         timeout=args.timeout,
