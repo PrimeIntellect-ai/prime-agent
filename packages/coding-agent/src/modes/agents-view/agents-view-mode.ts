@@ -2688,7 +2688,19 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.replyTarget) {
 			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
 		}
-		const hints = `${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate   ${keyText("tui.select.confirm")} open   ${keyText("app.agents.new")} new   ${keyText("app.shortcuts")} actions`;
+		const selected = this.rows[this.selectedIndex];
+		// Right toggles the list on a summary row and opens everywhere else; Left
+		// only has a parent scope to return to below the root view.
+		const rightAction = selected?.kind === "subagent-summary" ? (selected.expanded ? "collapse" : "expand") : "open";
+		const hints = [
+			`${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate`,
+			`${keyText("tui.select.confirm")} open`,
+			`${keyText("app.agents.new")} new`,
+			`${keyText("app.agents.open")} ${rightAction}`,
+			this.scopeRootSummary ? `${keyText("app.agents.back")} parent` : undefined,
+		]
+			.filter((hint): hint is string => hint !== undefined)
+			.join("   ");
 		return truncateToWidth(theme.fg("muted", hints), width);
 	}
 

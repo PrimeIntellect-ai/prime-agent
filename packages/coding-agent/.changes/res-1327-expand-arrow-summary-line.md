@@ -1,1 +1,2 @@
 - Changed the agents view subagent expand/collapse control: the arrow now sits on the always-visible subagent summary line instead of hiding on the session row.
+- Changed the agents view hint tray to describe the arrow keys in context — `→ open`, `→ expand`/`→ collapse` on a subagent summary line, and `← parent` only inside an agent scope — in place of the `?` actions hint.

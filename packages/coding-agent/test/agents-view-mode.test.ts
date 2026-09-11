@@ -1105,6 +1105,36 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("adapts the tray hints to the selected row and the scope", () => {
+		const parent = summary({ sessionName: "parent" });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const hints = () => stripAnsi(invoke("renderHints", view, 200) as string);
+		try {
+			Reflect.set(view, "lastListedSummaries", [parent, child]);
+			invoke("reconcileCatalogs", view);
+			Reflect.set(view, "selectedIndex", 0);
+			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → open");
+			// Right toggles the summary row, so its hint follows the expansion state.
+			Reflect.set(view, "selectedIndex", 1);
+			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → expand");
+			view.handleInput("\x1b[C");
+			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → collapse");
+			// Only a scoped view has a parent to return to.
+			Reflect.set(view, "scopeRootSummary", parent);
+			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → collapse   ← parent");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("dims a paused-only heartbeat badge and keeps active badges in the error color", () => {
 		const job = (status: "active" | "paused") => ({
 			job: {
