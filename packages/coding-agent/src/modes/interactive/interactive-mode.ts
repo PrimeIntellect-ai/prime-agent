@@ -5969,9 +5969,11 @@ export class InteractiveMode {
 
 	// Pickers mount either as overlays (model/provider/MCP menu) or in place of
 	// the editor (thinking, settings, and scoped-model selectors); the tray stays
-	// hidden while either surface is up.
+	// hidden while either surface is up. Autocomplete keeps focus in the editor.
 	private isInlinePickerOpen(): boolean {
-		if (this.ui.hasOverlay()) return true;
+		const editorAutocomplete =
+			this.editor instanceof CustomEditor && this.editor.focused && this.editor.isShowingAutocomplete();
+		if (this.ui.hasOverlay() && !editorAutocomplete) return true;
 		const editorChild = this.editorContainer.children[0];
 		return editorChild !== undefined && editorChild !== this.editor;
 	}
