@@ -152,9 +152,34 @@ export function getShellEnv(): NodeJS.ProcessEnv {
 	const hasBinDir = pathEntries.includes(binDir);
 	const updatedPath = hasBinDir ? currentPath : [binDir, currentPath].filter(Boolean).join(delimiter);
 
+	// Agent-spawned shells never have a usable stdin (stdio: ["ignore", "pipe", "pipe"]),
+	// so any interactive prompt opened via /dev/tty is a guaranteed hang until killed:
+	// `git commit` without -m launches $EDITOR, credential helpers block waiting for a
+	// password, pagers read the terminal directly. Make those cases fail fast or no-op
+	// instead of hanging. These deliberately override inherited terminal settings; a
+	// user who wants a prompt in a specific command can still override inline
+	// (e.g. `GIT_EDITOR=vim git commit`), which takes precedence over exported vars.
+	// Agent-spawned shells never have a usable stdin (stdio: ["ignore", "pipe", "pipe"]),
+	// so any interactive prompt opened via /dev/tty is a guaranteed hang until killed:
+	// `git commit` without -m launches $EDITOR, credential helpers block waiting for a
+	// password, pagers read the terminal directly. Make those cases fail fast or no-op
+	// instead of hanging.
+	//
+	// These deliberately override inherited terminal settings (an EDITOR=vim inherited
+	// from the launching shell is exactly the hang we are preventing, and stdin is
+	// ignored even for user `!` commands, so an interactive editor can never receive
+	// keystrokes anyway). A user who wants a prompt in a specific command can override
+	// inline (`GIT_EDITOR=vim git commit`), which takes precedence over exported vars.
 	return {
 		...process.env,
 		[pathKey]: updatedPath,
+		GIT_EDITOR: "true",
+		GIT_TERMINAL_PROMPTS: "0",
+		EDITOR: "true",
+		VISUAL: "true",
+		PAGER: "cat",
+		GIT_PAGER: "cat",
+		DEBIAN_FRONTEND: "noninteractive",
 	};
 }
 

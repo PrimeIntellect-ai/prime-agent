@@ -943,7 +943,30 @@ def _status_script(command: str, completion_a: str, completion_b: str) -> str:
 
 
 def _child_env() -> dict[str, str]:
-    return {**os.environ, "NO_COLOR": "1", "TERM": "dumb", "CLICOLOR": "0", "FORCE_COLOR": "0"}
+    """Environment for kernel-spawned shell commands.
+
+    Same non-interactive guard as the coding-agent shell tool
+    (packages/coding-agent/src/utils/shell.ts): agent shell commands have no
+    usable stdin, so interactive prompts (git commit without -m opening
+    $EDITOR, credential asks, pagers) can only hang. Fail fast or no-op
+    instead. Deliberately overrides inherited terminal settings; a
+    per-command inline assignment (`GIT_EDITOR=vim git commit`) still wins
+    because it replaces the exported value for that command.
+    """
+    return {
+        **os.environ,
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+        "CLICOLOR": "0",
+        "FORCE_COLOR": "0",
+        "GIT_EDITOR": "true",
+        "GIT_TERMINAL_PROMPTS": "0",
+        "EDITOR": "true",
+        "VISUAL": "true",
+        "PAGER": "cat",
+        "GIT_PAGER": "cat",
+        "DEBIAN_FRONTEND": "noninteractive",
+    }
 
 
 def _signal_group(pid: int, sig: int) -> bool:

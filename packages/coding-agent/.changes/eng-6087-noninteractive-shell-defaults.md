@@ -1,0 +1,1 @@
+- Fixed agent-spawned shells hanging on interactive prompts: git commit/rebase without -m, credential asks, and pagers now fail fast or no-op because GIT_EDITOR, EDITOR, VISUAL, PAGER, and related variables default to non-interactive values.

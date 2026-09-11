@@ -132,6 +132,26 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("400000", result.output)
         self.assertIn("bytes dropped", result.output)
 
+    def test_child_env_is_non_interactive(self):
+        """Agent shells have no usable stdin: interactive prompts (git commit
+        opening $EDITOR, credential asks, pagers) can only hang. _child_env()
+        must neutralize them, overriding inherited terminal settings."""
+        with mock.patch.dict(os.environ, {"EDITOR": "vim", "PAGER": "less"}):
+            env = bash_module._child_env()
+        self.assertEqual(env["GIT_EDITOR"], "true")
+        self.assertEqual(env["EDITOR"], "true")
+        self.assertEqual(env["VISUAL"], "true")
+        self.assertEqual(env["GIT_TERMINAL_PROMPTS"], "0")
+        self.assertEqual(env["PAGER"], "cat")
+        self.assertEqual(env["GIT_PAGER"], "cat")
+        self.assertEqual(env["DEBIAN_FRONTEND"], "noninteractive")
+
+    async def test_spawned_shell_receives_non_interactive_env(self):
+        handle = bash('echo "$GIT_EDITOR|$EDITOR|$GIT_TERMINAL_PROMPTS|$GIT_PAGER"')
+        result = await handle
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("true|true|0|cat", result.output)
+
     async def test_env_prefix_and_journal(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
