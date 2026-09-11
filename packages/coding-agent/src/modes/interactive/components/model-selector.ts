@@ -183,6 +183,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private errorMessage?: string;
 	private configuredAuth = new Map<string, boolean>();
 	private readonly effortLevels = new Map<string, ModelThinkingLevel>();
+	private readonly editedEffortModels = new Set<string>();
 	private initialThinkingLevel?: ModelThinkingLevel;
 	private readonly inline: boolean;
 	private renderWidth = 80;
@@ -417,6 +418,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const index = levels.indexOf(current);
 		const next = levels[(index + direction + levels.length) % levels.length]!;
 		this.effortLevels.set(this.getModelKey(item), next);
+		this.editedEffortModels.add(this.getModelKey(item));
 		return true;
 	}
 
@@ -698,15 +700,18 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			}
 			return;
 		}
-		// Left/right - adjust the highlighted model's effort level, wrapping like up/down
-		if (kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.editor.cursorRight")) {
+		// Keep arrows available for editing a filter; an empty filter controls effort.
+		if (
+			this.searchInput.getValue() === "" &&
+			(kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.editor.cursorRight"))
+		) {
 			const direction = kb.matches(keyData, "tui.editor.cursorLeft") ? -1 : 1;
 			const selected = this.filteredModels[this.selectedIndex];
 			if (selected && this.adjustEffort(selected, direction)) {
 				this.updateList();
 				this.tui.requestRender();
+				return;
 			}
-			return;
 		}
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
@@ -748,7 +753,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private handleConfirm(): void {
 		const selectedModel = this.filteredModels[this.selectedIndex];
 		if (selectedModel) {
-			this.onSelectCallback(selectedModel.model, this.getEffort(selectedModel));
+			const effort = this.editedEffortModels.has(this.getModelKey(selectedModel))
+				? this.getEffort(selectedModel)
+				: undefined;
+			this.onSelectCallback(selectedModel.model, effort);
 			return;
 		}
 	}

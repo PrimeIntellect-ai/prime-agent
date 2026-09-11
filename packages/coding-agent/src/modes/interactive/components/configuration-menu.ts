@@ -45,6 +45,7 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 	};
 	private activeTab: ConfigurationMenuTab;
 	private _focused = false;
+	private busy = false;
 
 	constructor(private readonly options: ConfigurationMenuOptions) {
 		super();
@@ -167,7 +168,12 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		this.bodies.models.updateState(currentModel, models, configuredProviders);
 	}
 
+	setBusy(busy: boolean): void {
+		this.busy = busy;
+	}
+
 	handleInput(keyData: string): void {
+		if (this.busy) return;
 		this.activeBody.handleInput(keyData);
 	}
 

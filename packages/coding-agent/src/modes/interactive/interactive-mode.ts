@@ -82,6 +82,7 @@ import {
 	DEFAULT_HEARTBEAT_DELIVERY_MODE,
 	parseHeartbeatCommand,
 } from "../../core/cron-jobs.js";
+import { DEFAULT_THINKING_LEVEL } from "../../core/defaults.js";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -1054,6 +1055,7 @@ export class InteractiveMode {
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
+	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
 	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
@@ -8100,17 +8102,19 @@ export class InteractiveMode {
 		});
 	}
 
-	private applyThinkingLevel(level: ThinkingLevel): void {
-		void this.agentConnection
+	private applyThinkingLevel(level: ThinkingLevel): Promise<boolean> {
+		return this.agentConnection
 			.setThinkingLevel(level)
 			.then(() => {
 				this.patchConnectionState({ thinkingLevel: level });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
 				this.showStatus(`Thinking level: ${level}`);
+				return true;
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
+				return false;
 			});
 	}
 
@@ -8119,6 +8123,7 @@ export class InteractiveMode {
 	}
 
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
+		if (this.configurationModelSelection) return this.configurationModelSelection;
 		this.closeConfigurationMenu?.();
 		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
@@ -8126,7 +8131,6 @@ export class InteractiveMode {
 
 		return new Promise((resolve) => {
 			let settled = false;
-			let hidden = false;
 			let busy = false;
 			let menu: ConfigurationMenuComponent;
 			const restoreEditor = () => {
@@ -8137,20 +8141,7 @@ export class InteractiveMode {
 				this.ui.requestRender();
 			};
 			const focus = () => {
-				if (!settled && !hidden && this.editorContainer.children.includes(menu)) this.ui.setFocus(menu);
-			};
-			const conceal = () => {
-				if (hidden || settled) return;
-				hidden = true;
-				restoreEditor();
-			};
-			const show = () => {
-				if (!hidden || settled) return;
-				hidden = false;
-				this.editorContainer.clear();
-				this.editorContainer.addChild(menu);
-				focus();
-				this.ui.requestRender();
+				if (!settled && this.editorContainer.children.includes(menu)) this.ui.setFocus(menu);
 			};
 			const finish = () => {
 				if (settled) return;
@@ -8223,7 +8214,9 @@ export class InteractiveMode {
 				configuredProviders: this.connectionConfiguredProviders,
 				recentModels: this.settingsManager.getRecentModels(),
 				initialModelSearch,
-				thinkingLevel: this.connectionState?.thinkingLevel,
+				thinkingLevel: this.getCurrentModel()?.reasoning
+					? this.connectionState?.thinkingLevel
+					: (this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL),
 				getRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 				requestRender: () => this.ui.requestRender(),
 				onSelectProvider: (provider) => authenticate(provider, "providers"),
@@ -8233,6 +8226,7 @@ export class InteractiveMode {
 					busy = true;
 					void (async () => {
 						let completed = false;
+						let selectionInFlight: Promise<void> | undefined;
 						try {
 							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions);
 							if (settled) return;
@@ -8244,17 +8238,26 @@ export class InteractiveMode {
 								this.connectionConfiguredProviders,
 							);
 							if (!ready) return;
-							conceal();
-							await this.completeModelSelection(model);
-							if (thinkingLevel !== undefined) {
-								this.applyThinkingLevel(thinkingLevel);
-							}
-							completed = true;
+							menu.setBusy(true);
+							const selection = (async () => {
+								await this.completeModelSelection(model);
+								if (settled) return false;
+								return thinkingLevel === undefined || (await this.applyThinkingLevel(thinkingLevel));
+							})();
+							selectionInFlight = selection.then(
+								() => {},
+								() => {},
+							);
+							this.configurationModelSelection = selectionInFlight;
+							completed = await selection;
 						} catch (error) {
-							show();
+							focus();
 							if (!settled) this.showError(error instanceof Error ? error.message : String(error));
 						} finally {
 							busy = false;
+							if (this.configurationModelSelection === selectionInFlight)
+								this.configurationModelSelection = undefined;
+							menu.setBusy(false);
 							if (completed) finish();
 						}
 					})();
