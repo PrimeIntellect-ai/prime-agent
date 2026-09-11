@@ -167,8 +167,9 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{
 		name: "autonomous",
-		description: "Set or view autonomous mode",
-		argumentHint: "[status|on|off]",
+		description: "Set or view autonomous mode with an optional budget",
+		argumentHint:
+			"[status|off|on [--max-continuations <n>] [--max-turns <n>] [--max-tokens <n>] [--timeout-ms <n>] [--gate <command>]]",
 		takesArgument: true,
 	},
 	{

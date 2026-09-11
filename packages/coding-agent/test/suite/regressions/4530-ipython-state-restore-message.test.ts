@@ -101,6 +101,9 @@ describe("ENG-4530 IPython state restore message", () => {
 			display: true,
 			details: { restored: true },
 		});
+		expect(getMessageText(prefixMessages[0])).toBe(
+			"[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: alpha, beta.",
+		);
 
 		releaseToolExecution();
 		await firstPrompt;

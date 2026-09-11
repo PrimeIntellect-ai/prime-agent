@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from colorsys import rgb_to_hsv
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -115,32 +117,103 @@ class ReportTests(unittest.TestCase):
                     observations(*samples["pr"]),
                     len(samples["main"]),
                 )
-                self.assertEqual(result[-1], "no clear change")
+                self.assertEqual(result.outcome, "no clear change")
 
     def test_slower_and_faster_have_consistent_signs_and_arrows(self):
         baseline = observations(*([2.0] * 10))
         slower = comparison(METRICS[0], baseline, observations(*([2.5] * 10)), 10)
         faster = comparison(METRICS[0], baseline, observations(*([1.5] * 10)), 10)
-        self.assertEqual(slower[2:], ("**↑ +500.0 ms**", "+25.00%", "**slower**"))
-        self.assertEqual(faster[2:], ("↓ -500.0 ms", "-25.00%", "faster"))
+        self.assertEqual(slower.outcome, "regressed")
+        self.assertEqual(faster.outcome, "improved")
+        self.assertEqual(slower.change, r"$`\textcolor{#b9625f}{\textsf{↑ +500.0 ms (+25.00\%)}}`$")
+        self.assertEqual(faster.change, r"$`\textcolor{#548565}{\textsf{↓ -500.0 ms (-25.00\%)}}`$")
+
+    def test_larger_percentages_are_more_vivid_and_intensity_is_capped(self):
+        def color(baseline, head):
+            result = comparison(METRICS[3], observations(baseline), observations(head), 1)
+            match = re.search(r"\\textcolor\{(#[0-9a-f]{6})\}", result.change)
+            self.assertIsNotNone(match)
+            return match[1]
+
+        baseline = 100_000_000
+        for direction in (-1, 1):
+            with self.subTest(direction=direction):
+                colors = [
+                    color(baseline, baseline * (1 + direction * fraction))
+                    for fraction in (0.01, 0.25, 0.5, 1.0)
+                ]
+                saturation, brightness = [], []
+                for hex_color in colors:
+                    _, s, v = rgb_to_hsv(*(int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5)))
+                    saturation.append(s)
+                    brightness.append(v)
+                self.assertEqual(saturation, sorted(set(saturation)))
+                self.assertEqual(brightness, sorted(set(brightness)))
+                self.assertEqual(color(baseline * 2, baseline * 2 * (1 + direction * 0.5)), colors[2])
+        self.assertEqual(color(baseline, baseline * 2), color(baseline, baseline * 6))
+        self.assertEqual(color(0, baseline), "#aa6a65")
 
     def test_noise_and_partial_results_are_not_regressions(self):
         noisy = observations(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         shifted = observations(1.2, 2.2, 3.2, 4.2, 5.2, 6.2, 7.2, 8.2, 9.2, 10.2)
-        self.assertEqual(comparison(METRICS[0], noisy, shifted, 10)[4], "no clear change")
+        self.assertEqual(comparison(METRICS[0], noisy, shifted, 10).outcome, "no clear change")
         shifted[-1] = Observation(trial=9, error="timed out")
-        self.assertEqual(comparison(METRICS[0], noisy, shifted, 10)[4], "incomplete")
-        self.assertEqual(comparison(METRICS[0], [], shifted, 10)[4], "unavailable")
+        incomplete = comparison(METRICS[0], noisy, shifted, 10)
+        self.assertEqual(incomplete.outcome, "incomplete")
+        self.assertIn("incomplete", incomplete.change)
+        self.assertNotIn("textcolor", incomplete.change)
+        self.assertEqual(comparison(METRICS[0], [], shifted, 10).outcome, "unavailable")
 
     def test_zero_baseline_and_small_bundle_changes(self):
         cells = comparison(METRICS[3], observations(0), observations(65537), 1)
-        self.assertEqual(cells[3], "N/A")
-        self.assertIn("larger", cells[4])
+        self.assertIn("(N/A)", cells.change)
+        self.assertEqual(cells.outcome, "regressed")
         unchanged = comparison(METRICS[3], observations(10_000_000), observations(10_001_000), 1)
-        self.assertEqual(unchanged[4], "no clear change")
+        self.assertEqual(unchanged.outcome, "no clear change")
+        self.assertEqual(unchanged.change, "≈ +0.001 MB (+0.01%)")
+
+    def test_compact_tables_summarize_outcomes_without_treating_missing_samples_as_unchanged(self):
+        report = fixture()
+        report.status = "partial"
+        for definition in (*METRICS, *RUNTIME_METRICS):
+            count = 1 if definition.key in ("bundle", "disk") else (3 if definition.key == "install" else 10)
+            report.main.metrics[definition.key] = observations(*([2.0] * count))
+            report.pr_head.metrics[definition.key] = observations(*([2.0] * count))
+        report.pr_head.metrics["cold"] = observations(*([1.5] * 10))
+        report.pr_head.metrics["warm"] = observations(*([2.5] * 10))
+        report.pr_head.metrics["install"] = observations(2.0, 2.0)
+        report.pr_head.metrics["bundle"] = []
+        text = render(report)
+        self.assertIn(
+            "**Overall: 1 regressed · 1 improved · 13 no clear change · 1 incomplete · 1 unavailable.**",
+            text,
+        )
+        tables = text.split("<details>")[0]
+        self.assertEqual(tables.count("| Metric | Main | This PR | Change |"), 2)
+        for row in tables.splitlines():
+            if row.startswith("|"):
+                self.assertEqual(len(row.strip("|").split("|")), 4)
+        self.assertNotIn("| Change % |", text)
+        self.assertNotIn("| Result |", text)
+        self.assertNotIn("↓ improved", text)
+
+    def test_running_and_pending_comments_hide_previous_results(self):
+        report = fixture()
+        report.main.metrics["cold"] = observations(*([2.0] * 10))
+        report.pr_head.metrics["cold"] = observations(*([1.5] * 10))
+        for status in ("running", "pending-trust"):
+            with self.subTest(status=status):
+                report.status = status
+                text = render(report)
+                self.assertNotIn("| Metric |", text)
+                self.assertNotIn("Overall:", text)
+                self.assertNotIn("1,500.0", text)
+                self.assertIn("/actions/runs/100", text)
+                self.assertIn(f"status:{status}", text)
 
     def test_comment_escapes_untrusted_text_and_reports_failures(self):
         report = fixture()
+        report.status = "failed"
         report.pr_head.error = "<img src=x> | ![click](https://example.test)\n<!-- comment -->"
         text = render(report)
         self.assertTrue(text.startswith(MARKER))
@@ -179,6 +252,10 @@ class ReportTests(unittest.TestCase):
 
 class FakeGitHub(GitHub):
     def __init__(self):
+        self.repository = "PrimeIntellect-ai/prime-agent"
+        self.base_repository = self.head_repository = self.repository
+        self.base_ref = "main"
+        self.base_sha = self.main_sha = SHA
         self.head = HEAD
         self.state = "open"
         self.attempt = 1
@@ -191,7 +268,18 @@ class FakeGitHub(GitHub):
             self.writes.append((method, path, body))
             return {}
         if path == "pulls/42":
-            return {"state": self.state, "head": {"sha": self.head}}
+            return {
+                "state": self.state,
+                "base": {
+                    "ref": self.base_ref,
+                    "sha": self.base_sha,
+                    "repo": {"full_name": self.base_repository},
+                },
+                "head": {"sha": self.head, "repo": {"full_name": self.head_repository}},
+                "user": {"login": "kevin"},
+            }
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": self.main_sha}}
         if path == "actions/runs/100":
             return {"run_attempt": self.attempt, "run_number": 10}
         raise AssertionError(path)
@@ -200,11 +288,105 @@ class FakeGitHub(GitHub):
         yield self.runs if key else self.comments
 
 
+class ResolverTests(unittest.TestCase):
+    def test_open_prs_use_current_main_and_exact_head_with_the_trusted_harness(self):
+        config = Config.load()
+        for base_ref in ("main", "refactor/stack-parent"):
+            for head_repository in ("PrimeIntellect-ai/prime-agent", "contributor/prime-agent"):
+                with self.subTest(base_ref=base_ref, head_repository=head_repository):
+                    github = FakeGitHub()
+                    github.base_ref = base_ref
+                    github.base_sha = "d" * 40
+                    github.head_repository = head_repository
+                    report, author = github.resolve(42, "c" * 40, 100, 2, config)
+                    self.assertEqual(report.repository, github.repository)
+                    self.assertEqual(report.head_repository, head_repository)
+                    self.assertEqual((report.pr, report.run_id, report.attempt), (42, 100, 2))
+                    self.assertEqual((report.base_sha, report.main.sha), (SHA, SHA))
+                    self.assertEqual((report.head_sha, report.pr_head.sha), (HEAD, HEAD))
+                    self.assertEqual(report.harness_sha, "c" * 40)
+                    self.assertEqual(report.config, config)
+                    self.assertEqual(author, "kevin")
+                    self.assertEqual(github.writes, [])
+
+    def test_closed_and_foreign_repository_prs_are_rejected_for_any_target(self):
+        for base_ref in ("main", "refactor/stack-parent"):
+            for case in ("closed", "foreign"):
+                with self.subTest(base_ref=base_ref, case=case):
+                    github = FakeGitHub()
+                    github.base_ref = base_ref
+                    if case == "closed":
+                        github.state = "closed"
+                        error = "requires an open PR"
+                    else:
+                        github.base_repository = "other/prime-agent"
+                        error = "belongs to another repository"
+                    with self.assertRaisesRegex(ValueError, error):
+                        github.resolve(42, "c" * 40, 100, 1, Config.load())
+
+    def test_stacked_request_pins_the_workflow_sha_not_pr_base_or_head_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event, output = root / "event.json", root / "output.txt"
+            github = FakeGitHub()
+            github.base_ref = "refactor/stack-parent"
+            github.base_sha = "d" * 40
+            pull = github.request("GET", "pulls/42") | {"number": 42}
+            event.write_text(json.dumps({"pull_request": pull}))
+            with (
+                patch("cli.GitHub", return_value=github),
+                patch.object(sys, "argv", ["cli.py", "resolve", "--results", directory]),
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_EVENT_PATH": str(event),
+                        "GITHUB_OUTPUT": str(output),
+                        "GITHUB_EVENT_NAME": "pull_request_target",
+                        "GITHUB_SHA": "c" * 40,
+                        "GITHUB_RUN_ID": "100",
+                        "GITHUB_RUN_ATTEMPT": "1",
+                    },
+                ),
+            ):
+                main()
+            report = load_report(root / "report.json")
+            self.assertEqual((report.harness_sha, report.base_sha, report.head_sha), ("c" * 40, SHA, HEAD))
+            self.assertEqual(output.read_text(), f"pr=42\nauthor=kevin\nharness={'c' * 40}\nneeded=true\n")
+            self.assertEqual(github.writes, [])
+
+
 class PublishingTests(unittest.TestCase):
+    def test_new_commit_replaces_the_previous_table_in_the_same_comment(self):
+        previous = fixture()
+        previous.status = "completed"
+        previous.head_sha = previous.pr_head.sha = "c" * 40
+        previous.run_id = 99
+        previous.main.metrics["cold"] = observations(*([2.0] * 10))
+        previous.pr_head.metrics["cold"] = observations(*([1.5] * 10))
+        github = FakeGitHub()
+        github.comments = [{"id": 2, "user": {"login": "github-actions[bot]"}, "body": render(previous)}]
+        current = fixture()
+        self.assertTrue(github.publish(current))
+        method, path, body = github.writes[-1]
+        self.assertEqual((method, path), ("PATCH", "issues/comments/2"))
+        self.assertIn("Benchmarking the latest PR commit", body["body"])
+        self.assertNotIn("| Metric |", body["body"])
+        self.assertNotIn(previous.head_sha[:8], body["body"])
+        github.comments[0]["body"] = body["body"]
+        self.assertFalse(github.publish(previous))
+        self.assertEqual(len(github.writes), 1)
+        current.status = "completed"
+        current.main.metrics = previous.main.metrics
+        current.pr_head.metrics = previous.pr_head.metrics
+        self.assertTrue(github.publish(current))
+        self.assertEqual(github.writes[-1][:2], ("PATCH", "issues/comments/2"))
+        self.assertIn("| Metric | Main | This PR | Change |", github.writes[-1][2]["body"])
+
     def test_superseded_commit_and_same_commit_rerun_do_not_publish(self):
         for case in ("head", "new_run", "attempt", "closed"):
             with self.subTest(case=case):
                 github = FakeGitHub()
+                github.base_ref = "refactor/stack-parent"
                 if case == "head":
                     github.head = SHA
                 elif case == "new_run":
@@ -382,6 +564,7 @@ class LifecycleTests(unittest.TestCase):
             "path": ".github/workflows/benchmarks.yml",
             "repository": {"full_name": "PrimeIntellect-ai/prime-agent"},
             "head_repository": {"full_name": "contributor/prime-agent"},
+            "head_branch": "refactor/stack-child",
             "head_sha": HEAD,
             "id": 100,
             "run_attempt": 1,

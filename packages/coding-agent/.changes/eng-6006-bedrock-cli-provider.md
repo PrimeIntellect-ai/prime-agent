@@ -1,0 +1,2 @@
+- Fixed Amazon Bedrock requests failing to load the provider in packaged CLI installations.
+- Fixed Bedrock provider failures losing structured error severity and worker context in the shared CLI log.
