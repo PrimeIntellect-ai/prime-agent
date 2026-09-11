@@ -527,6 +527,91 @@ describe("AgentSession goals", () => {
 		expect(harness.session.goalState.tokensUsed).toBe(1);
 	});
 
+	it("keeps a fired budget gate monotonic across summary context rebuilds", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.handleGoalHostRequest("goal.create", { objective: "do work", token_budget: 100 });
+
+		const goalId = harness.session.goalState.goalId;
+
+		// Bill usage until the budget gate fires.
+		const billed = assistantWithUsage("working", { input: 60, output: 50, totalTokens: 110 });
+		const accounted = (
+			harness.session as unknown as {
+				_accountGoalUsageForAssistantMessage(message: AssistantMessage): boolean;
+			}
+		)._accountGoalUsageForAssistantMessage(billed);
+		expect(accounted).toBe(true);
+		expect(harness.session.goalState.status).toBe("budget_limited");
+
+		// Stale branch snapshot for the same goal predates the budget gate.
+		harness.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, {
+			...harness.session.goalState,
+			status: "active",
+			active: true,
+			tokensUsed: 10,
+		});
+
+		const reload = (options?: { monotonicTokens?: boolean }) =>
+			(
+				harness.session as unknown as {
+					_reloadGoalStateFromBranch(options?: { monotonicTokens?: boolean }): void;
+				}
+			)._reloadGoalStateFromBranch(options);
+
+		// A summary rebuild continues the same timeline: the gate that already
+		// fired must survive, and the counter must not regress.
+		reload({ monotonicTokens: true });
+		expect(harness.session.goalState.status).toBe("budget_limited");
+		expect(harness.session.goalState.goalId).toBe(goalId);
+		expect(harness.session.goalState.tokensUsed).toBeGreaterThanOrEqual(110);
+	});
+
+	it("treats an empty extension summary as a plain branch move for goal accounting", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_tree", async () => ({ summary: { summary: "" } }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.handleGoalHostRequest("goal.create", { objective: "do work" });
+
+		const goalId = harness.session.goalState.goalId;
+		// Append the entry to navigate to directly so no goal continuation turn
+		// runs; the goal stays active with only the billed usage.
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "do something" }],
+			timestamp: Date.now(),
+		});
+
+		const billed = assistantWithUsage("working", { input: 40, output: 10, totalTokens: 50 });
+		(
+			harness.session as unknown as {
+				_accountGoalUsageForAssistantMessage(message: AssistantMessage): boolean;
+			}
+		)._accountGoalUsageForAssistantMessage(billed);
+		expect(harness.session.goalState.status).toBe("active");
+		expect(harness.session.goalState.tokensUsed).toBeGreaterThanOrEqual(50);
+
+		// The extension returns an empty summary string, so no summary branch is
+		// created: the navigation is a plain branch move and must reload the
+		// branch's own goal state instead of clamping counters.
+		const userEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(userEntry).toBeDefined();
+		const result = await harness.session.navigateTree(userEntry!.id, { summarize: true });
+
+		expect(result.cancelled).toBe(false);
+		expect(result.summaryEntry).toBeUndefined();
+		expect(harness.session.goalState.status).toBe("active");
+		expect(harness.session.goalState.goalId).toBe(goalId);
+		expect(harness.session.goalState.tokensUsed).toBe(0);
+	});
+
 	it("normalizes queued goal context text and images", async () => {
 		const harness = await createGoalHarness();
 		const image = { type: "image" as const, data: "image-data", mimeType: "image/png" };

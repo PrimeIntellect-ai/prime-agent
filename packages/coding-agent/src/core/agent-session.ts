@@ -1879,19 +1879,15 @@ export class AgentSession {
 	private _reloadGoalStateFromBranch(options: { monotonicTokens?: boolean } = {}): void {
 		const previous = this._goalState;
 		const reloaded = this._loadPersistedGoalState();
-		if (
-			options.monotonicTokens &&
-			previous.status === "active" &&
-			reloaded.status === "active" &&
-			reloaded.goalId === previous.goalId
-		) {
+		if (options.monotonicTokens && reloaded.goalId !== undefined && reloaded.goalId === previous.goalId) {
 			// A context rebuild continues the same timeline, but the rebuilt branch's
-			// last persisted goal entry can lag the in-memory counter (queue/flush
-			// races; child-usage attribution landing late). Accounting for the same
-			// logical goal must never regress across the cold boundary. Tree
+			// last persisted goal entry can lag the in-memory state (queue/flush
+			// races; child-usage attribution landing late). Neither the accounting
+			// counters nor an already-fired gate (budget limit, pause, completion)
+			// for the same logical goal may regress across the cold boundary. Tree
 			// navigation keeps faithful branch semantics by calling without the flag.
 			this._goalState = {
-				...reloaded,
+				...previous,
 				tokensUsed: Math.max(previous.tokensUsed, reloaded.tokensUsed),
 				continuationsUsed: Math.max(previous.continuationsUsed, reloaded.continuationsUsed),
 				timeUsedSeconds: Math.max(previous.timeUsedSeconds, reloaded.timeUsedSeconds),
@@ -12310,7 +12306,7 @@ export class AgentSession {
 			// same goal's accounting must never regress; a plain branch move is
 			// time travel and keeps faithful branch semantics.
 			this._ensureHarnessDigestContext();
-			this._reloadGoalStateFromBranch({ monotonicTokens: summaryText !== undefined });
+			this._reloadGoalStateFromBranch({ monotonicTokens: Boolean(summaryText) });
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
