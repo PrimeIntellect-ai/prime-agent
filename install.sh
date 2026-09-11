@@ -1847,7 +1847,6 @@ prime_agent_install_native() {
 		fi
 	fi
 	prime_agent_native_prepare_root
-	prime_agent_native_check_public_link
 	mv "$prime_agent_download_dir/selected.sha256" "$prime_agent_native_stage/selected.sha256"
 	rm -rf "$prime_agent_download_dir"
 	prime_agent_download_dir=
@@ -1876,6 +1875,7 @@ prime_agent_install_native() {
 	fi
 	[ "$(cat "$prime_agent_native_stage/version")" = "$native_version" ] || { printf 'error: archive version mismatch.\n' >&2; exit 1; }
 	"$native_extracted/prime-agent" --help >"$prime_agent_native_stage/help"
+	prime_agent_native_check_public_link
 	native_digest=$(awk '{ print $1 }' "$prime_agent_native_stage/selected.sha256")
 	native_release_name="$native_version-$native_platform-$native_digest"
 	native_destination="$native_root/releases/$native_release_name"

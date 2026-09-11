@@ -128,17 +128,12 @@ describe.skipIf(process.platform === "win32")("installer release format selectio
 		},
 	);
 
-	it.each(["npm", "unmanaged-root"] as const)(
-		"still rejects native ownership conflicts with %s present",
-		async (existing) => {
-			const result = await install(`${digest}  ${nativeFile}\n`, "auto", existing);
-			expect(result.code).not.toBe(0);
-			expect(result.output).toContain(
-				existing === "npm" ? "refusing to replace existing command" : "refusing to take ownership",
-			);
-			expect(result.output).not.toContain("node-route:");
-		},
-	);
+	it("still rejects an unmanaged native root for compiled releases", async () => {
+		const result = await install(`${digest}  ${nativeFile}\n`, "auto", "unmanaged-root");
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("refusing to take ownership");
+		expect(result.output).not.toContain("node-route:");
+	});
 
 	it.each([
 		["empty inventory", ""],

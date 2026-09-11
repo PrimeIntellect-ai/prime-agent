@@ -5,3 +5,4 @@
 - Fixed terminal hangups leaving an installation lock behind.
 - Fixed installing older releases that only provide npm packages through the default installer, including when an npm command already exists.
 - Fixed interrupted compiled updates discarding the existing rollback target.
+- Fixed reinstalling or upgrading through the installer after an incompatible compiled executable falls back to Node.

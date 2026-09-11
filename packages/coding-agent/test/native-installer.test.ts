@@ -156,6 +156,51 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		},
 	);
 
+	it.each(["1.0.0", "1.0.1"])("retries the Node fallback when reinstalling or upgrading to %s", async (version) => {
+		publish("1.0.0", { broken: true });
+		publish("1.0.1", { broken: true });
+		const harness = join(home, "fallback-installer.sh");
+		writeFileSync(
+			harness,
+			readFileSync(installer, "utf8").replace(
+				/\nmain "\$@"\s*$/,
+				() => `
+prime_agent_install_node() {
+ mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/node_modules/prime-agent/dist/bundle"
+ printf '%s\\n' "$1" > "$HOME/.local/lib/node_modules/prime-agent/dist/bundle/cli.js"
+ if [ ! -L "$HOME/.local/bin/prime-agent" ]; then
+  ln -s ../lib/node_modules/prime-agent/dist/bundle/cli.js "$HOME/.local/bin/prime-agent"
+ fi
+ printf 'node-route:%s\\n' "$1"
+}
+main "$@"
+`,
+			),
+		);
+		const first = await install("1.0.0", { PRIME_AGENT_INSTALL_METHOD: "auto" }, harness);
+		expect(first.code, first.output).toBe(0);
+		expect(first.output).toContain("node-route:1.0.0");
+		const publicCommand = join(home, ".local/bin/prime-agent");
+		const npmLink = readlinkSync(publicCommand);
+		const second = await install(version, { PRIME_AGENT_INSTALL_METHOD: "auto" }, harness);
+		expect(second.code, second.output).toBe(0);
+		expect(second.output).toContain(`node-route:${version}`);
+		expect(readlinkSync(publicCommand)).toBe(npmLink);
+		expect(readFileSync(publicCommand, "utf8")).toBe(`${version}\n`);
+		expect(existsSync(command())).toBe(false);
+		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
+
+		// A runnable archive still cannot take over the npm-owned public command.
+		publish("1.0.2");
+		const compiled = await install("1.0.2", { PRIME_AGENT_INSTALL_METHOD: "auto" }, harness);
+		expect(compiled.code, compiled.output).not.toBe(0);
+		expect(compiled.output).toContain("refusing to replace existing command");
+		expect(compiled.output).not.toContain("node-route:");
+		expect(readlinkSync(publicCommand)).toBe(npmLink);
+		expect(readFileSync(publicCommand, "utf8")).toBe(`${version}\n`);
+		expect(existsSync(command())).toBe(false);
+	});
+
 	it("refuses to replace an unrelated public command", async () => {
 		publish("1.0.0");
 		mkdirSync(join(home, ".local/bin"), { recursive: true });
