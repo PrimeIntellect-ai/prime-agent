@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
@@ -785,6 +786,51 @@ class HarnessState:
         else:
             lines.append("refinements: 0")
         return "\n".join(lines)
+
+    def search(
+        self,
+        query: str,
+        kind: HarnessKind | None = None,
+        limit: int = 10,
+        *,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> list[HarnessEntry]:
+        """Return harness entries ranked by weighted term overlap with *query*.
+
+        Mirrors the digest's relevance ranking (refinement.ts): terms are
+        scored against an entry's title, content, path, and id; matches in
+        more distinct fields count more. Use this to pull ranked entries on
+        demand instead of reading the whole overview.
+        """
+        if target := self._global_target(global_, kwargs):
+            return target.search(query, kind=kind, limit=limit)
+        self._sync_from_disk()
+        if not isinstance(query, str):
+            raise TypeError(f"query must be str, got {type(query).__name__}")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise TypeError("limit must be a positive int")
+        terms = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) >= 3]
+        if not terms:
+            return []
+
+        def score(entry: HarnessEntry) -> float:
+            title = entry.title.lower()
+            content = entry.content.lower()
+            path_and_id = f"{entry.path} {entry.id}".lower()
+            total = 0.0
+            for term in terms:
+                fields = (1 if term in title else 0) + (1 if term in content else 0) + (
+                    1 if term in path_and_id else 0
+                )
+                if fields:
+                    total += 1 + (fields - 1) * 0.5
+            return total
+
+        entries = self.list(kind, **kwargs) if kind is not None else self.list(None, **kwargs)
+        ranked = sorted(entries, key=lambda e: (score(e), e.updated_at), reverse=True)
+        ranked = [e for e in ranked if score(e) > 0]
+        return ranked[:limit]
 
     def snapshot(self, *, global_: bool = False, **kwargs: Any) -> dict[str, Any]:
         if target := self._global_target(global_, kwargs):

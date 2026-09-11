@@ -1030,3 +1030,45 @@ class HarnessStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessSearchTest(unittest.TestCase):
+    def test_search_ranks_relevant_entries_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+            state.create_memory("Worktree policy", "Use git worktrees for parallel branches.", id="worktree")
+            state.create_prompt_note("RSI program", "Ship [RSI] PRs from worktrees.", id="rsi")
+
+            results = state.search("worktree branches")
+
+            self.assertTrue(results)
+            self.assertEqual(results[0].id, "worktree")
+            self.assertTrue(all(entry.id != "tea" for entry in results))
+
+    def test_search_filters_by_kind_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Worktree memory", "worktree workflow", id="m1")
+            state.create_prompt_note("Worktree prompt", "worktree workflow", id="p1")
+            state.create_prompt_note("Worktree prompt 2", "worktree workflow", id="p2")
+
+            prompts = state.search("worktree", kind="prompt")
+            self.assertTrue(prompts)
+            self.assertEqual({entry.kind for entry in prompts}, {"prompt"})
+
+            limited = state.search("worktree", kind="prompt", limit=1)
+            self.assertEqual(len(limited), 1)
+
+    def test_search_drops_zero_score_entries_and_validates_args(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+
+            self.assertEqual(state.search("quantum"), [])
+            self.assertEqual(state.search("   "), [])
+            with self.assertRaises(TypeError):
+                state.search(42)
+            with self.assertRaises(TypeError):
+                state.search("worktree", limit=0)
+
