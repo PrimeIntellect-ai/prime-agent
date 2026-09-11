@@ -98,16 +98,17 @@ describe("RefinementOutcomeMessageComponent", () => {
 
 	afterAll(() => vi.unstubAllEnvs());
 
-	test("shows only the purple harness status in overview, then a softer summary and full diffs", () => {
+	test("shows the purple harness status and softer summary in overview and details, then full diffs", () => {
 		const message = createRefinementOutcomeMessage(result());
 		const component = new RefinementOutcomeMessageComponent(message);
 
 		const collapsed = rendered(component);
 		const content = collapsed.split("\n").filter((line) => line.trim());
-		expect(content.map((line) => line.trimEnd())).toEqual([" ◆ Harness refined"]);
+		expect(content.map((line) => line.trimEnd())).toEqual([" ◆ Harness refined", ` ${result().summary}`]);
+		expect(component.render(120).join("\n")).toContain(theme.fg("refinementSummary", ` ${result().summary}`));
 		expect(component.render(120)[1]).toContain(theme.fg("refinementHeader", "◆ Harness refined"));
 		expect(collapsed.split("\n")[0].trim()).toBe("");
-		expect(collapsed.split("\n").at(-1)?.trim()).toBe("◆ Harness refined");
+		expect(collapsed.split("\n").at(-1)?.trim()).toBe(result().summary);
 		expect(collapsed).not.toContain("Ctrl+O");
 		expect(collapsed).not.toContain("[refinement]");
 		expect(collapsed).not.toContain("rhyme-response-guidance");
@@ -119,6 +120,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 
 		component.setEditDiffsExpanded(true);
 		const details = rendered(component);
+		expect(details).toBe(collapsed);
 		expect(details).toContain("Added local guidance to make conversational responses rhyme.");
 		expect(component.render(120).join("\n")).toContain(
 			theme.fg("refinementSummary", " Added local guidance to make conversational responses rhyme."),
@@ -156,8 +158,10 @@ describe("RefinementOutcomeMessageComponent", () => {
 			"Created local memory entries for the verifiers project context and running subagent tracking, plus a reusable subagent spec for parallel codebase exploration.";
 		const component = new RefinementOutcomeMessageComponent(createRefinementOutcomeMessage(long));
 
+		const overview = component.render(80);
 		component.setEditDiffsExpanded(true);
-		const lines = component.render(80).map((line) => stripAnsi(line));
+		expect(component.render(80)).toEqual(overview);
+		const lines = overview.map((line) => stripAnsi(line));
 		const content = lines.filter((line) => line.trim().length > 0);
 		expect(content).toHaveLength(3);
 		expect(content[0].trim()).toBe("◆ Harness refined");
@@ -299,7 +303,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		});
 		const original = JSON.stringify(message);
 		const component = new RefinementOutcomeMessageComponent(message);
-		expect(rendered(component).trim()).toBe("◆ Harness refined");
+		expect(rendered(component)).toContain(message.details.summary);
 		component.setExpanded(true);
 		expect(rendered(component)).toContain("1 memory updated");
 		const rows = component.render(80);
@@ -339,7 +343,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 				}),
 			);
 			expect(rendered(component)).toContain(expected);
-			expect(rendered(component)).not.toContain("No summary was recorded");
+			expect(rendered(component)).toContain("No summary was recorded");
 			component.setEditDiffsExpanded(true);
 			expect(rendered(component)).toContain("No summary was recorded");
 			component.setExpanded(true);
@@ -379,7 +383,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 			expect(replay).toBeInstanceOf(RefinementOutcomeMessageComponent);
 			expect(live.render(120)).toEqual(replay!.render(120));
 			const output = rendered(live);
-			expect(output.includes(result().summary)).toBe(toolsExpanded || editDiffsExpanded);
+			expect(output).toContain(result().summary);
 			expect(output.includes("+ Make conversational responses rhyme.")).toBe(toolsExpanded);
 		}
 		expect(JSON.stringify(message)).toBe(original);

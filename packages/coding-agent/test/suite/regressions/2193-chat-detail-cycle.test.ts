@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
+import { createAsyncBashCompletionMessage } from "../../../src/core/messages.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import type { AgentConnection, AgentConnectionSessionEvent } from "../../../src/modes/agent-connection/index.js";
 import { BashExecutionComponent } from "../../../src/modes/interactive/components/bash-execution.js";
@@ -142,6 +143,85 @@ describe("conversation detail cycle", () => {
 		expect(readFileSync(sessionFile, "utf8")).toBe(savedTrace);
 		expect(harness.settingsManager.getHideThinkingBlock()).toBe(false);
 	});
+	test("keeps full shell notifications at their arrival position through live and reopened detail cycles", async () => {
+		const code = "h = bash('printf done')\nh";
+		const ipython: AgentTool = {
+			name: "ipython",
+			label: "ipython",
+			description: "Fixture shell launch",
+			parameters: Type.Object({ code: Type.String() }),
+			execute: async () => ({
+				content: [],
+				details: { result: "<BashHandle pid=42 running command='printf done'>", status: "ok" },
+			}),
+		};
+		harness = await createHarness({ tools: [...tools, ipython], persistSession: true });
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ipython", { code }, { id: "shell-launch" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				[fauxText("Work before notification."), fauxToolCall("generic", {}, { id: "intervening-tool" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Waiting for notification."),
+		]);
+		await harness.session.prompt("Run the shell fixture");
+		const notice = createAsyncBashCompletionMessage({ pid: 42, command: "printf done", exitCode: 0 }, 10000);
+		await harness.session.sendCustomMessage(notice, { triggerTurn: false });
+		harness.setResponses([fauxAssistantMessage("Work after notification.")]);
+		await harness.session.prompt("Continue the fixture");
+		const sessionFile = harness.sessionManager.getSessionFile()!;
+		const savedTrace = readFileSync(sessionFile, "utf8");
+		const context = SessionManager.open(sessionFile).buildSessionContext();
+		const source = JSON.stringify(context.messages);
+		const live = createMode(harness);
+		for (const event of harness.events) {
+			if (
+				event.type === "message_start" ||
+				event.type === "message_update" ||
+				event.type === "message_end" ||
+				event.type === "tool_execution_start" ||
+				event.type === "tool_execution_update" ||
+				event.type === "tool_execution_end"
+			)
+				await live.handleEvent(event);
+		}
+		const reopened = createMode(harness);
+		await reopened.renderSessionContext(context);
+		for (const mode of [live, reopened]) {
+			for (const detail of ["overview", "details", "all"] as const) {
+				const text = render(mode);
+				expect(text).toContain("Work before notification.");
+				expect(text).toContain("Work after notification.");
+				if (detail === "all") {
+					expect(text.match(/Shell message received\./g)).toHaveLength(1);
+					for (const line of notice.content.split("\n").filter(Boolean)) expect(text).toContain(line);
+					const launch = text.indexOf("h = bash");
+					const work = text.indexOf("Work before notification.");
+					const output = text.indexOf("FULL_TOOL_OUTPUT");
+					const waiting = text.indexOf("Waiting for notification.");
+					const notification = text.indexOf("Shell message received.");
+					const after = text.indexOf("Work after notification.");
+					expect(launch).toBeGreaterThanOrEqual(0);
+					expect(work).toBeGreaterThan(launch);
+					expect(output).toBeGreaterThan(work);
+					expect(waiting).toBeGreaterThan(output);
+					expect(notification).toBeGreaterThan(waiting);
+					expect(after).toBeGreaterThan(notification);
+				} else {
+					expect(text).not.toContain("Shell message received.");
+					expect(text).not.toContain("Background shell command");
+				}
+				cycle(mode);
+			}
+			expect(render(mode)).not.toContain("Shell message received.");
+			cycle(mode);
+			cycle(mode);
+			expect(render(mode).match(/Shell message received\./g)).toHaveLength(1);
+		}
+		expect(JSON.stringify(context.messages)).toBe(source);
+		expect(readFileSync(sessionFile, "utf8")).toBe(savedTrace);
+	});
+
 	test("applies the chosen mode to streamed thinking, tool results, and future turns", async () => {
 		harness = await createHarness({ tools });
 		harness.setResponses([

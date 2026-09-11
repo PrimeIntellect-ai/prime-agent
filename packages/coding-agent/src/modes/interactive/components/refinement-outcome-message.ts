@@ -196,13 +196,11 @@ export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
 		const outcome = refinementHeader(this.message);
 		const header = outcome.startsWith("Harness refined ·") ? "Harness refined" : outcome;
 		this.addChild(new Text(theme.fg("refinementHeader", `◆ ${header}`), 1, 0));
-		if (this.summaryExpanded || this.expanded) {
-			this.addSummary(
-				summary.trim() || "No summary was recorded for this harness change.",
-				undefined,
-				"refinementSummary",
-			);
-		}
+		this.addSummary(
+			summary.trim() || "No summary was recorded for this harness change.",
+			undefined,
+			"refinementSummary",
+		);
 		if (this.expanded) {
 			this.addChild(new Spacer(1));
 			this.addChild(

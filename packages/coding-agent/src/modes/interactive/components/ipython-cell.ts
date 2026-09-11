@@ -15,12 +15,7 @@ import { agentMessageBodyLines, agentMessageSummaryLine } from "./agent-message.
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
 import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
-import {
-	type BackgroundShellHandle,
-	formatShellCompletionTime,
-	type ShellCompletion,
-	shellCompletionText,
-} from "./shell-completion.js";
+import type { BackgroundShellHandle, ShellCompletion } from "./shell-completion.js";
 
 export interface IPythonCellContentBlock {
 	type: string;
@@ -391,19 +386,6 @@ export class IPythonCellComponent implements Component {
 		}
 
 		this.renderOutput(lines, safeWidth, details, hasCode);
-		if (this.state.shellCompletion) {
-			this.addBlank(lines, safeWidth);
-			this.addWrapped(
-				lines,
-				OUTPUT_INDENT,
-				theme.fg(
-					"dim",
-					`Shell completion · ${formatShellCompletionTime(this.state.shellCompletion.message.timestamp)}`,
-				),
-				safeWidth,
-			);
-			this.renderOutputText(lines, safeWidth, shellCompletionText(this.state.shellCompletion), "out");
-		}
 		return this.renderCache.set(safeWidth, cacheVersion, lines);
 	}
 
