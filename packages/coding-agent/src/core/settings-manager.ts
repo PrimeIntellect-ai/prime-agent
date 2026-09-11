@@ -93,10 +93,10 @@ export type PackageSource =
 	  };
 
 /**
- * Remote/local MCP server an integration connects to. Built-in integrations
- * (Linear/Notion) are defined in the ai/mcp catalog; this is for user-declared
- * servers. The kernel-side integration package reads creds from auth.json
- * (`mcp:<name>`); login/refresh run host-side.
+ * Remote/local MCP server an integration connects to. Catalog services are
+ * defined in the ai/mcp service catalog; this is for user-declared servers.
+ * The kernel's generic mcp runtime reads creds from auth.json (`mcp:<name>`);
+ * login/refresh/verification run host-side.
  */
 export type McpServerConfig =
 	| {

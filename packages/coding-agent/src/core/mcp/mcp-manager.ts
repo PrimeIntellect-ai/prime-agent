@@ -1,16 +1,29 @@
 // Host side of MCP integrations. The protocol itself runs Python-side in the kernel; the host
-// only registers OAuth providers, gates integration skills by auth, and serves mcp.* host-requests.
+// registers OAuth providers, gates integration skills by auth, verifies connections with a
+// real MCP handshake, and serves mcp.* host-requests including the service-catalog inventory.
 
-import {
-	BUILTIN_MCP_CATALOG,
-	createMcpOAuthProvider,
-	getCatalogEntry,
-	registerBuiltinMcpOAuthProviders,
-} from "@earendil-works/pi-ai/mcp";
-import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { join } from "node:path";
+import { createMcpOAuthProvider, registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
+import { getOAuthProvider, registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { getAgentDir } from "../../config.js";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
+import type { probeMcpEndpoint } from "./connection-probe.js";
+import { type McpConnectionRecord, McpConnectionStore } from "./connection-store.js";
+import {
+	buildConnectionViews,
+	buildPluginViews,
+	decodePluginCursor,
+	defaultServiceCatalogProvider,
+	filterPluginViewsByStatus,
+	type McpPluginView,
+	type McpServiceCatalogProvider,
+	type McpServiceDescriptor,
+	pagePluginViews,
+	searchPluginViews,
+	verifyMcpConnection,
+} from "./service-catalog.js";
 
 export interface McpManagerOptions {
 	authStorage: AuthStorage;
@@ -18,6 +31,19 @@ export interface McpManagerOptions {
 	getUserServers?: () => Record<string, McpServerConfig> | undefined;
 	/** Start an interactive host-side login for a server. Provided by the UI mode. */
 	beginLogin?: (server: string) => Promise<void>;
+	/**
+	 * Explicit user-approved connect handoff for the mcp.connect host request.
+	 * Registered only when provided; never auto-opens a browser.
+	 */
+	beginConnect?: (serviceId: string) => Promise<boolean>;
+	/** Service catalog source; defaults to the built-in adapter until the merged catalog lands. */
+	getServiceCatalog?: McpServiceCatalogProvider;
+	/** Connection record store; defaults to <agentDir>/mcp-connections.json. */
+	connectionStore?: McpConnectionStore;
+	/** Injectable MCP verification probe (tests). */
+	probeConnection?: typeof probeMcpEndpoint;
+	/** Disable demand-driven verification probes (tests that assert no network). */
+	noBackgroundVerification?: boolean;
 }
 
 /** A resolved integration: a catalog/user entry plus its provider id. */
@@ -32,26 +58,56 @@ interface ResolvedIntegration {
 	userDeclared?: boolean;
 }
 
+const LIST_PLUGINS_DEFAULT_LIMIT = 50;
+const LIST_PLUGINS_MAX_LIMIT = 200;
+const SEARCH_PLUGINS_DEFAULT_LIMIT = 10;
+const SEARCH_PLUGINS_MAX_LIMIT = 50;
+const CONNECTION_STATUS_FILTERS = new Set([
+	"connected",
+	"pending",
+	"not_connected",
+	"setup_required",
+	"disabled",
+	"error",
+]);
+
 export class McpManager {
 	private readonly authStorage: AuthStorage;
 	private readonly getUserServers: () => Record<string, McpServerConfig> | undefined;
 	private readonly beginLogin?: (server: string) => Promise<void>;
+	private readonly beginConnect?: (serviceId: string) => Promise<boolean>;
+	private readonly getServiceCatalog: McpServiceCatalogProvider;
+	private readonly connectionStore: McpConnectionStore;
+	private readonly probeConnection: typeof probeMcpEndpoint | undefined;
+	private readonly noBackgroundVerification: boolean;
 	private integrations = new Map<string, ResolvedIntegration>();
+	private services: readonly McpServiceDescriptor[] = [];
 	private acpServers = new Map<string, AcpMcpServerConfig>();
 	private acpOwnerId?: string;
 	/** Provider ids we registered for user servers, so refresh can drop removed ones. */
 	private registeredUserProviderIds = new Set<string>();
+	private verificationInFlight = new Set<string>();
 
 	constructor(options: McpManagerOptions) {
 		this.authStorage = options.authStorage;
 		this.getUserServers = options.getUserServers ?? (() => undefined);
 		this.beginLogin = options.beginLogin;
-		this.resolveIntegrations();
-		this.registerProviders();
+		this.beginConnect = options.beginConnect;
+		this.getServiceCatalog = options.getServiceCatalog ?? defaultServiceCatalogProvider();
+		this.connectionStore =
+			options.connectionStore ?? McpConnectionStore.open(join(getAgentDir(), "mcp-connections.json"));
+		this.probeConnection = options.probeConnection;
+		this.noBackgroundVerification = options.noBackgroundVerification ?? false;
+		this.refresh();
 	}
 
-	/** Re-read settings and re-register providers; call after a session reload. */
+	/**
+	 * Re-read settings/catalog and re-register providers. Verification stays
+	 * demand-driven (host-request reads); the store reloads because the
+	 * interactive client process persists records the daemon must observe.
+	 */
 	refresh(): void {
+		this.connectionStore.load();
 		this.resolveIntegrations();
 		this.registerProviders();
 	}
@@ -87,14 +143,31 @@ export class McpManager {
 		return `mcp:${server}`;
 	}
 
+	/** Catalog service ids that own their name: user settings cannot shadow them. */
+	private isReservedServerName(server: string): boolean {
+		return this.services.some((service) => service.bundledSkill && service.serviceId === server);
+	}
+
+	/** Whether a user-declared server name is owned by the user rather than the catalog. */
+	private isUserOwnedName(server: string): boolean {
+		return this.getUserServers()?.[server] !== undefined && !this.isReservedServerName(server);
+	}
+
 	private resolveIntegrations(): void {
+		this.services = this.getServiceCatalog();
 		const integrations = new Map<string, ResolvedIntegration>();
-		for (const entry of BUILTIN_MCP_CATALOG) {
-			integrations.set(entry.server, {
-				server: entry.server,
-				label: entry.label,
-				config: { type: "http", url: entry.url, oauth: true },
-				usesOAuth: entry.oauth?.kind === "oauth",
+		for (const service of this.services) {
+			if (service.transport.type !== "http" || !service.transport.url) continue;
+			const usesOAuth = service.authStrategy === "oauth" || service.authStrategy === "unknown";
+			integrations.set(service.serviceId, {
+				server: service.serviceId,
+				label: service.label,
+				config: {
+					type: "http",
+					url: service.transport.url,
+					...(usesOAuth ? { oauth: true } : {}),
+				},
+				usesOAuth,
 			});
 		}
 		for (const [server, config] of Object.entries(this.getUserServers() ?? {})) {
@@ -111,7 +184,32 @@ export class McpManager {
 
 	private registerProviders(): void {
 		registerBuiltinMcpOAuthProviders();
+		this.registerCatalogProviders();
 		this.registerUserProviders();
+	}
+
+	/**
+	 * Register OAuth providers for catalog services beyond the bundled slice. A
+	 * user-declared server that owns the name always wins: no provider is
+	 * registered against the official endpoint for an id the user repointed.
+	 */
+	private registerCatalogProviders(): void {
+		for (const service of this.services) {
+			if (service.bundledSkill) continue;
+			if (service.transport.type !== "http" || !service.transport.url) continue;
+			if (service.setup.status !== "ready") continue;
+			if (service.authStrategy !== "oauth" && service.authStrategy !== "unknown") continue;
+			if (this.isUserOwnedName(service.serviceId)) continue;
+			const id = this.providerId(service.serviceId);
+			if (getOAuthProvider(id)) continue;
+			registerOAuthProvider(
+				createMcpOAuthProvider({
+					server: service.serviceId,
+					label: service.label,
+					url: service.transport.url,
+				}),
+			);
+		}
 	}
 
 	/**
@@ -122,9 +220,8 @@ export class McpManager {
 	registerUserProviders(): void {
 		const current = new Set<string>();
 		for (const integration of this.integrations.values()) {
-			if (!integration.userDeclared || integration.config.type !== "http" || getCatalogEntry(integration.server)) {
-				continue;
-			}
+			if (!integration.userDeclared || integration.config.type !== "http") continue;
+			if (this.isReservedServerName(integration.server)) continue;
 			const id = this.providerId(integration.server);
 			if (integration.usesOAuth) {
 				current.add(id);
@@ -144,10 +241,12 @@ export class McpManager {
 		this.registeredUserProviderIds = current;
 	}
 
-	/** True when valid credentials exist for the integration (drives enablement). */
+	/** True when valid credentials exist for the integration (drives dispatch eligibility). */
 	private isAuthed(integration: ResolvedIntegration): boolean {
 		if (integration.config.enabled === false) return false;
-		if (integration.userDeclared && getCatalogEntry(integration.server)) return false;
+		// A bundled catalog service owns its name; a shadowing user entry is dead by design
+		// so its token can never replay against the official endpoint.
+		if (integration.userDeclared && this.isReservedServerName(integration.server)) return false;
 		if (integration.config.type === "stdio") return true;
 		const { bearerTokenEnvVar } = integration.config;
 		if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
@@ -163,16 +262,90 @@ export class McpManager {
 		return typeof endpoint === "string" && endpoint === integration.config.url;
 	}
 
-	/** `-<server>/SKILL.md` overrides for every built-in integration the user isn't logged into. */
+	/** `-<server>/SKILL.md` overrides for every bundled integration the user isn't logged into. */
 	getDisabledBuiltinSkillOverrides(): string[] {
 		const overrides: string[] = [];
-		for (const entry of BUILTIN_MCP_CATALOG) {
-			const integration = this.integrations.get(entry.server);
+		for (const service of this.services) {
+			if (!service.bundledSkill) continue;
+			const integration = this.integrations.get(service.serviceId);
 			if (integration && !this.isAuthed(integration)) {
-				overrides.push(`-${entry.server}/SKILL.md`);
+				overrides.push(`-${service.serviceId}/SKILL.md`);
 			}
 		}
 		return overrides;
+	}
+
+	/**
+	 * Verify a connection with a real MCP handshake and persist the record.
+	 * Used after login and for pending/error background re-verification.
+	 */
+	async verifyConnection(server: string): Promise<McpConnectionRecord> {
+		const integration = this.integrations.get(server);
+		if (!integration) throw new Error(`Unknown MCP connection: ${server}`);
+		if (integration.config.type !== "http") {
+			throw new Error(`MCP connection ${server} is not an HTTP endpoint`);
+		}
+		if (integration.userDeclared && this.isReservedServerName(server)) {
+			throw new Error(`MCP connection ${server} is reserved by a built-in service`);
+		}
+		return verifyMcpConnection({
+			authStorage: this.authStorage,
+			connectionStore: this.connectionStore,
+			connectionId: server,
+			serviceId: server,
+			label: integration.label,
+			endpoint: integration.config.url,
+			usesOAuth: integration.usesOAuth,
+			bearerTokenEnvVar: integration.config.type === "http" ? integration.config.bearerTokenEnvVar : undefined,
+			...(this.probeConnection ? { probe: this.probeConnection } : {}),
+		});
+	}
+
+	/**
+	 * Background verification for connections that hold credentials but lack a
+	 * verified record (or whose last verification failed/retryable-pending).
+	 * Bounded by the in-flight set; failures land in the record, not the console.
+	 */
+	private async verifyPendingConnections(): Promise<void> {
+		if (this.noBackgroundVerification) return;
+		const candidates: string[] = [];
+		for (const integration of this.integrations.values()) {
+			if (integration.config.type !== "http") continue;
+			if (integration.userDeclared && this.isReservedServerName(integration.server)) continue;
+			const hasCredentials = integration.usesOAuth
+				? this.authStorage.get(this.providerId(integration.server)) !== undefined
+				: Boolean(
+						integration.config.bearerTokenEnvVar && process.env[integration.config.bearerTokenEnvVar]?.trim(),
+					);
+			if (!hasCredentials) continue;
+			if (integration.config.enabled === false) continue;
+			const record = this.connectionStore.get(integration.server);
+			if (record?.status === "connected") continue;
+			if (this.verificationInFlight.has(integration.server)) continue;
+			candidates.push(integration.server);
+		}
+		await Promise.allSettled(
+			candidates.map(async (server) => {
+				this.verificationInFlight.add(server);
+				try {
+					await this.verifyConnection(server);
+				} catch {
+					// Verification failures are recorded inside verifyConnection;
+					// unexpected errors must not crash the host.
+				} finally {
+					this.verificationInFlight.delete(server);
+				}
+			}),
+		);
+	}
+
+	private pluginViews(): McpPluginView[] {
+		return buildPluginViews({
+			services: this.services,
+			userServers: this.getUserServers(),
+			authStorage: this.authStorage,
+			connectionStore: this.connectionStore,
+		});
 	}
 
 	/** Host-request handlers exposed to the kernel. */
@@ -189,8 +362,9 @@ export class McpManager {
 				if (!key) throw new Error(`Could not refresh credentials for ${server}`);
 				return {};
 			},
-			// Resolved config so the kernel skill connects to the same URL the host
-			// registered/authenticated (honors a user's mcpServers `url` override).
+			// Resolved config so the kernel connects to the same URL the host
+			// registered/authenticated. Catalog services join the generic route once
+			// the user holds credentials; user-declared servers resolve from settings.
 			"mcp.config": async (payload) => {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.config requires a server");
@@ -200,8 +374,53 @@ export class McpManager {
 					return { ...config, credentialSource: "acp" };
 				}
 				const integration = this.integrations.get(server);
-				if (!integration?.userDeclared || getCatalogEntry(server)) return {};
+				if (!integration) return {};
+				if (integration.userDeclared) {
+					if (this.isReservedServerName(server)) return {};
+					return { ...integration.config };
+				}
+				// Catalog service: serve the definition only with credentials present,
+				// so dispatch can authenticate; verification state lives in the record.
+				if (!this.isAuthed(integration)) return {};
 				return { ...integration.config };
+			},
+			"mcp.list_plugins": async (payload) => {
+				const status = payload.connectionStatus;
+				if (status !== undefined && typeof status !== "string") {
+					throw new Error("mcp.list_plugins connectionStatus must be a string");
+				}
+				if (status !== undefined && !CONNECTION_STATUS_FILTERS.has(status)) {
+					throw new Error(`mcp.list_plugins received an unknown connectionStatus: ${status}`);
+				}
+				const limit = boundedLimit(payload.limit, LIST_PLUGINS_DEFAULT_LIMIT, LIST_PLUGINS_MAX_LIMIT, "limit");
+				const cursor = decodePluginCursor(typeof payload.cursor === "string" ? payload.cursor : undefined);
+				let views = this.pluginViews();
+				if (status !== undefined) views = filterPluginViewsByStatus(views, status);
+				const page = pagePluginViews(views, cursor, limit);
+				// Demand-driven verification: credentialed-but-unverified entries get a
+				// background handshake so the next listing reflects real state.
+				void this.verifyPendingConnections();
+				return { plugins: page.plugins, nextCursor: page.nextCursor };
+			},
+			"mcp.search_plugins": async (payload) => {
+				const query = payload.query;
+				if (typeof query !== "string" || !query.trim()) {
+					throw new Error("mcp.search_plugins requires a non-empty query");
+				}
+				const limit = boundedLimit(payload.limit, SEARCH_PLUGINS_DEFAULT_LIMIT, SEARCH_PLUGINS_MAX_LIMIT, "limit");
+				const views = searchPluginViews(this.pluginViews(), query, limit);
+				void this.verifyPendingConnections();
+				return { plugins: views, nextCursor: null };
+			},
+			"mcp.list_connections": async () => {
+				const connections = buildConnectionViews({
+					services: this.services,
+					userServers: this.getUserServers(),
+					authStorage: this.authStorage,
+					connectionStore: this.connectionStore,
+					acpServers: [...this.acpServers.values()],
+				});
+				return { connections };
 			},
 		};
 		// Only expose begin_login when an interactive login is actually wired, so the
@@ -215,6 +434,27 @@ export class McpManager {
 				return {};
 			};
 		}
+		// mcp.connect is an explicit user-approval handoff; without an approver it
+		// stays unregistered and the kernel reports "no handler" honestly.
+		const beginConnect = this.beginConnect;
+		if (beginConnect) {
+			handlers["mcp.connect"] = async (payload) => {
+				const serviceId = String(payload.serviceId ?? "");
+				if (!serviceId) throw new Error("mcp.connect requires a serviceId");
+				const view = this.pluginViews().find((plugin) => plugin.serviceId === serviceId);
+				if (!view) throw new Error(`Unknown MCP service: ${serviceId}`);
+				if (!view.connectable) {
+					throw new Error(
+						view.setupHint ??
+							`${view.label} cannot be connected automatically (status: ${view.connectionStatus}).`,
+					);
+				}
+				const connected = await beginConnect(serviceId);
+				if (!connected) return { status: "cancelled" };
+				// The approver completed the OAuth flow; credentials now exist.
+				return { status: "connected", connectionId: serviceId };
+			};
+		}
 		return handlers;
 	}
 
@@ -223,16 +463,10 @@ export class McpManager {
 		return [...this.acpServers.values()];
 	}
 
-	/** Enabled user-declared servers available through the generic kernel API. */
+	/** Enabled servers available through the generic kernel API (user-declared + connected catalog services). */
 	getEnabledPersistentGenericServers(): string[] {
 		return Array.from(this.integrations.values())
-			.filter(
-				(integration) =>
-					integration.userDeclared &&
-					GENERIC_SERVER_NAME_PATTERN.test(integration.server) &&
-					!getCatalogEntry(integration.server) &&
-					this.isAuthed(integration),
-			)
+			.filter((integration) => GENERIC_SERVER_NAME_PATTERN.test(integration.server) && this.isAuthed(integration))
 			.map((integration) => integration.server)
 			.sort((left, right) => left.localeCompare(right));
 	}
@@ -246,4 +480,23 @@ export class McpManager {
 			usesOAuth: integration.usesOAuth,
 		}));
 	}
+
+	/** Connection records for /mcp logout wiring and tests. */
+	getConnectionRecord(connectionId: string): McpConnectionRecord | undefined {
+		return this.connectionStore.get(connectionId);
+	}
+
+	/** Remove a connection record (used when credentials are removed). */
+	async removeConnectionRecord(connectionId: string): Promise<void> {
+		this.connectionStore.remove(connectionId);
+		await this.connectionStore.flush().catch(() => undefined);
+	}
+}
+
+function boundedLimit(value: unknown, defaultLimit: number, maxLimit: number, name: string): number {
+	if (value === undefined) return defaultLimit;
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+		throw new Error(`mcp host request ${name} must be a positive integer`);
+	}
+	return Math.min(value, maxLimit);
 }

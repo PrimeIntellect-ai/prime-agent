@@ -97,7 +97,14 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
+import { type McpConnectionRecord, McpConnectionStore } from "../../core/mcp/connection-store.js";
 import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
+import {
+	buildPluginViews,
+	defaultServiceCatalogProvider,
+	type McpPluginView,
+	verifyMcpConnection,
+} from "../../core/mcp/service-catalog.js";
 import {
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
 	bashOutputToText,
@@ -218,6 +225,7 @@ import {
 	RefinementOutcomeMessageComponent,
 } from "./components/refinement-outcome-message.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
+import { ServiceCatalogPickerComponent } from "./components/service-catalog-picker.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
 import { SideQuestionComponent } from "./components/side-question.js";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.js";
@@ -1083,6 +1091,7 @@ export class InteractiveMode {
 	private nextImageMarkerId = 1;
 
 	private unsubscribe?: () => void;
+	private mcpConnectionStore?: McpConnectionStore;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	private autoCompactionLoader: Loader | undefined = undefined;
@@ -4896,6 +4905,11 @@ export class InteractiveMode {
 				if (commandName === "mcp") {
 					this.editor.setText("");
 					await this.handleMcpCommand(commandArgs);
+					return;
+				}
+				if (commandName === "plugins") {
+					this.editor.setText("");
+					await this.handlePluginsCommand(commandArgs);
 					return;
 				}
 				if (slashCommand?.name === "clear") {
@@ -8728,7 +8742,7 @@ export class InteractiveMode {
 		const argv = parseCommandArgs((args ?? "").trim());
 		const [sub, server] = argv;
 		if (!sub) {
-			await this.showConfigurationMenu("mcp-connections");
+			await this.showServiceCatalogPicker();
 			return;
 		}
 
@@ -8754,12 +8768,16 @@ export class InteractiveMode {
 				return;
 			}
 			authStorage.logout(`mcp:${server}`);
+			await this.removeMcpConnectionRecord(server);
 			await this.reloadAfterMcpChange(`Disconnected ${server}.`);
 			return;
 		}
 
 		try {
 			const result = await runMcpManagementCommand(argv, this.settingsManager, this.modelRegistry.authStorage);
+			if (result.changed && result.serverChange?.verb === "removed") {
+				await this.removeMcpConnectionRecord(result.serverChange.name);
+			}
 			if (result.changed && result.serverChange) {
 				const { name, transport, verb, usesOAuth } = result.serverChange;
 				const hasMcpProviderRefresh = this.uiServices.refreshMcpProviders !== undefined;
@@ -8784,6 +8802,138 @@ export class InteractiveMode {
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
+	}
+
+	private getMcpConnectionStore(): McpConnectionStore {
+		this.mcpConnectionStore ??= McpConnectionStore.open(path.join(getAgentDir(), "mcp-connections.json"));
+		return this.mcpConnectionStore;
+	}
+
+	private async removeMcpConnectionRecord(connectionId: string): Promise<void> {
+		const store = this.getMcpConnectionStore();
+		store.remove(connectionId);
+		await store.flush().catch(() => undefined);
+	}
+
+	/** External-service cards for the /plugins picker (client-side view of the shared files). */
+	private buildServiceCatalogViews(): McpPluginView[] {
+		return buildPluginViews({
+			services: defaultServiceCatalogProvider()(),
+			userServers: this.settingsManager.getGlobalMcpServers(),
+			authStorage: this.modelRegistry.authStorage,
+			connectionStore: this.getMcpConnectionStore(),
+		});
+	}
+
+	private async handlePluginsCommand(args: string | undefined): Promise<void> {
+		await this.showServiceCatalogPicker((args ?? "").trim() || undefined);
+	}
+
+	private async showServiceCatalogPicker(initialSearch?: string): Promise<void> {
+		const services = defaultServiceCatalogProvider()();
+		const views = this.buildServiceCatalogViews();
+		// Connect targets keyed by serviceId; user-declared servers resolve from settings.
+		const userServers = this.settingsManager.getGlobalMcpServers() ?? {};
+		const targets = new Map<
+			string,
+			{ url: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean }
+		>();
+		for (const service of services) {
+			if (service.transport.type === "http" && service.transport.url && !userServers[service.serviceId]) {
+				targets.set(service.serviceId, {
+					url: service.transport.url,
+					usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+					managedBySettings: false,
+				});
+			}
+		}
+		for (const [name, config] of Object.entries(userServers)) {
+			if (config.type === "http") {
+				targets.set(name, {
+					url: config.url,
+					usesOAuth: config.oauth === true,
+					...(config.bearerTokenEnvVar ? { bearerTokenEnvVar: config.bearerTokenEnvVar } : {}),
+					managedBySettings: true,
+				});
+			}
+		}
+
+		await new Promise<void>((resolve) => {
+			let handle: OverlayHandle | undefined;
+			let settled = false;
+			const close = () => {
+				if (settled) return;
+				settled = true;
+				handle?.hide();
+				this.ui.requestRender();
+				resolve();
+			};
+			const picker = new ServiceCatalogPickerComponent(
+				views,
+				(service) => {
+					void (async () => {
+						close();
+						await this.connectServiceFromPicker(service, targets.get(service.serviceId));
+					})();
+				},
+				() => close(),
+				{ getRows: () => this.ui.terminal.rows, ...(initialSearch ? { initialSearch } : {}) },
+			);
+			handle = showFullPaneOverlay(this.ui, picker, 78);
+		});
+	}
+
+	private async connectServiceFromPicker(
+		service: McpPluginView,
+		target: { url: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean } | undefined,
+	): Promise<void> {
+		if (service.connectionStatus === "connected") {
+			if (target?.managedBySettings && !service.usesOAuth) {
+				this.showStatus(
+					`${service.label} is configured through settings; manage it with /mcp remove ${service.serviceId}.`,
+				);
+				return;
+			}
+			this.modelRegistry.authStorage.logout(`mcp:${service.serviceId}`);
+			await this.removeMcpConnectionRecord(service.serviceId);
+			await this.reloadAfterMcpChange(`Disconnected ${service.label}.`);
+			return;
+		}
+		if (!service.connectable || !target) {
+			this.showStatus(service.setupHint ?? `${service.label} cannot be connected automatically in this build.`);
+			return;
+		}
+		const result = await this.createAuthFlows().runMcpLogin(service.serviceId, service.label);
+		if (result.status !== "success") {
+			return;
+		}
+		// A stored token is not "Connected": verify with a real MCP handshake.
+		let verification: McpConnectionRecord | undefined;
+		try {
+			verification = await verifyMcpConnection({
+				authStorage: this.modelRegistry.authStorage,
+				connectionStore: this.getMcpConnectionStore(),
+				connectionId: service.serviceId,
+				serviceId: service.serviceId,
+				label: service.label,
+				endpoint: target.url,
+				usesOAuth: target.usesOAuth,
+				...(target.bearerTokenEnvVar ? { bearerTokenEnvVar: target.bearerTokenEnvVar } : {}),
+			});
+		} catch {
+			verification = undefined;
+		}
+		const message =
+			verification?.status === "connected"
+				? `Connected ${service.label}${
+						verification.toolCount !== undefined ? ` (${verification.toolCount} tools verified)` : ""
+					}.`
+				: verification
+					? `Login succeeded for ${service.label}, but connection verification did not complete: ${
+							verification.lastError ?? "the endpoint did not respond to an MCP handshake"
+						}. The connection is saved; retry from /plugins.`
+					: `Connected ${service.label}. (Verification result could not be saved.)`;
+		await this.reloadAfterMcpChange(message);
 	}
 
 	private async reloadAfterMcpChange(message: string, successMessage = message): Promise<void> {

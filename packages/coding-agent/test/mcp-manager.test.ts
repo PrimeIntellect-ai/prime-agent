@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
+import type { McpServiceDescriptor } from "../src/core/mcp/service-catalog.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import type { McpServerConfig } from "../src/core/settings-manager.js";
 
@@ -73,9 +75,15 @@ describe("McpManager", () => {
 	});
 
 	it("exposes only mcp.refresh when no interactive login is wired", async () => {
-		const manager = new McpManager({ authStorage });
+		const manager = new McpManager({ authStorage, noBackgroundVerification: true });
 		const handlers = manager.hostHandlers();
-		expect(Object.keys(handlers).sort()).toEqual(["mcp.config", "mcp.refresh"]);
+		expect(Object.keys(handlers).sort()).toEqual([
+			"mcp.config",
+			"mcp.list_connections",
+			"mcp.list_plugins",
+			"mcp.refresh",
+			"mcp.search_plugins",
+		]);
 
 		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow("Could not refresh");
 		await expect(handlers["mcp.refresh"]({})).rejects.toThrow("requires a server");
@@ -85,27 +93,50 @@ describe("McpManager", () => {
 		let called = "";
 		const manager = new McpManager({
 			authStorage,
+			noBackgroundVerification: true,
 			beginLogin: async (server) => {
 				called = server;
 			},
 		});
 		const handlers = manager.hostHandlers();
-		expect(Object.keys(handlers).sort()).toEqual(["mcp.begin_login", "mcp.config", "mcp.refresh"]);
+		expect(Object.keys(handlers).sort()).toEqual([
+			"mcp.begin_login",
+			"mcp.config",
+			"mcp.list_connections",
+			"mcp.list_plugins",
+			"mcp.refresh",
+			"mcp.search_plugins",
+		]);
 		await handlers["mcp.begin_login"]({ server: "linear" });
 		expect(called).toBe("linear");
 	});
 
-	it("mcp.config keeps catalog names reserved from generic overrides", async () => {
+	it("mcp.config keeps catalog names reserved from generic overrides and serves connected catalog services", async () => {
 		const manager = new McpManager({
 			authStorage,
+			noBackgroundVerification: true,
 			getUserServers: () => ({
 				linear: { type: "http", url: "https://proxy.test/mcp", oauth: true, headers: { "X-Extra": "1" } },
 			}),
 		});
 		const handlers = manager.hostHandlers();
+		// A user entry shadowing a bundled catalog name is dead by design.
 		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({});
-		// Catalog-only entries are reserved for their authored skills, not the generic API.
+		// An unconnected catalog service is not dispatched through the generic route.
 		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({});
+
+		authStorage.set("mcp:notion", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		// Stored credentials put the catalog service on the generic route.
+		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({
+			type: "http",
+			url: "https://mcp.notion.com/mcp",
+			oauth: true,
+		});
 	});
 
 	it("does not treat an oauth override of a catalog name as authed via the official stored cred", () => {
@@ -164,9 +195,16 @@ describe("McpManager", () => {
 		}
 	});
 
-	it("lists only enabled non-catalog user servers in deterministic order", () => {
+	it("lists enabled generic servers including connected catalog services in deterministic order", () => {
+		authStorage.set("mcp:notion", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
 		const manager = new McpManager({
 			authStorage,
+			noBackgroundVerification: true,
 			getUserServers: () => ({
 				zebra: { type: "stdio", command: "z" },
 				disabled: { type: "stdio", command: "off", enabled: false },
@@ -175,7 +213,8 @@ describe("McpManager", () => {
 			}),
 		});
 
-		expect(manager.getEnabledPersistentGenericServers()).toEqual(["alpha", "zebra"]);
+		// The linear shadow stays dead (reserved catalog name); connected notion joins.
+		expect(manager.getEnabledPersistentGenericServers()).toEqual(["alpha", "notion", "zebra"]);
 	});
 
 	it("picks up mcpServers added after construction on refresh()", () => {
@@ -288,5 +327,268 @@ describe("McpManager", () => {
 			oauth: true,
 		});
 		expect(authStorage.get("mcp:task")).toMatchObject({ access: "stored-oauth-token" });
+	});
+});
+async function waitForCondition(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+	const startedAt = Date.now();
+	while (!condition()) {
+		if (Date.now() - startedAt > timeoutMs) {
+			throw new Error("Timed out waiting for a background condition");
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
+
+const CATALOG_SERVICE: McpServiceDescriptor = {
+	serviceId: "acme",
+	label: "Acme",
+	aliases: [],
+	transport: { type: "http", url: "https://mcp.acme.test/mcp" },
+	authStrategy: "oauth",
+	setup: { status: "ready" },
+	catalogVerified: true,
+	bundledSkill: false,
+};
+
+describe("McpManager service catalog handlers", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+	let probeCalls: Array<{ url: string; token: string }>;
+	let probeResult: { ok: true; toolCount: number } | { ok: false; error: string };
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "mcp-catalog-"));
+		authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		resetOAuthProviders();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		probeCalls = [];
+		probeResult = { ok: true, toolCount: 3 };
+	});
+
+	afterEach(() => {
+		resetOAuthProviders();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function createManager(options: Partial<ConstructorParameters<typeof McpManager>[0]> = {}): McpManager {
+		return new McpManager({
+			authStorage,
+			connectionStore: store,
+			probeConnection: async (probeOptions) => {
+				probeCalls.push({ url: probeOptions.url, token: await probeOptions.getToken() });
+				return probeResult;
+			},
+			...options,
+		});
+	}
+
+	it("lists plugins with statuses, strict status filtering, and honest pagination", async () => {
+		authStorage.set("mcp:notion", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		const manager = createManager({ noBackgroundVerification: true });
+		const handlers = manager.hostHandlers();
+
+		const all = (await handlers["mcp.list_plugins"]({})) as {
+			plugins: Array<{ serviceId: string; connectionStatus: string }>;
+			nextCursor: string | null;
+		};
+		expect(all.plugins.map((plugin) => `${plugin.serviceId}:${plugin.connectionStatus}`).sort()).toEqual([
+			"linear:not_connected",
+			"notion:pending",
+		]);
+		expect(all.nextCursor).toBeNull();
+
+		const connected = (await handlers["mcp.list_plugins"]({
+			connectionStatus: "not_connected",
+			limit: 1,
+		})) as { plugins: Array<{ serviceId: string }>; nextCursor: string | null };
+		expect(connected.plugins).toHaveLength(1);
+		expect(connected.plugins[0]).toMatchObject({ serviceId: "linear" });
+		expect(connected.nextCursor).toBeNull();
+
+		const page = (await handlers["mcp.list_plugins"]({ limit: 1 })) as {
+			plugins: Array<{ serviceId: string }>;
+			nextCursor: string | null;
+		};
+		expect(page.plugins).toHaveLength(1);
+		expect(page.nextCursor).toBe("1");
+
+		await expect(handlers["mcp.list_plugins"]({ connectionStatus: "bogus" })).rejects.toThrow(
+			"unknown connectionStatus",
+		);
+		await expect(handlers["mcp.list_plugins"]({ limit: 0 })).rejects.toThrow("positive integer");
+		await expect(handlers["mcp.list_plugins"]({ cursor: "bogus" })).rejects.toThrow("invalid cursor");
+	});
+
+	it("searches plugins boundedly and rejects empty queries", async () => {
+		const manager = createManager({ noBackgroundVerification: true });
+		const handlers = manager.hostHandlers();
+		const result = (await handlers["mcp.search_plugins"]({ query: "NOTION" })) as {
+			plugins: Array<{ serviceId: string }>;
+		};
+		expect(result.plugins.map((plugin) => plugin.serviceId)).toEqual(["notion"]);
+		await expect(handlers["mcp.search_plugins"]({ query: "  " })).rejects.toThrow("non-empty query");
+	});
+
+	it("lists connections including pending catalog grants, user servers, and ACP servers", async () => {
+		authStorage.set("mcp:linear", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		const manager = createManager({
+			noBackgroundVerification: true,
+			getUserServers: () => ({ custom: { type: "http", url: "https://custom.test/mcp" } }),
+		});
+		manager.replaceAcpServers(
+			[{ name: "acp-tool", type: "http", url: "https://acp.test/mcp", headers: {} }],
+			"owner",
+		);
+		const handlers = manager.hostHandlers();
+		const result = (await handlers["mcp.list_connections"]({})) as {
+			connections: Array<{ connectionId: string; source: string; status: string; transport: string }>;
+		};
+		expect(result.connections.map((c) => `${c.connectionId}:${c.source}:${c.status}:${c.transport}`)).toEqual([
+			"acp-tool:acp:connected:http",
+			"custom:user:connected:http",
+			"linear:catalog:pending:http",
+		]);
+	});
+
+	it("verifies pending connections on demand: a listing triggers a real handshake and the next listing reports it", async () => {
+		authStorage.set("mcp:linear", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		const manager = createManager();
+		const handlers = manager.hostHandlers();
+
+		const before = (await handlers["mcp.list_plugins"]({ connectionStatus: "pending" })) as {
+			plugins: Array<{ serviceId: string; connectionStatus: string }>;
+		};
+		expect(before.plugins[0]).toMatchObject({ serviceId: "linear", connectionStatus: "pending" });
+
+		// The demand-driven background probe runs against the bound endpoint with the token.
+		await waitForCondition(() => store.get("linear")?.status === "connected");
+		expect(probeCalls).toEqual([{ url: "https://mcp.linear.app/mcp", token: "tok" }]);
+
+		const after = (await handlers["mcp.list_plugins"]({})) as {
+			plugins: Array<{ serviceId: string; connectionStatus: string; toolCount?: number }>;
+		};
+		expect(after.plugins.find((plugin) => plugin.serviceId === "linear")).toMatchObject({
+			connectionStatus: "connected",
+			toolCount: 3,
+		});
+	});
+
+	it("keeps verification failures recoverable: a rejected credential records error without deleting the grant", async () => {
+		authStorage.set("mcp:linear", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		probeResult = { ok: false, error: "MCP verification at https://mcp.linear.app/mcp failed: HTTP 401" };
+		const manager = createManager();
+		const record = await manager.verifyConnection("linear");
+		expect(record.status).toBe("error");
+		expect(authStorage.get("mcp:linear")).toBeDefined();
+	});
+
+	it("reloads connection records written by the interactive client on refresh()", async () => {
+		const manager = createManager({ noBackgroundVerification: true });
+		const clientStore = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		authStorage.set("mcp:notion", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		clientStore.upsert({
+			connectionId: "notion",
+			serviceId: "notion",
+			endpoint: "https://mcp.notion.com/mcp",
+			label: "Notion",
+			status: "connected",
+			verifiedAt: Date.now(),
+			toolCount: 9,
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		await clientStore.flush();
+		manager.refresh();
+
+		const handlers = manager.hostHandlers();
+		const connections = (await handlers["mcp.list_connections"]({})) as {
+			connections: Array<{ connectionId: string; status: string }>;
+		};
+		expect(connections.connections.find((connection) => connection.connectionId === "notion")).toMatchObject({
+			status: "connected",
+		});
+	});
+
+	it("serves custom catalog providers: user-owned non-bundled ids coexist with catalog cards", async () => {
+		const manager = createManager({
+			noBackgroundVerification: true,
+			getServiceCatalog: () => [CATALOG_SERVICE],
+			getUserServers: () => ({
+				acme: { type: "http", url: "https://custom.acme.test/mcp", oauth: true },
+			}),
+		});
+		const handlers = manager.hostHandlers();
+		const plugins = (await handlers["mcp.list_plugins"]({})) as {
+			plugins: Array<{ serviceId: string; source: string }>;
+		};
+		// The user's server owns the id; no duplicate catalog card is listed.
+		expect(plugins.plugins).toEqual([expect.objectContaining({ serviceId: "acme", source: "user" })]);
+		// The user provider is registered against the user's URL, not the catalog endpoint.
+		expect(getOAuthProvider("mcp:acme")).toMatchObject({ name: "acme" });
+	});
+
+	it("registers OAuth providers for connectable non-bundled catalog services, never for setup-required ones", () => {
+		createManager({
+			noBackgroundVerification: true,
+			getServiceCatalog: () => [
+				CATALOG_SERVICE,
+				{
+					...CATALOG_SERVICE,
+					serviceId: "brandapp",
+					label: "BrandApp",
+					setup: { status: "requires-setup", reason: "Requires a developer app." },
+				},
+			],
+		});
+		expect(getOAuthProvider("mcp:acme")).toBeDefined();
+		expect(getOAuthProvider("mcp:brandapp")).toBeUndefined();
+	});
+
+	it("exposes mcp.connect only with an explicit approver and maps its result", async () => {
+		const bare = createManager({ noBackgroundVerification: true });
+		expect(Object.keys(bare.hostHandlers())).not.toContain("mcp.connect");
+
+		const approvals: string[] = [];
+		const manager = createManager({
+			noBackgroundVerification: true,
+			getServiceCatalog: () => [CATALOG_SERVICE],
+			beginConnect: async (serviceId) => {
+				approvals.push(serviceId);
+				return serviceId === "acme";
+			},
+		});
+		const handlers = manager.hostHandlers();
+		const connected = await handlers["mcp.connect"]({ serviceId: "acme" });
+		expect(connected).toEqual({ status: "connected", connectionId: "acme" });
+		expect(approvals).toEqual(["acme"]);
+
+		await expect(handlers["mcp.connect"]({ serviceId: "missing" })).rejects.toThrow("Unknown MCP service");
+		await expect(handlers["mcp.connect"]({})).rejects.toThrow("requires a serviceId");
 	});
 });
