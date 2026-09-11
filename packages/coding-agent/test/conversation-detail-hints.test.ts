@@ -22,7 +22,7 @@ describe("conversation detail hints", () => {
 					tokensBefore: 12000,
 					timestamp: 0,
 				}),
-				label: "Compacted from 12,000 tokens",
+				label: "Context compacted",
 				body: "Preserved context details",
 			},
 			{
@@ -49,7 +49,8 @@ describe("conversation detail hints", () => {
 		for (const { component, label, body } of cards) {
 			const collapsed = stripAnsi(component.render(100).join("\n"));
 			expect(collapsed).toContain(label);
-			expect(collapsed).not.toContain(body);
+			if (component instanceof CompactionSummaryMessageComponent) expect(collapsed).toContain(body);
+			else expect(collapsed).not.toContain(body);
 			expect(collapsed).not.toContain("Ctrl+O");
 			expect(collapsed).not.toMatch(/\(\s*\)|·\s*$/m);
 
