@@ -330,6 +330,113 @@ describe("AgentSession compaction characterization", () => {
 		]);
 	});
 
+	async function createGatedCompactionHarness(options: Parameters<typeof createHarness>[0]) {
+		let releaseCompaction: () => void = () => {};
+		const compactionGate = new Promise<void>((resolve) => {
+			releaseCompaction = resolve;
+		});
+		const harness = await createHarness({
+			...options,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async () => {
+						await compactionGate;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		return { harness, releaseCompaction };
+	}
+
+	it("keeps a message queued during compaction visible in the action snapshot", async () => {
+		const { harness, releaseCompaction } = await createGatedCompactionHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			persistSession: true,
+		});
+		harness.setResponses([
+			fauxAssistantMessage("first response"),
+			fauxAssistantMessage("model-generated summary"),
+			fauxAssistantMessage("queued turn response"),
+		]);
+		await harness.session.prompt("one");
+
+		const compacting = harness.session.compact();
+		await vi.waitFor(() => expect(harness.session.isCompacting).toBe(true));
+		const queued = harness.session.prompt("queued during compaction", {
+			streamingBehavior: "steer",
+			queueIfBusy: true,
+		});
+		// The TUI renders from the emitted event, not the pull snapshot.
+		await vi.waitFor(() => {
+			const updates = harness.eventsOfType("session_action_update");
+			expect(updates[updates.length - 1]).toMatchObject({
+				actions: { queuedCount: 1, steering: ["queued during compaction"] },
+			});
+		});
+		expect(harness.session.isCompacting).toBe(true);
+		releaseCompaction();
+		await Promise.all([compacting, queued]);
+	});
+
+	it("keeps a queued message visible while its own pre-turn compaction runs", async () => {
+		let releaseTurn: () => void = () => {};
+		const turnGate = new Promise<void>((resolve) => {
+			releaseTurn = resolve;
+		});
+		const { harness, releaseCompaction } = await createGatedCompactionHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+		});
+		harness.setResponses([
+			async () => {
+				await turnGate;
+				return fauxAssistantMessage("slow response");
+			},
+			fauxAssistantMessage("model-generated summary"),
+			fauxAssistantMessage("queued turn response"),
+		]);
+		harness.session.setFollowUpMode("all");
+		const running = harness.session.prompt("one");
+		await vi.waitFor(() => expect(harness.session.isStreaming).toBe(true));
+		const queued = harness.session.prompt("queued before compaction", {
+			streamingBehavior: "followUp",
+			queueIfBusy: true,
+		});
+		const alsoQueued = harness.session.prompt("also queued before compaction", {
+			streamingBehavior: "followUp",
+			queueIfBusy: true,
+		});
+		await vi.waitFor(() =>
+			expect(harness.session.getSessionActionSnapshot().followUps).toEqual([
+				"queued before compaction",
+				"also queued before compaction",
+			]),
+		);
+		// Hold the pump so the context growth lands between the run and the queued turns' preparation.
+		const pause = harness.session.acquireQueuedWorkPause();
+		releaseTurn();
+		await running;
+		harness.session.agent.state.messages.push({
+			role: "custom",
+			customType: "large-context",
+			content: [{ type: "text", text: "x".repeat(800_000) }],
+			display: false,
+			timestamp: Date.now(),
+		});
+		pause.release();
+		// The batch's own pre-turn compaction empties the lanes; preparing must carry every lane preview through it.
+		await vi.waitFor(() => expect(harness.session.isCompacting).toBe(true), { timeout: 3000 });
+		expect(harness.session.getSessionActionSnapshot()).toMatchObject({
+			steering: [],
+			followUps: [],
+			preparing: ["queued before compaction", "also queued before compaction"],
+			active: { kind: "turn", phase: "preparing", label: "queued before compaction" },
+		});
+		releaseCompaction();
+		await Promise.all([running, queued, alsoQueued]);
+	});
+
 	it("reschedules a pending post-compaction continuation after successful manual compaction", async () => {
 		vi.useFakeTimers();
 		const harness = await createHarness({

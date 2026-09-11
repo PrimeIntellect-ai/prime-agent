@@ -6804,7 +6804,16 @@ export class AgentSession {
 		const followUps = visibleSessionActionProjection(this._actionStore.queuedActions("when_run_idle")).map(
 			queuedAgentMessagePreview,
 		);
-		const active = visibleSessionActionProjection(this._actionStore.activeActions())[0];
+		const activeProjection = visibleSessionActionProjection(this._actionStore.activeActions());
+		// Lane-preview projection for pump-owned turns that have not started; their own pre-turn compaction can hold them here.
+		const preparing = activeProjection
+			.filter(
+				(action) =>
+					action.payload.kind === "turn" &&
+					(action.lifecycle.state === "selected" || action.lifecycle.state === "preparing"),
+			)
+			.map(queuedAgentMessagePreview);
+		const active = activeProjection[0];
 		const activeState = active?.lifecycle.state;
 		const phase =
 			activeState === "selected"
@@ -6816,6 +6825,7 @@ export class AgentSession {
 			queuedCount: steering.length + followUps.length,
 			steering,
 			followUps,
+			...(preparing.length > 0 ? { preparing } : {}),
 			...(active && phase
 				? {
 						active: {
