@@ -87,6 +87,7 @@ import {
 	resolveHeartbeatStreamingBehavior,
 	shouldDeferHeartbeatCronJob,
 } from "../../core/cron-jobs.js";
+import { HERDR_REBIND_EVENT } from "../../core/extensions/builtin/herdr-agent-state.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
@@ -972,6 +973,36 @@ export class AgentDaemon {
 				this.adoptClientEnv(child, env);
 			}
 		}
+	}
+
+	/**
+	 * Rebind the session's pane identity to an attaching client that carries
+	 * the allowlisted HERDR_* env. Every pane client attaches right after it
+	 * creates or opens a session, so the last pane to attach owns the
+	 * identity: pi.exec reads state.clientEnv live and every runtime rebuild
+	 * re-loads extensions under it, so subprocess env and load-time captures
+	 * move together instead of pinning the creator's (possibly closed) pane.
+	 * The already-loaded herdr reporter cannot re-run its factory, so the
+	 * rebind is also emitted on the session's shared extension bus and the
+	 * reporter switches panes immediately. Env-less clients (headless CLI,
+	 * watchers such as the agents view and subagent viewers) send no env and
+	 * never move the identity.
+	 */
+	private rebindClientEnv(state: ActiveSessionState, env?: Record<string, string>): void {
+		if (!env) {
+			return;
+		}
+		state.clientEnv = env;
+		for (const child of this.sessions.values()) {
+			const metadata = child.runtime.metadata;
+			if (metadata.kind === "subagent" && metadata.parentActiveSessionId === state.activeSessionId) {
+				this.rebindClientEnv(child, env);
+			}
+		}
+		if (state.runtime.metadata.kind === "subagent") {
+			return;
+		}
+		state.runtime.services.resourceLoader.emitExtensionEvent(HERDR_REBIND_EVENT, { env });
 	}
 
 	/** Root sessions dir that keys this daemon's spawn ledger. */
@@ -1898,9 +1929,9 @@ export class AgentDaemon {
 				// A live runtime already owns this session file; reuse it instead of
 				// starting a second runtime that would interleave writes to one file.
 				// clientEnv adopts the first offered identity (e.g. a pane opening a
-				// cron-created session) but never overwrites one: extensions captured
-				// the creator's identity at load, and swapping it would only make
-				// pi.exec disagree with those captures.
+				// cron-created session) but never overwrites one here: pane clients
+				// rebind the session's pane identity on the attach that follows
+				// (rebindClientEnv), which keeps captures and pi.exec consistent.
 				if (command.name) {
 					await this.setStateSessionName(existing, command.name);
 				}
@@ -3404,9 +3435,7 @@ export class AgentDaemon {
 			...(entry.repliedSinceTask !== undefined ? { repliedSinceTask: entry.repliedSinceTask } : {}),
 			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
 			...(entry.rlmChildId ? { rlmChildId: entry.rlmChildId } : {}),
-			...(entry.firstMessage
-				? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) }
-				: {}),
+			...(entry.firstMessage ? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) } : {}),
 		};
 	}
 
@@ -3482,7 +3511,11 @@ export class AgentDaemon {
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 			...(latest
 				? {
-						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, AGENT_OBSERVE_PREVIEW_MAX_CHARS),
+						latestMessage: createAgentObserveMessagePreview(
+							latest,
+							messages.length - 1,
+							AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+						),
 					}
 				: {}),
 		};
@@ -4183,11 +4216,12 @@ export class AgentDaemon {
 					client.transport === "private-framed" &&
 					daemonClientCapabilitiesForSession(client, state.activeSessionId).has("chunked_snapshot");
 				// Attach is admitted during update-restart preparation as a read. Env
-				// adoption remains safe while mutations are only draining; after fencing,
-				// defer it until rollback so the checkpoint never omits a live identity.
+				// rebinding remains safe while mutations are only draining; after
+				// fencing, defer it until rollback so the checkpoint never omits a
+				// live identity.
 				const clientEnv = filterClientEnv(command.env);
 				const deferClientEnv = this.updateRestart && this.updateRestart.phase !== "preparing";
-				if (!deferClientEnv) this.adoptClientEnv(state, clientEnv);
+				if (!deferClientEnv) this.rebindClientEnv(state, clientEnv);
 				const snapshotSignal = streamsSnapshot
 					? markClientSnapshotStreaming(client, state.activeSessionId)
 					: undefined;
@@ -6595,7 +6629,7 @@ export class AgentDaemon {
 				deferred.state.clients.has(deferred.client) &&
 				deferred.client.attachedActiveSessionIds.has(deferred.state.activeSessionId)
 			) {
-				this.adoptClientEnv(deferred.state, deferred.env);
+				this.rebindClientEnv(deferred.state, deferred.env);
 			}
 		}
 		transaction.deferredClientEnv.length = 0;

@@ -78,7 +78,6 @@ import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
 import { DaemonSessionRecoveringError, deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import {
-	collectDaemonClientEnv,
 	createDaemonEventMeta,
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
@@ -5111,7 +5110,11 @@ export class DaemonSupervisor {
 								? ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"]
 								: ["attach_snapshot", "event_sequence", "slim_attach"],
 							supportsExtensionUi: false,
-							env: command.env ?? collectDaemonClientEnv(),
+							// Forward only the client's env. Fabricating the
+							// supervisor's here would rebind env-less sessions
+							// (and their herdr reporter) to the pane that started
+							// the daemon whenever a watcher attaches.
+							env: command.env,
 						});
 						const loaded = attachResultFromResponse(response);
 						if (match.worker.snapshotLoads.get(snapshotLoadKey) !== loading) {

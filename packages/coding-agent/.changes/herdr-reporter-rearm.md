@@ -1,0 +1,1 @@
+- Fixed the herdr agent indicator to follow the pane that attaches a daemon session, so a session opened from a pane appears in herdr without a manual `/reload`.

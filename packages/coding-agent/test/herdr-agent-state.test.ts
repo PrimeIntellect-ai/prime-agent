@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	createHerdrAgentStateExtension,
+	HERDR_REBIND_EVENT,
 	hasFileBasedHerdrIntegration,
 	herdrAgentStateExtension,
 	herdrSocketTarget,
@@ -152,7 +153,42 @@ describe("herdrAgentStateExtension", () => {
 		expect(requests[0]?.params.state).toBe("idle");
 	});
 
-	it("registers no handlers when HERDR_ENV is not set", () => {
+	it("stays off the wire when HERDR_ENV is not set", async () => {
+		const tempDir = join(tmpdir(), `hrd-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const socketPath = join(tempDir, "h.sock");
+
+		const { server, requests } = await startFakeHerdrServer(socketPath);
+		cleanupServers.push(server);
+
+		delete process.env.HERDR_ENV;
+		process.env.HERDR_SOCKET_PATH = socketPath;
+		delete process.env.HERDR_PANE_ID;
+
+		const { pi, handlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+		// Handlers stay registered so state tracking continues, but nothing
+		// reaches the wire until a rebind arms a full pane identity.
+		expect(handlers.size).toBeGreaterThan(0);
+
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
+		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
+		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(requests).toHaveLength(0);
+	});
+
+	it("arms from a herdr:rebind event and reports the live state to the new pane", async () => {
+		const tempDir = join(tmpdir(), `hrd-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const socketPath = join(tempDir, "h.sock");
+
+		const { server, requests, waitForRequests } = await startFakeHerdrServer(socketPath);
+		cleanupServers.push(server);
+
 		delete process.env.HERDR_ENV;
 		delete process.env.HERDR_SOCKET_PATH;
 		delete process.env.HERDR_PANE_ID;
@@ -160,8 +196,128 @@ describe("herdrAgentStateExtension", () => {
 		const { pi, handlers, busHandlers } = createMockPi();
 		herdrAgentStateExtension(pi);
 
-		expect(handlers.size).toBe(0);
-		expect(busHandlers.size).toBe(0);
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		// The session started headless and is mid-turn when a pane client
+		// attaches; the daemon emits the rebind on the session's shared bus.
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
+		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
+		expect(requests).toHaveLength(0);
+
+		busHandlers.get(HERDR_REBIND_EVENT)?.[0]?.({
+			env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "w2:p2" },
+		});
+
+		await waitForRequests(1);
+		expect(requests[0]?.method).toBe("pane.report_agent");
+		expect(requests[0]?.params.pane_id).toBe("w2:p2");
+		expect(requests[0]?.params.state).toBe("working");
+
+		handlers.get("agent_end")?.[0]?.({ type: "agent_end", messages: [] }, ctx);
+		await waitForRequests(2);
+		expect(requests[1]?.params.pane_id).toBe("w2:p2");
+		expect(requests[1]?.params.state).toBe("idle");
+	});
+
+	it("switches panes on a later rebind; the last attach wins", async () => {
+		const tempDir = join(tmpdir(), `hrd-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const socketPath = join(tempDir, "h.sock");
+
+		const { server, requests, waitForRequests } = await startFakeHerdrServer(socketPath);
+		cleanupServers.push(server);
+
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = socketPath;
+		process.env.HERDR_PANE_ID = "w1:p1";
+
+		const { pi, handlers, busHandlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
+		await waitForRequests(1);
+		expect(requests[0]?.params.pane_id).toBe("w1:p1");
+
+		// The session was created in a pane that has since closed; a different
+		// pane re-adopts it, and the reporter follows the last attacher.
+		busHandlers.get(HERDR_REBIND_EVENT)?.[0]?.({
+			env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "w2:p2" },
+		});
+		await waitForRequests(2);
+		expect(requests[1]?.params.pane_id).toBe("w2:p2");
+
+		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
+		handlers.get("agent_end")?.[0]?.({ type: "agent_end", messages: [] }, ctx);
+		await waitForRequests(3);
+		expect(requests[2]?.params.pane_id).toBe("w2:p2");
+
+		// A re-attach from a third pane switches again, even mid-flow.
+		busHandlers.get(HERDR_REBIND_EVENT)?.[0]?.({
+			env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "w3:p3" },
+		});
+		await waitForRequests(4);
+		expect(requests[3]?.params.pane_id).toBe("w3:p3");
+		expect(requests[3]?.params.state).toBe("idle");
+
+		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, ctx);
+		await waitForRequests(5);
+		expect(requests.at(-1)?.method).toBe("pane.release_agent");
+		expect(requests.at(-1)?.params.pane_id).toBe("w3:p3");
+	});
+
+	it("ignores a rebind without a complete pane identity", async () => {
+		const tempDir = join(tmpdir(), `hrd-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const socketPath = join(tempDir, "h.sock");
+
+		const { server, requests, waitForRequests } = await startFakeHerdrServer(socketPath);
+		cleanupServers.push(server);
+
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = socketPath;
+		process.env.HERDR_PANE_ID = "w1:p1";
+
+		const { pi, handlers, busHandlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
+		await waitForRequests(1);
+
+		// A headless client attaches: the rebind carries no pane identity and
+		// must neither move nor disarm the current one.
+		busHandlers.get(HERDR_REBIND_EVENT)?.[0]?.({ env: { HERDR_ENV: "1" } });
+		busHandlers.get(HERDR_REBIND_EVENT)?.[0]?.({
+			env: { HERDR_ENV: "0", HERDR_PANE_ID: "w9:p9", HERDR_SOCKET_PATH: socketPath },
+		});
+
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.params.pane_id).toBe("w1:p1");
+	});
+
+	it("unsubscribes the shared-bus herdr:rebind listener on shutdown", async () => {
+		const tempDir = join(tmpdir(), `hrd-${Math.random().toString(36).slice(2, 8)}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const socketPath = join(tempDir, "h.sock");
+
+		const { server } = await startFakeHerdrServer(socketPath);
+		cleanupServers.push(server);
+
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = socketPath;
+		process.env.HERDR_PANE_ID = "w1:p1";
+
+		const { pi, handlers, busHandlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+		expect(busHandlers.get(HERDR_REBIND_EVENT)).toHaveLength(1);
+
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "new" }, ctx);
+		expect(busHandlers.get(HERDR_REBIND_EVENT)).toHaveLength(0);
 	});
 
 	it("detects the file-based herdr integration among loaded extension paths", () => {

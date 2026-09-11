@@ -181,6 +181,7 @@ function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
 		getAppendSystemPrompt: () => [],
 		extendResources: () => {},
 		reload: async () => {},
+		emitExtensionEvent: () => {},
 	};
 }
 

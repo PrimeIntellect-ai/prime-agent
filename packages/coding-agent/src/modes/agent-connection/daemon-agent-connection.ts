@@ -175,9 +175,9 @@ export interface DaemonAgentConnectionOptions {
 	snapshotTimeoutMs?: number;
 	/**
 	 * Send this client's allowlisted env (herdr pane identity) with attach so
-	 * an env-less session (e.g. cron-created) adopts it. Set only by the
-	 * primary interactive connection — the daemon adopts-if-absent, never
-	 * rebinds, so watchers must not send env at all.
+	 * the session's pane identity follows the pane the client runs in. Set
+	 * only by the primary interactive connection — the daemon rebinds to the
+	 * attaching client, so watchers must not send env at all.
 	 */
 	sendClientEnv?: boolean;
 	/** Advertise support for interactive extension dialogs. */

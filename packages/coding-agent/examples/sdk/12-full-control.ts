@@ -48,6 +48,7 @@ Available: ipython. Be concise.`,
 	getAppendSystemPrompt: () => [],
 	extendResources: () => {},
 	reload: async () => {},
+	emitExtensionEvent: () => {},
 };
 
 const { session } = await createAgentSession({

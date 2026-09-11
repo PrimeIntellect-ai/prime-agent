@@ -208,8 +208,10 @@ export interface DaemonAttachClientMetadata {
  * (e.g. HERDR_PANE_ID/HERDR_SOCKET_PATH that herdr sets per pane). The daemon
  * scopes these to the created session and merges them over process.env for
  * that session's pi.exec() subprocesses — it does not mutate the daemon's own
- * env. Carried on create only: attach must not rebind a session's identity,
- * since watchers (agents view, subagent viewers) also attach.
+ * env. Create binds the creator's env; an attach carrying env rebinds the
+ * session's pane identity to the attaching client (last pane wins), while
+ * watchers (agents view, subagent viewers) attach without env and never
+ * move it.
  */
 export interface DaemonClientEnv {
 	env?: Record<string, string>;
@@ -415,9 +417,11 @@ export type DaemonCommand =
 			lifecycle?: DaemonSessionLifecycle;
 	  } & DaemonClientEnv &
 			DaemonLaunchEnv)
-	// Attach env is adopt-if-absent only: it fills identity for env-less
-	// sessions (e.g. cron-created) but never rebinds one, since watchers
-	// (agents view, subagent viewers) also attach.
+	// Attach env fills identity for env-less sessions (e.g. cron-created) and
+	// rebinds it to the attaching client afterwards (last pane wins), so a
+	// daemon-resident session attached from a pane reports to that pane.
+	// Env-less clients — watchers (agents view, subagent viewers) and
+	// headless clients — never move it.
 	| ({
 			id?: string;
 			type: "attach";

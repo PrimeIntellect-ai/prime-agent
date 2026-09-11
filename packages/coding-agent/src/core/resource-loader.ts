@@ -36,6 +36,12 @@ export interface ResourceLoader {
 	getAppendSystemPrompt(): string[];
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(): Promise<void>;
+	/**
+	 * Emit an event on the bus shared with the loaded extensions (`pi.events`).
+	 * Lets a host (e.g. the daemon) notify extension instances about events
+	 * that happen after load (such as a client attach carrying pane identity).
+	 */
+	emitExtensionEvent(channel: string, data: unknown): void;
 }
 
 function resolvePromptInput(input: string | undefined, description: string): string | undefined {
@@ -267,6 +273,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 	/** Extension file paths the last reload actually loaded (after settings overrides). */
 	getLoadedExtensionPaths(): string[] {
 		return this.loadedExtensionPaths;
+	}
+
+	emitExtensionEvent(channel: string, data: unknown): void {
+		this.eventBus.emit(channel, data);
 	}
 
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] } {

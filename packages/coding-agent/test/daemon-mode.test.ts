@@ -4063,6 +4063,177 @@ describe("daemon mode helpers", () => {
 		expect(write).not.toHaveBeenCalled();
 	});
 
+	it("rebinds the herdr pane identity to the client of an env-carrying attach", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const emittedEvents: Array<{ channel: string; data: unknown }> = [];
+		const state = makeState("active");
+		state.clientEnv = { HERDR_PANE_ID: "w1:p1", HERDR_ENV: "1" };
+		state.runtime = {
+			...state.runtime,
+			metadata: { kind: "top-level", createdAt: 1 },
+			services: {
+				resourceLoader: {
+					emitExtensionEvent: (channel: string, data: unknown) => {
+						emittedEvents.push({ channel, data });
+					},
+				},
+			},
+		} as never;
+		const client = makeClient("client-1", state.activeSessionId);
+		client.attachedActiveSessionIds.clear();
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult: ReturnType<typeof vi.fn>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.createAttachResult = vi.fn(async () => ({
+			activeSessionId: state.activeSessionId,
+			snapshot: { summary: {}, state: {}, messages: [] },
+			lastEventSequence: 0,
+		}));
+
+		await internals.handleCommand(client, {
+			type: "attach",
+			activeSessionId: state.activeSessionId,
+			env: { HERDR_ENV: "1", HERDR_PANE_ID: "w2:p2", HERDR_SOCKET_PATH: "/tmp/herdr.sock", PATH: "/evil" },
+		});
+
+		// Last pane wins: the session's env identity follows the attaching
+		// client, filtered to the allowlist, and the loaded herdr reporter is
+		// notified on the session's extension bus.
+		expect(state.clientEnv).toEqual({
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "w2:p2",
+			HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+		});
+		expect(emittedEvents).toEqual([
+			{
+				channel: "herdr:rebind",
+				data: {
+					env: {
+						HERDR_ENV: "1",
+						HERDR_PANE_ID: "w2:p2",
+						HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+					},
+				},
+			},
+		]);
+
+		// A second pane re-adopts: the identity switches again.
+		await internals.handleCommand(makeClient("client-2", state.activeSessionId), {
+			type: "attach",
+			activeSessionId: state.activeSessionId,
+			env: { HERDR_ENV: "1", HERDR_PANE_ID: "w3:p3" },
+		});
+		expect(state.clientEnv).toEqual({ HERDR_ENV: "1", HERDR_PANE_ID: "w3:p3" });
+		expect(emittedEvents).toHaveLength(2);
+		expect(emittedEvents[1]?.data).toEqual({ env: { HERDR_ENV: "1", HERDR_PANE_ID: "w3:p3" } });
+	});
+
+	it("leaves the herdr pane identity alone on an env-less attach", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const emittedEvents: Array<{ channel: string; data: unknown }> = [];
+		const state = makeState("active");
+		state.clientEnv = { HERDR_PANE_ID: "w1:p1", HERDR_ENV: "1" };
+		state.runtime = {
+			...state.runtime,
+			metadata: { kind: "top-level", createdAt: 1 },
+			services: {
+				resourceLoader: {
+					emitExtensionEvent: (channel: string, data: unknown) => {
+						emittedEvents.push({ channel, data });
+					},
+				},
+			},
+		} as never;
+		const client = makeClient("watcher", state.activeSessionId);
+		client.attachedActiveSessionIds.clear();
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult: ReturnType<typeof vi.fn>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.createAttachResult = vi.fn(async () => ({
+			activeSessionId: state.activeSessionId,
+			snapshot: { summary: {}, state: {}, messages: [] },
+			lastEventSequence: 0,
+		}));
+
+		// Watchers (agents view, subagent viewers) and headless clients attach
+		// without env: no rebind, no bus event.
+		await internals.handleCommand(client, { type: "attach", activeSessionId: state.activeSessionId });
+
+		expect(state.clientEnv).toEqual({ HERDR_PANE_ID: "w1:p1", HERDR_ENV: "1" });
+		expect(emittedEvents).toEqual([]);
+	});
+
+	it("propagates an attach rebind to subagents spawned before it", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const emittedEvents: Array<{ channel: string; data: unknown }> = [];
+		const parent = makeState("active-parent");
+		const child = makeState("active-child", parent.activeSessionId);
+		const childLoader = { emitExtensionEvent: vi.fn() };
+		for (const state of [parent, child]) {
+			state.clientEnv = { HERDR_PANE_ID: "w1:p1", HERDR_ENV: "1" };
+			state.runtime = {
+				...state.runtime,
+				metadata:
+					state === parent
+						? { kind: "top-level", createdAt: 1 }
+						: { kind: "subagent", createdAt: 1, parentActiveSessionId: parent.activeSessionId },
+				services: {
+					resourceLoader:
+						state === parent
+							? {
+									emitExtensionEvent: (channel: string, data: unknown) => {
+										emittedEvents.push({ channel, data });
+									},
+								}
+							: childLoader,
+				},
+			} as never;
+		}
+		const client = makeClient("client-1", parent.activeSessionId);
+		client.attachedActiveSessionIds.clear();
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult: ReturnType<typeof vi.fn>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(parent.activeSessionId, parent);
+		internals.sessions.set(child.activeSessionId, child);
+		internals.createAttachResult = vi.fn(async () => ({
+			activeSessionId: parent.activeSessionId,
+			snapshot: { summary: {}, state: {}, messages: [] },
+			lastEventSequence: 0,
+		}));
+
+		await internals.handleCommand(client, {
+			type: "attach",
+			activeSessionId: parent.activeSessionId,
+			env: { HERDR_ENV: "1", HERDR_PANE_ID: "w2:p2" },
+		});
+
+		// The subagent's exec env reads state.clientEnv live, so it follows the
+		// parent's new pane; only the top-level session notifies its reporter.
+		expect(parent.clientEnv).toEqual({ HERDR_ENV: "1", HERDR_PANE_ID: "w2:p2" });
+		expect(child.clientEnv).toEqual({ HERDR_ENV: "1", HERDR_PANE_ID: "w2:p2" });
+		expect(emittedEvents).toHaveLength(1);
+		expect(emittedEvents[0]?.data).toEqual({ env: { HERDR_ENV: "1", HERDR_PANE_ID: "w2:p2" } });
+		expect(childLoader.emitExtensionEvent).not.toHaveBeenCalled();
+	});
+
 	it("marks a chunked attach as snapshotting before deferred streaming", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-snapshot-order-"));
 		try {

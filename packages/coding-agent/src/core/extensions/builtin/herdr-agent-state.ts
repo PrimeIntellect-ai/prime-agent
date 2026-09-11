@@ -12,8 +12,10 @@
  * loader invokes per session load — inside the daemon's client-env window —
  * so each daemon session captures its own pane identity.
  *
- * The factory is a complete no-op when `HERDR_ENV` is not `"1"` (i.e. when
- * not running inside a Herdr pane), so it is safe to always load.
+ * The factory only opens sockets when armed with a full Herdr pane identity,
+ * so it is safe to always load. Outside Herdr it stays unarmed but keeps
+ * tracking session state, so the daemon can arm it later when a pane client
+ * attaches (see `HERDR_REBIND_EVENT`).
  */
 
 import { createConnection } from "node:net";
@@ -131,16 +133,36 @@ export const herdrAgentStateExtension: ExtensionFactory = (pi: ExtensionAPI) => 
 	herdrAgentStateExtensionImpl(pi, () => []);
 };
 
+/**
+ * Shared-bus event the daemon emits when a client carrying the allowlisted
+ * HERDR_* env attaches to a session. The reporter re-captures its pane
+ * identity from `env` and claims the new pane with the live session state, so
+ * a daemon-resident session attached from a pane appears in Herdr without a
+ * manual /reload.
+ */
+export const HERDR_REBIND_EVENT = "herdr:rebind";
+
+export interface HerdrRebindEventData {
+	/** The attaching client's allowlisted HERDR_* env. */
+	env: Record<string, string>;
+}
+
 function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths: () => string[]): void {
+	// The file-based integration owns the pane; the built-in must stay silent
+	// entirely, including on rebind events.
+	if (hasFileBasedHerdrIntegration(getLoadedExtensionPaths())) {
+		return;
+	}
+
 	// Captured per factory invocation: the resource loader runs this during
 	// session load, inside the daemon's client-env window, so these reflect the
 	// session's own Herdr pane rather than the daemon's startup environment.
-	const socketPath = process.env.HERDR_SOCKET_PATH;
-	const paneId = process.env.HERDR_PANE_ID;
-	const enabled = process.env.HERDR_ENV === "1" && !!socketPath && !!paneId;
-	if (!enabled || hasFileBasedHerdrIntegration(getLoadedExtensionPaths())) {
-		return;
-	}
+	// Sessions created outside Herdr start unarmed; the listener set below
+	// still tracks state, and the daemon arms it by emitting HERDR_REBIND_EVENT
+	// on the first attach that carries a pane's env.
+	let socketPath = process.env.HERDR_SOCKET_PATH;
+	let paneId = process.env.HERDR_PANE_ID;
+	let enabled = process.env.HERDR_ENV === "1" && !!socketPath && !!paneId;
 
 	const source = "herdr:pi";
 	const agentLabel = "prime-agent";
@@ -245,6 +267,11 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 			// leave Herdr showing an agent that already exited.
 			return;
 		}
+		if (!enabled) {
+			// Unarmed sessions never touch the wire; a later rebind publishes
+			// the tracked state to the pane it arms with.
+			return;
+		}
 		queuedState = { state, message, seq: nextReportSeq() };
 		if (!sendInFlight) {
 			activeDrain = drainStateQueue();
@@ -277,6 +304,10 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		// a report landing after the release would reclaim the pane.
 		released = true;
 		queuedState = undefined;
+		if (!enabled) {
+			// Never armed: no pane to release.
+			return;
+		}
 		await activeDrain.catch(() => undefined);
 		return sendRequest({
 			id: `${source}:release:${Date.now()}:${Math.random().toString(36).slice(2)}`,
@@ -381,6 +412,37 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		publishState(true);
 	});
 
+	// The daemon emits this on the session's shared bus when a client carrying
+	// HERDR_* env attaches; the loaded factory cannot re-run under the new env,
+	// so the identity is re-captured here instead.
+	const unsubscribeRebind = pi.events.on(HERDR_REBIND_EVENT, (data: unknown) => {
+		const env = (data as Partial<HerdrRebindEventData> | undefined)?.env;
+		const nextSocketPath = env?.HERDR_SOCKET_PATH;
+		const nextPaneId = env?.HERDR_PANE_ID;
+		// Rebind only arms or moves the identity; an event without a complete
+		// pane identity (headless client) leaves the current one alone.
+		if (env?.HERDR_ENV !== "1" || !nextSocketPath || !nextPaneId) {
+			return;
+		}
+		if (enabled && socketPath === nextSocketPath && paneId === nextPaneId) {
+			return;
+		}
+		// Switch panes the way a reload replaces this instance: drop transient
+		// timers and failure holds, then claim the new pane with the live state
+		// (agentActive and blocked counters keep tracking while unarmed). A
+		// report still in flight may land on the old pane; Herdr drops reports
+		// for panes it does not know.
+		clearPendingTimers();
+		clearFailureState();
+		queuedState = undefined;
+		socketPath = nextSocketPath;
+		paneId = nextPaneId;
+		enabled = true;
+		lastState = undefined;
+		lastMessage = undefined;
+		publishState(true);
+	});
+
 	const unsubscribeBlocked = pi.events.on("herdr:blocked", (data: any) => {
 		if (!data?.active) {
 			blockedCount = Math.max(0, blockedCount - 1);
@@ -453,8 +515,10 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		clearPendingTimers();
 		// The event bus is shared across reloads and session replacements, so a
 		// listener left behind would keep this stale instance reporting with a
-		// captured (possibly wrong) pane identity forever.
+		// captured (possibly wrong) pane identity forever, or let a rebind
+		// event re-arm an instance that already handed the pane over.
 		unsubscribeBlocked();
+		unsubscribeRebind();
 		// On session replacement (new/resume/fork) or reload, a successor
 		// instance in this same pane re-reports immediately. Releasing here
 		// races that report: two independent socket writes with no ordering,
