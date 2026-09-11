@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field, fields
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from functools import wraps
-from math import isfinite
+from math import copysign, isfinite
 from pathlib import Path
 from threading import RLock
 from uuid import uuid4
@@ -232,7 +232,11 @@ def _contains_unsafe_json_number(value: object) -> bool:
     if type(value) is int:
         return abs(value) > _MAX_SAFE_JSON_INTEGER
     if type(value) is float:
-        return not isfinite(value) or (value.is_integer() and abs(value) > _MAX_SAFE_JSON_INTEGER)
+        return (
+            not isfinite(value)
+            or (value == 0 and copysign(1, value) < 0)
+            or (value.is_integer() and abs(value) > _MAX_SAFE_JSON_INTEGER)
+        )
     if isinstance(value, list):
         return any(_contains_unsafe_json_number(item) for item in value)
     if isinstance(value, dict):

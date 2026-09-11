@@ -338,6 +338,20 @@ describe("concurrent harness memory persistence", () => {
 		},
 	);
 
+	it("refuses to persist an in-memory signed zero from the host writer", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const dir = join(harness.tempDir, "harness");
+		createHostMemory(dir, "seed-entry");
+		const statePath = getHarnessStatePath(dir);
+		const accepted = readFileSync(statePath, "utf8");
+		const state = loadHarnessState(dir, "local");
+		state.entries.memory["seed-entry"].metadata = { value: -0 };
+
+		expect(() => saveHarnessState(dir, state)).toThrow("invalid or unreadable");
+		expect(readFileSync(statePath, "utf8")).toBe(accepted);
+	});
+
 	it.each(["metadata", "reference", "arguments"] as const)(
 		"refuses to overwrite non-finite persisted %s values during Python mutations",
 		async (field) => {

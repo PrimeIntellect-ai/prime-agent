@@ -277,7 +277,9 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 
 function containsUnsafeJsonNumber(value: unknown): boolean {
 	if (typeof value === "number") {
-		return !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value));
+		return (
+			Object.is(value, -0) || !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))
+		);
 	}
 	if (Array.isArray(value)) return value.some(containsUnsafeJsonNumber);
 	const record = objectRecord(value);

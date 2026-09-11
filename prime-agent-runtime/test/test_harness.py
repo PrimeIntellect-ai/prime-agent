@@ -426,6 +426,18 @@ class HarnessStateTest(unittest.TestCase):
                     loaded.create_memory("Rejected", "Must not rewrite rounded data.", id="rejected")
                 self.assertEqual(state_path.read_text(encoding="utf-8"), payload)
 
+    def test_in_memory_signed_zero_is_rejected_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Preserved", "Must survive.", id="preserved")
+            accepted = state_path.read_text(encoding="utf-8")
+            state.entries["memory"]["preserved"].metadata = {"value": -0.0}
+
+            with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
+                state.save()
+            self.assertEqual(state_path.read_text(encoding="utf-8"), accepted)
+
     def test_shared_instance_serializes_concurrent_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
