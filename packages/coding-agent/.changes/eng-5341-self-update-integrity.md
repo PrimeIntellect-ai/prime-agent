@@ -1,0 +1,1 @@
+- Fixed `prime-agent update` installing release tarballs unverified: the tarball must now be on the release origin over https, match the manifest package name and version, and pass a SHA-256 check against the manifest digest before the package manager runs; the npm-registry fallback was removed.
