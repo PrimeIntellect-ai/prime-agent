@@ -252,9 +252,9 @@ describe("InteractiveMode startup hints", () => {
 	});
 
 	it.each([
-		[false, false, "Showing overview (Ctrl+O to expand)"],
-		[false, true, "Showing details (Ctrl+O to expand)"],
-		[true, true, "Showing all output (Ctrl+O to collapse)"],
+		[false, false, "Collapsed mode (Ctrl+O to expand)"],
+		[false, true, "Details mode (Ctrl+O to expand)"],
+		[true, true, "All output mode (Ctrl+O to collapse)"],
 	] as const)("shows a muted detail status above the prompt (%s, %s)", (allOutput, details, expected) => {
 		const mode = Object.assign(createMode(), { toolOutputExpanded: allOutput, editDiffsExpanded: details });
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getPromptContextLabel").call(mode, 120);
@@ -323,7 +323,7 @@ describe("InteractiveMode startup hints", () => {
 		if (ownHeader) expect(replacement.render(80)[1]).toContain("extension header");
 		const rows = mode.recapContainer.render(80);
 		expect(rows).toHaveLength(2);
-		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: Updated files\s+Showing overview \(Ctrl\+O to expand\) $/);
+		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: Updated files\s+Collapsed mode \(Ctrl\+O to expand\) $/);
 		expect(rows[0]).toBe("");
 		expect(rows[1]).not.toMatch(/\x1b\[(?:4\d|10[0-7])(?:;[\d;]*)?m/);
 		const promptDock = new Container();
@@ -415,9 +415,9 @@ describe("InteractiveMode startup hints", () => {
 			const precedingRows = [...finalMessage.render(width)];
 			if (withWidget) precedingRows.push("", ...widget.render(width));
 			expect(layout.render(width)).toEqual([...precedingRows, "", recapRows[1], ...activeInput.render(width)]);
-			expect(stripAnsi(recapRows[1]!)).toContain("Showing overview");
+			expect(stripAnsi(recapRows[1]!)).toContain("Collapsed mode");
 			expect(stripAnsi(recapRows[1]!)).not.toContain("test-model");
-			expect(stripAnsi(recapRows[1]!)).toContain(withRecap ? "Recap: Completed the work" : "Showing overview");
+			expect(stripAnsi(recapRows[1]!)).toContain(withRecap ? "Recap: Completed the work" : "Collapsed mode");
 			if (!withRecap) expect(stripAnsi(recapRows[1]!)).not.toContain("Recap:");
 			expect(mode.widgetContainerBelow.render(width)).toEqual([]);
 			if (!withWidget) expect(mode.widgetContainerAbove.render(width)).toEqual([]);

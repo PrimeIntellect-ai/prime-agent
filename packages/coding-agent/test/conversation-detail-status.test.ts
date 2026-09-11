@@ -43,10 +43,10 @@ describe("conversation detail status", () => {
 			(width) => mode.getPromptContextLabel(width),
 		);
 		for (const expected of [
-			"Showing overview (Ctrl+O to expand)",
-			"Showing details (Ctrl+O to expand)",
-			"Showing all output (Ctrl+O to collapse)",
-			"Showing overview (Ctrl+O to expand)",
+			"Collapsed mode (Ctrl+O to expand)",
+			"Details mode (Ctrl+O to expand)",
+			"All output mode (Ctrl+O to collapse)",
+			"Collapsed mode (Ctrl+O to expand)",
 		]) {
 			expect(mode.getPromptContextLabel(120)).toBe(theme.fg("dim", expected));
 			const line = stripAnsi(bar.render(120)[1]!);
@@ -59,21 +59,21 @@ describe("conversation detail status", () => {
 
 	it("uses the configured primary key and omits an unbound shortcut without an empty wrapper", () => {
 		setKeybindings(new KeybindingsManager({ "app.tools.expand": ["ctrl+e", "alt+e"] }));
-		expect(formatConversationDetailStatus(false, false)).toBe("Showing overview (Ctrl+E to expand)");
-		expect(formatConversationDetailStatus(false, true)).toBe("Showing details (Ctrl+E to expand)");
-		expect(formatConversationDetailStatus(true, true)).toBe("Showing all output (Ctrl+E to collapse)");
+		expect(formatConversationDetailStatus(false, false)).toBe("Collapsed mode (Ctrl+E to expand)");
+		expect(formatConversationDetailStatus(false, true)).toBe("Details mode (Ctrl+E to expand)");
+		expect(formatConversationDetailStatus(true, true)).toBe("All output mode (Ctrl+E to collapse)");
 		setKeybindings(new KeybindingsManager({ "app.tools.expand": [] }));
-		expect(formatConversationDetailStatus(false, false)).toBe("Showing overview");
-		expect(formatConversationDetailStatus(false, true)).toBe("Showing details");
-		expect(formatConversationDetailStatus(true, true)).toBe("Showing all output");
+		expect(formatConversationDetailStatus(false, false)).toBe("Collapsed mode");
+		expect(formatConversationDetailStatus(false, true)).toBe("Details mode");
+		expect(formatConversationDetailStatus(true, true)).toBe("All output mode");
 	});
 
 	it("reflects extension expansion setters", () => {
 		const mode = createMode();
 		mode.setToolsExpanded(true);
-		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("Showing all output (Ctrl+O to collapse)");
+		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("All output mode (Ctrl+O to collapse)");
 		mode.setToolsExpanded(false);
-		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("Showing overview (Ctrl+O to expand)");
+		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("Collapsed mode (Ctrl+O to expand)");
 	});
 
 	it("preserves top-row bounds while the lower tray retains model metadata and navigation overrides", () => {

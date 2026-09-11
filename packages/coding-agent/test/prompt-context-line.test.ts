@@ -16,13 +16,13 @@ describe("PromptContextLine", () => {
 			initTheme(name);
 			const line = new PromptContextLine(
 				() => "Updated the prompt layout",
-				() => theme.fg("dim", "Showing overview (Ctrl+O to expand)"),
+				() => theme.fg("dim", "Collapsed mode (Ctrl+O to expand)"),
 			);
 			const rows = line.render(80);
 
 			expect(rows).toHaveLength(2);
 			expect(stripAnsi(rows[1]!)).toMatch(
-				/^ Recap: Updated the prompt layout\s{2,}Showing overview \(Ctrl\+O to expand\) $/,
+				/^ Recap: Updated the prompt layout\s{2,}Collapsed mode \(Ctrl\+O to expand\) $/,
 			);
 			expect(rows[0]).toBe("");
 			expect(visibleWidth(rows[1]!)).toBe(80);
@@ -33,12 +33,12 @@ describe("PromptContextLine", () => {
 	it("keeps detail status aligned right above the prompt", () => {
 		const line = new PromptContextLine(
 			() => undefined,
-			() => "Showing overview (Ctrl+O to expand)",
+			() => "Collapsed mode (Ctrl+O to expand)",
 		);
 
 		const rows = line.render(40);
 		expect(rows).toHaveLength(2);
-		expect(stripAnsi(rows[1]!)).toBe(`${"Showing overview (Ctrl+O to expand)".padStart(39)} `);
+		expect(stripAnsi(rows[1]!)).toBe(`${"Collapsed mode (Ctrl+O to expand)".padStart(39)} `);
 		expect(rows[0]).toBe("");
 	});
 
@@ -58,7 +58,7 @@ describe("PromptContextLine", () => {
 	it("keeps long Unicode recaps and detail status within narrow terminal widths", () => {
 		const line = new PromptContextLine(
 			() => "Updated 界面 files and checked the résumé with a long recap",
-			() => theme.fg("dim", "Showing details"),
+			() => theme.fg("dim", "Details mode"),
 		);
 
 		for (const width of [1, 2, 3, 4, 8, 16, 24, 40, 80, 120]) {
@@ -66,10 +66,10 @@ describe("PromptContextLine", () => {
 			const plain = stripAnsi(rows[1]!);
 			expect(rows).toHaveLength(2);
 			expect(visibleWidth(rows[1]!)).toBe(width);
-			expect(plain).toContain("S");
+			expect(plain).toContain("D");
 			expect(rows[0]).toBe("");
 			if (width >= 40) {
-				expect(plain).toMatch(/^ Recap: .+ {2,}Showing details $/);
+				expect(plain).toMatch(/^ Recap: .+ {2,}Details mode $/);
 			}
 		}
 	});
@@ -77,10 +77,10 @@ describe("PromptContextLine", () => {
 	it("fits detail status beside recap while preserving the recap and narrow widths", () => {
 		const line = new PromptContextLine(
 			() => "Updated the interface",
-			() => theme.fg("dim", "Showing all output (Ctrl+O to collapse)"),
+			() => theme.fg("dim", "All output mode (Ctrl+O to collapse)"),
 		);
 		expect(stripAnsi(line.render(100)[1]!)).toMatch(
-			/^ Recap: Updated the interface\s{2,}Showing all output \(Ctrl\+O to collapse\) $/,
+			/^ Recap: Updated the interface\s{2,}All output mode \(Ctrl\+O to collapse\) $/,
 		);
 		for (const width of [1, 2, 3, 8, 24, 40, 80]) {
 			const rows = line.render(width);
@@ -91,7 +91,7 @@ describe("PromptContextLine", () => {
 	});
 
 	it("reserves the full detail status before ellipsizing the recap", () => {
-		const metadata = "Showing all output (Ctrl+O to collapse)";
+		const metadata = "All output mode (Ctrl+O to collapse)";
 		const line = new PromptContextLine(
 			() => "Updated the interface and verified all of the layout changes",
 			(maxWidth) => {
@@ -102,7 +102,7 @@ describe("PromptContextLine", () => {
 
 		const rows = line.render(56);
 		expect(rows[0]).toBe("");
-		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: .+… {2}Showing all output \(Ctrl\+O to collapse\) $/);
+		expect(stripAnsi(rows[1]!)).toMatch(/^ Recap: .+… {2}All output mode \(Ctrl\+O to collapse\) $/);
 		expect(visibleWidth(rows[1]!)).toBe(56);
 	});
 
