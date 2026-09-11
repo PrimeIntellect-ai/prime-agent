@@ -49,12 +49,13 @@ type FastCommandContext = {
 	patchConnectionState: (patch: Record<string, unknown>) => void;
 	getCurrentModel: () => Model<Api> | undefined;
 	currentModelSupportsFastMode: () => boolean;
+	getConnectionContextUsage: () => undefined;
 };
 
 type FastInteractiveModePrototype = {
 	currentModelSupportsFastMode(this: FastCommandContext): boolean;
 	handleFastCommand(this: FastCommandContext): void;
-	getPromptContextLabel(this: FastCommandContext, maxWidth: number): string;
+	getModelContextLabel(this: FastCommandContext, maxWidth: number): string;
 };
 
 const fastInteractiveModePrototype = InteractiveMode.prototype as unknown as FastInteractiveModePrototype;
@@ -87,6 +88,7 @@ function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5"
 			context.connectionState = { ...context.connectionState, ...patch } as FastCommandContext["connectionState"];
 		}),
 		getCurrentModel: () => model,
+		getConnectionContextUsage: () => undefined,
 		currentModelSupportsFastMode: () => fastInteractiveModePrototype.currentModelSupportsFastMode.call(context),
 	};
 	context.agentConnection = {
@@ -408,12 +410,12 @@ describe("InteractiveMode /effort", () => {
 			);
 		});
 
-		it("keeps Fast mode with model and effort above the input", () => {
+		it("keeps Fast mode with the model ID and effort in the bottom tray", () => {
 			const context = makeFastContext();
 			context.connectionState = { sessionId: "session-1", serviceTier: "priority", thinkingLevel: "high" };
 
-			expect(stripAnsi(fastInteractiveModePrototype.getPromptContextLabel.call(context, 80))).toBe(
-				"GPT 5.5 · high · fast",
+			expect(stripAnsi(fastInteractiveModePrototype.getModelContextLabel.call(context, 80))).toBe(
+				"gpt-5.5:high · fast",
 			);
 		});
 	});

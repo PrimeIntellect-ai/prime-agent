@@ -3522,8 +3522,8 @@ export class InteractiveMode {
 
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, false, true);
-		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
+		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true);
+		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false);
 		this.ui.requestRender();
 	}
 
@@ -3548,15 +3548,11 @@ export class InteractiveMode {
 	private renderWidgetContainer(
 		container: Container,
 		widgets: Map<string, Component & { dispose?(): void }>,
-		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
 		container.clear();
 
 		if (widgets.size === 0) {
-			if (spacerWhenEmpty) {
-				container.addChild(new Spacer(1));
-			}
 			return;
 		}
 
@@ -5930,7 +5926,8 @@ export class InteractiveMode {
 	}
 
 	private focusSubagentSummary(): boolean {
-		if (!this.subagentSummaryLine.isSelectable() || this.getTrayOverrideLabel()) return false;
+		if (this.isInlinePickerOpen() || !this.subagentSummaryLine.isSelectable() || this.getTrayOverrideLabel())
+			return false;
 		this.ui.setFocus(this.subagentSummaryLine);
 		this.ui.requestRender();
 		return true;

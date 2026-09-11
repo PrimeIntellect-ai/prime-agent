@@ -238,6 +238,13 @@ export interface SlashCommand {
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
 }
 
+function commandTakesArgument(command: SlashCommand | AutocompleteItem): boolean {
+	return (
+		command.takesArgument ??
+		("getArgumentCompletions" in command && typeof command.getArgumentCompletions === "function")
+	);
+}
+
 export interface AutocompleteSuggestions {
 	items: AutocompleteItem[];
 	prefix: string; // What we're matching against (e.g., "/" or "src/")
@@ -311,7 +318,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const aliases = "aliases" in cmd && cmd.aliases ? cmd.aliases : [];
 				const argumentHint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 				const sourceTag = "sourceTag" in cmd && cmd.sourceTag ? cmd.sourceTag : undefined;
-				const takesArgument = "takesArgument" in cmd ? cmd.takesArgument === true : false;
+				const takesArgument = commandTakesArgument(cmd);
 				return {
 					name,
 					searchText: [name, ...aliases].join(" "),
@@ -398,8 +405,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		);
 		const isSlashCommand = slashContext?.kind === "name" && slashContext.prefix === prefix && command !== undefined;
 		if (isSlashCommand) {
-			const takesArgument =
-				command !== undefined && "takesArgument" in command ? command.takesArgument === true : false;
+			const takesArgument = commandTakesArgument(command);
 			const hasSeparatorAfterCursor = /^[ \t]/.test(adjustedAfterCursor);
 			// Argument commands complete into the parameter position; commands without
 			// arguments complete bare so a following submit runs them as typed.
