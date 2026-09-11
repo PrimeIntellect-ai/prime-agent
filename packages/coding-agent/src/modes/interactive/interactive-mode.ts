@@ -980,8 +980,6 @@ export class InteractiveMode {
 	private installationReady?: Promise<void>;
 	private pendingInputStatus?: TelemetryUiInputAttempt;
 	private inputStatusRendered = false;
-	private inputStatusFrameAt?: number;
-	private inputStatusAdmitted = false;
 	private pendingCancellation?: {
 		finish: ReturnType<TelemetryJourneys["beginCancellation"]>;
 		acknowledged: boolean;
@@ -1182,7 +1180,6 @@ export class InteractiveMode {
 			settingsManager: uiServices.settingsManager,
 			onDisabled: () => {
 				this.pendingInputStatus = undefined;
-				this.inputStatusFrameAt = undefined;
 				this.inputStatusRendered = false;
 				this.pendingCancellation = undefined;
 			},
@@ -1284,11 +1281,9 @@ export class InteractiveMode {
 				? getTelemetryExecutionContext(this.modelRegistry, this.getCurrentModel())
 				: undefined,
 		);
-		const overlapping = this.pendingInputStatus !== undefined;
+		const overlapping = this.pendingInputStatus?.statusPending === true;
 		this.pendingInputStatus?.firstStatus(false);
 		this.pendingInputStatus = undefined;
-		this.inputStatusFrameAt = undefined;
-		this.inputStatusAdmitted = false;
 		this.inputStatusRendered = false;
 		if (!attempt?.metadata) return attempt;
 		if (!overlapping && !this.hasInterruptibleWork() && this.getQueuedActionCount() === 0 && !this.ui.hasOverlay()) {
@@ -1313,11 +1308,7 @@ export class InteractiveMode {
 			this.pendingInputStatus = undefined;
 			return;
 		}
-		this.inputStatusFrameAt ??= performance.now();
-		if (this.inputStatusAdmitted) {
-			this.pendingInputStatus.firstStatus(true, this.inputStatusFrameAt);
-			this.pendingInputStatus = undefined;
-		}
+		this.pendingInputStatus.firstStatus();
 	}
 
 	private async promptWithTelemetry(
@@ -1332,19 +1323,8 @@ export class InteractiveMode {
 					? { telemetryInput: attempt.metadata }
 					: {}),
 			});
+			if (this.pendingInputStatus === attempt && this.getQueuedActionCount() > 0) attempt?.firstStatus(false);
 			attempt?.admission("completed");
-			if (attempt && this.pendingInputStatus === attempt) {
-				if (this.getQueuedActionCount() > 0) {
-					attempt?.firstStatus(false);
-					this.pendingInputStatus = undefined;
-					return;
-				}
-				this.inputStatusAdmitted = true;
-				if (this.inputStatusFrameAt !== undefined) {
-					attempt?.firstStatus(true, this.inputStatusFrameAt);
-					this.pendingInputStatus = undefined;
-				}
-			}
 		} catch (error) {
 			const uncertain =
 				error instanceof AgentConnectionPromptAdmissionError &&
@@ -5949,7 +5929,7 @@ export class InteractiveMode {
 				break;
 
 			case "agent_end":
-				if (this.pendingInputStatus && this.inputStatusFrameAt === undefined) {
+				if (this.pendingInputStatus && !this.pendingInputStatus.statusFrameObserved) {
 					this.pendingInputStatus.firstStatus(false);
 					this.pendingInputStatus = undefined;
 				}

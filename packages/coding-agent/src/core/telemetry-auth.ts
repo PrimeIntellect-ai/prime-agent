@@ -2,8 +2,9 @@ import { captureTelemetryEvent, isTelemetryEnabled } from "./telemetry.js";
 import { telemetryProviderCategory } from "./telemetry-categories.js";
 import type { TelemetryErrorOperation } from "./telemetry-error-classification.js";
 import { getTelemetryErrorRecoveryTracker, type TelemetryRecoveryScope } from "./telemetry-error-recovery.js";
-import { captureTelemetryError, type TelemetryErrorContext, withTelemetryErrorContext } from "./telemetry-errors.js";
+import type { TelemetryErrorContext } from "./telemetry-errors.js";
 import { isTelemetryUuid } from "./telemetry-schema.js";
+import { TelemetryScope } from "./telemetry-scope.js";
 
 export interface TelemetryAuthenticationAttempt {
 	run<T>(callback: () => T): T;
@@ -16,20 +17,10 @@ export function beginTelemetryAuthentication(
 	options: TelemetryErrorContext & { provider: string; clientSessionId: string },
 ): TelemetryAuthenticationAttempt {
 	const context: TelemetryErrorContext = { ...options };
-	let finished = false;
-	let validated = false;
-	const enabled = () => {
-		try {
-			if (!context.telemetryDisabled && isTelemetryEnabled(context.settingsManager)) return true;
-		} catch {
-			// An unavailable consent check disables this attempt permanently.
-		}
-		context.telemetryDisabled = true;
-		return false;
-	};
 	if (!isTelemetryUuid(context.clientSessionId)) context.telemetryDisabled = true;
-	enabled();
-	const unsubscribe = context.settingsManager.subscribeTelemetryEnabled(enabled);
+	const telemetry = new TelemetryScope(context);
+	const attempt = telemetry.start();
+	let validated = false;
 	const scope: TelemetryRecoveryScope = {
 		clientSessionId: context.clientSessionId,
 		providerCategory: telemetryProviderCategory(options.provider),
@@ -38,15 +29,12 @@ export function beginTelemetryAuthentication(
 		operations: ["login", "validate"],
 	};
 	return {
-		run: (callback) => withTelemetryErrorContext(context, callback),
+		run: attempt.run,
 		validation: (outcome) => {
-			if (!finished && enabled()) validated = outcome === "completed";
+			if (attempt.active()) validated = outcome === "completed";
 		},
 		reportError: (error, operation) => {
-			if (finished || !enabled()) return;
-			captureTelemetryError({
-				...context,
-				error,
+			attempt.error(error, {
 				provider: options.provider,
 				component: "authentication",
 				operation,
@@ -54,10 +42,9 @@ export function beginTelemetryAuthentication(
 			});
 		},
 		finish: (outcome) => {
-			if (finished) return false;
-			finished = true;
-			unsubscribe();
-			if (!enabled() || outcome !== "completed") return false;
+			const captured = attempt.finish();
+			telemetry.dispose();
+			if (!captured || outcome !== "completed") return false;
 			if (scope.providerCategory === "custom" || scope.providerCategory === "unknown") return true;
 			const tracker = getTelemetryErrorRecoveryTracker(context.settingsManager, context.agentDir, {
 				isEnabled: () => isTelemetryEnabled(context.settingsManager),

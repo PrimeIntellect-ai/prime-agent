@@ -39,7 +39,6 @@ import {
 	telemetryLegacyErrorCategory,
 } from "./telemetry-error-classification.js";
 import { getTelemetryErrorRecoveryTracker } from "./telemetry-error-recovery.js";
-import { captureTelemetryError } from "./telemetry-errors.js";
 import {
 	getTelemetryExecutionContext,
 	subscribeTelemetryExecutionContexts,
@@ -61,6 +60,8 @@ import {
 	TELEMETRY_ERROR_MESSAGE_PROPERTIES,
 	type TelemetryProperties,
 } from "./telemetry-schema.js";
+
+import { type TelemetryOperation, TelemetryScope } from "./telemetry-scope.js";
 
 export type TelemetryEventName =
 	| "agent started"
@@ -904,25 +905,21 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		usage: newUsageTotals(),
 	};
 	let activeRun: ActiveRun | undefined;
-	let standaloneCompaction: { startedAt: number; providerCategory: string } | undefined;
+	let standaloneCompaction: TelemetryOperation | undefined;
 	let nextRunIndex = 0;
 	let turnActionActive = false;
 	let disposed = false;
 	let lastProviderCategory: string | undefined;
-	const goals = new Map<string, { id: string; startedAt: number; choice: string }>();
+	const goals = new Map<string, TelemetryOperation>();
 	const childFailures = new Map<string, string>();
-	const commonProperties = (): TelemetryProperties => ({
-		...baseProperties(options.executionMode ?? "unknown"),
-		...(sessionId ? { session_id: sessionId } : {}),
+	const telemetry = new TelemetryScope({
+		...options,
+		sink,
+		now,
+		properties: (): TelemetryProperties => (sessionId ? { session_id: sessionId } : {}),
 	});
 	const capture = (name: TelemetryEventName, properties: TelemetryProperties): void => {
-		try {
-			if (!isTelemetryEnabled(options.settingsManager)) return;
-			const safe = sanitizeTelemetryProperties(name, { ...commonProperties(), ...properties });
-			if (safe) sink.capture(name, safe);
-		} catch {
-			/* Telemetry observers cannot interrupt a session. */
-		}
+		telemetry.capture(name, properties);
 	};
 	const runProperties = (run = activeRun): TelemetryProperties => {
 		const onboarding = run?.onboarding;
@@ -994,14 +991,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		});
 	};
 	const finishStandaloneCompaction = (outcome: string): void => {
-		if (!standaloneCompaction) return;
-		capture("agent timing", {
-			provider_category: standaloneCompaction.providerCategory,
-			stage: "compaction",
-			duration_ms: Math.max(0, now() - standaloneCompaction.startedAt),
-			outcome,
-			timing_origin: "worker_action",
-		});
+		standaloneCompaction?.finish("agent timing", { outcome });
 		standaloneCompaction = undefined;
 	};
 	const reportError = (
@@ -1011,10 +1001,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		stage: TelemetryErrorStage,
 		occurrence?: object,
 	): string | undefined => {
-		const id = captureTelemetryError({
-			...options,
-			sink,
-			error,
+		const id = telemetry.error(error, {
 			component,
 			operation,
 			stage,
@@ -1032,10 +1019,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 	const inputs = new TelemetryInputTracker({
 		capture,
 		onError: (error, input, runId) =>
-			captureTelemetryError({
-				...options,
-				sink,
-				error,
+			telemetry.error(error, {
 				component: "session",
 				operation: "execute",
 				stage: "unknown",
@@ -1300,24 +1284,19 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 						const key = event.message.details.commandEntryId;
 						if (key && !goals.has(key)) {
 							const args = event.message.details.command.args.trim();
-							const goal = {
-								id: randomId(),
-								startedAt: now(),
-								choice: ["status", "pause", "resume", "clear"].includes(args)
+							const goal = telemetry.start({
+								...runProperties(),
+								feature_id: randomId(),
+								feature_name: "goal",
+								configuration_choice: ["status", "pause", "resume", "clear"].includes(args)
 									? args
 									: args
 										? "create"
 										: "status",
-							};
+							});
 							if (goals.size >= 64) goals.delete(goals.keys().next().value ?? "");
 							goals.set(key, goal);
-							capture("agent feature outcome", {
-								...runProperties(),
-								feature_id: goal.id,
-								feature_name: "goal",
-								outcome: "initiated",
-								configuration_choice: goal.choice,
-							});
+							goal.record("agent feature outcome", { outcome: "initiated" });
 						}
 					} else if (
 						isSessionSlashCommandResultMessage(event.message) &&
@@ -1327,13 +1306,9 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 						const goal = key ? goals.get(key) : undefined;
 						if (key && goal) {
 							goals.delete(key);
-							capture("agent feature outcome", {
+							goal.finish("agent feature outcome", {
 								...runProperties(),
-								feature_id: goal.id,
-								feature_name: "goal",
 								outcome: event.message.details.success ? "completed" : "failed",
-								configuration_choice: goal.choice,
-								duration_ms: Math.max(0, now() - goal.startedAt),
 							});
 						}
 					}
@@ -1438,10 +1413,11 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 				case "compaction_start":
 					if (activeRun) activeRun.compactionStartedAt = now();
 					else
-						standaloneCompaction = {
-							startedAt: now(),
-							providerCategory: telemetryProviderCategory(session.model?.provider),
-						};
+						standaloneCompaction = telemetry.start({
+							stage: "compaction",
+							timing_origin: "worker_action",
+							provider_category: telemetryProviderCategory(session.model?.provider),
+						});
 					break;
 				case "compaction_end":
 					if (standaloneCompaction)
@@ -1519,7 +1495,10 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 		unsubscribeInputs();
 		unsubscribeContext();
 		inputs.clear();
-		if (!refreshConsent()) return;
+		if (!refreshConsent()) {
+			telemetry.dispose();
+			return;
+		}
 		const interrupted =
 			standaloneCompaction !== undefined || (activeRun !== undefined && (!activeRun.agentEnded || turnActionActive));
 		finalizeRun(true);
@@ -1542,6 +1521,7 @@ export function installAgentTelemetry(session: AgentSession, options: InstallAge
 			cache_write_tokens: sessionTotals.usage.cacheWrite,
 			total_tokens: sessionTotals.usage.totalTokens,
 		});
+		telemetry.dispose();
 		try {
 			await sink.flush({ timeoutMs: 1_500 });
 		} catch {

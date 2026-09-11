@@ -2,8 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { AuthCredential, AuthStatus } from "./auth-storage.js";
 import type { SettingsManager } from "./settings-manager.js";
 import {
-	captureTelemetryEvent,
-	isTelemetryEnabled,
 	type TelemetryEventName,
 	type TelemetryProperties,
 	type TelemetrySink,
@@ -22,6 +20,7 @@ import {
 	type OnboardingTelemetryContext,
 	saveOnboardingTelemetryContext,
 } from "./telemetry-journey-state.js";
+import { TelemetryScope } from "./telemetry-scope.js";
 
 export type TelemetryFeature = (typeof TELEMETRY_ENUMS.feature)[number];
 export type TelemetryFeatureOutcome = "completed" | "failed" | "canceled" | "unavailable";
@@ -50,6 +49,8 @@ export interface OnboardingStageObservation {
 
 export interface TelemetryUiInputAttempt {
 	metadata?: TelemetryInputMetadata;
+	readonly statusPending: boolean;
+	readonly statusFrameObserved: boolean;
 	admission(outcome: TelemetryFeatureOutcome): void;
 	firstStatus(observed?: boolean, observedAt?: number): void;
 }
@@ -75,7 +76,12 @@ interface TelemetryJourneysOptions {
 }
 
 const DISABLED_FEATURE: TelemetryFeatureAttempt = { finish: () => {} };
-const DISABLED_INPUT: TelemetryUiInputAttempt = { admission: () => {}, firstStatus: () => {} };
+const DISABLED_INPUT: TelemetryUiInputAttempt = {
+	statusPending: false,
+	statusFrameObserved: false,
+	admission: () => {},
+	firstStatus: () => {},
+};
 const DISABLED_ONBOARDING: TelemetryOnboardingAttempt = {
 	context: { onboardingId: "", clientSessionId: "", startedAt: 0 },
 	stage: () => {},
@@ -84,9 +90,8 @@ const DISABLED_ONBOARDING: TelemetryOnboardingAttempt = {
 
 export class TelemetryJourneys {
 	private clientSessionIdValue?: string;
-	private consentGeneration = 0;
 	private disposed = false;
-	private readonly unsubscribe: () => void;
+	private readonly telemetry: TelemetryScope;
 	private readonly now: () => number;
 	private readonly randomId: () => string;
 	private readonly successfulFeatures = new Set<TelemetryFeature>();
@@ -98,20 +103,25 @@ export class TelemetryJourneys {
 	constructor(private readonly options: TelemetryJourneysOptions) {
 		this.now = options.now ?? (() => performance.now());
 		this.randomId = options.randomId ?? randomUUID;
-		this.unsubscribe = options.settingsManager.subscribeTelemetryEnabled(() => {
-			this.enabled();
+		this.telemetry = new TelemetryScope({
+			...options,
+			executionMode: "interactive",
+			properties: () => ({ client_session_id: this.clientSessionId }),
+			onDisabled: () => {
+				this.clearMemory();
+				clearOnboardingTelemetryContext(options.agentDir);
+			},
 		});
-		this.enabled();
+		this.telemetry.enabled();
 	}
 
 	get clientSessionId(): string {
-		if (!this.enabled()) return "";
+		if (!this.telemetry.enabled()) return "";
 		this.clientSessionIdValue ??= this.randomId();
 		return this.clientSessionIdValue;
 	}
 
 	private clearMemory(): void {
-		this.consentGeneration++;
 		this.clientSessionIdValue = undefined;
 		this.activeOnboarding = undefined;
 		this.pendingFeatures.clear();
@@ -125,47 +135,14 @@ export class TelemetryJourneys {
 		}
 	}
 
-	private enabled(): boolean {
-		if (this.disposed) return false;
-		if (isTelemetryEnabled(this.options.settingsManager)) return true;
-		this.clearMemory();
-		clearOnboardingTelemetryContext(this.options.agentDir);
-		return false;
-	}
-
 	private capture(name: TelemetryEventName, properties: TelemetryProperties): void {
-		if (!this.enabled()) return;
-		captureTelemetryEvent({
-			...this.options,
-			executionMode: "interactive",
-			name,
-			properties: { client_session_id: this.clientSessionId, ...properties },
-		});
-	}
-
-	private start(properties: TelemetryProperties, startedAt = this.now()) {
-		const generation = this.consentGeneration;
-		const context = { client_session_id: this.clientSessionId, ...properties };
-		let finished = false;
-		const current = () => this.enabled() && generation === this.consentGeneration;
-		const active = () => !finished && current();
-		const record = (name: TelemetryEventName, fields: TelemetryProperties, at = this.now(), terminal = false) => {
-			if (!active()) return false;
-			finished = terminal;
-			this.capture(name, { ...context, duration_ms: Math.max(0, at - startedAt), ...fields });
-			return current();
-		};
-		return {
-			active,
-			record,
-			finish: (name: TelemetryEventName, fields: TelemetryProperties, at?: number) => record(name, fields, at, true),
-		};
+		this.telemetry.capture(name, properties);
 	}
 
 	beginFeature(feature: TelemetryFeature, choice?: TelemetryConfigurationChoice): TelemetryFeatureAttempt {
-		if (!this.enabled()) return DISABLED_FEATURE;
+		if (!this.telemetry.enabled()) return DISABLED_FEATURE;
 		const startedAt = this.now();
-		const operation = this.start(
+		const operation = this.telemetry.start(
 			{
 				feature_name: feature,
 				feature_id: this.randomId(),
@@ -190,7 +167,7 @@ export class TelemetryJourneys {
 	}
 
 	beginOnboarding(reason: TelemetryOnboardingEntryReason, persist = true): TelemetryOnboardingAttempt {
-		if (!this.enabled()) return DISABLED_ONBOARDING;
+		if (!this.telemetry.enabled()) return DISABLED_ONBOARDING;
 		this.activeOnboarding?.finish("canceled");
 		const startedAt = this.now();
 		const context: OnboardingTelemetryContext = {
@@ -198,7 +175,7 @@ export class TelemetryJourneys {
 			clientSessionId: this.clientSessionId,
 			startedAt: (this.options.wallNow ?? Date.now)(),
 		};
-		const operation = this.start({ onboarding_id: context.onboardingId, entry_reason: reason }, startedAt);
+		const operation = this.telemetry.start({ onboarding_id: context.onboardingId, entry_reason: reason }, startedAt);
 		if (persist && operation.active()) saveOnboardingTelemetryContext(this.options.agentDir, context);
 		const stage = (
 			stage: TelemetryOnboardingStage,
@@ -237,11 +214,11 @@ export class TelemetryJourneys {
 	}
 
 	noteRecoveryAction(action: TelemetryInputRecoveryAction): void {
-		if (this.enabled()) this.pendingRecoveryAction = action;
+		if (this.telemetry.enabled()) this.pendingRecoveryAction = action;
 	}
 
 	beginInput(uiContext?: TelemetryExecutionContextCategories): TelemetryUiInputAttempt {
-		if (!this.enabled()) return DISABLED_INPUT;
+		if (!this.telemetry.enabled()) return DISABLED_INPUT;
 		const startedAt = this.now();
 		const onboarding = getCurrentOnboardingTelemetryContext(
 			this.options.agentDir,
@@ -256,7 +233,7 @@ export class TelemetryJourneys {
 			...(uiContext ? { uiContext: sanitizeTelemetryExecutionContext(uiContext) } : {}),
 			...(recoveryAction ? { recoveryAction } : {}),
 		};
-		const operation = this.start(
+		const operation = this.telemetry.start(
 			{
 				input_id: metadata.inputId,
 				...(metadata.onboardingId ? { onboarding_id: metadata.onboardingId } : {}),
@@ -267,7 +244,14 @@ export class TelemetryJourneys {
 		operation.record("agent input stage", { stage: "submitted", outcome: "initiated" });
 		let admitted = false;
 		let statusObserved = false;
+		let statusFrameAt: number | undefined;
 		const attempt: TelemetryUiInputAttempt = {
+			get statusPending() {
+				return !statusObserved && operation.active();
+			},
+			get statusFrameObserved() {
+				return statusFrameAt !== undefined;
+			},
 			get metadata() {
 				return operation.active() ? metadata : undefined;
 			},
@@ -283,20 +267,24 @@ export class TelemetryJourneys {
 					if (operation.active() && recoveryAction && !this.pendingRecoveryAction)
 						this.pendingRecoveryAction = recoveryAction;
 					attempt.firstStatus(false);
-				}
+				} else if (statusFrameAt !== undefined) attempt.firstStatus(true, statusFrameAt);
 			},
 			firstStatus: (observed = true, observedAt) => {
 				if (statusObserved) return;
+				if (observed) {
+					statusFrameAt ??= observedAt ?? this.now();
+					if (!admitted) return;
+				}
 				statusObserved = true;
 				if (admitted) this.pendingInputs.delete(attempt);
 				operation.record(
 					"agent timing",
 					{
 						stage: "first_status",
-						outcome: observed ? "completed" : "unavailable",
+						outcome: observed ? "success" : "unavailable",
 						...(!observed ? { duration_ms: null } : {}),
 					},
-					observedAt,
+					observed ? statusFrameAt : observedAt,
 				);
 			},
 		};
@@ -305,13 +293,15 @@ export class TelemetryJourneys {
 	}
 
 	beginCancellation(): (outcome: TelemetryFeatureOutcome, observedAt?: number) => void {
-		if (!this.enabled()) return () => {};
-		const operation = this.start({ stage: "cancellation_to_idle", timing_origin: "ui_cancellation" });
+		if (!this.telemetry.enabled()) return () => {};
+		const operation = this.telemetry.start({ stage: "cancellation_to_idle", timing_origin: "ui_cancellation" });
 		return (outcome, observedAt) => {
 			operation.finish(
 				"agent timing",
 				{
-					outcome,
+					outcome: { completed: "success", failed: "error", canceled: "cancelled", unavailable: "unavailable" }[
+						outcome
+					],
 					...(outcome !== "completed" ? { duration_ms: null } : {}),
 				},
 				observedAt,
@@ -336,7 +326,7 @@ export class TelemetryJourneys {
 	}
 
 	feedback(value: TelemetryTaskFeedback): void {
-		if (!this.enabled()) return;
+		if (!this.telemetry.enabled()) return;
 		this.capture("agent feature outcome", {
 			feature_name: "feedback",
 			feature_id: this.randomId(),
@@ -347,7 +337,6 @@ export class TelemetryJourneys {
 
 	dispose(): void {
 		if (this.disposed) return;
-		this.unsubscribe();
 		this.activeOnboarding?.finish("canceled");
 		for (const attempt of this.pendingFeatures) attempt.finish("canceled");
 		for (const attempt of this.pendingInputs) {
@@ -355,6 +344,7 @@ export class TelemetryJourneys {
 			attempt.firstStatus(false);
 		}
 		this.disposed = true;
+		this.telemetry.dispose();
 		this.clearMemory();
 	}
 }

@@ -240,6 +240,13 @@ function event(
 	};
 }
 
+function legacyEvent(
+	required: Record<string, TelemetryPropertyRule>,
+	optional: Record<string, TelemetryPropertyRule>,
+): TelemetryEventRule {
+	return event(Object.keys(required), { ...sessionProperties, ...required, ...optional }, true);
+}
+
 export const TELEMETRY_CONTRACT: {
 	schema_version: number;
 	schema_revision: number;
@@ -276,33 +283,9 @@ export const TELEMETRY_CONTRACT: {
 			},
 			true,
 		),
-		"agent run completed": event(
-			[
-				"session_id",
-				"outcome",
-				"duration_ms",
-				"visible_ttft_ms",
-				"first_model_event_ms",
-				"model_latency_ms",
-				"max_model_latency_ms",
-				"model_call_count",
-				"turn_count",
-				"tool_call_count",
-				"tool_error_count",
-				"input_tokens",
-				"output_tokens",
-				"cache_read_tokens",
-				"cache_write_tokens",
-				"total_tokens",
-				"compaction_count",
-				"retry_count",
-				"provider_category",
-				"model_category",
-				"error_category",
-			],
+		"agent run completed": legacyEvent(
 			{
-				...sessionProperties,
-				...executionProperties,
+				session_id: sessionProperties.session_id,
 				outcome: enumRule(["success", "error", "aborted"]),
 				duration_ms: duration,
 				visible_ttft_ms: duration,
@@ -310,7 +293,6 @@ export const TELEMETRY_CONTRACT: {
 				model_latency_ms: duration,
 				max_model_latency_ms: duration,
 				model_call_count: count,
-				successful_model_call_count: count,
 				turn_count: count,
 				tool_call_count: count,
 				tool_error_count: count,
@@ -321,7 +303,13 @@ export const TELEMETRY_CONTRACT: {
 				total_tokens: tokens,
 				compaction_count: count,
 				retry_count: count,
+				provider_category: sessionProperties.provider_category,
+				model_category: sessionProperties.model_category,
 				error_category: errorCategory,
+			},
+			{
+				...executionProperties,
+				successful_model_call_count: count,
 				terminal_outcome: terminalOutcome,
 				first_status_ms: duration,
 				first_reasoning_ms: duration,
@@ -339,28 +327,10 @@ export const TELEMETRY_CONTRACT: {
 				local_preparation_ms: duration,
 				input_to_run_ms: duration,
 			},
-			true,
 		),
-		"agent session ended": event(
-			[
-				"session_id",
-				"duration_ms",
-				"prompt_count",
-				"run_count",
-				"successful_run_count",
-				"failed_run_count",
-				"aborted_run_count",
-				"tool_call_count",
-				"compaction_count",
-				"model_call_count",
-				"input_tokens",
-				"output_tokens",
-				"cache_read_tokens",
-				"cache_write_tokens",
-				"total_tokens",
-			],
+		"agent session ended": legacyEvent(
 			{
-				...sessionProperties,
+				session_id: sessionProperties.session_id,
 				duration_ms: duration,
 				prompt_count: count,
 				run_count: count,
@@ -375,9 +345,10 @@ export const TELEMETRY_CONTRACT: {
 				cache_read_tokens: tokens,
 				cache_write_tokens: tokens,
 				total_tokens: tokens,
+			},
+			{
 				terminal_outcome: terminalOutcome,
 			},
-			true,
 		),
 		"agent run started": event(["session_id", "run_id"], {
 			...sessionProperties,

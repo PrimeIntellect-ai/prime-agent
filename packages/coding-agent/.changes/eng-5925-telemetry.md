@@ -7,3 +7,4 @@
 - Fixed `/feedback` and `/resume` usage events being dropped from command telemetry.
 - Changed error reporting to prepare PostHog error events in Prime Agent, preserving code grouping, opt-out, and compatibility with older collectors.
 - Fixed pending error reports being lost during collector capability refreshes and inconsistent delivery retry counts.
+- Fixed successful UI status and cancellation timings being categorized as unknown.

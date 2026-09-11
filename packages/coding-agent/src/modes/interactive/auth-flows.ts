@@ -14,11 +14,13 @@ import {
 	PRIME_AGENT_TRACES_PROVIDER_NAME,
 	PRIME_INFERENCE_PROVIDER_ID,
 	PRIME_INFERENCE_PROVIDER_NAME,
+	type PrimeInferenceLoginCallbacks,
 	type PrimeTeam,
 	resolvePrimeAgentTracesBaseUrl,
 } from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
 import type { TelemetryAcquisitionMethod, TelemetryValidationScope } from "../../core/telemetry-journeys.js";
+import { tryTelemetry } from "../../core/telemetry-scope.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
 import { showFullPaneOverlay } from "./components/centered-overlay.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
@@ -137,18 +139,9 @@ export class ProviderAuthFlows {
 		method: TelemetryAcquisitionMethod,
 		run: () => Promise<AuthenticationResult>,
 	): Promise<AuthenticationResult> {
-		let finish: ((result: AuthenticationResult) => void) | undefined;
-		try {
-			finish = this.host.onAuthenticationStarted?.(providerId, method);
-		} catch {
-			// Optional telemetry must not interfere with authentication.
-		}
+		const finish = tryTelemetry(() => this.host.onAuthenticationStarted?.(providerId, method));
 		const complete = (result: AuthenticationResult) => {
-			try {
-				finish?.(result);
-			} catch {
-				// Optional telemetry must not interfere with authentication.
-			}
+			tryTelemetry(() => finish?.(result));
 			return result;
 		};
 		const execute = () =>
@@ -161,11 +154,7 @@ export class ProviderAuthFlows {
 	}
 
 	private observeAuth(observation: AuthFlowObservation): void {
-		try {
-			this.host.onAuthObservation?.(observation);
-		} catch {
-			// Optional telemetry must not interfere with authentication.
-		}
+		tryTelemetry(() => this.host.onAuthObservation?.(observation));
 	}
 
 	private observeConfiguredCredentials(providerId: string, method: TelemetryAcquisitionMethod): void {
@@ -186,11 +175,7 @@ export class ProviderAuthFlows {
 	}
 
 	private reportAuthError(error: unknown, providerId: string, operation: "login" | "logout" | "discover"): void {
-		try {
-			this.host.onAuthError?.(error, providerId, operation);
-		} catch {
-			// Optional telemetry must not interfere with authentication.
-		}
+		tryTelemetry(() => this.host.onAuthError?.(error, providerId, operation));
 	}
 
 	/**
@@ -270,11 +255,7 @@ export class ProviderAuthFlows {
 		onOutcome?: (outcome: "completed" | "failed" | "canceled" | "unavailable") => void,
 	): Promise<string | null> {
 		const finish = (outcome: "completed" | "failed" | "canceled" | "unavailable") => {
-			try {
-				onOutcome?.(outcome);
-			} catch {
-				// Optional telemetry must not interfere with authentication.
-			}
+			tryTelemetry(() => onOutcome?.(outcome));
 		};
 		const providerOptions = this.getLogoutProviderOptions();
 		if (providerOptions.length === 0) {
@@ -641,18 +622,17 @@ export class ProviderAuthFlows {
 
 	async runPrimeInferenceLogin(): Promise<AuthenticationResult> {
 		return this.observeAuthentication(PRIME_INFERENCE_PROVIDER_ID, "unknown", () =>
-			this.runPrimeInferenceLoginFlow(),
+			this.runPrimeLoginFlow(PRIME_INFERENCE_PROVIDER_ID),
 		);
 	}
 
-	private async runPrimeInferenceLoginFlow(): Promise<AuthenticationResult> {
+	private async runPrimeLoginFlow(
+		providerId: typeof PRIME_INFERENCE_PROVIDER_ID | typeof PRIME_AGENT_TRACES_PROVIDER_ID,
+	): Promise<AuthenticationResult> {
+		const traces = providerId === PRIME_AGENT_TRACES_PROVIDER_ID;
+		const providerName = traces ? PRIME_AGENT_TRACES_PROVIDER_NAME : PRIME_INFERENCE_PROVIDER_NAME;
 		let validationMethod: TelemetryAcquisitionMethod = "existing_configuration";
-		const dialog = new LoginDialogComponent(
-			this.host.ui,
-			PRIME_INFERENCE_PROVIDER_ID,
-			(_success, _message) => {},
-			PRIME_INFERENCE_PROVIDER_NAME,
-		);
+		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
 
 		const handle = showFullPaneOverlay(this.host.ui, dialog, {
 			maxContentWidth: 88,
@@ -689,34 +669,38 @@ export class ProviderAuthFlows {
 		};
 
 		try {
-			const browserLogin = loginPrimeInference(
-				{
-					onAuth: (info) => {
-						validationMethod = "prime_browser";
-						dialog.showAuth(info.url, info.instructions);
-						armManualInput("Complete the sign-in in your browser, or paste an API key below:");
-					},
-					onProgress: (message) => {
-						dialog.showProgress(message);
-					},
-					onValidation: (result) => {
-						if (!browserAbort.signal.aborted)
-							this.observeAuth({
-								providerId: PRIME_INFERENCE_PROVIDER_ID,
-								stage: "credential_validation",
-								outcome: result.outcome,
-								method: validationMethod,
-								validationScope: result.scope,
-								durationMs: result.durationMs,
-								systemWork: true,
-							});
-					},
-					signal: browserAbort.signal,
+			const callbacks: PrimeInferenceLoginCallbacks = {
+				onAuth: (info) => {
+					validationMethod = "prime_browser";
+					dialog.showAuth(info.url, info.instructions);
+					armManualInput(
+						traces
+							? "Complete the sign-in in your browser, or paste a Prime API key below:"
+							: "Complete the sign-in in your browser, or paste an API key below:",
+					);
 				},
-				{
-					configPath: this.host.modelRegistry.authStorage.getPrimeCliConfigPath(),
+				onProgress: (message: string) => {
+					dialog.showProgress(message);
 				},
-			);
+				onValidation: (result) => {
+					if (!browserAbort.signal.aborted)
+						this.observeAuth({
+							providerId,
+							stage: "credential_validation",
+							outcome: result.outcome,
+							method: validationMethod,
+							validationScope: result.scope,
+							durationMs: result.durationMs,
+							systemWork: true,
+						});
+				},
+				signal: browserAbort.signal,
+			};
+			const browserLogin = traces
+				? loginPrimeAgentTraces(callbacks)
+				: loginPrimeInference(callbacks, {
+						configPath: this.host.modelRegistry.authStorage.getPrimeCliConfigPath(),
+					});
 			// When the browser challenge cannot start or breaks down, keep the dialog
 			// open and fall back to plain API key entry instead of failing outright.
 			const browserLoginOrFallback = browserLogin.catch((error: unknown) => {
@@ -724,7 +708,7 @@ export class ProviderAuthFlows {
 					throw error;
 				}
 				const errorMsg = error instanceof Error ? error.message : String(error);
-				this.reportAuthError(error, PRIME_INFERENCE_PROVIDER_ID, "login");
+				this.reportAuthError(error, providerId, "login");
 				dialog.showProgress(`Browser sign-in unavailable (${errorMsg}).`);
 				if (!manualInputArmed) {
 					armManualInput("Paste a Prime API key below:");
@@ -750,16 +734,22 @@ export class ProviderAuthFlows {
 
 			if (result.source === "manual") {
 				browserAbort.abort();
-				dialog.showProgress("Checking Prime Inference access...");
-				const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
+				dialog.showProgress(traces ? "Checking Prime Agent trace access..." : "Checking Prime Inference access...");
+				const baseUrl = traces
+					? resolvePrimeAgentTracesBaseUrl()
+					: loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath()).baseUrl;
 				const validationStartedAt = performance.now();
-				const access = await checkPrimeInferenceAccess(result.apiKey, config.baseUrl, { signal: dialog.signal });
+				const access = await (traces ? checkPrimeAgentTracesAccess : checkPrimeInferenceAccess)(
+					result.apiKey,
+					baseUrl,
+					{ signal: dialog.signal },
+				);
 				if (dialog.signal.aborted) {
 					closeDialog();
 					return { status: "cancelled" };
 				}
 				this.observeAuth({
-					providerId: PRIME_INFERENCE_PROVIDER_ID,
+					providerId,
 					stage: "credential_validation",
 					outcome: access.ok ? "completed" : "failed",
 					method: "prime_key_entry",
@@ -769,27 +759,29 @@ export class ProviderAuthFlows {
 				});
 				if (!access.ok) {
 					const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-					throw new Error(`Prime API key does not have Prime Inference access (${status}${access.message})`, {
-						cause: access,
-					});
+					throw new Error(
+						`Prime API key does not have ${traces ? "Prime Agent trace" : "Prime Inference"} access (${status}${access.message})`,
+						{
+							cause: access,
+						},
+					);
 				}
 			}
-			return await this.completePrimeInferenceLogin(
-				result.apiKey,
-				dialog,
-				closeDialog,
+			const method =
 				result.source === "manual"
 					? "prime_key_entry"
 					: result.source === "browser"
 						? "prime_browser"
-						: "existing_configuration",
-			);
+						: "existing_configuration";
+			return traces
+				? await this.completePrimeAgentTracesLogin(result.apiKey, closeDialog, method)
+				: await this.completePrimeInferenceLogin(result.apiKey, dialog, closeDialog, method);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (!dialog.signal.aborted && errorMsg !== "Login cancelled") {
-				this.reportAuthError(error, PRIME_INFERENCE_PROVIDER_ID, "login");
-				this.host.showError(`Failed to login to ${PRIME_INFERENCE_PROVIDER_NAME}: ${errorMsg}`);
+				this.reportAuthError(error, providerId, "login");
+				this.host.showError(`Failed to login to ${providerName}: ${errorMsg}`);
 				return { status: "failed" };
 			}
 			return { status: "cancelled" };
@@ -800,147 +792,8 @@ export class ProviderAuthFlows {
 
 	async runPrimeAgentTracesLogin(): Promise<AuthenticationResult> {
 		return this.observeAuthentication(PRIME_AGENT_TRACES_PROVIDER_ID, "unknown", () =>
-			this.runPrimeAgentTracesLoginFlow(),
+			this.runPrimeLoginFlow(PRIME_AGENT_TRACES_PROVIDER_ID),
 		);
-	}
-
-	private async runPrimeAgentTracesLoginFlow(): Promise<AuthenticationResult> {
-		let validationMethod: TelemetryAcquisitionMethod = "existing_configuration";
-		const dialog = new LoginDialogComponent(
-			this.host.ui,
-			PRIME_AGENT_TRACES_PROVIDER_ID,
-			(_success, _message) => {},
-			PRIME_AGENT_TRACES_PROVIDER_NAME,
-		);
-
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
-
-		const browserAbort = new AbortController();
-		const onDialogAbort = () => browserAbort.abort();
-		dialog.signal.addEventListener("abort", onDialogAbort, { once: true });
-
-		let manualInputArmed = false;
-		let resolveManualKey: (entry: { apiKey: string; source: "manual" }) => void = () => {};
-		const manualKeyEntry = new Promise<{ apiKey: string; source: "manual" }>((resolve) => {
-			resolveManualKey = resolve;
-		});
-		const armManualInput = (prompt: string): void => {
-			manualInputArmed = true;
-			void (async () => {
-				let value = (await dialog.showManualInput(prompt)).trim();
-				while (!value) {
-					value = (await dialog.waitForInput()).trim();
-				}
-				resolveManualKey({ apiKey: value, source: "manual" });
-			})().catch(() => {
-				// Cancellation surfaces through the dialog signal.
-			});
-		};
-
-		try {
-			const browserLogin = loginPrimeAgentTraces({
-				onAuth: (info) => {
-					validationMethod = "prime_browser";
-					dialog.showAuth(info.url, info.instructions);
-					armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
-				},
-				onProgress: (message) => {
-					dialog.showProgress(message);
-				},
-				onValidation: (result) => {
-					if (!browserAbort.signal.aborted)
-						this.observeAuth({
-							providerId: PRIME_AGENT_TRACES_PROVIDER_ID,
-							stage: "credential_validation",
-							outcome: result.outcome,
-							method: validationMethod,
-							validationScope: result.scope,
-							durationMs: result.durationMs,
-							systemWork: true,
-						});
-				},
-				signal: browserAbort.signal,
-			});
-			const browserLoginOrFallback = browserLogin.catch((error: unknown) => {
-				if (browserAbort.signal.aborted) {
-					throw error;
-				}
-				const errorMsg = error instanceof Error ? error.message : String(error);
-				this.reportAuthError(error, PRIME_AGENT_TRACES_PROVIDER_ID, "login");
-				dialog.showProgress(`Browser sign-in unavailable (${errorMsg}).`);
-				if (!manualInputArmed) {
-					armManualInput("Paste a Prime API key below:");
-				}
-				return manualKeyEntry;
-			});
-			const dialogCancelled = new Promise<never>((_, reject) => {
-				dialog.signal.addEventListener("abort", () => reject(new Error("Login cancelled")), { once: true });
-			});
-			browserLoginOrFallback.catch(() => {});
-			dialogCancelled.catch(() => {});
-
-			const result = await Promise.race([browserLoginOrFallback, manualKeyEntry, dialogCancelled]);
-			if (dialog.signal.aborted) {
-				closeDialog();
-				return { status: "cancelled" };
-			}
-
-			if (result.source === "manual") {
-				browserAbort.abort();
-				dialog.showProgress("Checking Prime Agent trace access...");
-				const validationStartedAt = performance.now();
-				const access = await checkPrimeAgentTracesAccess(result.apiKey, resolvePrimeAgentTracesBaseUrl(), {
-					signal: dialog.signal,
-				});
-				if (dialog.signal.aborted) {
-					closeDialog();
-					return { status: "cancelled" };
-				}
-				this.observeAuth({
-					providerId: PRIME_AGENT_TRACES_PROVIDER_ID,
-					stage: "credential_validation",
-					outcome: access.ok ? "completed" : "failed",
-					method: "prime_key_entry",
-					validationScope: "identity_scope",
-					durationMs: performance.now() - validationStartedAt,
-					systemWork: true,
-				});
-				if (!access.ok) {
-					const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-					throw new Error(`Prime API key does not have Prime Agent trace access (${status}${access.message})`, {
-						cause: access,
-					});
-				}
-			}
-			return await this.completePrimeAgentTracesLogin(
-				result.apiKey,
-				closeDialog,
-				result.source === "manual"
-					? "prime_key_entry"
-					: result.source === "browser"
-						? "prime_browser"
-						: "existing_configuration",
-			);
-		} catch (error: unknown) {
-			closeDialog();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (!dialog.signal.aborted && errorMsg !== "Login cancelled") {
-				this.reportAuthError(error, PRIME_AGENT_TRACES_PROVIDER_ID, "login");
-				this.host.showError(`Failed to login to ${PRIME_AGENT_TRACES_PROVIDER_NAME}: ${errorMsg}`);
-				return { status: "failed" };
-			}
-			return { status: "cancelled" };
-		} finally {
-			dialog.signal.removeEventListener("abort", onDialogAbort);
-		}
 	}
 
 	private async showApiKeyLoginDialog(

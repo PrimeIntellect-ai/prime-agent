@@ -159,6 +159,17 @@ describe("installation attempt observations", () => {
 			duration_ms: null,
 		});
 	});
+	it("keeps relaunch context and reports fallback errors after releasing the listener", () => {
+		const attempt = begin({ source: "interactive" });
+		attempt?.finish("success");
+		const environment = attempt?.environment();
+		attempt?.dispose();
+		expect(attempt?.environment()).toEqual(environment);
+		attempt?.fail("relaunch", new Error("Permission denied"), "relaunch_failed");
+		expect(sink.events.at(-1)?.properties).toMatchObject({ stage: "relaunch", outcome: "failed" });
+		settingsManager.setTelemetryEnabled(false);
+		expect(attempt?.environment().PRIME_AGENT_TELEMETRY).toBe("0");
+	});
 });
 
 describe("installation consent", () => {

@@ -6,7 +6,7 @@ import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
-import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { PRIME_AGENT_TRACES_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { TelemetryProperties } from "../src/core/telemetry.js";
 import { reportTelemetryError, withTelemetryErrorContext } from "../src/core/telemetry-errors.js";
@@ -220,6 +220,27 @@ describe("ProviderAuthFlows", () => {
 			type: "api_key",
 			key: "prime-cli-key",
 		});
+	});
+
+	it("keeps trace login credentials and access checks separate from inference", async () => {
+		process.env.HOME = tempDir;
+		mkdirSync(join(tempDir, ".prime"));
+		const config = JSON.stringify({ api_key: "trace-key", team_id: "existing-team" });
+		const configPath = join(tempDir, ".prime", "config.json");
+		writeFileSync(configPath, config);
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const fetchMock = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(jsonResponse({ data: { scope: { agent_traces: { write: true } } } }));
+
+		await expect(new ProviderAuthFlows(host).runPrimeAgentTracesLogin()).resolves.toMatchObject({
+			status: "success",
+		});
+		expect(fetchMock).toHaveBeenCalledOnce();
+		await expect(authStorage.getApiKey(PRIME_AGENT_TRACES_PROVIDER_ID)).resolves.toBe("trace-key");
+		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
+		expect(readFileSync(configPath, "utf8")).toBe(config);
 	});
 
 	it("offers Prime Inference logout when auth comes from the Prime CLI config", async () => {

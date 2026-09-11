@@ -13,7 +13,6 @@ import {
 	type TelemetrySink,
 } from "./telemetry.js";
 import type { TELEMETRY_ENUMS } from "./telemetry-contract.js";
-import { captureTelemetryError } from "./telemetry-errors.js";
 import {
 	clearInstallationTelemetryState,
 	installationTelemetryContext,
@@ -21,6 +20,7 @@ import {
 	removeInstallationTelemetryState,
 	writeInstallationTelemetryState,
 } from "./telemetry-installation-state.js";
+import { type TelemetryOperation, TelemetryScope } from "./telemetry-scope.js";
 
 export const INSTALLATION_TELEMETRY_CONTEXT_ENV = "PRIME_AGENT_TELEMETRY_INSTALLATION_CONTEXT";
 
@@ -44,20 +44,16 @@ function installationConsent(options: InstallationTelemetryOptions): boolean {
 }
 
 export class TelemetryInstallationAttempt {
-	private disabled = false;
-	private completed = false;
-	private readonly now: () => number;
-	private readonly startedAt: number | undefined;
+	private readonly telemetry: TelemetryScope;
+	private readonly operation: TelemetryOperation;
 	private readonly stages = new Map<InstallationStage, number>();
-	private readonly unsubscribe: () => void;
 	readonly properties: TelemetryProperties;
 
 	constructor(
 		private readonly options: InstallationTelemetryOptions,
 		inherited?: TelemetryProperties,
 	) {
-		this.now = options.now ?? (() => performance.now());
-		this.startedAt = inherited ? undefined : this.now();
+		const startedAt = inherited ? null : (options.now ?? (() => performance.now()))();
 		this.properties = inherited ?? {
 			installation_attempt_id: randomUUID(),
 			installation_action: "update",
@@ -68,20 +64,23 @@ export class TelemetryInstallationAttempt {
 			...options,
 			sink: options.sink ?? new TelemetryClient({ agentDir: options.agentDir, isEnabled: () => this.enabled() }),
 		};
-		this.unsubscribe = options.settingsManager.subscribeTelemetryEnabled(() => this.enabled());
+		let consentRevoked = false;
+		this.telemetry = new TelemetryScope({
+			...this.options,
+			executionMode: options.source === "interactive" ? "interactive" : undefined,
+			isEnabled: () => !consentRevoked && installationConsent(this.options),
+			onDisabled: () => {
+				consentRevoked = true;
+				clearPendingTelemetry(this.options);
+				removeInstallationTelemetryState(options.agentDir, this.properties.installation_attempt_id);
+			},
+		});
+		this.operation = this.telemetry.start({}, startedAt);
 		if (!inherited) this.stage("started", "started");
 	}
 
 	private enabled(): boolean {
-		try {
-			if (!this.disabled && installationConsent(this.options)) return true;
-		} catch {
-			// An unavailable consent context disables this attempt.
-		}
-		this.disabled = true;
-		clearPendingTelemetry(this.options);
-		removeInstallationTelemetryState(this.options.agentDir, this.properties.installation_attempt_id);
-		return false;
+		return this.telemetry.enabled();
 	}
 
 	setTargetVersion(version: string | undefined): void {
@@ -96,29 +95,24 @@ export class TelemetryInstallationAttempt {
 		extra: TelemetryProperties = {},
 	): void {
 		if (!this.enabled()) return;
-		const at = this.now();
+		const at = this.telemetry.now();
 		if (outcome === "started") this.stages.set(stage, at);
-		const start = stage === "completed" ? this.startedAt : this.stages.get(stage);
-		captureTelemetryEvent({
-			...this.options,
-			executionMode: this.options.source === "interactive" ? "interactive" : undefined,
-			name: "agent installation stage",
-			properties: {
-				...this.properties,
-				...extra,
-				stage,
-				outcome,
-				duration_ms: start === undefined ? null : Math.max(0, at - start),
-				...(reason ? { reason } : {}),
-			},
-		});
+		const start = this.stages.get(stage);
+		const fields = {
+			...this.properties,
+			...extra,
+			stage,
+			outcome,
+			duration_ms:
+				stage === "completed" ? this.operation.elapsed(at) : start === undefined ? null : Math.max(0, at - start),
+			...(reason ? { reason } : {}),
+		};
+		if (stage === "completed") this.operation.finish("agent installation stage", fields, at);
+		else this.telemetry.capture("agent installation stage", fields);
 	}
 
 	fail(stage: InstallationStage, error: unknown, reason: InstallationReason): void {
-		if (!this.enabled()) return;
-		const errorId = captureTelemetryError({
-			...this.options,
-			error,
+		const errorId = this.telemetry.error(error, {
 			component: stage === "daemon_restart" || stage === "session_restore" ? "daemon" : "startup",
 			operation: "execute",
 			stage: "startup",
@@ -174,8 +168,7 @@ export class TelemetryInstallationAttempt {
 	}
 
 	finish(outcome: Exclude<InstallationOutcome, "started">, reason?: InstallationReason): void {
-		if (this.completed) return;
-		this.completed = true;
+		if (!this.operation.active()) return;
 		this.stage("completed", outcome, reason);
 		if (outcome !== "success")
 			removeInstallationTelemetryState(this.options.agentDir, this.properties.installation_attempt_id);
@@ -196,7 +189,7 @@ export class TelemetryInstallationAttempt {
 	}
 
 	dispose(): void {
-		this.unsubscribe();
+		this.telemetry.detach();
 		clearPendingTelemetry(this.options);
 	}
 }

@@ -1,10 +1,12 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { TelemetryProperties } from "../../../src/core/telemetry.js";
 import {
 	clearTelemetryInputs,
 	subscribeTelemetryInputs,
 	type TelemetryInputObservation,
 } from "../../../src/core/telemetry-input.js";
+import { TelemetryJourneys } from "../../../src/core/telemetry-journeys.js";
 import { createHarness, getUserTexts, type Harness } from "../harness.js";
 
 const FIRST = "10000000-0000-4000-8000-000000000001";
@@ -16,6 +18,7 @@ describe("ENG-5931 actual session input observation", () => {
 	const cleanups: Array<() => void> = [];
 	afterEach(() => {
 		for (const cleanup of cleanups.splice(0)) cleanup();
+		vi.unstubAllEnvs();
 		while (harnesses.length) harnesses.pop()?.cleanup();
 	});
 
@@ -154,4 +157,48 @@ describe("ENG-5931 actual session input observation", () => {
 		expect(observations).toHaveLength(count);
 		expect(harness.faux.state.callCount).toBe(1);
 	});
+	it.each(["frame", "admission"])(
+		"keeps UI timing accurate when %s arrives first and honors opt-out",
+		async (first) => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("DO_NOT_TRACK", "0");
+			vi.stubEnv("PRIME_AGENT_TELEMETRY", "");
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const { settingsManager } = harness;
+			const events: TelemetryProperties[] = [];
+			let now = 100;
+			const journeys = new TelemetryJourneys({
+				agentDir: harness.tempDir,
+				settingsManager,
+				now: () => now,
+				sink: { capture: (_name, properties) => events.push(properties), flush: async () => {} },
+			});
+			cleanups.push(() => journeys.dispose());
+			const input = journeys.beginInput();
+			now = 140;
+			if (first === "frame") input.firstStatus();
+			else input.admission("completed");
+			expect(input.statusPending).toBe(true);
+			now = 180;
+			if (first === "frame") input.admission("completed");
+			else input.firstStatus();
+			input.firstStatus();
+			expect(input.statusPending).toBe(false);
+			expect(events.filter(({ stage }) => stage === "first_status")).toEqual([
+				expect.objectContaining({ duration_ms: first === "frame" ? 40 : 80, outcome: "success" }),
+			]);
+			journeys.beginCancellation()("completed");
+			expect(events.at(-1)).toMatchObject({ stage: "cancellation_to_idle", outcome: "success" });
+			const cancel = journeys.beginCancellation();
+			const pending = journeys.beginInput();
+			settingsManager.setTelemetryEnabled(false);
+			settingsManager.setTelemetryEnabled(true);
+			const count = events.length;
+			pending.admission("completed");
+			pending.firstStatus();
+			cancel("completed");
+			expect(events).toHaveLength(count);
+		},
+	);
 });
