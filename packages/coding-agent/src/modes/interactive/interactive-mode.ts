@@ -578,6 +578,9 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 // evicted past the cap to keep a long session bounded.
 const MAX_PASTED_IMAGE_BYTES = 64 * 1024 * 1024;
 const INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT = 400;
+// Coalesce at most this many heartbeats_changed refreshes into one refresh
+// promise; sustained churn must not hold rebindCurrentSession in a drain loop.
+const HEARTBEAT_REFRESH_DRAIN_LIMIT = 25;
 
 function initialRenderMessages(messages: AgentMessage[]): AgentMessage[] {
 	if (messages.length <= INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT) {
@@ -2580,12 +2583,16 @@ export class InteractiveMode {
 		}
 		const connection = this.agentConnection;
 		const refresh = (async () => {
-			do {
+			// Bound the drain loop: sustained heartbeats_changed churn must not
+			// starve an awaiting rebind (and its transcript render) indefinitely.
+			for (let drain = 0; drain <= HEARTBEAT_REFRESH_DRAIN_LIMIT; drain++) {
 				this.heartbeatRefreshRequested = false;
 				const heartbeats = await connection.listHeartbeats();
 				if (this.agentConnection !== connection) return;
 				this.applyHeartbeatCatalog(heartbeats);
-			} while (this.heartbeatRefreshRequested);
+				if (!this.heartbeatRefreshRequested) return;
+			}
+			// A further heartbeats_changed event starts the next refresh.
 		})().finally(() => {
 			if (this.heartbeatRefreshPromise === refresh) {
 				this.heartbeatRefreshPromise = undefined;
@@ -2840,14 +2847,28 @@ export class InteractiveMode {
 			await this.bindCurrentSessionExtensions();
 		} else {
 			setRegisteredThemes(this.uiServices.getThemes());
-			await this.refreshConnectionCatalog();
+			// Best-effort: the catalog enriches the composer (commands, models,
+			// resources). A transient control-plane failure must not abort the
+			// rebind and leave the transcript unrendered.
+			try {
+				await this.refreshConnectionCatalog();
+			} catch {
+				// Keep the previous catalog; reconnects re-fetch it.
+			}
 			this.setupAutocompleteProvider();
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
 		await this.subscribeToRosterBar();
 		// A session_action_update in the unsubscribed gap above is lost; re-sync the queue post-subscription.
-		this.patchConnectionState({ sessionActions: (await this.agentConnection.getState()).sessionActions });
+		// Best-effort: a transient control-plane failure must not abort the
+		// rebind and leave the transcript unrendered.
+		try {
+			this.patchConnectionState({ sessionActions: (await this.agentConnection.getState()).sessionActions });
+		} catch {
+			// Keep the attached snapshot's session actions; the next connection
+			// state update re-syncs them.
+		}
 		this.refreshQueueSelectionFromState();
 		this.updatePendingMessagesDisplay();
 		await this.refreshHeartbeatCatalog().catch(() => undefined);
@@ -6407,7 +6428,14 @@ export class InteractiveMode {
 				}
 			}
 		}
-		await this.preloadToolDefinitions(toolNames);
+		// Tool definitions only enrich rendering: components fall back to
+		// cached or missing definitions. A transient control-plane failure here
+		// must not abort the render (a resync render aborts into an empty chat).
+		try {
+			await this.preloadToolDefinitions(toolNames);
+		} catch (error) {
+			this.showWarning(`Could not load tool definitions: ${error instanceof Error ? error.message : String(error)}`);
+		}
 
 		if (options.clearChat) {
 			this.chatContainer.clear();
@@ -6441,61 +6469,79 @@ export class InteractiveMode {
 		}
 
 		for (const message of messagesToRender) {
-			// Assistant messages need special handling for tool calls
-			if (message.role === "assistant") {
-				this.addMessageToChat(message);
-				// Render tool call components
-				for (const content of message.content) {
-					if (content.type === "toolCall") {
-						const spacing = createConversationSpacing(this.chatContainer.children);
-						const component = new ToolExecutionComponent(
-							content.name,
-							content.id,
-							content.arguments,
-							{
-								showImages: this.settingsManager.getShowImages(),
-								includeImageDimensions: false,
-								shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
-							},
-							this.getCachedToolDefinition(content.name),
-							this.ui,
-							this.getCurrentCwd(),
-						);
-						component.setExpanded(this.toolOutputExpanded);
-						component.setEditDiffsExpanded(this.editDiffsExpanded);
-						selectLatestToolExpandHint(this.chatContainer.children, component);
-						this.chatContainer.addChild(component);
-						this.registerIpythonToolComponent(content.name, content.id, component);
+			// One unrenderable message must not abort the whole transcript:
+			// the chat container may already be cleared for this render.
+			try {
+				// Assistant messages need special handling for tool calls
+				if (message.role === "assistant") {
+					this.addMessageToChat(message);
+					// Render tool call components
+					for (const content of message.content) {
+						if (content.type === "toolCall") {
+							const spacing = createConversationSpacing(this.chatContainer.children);
+							const component = new ToolExecutionComponent(
+								content.name,
+								content.id,
+								content.arguments,
+								{
+									showImages: this.settingsManager.getShowImages(),
+									includeImageDimensions: false,
+									shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
+								},
+								this.getCachedToolDefinition(content.name),
+								this.ui,
+								this.getCurrentCwd(),
+							);
+							component.setExpanded(this.toolOutputExpanded);
+							component.setEditDiffsExpanded(this.editDiffsExpanded);
+							selectLatestToolExpandHint(this.chatContainer.children, component);
+							this.chatContainer.addChild(component);
+							this.registerIpythonToolComponent(content.name, content.id, component);
 
-						if (message.stopReason === "aborted" || message.stopReason === "error") {
-							let errorMessage: string;
-							if (message.stopReason === "aborted") {
-								const retryAttempt = this.getRetryAttempt();
-								errorMessage =
-									retryAttempt > 0
-										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-										: message.errorMessage && message.errorMessage !== "Request was aborted"
-											? message.errorMessage
-											: "Operation aborted";
+							if (message.stopReason === "aborted" || message.stopReason === "error") {
+								let errorMessage: string;
+								if (message.stopReason === "aborted") {
+									const retryAttempt = this.getRetryAttempt();
+									errorMessage =
+										retryAttempt > 0
+											? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+											: message.errorMessage && message.errorMessage !== "Request was aborted"
+												? message.errorMessage
+												: "Operation aborted";
+								} else {
+									errorMessage = message.errorMessage || "Error";
+								}
+								component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 							} else {
-								errorMessage = message.errorMessage || "Error";
+								renderedPendingTools.set(content.id, component);
 							}
-							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-						} else {
-							renderedPendingTools.set(content.id, component);
 						}
 					}
+				} else if (message.role === "toolResult") {
+					// Match tool results to pending tool components
+					const component = renderedPendingTools.get(message.toolCallId);
+					if (component) {
+						component.updateResult(message);
+						renderedPendingTools.delete(message.toolCallId);
+					}
+				} else {
+					// All other messages use standard rendering
+					this.addMessageToChat(message, renderOptions);
 				}
-			} else if (message.role === "toolResult") {
-				// Match tool results to pending tool components
-				const component = renderedPendingTools.get(message.toolCallId);
-				if (component) {
-					component.updateResult(message);
-					renderedPendingTools.delete(message.toolCallId);
-				}
-			} else {
-				// All other messages use standard rendering
-				this.addMessageToChat(message, renderOptions);
+			} catch (error) {
+				// Render an inline placeholder instead of losing the transcript.
+				this.chatContainer.addChild(
+					new Text(
+						theme.fg(
+							"warning",
+							`Failed to render a ${message.role} message: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						),
+						1,
+						0,
+					),
+				);
 			}
 		}
 
