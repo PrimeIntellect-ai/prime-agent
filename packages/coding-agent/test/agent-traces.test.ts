@@ -172,35 +172,38 @@ describe("agent trace upload", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		vi.useRealTimers();
-		// Flush straggler uploads and remove the temp dir while ENV_AGENT_DIR
-		// still points at it, so late writes land inside the dir being removed.
-		if (tempDir && existsSync(tempDir)) {
-			await rmTempDirSafely(tempDir);
-		}
-		if (originalAgentDir === undefined) {
-			delete process.env[ENV_AGENT_DIR];
-		} else {
-			process.env[ENV_AGENT_DIR] = originalAgentDir;
-		}
-		if (originalTraceApiKey === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_API_KEY;
-		} else {
-			process.env.PRIME_AGENT_TRACES_API_KEY = originalTraceApiKey;
-		}
-		if (originalPrimeApiKey === undefined) {
-			delete process.env.PRIME_API_KEY;
-		} else {
-			process.env.PRIME_API_KEY = originalPrimeApiKey;
-		}
-		if (originalTraceBaseUrl === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_BASE_URL;
-		} else {
-			process.env.PRIME_AGENT_TRACES_BASE_URL = originalTraceBaseUrl;
-		}
-		if (originalPrimeBaseUrl === undefined) {
-			delete process.env.PRIME_API_BASE_URL;
-		} else {
-			process.env.PRIME_API_BASE_URL = originalPrimeBaseUrl;
+		try {
+			// Flush straggler uploads and remove the temp dir while ENV_AGENT_DIR
+			// still points at it, so late writes land inside the dir being removed.
+			if (tempDir && existsSync(tempDir)) {
+				await rmTempDirSafely(tempDir);
+			}
+		} finally {
+			if (originalAgentDir === undefined) {
+				delete process.env[ENV_AGENT_DIR];
+			} else {
+				process.env[ENV_AGENT_DIR] = originalAgentDir;
+			}
+			if (originalTraceApiKey === undefined) {
+				delete process.env.PRIME_AGENT_TRACES_API_KEY;
+			} else {
+				process.env.PRIME_AGENT_TRACES_API_KEY = originalTraceApiKey;
+			}
+			if (originalPrimeApiKey === undefined) {
+				delete process.env.PRIME_API_KEY;
+			} else {
+				process.env.PRIME_API_KEY = originalPrimeApiKey;
+			}
+			if (originalTraceBaseUrl === undefined) {
+				delete process.env.PRIME_AGENT_TRACES_BASE_URL;
+			} else {
+				process.env.PRIME_AGENT_TRACES_BASE_URL = originalTraceBaseUrl;
+			}
+			if (originalPrimeBaseUrl === undefined) {
+				delete process.env.PRIME_API_BASE_URL;
+			} else {
+				process.env.PRIME_API_BASE_URL = originalPrimeBaseUrl;
+			}
 		}
 	});
 
