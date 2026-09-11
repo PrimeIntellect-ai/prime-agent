@@ -49,10 +49,13 @@ result = await mcp.call_tool("notion", "notion-search", {"query": "roadmap"})
 
 - Discover before calling: don't assume tool names or arguments; read the
   `inputSchema` with `describe_tool` and construct matching arguments.
+- `list_tools` returns the complete inventory or raises — never a silent
+  partial list. Returned schemas are isolated copies; mutate them freely.
 - `search_tools` without a `connection_id` searches at most 8 connections the
   host reports as connected and reports its scope: `searched`, `unavailable`
-  (per-connection failures), and `truncated` (narrow the query or pick a
-  connection when it is set — the result never claims to be exhaustive).
+  (per-connection failures as fixed, redaction-safe summaries), and
+  `truncated` (narrow the query or pick a connection when it is set — the
+  result never claims to be exhaustive).
 - Prefer narrow catalog searches over paging the whole catalog; don't dump all
   schemas into context.
 - Results are already-parsed Python (a `dict` for structured output, otherwise
@@ -64,9 +67,12 @@ result = await mcp.call_tool("notion", "notion-search", {"query": "roadmap"})
   `disabledTools` policy. Don't retry; tell the user.
 - `KeyError` — the tool or connection doesn't exist. Re-check with
   `list_tools` / `list_connections`; tools can change across sessions.
-- `RuntimeError` — credentials are not available (ask the user to connect via
-  `/plugins` or `/mcp login <service>`; never ask them to set environment
-  variables), a refresh failed, or the host bridge is unavailable.
+- `McpDiscoveryError` — the server's tool listing couldn't complete honestly
+  (broken pagination). No partial inventory is published; re-run, and ask the
+  user to reconnect if it persists.
+- `RuntimeError` — credentials are not available (`McpCredentialsUnavailable`:
+  ask the user to connect via `/plugins` or `/mcp login <service>`, never via
+  environment variables), a refresh failed, or the host bridge is unavailable.
 - `McpToolError` — the server flagged the call as an error. Surface the
   message; don't blindly retry a write that may have already happened.
 

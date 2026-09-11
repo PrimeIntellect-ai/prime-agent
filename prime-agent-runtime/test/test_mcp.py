@@ -876,8 +876,30 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
 
         described = run(scenario())
         self.assertEqual(described["inputSchema"], schema)
+        # Isolated copies: mutating the returned schema (nested included) must
+        # never reach the cached canonical inventory.
+        described["inputSchema"]["injected"] = True
         described["name"] = "mutated"
+        self.assertNotIn("injected", generation.tools["search-docs"]["inputSchema"])
         self.assertEqual(generation.tools["search-docs"]["name"], "search-docs")
+
+    def test_list_tools_returns_isolated_copies(self):
+        schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+        generation = self.generation(
+            {"type": "http"},
+            [SimpleNamespace(name="search-docs", description="Search docs", inputSchema=schema)],
+        )
+        generation.server = "notion"
+
+        async def scenario():
+            with mock.patch.object(mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)):
+                tools = await mcp.list_tools("notion")
+                tools[0]["inputSchema"]["injected"] = True
+                return await mcp.list_tools("notion")
+
+        again = run(scenario())
+        self.assertNotIn("injected", again[0]["inputSchema"])
+        self.assertNotIn("injected", generation.tools["search-docs"]["inputSchema"])
 
     def test_search_tools_scoped_connection_matches_policy_and_limit(self):
         tools = [
@@ -922,7 +944,10 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         tools = [SimpleNamespace(name="search-docs", description="Search workspace documents", inputSchema={})]
         generation = self.generation({"type": "http"}, tools)
         generation.server = "a"
-        broken = RuntimeError("credentials missing")
+        broken = mcp.McpCredentialsUnavailable(
+            "MCP credentials for 'b' are not available. Ask the user to connect it"
+            " (/plugins or /mcp login b); do not ask them to set environment variables."
+        )
 
         async def get_locked(server):
             if server == "a":
@@ -952,7 +977,11 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         ])
         self.assertEqual(result["searched"], ["a"])
         self.assertEqual([entry["connectionId"] for entry in result["unavailable"]], ["b"])
-        self.assertIn("credentials missing", result["unavailable"][0]["error"])
+        self.assertEqual(
+            result["unavailable"][0]["error"],
+            "McpCredentialsUnavailable: credentials for this connection are not available; "
+            "the user must connect it",
+        )
         self.assertFalse(result["truncated"])
 
     def test_search_tools_bounds_servers_and_reports_truncation(self):
@@ -980,6 +1009,40 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         self.assertEqual(result["searched"], [f"svc-{index}" for index in range(mcp._MAX_TOOL_SEARCH_SERVERS)])
         self.assertTrue(result["truncated"])
 
+    def test_search_unavailable_never_echoes_raw_exception_text(self):
+        connections = {"connections": [{"connectionId": "leaky", "status": "connected"}]}
+        raw = "Connection failed: https://user:hunter2@evil.test/mcp?api_key=abc123 Authorization: Bearer tok-123-secret"
+
+        async def get_locked(server):
+            raise RuntimeError(raw)
+
+        async def scenario():
+            with self._patch_host({"mcp.list_connections": connections}), mock.patch.object(
+                mcp._registry, "_get_locked", side_effect=get_locked
+            ):
+                return await mcp.search_tools("documents")
+
+        result = run(scenario())
+        error = result["unavailable"][0]["error"]
+        self.assertEqual(error, "RuntimeError: the connection could not be opened or searched")
+        for leaked in ("hunter2", "abc123", "tok-123-secret", "evil.test", "Bearer"):
+            self.assertNotIn(leaked, error)
+
+    def test_host_inventory_redacts_credential_bearing_host_errors(self):
+        raw = "GET https://user:hunter2@sync.test/mcp?token=tok-123-secret failed"
+
+        async def host_request(request_type, payload):
+            raise RuntimeError(raw)
+
+        with mock.patch.object(mcp, "host_request", host_request):
+            with self.assertRaises(RuntimeError) as caught:
+                run(mcp.list_connections())
+        message = str(caught.exception)
+        self.assertIn("mcp.list_connections", message)
+        self.assertIn("[REDACTED]", message)
+        for leaked in ("hunter2", "tok-123-secret"):
+            self.assertNotIn(leaked, message)
+
     # -- tools/list pagination ----------------------------------------------
 
     def test_discover_follows_cursor_pages(self):
@@ -992,23 +1055,37 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         self.assertEqual(sorted(generation.tools), ["one", "two"])
         self.assertEqual(session.cursors, [None, "cursor-2"])
 
-    def test_discover_stops_on_repeated_cursor(self):
+    def test_discover_repeated_cursor_raises_and_publishes_nothing(self):
         tools = [SimpleNamespace(name="one", description="", inputSchema={})]
         session = PagedSession([(tools, "same"), (tools, "same"), (tools, "same"), (tools, "same")])
         generation = mcp._Generation("svc", {"type": "http"})
         generation.session = session
-        run(generation.discover())
+        with self.assertRaisesRegex(mcp.McpDiscoveryError, "repeated"):
+            run(generation.discover())
         self.assertEqual(session.cursors, [None, "same"])
+        self.assertEqual(generation.tools, {})
 
-    def test_discover_page_cap_bounds_runaway_servers(self):
+    def test_discover_page_cap_raises_instead_of_partial_inventory(self):
         tools = [SimpleNamespace(name="one", description="", inputSchema={})]
         pages = [(tools, f"cursor-{index}") for index in range(10)]
         session = PagedSession(pages)
         generation = mcp._Generation("svc", {"type": "http"})
         generation.session = session
         with mock.patch.object(mcp, "_MAX_TOOL_PAGES", 3):
-            run(generation.discover())
+            with self.assertRaisesRegex(mcp.McpDiscoveryError, "partial"):
+                run(generation.discover())
         self.assertEqual(session.cursors, [None, "cursor-0", "cursor-1"])
+        self.assertEqual(generation.tools, {})
+
+    def test_discover_malformed_cursor_raises(self):
+        tools = [SimpleNamespace(name="one", description="", inputSchema={})]
+        for bad_cursor in ("", 42, {}):
+            session = PagedSession([(tools, bad_cursor), (tools, None)])
+            generation = mcp._Generation("svc", {"type": "http"})
+            generation.session = session
+            with self.assertRaisesRegex(mcp.McpDiscoveryError, "malformed"):
+                run(generation.discover())
+            self.assertEqual(generation.tools, {})
 
     # -- moved shared helpers ----------------------------------------------
 

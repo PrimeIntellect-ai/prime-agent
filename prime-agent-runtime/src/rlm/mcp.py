@@ -15,6 +15,7 @@ Two surfaces, one module:
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import io
 import json
@@ -30,6 +31,8 @@ from typing import Any, TypeVar
 from . import host_request
 
 __all__ = [
+    "McpCredentialsUnavailable",
+    "McpDiscoveryError",
     "McpStartupError",
     "McpToolError",
     "call_tool",
@@ -79,6 +82,21 @@ class McpStartupError(RuntimeError):
 
 class McpToolError(RuntimeError):
     """Raised when an MCP tool call returns a result flagged as an error."""
+
+
+class McpDiscoveryError(RuntimeError):
+    """Raised when a server's tools/list pagination cannot complete honestly.
+
+    A repeated or malformed pagination cursor, or more pages than allowed,
+    means the inventory cannot be trusted — a partial tool map is never
+    published as if complete."""
+
+
+class McpCredentialsUnavailable(RuntimeError):
+    """Raised when a configured connection has no usable credentials.
+
+    The user must connect the service first (`/plugins` or
+    `/mcp login <service>`)."""
 
 
 class _StderrTail(io.TextIOBase):
@@ -304,12 +322,19 @@ class _Generation:
         return await self.stack.enter_async_context(stdio_client(params, errlog=self._stderr))
 
     async def discover(self) -> None:
-        """Fetch the server tool inventory, following tools/list cursors safely."""
+        """Fetch the complete tool inventory, following tools/list cursors.
+
+        Raises McpDiscoveryError when pagination cannot complete honestly — a
+        repeated or malformed continuation cursor, or more pages than allowed —
+        so a partial inventory is never published as if complete.
+        """
         tools: dict[str, dict[str, Any]] = {}
         cursors: set[str] = set()
         cursor: str | None = None
-        for _ in range(_MAX_TOOL_PAGES):
+        pages = 0
+        while True:
             response = await self._list_tools_page(cursor)
+            pages += 1
             for tool in getattr(response, "tools", None) or []:
                 name = getattr(tool, "name", None)
                 if not isinstance(name, str):
@@ -325,9 +350,22 @@ class _Generation:
             cursor = getattr(response, "next_cursor", None)
             if cursor is None:
                 cursor = getattr(response, "nextCursor", None)
-            # An empty or already-seen cursor means the server is looping or done.
-            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            if cursor is None:
                 break
+            if not isinstance(cursor, str) or not cursor:
+                raise McpDiscoveryError(
+                    f"MCP server '{self.server}' returned a malformed tools/list pagination cursor"
+                )
+            if cursor in cursors:
+                raise McpDiscoveryError(
+                    f"MCP server '{self.server}' repeated a tools/list pagination cursor; "
+                    "its tool inventory cannot be completed"
+                )
+            if pages >= _MAX_TOOL_PAGES:
+                raise McpDiscoveryError(
+                    f"MCP server '{self.server}' paginated tools/list beyond {_MAX_TOOL_PAGES} pages; "
+                    "refusing to publish a partial tool inventory"
+                )
             cursors.add(cursor)
         self.tools = tools
 
@@ -442,7 +480,9 @@ class _Registry:
     async def tools(self, server: str) -> list[dict[str, Any]]:
         async def operation() -> list[dict[str, Any]]:
             generation = await self._get(server)
-            return [dict(tool) for name, tool in generation.tools.items() if generation.allows(name)]
+            return [
+                copy.deepcopy(tool) for name, tool in generation.tools.items() if generation.allows(name)
+            ]
 
         return await self._tracked(operation)
 
@@ -460,7 +500,7 @@ class _Registry:
                 raise KeyError(f"MCP server '{server}' has no tool '{tool}'")
             if not generation.allows(tool):
                 raise PermissionError(f"MCP tool '{tool}' is disabled for server '{server}'")
-            return dict(generation.tools[tool])
+            return copy.deepcopy(generation.tools[tool])
 
         return await self._tracked(operation)
 
@@ -639,7 +679,7 @@ async def search_tools(
     With ``connection_id`` only that connection is searched and its errors
     propagate. Without it, at most ``_MAX_TOOL_SEARCH_SERVERS`` connections the
     host reports as connected are searched in host order; per-connection
-    failures are reported, not raised.
+    failures are reported as fixed, redaction-safe summaries, not raised.
 
     Returns ``{"tools": [{connectionId, name, description}, ...], "searched":
     [connectionId, ...], "unavailable": [{connectionId, error}, ...],
@@ -695,7 +735,12 @@ async def _host_inventory(request_type: str, payload: dict[str, Any]) -> dict[st
     except TimeoutError as exc:
         raise RuntimeError(f"MCP {request_type} request timed out") from exc
     except Exception as exc:
-        raise RuntimeError(f"MCP {request_type} request failed: {exc}") from exc
+        # Host/bridge error text is echoed only after scrubbing credential-
+        # bearing URLs, query strings and headers, and bounded to a tail.
+        detail = _sanitize_diagnostic(
+            _redact_sensitive_text(str(exc)), (), (), byte_limit=_INVENTORY_ERROR_CHARS
+        )
+        raise RuntimeError(f"MCP {request_type} request failed: {detail or type(exc).__name__}") from exc
     if not isinstance(result, dict):
         raise RuntimeError(f"MCP {request_type} returned a malformed response")
     return result
@@ -759,9 +804,43 @@ def _match_tools(generation: _Generation, query: str, limit: int) -> list[dict[s
     return matches
 
 
+_SEARCH_FAILURE_HINTS: tuple[tuple[type[BaseException], str], ...] = (
+    (McpCredentialsUnavailable, "credentials for this connection are not available; the user must connect it"),
+    (McpStartupError, "the MCP server failed during startup"),
+    (KeyError, "the connection or tool is not declared"),
+    (PermissionError, "policy excludes this connection or tool"),
+    (TimeoutError, "opening or querying the connection timed out"),
+)
+
+
 def _bounded_error(exc: BaseException) -> str:
-    message = _sanitize_diagnostic(f"{type(exc).__name__}: {exc}", (), (), byte_limit=_INVENTORY_ERROR_CHARS)
-    return message or type(exc).__name__
+    """A fixed, redaction-safe summary of one connection's search failure.
+
+    Raw exception text can embed credential-bearing URLs and HTTP bodies, so
+    only the exception type name and a fixed hint are ever surfaced.
+    """
+    hint = "the connection could not be opened or searched"
+    for failure_type, message in _SEARCH_FAILURE_HINTS:
+        if isinstance(exc, failure_type):
+            hint = message
+            break
+    return f"{type(exc).__name__}: {hint}"
+
+
+_URL_CREDENTIALS = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@")
+_SENSITIVE_QUERY = re.compile(
+    r"([?&](?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|authorization|code|state)=)[^&\s]+",
+    re.I,
+)
+_AUTH_HEADER = re.compile(r"(Authorization:\s*(?:Bearer|Basic|token)\s+)[^\s]+", re.I)
+
+
+def _redact_sensitive_text(value: str) -> str:
+    """Scrub credential-bearing URLs, query strings and auth headers from text."""
+    value = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", value)
+    value = _SENSITIVE_QUERY.sub(r"\1[REDACTED]", value)
+    value = _AUTH_HEADER.sub(r"\1[REDACTED]", value)
+    return value
 
 
 def _validate_limit(value: Any, label: str, maximum: int) -> None:
@@ -810,8 +889,8 @@ def _bound_auth(provider: str, config: dict[str, Any]) -> dict[str, Any] | None:
     return cred
 
 
-def _credentials_unavailable(server: str) -> RuntimeError:
-    return RuntimeError(
+def _credentials_unavailable(server: str) -> McpCredentialsUnavailable:
+    return McpCredentialsUnavailable(
         f"MCP credentials for '{server}' are not available. Ask the user to connect it "
         f"(/plugins or /mcp login {server}); do not ask them to set environment variables."
     )
