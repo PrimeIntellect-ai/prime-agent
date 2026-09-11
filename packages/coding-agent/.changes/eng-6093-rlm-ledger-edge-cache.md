@@ -1,0 +1,1 @@
+- Sped up roster and family resolution by caching the RLM spawn ledger's replayed edges behind a file-stat guard: unchanged files reuse the cached edges instead of re-reading and re-parsing the whole ledger, while any writer's append (this process or another daemon) still forces a fresh replay.

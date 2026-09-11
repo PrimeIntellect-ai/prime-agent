@@ -8,6 +8,7 @@ import {
 	openSync,
 	realpathSync,
 	rmSync,
+	statSync,
 	writeSync,
 } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -301,6 +302,11 @@ export class RlmSpawnLedger {
 	private readonly canonicalSessionsDir: string;
 	private queue: Promise<unknown> = Promise.resolve();
 	private seedAttempted = false;
+	/** Last replay guarded by a file stat snapshot; see replaySyncCached(). */
+	private edgeCache?: {
+		stat: { size: number; mtimeMs: number; ino: number };
+		edges: Map<string, RlmLedgerEdge>;
+	};
 
 	constructor(
 		agentDir: string,
@@ -342,7 +348,7 @@ export class RlmSpawnLedger {
 	appendRenameByChildPath(child: string, name: string): Promise<void> {
 		return this.enqueue(() => {
 			const target = canonicalSessionPath(child);
-			for (const edge of this.replaySync().values()) {
+			for (const edge of this.replaySyncCached().values()) {
 				if (!edge.deleted && canonicalSessionPath(edge.child) === target) {
 					this.appendRecord({ v: 1, op: "rename", at: nowIso(), childId: edge.childId, child: target, name });
 				}
@@ -375,7 +381,9 @@ export class RlmSpawnLedger {
 	 * as cleanup retries.
 	 */
 	edges(includeDeleted = false): Promise<RlmLedgerEdge[]> {
-		return this.enqueue(() => [...this.replaySync().values()].filter((edge) => includeDeleted || !edge.deleted));
+		return this.enqueue(() =>
+			[...this.replaySyncCached().values()].filter((edge) => includeDeleted || !edge.deleted),
+		);
 	}
 
 	/**
@@ -394,7 +402,7 @@ export class RlmSpawnLedger {
 		return this.enqueue(async () => {
 			const target = canonicalSessionPath(sessionPath);
 			const family = await this.familyUnlocked();
-			const edges = [...this.replaySync().values()].filter((edge) => !edge.deleted);
+			const edges = [...this.replaySyncCached().values()].filter((edge) => !edge.deleted);
 			const parentByChild = new Map(
 				edges.map((edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)]),
 			);
@@ -466,7 +474,7 @@ export class RlmSpawnLedger {
 		// Advisory, per-process: catches double-admission mistakes inside this
 		// daemon. It is NOT a global uniqueness guarantee — other processes
 		// append to the same file between our read and write.
-		for (const edge of this.replaySync().values()) {
+		for (const edge of this.replaySyncCached().values()) {
 			if (!edge.deleted && canonicalSessionPath(edge.child) === childPath && edge.childId !== input.childId) {
 				throw new Error(`RLM ledger: duplicate child session path ${childPath} (already ${edge.childId})`);
 			}
@@ -489,7 +497,7 @@ export class RlmSpawnLedger {
 	}
 
 	private async liveEdgesUnlocked(
-		edges = [...this.replaySync().values()].filter((edge) => !edge.deleted),
+		edges = [...this.replaySyncCached().values()].filter((edge) => !edge.deleted),
 	): Promise<RlmLedgerEdge[]> {
 		const statCache = new Map<string, boolean>();
 		const exists = async (path: string): Promise<boolean> => {
@@ -517,7 +525,7 @@ export class RlmSpawnLedger {
 		// One replay, one stat snapshot: byChild comes from the same alive set that emits child rows,
 		// so a child whose dead edge was reconciled away degrades to a root row instead of vanishing.
 		let alive: RlmLedgerEdge[] = await this.liveEdgesUnlocked(
-			[...this.replaySync().values()].filter((candidate) => !candidate.deleted),
+			[...this.replaySyncCached().values()].filter((candidate) => !candidate.deleted),
 		);
 		const byChild = new Map<string, RlmLedgerEdge>();
 		for (const edge of alive) {
@@ -718,6 +726,44 @@ export class RlmSpawnLedger {
 				{ v: 1, op: "meta", at: nowIso(), sessionsDir: this.canonicalSessionsDir } satisfies RlmLedgerMetaRecord,
 			],
 		});
+		// Our own writes must not be served stale from the stat-guarded cache;
+		// other processes' appends are caught by the stat guard itself.
+		this.edgeCache = undefined;
+	}
+
+	/**
+	 * Replay the ledger behind a stat-guarded edge cache. Every roster and
+	 * family resolution replays, and each replay re-reads and re-parses the
+	 * whole file; reads outnumber writes by orders of magnitude. The
+	 * multi-writer contract is preserved: any writer's append changes the
+	 * file's size, mtime, or inode, forcing a fresh replay, so cross-process
+	 * staleness stays bounded to in-flight appends exactly as before - minus
+	 * the re-parse cost on the unchanged-file fast path. A missing file skips
+	 * the cache: replaySync owns that decision and returns empty.
+	 */
+	private replaySyncCached(): Map<string, RlmLedgerEdge> {
+		let snapshot: { size: number; mtimeMs: number; ino: number } | undefined;
+		try {
+			const current = statSync(this.path);
+			snapshot = { size: current.size, mtimeMs: current.mtimeMs, ino: current.ino };
+		} catch {
+			snapshot = undefined;
+		}
+		const cache = this.edgeCache;
+		if (
+			snapshot !== undefined &&
+			cache !== undefined &&
+			cache.stat.size === snapshot.size &&
+			cache.stat.mtimeMs === snapshot.mtimeMs &&
+			cache.stat.ino === snapshot.ino
+		) {
+			return cache.edges;
+		}
+		const edges = this.replaySync();
+		if (snapshot !== undefined) {
+			this.edgeCache = { stat: snapshot, edges };
+		}
+		return edges;
 	}
 
 	private replaySync(): Map<string, RlmLedgerEdge> {
