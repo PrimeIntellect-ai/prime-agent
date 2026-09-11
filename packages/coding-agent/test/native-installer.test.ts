@@ -12,7 +12,8 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { createServer } from "node:http";
+import { createServer as createHttpServer, type RequestListener } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -30,15 +31,21 @@ const assets = [
 const platform = `${process.platform}-${process.arch}`;
 const feed = new Map<string, Buffer>();
 let beforeArchiveResponse: (() => void) | undefined;
-const server = createServer((request, response) => {
+let redirectToHttp = false;
+let insecureRequestCount = 0;
+let httpBase: string;
+const serveFeed: RequestListener = (request, response) => {
 	if (request.url?.endsWith(".tar.gz")) beforeArchiveResponse?.();
 	const data = feed.get(request.url ?? "");
 	response.writeHead(data ? 200 : 404);
 	response.end(data ?? "not found");
-});
+};
+let server: ReturnType<typeof createHttpsServer>;
+let insecureServer: ReturnType<typeof createHttpServer>;
 let root: string;
 let home: string;
 let base: string;
+let certificate: string;
 
 function publish(version: string, options: { broken?: boolean; missing?: boolean; link?: boolean } = {}) {
 	const source = mkdtempSync(join(root, "archive-"));
@@ -63,6 +70,14 @@ function publish(version: string, options: { broken?: boolean; missing?: boolean
 	return filename;
 }
 
+function publishNodePackage(version: string) {
+	const filename = `prime-agent-${version}.tgz`;
+	const bytes = Buffer.from(`node package ${version}\n`);
+	const digest = createHash("sha256").update(bytes).digest("hex");
+	feed.set(`/releases/v${version}/${filename}`, bytes);
+	feed.set(`/releases/v${version}/SHA256SUMS`, Buffer.from(`${digest}  ${filename}\n`));
+}
+
 async function install(version: string, extra: NodeJS.ProcessEnv = {}, entrypoint = installer) {
 	const child = spawn("sh", [entrypoint, version], {
 		env: {
@@ -76,6 +91,7 @@ async function install(version: string, extra: NodeJS.ProcessEnv = {}, entrypoin
 			PRIME_AGENT_INSTALLER_PLAIN: "1",
 			PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL: "0",
 			PRIME_AGENT_DOWNLOAD_BASE_URL: base,
+			CURL_CA_BUNDLE: certificate,
 			...extra,
 		},
 		stdio: ["ignore", "pipe", "pipe"],
@@ -100,19 +116,127 @@ function command() {
 describe.skipIf(process.platform === "win32")("managed compiled installer", () => {
 	beforeAll(async () => {
 		root = mkdtempSync(join(tmpdir(), "native-installer-"));
+		const key = join(root, "localhost.key");
+		certificate = join(root, "localhost.crt");
+		execFileSync(
+			"openssl",
+			[
+				"req",
+				"-x509",
+				"-newkey",
+				"rsa:2048",
+				"-nodes",
+				"-keyout",
+				key,
+				"-out",
+				certificate,
+				"-days",
+				"1",
+				"-subj",
+				"/CN=127.0.0.1",
+				"-addext",
+				"subjectAltName=IP:127.0.0.1",
+			],
+			{ stdio: "ignore" },
+		);
+		insecureServer = createHttpServer((request, response) => {
+			insecureRequestCount += 1;
+			serveFeed(request, response);
+		});
+		await new Promise<void>((done) => insecureServer.listen(0, "127.0.0.1", done));
+		const insecureAddress = insecureServer.address();
+		if (!insecureAddress || typeof insecureAddress === "string") throw new Error("missing insecure server address");
+		httpBase = `http://127.0.0.1:${insecureAddress.port}`;
+		server = createHttpsServer({ cert: readFileSync(certificate), key: readFileSync(key) }, (request, response) => {
+			if (redirectToHttp) {
+				response.writeHead(302, { location: `${httpBase}${request.url ?? ""}` });
+				response.end();
+				return;
+			}
+			serveFeed(request, response);
+		});
 		await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
 		const address = server.address();
 		if (!address || typeof address === "string") throw new Error("missing server address");
-		base = `http://127.0.0.1:${address.port}`;
+		base = `https://127.0.0.1:${address.port}`;
 	});
 	beforeEach(() => {
 		home = mkdtempSync(join(root, "home with spaces-"));
 		feed.clear();
 		beforeArchiveResponse = undefined;
+		redirectToHttp = false;
+		insecureRequestCount = 0;
 	});
 	afterAll(async () => {
 		await new Promise<void>((done) => server.close(() => done()));
+		await new Promise<void>((done) => insecureServer.close(() => done()));
 		rmSync(root, { recursive: true, force: true });
+	});
+
+	it.each(["binary", "node"])("rejects an HTTP download base in %s mode", async (method) => {
+		const result = await install("1.0.0", {
+			PRIME_AGENT_DOWNLOAD_BASE_URL: httpBase,
+			PRIME_AGENT_INSTALL_METHOD: method,
+		});
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("downloads require an HTTPS base URL");
+		expect(insecureRequestCount).toBe(0);
+	});
+
+	it("does not let the test opt-in enable HTTP for a non-loopback origin", async () => {
+		const result = await install("1.0.0", {
+			PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS: "1",
+			PRIME_AGENT_DOWNLOAD_BASE_URL: "http://example.invalid",
+		});
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("downloads require an HTTPS base URL");
+	});
+
+	it("rejects an HTTPS-to-HTTP redirect before downloading a native release", async () => {
+		publish("1.0.0");
+		redirectToHttp = true;
+		const result = await install("1.0.0");
+		expect(result.code).not.toBe(0);
+		expect(insecureRequestCount).toBe(0);
+		expect(existsSync(command())).toBe(false);
+	});
+
+	it("downloads the Node package and checksum inventory over HTTPS", async () => {
+		publishNodePackage("1.0.0");
+		const harness = join(home, "node-download.sh");
+		writeFileSync(
+			harness,
+			readFileSync(installer, "utf8").replace(
+				/\nmain "\$@"\s*$/,
+				() => `
+prime_agent_validate_download_base_url
+download_prime_agent_package "$1" "$prime_agent_base_url/releases/v$1/$prime_agent_package-$1.tgz" "$HOME/$prime_agent_package-$1.tgz"
+`,
+			),
+		);
+		const result = await install("1.0.0", {}, harness);
+		expect(result.code, result.output).toBe(0);
+		expect(readFileSync(join(home, "prime-agent-1.0.0.tgz"), "utf8")).toBe("node package 1.0.0\n");
+	});
+
+	it("rejects an HTTPS-to-HTTP redirect for the Node package route", async () => {
+		publishNodePackage("1.0.0");
+		redirectToHttp = true;
+		const harness = join(home, "node-download.sh");
+		writeFileSync(
+			harness,
+			readFileSync(installer, "utf8").replace(
+				/\nmain "\$@"\s*$/,
+				() => `
+prime_agent_validate_download_base_url
+download_prime_agent_package "$1" "$prime_agent_base_url/releases/v$1/$prime_agent_package-$1.tgz" "$HOME/$prime_agent_package-$1.tgz"
+`,
+			),
+		);
+		const result = await install("1.0.0", {}, harness);
+		expect(result.code).not.toBe(0);
+		expect(insecureRequestCount).toBe(0);
+		expect(existsSync(join(home, "prime-agent-1.0.0.tgz"))).toBe(false);
 	});
 
 	it("defaults to a verified executable without Node, preserves user data, and retains the previous release", async () => {

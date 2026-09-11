@@ -2,7 +2,15 @@
 
 The macOS and Linux release archives contain `prime-agent` and its support files. Normal application execution does not require Node, npm, or Bun. Keep the archive contents together: moving only the executable breaks asset and Python runtime discovery. Linux archives target glibc; Alpine/musl and Windows are outside this distribution.
 
-Download `prime-agent-<version>-<platform>.tar.gz` and `SHA256SUMS` from the same release. Platforms are `darwin-arm64`, `darwin-x64`, `linux-arm64`, and `linux-x64`. Verify the selected archive's SHA-256 against that inventory, then extract it into its own directory and run `./prime-agent --help`.
+On macOS, use the published installer:
+
+```sh
+curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+```
+
+The current macOS archives are not Developer ID signed or notarized. A browser-downloaded archive may retain quarantine metadata and be blocked by Gatekeeper, so manual macOS archive installation is not supported yet. Do not bypass Gatekeeper; use the installer until signed and notarized downloads are available.
+
+On Linux, download `prime-agent-<version>-<platform>.tar.gz` and `SHA256SUMS` over HTTPS from the same release. Platforms are `linux-arm64` and `linux-x64`. Check the selected archive's SHA-256 against that inventory, extract it into its own directory, and run `./prime-agent --help`.
 
 The Python tool uses the existing managed CPython setup. Its first use requires uv and network access to install Python and Python dependencies. The archive includes the matching `prime-agent-runtime` sources and built-in Python skills. It contains no prebuilt virtual environment or `node_modules` directory. External tools and extension-specific dependencies retain their own requirements.
 
@@ -62,9 +70,11 @@ The release workflow consumes those tested artifacts, adds the stable or beta pa
 
 ## Installation
 
-The published installer defaults to the compiled archive on macOS 13+ and glibc Linux, on ARM64 or x64. It checks the exact release checksum, rejects unsafe archive entries, validates required assets, and runs the executable before activating it. Machines outside those targets use the existing Node installer; an executable that cannot run also falls back to Node. A failed checksum never triggers a fallback.
+The published installer defaults to the compiled archive on macOS 13+ and glibc Linux, on ARM64 or x64. It requires an HTTPS release base, allows redirects only to HTTPS, checks the exact release checksum, rejects unsafe archive entries, validates required assets, and runs the executable before activating it. Machines outside those targets use the existing Node installer; an executable that cannot run also falls back to Node. A failed checksum never triggers a fallback.
 
-Pinning a release whose checksum inventory only advertises npm packages uses the verified Node installer. This preserves installation of releases published before compiled archives existed. Missing or invalid compiled checksums, an incomplete compiled release, and failed archive downloads remain errors; `binary` mode never falls back.
+The archive and `SHA256SUMS` inventory are served by the same release origin. The checksum detects corruption or inconsistent content but is not an independent signature and does not protect against a compromised origin; HTTPS authentication of the configured origin is the trust boundary.
+
+Pinning a release whose checksum inventory only advertises npm packages uses the checksummed Node installer. This preserves installation of releases published before compiled archives existed without requiring newer release metadata. Missing or invalid compiled checksums, an incomplete compiled release, and failed archive downloads remain errors; `binary` mode never falls back.
 
 Set `PRIME_AGENT_INSTALL_METHOD=node` to explicitly keep the Node installation, or `binary` to require the compiled application. `PRIME_AGENT_INSTALL_DIR` overrides the managed root (default `$XDG_DATA_HOME/prime-agent` or `~/.local/share/prime-agent`); `PRIME_AGENT_BIN_DIR` overrides the public command directory (default `~/.local/bin`). Both must be absolute. Existing unrelated commands are never replaced. `PRIME_AGENT_INSTALL_LINK=0` installs without a public link.
 

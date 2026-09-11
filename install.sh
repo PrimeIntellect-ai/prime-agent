@@ -59,6 +59,7 @@ prime_agent_screen_question=
 prime_agent_animation_frame=0
 prime_agent_native_stage=
 prime_agent_native_lock=
+prime_agent_allow_insecure_http=0
 
 main() {
 	if [ "${1:-}" = --native-platform ]; then
@@ -89,6 +90,7 @@ prime_agent_install_node() {
 		printf 'Set PRIME_AGENT_DOWNLOAD_BASE_URL or use the installer published by the release workflow.\n' >&2
 		exit 1
 	fi
+	prime_agent_validate_download_base_url
 
 	prime_agent_install_traps
 	prime_agent_init_screen
@@ -177,6 +179,45 @@ create_temp_dir() {
 
 	printf 'error: mktemp is required to create a secure temporary directory.\n' >&2
 	exit 1
+}
+
+prime_agent_is_loopback_test_base_url() {
+	case "$1" in
+		http://127.0.0.1:*) ;;
+		*) return 1 ;;
+	esac
+	test_port=${1##*:}
+	case "$test_port" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+prime_agent_validate_download_base_url() {
+	case "$prime_agent_base_url" in
+		https://*)
+			prime_agent_allow_insecure_http=0
+			;;
+		http://*)
+			if [ "${PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS:-0}" = 1 ] &&
+				prime_agent_is_loopback_test_base_url "$prime_agent_base_url"; then
+				prime_agent_allow_insecure_http=1
+				return
+			fi
+			printf 'error: Prime Agent downloads require an HTTPS base URL.\n' >&2
+			printf 'Local loopback test feeds require PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS=1.\n' >&2
+			exit 1
+			;;
+		*)
+			printf 'error: Prime Agent download base URL must use HTTPS.\n' >&2
+			exit 1
+			;;
+	esac
+}
+
+prime_agent_curl_download() {
+	if [ "$prime_agent_allow_insecure_http" = 1 ]; then
+		curl --proto '=http,https' --proto-redir '=https' "$@"
+	else
+		curl --proto '=https' --proto-redir '=https' "$@"
+	fi
 }
 
 prime_agent_install_traps() {
@@ -985,7 +1026,7 @@ resolve_prime_agent_version() {
 		"Resolving latest release" \
 		"Resolving latest release" \
 		"Checking the $release_channel release channel." \
-		curl -fsSL "$prime_agent_base_url/$release_channel" -o "$channel_path"; then
+		prime_agent_curl_download -fsSL "$prime_agent_base_url/$release_channel" -o "$channel_path"; then
 		rm -rf "$channel_dir"
 		printf 'error: could not resolve latest Prime Agent version from %s/%s\n' "$prime_agent_base_url" "$release_channel" >&2
 		exit 1
@@ -1215,7 +1256,7 @@ install_node_standalone() {
 	mkdir -p "$node_tmp_dir" "$node_base_dir"
 
 	printf 'Resolving Node.js binary for %s-%s\n' "$node_platform" "$node_arch"
-	curl -fsSL "$node_dist_base/SHASUMS256.txt" -o "$node_tmp_dir/SHASUMS256.txt"
+	prime_agent_curl_download -fsSL "$node_dist_base/SHASUMS256.txt" -o "$node_tmp_dir/SHASUMS256.txt"
 	node_file=$(awk -v suffix="-$node_platform-$node_arch.tar.xz" '
 		index($2, "node-v") == 1 && length($2) >= length(suffix) && substr($2, length($2) - length(suffix) + 1) == suffix { print $2; exit }
 	' "$node_tmp_dir/SHASUMS256.txt")
@@ -1239,7 +1280,7 @@ install_node_standalone() {
 	esac
 
 	printf 'Downloading Node.js %s\n' "${node_file%.tar.xz}"
-	curl -fsSL "$node_dist_base/$node_file" -o "$node_tmp_dir/$node_file"
+	prime_agent_curl_download -fsSL "$node_dist_base/$node_file" -o "$node_tmp_dir/$node_file"
 	verify_node_standalone_download "$node_tmp_dir" "$node_file"
 	ensure_node_standalone_extract_tools "$node_platform"
 
@@ -1496,13 +1537,13 @@ download_prime_agent_package() {
 		"Downloading checksums" \
 		"Downloading release checksums" \
 		"Prime Agent v$version" \
-		curl -fsSL "$checksums_url" -o "$checksums_path"
+		prime_agent_curl_download -fsSL "$checksums_url" -o "$checksums_path"
 
 	prime_agent_run_quiet_with_animation \
 		"Downloading Prime Agent" \
 		"Downloading Prime Agent v$version" \
-		"Fetching the verified package." \
-		curl -fsSL "$tarball_url" -o "$tarball_path"
+		"Fetching the checksummed package." \
+		prime_agent_curl_download -fsSL "$tarball_url" -o "$tarball_path"
 
 	verify_prime_agent_package_checksum "$checksums_path" "$tarball_path"
 }
@@ -1558,7 +1599,7 @@ confirm_install() {
 
 	if prime_agent_prompt_yes_no \
 		"Install Prime Agent v$version globally with npm?" \
-		"Downloads the verified release and runs npm install -g." \
+		"Downloads the checksummed release and runs npm install -g." \
 		"Install? [Y/n]"; then
 		return 0
 	else
@@ -1814,6 +1855,7 @@ prime_agent_install_native() {
 	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
 		printf 'error: set PRIME_AGENT_DOWNLOAD_BASE_URL or use the published installer.\n' >&2; exit 1
 	fi
+	prime_agent_validate_download_base_url
 	prime_agent_install_traps
 	prime_agent_init_screen
 	native_version=$(resolve_prime_agent_version "$@")
@@ -1825,7 +1867,7 @@ prime_agent_install_native() {
 	native_file="prime-agent-$native_version-$native_platform.tar.gz"
 	native_checksums="$prime_agent_download_dir/SHA256SUMS"
 	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading release checksums" "Prime Agent v$native_version" \
-		curl -fsSL --connect-timeout 10 --max-time 120 "$prime_agent_base_url/releases/v$native_version/SHA256SUMS" -o "$native_checksums"
+		prime_agent_curl_download -fsSL --connect-timeout 10 --max-time 120 "$prime_agent_base_url/releases/v$native_version/SHA256SUMS" -o "$native_checksums"
 	awk -v file="$native_file" '$2 == file { count++; hash=$1; fields=NF } END { if (count != 1 || fields != 2 || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1; print tolower(hash) "  " file }' \
 		"$native_checksums" >"$prime_agent_download_dir/selected.sha256" || {
 		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ] &&
@@ -1852,7 +1894,7 @@ prime_agent_install_native() {
 	prime_agent_download_dir=
 	native_archive="$prime_agent_native_stage/$native_file"
 	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading compiled Prime Agent" "$native_platform" \
-		curl -fsSL --connect-timeout 10 --max-time 300 "$prime_agent_base_url/releases/v$native_version/$native_file" -o "$native_archive"
+		prime_agent_curl_download -fsSL --connect-timeout 10 --max-time 300 "$prime_agent_base_url/releases/v$native_version/$native_file" -o "$native_archive"
 	if command -v sha256sum >/dev/null 2>&1; then native_checker=sha256sum; else native_checker=shasum; fi
 	prime_agent_run_quiet_with_animation "Verifying Prime Agent" "Verifying SHA-256" "Checking the downloaded archive." \
 		prime_agent_run_checksum_check "$prime_agent_native_stage" selected.sha256 "$native_checker"

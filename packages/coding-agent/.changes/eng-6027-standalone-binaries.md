@@ -7,3 +7,5 @@
 - Fixed interrupted compiled updates discarding the existing rollback target.
 - Fixed reinstalling or upgrading through the installer after an incompatible compiled executable falls back to Node.
 - Fixed interrupted fresh installations leaving a broken command.
+- Fixed installer downloads to require HTTPS and reject redirects to insecure protocols.
+- Changed macOS installation guidance to use the published installer until browser downloads are signed and notarized.
