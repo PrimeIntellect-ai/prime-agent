@@ -69,7 +69,10 @@ def restore_test_files(fixture: dict, fixture_dir: Path, repo_dir: Path) -> None
     for rel_path in fixture.get("test_files", []):
         source = fixture_dir / rel_path
         if source.is_file():
-            shutil.copy2(source, repo_dir / rel_path)
+            destination = repo_dir / rel_path
+            # The agent may have deleted the file or its directory.
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
 
 
 def fixture_outcome(

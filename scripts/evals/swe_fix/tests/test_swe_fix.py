@@ -298,6 +298,22 @@ class RunnerTests(unittest.TestCase):
         # budget.py is allowed; only the untracked scratch file is extra.
         self.assertEqual(result["extra_changed_files"], ["newfile.txt"])
 
+    def test_deleted_test_directory_still_scores(self):
+        script = self.write_agent_script('cd "$6"\nrm -rf test\n')
+        argv = [
+            "--fixture",
+            str(FIXTURES / "ts-date-utils"),
+            "--model",
+            "test/fake",
+            "--agent-bin",
+            str(script),
+        ]
+        exit_code, result = self.run_runner(argv)
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(result["resolved"])
+        self.assertFalse(result["target_test_passes"])
+        self.assertIn("test/dates.test.js", result["extra_changed_files"])
+
     def test_run_command_timeout_returns_failure_result(self):
         workdir = Path(tempfile.mkdtemp(prefix="swe-fix-cmd-"))
         result = runner.run_command("sleep 30", workdir, timeout=1)
