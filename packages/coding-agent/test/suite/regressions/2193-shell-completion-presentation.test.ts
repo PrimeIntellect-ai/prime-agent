@@ -235,6 +235,7 @@ describe("#2193 shell completion presentation", () => {
 				stopReason: "toolUse",
 			});
 			const chatContainer = new Container();
+			chatContainer.addChild(launch);
 			chatContainer.addChild(event);
 			const mode = Object.assign(Object.create(InteractiveMode.prototype), {
 				chatContainer,
@@ -244,7 +245,7 @@ describe("#2193 shell completion presentation", () => {
 				getCurrentCwd: () => "/tmp",
 			});
 			Reflect.get(InteractiveMode.prototype, "startAssistantStreamingMessage").call(mode, next);
-			expect(chatContainer.children[1]!.render(120)).toEqual([]);
+			expect(chatContainer.children[2]!.render(120)).toEqual([]);
 			const replay = buildConversationComponents(
 				[
 					fauxAssistantMessage(fauxToolCall("ipython", { code }, { id: "launch" }), { stopReason: "toolUse" }),

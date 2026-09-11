@@ -259,7 +259,7 @@ describe("IPythonCellComponent diff rendering", () => {
 			editDiffsExpanded: true,
 		}).render(120);
 		const plain = lines.map(stripAnsi);
-		const summaries = plain.filter((line) => line.includes("╰─"));
+		const summaries = plain.filter((line) => /╰─ [ab]\.ts/.test(line));
 		expect(summaries).toEqual(["    ╰─ a.ts +1 -1", "    ╰─ b.ts +1 -1"]);
 		expect(plain.join("\n")).not.toContain("Ctrl+O");
 	});
@@ -322,9 +322,8 @@ describe("IPythonCellComponent diff rendering", () => {
 			editDiffsExpanded: true,
 		}).split("\n");
 		expect(out[0]).not.toContain("cycle detail");
-		expect(out[1].trim()).toBe("");
-		expect(out[2]).toContain("await edit(...)");
-		expect(out.findIndex((line) => line.includes("a.ts"))).toBeGreaterThan(2);
+		expect(out[1]).toBe(" ╰─ await edit(...)");
+		expect(out.findIndex((line) => line.includes("a.ts"))).toBeGreaterThan(1);
 	});
 
 	it("keeps the summary line but hides diff rows when edit diffs are collapsed", () => {

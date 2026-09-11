@@ -347,7 +347,7 @@ describe("ENG-4531 agent message UI", () => {
 		expect(render(components[0] as AgentMessageComponent)).toContain("Agent message received · from parent Planner");
 	});
 
-	it.each([false, true])("uses compact rebuilt agent-message spacing with all output=%s", (expanded) => {
+	it.each([false, true])("uses mode-aware rebuilt agent-message spacing with all output=%s", (expanded) => {
 		const first = createAgentSessionMessage(createPayload("First notification."));
 		const second = createAgentSessionMessage({ ...createPayload("Second notification."), id: "agentmsg_4531_2" });
 		const toolCall = fauxAssistantMessage(fauxToolCall("ipython", { code: "print('ready')" }), {
@@ -365,13 +365,13 @@ describe("ENG-4531 agent message UI", () => {
 
 		const adjacent = buildConversationComponents([first, second], options);
 		expect(adjacent).toHaveLength(2);
-		expect(adjacent[0]?.render(120)[0]).toBe("");
-		expect(adjacent[1]?.render(120)[0]).not.toBe("");
+		expect(adjacent[0]?.render(120)[0] === "").toBe(!expanded);
+		expect(adjacent[1]?.render(120)[0] === "").toBe(expanded);
 
 		const toolThenMessage = buildConversationComponents([toolCall, second], options);
-		expect(toolThenMessage.at(-1)?.render(120)[0]).not.toBe("");
+		expect(toolThenMessage.at(-1)?.render(120)[0] === "").toBe(expanded);
 		const messageThenTool = buildConversationComponents([first, toolCall], options);
-		expect(messageThenTool.at(-1)?.render(120)[0]).not.toBe("");
+		expect(messageThenTool.at(-1)?.render(120)[0] === "").toBe(expanded);
 
 		const userThenMessage = buildConversationComponents(
 			[{ role: "user", content: "intervening prompt", timestamp: 123 }, second] as AgentMessage[],
@@ -386,7 +386,7 @@ describe("ENG-4531 agent message UI", () => {
 		expect(assistantThenMessage[1]?.render(120)[0]).toBe("");
 	});
 
-	it.each([false, true])("uses compact live agent-message spacing with all output=%s", (expanded) => {
+	it.each([false, true])("uses mode-aware live agent-message spacing with all output=%s", (expanded) => {
 		const chatContainer = new Container();
 		const mode = {
 			chatContainer,
@@ -402,8 +402,8 @@ describe("ENG-4531 agent message UI", () => {
 
 		addMessage(first);
 		addMessage(second);
-		expect(chatContainer.children[0]?.render(120)[0]).toBe("");
-		expect(chatContainer.children[1]?.render(120)[0]).not.toBe("");
+		expect(chatContainer.children[0]?.render(120)[0] === "").toBe(!expanded);
+		expect(chatContainer.children[1]?.render(120)[0] === "").toBe(expanded);
 
 		addMessage(fauxAssistantMessage(fauxToolCall("ipython", { code: "print('live')" }), { stopReason: "toolUse" }));
 		expect(chatContainer.children[2]?.render(120)[0]).not.toBe("");
@@ -422,7 +422,7 @@ describe("ENG-4531 agent message UI", () => {
 		if (!toolComponent) throw new Error("Missing tool component");
 		chatContainer.addChild(toolComponent);
 		addMessage(second);
-		expect(chatContainer.children[4]?.render(120)[0]).not.toBe("");
+		expect(chatContainer.children[4]?.render(120)[0] === "").toBe(expanded);
 
 		chatContainer.addChild(new Container());
 		addMessage(second);

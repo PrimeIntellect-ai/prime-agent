@@ -11,3 +11,5 @@
 - Changed sent and received agent messages to keep compact notices in overview and details, show full bodies only in all output, and use the shared detail cycle instead of a separate Ctrl+P toggle.
 - Fixed spacing after background shell completions and matched unique literal assignment-only shell launches to their completion notices.
 - Fixed multiline Python string colors across source lines and narrow wrapping, and kept embedded string content out of collapsed code previews.
+- Changed expanded Python cells to nest input directly under the summary, align marked output beneath it, and separate full tool and message blocks.
+- Fixed unwanted gaps between compact tool and agent-message rows when empty assistant messages or hidden thinking appear between them.

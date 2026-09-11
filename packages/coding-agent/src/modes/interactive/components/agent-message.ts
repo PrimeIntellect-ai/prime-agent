@@ -46,22 +46,25 @@ export class AgentMessageComponent extends Container {
 	private readonly content = new Container();
 	private readonly header = new Text("", 1, 0);
 	private readonly suppressLeadingSpace: boolean;
+	private readonly shouldAddLeadingSpace?: (expanded: boolean) => boolean;
 	private expanded = false;
 
 	constructor(
 		private readonly message: AgentSessionMessage,
 		_markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		options: { suppressLeadingSpace?: boolean } = {},
+		options: { suppressLeadingSpace?: boolean; shouldAddLeadingSpace?: (expanded: boolean) => boolean } = {},
 	) {
 		super();
 		this.suppressLeadingSpace = options.suppressLeadingSpace ?? false;
+		this.shouldAddLeadingSpace = options.shouldAddLeadingSpace;
 		this.addChild(this.content);
 		this.updateDisplay();
 	}
 
 	override render(width: number): string[] {
 		const lines = super.render(width);
-		return this.suppressLeadingSpace ? lines : ["", ...lines];
+		const leadingSpace = this.shouldAddLeadingSpace?.(this.expanded) ?? !this.suppressLeadingSpace;
+		return leadingSpace ? ["", ...lines] : lines;
 	}
 
 	setExpanded(expanded: boolean): void {

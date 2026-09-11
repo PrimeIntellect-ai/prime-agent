@@ -60,6 +60,50 @@ export function isCompactAgentMessageNeighbor(component: Component | undefined):
 	);
 }
 
+export interface ConversationSpacing {
+	precededByToolActivity: () => boolean;
+	shouldAddLeadingSpace: (expanded: boolean) => boolean;
+}
+
+/** Keep spacing responsive to hidden thinking and late shell attachment without rendering prior blocks again. */
+export function createConversationSpacing(previous: readonly Component[]): ConversationSpacing {
+	const last = previous.at(-1);
+	let lastIndex = previous.length - 1;
+	const getPrevious = (): { component: Component; trailingSpace: boolean } | undefined => {
+		if (!last) return undefined;
+		if (previous[lastIndex] !== last) lastIndex = previous.indexOf(last);
+		let toolSeparator: AssistantMessageComponent | undefined;
+		for (let index = lastIndex; index >= 0; index--) {
+			const component = previous[index]!;
+			if (component instanceof AssistantMessageComponent) {
+				const content = component.getSpacingContent();
+				if (content === "hidden") continue;
+				if (content === "tool-only") {
+					toolSeparator ??= component;
+					continue;
+				}
+				return toolSeparator
+					? { component: toolSeparator, trailingSpace: true }
+					: { component, trailingSpace: component.hasTrailingSpace() };
+			}
+			if (component instanceof ShellCompletionComponent && !component.isVisible()) continue;
+			if (toolSeparator && !isCompactAgentMessageNeighbor(component)) {
+				return { component: toolSeparator, trailingSpace: true };
+			}
+			return { component, trailingSpace: false };
+		}
+		return toolSeparator ? { component: toolSeparator, trailingSpace: true } : undefined;
+	};
+	return {
+		precededByToolActivity: () => isCompactAgentMessageNeighbor(getPrevious()?.component),
+		shouldAddLeadingSpace: (expanded) => {
+			const preceding = getPrevious();
+			if (preceding?.trailingSpace) return false;
+			return expanded ? preceding !== undefined : !isCompactAgentMessageNeighbor(preceding?.component);
+		},
+	};
+}
+
 function readUserText(content: string | Array<{ type: string; text?: string }>): string {
 	if (typeof content === "string") {
 		return content;
@@ -77,7 +121,10 @@ export function createShellCompletionComponent(
 	previous: readonly Component[],
 ): ShellCompletionComponent | undefined {
 	if (message.customType !== ASYNC_BASH_COMPLETION_CUSTOM_TYPE) return undefined;
-	const component = new ShellCompletionComponent(message);
+	const spacing = createConversationSpacing(previous);
+	const component = new ShellCompletionComponent(message, false, {
+		shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
+	});
 	const completion = readShellCompletion(message);
 	if (!completion) return component;
 	const tools = previous.filter((entry): entry is ToolExecutionComponent => entry instanceof ToolExecutionComponent);
@@ -126,7 +173,7 @@ export function buildConversationComponents(
 					{
 						cwd: options.cwd,
 						expanded,
-						precededByToolActivity: isCompactAgentMessageNeighbor(components.at(-1)),
+						precededByToolActivity: createConversationSpacing(components).precededByToolActivity,
 					},
 				),
 			);
@@ -134,11 +181,16 @@ export function buildConversationComponents(
 				if (content.type !== "toolCall") {
 					continue;
 				}
+				const spacing = createConversationSpacing(components);
 				const tool = new ToolExecutionComponent(
 					content.name,
 					content.id,
 					content.arguments,
-					{ ...options.toolOptions, includeImageDimensions: false },
+					{
+						...options.toolOptions,
+						includeImageDimensions: false,
+						shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
+					},
 					options.getToolDefinition(content.name),
 					options.ui,
 					options.cwd,
@@ -191,7 +243,7 @@ export function buildConversationComponents(
 			components.push(component);
 		} else if (isAgentSessionMessage(message) && message.display) {
 			const component = new AgentMessageComponent(message, options.markdownTheme, {
-				suppressLeadingSpace: isCompactAgentMessageNeighbor(components.at(-1)),
+				shouldAddLeadingSpace: createConversationSpacing(components).shouldAddLeadingSpace,
 			});
 			component.setExpanded(expanded);
 			components.push(component);

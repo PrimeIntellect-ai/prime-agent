@@ -1407,15 +1407,23 @@ export class TUI extends Container {
 
 		// Single pass through baseLine extracts both before and after segments
 		const afterStart = startCol + overlayWidth;
-		const base = extractSegments(baseLine, startCol, afterStart, totalWidth - afterStart, true);
+		const base = extractSegments(
+			normalizeTerminalOutput(baseLine),
+			startCol,
+			afterStart,
+			totalWidth - afterStart,
+			true,
+		);
+		// Clip a wide character crossing the overlay boundary instead of shifting the overlay.
+		const before = sliceWithWidth(base.before, 0, startCol, true);
 
 		// Extract overlay with width tracking (strict=true to exclude wide chars at boundary)
 		const overlay = sliceWithWidth(overlayLine, 0, overlayWidth, true);
 
 		// Pad segments to target widths
-		const beforePad = Math.max(0, startCol - base.beforeWidth);
+		const beforePad = Math.max(0, startCol - before.width);
 		const overlayPad = Math.max(0, overlayWidth - overlay.width);
-		const actualBeforeWidth = Math.max(startCol, base.beforeWidth);
+		const actualBeforeWidth = Math.max(startCol, before.width);
 		const actualOverlayWidth = Math.max(overlayWidth, overlay.width);
 		const afterTarget = Math.max(0, totalWidth - actualBeforeWidth - actualOverlayWidth);
 		const afterPad = Math.max(0, afterTarget - base.afterWidth);
@@ -1423,7 +1431,7 @@ export class TUI extends Container {
 		// Compose result
 		const r = TUI.SEGMENT_RESET;
 		const result =
-			base.before +
+			before.text +
 			" ".repeat(beforePad) +
 			r +
 			overlay.text +

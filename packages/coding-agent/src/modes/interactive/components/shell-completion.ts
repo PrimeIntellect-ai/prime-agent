@@ -112,12 +112,16 @@ export class ShellCompletionComponent implements Component {
 	constructor(
 		private readonly message: CustomMessage,
 		private attached = false,
+		private readonly options: { shouldAddLeadingSpace?: () => boolean } = {},
 	) {}
 	setAttached(): void {
 		this.attached = true;
 	}
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
+	}
+	isVisible(): boolean {
+		return !this.attached || this.expanded;
 	}
 	invalidate(): void {}
 	render(width: number): string[] {
@@ -135,7 +139,8 @@ export class ShellCompletionComponent implements Component {
 			: typeof this.message.content === "string"
 				? this.message.content
 				: JSON.stringify(this.message.content);
-		return [header, ...new Text(raw, 1, 0).render(width)];
+		const lines = [header, ...new Text(raw, 1, 0).render(width)];
+		return (this.options.shouldAddLeadingSpace?.() ?? true) ? ["", ...lines] : lines;
 	}
 }
 
