@@ -6,7 +6,7 @@ Status: Kevin approved implementation on September 11, 2026, with GPT-Astra dele
 
 The five PRs extracted behavior from AgentSession, but left existing parts of the same features in `core/`. The plan did not specify how to finish those migrations or organize the rest of the package. A smaller facade is useful, but it is not completion of the codebase cleanup.
 
-The current source inventory contains 343 TypeScript files. Physical LOC includes comments and blank lines. Assets, JavaScript templates/vendor files, Python runtime, tests, and generated output are outside that count.
+The audited stack base contains 343 TypeScript files. The following table records that baseline, before the ownership completion below. Physical LOC includes comments and blank lines. Assets, JavaScript templates/vendor files, Python runtime, tests, and generated output are outside that count.
 
 | Current location | Direct TypeScript files | Physical LOC in those files | Problem |
 | --- | ---: | ---: | --- |
@@ -84,7 +84,7 @@ Some repeated names still represent deliberate capability/integration pairs: `to
 
 ## First consolidated stack update
 
-Complete session ownership in one follow-up PR on the stack, using separate reviewable commits within it. Do not open one PR per file. Preserve the five existing PR titles and do not merge automatically.
+Implemented in one consolidated follow-up PR on the stack, with context and input/child changes in separate reviewable commits. The five existing PRs remain unchanged. Historical paths in this table remain explicit compatibility exports; canonical application consumers use the destinations.
 
 | Current source | Destination/responsibility |
 | --- | --- |
@@ -104,11 +104,11 @@ Complete session ownership in one follow-up PR on the stack, using separate revi
 
 Compaction/refinement functions are not independent just because they can be unit tested: they interpret persisted session entries and operate on session context. Keep the public SDK functions exported from the package root, redirecting them to their owner.
 
-Before consolidating refinement, separate lightweight outcome formatting from planning. The current message module imports refinement formatting while refinement imports message conversion; moving the same broad barrel would preserve the cycle. Harness persistence also shares an on-disk contract with Python's `rlm.harness`; preserve its format and reread-before-apply behavior.
+Refinement now separates lightweight outcome formatting from planning. Message conversion imports formatting/contracts directly; planning may consume message conversion without creating the former cycle. Harness persistence retains its shared on-disk contract with Python's `rlm.harness`, including reread-before-apply behavior.
 
 ## Kernel and runtime completion
 
-Treat this as the next coherent implementation commit group, not just a folder rename. It can share the ownership PR if review size remains reasonable; otherwise it is one complete kernel/runtime PR.
+This is the second consolidated follow-up PR. It completes kernel/runtime and SDK ownership together; it is pending integration and validation after the session feature PR.
 
 | Current source | Destination/responsibility |
 | --- | --- |
