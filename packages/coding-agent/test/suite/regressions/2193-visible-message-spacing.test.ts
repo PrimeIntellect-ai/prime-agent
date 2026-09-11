@@ -11,7 +11,7 @@ import stripAnsi from "strip-ansi";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
-import { createAsyncBashCompletionMessage } from "../../../src/core/messages.js";
+import { createAsyncBashCompletionMessage, createRefinementOutcomeMessage } from "../../../src/core/messages.js";
 import type {
 	AgentConnection,
 	AgentConnectionSessionContext,
@@ -202,6 +202,49 @@ describe("visible conversation spacing", () => {
 			assertSpacing(rows(components), detail);
 		}
 	});
+	test("separates shell notices from the previous visible event in live, replay and all detail modes", async () => {
+		harness = await createHarness();
+		const refinement = createRefinementOutcomeMessage({
+			id: "spacing-refinement",
+			summary: "Remember the verified shell behavior.",
+			rationale: "Keep the result.",
+			expectedOutcome: "Retain verified knowledge.",
+			appliedEdits: [{ action: "create", kind: "memory", id: "verified-shell", applied: true }],
+			harnessStatePath: "/tmp/harness.json",
+			scope: "local",
+		});
+		const messages: AgentMessage[] = [
+			refinement,
+			fauxAssistantMessage([fauxText("")]),
+			createAsyncBashCompletionMessage({ pid: 91, command: "unmatched", exitCode: 0 }, 10000),
+			fauxAssistantMessage([fauxThinking("Reasoning after completion"), fauxText("")]),
+			createAsyncBashCompletionMessage({ pid: 92, command: "another unmatched", exitCode: 0 }, 20000),
+		];
+		const source = JSON.stringify(messages);
+		const live = createMode(harness);
+		await deliver(live, messages);
+		const reopened = createMode(harness);
+		await reopened.renderSessionContext({ messages, thinkingLevel: "off", serviceTier: "default", model: null });
+		for (const mode of [live, reopened]) {
+			const [refinementComponent, empty, firstShell, thinking, secondShell] = mode.chatContainer.children;
+			for (const detail of [0, 1, 2, 0]) {
+				expect(empty!.render(120)).toEqual([]);
+				const refinementRows = refinementComponent!.render(120);
+				const firstShellRows = firstShell!.render(120);
+				expect(stripAnsi(refinementRows.at(-1)!).trim()).not.toBe("");
+				expect(precedingGap(rows(mode.chatContainer.children), "Background shell command finished")).toBe(1);
+				expect(firstShellRows[0]).toBe("");
+				expect(stripAnsi(firstShellRows[1]!)).toContain("Background shell command finished");
+				// No trailing separator is added to an event merely because it ends the transcript.
+				expect(mode.chatContainer.render(120).slice(0, refinementRows.length)).toEqual(refinementRows);
+				expect(secondShell!.render(120)[0] === "").toBe(detail !== 0);
+				expect(thinking!.render(120).length > 0).toBe(detail !== 0);
+				mode.defaultEditor.handleInput("\x0f");
+			}
+		}
+		expect(JSON.stringify(messages)).toBe(source);
+	});
+
 	test("handles long invisible histories without losing the preceding compact row", async () => {
 		harness = await createHarness();
 		const mode = createMode(harness);

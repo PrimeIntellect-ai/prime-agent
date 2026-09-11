@@ -123,7 +123,7 @@ export function createShellCompletionComponent(
 	if (message.customType !== ASYNC_BASH_COMPLETION_CUSTOM_TYPE) return undefined;
 	const spacing = createConversationSpacing(previous);
 	const component = new ShellCompletionComponent(message, false, {
-		shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
+		shouldAddLeadingSpace: spacing.shouldAddLeadingSpace,
 	});
 	const completion = readShellCompletion(message);
 	if (!completion) return component;
