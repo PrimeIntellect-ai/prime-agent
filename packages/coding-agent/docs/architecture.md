@@ -100,6 +100,12 @@ Place code inside the smallest feature that owns its behavior. Promote it outsid
 
 Use feature names and keep the structure shallow: files directly inside a feature directory are the default. Add another directory only for a coherent subfeature. Application source stays under `src/`; tests, scripts, docs, and build output stay at the package root. `core/` is a transitional location for existing code, not the default home for new shared code.
 
+A directory containing feature subdirectories should keep only its entry points, composition, and explicitly named cross-feature contracts directly inside it. Feature implementation belongs with its owner, even when other features import its contracts. Do not create a folder for every file or prohibit useful files at a feature root merely to make the tree uniform.
+
+Complete a feature's placement across old and new files. Extracting its controller does not leave its algorithms, persistence, or contracts ownerless in `core/`. Separate files can express those responsibilities inside one feature. If similar directory names represent an independent capability and its session integration, document the distinct APIs and consumers; neither naming nor hypothetical reuse establishes that boundary. Mixed files require a responsibility split before relocation.
+
+Every transitional location needs a named destination and migration scope. The [source organization completion plan](source-organization-plan.md) records the current gaps, proposed destinations, and validation requirements. Its proposed tree is not a claim that those moves have shipped.
+
 Independent testability, a pure function, or a small dependency interface does not require a top-level directory. Multiple importers are evidence to inspect, not a promotion rule: a UI reading a session goal's status does not make goal execution independent of sessions. Do not promote code for hypothetical future reuse.
 
 ### Keeping a feature together

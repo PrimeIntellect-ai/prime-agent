@@ -4,6 +4,8 @@
 
 `core/` currently contains most execution logic. Migrate responsibilities into their owning feature folders as their boundaries are established. `AgentSession` remains the public entry point and coordinates work across features. Each feature owner keeps its state and transitions together and receives only the dependencies it uses.
 
+The five session extraction PRs establish owners but do not complete source organization. The [completion plan](../docs/source-organization-plan.md) inventories the remaining gaps and proposed moves across the package. This source map describes current paths; update it with each implemented move.
+
 ## Goals
 
 | File | Responsibility |
@@ -46,7 +48,7 @@ Apply the architecture guide's placement and dependency rules to each extraction
 | `session/tools/` | Tool selection and shell-command execution. |
 | `session/extensions/` | Extension bindings, resource reload, and tool hooks. |
 
-`session/prepared-actions.ts` remains the shared action and recovery contract used across input, turns, and context. Shared continuation belongs to `session/turns/`, including continuation after compaction. Child usage belongs to `session/children/` because its accounting and cleanup follow child records. Core compaction/refinement algorithms and their public exports remain in `core/` for their broader callers.
+`session/prepared-actions.ts` currently contains action and recovery contracts used across input, turns, and context; the completion plan places these with input. Shared continuation belongs to `session/turns/`, including continuation after compaction. Child usage belongs to `session/children/` because its accounting and cleanup follow child records. Compaction/refinement implementations still in `core/` are unfinished migrations: SDK exports and cross-feature callers do not require a second feature directory.
 
 ## Session input scheduling
 
