@@ -185,6 +185,20 @@ describe("concurrent harness memory persistence", () => {
 		]);
 	});
 
+	it("copies unchanged entries when a loaded state is saved to a different directory", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sourceDir = join(harness.tempDir, "source-harness");
+		const targetDir = join(harness.tempDir, "target-harness");
+		createHostMemory(sourceDir, "seed-entry");
+
+		const source = loadHarnessState(sourceDir, "local");
+		saveHarnessState(targetDir, source);
+
+		expect(Object.keys(loadHarnessState(sourceDir, "local").entries.memory)).toEqual(["seed-entry"]);
+		expect(Object.keys(loadHarnessState(targetDir, "local").entries.memory)).toEqual(["seed-entry"]);
+	});
+
 	it("preserves two Python writers starting from the same absent file", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

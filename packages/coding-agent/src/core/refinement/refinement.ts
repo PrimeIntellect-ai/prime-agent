@@ -57,7 +57,7 @@ export interface HarnessState {
 	refinements: HarnessRefinementEvent[];
 }
 
-const harnessSnapshots = new WeakMap<HarnessState, { state: HarnessState; scope: HarnessScope }>();
+const harnessSnapshots = new WeakMap<HarnessState, { state: HarnessState; scope: HarnessScope; statePath: string }>();
 
 export interface RefinementEdit {
 	action: RefinementAction;
@@ -439,12 +439,29 @@ export function getHarnessStatePath(harnessStateDir: string = getGlobalHarnessSt
 	return join(harnessStateDir, "harness_state.json");
 }
 
+function resolveHarnessStateTarget(statePath: string): string {
+	const resolvedPath = realpathIfPresentSync(statePath);
+	let parent = dirname(resolvedPath);
+	try {
+		parent = realpathSync(parent);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		// The save path may not exist yet; saveHarnessState creates it before locking.
+	}
+	return join(parent, basename(resolvedPath));
+}
+
 export function loadHarnessState(
 	harnessStateDir: string = getGlobalHarnessStateDir(),
 	scope: HarnessScope = "global",
 ): HarnessState {
-	const state = readHarnessState(getHarnessStatePath(harnessStateDir), scope);
-	harnessSnapshots.set(state, { state: structuredClone(state), scope });
+	const statePath = getHarnessStatePath(harnessStateDir);
+	const state = readHarnessState(statePath, scope);
+	harnessSnapshots.set(state, {
+		state: structuredClone(state),
+		scope,
+		statePath: resolveHarnessStateTarget(statePath),
+	});
 	return state;
 }
 
@@ -531,8 +548,7 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
-	const resolvedPath = realpathIfPresentSync(statePath);
-	const targetPath = join(realpathSync(dirname(resolvedPath)), basename(resolvedPath));
+	const targetPath = resolveHarnessStateTarget(statePath);
 	const snapshot = harnessSnapshots.get(state);
 	const scope = snapshot?.scope ?? "global";
 	withHarnessFileLock(targetPath, () => {
@@ -546,11 +562,12 @@ export function saveHarnessState(harnessStateDir: string, state: HarnessState): 
 		}
 		if (!isWritableHarnessState(state)) throw new Error(invalidHarnessStateError());
 		const latest = latestRead.state;
-		const merged = mergeHarnessStateChanges(snapshot?.state ?? emptyHarnessState(), state, latest);
+		const baseline = snapshot?.statePath === targetPath ? snapshot.state : emptyHarnessState();
+		const merged = mergeHarnessStateChanges(baseline, state, latest);
 		const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
 		writeFileAtomicSync(targetPath, `${JSON.stringify(merged, null, 2)}\n`, { mode });
 		Object.assign(state, merged);
-		harnessSnapshots.set(state, { state: structuredClone(merged), scope });
+		harnessSnapshots.set(state, { state: structuredClone(merged), scope, statePath: targetPath });
 	});
 	return statePath;
 }
