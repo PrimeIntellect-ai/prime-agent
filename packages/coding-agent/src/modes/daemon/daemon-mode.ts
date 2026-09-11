@@ -267,6 +267,18 @@ const structuredLog = getLogger("coding-agent.daemon");
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
 const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
 const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
+// Orphaned-worker garbage collection: a session worker whose supervisor stays
+// unreachable (no supervisor claim, no successful replacement launch) exits
+// after this window instead of retrying the resurrection loop forever.
+// Sessions persist on disk, and a later supervisor spawns fresh workers on
+// demand, so an unreachable-supervisor worker serves nothing by lingering.
+const WORKER_SUPERVISOR_LOST_EXIT_MS_ENV = "PRIME_AGENT_INTERNAL_WORKER_SUPERVISOR_LOST_EXIT_MS";
+const DEFAULT_WORKER_SUPERVISOR_LOST_EXIT_MS = 5 * 60_000;
+
+function workerSupervisorLostExitMs(): number {
+	const raw = Number(process.env[WORKER_SUPERVISOR_LOST_EXIT_MS_ENV]);
+	return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_WORKER_SUPERVISOR_LOST_EXIT_MS;
+}
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -556,6 +568,7 @@ export class AgentDaemon {
 	private supervisorMonitorTimer?: ReturnType<typeof setTimeout>;
 	private supervisorFenceTimer?: ReturnType<typeof setTimeout>;
 	private supervisorLaunchInProgress = false;
+	private supervisorAbsentSince?: number;
 	private readonly supervisorClaims = new Map<DaemonSocketClient, BoundSupervisorGenerationClaim>();
 	private readonly peerGrants = new Map<string, DaemonWorkerPeerGrant>();
 	private readonly peerClaims = new Map<DaemonSocketClient, DaemonWorkerPeerGrant>();
@@ -741,19 +754,62 @@ export class AgentDaemon {
 
 	private async checkSupervisorAvailability(supervisorSocketPath: string): Promise<void> {
 		if (this.shuttingDown || this.hasAuthenticatedSupervisorConnection()) {
+			this.supervisorAbsentSince = undefined;
 			return;
 		}
 		if (await isDaemonShutdownAdmissionActive()) {
+			this.supervisorAbsentSince = undefined;
 			this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 5000);
 			return;
 		}
 		if (await this.canConnectToSupervisor(supervisorSocketPath)) {
+			this.supervisorAbsentSince = undefined;
 			return;
 		}
+		// The supervisor socket is unreachable; remember when the worker last
+		// saw it so the orphan window below stays bounded.
+		this.supervisorAbsentSince ??= Date.now();
 		await this.launchReplacementSupervisor(supervisorSocketPath);
+		await this.exitIfSupervisorOrphanedForTooLong(supervisorSocketPath);
 		if (!this.shuttingDown && !this.hasAuthenticatedSupervisorConnection()) {
 			this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 5000);
 		}
+	}
+
+	/**
+	 * Garbage-collect orphaned workers. If the supervisor has been unreachable
+	 * for the whole bounded window — no supervisor claim, no successful
+	 * replacement launch — the worker exits: retrying the resurrection loop
+	 * forever only accumulates garbage. Sessions persist on disk, so the next
+	 * supervisor to claim the socket spawns fresh workers on demand.
+	 */
+	private async exitIfSupervisorOrphanedForTooLong(supervisorSocketPath: string): Promise<void> {
+		const absentSince = this.supervisorAbsentSince;
+		if (absentSince === undefined || Date.now() - absentSince < workerSupervisorLostExitMs()) {
+			return;
+		}
+		if (this.hasAuthenticatedSupervisorConnection()) {
+			this.supervisorAbsentSince = undefined;
+			return;
+		}
+		if (this.hasOngoingSessionWork()) {
+			// An active run owns the worker a little longer; its turn end
+			// lets the next availability check reconsider.
+			return;
+		}
+		this.log(
+			`supervisor ${supervisorSocketPath} unreachable for ${Math.round((Date.now() - absentSince) / 1000)}s; exiting orphaned worker`,
+		);
+		await this.shutdown(0);
+	}
+
+	private hasOngoingSessionWork(): boolean {
+		for (const state of this.sessions.values()) {
+			if (state.runtime.session.isStreaming || state.runtime.session.isCompacting) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private hasAuthenticatedSupervisorConnection(): boolean {
