@@ -4,7 +4,7 @@
 
 `session/agent-session.ts` is the public session composition point. Each feature owner keeps its state and transitions together and receives only the dependencies it uses. `core/` still contains unmigrated capabilities and compatibility exports; it is not a destination for new implementation.
 
-The session ownership follow-up consolidates context algorithms, input actions, autonomy and child request contracts with their owners. The [completion plan](../docs/source-organization-plan.md) distinguishes implemented boundaries from remaining package work. Historical module paths forward explicit exports to canonical modules; application imports use the canonical paths. These compatibility files do not own duplicate state or behavior.
+The ownership follow-ups consolidate session features, the independent Python kernel, session runtime composition and SDK factories. The [completion plan](../docs/source-organization-plan.md) distinguishes implemented boundaries from remaining package work. Historical module paths forward explicit exports to canonical modules; application imports use the canonical paths. The former `SessionKernel.build()` entry has a small compatibility adapter over the same provisioner and tool assembly operations; it owns no duplicate lifecycle state.
 
 ## Goals
 
@@ -44,7 +44,7 @@ Apply the architecture guide's placement and dependency rules to each extraction
 | `session/refinement/` | Refinement planning/application lifecycle, automatic review, and execution. |
 | `session/context/` | Model-facing messages, usage, token estimates, prompts, pending context, transcript views, branch navigation, and export. |
 | `session/children/` | Child records, runtime creation, execution, projections, and usage accounting. |
-| `session/kernel/` | Kernel lifecycle, environment, host-handler composition, and stateless host-request adapters. |
+| `session/runtime/` | Session construction, replacement, configuration, kernel lifecycle/environment and host-handler composition. |
 | `session/models/` | Model selection, thinking preferences, and authenticated availability. |
 | `session/tools/` | Tool selection and shell-command execution. |
 | `session/extensions/` | Extension bindings, resource reload, and tool hooks. |
@@ -184,19 +184,28 @@ The former RLM runtime module's model search belongs to `session/models/model-se
 - Complete child cleanup before kernel teardown. The session supplies the following teardown operation so an empty child set does not add a scheduling delay before kernel disposal begins.
 - Keep calls that previously passed through public session methods live, including descendant receivers, registration, deletion, and maximum-depth status after settings updates.
 
-The root kernel directory belongs to `session/kernel/kernel-environment.ts`. Child directory construction receives a lazy operation for that directory rather than keeping a second root-directory field. The existing child runtime-options factory retains its public parent-session contract at the facade; child owners receive only the operations they use.
+The root kernel directory belongs to `session/runtime/kernel-environment.ts`. Child directory construction receives a lazy operation for that directory rather than keeping a second root-directory field. The existing child runtime-options factory retains its public parent-session contract at the facade; child owners receive only the operations they use.
 
 ## Tools, extensions, and kernel resources
 
 | File | Responsibility |
 | --- | --- |
-| `session/tools/tools.ts` | Tool definitions and active selection, allowlists, prompt contributions, and ACP tool updates. |
+| `session/tools/tools.ts` | Built-in tool assembly, active selection, allowlists, prompt contributions, and ACP tool updates. |
 | `session/extensions/extensions.ts` | Extension runner bindings, resource reload, and extension lifecycle. |
-| `session/kernel/kernel.ts` | Kernel construction, snapshot restoration, prewarming, and disposal. |
-| `session/kernel/kernel-environment.ts` | Kernel provisioning environment and root or ephemeral session directories. |
-| `session/kernel/kernel-host-handlers.ts` | Typed host-handler composition from live session operations. |
+| `session/runtime/kernel-lifecycle.ts` | Kernel preparation, snapshot restoration, prewarming, and disposal. |
+| `session/runtime/kernel-environment.ts` | Kernel provisioning environment and root or ephemeral session directories. |
+| `session/runtime/host-bridge.ts` | Typed host-handler composition from live session operations. |
+| `kernel/provisioner.ts`, `skill-bootstrap.ts` | Reusable kernel provisioning and Python skill handle installation. |
+| `kernel/repl-manager.ts`, `protocol.ts` | Python subprocess transport and protocol constants. |
+| `kernel/contracts.ts` | Kernel request/result contracts without process cleanup registration. |
+| `kernel/process-registry.ts`, `boot-gate.ts` | Process-wide cleanup registration and bounded kernel startup. |
+| `kernel/bootstrap.ts`, `state-snapshot.ts` | Python environment discovery/setup and snapshot path operations. |
 
 The session coordinates these owners with children, models, and input admission. A kernel replacement uses the previous kernel's disposal promise as its readiness gate. First-build restoration notices and snapshot-directory ownership stay with the kernel owner. Host handlers read the current runtime when invoked, including after replacement.
+
+`kernel/` exposes provisioning and process operations usable by installation/bootstrap without constructing a session. `session/runtime/` binds that capability to session lifetime, transcript notices and replacement ordering. The lifecycle's `prepare()` returns the provisioner; session tools assemble definitions afterward in the existing order. The legacy `session/kernel/kernel.ts` adapter retains `build()` and delegates to both owners, preserving late-message callback receivers and inherited disposal. Other historical kernel modules forward exports; `core/kernel/bootstrap-cli.ts` remains an executable wrapper around `cli/bootstrap-kernel.ts`.
+
+`sdk/create-session.ts` constructs sessions; `sdk/services.ts` composes their services; `sdk/contracts.ts` carries creation/service contracts. The runtime retains its injected creation factory and imports contracts directly. Public SDK barrels remain outward-facing so importing the runtime does not cycle back through SDK construction. Public exports, constructor options, session leases and replacement/disposal sequences remain unchanged.
 
 ACP resource cleanup retains its input pause until queued work and cleanup finish, and releases the pause on failure. Extension bindings preserve public session dispatch and callback receivers, including shutdown and partial rebinding. Pure facade delegates do not add asynchronous wrappers around already asynchronous owner operations.
 
@@ -209,9 +218,9 @@ ACP resource cleanup retains its input pause until queued work and cleanup finis
 | `session/context/context-view.ts` | Context usage, session statistics, and tree views over live transcript and child usage. |
 | `session/context/harness-context.ts` | Harness changes, digest consumption, and context for subsequent turns. |
 | `session/context/export.ts` | Session export using current model and extension rendering dependencies. |
-| `session/kernel/heartbeat-host-requests.ts` | Heartbeat request validation and controller operations. |
-| `session/kernel/message-host-requests.ts` | Message request validation and controller operations. |
-| `session/kernel/observe-host-requests.ts` | Observation request validation, controller operations, and result encoding. |
+| `coordination/scheduling/host-requests.ts` | Heartbeat request validation and controller operations. |
+| `coordination/messaging/host-requests.ts` | Message request validation and controller operations. |
+| `coordination/observation/host-requests.ts` | Observation request validation, controller operations, and result encoding. |
 
 The three host-request modules are stateless adapters. Kernel handler composition still calls the public session methods. Heartbeat and observation requests capture their controller on entry; messaging reads its controller at each operation. Compaction request interpretation belongs to the compaction owner.
 
