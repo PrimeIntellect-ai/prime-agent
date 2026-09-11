@@ -732,14 +732,12 @@ export class RlmSpawnLedger {
 	}
 
 	/**
-	 * Replay the ledger behind a stat-guarded edge cache. Every roster and
-	 * family resolution replays, and each replay re-reads and re-parses the
-	 * whole file; reads outnumber writes by orders of magnitude. The
-	 * multi-writer contract is preserved: any writer's append changes the
-	 * file's size, mtime, or inode, forcing a fresh replay, so cross-process
-	 * staleness stays bounded to in-flight appends exactly as before - minus
-	 * the re-parse cost on the unchanged-file fast path. A missing file skips
-	 * the cache: replaySync owns that decision and returns empty.
+	 * Replay the ledger behind a stat-guarded edge cache: a file whose size,
+	 * mtime, and inode are unchanged reuses the cached edges instead of
+	 * re-parsing. Any append forces a fresh replay - appendRecord drops the
+	 * cache for our own writes, and another process's append changes the
+	 * stat - so staleness stays bounded to in-flight appends. A missing file
+	 * bypasses the cache and replays to an empty edge set.
 	 */
 	private replaySyncCached(): Map<string, RlmLedgerEdge> {
 		let snapshot: { size: number; mtimeMs: number; ino: number } | undefined;
