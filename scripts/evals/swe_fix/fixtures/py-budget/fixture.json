@@ -5,6 +5,5 @@
   "target_test_command": "python3 -m unittest test_budget.AllocateTests.test_shares_sum_exactly_to_income",
   "pre_passing_tests": 3,
   "golden_patch": "golden.patch",
-  "allowed_files": ["budget.py"],
-  "test_files": ["test_budget.py"]
+  "allowed_files": ["budget.py"]
 }

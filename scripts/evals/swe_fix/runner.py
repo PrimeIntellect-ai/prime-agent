@@ -5,7 +5,7 @@ records the post-state (test results, diff, transcript), and prints the
 scored outcome as JSON.
 
 Real-model runs are manual: pass --model and ensure provider auth is
-configured in the environment. The harness itself is validated in CI by
+configured in the environment. The harness itself is validated by
 model-free self-tests (tests/test_swe_fix.py).
 
 Usage:
@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scorer  # noqa: E402
+
+
+def _captured_text(output: str | bytes | None) -> str:
+    """Decode captured subprocess output.
+
+    TimeoutExpired output arrives as bytes even with text=True.
+    """
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output
 
 
 def run_command(command: str, cwd: Path, timeout: int = 300) -> dict:
@@ -41,8 +54,8 @@ def run_command(command: str, cwd: Path, timeout: int = 300) -> dict:
         # A hanging command must still score as a failure, not abort the eval.
         return {
             "exit_code": 124,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
+            "stdout": _captured_text(exc.stdout),
+            "stderr": _captured_text(exc.stderr),
         }
     return {
         "exit_code": completed.returncode,
@@ -51,36 +64,52 @@ def run_command(command: str, cwd: Path, timeout: int = 300) -> dict:
     }
 
 
-def repo_changed_files(repo_dir: Path, initial_sha: str) -> list[str]:
-    """Files the agent changed: committed, staged, unstaged, or new."""
-    names: list[str] = []
-    commands = (
+def repo_changes(repo_dir: Path, initial_sha: str) -> tuple[list[str], list[str]]:
+    """Tracked changes against the initial commit, and untracked (new) files."""
+    tracked = subprocess.run(
         ["git", "diff", "--name-only", initial_sha],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return (
+        [line for line in tracked.splitlines() if line],
+        [line for line in untracked.splitlines() if line],
     )
-    for command in commands:
-        output = subprocess.run(command, cwd=repo_dir, capture_output=True, text=True, check=True).stdout
-        names.extend(line for line in output.splitlines() if line)
-    return sorted(set(names))
 
 
-def restore_test_files(fixture: dict, fixture_dir: Path, repo_dir: Path) -> None:
-    """Reset fixture tests to pristine so edited tests cannot mask a failed fix."""
-    for rel_path in fixture.get("test_files", []):
-        source = fixture_dir / rel_path
-        if source.is_file():
-            destination = repo_dir / rel_path
-            # The agent may have deleted the file or its directory.
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+def restore_scoring_tree(fixture: dict, repo_dir: Path, initial_sha: str) -> None:
+    """Revert every change outside allowed_files, including new files.
+
+    The scored suites then run the fixture's pristine tests and runners
+    plus the agent's allowed edits, so edited tests or agent-added shadow
+    runners (for example a repo-level unittest.py) cannot mask a failed
+    fix.
+    """
+    allowed = set(fixture.get("allowed_files", []))
+    tracked, untracked = repo_changes(repo_dir, initial_sha)
+    reverted = [path for path in tracked if path not in allowed]
+    if reverted:
+        subprocess.run(["git", "checkout", initial_sha, "--", *reverted], cwd=repo_dir, check=True)
+    for path in untracked:
+        if path not in allowed:
+            (repo_dir / path).unlink(missing_ok=True)
 
 
-def fixture_outcome(
-    fixture: dict, fixture_dir: Path, workdir: Path, initial_sha: str, agent_log: str
-) -> dict:
-    # Record the diff before restoring tests so edited tests stay visible.
-    changed_files = repo_changed_files(workdir, initial_sha)
-    restore_test_files(fixture, fixture_dir, workdir)
+def fixture_outcome(fixture: dict, workdir: Path, initial_sha: str, agent_log: str) -> dict:
+    # Record the diff before restoring so out-of-scope edits stay visible
+    # in the containment report even though they are reverted for scoring.
+    tracked, untracked = repo_changes(workdir, initial_sha)
+    changed_files = sorted(set(tracked) | set(untracked))
+    restore_scoring_tree(fixture, workdir, initial_sha)
     suite_result = run_command(fixture["test_command"], workdir)
     target_result = run_command(fixture["target_test_command"], workdir)
     session_text = read_session_text(agent_log)
@@ -129,6 +158,34 @@ def first_stderr_error(stderr: str) -> str | None:
         if stripped:
             return stripped
     return None
+
+
+def shutdown_agent_daemon(socket_path: Path) -> None:
+    """Stop the daemon the agent run leaves listening on the eval socket.
+
+    The CLI spawns a detached daemon per --daemon-socket; without this,
+    repeated evals accumulate orphan daemons and a timed-out run keeps
+    its worker going. Client commands ride in a protocol envelope; the
+    shutdown command closes the daemon's sessions before it exits.
+    """
+    envelope = json.dumps(
+        {
+            "type": "command",
+            "id": "eval-shutdown",
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "command": {"type": "shutdown"},
+        }
+    )
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(10)
+            client.connect(str(socket_path))
+            client.sendall(envelope.encode() + b"\n")
+            while client.recv(4096):
+                pass
+    except OSError:
+        # No daemon on the socket (launch failure or a stub agent): done.
+        pass
 
 
 def agent_env(agent_home: Path) -> dict:
@@ -223,19 +280,21 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = completed.returncode
     except subprocess.TimeoutExpired as exc:
         # A timed-out run still scores; keep whatever transcript exists.
-        agent_log = exc.stdout or ""
-        stderr_text = exc.stderr or ""
+        agent_log = _captured_text(exc.stdout)
+        stderr_text = _captured_text(exc.stderr)
         exit_code = None
     except OSError as exc:
         # A missing or non-executable agent binary still produces a result.
         agent_log = ""
         stderr_text = str(exc)
         exit_code = None
+    finally:
+        shutdown_agent_daemon(workdir / "daemon.sock")
     (workdir / "agent.log").write_text(agent_log)
     # stderr is where launch and auth failures land; keep it with the result.
     (workdir / "agent.stderr").write_text(stderr_text)
 
-    outcome = fixture_outcome(fixture, fixture_dir, repo_dir, initial_sha, agent_log)
+    outcome = fixture_outcome(fixture, repo_dir, initial_sha, agent_log)
     result = scorer.score_fixture(fixture, outcome)
     result["exit_code"] = exit_code
     result["workdir"] = str(workdir)

@@ -16,9 +16,10 @@ Measures the inner software-engineering loop on seeded-bug fixtures:
    prompt names the failing behavior, never the location.
 2. **Runner** (`swe_fix/runner.py`) copies a fixture to a temp dir, runs
    the agent headless (`--mode json`, `--cwd` at the fixture, task prompt
-   from the fixture), then records the post-state. Fixture tests are
-   restored to pristine before the post-run suites, so an agent that
-   edits tests cannot mask a failed fix.
+   from the fixture), then records the post-state. The post-run suites
+   run against pristine fixture files plus the agent's edits inside
+   `allowed_files`, so out-of-scope edits (tests, runners) cannot mask
+   a failed fix.
 3. **Scorer** (`swe_fix/scorer.py`) applies the rubric: target test
    passes; pre-existing tests still pass (no regressions); diff stays
    within the golden patch's file list (30% collateral tolerance); the
@@ -59,5 +60,4 @@ uv run --locked python -m unittest discover -s tests -v
 Copy an existing fixture directory, keep the shape: sources + tests
 (3 passing, 1 seeded failing), `task.txt` (symptom only), `golden.patch`
 (diff from the buggy tree, generated with `git diff`), and
-`fixture.json` (test command, target test command, test files,
-allowed files).
+`fixture.json` (test command, target test command, allowed files).

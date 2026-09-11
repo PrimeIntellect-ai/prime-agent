@@ -12,9 +12,11 @@ import contextlib
 import io
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -297,6 +299,90 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         # budget.py is allowed; only the untracked scratch file is extra.
         self.assertEqual(result["extra_changed_files"], ["newfile.txt"])
+
+    def test_agent_timeout_with_partial_output_still_scores(self):
+        # TimeoutExpired output arrives as bytes even with text=True; the
+        # partial transcript must still decode, save, and count.
+        event = json.dumps(
+            {
+                "type": "message_end",
+                "message": {"role": "assistant", "usage": {"totalTokens": 42}},
+            }
+        )
+        script = self.write_agent_script(f"cat <<'EVENTS'\n{event}\nEVENTS\nexec sleep 30\n")
+        argv = [
+            "--fixture",
+            str(FIXTURES / "py-budget"),
+            "--model",
+            "test/fake",
+            "--agent-bin",
+            str(script),
+            "--timeout",
+            "1",
+        ]
+        exit_code, result = self.run_runner(argv)
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(result["resolved"])
+        self.assertIsNone(result["exit_code"])
+        self.assertEqual(result["tokens_used"], 42)
+
+    def test_shadow_runner_cannot_fake_resolution(self):
+        # An agent-added repo-level unittest.py would shadow the stdlib
+        # runner and fake a passing suite; it is reverted before scoring.
+        script = self.write_agent_script(
+            'cd "$6"\n'
+            "cat > unittest.py <<'EOF'\n"
+            "import sys\n"
+            "sys.exit(0)\n"
+            "EOF\n"
+            "cat <<'EVENTS'\n"
+            + json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "toolCall",
+                                "id": "c1",
+                                "name": "ipython",
+                                "arguments": {"code": "await bash('python3 -m unittest -v')"},
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\nEVENTS\n"
+        )
+        argv = ["--fixture", str(FIXTURES / "py-budget"), "--model", "test/fake", "--agent-bin", str(script)]
+        exit_code, result = self.run_runner(argv)
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(result["resolved"])
+        self.assertFalse(result["target_test_passes"])
+        self.assertIn("unittest.py", result["extra_changed_files"])
+
+    def test_shutdown_agent_daemon_sends_shutdown_command(self):
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        socket_dir = Path(tempfile.mkdtemp(prefix="swe-fix-sock-"))
+        socket_path = socket_dir / "daemon.sock"
+        server.bind(str(socket_path))
+        server.listen(1)
+        received = []
+
+        def serve() -> None:
+            connection, _ = server.accept()
+            received.append(connection.recv(1024).decode())
+            connection.close()
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        runner.shutdown_agent_daemon(socket_path)
+        thread.join(timeout=5)
+        server.close()
+        self.assertEqual(len(received), 1)
+        envelope = json.loads(received[0])
+        self.assertEqual(envelope["type"], "command")
+        self.assertEqual(envelope["command"]["type"], "shutdown")
 
     def test_deleted_test_directory_still_scores(self):
         script = self.write_agent_script('cd "$6"\nrm -rf test\n')
