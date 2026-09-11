@@ -55,13 +55,14 @@ describe("InteractiveMode no-argument command usage errors", () => {
 		const context = makeSubmitContext();
 		const prompt = (context.agentConnection as { prompt: ReturnType<typeof vi.fn> }).prompt;
 		prototype.setupEditorSubmitHandler.call(context);
-		// The real editor holds the submitted text; the usage error must preserve it.
-		context.editor.setText("/tree fix the bug");
+		// The real editor clears its buffer before onSubmit runs; the usage
+		// error must put the draft back for editing (as /clear does).
+		// The real editor clears its buffer BEFORE invoking onSubmit.
+		context.editor.setText("");
 		await context.defaultEditor.onSubmit?.("/tree fix the bug");
 		expect(context.showError).toHaveBeenCalledWith("Usage: /tree");
 		expect(prompt).not.toHaveBeenCalled();
 		expect(context.showTreeSelector).not.toHaveBeenCalled();
-		// The submit chain preserves the editor text when a usage error shows.
 		expect(context.editor.getText()).toBe("/tree fix the bug");
 	});
 

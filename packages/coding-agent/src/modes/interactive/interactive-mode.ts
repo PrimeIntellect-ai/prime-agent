@@ -4758,6 +4758,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "settings") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /settings");
 						return;
 					}
@@ -4767,6 +4768,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "scoped-models") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /scoped-models");
 						return;
 					}
@@ -4806,6 +4808,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "share") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /share");
 						return;
 					}
@@ -4815,6 +4818,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "copy") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /copy");
 						return;
 					}
@@ -4834,6 +4838,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "session") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /session");
 						return;
 					}
@@ -4844,6 +4849,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "system-prompt") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /system-prompt");
 						return;
 					}
@@ -4859,6 +4865,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "context") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /context");
 						return;
 					}
@@ -4869,6 +4876,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "logs") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /logs");
 						return;
 					}
@@ -4884,6 +4892,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "heartbeats") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /heartbeats");
 						return;
 					}
@@ -4893,6 +4902,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "changelog") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /changelog");
 						return;
 					}
@@ -4903,6 +4913,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "hotkeys") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /hotkeys");
 						return;
 					}
@@ -4913,6 +4924,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "fork") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /fork");
 						return;
 					}
@@ -4922,6 +4934,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "clone") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /clone");
 						return;
 					}
@@ -4931,6 +4944,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "tree") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /tree");
 						return;
 					}
@@ -4941,6 +4955,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "login") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /login");
 						return;
 					}
@@ -4950,6 +4965,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "logout") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /logout");
 						return;
 					}
@@ -4992,6 +5008,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "reload") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /reload");
 						return;
 					}
@@ -5025,6 +5042,7 @@ export class InteractiveMode {
 				}
 				if (commandName === "debug") {
 					if (commandArgs) {
+						this.editor.setText(text);
 						this.showError("Usage: /debug");
 						return;
 					}
