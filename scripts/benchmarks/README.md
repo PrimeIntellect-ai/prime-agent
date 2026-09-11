@@ -68,7 +68,8 @@ Startup and memory use 10 trials per revision. Installation uses three; sizes ar
 Compiled revisions provision pinned Bun tooling and build their Linux x64 archive during untimed
 setup. The installer selects its normal default from the available artifacts; the harness does not
 force Node or compiled mode. Loopback downloads use the installer's explicit test exception, while
-external downloads retain normal HTTPS checks. Harness changes must land on `main` before CI uses
+external downloads retain normal HTTPS checks. A compiled candidate that falls back to Node is
+reported as a failed installation, rather than measuring the wrong runtime. Harness changes must land on `main` before CI uses
 them, including when benchmarking the Bun migration stack.
 Stock tools, skills, daemon, persistence, and Python bootstrap remain enabled. Homes contain no
 credentials, extensions, MCP servers, or personal skills. The onboarding splash is marked as already

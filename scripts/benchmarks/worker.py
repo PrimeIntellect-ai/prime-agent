@@ -272,6 +272,14 @@ def disk_bytes(home: Path) -> int:
     return int(output.split()[0])
 
 
+def verify_installation_format(home: Path, side: Side) -> None:
+    with (home / ".local/bin/prime-agent").open("rb") as executable:
+        compiled = executable.read(4) == b"\x7fELF"
+    side.runtime["installation_format"] = "compiled" if compiled else "npm"
+    if side.runtime.get("artifact_format") == "npm-tarballs+linux-x64-native" and not compiled:
+        raise RuntimeError("Expected the compiled installation, but the installer selected Node")
+
+
 def install(request: Request, side: Side, trial: int) -> None:
     user = f"benchmark{trial + 1}"
     subprocess.run(
@@ -300,6 +308,7 @@ def install(request: Request, side: Side, trial: int) -> None:
         version = run_as(user, ["prime-agent", "--version"], home, merge_output=True).strip()
         if VERSION not in version:
             raise RuntimeError(f"Installed version does not match the packed release: {version[:100]}")
+        verify_installation_format(home, side)
         if not (home / ".prime/agent/kernel-venv/bin/python").exists():
             raise RuntimeError("The installer's Python bootstrap did not complete")
         record(side, "install", trial, elapsed)

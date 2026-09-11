@@ -638,6 +638,9 @@ class MeasurementTests(unittest.TestCase):
             home = root / "benchmark1"
             (home / ".prime/agent/kernel-venv/bin").mkdir(parents=True)
             (home / ".prime/agent/kernel-venv/bin/python").touch()
+            command = home / ".local/bin/prime-agent"
+            command.parent.mkdir(parents=True)
+            command.write_text("#!/usr/bin/env node\n")
             side = Side(sha=SHA)
 
             def run_as(_user, command, *_args, **_kwargs):

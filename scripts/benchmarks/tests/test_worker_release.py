@@ -116,6 +116,24 @@ class ReleasePreparationTests(unittest.TestCase):
         self.assertEqual(env["PRIME_AGENT_DOWNLOAD_BASE_URL"], worker.ORIGIN)
         self.assertNotIn("PRIME_AGENT_INSTALL_METHOD", env)
 
+    def test_rejects_node_fallback_when_measuring_a_compiled_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            command = home / ".local/bin/prime-agent"
+            command.parent.mkdir(parents=True)
+            command.write_bytes(b"#!/usr/bin/env node\n")
+            side = Side(sha="a" * 40, runtime={"artifact_format": "npm-tarballs+linux-x64-native"})
+            with self.assertRaisesRegex(RuntimeError, "selected Node"):
+                worker.verify_installation_format(home, side)
+            self.assertEqual(side.runtime["installation_format"], "npm")
+            command.write_bytes(b"\x7fELFfixture")
+            worker.verify_installation_format(home, side)
+            self.assertEqual(side.runtime["installation_format"], "compiled")
+            command.write_bytes(b"#!/usr/bin/env node\n")
+            side.runtime["artifact_format"] = "npm-tarballs"
+            worker.verify_installation_format(home, side)
+            self.assertEqual(side.runtime["installation_format"], "npm")
+
 
 if __name__ == "__main__":
     unittest.main()
