@@ -1124,12 +1124,12 @@ describe("AgentsViewMode", () => {
 			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → open");
 			// Right toggles the summary row, so its hint follows the expansion state.
 			Reflect.set(view, "selectedIndex", 1);
-			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → expand");
+			expect(hints()).toBe("↑/↓ navigate   Enter expand   Ctrl+N new   → expand");
 			view.handleInput("\x1b[C");
-			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → collapse");
+			expect(hints()).toBe("↑/↓ navigate   Enter collapse   Ctrl+N new   → collapse");
 			// Only a scoped view has a parent to return to.
 			Reflect.set(view, "scopeRootSummary", parent);
-			expect(hints()).toBe("↑/↓ navigate   Enter open   Ctrl+N new   → collapse   ← parent");
+			expect(hints()).toBe("↑/↓ navigate   Enter collapse   Ctrl+N new   → collapse   ← parent");
 		} finally {
 			stopThemeWatcher();
 		}

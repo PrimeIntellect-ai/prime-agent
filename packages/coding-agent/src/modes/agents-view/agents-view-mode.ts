@@ -2689,12 +2689,12 @@ export class AgentsViewMode implements Component, Focusable {
 			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
 		}
 		const selected = this.rows[this.selectedIndex];
-		// Right toggles the list on a summary row and opens everywhere else; Left
-		// only has a parent scope to return to below the root view.
+		// Enter and Right both toggle the list on a summary row and open everywhere
+		// else; Left only has a parent scope to return to below the root view.
 		const rightAction = selected?.kind === "subagent-summary" ? (selected.expanded ? "collapse" : "expand") : "open";
 		const hints = [
 			`${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate`,
-			`${keyText("tui.select.confirm")} open`,
+			`${keyText("tui.select.confirm")} ${rightAction}`,
 			`${keyText("app.agents.new")} new`,
 			`${keyText("app.agents.open")} ${rightAction}`,
 			this.scopeRootSummary ? `${keyText("app.agents.back")} parent` : undefined,
