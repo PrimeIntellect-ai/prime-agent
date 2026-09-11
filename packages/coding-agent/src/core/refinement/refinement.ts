@@ -17,6 +17,7 @@ export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 export const REFINE_SKILL_NAME = "refine";
 const HARNESS_STATE_DIR_NAME = "harness";
 const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
+const HARNESS_SCHEMA_VERSION = 1;
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
@@ -274,6 +275,21 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
+function containsNonFiniteNumber(value: unknown): boolean {
+	if (typeof value === "number") return !Number.isFinite(value);
+	if (Array.isArray(value)) return value.some(containsNonFiniteNumber);
+	const record = objectRecord(value);
+	return record ? Object.values(record).some(containsNonFiniteNumber) : false;
+}
+
+function invalidHarnessStateError(): string {
+	return "Harness state is invalid or unreadable and was not overwritten. Repair or remove the file before saving.";
+}
+
+function unsupportedHarnessSchemaError(schema: unknown): string {
+	return `Unsupported harness schema ${String(schema)}; this version supports schema ${HARNESS_SCHEMA_VERSION}. The file was not overwritten.`;
+}
+
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
 	return value === "global" || value === "local" ? value : fallback;
 }
@@ -320,24 +336,41 @@ export function loadHarnessState(
 }
 
 function readHarnessState(statePath: string, scope: HarnessScope): HarnessState {
+	return readHarnessStateResult(statePath, scope).state;
+}
+
+function readHarnessStateResult(statePath: string, scope: HarnessScope): { state: HarnessState; writeError?: string } {
 	if (!existsSync(statePath)) {
-		return emptyHarnessState();
+		return { state: emptyHarnessState() };
 	}
 	let parsed: Partial<HarnessState>;
 	try {
 		const raw = JSON.parse(readFileSync(statePath, "utf8"));
 		// loadHarnessState runs on every system-prompt build and before each /refine, so
 		// a corrupt or unreadable (or non-object) state file must degrade to empty rather
-		// than throw and break the session. The next saveHarnessState rewrites it cleanly.
+		// than throw and break the session. Saving stays blocked so unknown data survives.
 		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-			return emptyHarnessState();
+			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
+		}
+		if (containsNonFiniteNumber(raw)) {
+			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 		}
 		parsed = raw as Partial<HarnessState>;
 	} catch {
-		return emptyHarnessState();
+		return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 	}
 	const state = emptyHarnessState();
-	state.schema = typeof parsed.schema === "number" ? parsed.schema : 1;
+	let writeError: string | undefined;
+	if (parsed.schema === undefined) {
+		state.schema = HARNESS_SCHEMA_VERSION;
+	} else if (typeof parsed.schema !== "number" || !Number.isFinite(parsed.schema)) {
+		return { state, writeError: invalidHarnessStateError() };
+	} else {
+		state.schema = parsed.schema;
+		if (parsed.schema !== HARNESS_SCHEMA_VERSION) {
+			writeError = unsupportedHarnessSchemaError(parsed.schema);
+		}
+	}
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const records = parsed.entries?.[kind];
 		if (records && typeof records === "object") {
@@ -357,7 +390,7 @@ function readHarnessState(statePath: string, scope: HarnessScope): HarnessState 
 	if (Array.isArray(parsed.refinements)) {
 		state.refinements = parsed.refinements;
 	}
-	return state;
+	return { state, writeError };
 }
 
 export function mergeHarnessStates(globalState: HarnessState, localState?: HarnessState): HarnessState {
@@ -387,7 +420,13 @@ export function saveHarnessState(harnessStateDir: string, state: HarnessState): 
 	const snapshot = harnessSnapshots.get(state);
 	const scope = snapshot?.scope ?? "global";
 	withHarnessFileLock(targetPath, () => {
-		const latest = readHarnessState(targetPath, scope);
+		const latestRead = readHarnessStateResult(targetPath, scope);
+		if (latestRead.writeError) throw new Error(latestRead.writeError);
+		if (state.schema !== HARNESS_SCHEMA_VERSION) {
+			throw new Error(unsupportedHarnessSchemaError(state.schema));
+		}
+		if (containsNonFiniteNumber(state)) throw new Error(invalidHarnessStateError());
+		const latest = latestRead.state;
 		const merged = mergeHarnessStateChanges(snapshot?.state ?? emptyHarnessState(), state, latest);
 		const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
 		writeFileAtomicSync(targetPath, `${JSON.stringify(merged, null, 2)}\n`, { mode });

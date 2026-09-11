@@ -372,9 +372,29 @@ class HarnessStateTest(unittest.TestCase):
 
                 self.assertEqual(state.list(), [])
                 self.assertEqual(state.refinements, [])
-                # The store must remain usable and self-heal on the next write.
-                created = state.create_memory("Recovered", "Works after corruption.", id="recovered")
-                self.assertEqual(HarnessState(state_path).get("memory", "recovered").content, created.content)
+                with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
+                    state.create_memory("Rejected", "Must not replace unknown data.", id="rejected")
+                self.assertEqual(state_path.read_text(encoding="utf-8"), payload)
+
+    def test_unsupported_schema_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            seed = HarnessState(state_path)
+            seed.create_memory("Preserved", "Known data remains readable.", id="preserved")
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            payload["schema"] = 2
+            payload["future_top"] = {"preserved": True}
+            payload["entries"]["futurekind"] = {"future": {"preserved": True}}
+            payload["entries"]["memory"]["preserved"]["future_entry_field"] = "preserved"
+            raw = json.dumps(payload, indent=2)
+            state_path.write_text(raw, encoding="utf-8")
+
+            state = HarnessState(state_path)
+
+            self.assertEqual(state.get("memory", "preserved").content, "Known data remains readable.")
+            with self.assertRaisesRegex(RuntimeError, "Unsupported harness schema 2"):
+                state.create_memory("Rejected", "Must not discard future data.", id="rejected")
+            self.assertEqual(state_path.read_text(encoding="utf-8"), raw)
 
     def test_update_skill_preserves_omitted_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

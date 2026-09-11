@@ -2,9 +2,9 @@
 
 The TypeScript refinement host and Python harness use the same adjacent `harness_state.json.lock` directory to serialize saves. Each save rereads the latest state while holding the lock, applies only the changes since its own loaded snapshot, and atomically replaces the file. Unrelated entries and appended refinement events survive concurrent saves. Changes to the same entry cause the entire later save to fail with a reload-and-retry error; no part of that save is persisted.
 
-Both writers retain the schema version loaded from disk. An ordinary memory save preserves the latest schema version; an explicit schema change fails if another writer has already changed the version since the snapshot was loaded.
+Both writers support schema `1`. Known entries remain readable from a newer schema, but mutations are rejected without changing the file so unknown fields and entry kinds cannot be discarded. Schema changes are accepted only after the implementation's supported version is updated.
 
-Python normalizes non-finite stored numbers to `null` and an invalid stored schema to version 1, so legacy invalid values do not block unrelated mutations. New writes containing non-finite numbers such as `NaN` or infinity fail before replacing the file, preserving the previously accepted state and keeping the JSON readable by the host.
+Malformed files, including legacy JSON containing `NaN`, infinity, or an unrepresentable numeric value, produce an empty read view so the session can continue. TypeScript and Python both reject mutations until the file is repaired or removed, and leave its bytes unchanged. New writes containing non-finite numbers also fail before replacing the previous state.
 
 Python generates distinct default refinement event IDs for concurrent calls. A pending refinement append fails if another writer has reset or rewritten the existing history. A memory save that leaves its refinement history unchanged preserves that accepted history replacement.
 

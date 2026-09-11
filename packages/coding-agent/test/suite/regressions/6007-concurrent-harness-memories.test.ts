@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -201,34 +201,30 @@ describe("concurrent harness memory persistence", () => {
 		}
 	});
 
-	it.each(["before Python loads", "after Python reloads"])("preserves a host schema change %s", async (timing) => {
+	it.each(["Python", "host"])("refuses an unsupported schema change from the %s writer", async (writer) => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const dir = join(harness.tempDir, "harness");
 		createHostMemory(dir, "seed-entry");
-		const updateHost = () => {
+		const statePath = getHarnessStatePath(dir);
+		const accepted = readFileSync(statePath, "utf8");
+		if (writer === "host") {
 			const host = loadHarnessState(dir, "local");
 			host.schema = 2;
-			applyRefinementProposal(host, proposal("host-entry"), { id: "host-migration", scope: "local" });
-			saveHarnessState(dir, host);
-		};
-		const paused = timing === "after Python reloads";
-		if (!paused) updateHost();
-		const python = pythonWriter(dir, "python-entry", paused);
-		try {
-			if (paused) {
-				await python.waitReady();
-				updateHost();
-				python.release();
+			expect(() => saveHarnessState(dir, host)).toThrow("supports schema 1");
+		} else {
+			const python = pythonWriter(dir, "schema-change", false, "schema");
+			try {
+				const result = await python.done;
+				expect(result.code).toBe(1);
+				expect(result.stderr).toContain("supports schema 1");
+			} finally {
+				await python.cleanup();
 			}
-			expect(await python.done).toEqual({ code: 0, stdout: "accepted\n", stderr: "" });
-			const state = loadHarnessState(dir);
-			expect(state.schema).toBe(2);
-			expect(Object.keys(state.entries.memory).sort()).toEqual(["host-entry", "python-entry", "seed-entry"]);
-			expect(state.refinements.some((event) => event.id === "host-migration")).toBe(true);
-		} finally {
-			await python.cleanup();
 		}
+		expect(readFileSync(statePath, "utf8")).toBe(accepted);
+		expect(existsSync(`${statePath}.lock`)).toBe(false);
+		createHostMemory(dir, "after-rejection");
 	});
 
 	it("assigns distinct default IDs to concurrent Python refinements", async () => {
@@ -259,7 +255,7 @@ describe("concurrent harness memory persistence", () => {
 		try {
 			const result = await python.done;
 			expect(result.code).toBe(1);
-			expect(result.stderr).toContain("Out of range float values are not JSON compliant");
+			expect(result.stderr).toContain("supports schema 1");
 			expect(loadHarnessState(dir)).toEqual(accepted);
 			expect(existsSync(`${getHarnessStatePath(dir)}.lock`)).toBe(false);
 			createHostMemory(dir, "after-rejection");
@@ -269,30 +265,40 @@ describe("concurrent harness memory persistence", () => {
 		}
 	});
 
-	it.each(["NaN", "Infinity", "-Infinity"])(
-		"normalizes an existing non-finite schema %s before Python saves",
-		async (schema) => {
-			const harness = await createHarness();
-			harnesses.push(harness);
-			const dir = join(harness.tempDir, "harness");
-			createHostMemory(dir, "seed-entry");
-			const state = loadHarnessState(dir);
-			writeFileSync(getHarnessStatePath(dir), JSON.stringify(state).replace('"schema":1', `"schema":${schema}`));
-			const python = pythonWriter(dir, "python-entry");
-			try {
-				expect((await python.done).code).toBe(0);
-				const saved = loadHarnessState(dir);
-				expect(saved.schema).toBe(1);
-				expect(Object.keys(saved.entries.memory).sort()).toEqual(["python-entry", "seed-entry"]);
-				expect(saved.refinements).toEqual(state.refinements);
-			} finally {
-				await python.cleanup();
-			}
-		},
-	);
+	for (const schema of ["NaN", "Infinity", "-Infinity", "1e400", "null", '"1"', "true"]) {
+		it.each(["Python", "host"])(
+			`refuses to overwrite a harness containing invalid schema ${schema} from the %s writer`,
+			async (writer) => {
+				const harness = await createHarness();
+				harnesses.push(harness);
+				const dir = join(harness.tempDir, "harness");
+				createHostMemory(dir, "seed-entry");
+				const state = loadHarnessState(dir);
+				const statePath = getHarnessStatePath(dir);
+				const corrupted = JSON.stringify(state).replace('"schema":1', `"schema":${schema}`);
+				writeFileSync(statePath, corrupted);
+				if (writer === "host") {
+					const host = loadHarnessState(dir, "local");
+					applyRefinementProposal(host, proposal("host-entry"), { id: "host-refine", scope: "local" });
+					expect(() => saveHarnessState(dir, host)).toThrow("invalid or unreadable");
+				} else {
+					const python = pythonWriter(dir, "python-entry");
+					try {
+						const result = await python.done;
+						expect(result.code).toBe(1);
+						expect(result.stderr).toContain("invalid or unreadable");
+					} finally {
+						await python.cleanup();
+					}
+				}
+				expect(readFileSync(statePath, "utf8")).toBe(corrupted);
+				expect(existsSync(`${statePath}.lock`)).toBe(false);
+			},
+		);
+	}
 
 	it.each(["metadata", "reference", "arguments"] as const)(
-		"repairs non-finite persisted %s values during unrelated Python mutations",
+		"refuses to overwrite non-finite persisted %s values during Python mutations",
 		async (field) => {
 			for (const value of ["NaN", "Infinity", "-Infinity", "1e400"]) {
 				for (const action of ["create", "update", "delete"]) {
@@ -303,19 +309,15 @@ describe("concurrent harness memory persistence", () => {
 					if (action !== "create") createHostMemory(dir, "target-entry");
 					const state = loadHarnessState(dir);
 					state.entries.memory["seed-entry"][field] = { invalid: "__NON_FINITE__", valid: "preserved" };
-					writeFileSync(getHarnessStatePath(dir), JSON.stringify(state).replace('"__NON_FINITE__"', value));
+					const statePath = getHarnessStatePath(dir);
+					const corrupted = JSON.stringify(state).replace('"__NON_FINITE__"', value);
+					writeFileSync(statePath, corrupted);
 					const python = pythonWriter(dir, "target-entry", false, action);
 					try {
 						const result = await python.done;
-						expect(result.code, `${field} ${value} ${action}: ${result.stderr}`).toBe(0);
-						const saved = loadHarnessState(dir);
-						expect(saved.entries.memory["seed-entry"][field]).toEqual({ invalid: null, valid: "preserved" });
-						expect(saved.refinements).toEqual(state.refinements);
-						if (action === "delete") expect(saved.entries.memory["target-entry"]).toBeUndefined();
-						else
-							expect(saved.entries.memory["target-entry"].content).toBe(
-								action === "update" ? "python update" : "target-entry",
-							);
+						expect(result.code, `${field} ${value} ${action}: ${result.stderr}`).toBe(1);
+						expect(result.stderr).toContain("invalid or unreadable");
+						expect(readFileSync(statePath, "utf8")).toBe(corrupted);
 					} finally {
 						await python.cleanup();
 					}
@@ -388,35 +390,51 @@ describe("concurrent harness memory persistence", () => {
 		}
 	});
 
-	it.each(["Python", "host"])("rejects a conflicting schema change when %s saves last", async (lastWriter) => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const dir = join(harness.tempDir, "harness");
-		createHostMemory(dir, "seed-entry");
-		const host = loadHarnessState(dir, "local");
-		host.schema = 2;
-		const pythonLast = lastWriter === "Python";
-		const python = pythonWriter(dir, "schema-change", pythonLast, "schema");
-		try {
-			if (pythonLast) {
-				await python.waitReady();
-				saveHarnessState(dir, host);
-				python.release();
-				const result = await python.done;
-				expect(result.code).toBe(1);
-				expect(result.stderr).toContain("Harness schema changed before save");
+	it.each(["Python", "host"])(
+		"refuses to rewrite unsupported future schema data from the %s writer",
+		async (writer) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const dir = join(harness.tempDir, "harness");
+			createHostMemory(dir, "seed-entry");
+			const statePath = getHarnessStatePath(dir);
+			const current = loadHarnessState(dir, "local");
+			const futureState = {
+				...current,
+				schema: 2,
+				future_top: { preserved: true },
+				entries: {
+					...current.entries,
+					memory: {
+						...current.entries.memory,
+						"seed-entry": { ...current.entries.memory["seed-entry"], future_entry_field: "preserved" },
+					},
+					futurekind: { future: { preserved: true } },
+				},
+			};
+			const futureRaw = `${JSON.stringify(futureState, null, 2)}\n`;
+			writeFileSync(statePath, futureRaw);
+			if (writer === "host") {
+				const host = loadHarnessState(dir, "local");
+				applyRefinementProposal(host, proposal("host-entry"), { id: "host-refine", scope: "local" });
+				expect(() => saveHarnessState(dir, host)).toThrow("Unsupported harness schema 2");
 			} else {
-				expect(await python.done).toEqual({ code: 0, stdout: "accepted\n", stderr: "" });
-				expect(() => saveHarnessState(dir, host)).toThrow("Harness schema changed before save");
+				const python = pythonWriter(dir, "python-entry");
+				try {
+					const result = await python.done;
+					expect(result.code).toBe(1);
+					expect(result.stderr).toContain("Unsupported harness schema 2");
+				} finally {
+					await python.cleanup();
+				}
 			}
-			expect(loadHarnessState(dir).schema).toBe(pythonLast ? 2 : 3);
-			expect(Object.keys(loadHarnessState(dir).entries.memory)).toEqual(["seed-entry"]);
-			expect(existsSync(`${getHarnessStatePath(dir)}.lock`)).toBe(false);
-			createHostMemory(dir, "after-conflict");
-		} finally {
-			await python.cleanup();
-		}
-	});
+			expect(readFileSync(statePath, "utf8")).toBe(futureRaw);
+			const readable = loadHarnessState(dir, "local");
+			expect(readable.schema).toBe(2);
+			expect(readable.entries.memory["seed-entry"].content).toBe("seed-entry");
+			expect(existsSync(`${statePath}.lock`)).toBe(false);
+		},
+	);
 
 	it("waits for Python's lock before the host reads and merges its save", async () => {
 		const harness = await createHarness();

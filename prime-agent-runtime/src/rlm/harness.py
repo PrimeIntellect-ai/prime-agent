@@ -27,6 +27,7 @@ HarnessScope = Literal["local", "global"]
 
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
+_HARNESS_SCHEMA_VERSION = 1
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 
@@ -89,9 +90,29 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _finite_json_float(value: str) -> float | None:
+def _finite_json_float(value: str) -> float:
     number = float(value)
-    return number if isfinite(number) else None
+    if not isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-JSON numeric constant {value}")
+
+
+def _invalid_harness_state_error() -> str:
+    return (
+        "Harness state is invalid or unreadable and was not overwritten. "
+        "Repair or remove the file before saving."
+    )
+
+
+def _unsupported_harness_schema_error(schema: object) -> str:
+    return (
+        f"Unsupported harness schema {schema}; this version supports schema "
+        f"{_HARNESS_SCHEMA_VERSION}. The file was not overwritten."
+    )
 
 
 def _slug(raw: str, fallback: str) -> str:
@@ -229,6 +250,7 @@ class HarnessState:
         # When set, local mutations raise instead of vanishing into a volatile
         # store; reads and global_=True delegation keep working.
         self._local_write_error = local_write_error
+        self._load_error: str | None = None
         self.schema: int | float = 1
         self.entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         self.refinements: list[RefinementEvent] = []
@@ -242,6 +264,8 @@ class HarnessState:
     def _ensure_local_writable(self) -> None:
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
+        if self._load_error is not None:
+            raise RuntimeError(self._load_error)
 
     def _disk_mtime(self) -> int | None:
         if self.file_path is None:
@@ -272,24 +296,34 @@ class HarnessState:
             self.refinements = []
             self._loaded_data = self._serialize()
             self._loaded_mtime = None
+            self._load_error = None
             return self
         mtime = self._disk_mtime()
+        self._load_error = None
         try:
             with self.file_path.open("r", encoding="utf-8") as f:
-                data = json.load(f, parse_constant=lambda _: None, parse_float=_finite_json_float)
+                data = json.load(f, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
         except (OSError, ValueError):
-            # A corrupt or unreadable state file must not crash the kernel or block
-            # refinement. Treat it as empty; the next save() rewrites it cleanly.
+            # Reads remain available, but writes must not replace data this runtime
+            # could not parse.
             data = {}
+            self._load_error = _invalid_harness_state_error()
         # json.load returns non-dict types for valid JSON like `null`, `[]`, or a bare
         # string; coerce those to an empty object before attribute access.
         if not isinstance(data, dict):
             data = {}
+            self._load_error = _invalid_harness_state_error()
 
-        schema = data.get("schema")
-        if type(schema) not in (int, float) or (isinstance(schema, float) and not isfinite(schema)):
-            schema = 1
+        if "schema" not in data:
+            schema = _HARNESS_SCHEMA_VERSION
+        else:
+            schema = data["schema"]
+            if type(schema) not in (int, float) or (isinstance(schema, float) and not isfinite(schema)):
+                self._load_error = _invalid_harness_state_error()
+                schema = _HARNESS_SCHEMA_VERSION
         self.schema = schema
+        if self._load_error is None and schema != _HARNESS_SCHEMA_VERSION:
+            self._load_error = _unsupported_harness_schema_error(schema)
 
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         raw_entries = data.get("entries", {})
@@ -374,8 +408,12 @@ class HarnessState:
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         target_path = Path(os.path.realpath(self.file_path))
         try:
+            self._ensure_local_writable()
+            if self.schema != _HARNESS_SCHEMA_VERSION:
+                raise RuntimeError(_unsupported_harness_schema_error(self.schema))
             with _harness_file_lock(target_path):
                 latest = HarnessState(target_path, scope=self.scope)
+                latest._ensure_local_writable()
                 data = _merge_harness_changes(self._loaded_data, self._serialize(), latest._loaded_data)
                 self._write_state(target_path, data)
                 self.load()
@@ -442,8 +480,8 @@ class HarnessState:
                 metadata=metadata,
                 source=source,
             )
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         return self._upsert(
             kind,
             title,
@@ -527,8 +565,8 @@ class HarnessState:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
             return target.delete(kind, id)
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
@@ -577,8 +615,8 @@ class HarnessState:
                 metadata=metadata,
                 source=source,
             )
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         entry_id = id or _slug(title, kind)
@@ -624,8 +662,8 @@ class HarnessState:
                 metadata=metadata,
                 source=source,
             )
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
@@ -801,8 +839,8 @@ class HarnessState:
     ) -> RefinementEvent:
         if target := self._global_target(global_, kwargs):
             return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         event_id = id or f"refine_{uuid4().hex}"
         normalized_changes = [changes] if isinstance(changes, str) else list(changes)
         event = RefinementEvent(
