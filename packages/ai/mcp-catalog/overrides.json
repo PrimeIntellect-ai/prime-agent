@@ -1,0 +1,227 @@
+{
+	"$comment": "Prime-curated adjustments layered on the deterministic import. Keys are '<source>/<plugin>/<server>' identity triples from the pinned fixtures (stdio adapters are keyed '<source>/<plugin>'). This file is review data, never credentials: it can rename ids/labels, group brands, and mark verified/dynamic-registration knowledge, but cannot add OAuth client ids or secrets.",
+	"servers": {
+		"openai-plugins/linear/linear": {
+			"bundledSkill": true,
+			"verification": "verified",
+			"clientRegistration": "dynamic",
+			"note": "pre-existing built-in integration; OAuth dynamic client registration (plus CIMD) verified against public provider metadata",
+			"aliases": [
+				"linear-app"
+			]
+		},
+		"openai-plugins/notion/notion": {
+			"bundledSkill": true,
+			"verification": "verified",
+			"clientRegistration": "dynamic",
+			"note": "pre-existing built-in integration; OAuth dynamic client registration (plus CIMD) verified against public provider metadata",
+			"aliases": [
+				"notion-workspace"
+			]
+		},
+		"openai-plugins/slack/slack": {
+			"clientRegistration": "pre-registered",
+			"setupReason": "Slack MCP has no dynamic client registration; a Slack-registered app client id is required. Upstream configs carry OpenAI/Claude-branded client ids that Prime must not reuse.",
+			"note": "branded OAuth client ids stripped from both upstream configs"
+		},
+		"openai-plugins/zoom/zoom": {
+			"id": "zoom-meetings",
+			"label": "Zoom Meetings",
+			"note": "the upstream OpenAI zoom plugin targets the Zoom meetings MCP endpoint; renamed to keep the general zoom endpoint distinct"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-mcp": {
+			"label": "Zoom"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-chat-mcp": {
+			"label": "Zoom Chat"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-canvas-mcp": {
+			"label": "Zoom Canvas"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-tasks-mcp": {
+			"label": "Zoom Tasks"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-whiteboard-mcp": {
+			"label": "Zoom Whiteboard"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-revenue-accelerator-mcp": {
+			"label": "Zoom Revenue Accelerator"
+		},
+		"claude-plugins-official/vanta/vanta-us": {
+			"id": "vanta",
+			"label": "Vanta (US)"
+		},
+		"claude-plugins-official/vanta/vanta-eu": {
+			"label": "Vanta (EU)"
+		},
+		"claude-plugins-official/vanta/vanta-aus": {
+			"label": "Vanta (Australia)"
+		},
+		"claude-plugins-official/airwallex-agentos/airwallex-agentos": {
+			"id": "airwallex",
+			"label": "Airwallex"
+		},
+		"claude-plugins-official/airwallex-agentos/airwallex-dev": {
+			"id": "airwallex-sandbox",
+			"label": "Airwallex (Sandbox)"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-asset-mgmt": {
+			"label": "Cloudinary Asset Management"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-env-config": {
+			"label": "Cloudinary Environment Config"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-smd": {
+			"label": "Cloudinary Structured Metadata"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-analysis": {
+			"label": "Cloudinary Analysis"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-mediaflows": {
+			"label": "Cloudinary MediaFlows"
+		},
+		"claude-plugins-official/mapbox/mapbox": {
+			"label": "Mapbox"
+		},
+		"claude-plugins-official/mapbox/mapbox-devkit": {
+			"label": "Mapbox DevKit"
+		},
+		"claude-plugins-official/mapbox/mapbox-docs": {
+			"label": "Mapbox Docs"
+		},
+		"claude-plugins-official/confidence/confidence-flags": {
+			"label": "Spotify Confidence Flags"
+		},
+		"claude-plugins-official/confidence/confidence-docs": {
+			"label": "Spotify Confidence Docs"
+		},
+		"claude-plugins-official/synthflow/synthflow": {
+			"label": "Synthflow"
+		},
+		"claude-plugins-official/synthflow/synthflow-docs": {
+			"label": "Synthflow Docs"
+		},
+		"claude-plugins-official/atlassian/atlassian": {
+			"label": "Atlassian"
+		},
+		"claude-plugins-official/paypal/paypal-sandbox": {
+			"id": "paypal-sandbox",
+			"label": "PayPal (Sandbox)"
+		},
+		"claude-plugins-official/cockroachdb/cockroachdb-cloud": {
+			"id": "cockroachdb",
+			"label": "CockroachDB Cloud"
+		},
+		"claude-plugins-official/prisma/Prisma-Remote": {
+			"id": "prisma",
+			"label": "Prisma"
+		},
+		"claude-plugins-official/adobe-for-creativity/Adobe for creativity": {
+			"label": "Adobe for Creativity"
+		},
+		"claude-plugins-official/hubspot-sales/hubspot": {
+			"note": "endpoint path is scoped to the Claude connector catalog"
+		},
+		"claude-plugins-official/lusha/lusha": {
+			"note": "endpoint path is scoped to the Claude connector catalog"
+		},
+		"claude-plugins-official/legalzoom/legalzoom": {
+			"note": "endpoint path is scoped to the Claude connector catalog"
+		},
+		"claude-plugins-official/firebase": {
+			"service": "firebase",
+			"label": "Firebase"
+		},
+		"claude-plugins-official/looker": {
+			"service": "looker",
+			"label": "Looker"
+		},
+		"claude-plugins-official/data-agent-kit-starter-pack": {
+			"service": "google-cloud",
+			"label": "Google Data Agent Kit"
+		},
+		"claude-plugins-official/mongodb-atlas/mongodb-atlas": {
+			"label": "MongoDB Atlas"
+		},
+		"openai-plugins/datadog/datadog": {
+			"label": "Datadog"
+		},
+		"claude-plugins-official/aws-agents-for-devsecops/aws-devops-agent": {
+			"label": "AWS Agents for DevSecOps"
+		},
+		"claude-plugins-official/alloydb": {
+			"label": "AlloyDB",
+			"service": "alloydb"
+		},
+		"claude-plugins-official/cloud-sql-mysql": {
+			"label": "Cloud SQL for MySQL",
+			"service": "cloud-sql"
+		},
+		"claude-plugins-official/cloud-sql-postgresql": {
+			"label": "Cloud SQL for PostgreSQL",
+			"service": "cloud-sql"
+		},
+		"claude-plugins-official/cloud-sql-sqlserver": {
+			"label": "Cloud SQL for SQL Server",
+			"service": "cloud-sql"
+		},
+		"claude-plugins-official/spanner": {
+			"label": "Spanner",
+			"service": "spanner"
+		},
+		"claude-plugins-official/dataproc": {
+			"label": "Dataproc",
+			"service": "dataproc"
+		},
+		"claude-plugins-official/bigquery-data-analytics": {
+			"label": "BigQuery",
+			"service": "bigquery"
+		},
+		"claude-plugins-official/firestore-native": {
+			"label": "Firestore",
+			"service": "firebase"
+		},
+		"claude-plugins-official/google-cloud-storage": {
+			"label": "Google Cloud Storage",
+			"service": "google-cloud"
+		},
+		"claude-plugins-official/knowledge-catalog": {
+			"label": "Knowledge Catalog",
+			"service": "google-cloud"
+		},
+		"claude-plugins-official/amazon-location-service": {
+			"label": "Amazon Location Service"
+		},
+		"claude-plugins-official/aws-amplify": {
+			"label": "AWS Amplify"
+		},
+		"claude-plugins-official/aws-core": {
+			"label": "AWS Core"
+		},
+		"claude-plugins-official/aws-data-analytics": {
+			"label": "AWS Data Analytics"
+		},
+		"claude-plugins-official/aws-serverless": {
+			"label": "AWS Serverless"
+		},
+		"claude-plugins-official/aws-transform": {
+			"label": "AWS Transform"
+		},
+		"claude-plugins-official/sagemaker-ai": {
+			"label": "Amazon SageMaker AI"
+		},
+		"claude-plugins-official/deploy-on-aws": {
+			"label": "Deploy on AWS"
+		}
+	},
+	"excludedServers": [
+		{
+			"key": "claude-plugins-official/dropbox/claude_app_mcp",
+			"reason": "Claude-app-specific endpoint variant; the official Dropbox endpoint is imported from the openai catalog"
+		},
+		{
+			"key": "claude-plugins-official/deploy-on-aws/awsknowledge",
+			"reason": "docs-only server per upstream plugin notes; the AWS IaC stdio adapter is recorded for the plugin"
+		}
+	]
+}

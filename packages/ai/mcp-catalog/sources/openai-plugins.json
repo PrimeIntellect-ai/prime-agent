@@ -1,0 +1,626 @@
+{
+	"$comment": "Pinned snapshot of the remote account/SaaS/cloud service MCP configs in OpenAI's public plugins catalog. Derived 2026-09-11 by reading the public marketplace and per-plugin configs at the pinned commit (read-only HTTP, no plugin code executed, no auth). This file is an import input, not the shipped catalog; provenance fields are preserved verbatim so the importer can strip OAuth placeholders/branded client ids deterministically. Regenerate by re-reading the pinned URLs below and updating plugins[].mcpServers accordingly.",
+	"source": "openai-plugins",
+	"repository": "https://github.com/openai/plugins",
+	"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+	"catalogUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/.agents/plugins/marketplace.json",
+	"loaderConvention": "Legacy Codex plugins auto-discover a root .mcp.json when the manifest omits mcpServers; both explicitly referenced and implicitly discovered configs are recorded (see wiring).",
+	"scope": "Plugins whose shipped config is a remote account/SaaS/cloud MCP server. Excluded upstream: hosted research/search (consensus), hosted app-ID-only mappings, local stdio utilities, docs/workflow plugins.",
+	"counts": {
+		"plugins": 25,
+		"withOauthPlaceholders": 6
+	},
+	"plugins": [
+		{
+			"name": "airtable",
+			"displayName": "Airtable",
+			"description": "Bring operational data and context into the flow of your ChatGPT conversations. You can ask questions, create and update records, and analyze your data—all through conversation. Use the data in Airtable as input to the work you’re doing in ChatGPT, like building a landing page using content you’ve organized in Airtable. Make quick updates to Airtable without leaving the chat. Airtable for ChatGPT is ideal anytime you need quick access to structured internal data to inform your conversation.\n\nAirtable's App connects ChatGPT directly to your Airtable bases, so you can ask questions, create and update records, and analyze your data—all through conversation",
+			"category": "Productivity",
+			"author": "Airtable",
+			"homepage": "https://airtable.com",
+			"privacyUrl": "https://www.airtable.com/company/privacy",
+			"supportUrl": "https://support.airtable.com/docs/contacting-airtable-support",
+			"termsUrl": "https://www.airtable.com/company/tos",
+			"version": "6.0.1",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/airtable/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": true,
+			"mcpServers": {
+				"airtable": {
+					"type": "http",
+					"url": "https://mcp.airtable.com/mcp",
+					"oauth": {
+						"client_id": "<AIRTABLE_PUBLIC_CLIENT_ID>"
+					}
+				}
+			}
+		},
+		{
+			"name": "atlassian-rovo",
+			"displayName": "Atlassian Rovo",
+			"description": "Manage Jira and Confluence fast",
+			"category": "Productivity",
+			"author": "Atlassian",
+			"homepage": "https://www.atlassian.com",
+			"privacyUrl": "https://www.atlassian.com/legal/privacy-policy",
+			"termsUrl": "https://www.atlassian.com/legal/cloud-terms-of-service",
+			"license": "MIT",
+			"version": "1.0.6",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/atlassian-rovo/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"atlassian-rovo": {
+					"type": "http",
+					"url": "https://mcp.atlassian.com/v1/mcp/authv2"
+				}
+			}
+		},
+		{
+			"name": "canva",
+			"displayName": "Canva",
+			"description": "Bring your Canva design workflow into Codex and create, refine, and review designs through natural conversation.\nAvailable skills:\nResize for social media: Adapt a design for Facebook, Instagram, and LinkedIn in one step.\nBulk create: Generate multiple designs from spreadsheet data using a brand template.\nEdit designs: Update text, media, and formatting, or reposition and resize elements.\nGet design feedback: Receive structured feedback on visual hierarchy, layout, readability, consistency, and accessibility.\nImplement feedback: Review comment threads and apply clear, actionable changes.\nBrand check: Check colors, fonts, logo usage, and copy against your Brand Kit.\nOnce installed, describe what you want in plain language or invoke Canva directly with @Canva.\nTry prompts like:\n- @Canva, resize this design for social media.\n- @Canva, create designs from this spreadsheet using my brand template.\n- @Canva, update the headline in this design.\n- @Canva, review this design’s visual hierarchy and readability.\n- @Canva, implement the feedback in the comment threads.\n- @Canva, check this design against my Brand Kit.\n\nRequirements: Connect your Canva account to use the plugin. Bulk Create requires an eligible Canva Enterprise plan.\n\nWant to take a more hands-on approach? Instantly open your design in Canva’s powerful editor for the final touches.",
+			"category": "Creativity",
+			"author": "Canva Pty Ltd.",
+			"homepage": "https://www.canva.com",
+			"privacyUrl": "https://www.canva.com/policies/privacy-policy/",
+			"supportUrl": "https://www.canva.com/help/contact-us/",
+			"termsUrl": "https://www.canva.com/policies/terms-of-use/",
+			"version": "14.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/canva/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"canva": {
+					"type": "http",
+					"url": "https://mcp.canva.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "clickup",
+			"displayName": "ClickUp",
+			"description": "Turn Codex into your ClickUp command center.",
+			"category": "Productivity",
+			"author": "ClickUp",
+			"homepage": "https://clickup.com",
+			"license": "MIT",
+			"version": "1.0.3",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/clickup/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"clickup": {
+					"type": "http",
+					"url": "https://mcp.clickup.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "cloudflare",
+			"displayName": "Cloudflare",
+			"description": "Cloudflare platform plugin with curated skills for Workers, Wrangler, and Agents SDK plus the official Cloudflare API MCP server.",
+			"category": "Developer Tools",
+			"author": "Cloudflare",
+			"homepage": "https://workers.cloudflare.com/",
+			"privacyUrl": "https://www.cloudflare.com/privacypolicy/",
+			"termsUrl": "https://www.cloudflare.com/website-terms/",
+			"license": "MIT",
+			"version": "0.1.2",
+			"wiring": "explicit_manifest",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/cloudflare/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"cloudflare-api": {
+					"type": "http",
+					"url": "https://mcp.cloudflare.com/mcp",
+					"note": "Official Cloudflare API MCP server. Uses OAuth on first connection, with optional bearer-token auth for automation. Provides token-efficient access to the Cloudflare API via search() and execute()."
+				}
+			}
+		},
+		{
+			"name": "datadog",
+			"displayName": "Datadog (Preview)",
+			"description": "Available for US1 customers only. Analyze, investigate, and act on your Datadog telemetry directly from ChatGPT using natural language. Ask questions about your production applications, identify, visualize, and remediate issues in your critical services. Run agentic loops to ensure you continue to maintain good observability and service management posture.",
+			"category": "Developer Tools",
+			"author": "Datadog",
+			"homepage": "https://www.datadoghq.com",
+			"privacyUrl": "https://www.datadoghq.com/legal/privacy/",
+			"supportUrl": "https://www.datadoghq.com/support/",
+			"termsUrl": "https://www.datadoghq.com/legal/terms/2024-10-25/",
+			"version": "10.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/datadog/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"datadog": {
+					"type": "http",
+					"url": "https://mcp.datadoghq.com/v1/mcp"
+				}
+			}
+		},
+		{
+			"name": "dropbox",
+			"displayName": "Dropbox",
+			"description": "The Dropbox plugin for ChatGPT connects your Dropbox files directly to ChatGPT. You can access files, save ChatGPT-generated content to Dropbox, and create sharing links without switching tools. Everything respects your existing Dropbox permissions, and ChatGPT only works with files you already have access to.",
+			"category": "Productivity",
+			"author": "Dropbox",
+			"homepage": "https://www.dropbox.com",
+			"privacyUrl": "https://www.dropbox.com/privacy",
+			"supportUrl": "https://www.dropbox.com/get_help",
+			"termsUrl": "https://www.dropbox.com/terms",
+			"version": "5.0.1",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/dropbox/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"dropbox": {
+					"type": "http",
+					"url": "https://mcp.dropbox.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "figma",
+			"displayName": "Figma",
+			"description": "Figma workflows for design implementation, Code Connect templates, and design system rule generation.",
+			"category": "Creativity",
+			"author": "Figma",
+			"homepage": "https://www.figma.com",
+			"privacyUrl": "https://www.figma.com/legal/privacy/",
+			"termsUrl": "https://www.figma.com/legal/developer-terms/",
+			"license": "LicenseRef-Figma-Developer-Terms",
+			"version": "2.0.20",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/figma/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"figma": {
+					"type": "http",
+					"url": "https://mcp.figma.com/mcp",
+					"oauth_resource": "https://mcp.figma.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "github",
+			"displayName": "GitHub",
+			"description": "Inspect repositories, triage pull requests and issues, debug CI, and publish changes through a hybrid GitHub connector and CLI workflow.",
+			"category": "Developer Tools",
+			"author": "OpenAI",
+			"homepage": "https://github.com/",
+			"privacyUrl": "https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement",
+			"termsUrl": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+			"license": "MIT",
+			"version": "0.1.11",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/github/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"github": {
+					"type": "http",
+					"url": "https://api.githubcopilot.com/mcp/",
+					"bearer_token_env_var": "GITHUB_PAT_TOKEN"
+				}
+			}
+		},
+		{
+			"name": "gmail",
+			"displayName": "Gmail",
+			"description": "Work with Gmail using the configured Gmail app connector.",
+			"category": "Communication",
+			"author": "OpenAI",
+			"homepage": "https://workspace.google.com/products/gmail/",
+			"privacyUrl": "https://policies.google.com/privacy",
+			"termsUrl": "https://policies.google.com/terms",
+			"license": "MIT",
+			"version": "0.1.9",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/gmail/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": true,
+			"mcpServers": {
+				"gmail": {
+					"type": "http",
+					"url": "https://gmailmcp.googleapis.com/mcp/v1",
+					"scopes": [
+						"https://mail.google.com/",
+						"https://www.googleapis.com/auth/gmail.modify",
+						"https://www.googleapis.com/auth/gmail.compose",
+						"https://www.googleapis.com/auth/gmail.readonly",
+						"https://www.googleapis.com/auth/gmail.metadata"
+					],
+					"oauth": {
+						"callback_port": 12798,
+						"client_id": "<GMAIL_PUBLIC_CLIENT_ID>",
+						"client_secret": "<GMAIL_CLIENT_SECRET>"
+					}
+				}
+			}
+		},
+		{
+			"name": "google-calendar",
+			"displayName": "Google Calendar",
+			"description": "Connect Google Calendar for scheduling, availability, daily briefs, and event management.",
+			"category": "Productivity",
+			"author": "OpenAI",
+			"homepage": "https://workspace.google.com/products/calendar/",
+			"privacyUrl": "https://policies.google.com/privacy",
+			"termsUrl": "https://policies.google.com/terms",
+			"license": "MIT",
+			"version": "1.2.6",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/google-calendar/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": true,
+			"mcpServers": {
+				"google-calendar": {
+					"type": "http",
+					"url": "https://calendarmcp.googleapis.com/mcp/v1",
+					"scopes": [
+						"https://www.googleapis.com/auth/calendar",
+						"https://www.googleapis.com/auth/calendar.acls",
+						"https://www.googleapis.com/auth/calendar.calendarlist",
+						"https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+						"https://www.googleapis.com/auth/calendar.calendars",
+						"https://www.googleapis.com/auth/calendar.calendars.readonly",
+						"https://www.googleapis.com/auth/calendar.events",
+						"https://www.googleapis.com/auth/calendar.events.freebusy",
+						"https://www.googleapis.com/auth/calendar.events.readonly",
+						"https://www.googleapis.com/auth/calendar.freebusy",
+						"https://www.googleapis.com/auth/calendar.readonly",
+						"https://www.googleapis.com/auth/calendar.settings.readonly"
+					],
+					"oauth": {
+						"callback_port": 12798,
+						"client_id": "<GOOGLE_CALENDAR_PUBLIC_CLIENT_ID>",
+						"client_secret": "<GOOGLE_CALENDAR_CLIENT_SECRET>"
+					}
+				}
+			}
+		},
+		{
+			"name": "google-drive",
+			"displayName": "Google Drive",
+			"description": "Use Google Drive as the single entrypoint for Drive, Docs, Sheets, and Slides work.",
+			"category": "Productivity",
+			"author": "OpenAI",
+			"homepage": "https://workspace.google.com/products/drive/",
+			"privacyUrl": "https://policies.google.com/privacy",
+			"termsUrl": "https://policies.google.com/terms",
+			"license": "MIT",
+			"version": "0.1.15",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/google-drive/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": true,
+			"mcpServers": {
+				"google-drive": {
+					"type": "http",
+					"url": "https://drivemcp.googleapis.com/mcp/v1",
+					"scopes": [
+						"https://www.googleapis.com/auth/drive",
+						"https://www.googleapis.com/auth/drive.readonly",
+						"https://www.googleapis.com/auth/drive.file"
+					],
+					"oauth": {
+						"callback_port": 12798,
+						"client_id": "<GOOGLE_DRIVE_PUBLIC_CLIENT_ID>",
+						"client_secret": "<GOOGLE_DRIVE_CLIENT_SECRET>"
+					}
+				}
+			}
+		},
+		{
+			"name": "granola",
+			"displayName": "Granola",
+			"description": "Granola MCP connects your meeting history to ChatGPT so your assistant can pull real context from past conversations while you work.\n\nUse MCP when you're already working on something bigger:\n\n-   Writing PRDs or proposals: Pull customer feedback, stakeholder input, and decisions from relevant meetings directly into your draft\n    \n-   Building presentations or reports: Combine insights from multiple conversations with your other research and data\n    \n-   Coding with context: Give your AI the project background, requirements, and technical decisions discussed in planning meetings\n    \n-   Strategic analysis: Merge meeting insights with documents, data, and other sources for comprehensive analysis\n    \nHow it works:\n\nYour AI assistant can search your Granola meetings by topic, person, company, or timeframe - then cite specific conversations in its responses. No more switching tabs to find \"what the customer said\" or \"when we decided that.\"\n\nThe difference:\n\nInstead of copy-pasting meeting notes into prompts, your AI pulls exactly what it needs from your meeting history automatically. You stay focused on the work, not the research or context.",
+			"category": "Productivity",
+			"author": "Granola",
+			"homepage": "https://www.granola.ai",
+			"privacyUrl": "https://help.granola.ai/article/privacy-policy",
+			"supportUrl": "https://help.granola.ai/",
+			"termsUrl": "https://help.granola.ai/article/platform-terms-of-service",
+			"license": "MIT",
+			"version": "1.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/granola/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"granola": {
+					"type": "http",
+					"url": "https://mcp.granola.ai/mcp"
+				}
+			}
+		},
+		{
+			"name": "higgsfield",
+			"displayName": "Higgsfield",
+			"description": "Generate images and videos from a text prompt or your own photo. Turn a product shot into a video ad, restyle a photo, animate a still, or build a two-minute narrated explainer. Every major image and video model in one place.",
+			"category": "Creativity",
+			"author": "Higgsfield AI, Inc.",
+			"homepage": "https://higgsfield.ai",
+			"privacyUrl": "https://higgsfield.ai/privacy-policy",
+			"supportUrl": "https://discord.com/invite/higgsfield",
+			"termsUrl": "https://higgsfield.ai/terms-of-use-agreement",
+			"version": "1.2.1",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/higgsfield/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"higgsfield": {
+					"type": "http",
+					"url": "https://mcp.higgsfield.ai/mcp"
+				}
+			}
+		},
+		{
+			"name": "linear",
+			"displayName": "Linear",
+			"description": "Search, create and update Linear issues, projects, and initiatives. Draft PRDs, write updates, analyze customer requests, and keep plans up to date — all from within ChatGPT",
+			"category": "Productivity",
+			"author": "Linear Orbit, Inc",
+			"homepage": "https://linear.app/",
+			"privacyUrl": "https://linear.app/privacy",
+			"supportUrl": "https://linear.app/contact",
+			"termsUrl": "https://linear.app/terms",
+			"license": "MIT",
+			"version": "5.0.1",
+			"wiring": "explicit_manifest",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/linear/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"linear": {
+					"type": "http",
+					"url": "https://mcp.linear.app/mcp",
+					"oauth_resource": "https://mcp.linear.app/mcp"
+				}
+			}
+		},
+		{
+			"name": "monday-com",
+			"displayName": "monday.com",
+			"description": "The monday.com AI Connector brings core platform capabilities directly to agents and AI assistants. It supports searching boards, creating and updating items and columns, assigning owners, setting timelines, and posting updates — enabling a wide range of work management and CRM use cases across teams and departments.\n\nTeams of people and agents use monday.com as a task tracker and project tracking hub: planning campaigns and events, tracking milestones, dependencies, and workload, managing approval workflows and request intake, and sharing status updates across projects and portfolios — as well as a CRM for managing leads, contacts, and deals.\n\nBeyond day-to-day work management, the connector lets agents answer questions using monday.com's official knowledge base, plan and build automations and multi-step workflows, run and save reusable code actions, and configure other monday.com agents .",
+			"category": "Productivity",
+			"author": "monday.com",
+			"homepage": "https://monday.com",
+			"privacyUrl": "https://monday.com/l/privacy/privacy-policy/",
+			"supportUrl": "https://support.monday.com/hc/en-us/requests/new?ticket_form_id=13855862562962",
+			"termsUrl": "https://monday.com/terms/tos",
+			"version": "2.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/monday-com/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"monday-com": {
+					"type": "http",
+					"url": "https://mcp.monday.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "notion",
+			"displayName": "Notion",
+			"description": "Notion workflows for implementation planning, research synthesis, meeting preparation, and knowledge capture.",
+			"category": "Productivity",
+			"author": "Notion",
+			"homepage": "https://www.notion.so/",
+			"privacyUrl": "https://www.notion.com/help/privacy",
+			"termsUrl": "https://www.notion.so/legal/terms-of-use",
+			"license": "MIT",
+			"version": "0.1.7",
+			"wiring": "explicit_manifest",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/notion/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"notion": {
+					"type": "http",
+					"url": "https://mcp.notion.com/mcp",
+					"oauth_resource": "https://mcp.notion.com"
+				}
+			}
+		},
+		{
+			"name": "posthog",
+			"displayName": "PostHog",
+			"description": "PostHog gives your AI agent direct access to your product analytics, feature flags, experiments, error tracking, surveys, logs, and LLM analytics. Ask questions about your data, create insights, toggle feature flags, analyze errors, search docs, and more — all from chat.",
+			"category": "Data & Analytics",
+			"author": "PostHog Inc.",
+			"homepage": "https://posthog.com",
+			"privacyUrl": "https://posthog.com/privacy",
+			"supportUrl": "https://posthog.com/support",
+			"termsUrl": "https://posthog.com/terms",
+			"license": "MIT",
+			"version": "1.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/posthog/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"posthog": {
+					"type": "http",
+					"url": "https://mcp.posthog.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "sentry",
+			"displayName": "Sentry",
+			"description": "Inspect recent issues and events in Sentry from Codex.",
+			"category": "Developer Tools",
+			"author": "OpenAI",
+			"homepage": "https://sentry.io/",
+			"privacyUrl": "https://sentry.io/privacy/",
+			"termsUrl": "https://sentry.io/terms/",
+			"license": "MIT",
+			"version": "0.1.2",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/sentry/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"sentry": {
+					"type": "http",
+					"url": "https://mcp.sentry.dev/mcp"
+				}
+			}
+		},
+		{
+			"name": "shopify",
+			"displayName": "Shopify",
+			"description": "Shopify for ChatGPT makes store building and management as easy as having a conversation. Effortlessly connect your existing store or create a new online store by describing your business. Simply chat to add products, adjust inventory across locations, create discount codes, browse recent orders, view customer details, or pull analytics on your store’s performance.",
+			"category": "Business & Operations",
+			"author": "Shopify",
+			"homepage": "https://shopify.com",
+			"privacyUrl": "https://www.shopify.com/legal/privacy",
+			"supportUrl": "https://help.shopify.com",
+			"termsUrl": "https://www.shopify.com/legal/terms",
+			"version": "3.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/shopify/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": true,
+			"mcpServers": {
+				"shopify": {
+					"type": "http",
+					"url": "https://setup.shopify.com/mcp",
+					"oauth": {
+						"client_id": "<SHOPIFY_PUBLIC_CLIENT_ID>"
+					},
+					"oauth_resource": "https://setup.shopify.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "slack",
+			"displayName": "Slack",
+			"description": "Work with Slack using the configured Slack integration.",
+			"category": "Communication",
+			"author": "Slack",
+			"homepage": "https://slack.com/",
+			"privacyUrl": "https://slack.com/privacy-policy",
+			"termsUrl": "https://slack.com/terms-of-service/user",
+			"license": "MIT",
+			"version": "0.1.7",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/slack/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"slack": {
+					"type": "http",
+					"url": "https://mcp.slack.com/mcp",
+					"oauth": {
+						"client_id": "11843774967.11905492103734"
+					}
+				}
+			}
+		},
+		{
+			"name": "stripe",
+			"displayName": "Stripe",
+			"description": "Develop your payments integration faster with the ability to create products, prices, and payment links directly in ChatGPT. Run your business from ChatGPT with the ability to retrieve and manage payments, subscriptions, invoices, refunds, disputes, and customers. Build and debug your payment integration quicker than ever by searching the Stripe documentation and getting integration recommendations without needing to leave ChatGPT.",
+			"category": "Finance",
+			"author": "Stripe",
+			"homepage": "https://stripe.com",
+			"privacyUrl": "https://stripe.com/privacy",
+			"supportUrl": "https://support.stripe.com",
+			"termsUrl": "https://stripe.com/legal/ssa",
+			"version": "7.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/stripe/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"stripe": {
+					"type": "http",
+					"url": "https://mcp.stripe.com"
+				}
+			}
+		},
+		{
+			"name": "supabase",
+			"displayName": "Supabase",
+			"description": "Manage Supabase projects directly through ChatGPT. Execute SQL queries on PostgreSQL databases, design and modify table schemas, deploy serverless edge functions, and configure user authentication. Access real-time logs for debugging, create and apply database migrations, and manage development branches through natural language.",
+			"category": "Developer Tools",
+			"author": "Supabase",
+			"homepage": "https://supabase.com",
+			"privacyUrl": "https://supabase.com/privacy",
+			"supportUrl": "https://supabase.com/support",
+			"termsUrl": "https://supabase.com/terms",
+			"license": "MIT",
+			"version": "1.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/supabase/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"supabase": {
+					"type": "http",
+					"url": "https://mcp.supabase.com/mcp"
+				}
+			}
+		},
+		{
+			"name": "vercel",
+			"displayName": "Vercel",
+			"description": "Build and deploy web apps and agents",
+			"category": "Developer Tools",
+			"author": "Vercel Labs",
+			"homepage": "https://vercel.com/",
+			"privacyUrl": "https://vercel.com/legal/privacy-policy",
+			"termsUrl": "https://vercel.com/legal/terms",
+			"license": "Apache-2.0",
+			"version": "0.21.4",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/vercel/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": false,
+			"mcpServers": {
+				"vercel": {
+					"type": "http",
+					"url": "https://mcp.vercel.com"
+				}
+			}
+		},
+		{
+			"name": "zoom",
+			"displayName": "Zoom",
+			"description": "Smart meeting insights from Zoom",
+			"category": "Communication",
+			"author": "Zoom",
+			"homepage": "https://zoom.us",
+			"privacyUrl": "https://zoom.us/privacy",
+			"termsUrl": "https://www.zoom.com/en/trust/terms/",
+			"license": "MIT",
+			"version": "1.0.0",
+			"wiring": "implicit_default_dot_mcp",
+			"configUrl": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/zoom/.mcp.json",
+			"serviceKind": "account_saas_cloud",
+			"oauthPlaceholders": true,
+			"mcpServers": {
+				"zoom": {
+					"type": "http",
+					"url": "https://mcp.zoom.us/mcp/meeting/streamable",
+					"oauth": {
+						"client_id": "<ZOOM_PUBLIC_CLIENT_ID>"
+					}
+				}
+			}
+		}
+	]
+}

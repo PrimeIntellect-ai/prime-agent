@@ -1,0 +1,258 @@
+{
+	"sources": {
+		"openai-plugins": {
+			"plugins": 25,
+			"remoteServers": 25,
+			"stdioServers": 0,
+			"excluded": 0
+		},
+		"claude-plugins-official": {
+			"plugins": 118,
+			"remoteServers": 98,
+			"stdioServers": 43,
+			"excluded": 5
+		}
+	},
+	"merged": [
+		{
+			"server": "airtable",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.airtable.com/mcp"
+			]
+		},
+		{
+			"server": "canva",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.canva.com/mcp"
+			]
+		},
+		{
+			"server": "cloudflare-api",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.cloudflare.com/mcp"
+			]
+		},
+		{
+			"server": "datadog",
+			"sources": [
+				"openai-plugins"
+			],
+			"urls": [
+				"https://mcp.datadoghq.com/v1/mcp"
+			]
+		},
+		{
+			"server": "figma",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.figma.com/mcp"
+			]
+		},
+		{
+			"server": "github",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://api.githubcopilot.com/mcp/"
+			]
+		},
+		{
+			"server": "linear",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.linear.app/mcp"
+			]
+		},
+		{
+			"server": "monday-com",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.monday.com/mcp"
+			]
+		},
+		{
+			"server": "notion",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.notion.com/mcp"
+			]
+		},
+		{
+			"server": "posthog",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.posthog.com/mcp"
+			]
+		},
+		{
+			"server": "sentry",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.sentry.dev/mcp",
+				"https://mcp.sentry.dev/mcp?utm_source=plugin"
+			]
+		},
+		{
+			"server": "slack",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.slack.com/mcp"
+			]
+		},
+		{
+			"server": "stripe",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.stripe.com"
+			]
+		},
+		{
+			"server": "supabase",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.supabase.com/mcp"
+			]
+		},
+		{
+			"server": "vercel",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.vercel.com"
+			]
+		},
+		{
+			"server": "zoom-meetings",
+			"sources": [
+				"openai-plugins",
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.zoom.us/mcp/meeting/streamable"
+			]
+		},
+		{
+			"server": "airwallex-sandbox",
+			"sources": [
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.sandbox.airwallex.com/developer"
+			]
+		},
+		{
+			"server": "revenuecat",
+			"sources": [
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.revenuecat.ai/mcp"
+			]
+		},
+		{
+			"server": "vanta",
+			"sources": [
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.vanta.com/mcp"
+			]
+		},
+		{
+			"server": "vanta-eu",
+			"sources": [
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.eu.vanta.com/mcp"
+			]
+		},
+		{
+			"server": "vanta-aus",
+			"sources": [
+				"claude-plugins-official"
+			],
+			"urls": [
+				"https://mcp.aus.vanta.com/mcp"
+			]
+		}
+	],
+	"excluded": [
+		{
+			"key": "claude-plugins-official/cockroachdb/cockroachdb-toolbox",
+			"reason": "local stdio utility inside a remote-service plugin; outside the remote service lane"
+		},
+		{
+			"key": "claude-plugins-official/cockroachdb/cockroachdb-toolbox-http",
+			"reason": "loopback endpoint; local server, not a remote service"
+		},
+		{
+			"key": "claude-plugins-official/deploy-on-aws/awsknowledge",
+			"reason": "docs-only server per upstream plugin notes; the AWS IaC stdio adapter is recorded for the plugin"
+		},
+		{
+			"key": "claude-plugins-official/dropbox/claude_app_mcp",
+			"reason": "Claude-app-specific endpoint variant; the official Dropbox endpoint is imported from the openai catalog"
+		},
+		{
+			"key": "claude-plugins-official/prisma/Prisma-Local",
+			"reason": "local stdio utility inside a remote-service plugin; outside the remote service lane"
+		}
+	],
+	"counts": {
+		"total": 140,
+		"http": 102,
+		"httpTemplate": 5,
+		"sse": 1,
+		"stdio": 32,
+		"ready": 80,
+		"requiresSetup": 60,
+		"verified": 2,
+		"oauthStrategy": 14,
+		"apiKeyStrategy": 32,
+		"mergedFromBothSources": 16
+	}
+}
