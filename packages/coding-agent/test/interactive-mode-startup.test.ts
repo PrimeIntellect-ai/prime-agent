@@ -1,11 +1,21 @@
-import { type Component, Container, setKeybindings, Text, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	type AutocompleteProvider,
+	type Component,
+	Container,
+	setKeybindings,
+	Text,
+	TUI,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { emptyUsage } from "../src/core/usage.js";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
 import { RefinementOutcomeMessageComponent } from "../src/modes/interactive/components/refinement-outcome-message.js";
+import { SubagentSummaryLine } from "../src/modes/interactive/components/subagent-summary-line.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { BrandSplashHeader, InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import type { PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
@@ -608,6 +618,77 @@ describe("InteractiveMode startup hints", () => {
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
 		expect(stripAnsi(label)).toBe("");
+	});
+
+	it("keeps the tray and subagents visible during slash autocomplete but hides them for a picker", async () => {
+		const ui = new TUI(new VirtualTerminal(100, 30));
+		vi.spyOn(ui, "requestRender").mockImplementation(() => {});
+		const editor = new CustomEditor(ui, getEditorTheme(), new KeybindingsManager());
+		const provider: AutocompleteProvider = {
+			getSuggestions: async (lines, line, col) => ({
+				prefix: lines[line]!.slice(0, col),
+				kind: "slash-command",
+				items: [
+					{ value: "/model", label: "model" },
+					{ value: "/mcp", label: "mcp" },
+				],
+			}),
+			applyCompletion: (lines, cursorLine, _cursorCol, item) => ({
+				lines: lines.map((line, index) => (index === cursorLine ? item.value : line)),
+				cursorLine,
+				cursorCol: item.value.length,
+			}),
+		};
+		editor.setAutocompleteProvider(provider);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const mode = Object.assign(createMode(1, true), { ui, editor, editorContainer });
+		const call = (method: string) => Reflect.get(InteractiveMode.prototype, method).call(mode);
+		const summary = new SubagentSummaryLine(
+			() => call("getTrayLocationLabel"),
+			() => call("getTrayContextLabel"),
+			() => call("getTrayOverrideLabel"),
+			() => call("isInlinePickerOpen"),
+		);
+		summary.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
+		summary.setOpenable(true);
+		const expectVisible = () => {
+			const output = stripAnsi(summary.render(100).join("\n"));
+			expect(output).toContain("manage");
+			expect(output).toContain("test-model:high");
+			expect(output).toContain("subagents");
+			expect(output).toContain("1 running");
+		};
+		ui.setFocus(editor);
+		expectVisible();
+		editor.handleInput("/");
+		await vi.waitFor(() => expect(editor.isShowingAutocomplete()).toBe(true));
+		expect(ui.hasOverlay()).toBe(true);
+		expectVisible();
+		editor.handleInput("m");
+		await vi.waitFor(() => expect(editor.isShowingAutocomplete()).toBe(true));
+		expect(editor.getText()).toBe("/m");
+		expectVisible();
+
+		// Opening a capturing picker must hide the tray even while autocomplete is retained underneath.
+		const picker = ui.showOverlay(new Text("Models / Providers / MCP", 0, 0));
+		expect(editor.isShowingAutocomplete()).toBe(true);
+		expect(editor.focused).toBe(false);
+		expect(summary.render(100)).toEqual([]);
+		picker.hide();
+		expect(editor.focused).toBe(true);
+		expectVisible();
+
+		editorContainer.clear();
+		editorContainer.addChild(new Text("Inline settings picker", 0, 0));
+		expect(summary.render(100)).toEqual([]);
+		editorContainer.clear();
+		editorContainer.addChild(editor);
+		expectVisible();
+		editor.handleInput("\x1b");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(ui.hasOverlay()).toBe(false);
+		expectVisible();
 	});
 
 	it("hides the tray while an inline picker is open", () => {
