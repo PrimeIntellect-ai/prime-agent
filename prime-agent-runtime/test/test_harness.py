@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event, Thread, current_thread
 
 from rlm import harness as package_harness
 from rlm import rlm as callable_rlm
@@ -406,6 +407,78 @@ class HarnessStateTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
                 state.save()
             self.assertEqual(state_path.read_text(encoding="utf-8"), raw)
+
+    def test_unrepresentable_decimal_token_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Preserved", "Must survive.", id="preserved")
+            payload = state_path.read_text(encoding="utf-8").replace(
+                '"metadata": {}', '"metadata": {"value": 9007199254740991.1}', 1
+            )
+            state_path.write_text(payload, encoding="utf-8")
+
+            loaded = HarnessState(state_path)
+
+            self.assertEqual(loaded.list(), [])
+            with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
+                loaded.create_memory("Rejected", "Must not rewrite rounded data.", id="rejected")
+            self.assertEqual(state_path.read_text(encoding="utf-8"), payload)
+
+    def test_shared_instance_serializes_concurrent_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            first_write_started = Event()
+            release_first_write = Event()
+            second_call_started = Event()
+            second_save_started = Event()
+            failures: list[BaseException] = []
+            original_write = state._write_state
+            original_save = state.save
+            write_count = 0
+
+            def delayed_first_write(target_path: Path, data: dict) -> None:
+                nonlocal write_count
+                write_count += 1
+                if write_count == 1:
+                    first_write_started.set()
+                    if not release_first_write.wait(5):
+                        raise TimeoutError("first harness write was not released")
+                original_write(target_path, data)
+
+            state._write_state = delayed_first_write  # type: ignore[method-assign]
+
+            def observed_save() -> HarnessState:
+                if current_thread().name == "second-writer":
+                    second_save_started.set()
+                return original_save()
+
+            state.save = observed_save  # type: ignore[method-assign]
+
+            def create_entry(entry_id: str, started: Event | None = None) -> None:
+                if started is not None:
+                    started.set()
+                try:
+                    state.create_memory(entry_id, entry_id, id=entry_id)
+                except BaseException as error:
+                    failures.append(error)
+
+            first = Thread(target=create_entry, args=("first",))
+            second = Thread(target=create_entry, args=("second", second_call_started), name="second-writer")
+            first.start()
+            self.assertTrue(first_write_started.wait(5))
+            second.start()
+            self.assertTrue(second_call_started.wait(5))
+            second_reached_save_before_release = second_save_started.wait(0.2)
+            release_first_write.set()
+            first.join(5)
+            second.join(5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertFalse(second_reached_save_before_release)
+            self.assertEqual(failures, [])
+            self.assertEqual(set(HarnessState(state.file_path).entries["memory"]), {"first", "second"})
 
     def test_update_skill_preserves_omitted_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

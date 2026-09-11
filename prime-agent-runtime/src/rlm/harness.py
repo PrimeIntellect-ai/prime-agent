@@ -16,11 +16,14 @@ import time
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
+from decimal import Decimal
 from datetime import datetime, timezone
+from functools import wraps
 from math import isfinite
 from pathlib import Path
+from threading import RLock
 from uuid import uuid4
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Concatenate, Iterator, Literal, ParamSpec, TypeVar
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
 HarnessScope = Literal["local", "global"]
@@ -93,8 +96,8 @@ def _now() -> str:
 
 def _finite_json_float(value: str) -> float:
     number = float(value)
-    if not isfinite(number):
-        raise ValueError("non-finite JSON number")
+    if not isfinite(number) or Decimal(value) != Decimal(repr(number)):
+        raise ValueError("unrepresentable JSON number")
     return number
 
 
@@ -282,6 +285,23 @@ def _is_writable_harness_data(value: object) -> bool:
     )
 
 
+_StateMethodParams = ParamSpec("_StateMethodParams")
+_StateMethodResult = TypeVar("_StateMethodResult")
+
+
+def _with_state_lock(
+    method: Callable[Concatenate["HarnessState", _StateMethodParams], _StateMethodResult],
+) -> Callable[Concatenate["HarnessState", _StateMethodParams], _StateMethodResult]:
+    @wraps(method)
+    def locked(
+        self: "HarnessState", *args: _StateMethodParams.args, **kwargs: _StateMethodParams.kwargs
+    ) -> _StateMethodResult:
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
 def _validate_python_skill_reference(reference: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(reference, dict):
         raise ValueError("skill entries require a Python reference")
@@ -306,6 +326,7 @@ class HarnessState:
         scope: HarnessScope = "local",
         local_write_error: str | None = None,
     ):
+        self._state_lock = RLock()
         # in_memory mode never resolves or touches a path. It is the safe fallback when
         # path resolution itself fails, so constructing it cannot re-raise that error.
         if in_memory:
@@ -357,6 +378,7 @@ class HarnessState:
         if self._disk_mtime() != self._loaded_mtime:
             self.load()
 
+    @_with_state_lock
     def load(self) -> "HarnessState":
         if self.file_path is None:
             return self
@@ -473,6 +495,7 @@ class HarnessState:
             return None
         return target
 
+    @_with_state_lock
     def save(self) -> "HarnessState":
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
@@ -530,6 +553,7 @@ class HarnessState:
         finally:
             temp_path.unlink(missing_ok=True)
 
+    @_with_state_lock
     def upsert(
         self,
         kind: HarnessKind,
@@ -630,6 +654,7 @@ class HarnessState:
         self.save()
         return entry
 
+    @_with_state_lock
     def get(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> HarnessEntry | None:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
@@ -639,6 +664,7 @@ class HarnessState:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         return self.entries[kind].get(id)
 
+    @_with_state_lock
     def delete(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
@@ -653,6 +679,7 @@ class HarnessState:
         self.save()
         return True
 
+    @_with_state_lock
     def list(self, kind: HarnessKind | None = None, *, global_: bool = False, **kwargs: Any) -> list[HarnessEntry]:
         if target := self._global_target(global_, kwargs):
             return target.list(kind)
@@ -665,6 +692,7 @@ class HarnessState:
             records.extend(self.entries[current_kind].values())
         return sorted(records, key=lambda entry: (entry.kind, entry.path, entry.title, entry.id))
 
+    @_with_state_lock
     def create(
         self,
         kind: HarnessKind,
@@ -712,6 +740,7 @@ class HarnessState:
             source=source,
         )
 
+    @_with_state_lock
     def update(
         self,
         kind: HarnessKind,
@@ -904,6 +933,7 @@ class HarnessState:
     def delete_subagent(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         return self.delete("subagent", id, global_=global_, **kwargs)
 
+    @_with_state_lock
     def record_refinement(
         self,
         trigger: str,
@@ -949,6 +979,7 @@ class HarnessState:
             plan.append(f"Immediate validation step: {next_step}")
         return plan
 
+    @_with_state_lock
     def overview(self, *, max_entries_per_kind: int = 20, global_: bool = False, **kwargs: Any) -> str:
         if target := self._global_target(global_, kwargs):
             return target.overview(max_entries_per_kind=max_entries_per_kind)
@@ -998,6 +1029,7 @@ class HarnessState:
             lines.append("refinements: 0")
         return "\n".join(lines)
 
+    @_with_state_lock
     def snapshot(self, *, global_: bool = False, **kwargs: Any) -> dict[str, Any]:
         if target := self._global_target(global_, kwargs):
             return target.snapshot()

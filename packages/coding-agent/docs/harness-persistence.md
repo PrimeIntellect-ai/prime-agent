@@ -1,6 +1,6 @@
 # Concurrent harness saves
 
-The TypeScript refinement host and Python harness use the same adjacent `harness_state.json.lock` directory to serialize saves. Each save rereads the latest state while holding the lock, applies only the changes since its own loaded snapshot, and atomically replaces the file. Unrelated entries and appended refinement events survive concurrent saves. Changes to the same entry cause the entire later save to fail with a reload-and-retry error; no part of that save is persisted.
+The TypeScript refinement host and Python harness use the same adjacent `harness_state.json.lock` directory to serialize saves. Python also serializes access to each in-memory `HarnessState` instance across threads. Each save rereads the latest state while holding the lock, applies only the changes since its own loaded snapshot, and atomically replaces the file. Unrelated entries and appended refinement events survive concurrent saves. Changes to the same entry cause the entire later save to fail with a reload-and-retry error; no part of that save is persisted.
 
 Both writers support schema `1`. Known entries remain readable from a newer schema, but mutations are rejected without changing the file so unknown fields and entry kinds cannot be discarded. Schema changes are accepted only after the implementation's supported version is updated.
 

@@ -284,6 +284,44 @@ function containsUnsafeJsonNumber(value: unknown): boolean {
 	return record ? Object.values(record).some(containsUnsafeJsonNumber) : false;
 }
 
+const JSON_NUMBER_TOKEN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/;
+const JSON_NUMBER_PARTS = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
+
+function normalizeJsonNumberToken(token: string): string | undefined {
+	const match = JSON_NUMBER_PARTS.exec(token);
+	if (!match) return undefined;
+	const fraction = match[3] ?? "";
+	let digits = `${match[2]}${fraction}`.replace(/^0+/, "");
+	if (!digits) return "0e0";
+	let exponent = BigInt(match[4] ?? "0") - BigInt(fraction.length);
+	while (digits.endsWith("0")) {
+		digits = digits.slice(0, -1);
+		exponent++;
+	}
+	return `${match[1]}${digits}e${exponent}`;
+}
+
+function hasLosslessJsonNumbers(source: string): boolean {
+	for (let index = 0; index < source.length; index++) {
+		if (source[index] === '"') {
+			index++;
+			while (index < source.length && source[index] !== '"') {
+				if (source[index] === "\\") index++;
+				index++;
+			}
+			continue;
+		}
+		if (source[index] !== "-" && (source[index] < "0" || source[index] > "9")) continue;
+		const token = JSON_NUMBER_TOKEN.exec(source.slice(index))?.[0];
+		if (!token) return false;
+		const number = Number(token);
+		if (!Number.isFinite(number)) return false;
+		if (normalizeJsonNumberToken(token) !== normalizeJsonNumberToken(String(number))) return false;
+		index += token.length - 1;
+	}
+	return true;
+}
+
 const HARNESS_STATE_FIELDS = new Set(["schema", "entries", "refinements"]);
 const HARNESS_ENTRY_FIELDS = new Set([
 	"id",
@@ -418,7 +456,11 @@ function readHarnessStateResult(statePath: string, scope: HarnessScope): { state
 	}
 	let parsed: Partial<HarnessState>;
 	try {
-		const raw = JSON.parse(readFileSync(statePath, "utf8"));
+		const source = readFileSync(statePath, "utf8");
+		if (!hasLosslessJsonNumbers(source)) {
+			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
+		}
+		const raw = JSON.parse(source);
 		// loadHarnessState runs on every system-prompt build and before each /refine, so
 		// a corrupt or unreadable (or non-object) state file must degrade to empty rather
 		// than throw and break the session. Saving stays blocked so unknown data survives.
