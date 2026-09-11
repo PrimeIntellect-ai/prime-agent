@@ -3988,7 +3988,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		expect(fakeThis.uiServices.settingsManager.setOnboardingShown).toHaveBeenCalledWith(true);
 	});
 
-	test("persists onboarding before opening the one-shot flow", async () => {
+	test("persists onboarding only after the one-shot flow completes", async () => {
 		let shown = false;
 		let flushed = false;
 		const fakeThis = createPrimeCliHarness(false);
@@ -4001,8 +4001,9 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		});
 		fakeThis.runOnboardingFlow = vi.fn(async (showPrimeCliSplash?: boolean) => {
 			expect(showPrimeCliSplash).toBe(true);
-			expect(shown).toBe(true);
-			expect(flushed).toBe(true);
+			// The flag persists only after the flow completes with a ready model.
+			expect(shown).toBe(false);
+			expect(flushed).toBe(false);
 		});
 
 		await expect(runStartupOnboarding.call(fakeThis)).resolves.toBe(true);
