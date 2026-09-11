@@ -2,6 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -268,6 +269,63 @@ main "$@"
 		expect(result.code, result.output).not.toBe(0);
 		expect(readFileSync(publicCommand, "utf8")).toBe("concurrent command");
 		expect(readlinkSync(command())).toBe(current);
+	});
+
+	it.each([
+		["before", "mv", "FAIL"],
+		["before", "mv", "HUP"],
+		["before", "mv", "TERM"],
+		["before", "mv", "KILL"],
+		["after", "mv", "HUP"],
+		["after", "mv", "TERM"],
+		["after", "mv", "KILL"],
+		["after", "ln", "HUP"],
+		["after", "ln", "TERM"],
+		["after", "ln", "KILL"],
+	])("keeps fresh installation retryable when %s %s receives %s", async (point, operation, signal) => {
+		publish("1.0.0");
+		const publicCommand = join(home, ".local/bin/prime-agent");
+		const shim = mkdtempSync(join(root, "fresh-activation-"));
+		writeFileSync(
+			join(shim, operation),
+			`#!/bin/sh
+interrupt() {
+ if [ "$INTERRUPT_SIGNAL" = FAIL ]; then exit 73; fi
+ kill -"$INTERRUPT_SIGNAL" "$PPID"
+ exit 74
+}
+for destination in "$@"; do :; done
+if [ "$destination" = "$INTERRUPT_COMMAND" ] && [ "$INTERRUPT_POINT" = before ]; then interrupt; fi
+/bin/${operation} "$@" || exit $?
+if [ "$destination" = "$INTERRUPT_COMMAND" ] && [ "$INTERRUPT_POINT" = after ]; then interrupt; fi
+`,
+			{ mode: 0o755 },
+		);
+		mkdirSync(join(home, ".prime/agent"), { recursive: true });
+		const userData = join(home, ".prime/agent/auth.json");
+		writeFileSync(userData, "keep credentials");
+		const result = await install("1.0.0", {
+			PATH: `${shim}:/usr/bin:/bin`,
+			INTERRUPT_COMMAND:
+				operation === "mv" ? join(realpathSync(home), "data/prime-agent/bin/prime-agent") : publicCommand,
+			INTERRUPT_POINT: point,
+			INTERRUPT_SIGNAL: signal,
+		});
+		expect(result.code, result.output).not.toBe(0);
+		if (lstatSync(publicCommand, { throwIfNoEntry: false })) {
+			expect(existsSync(publicCommand), "public command must never be a dangling symlink").toBe(true);
+			expect(execFileSync(publicCommand, ["--version"], { encoding: "utf8" })).toBe("1.0.0\n");
+		}
+		expect(readFileSync(userData, "utf8")).toBe("keep credentials");
+		const lock = join(home, "data/prime-agent/.install-lock");
+		expect(existsSync(lock)).toBe(signal === "KILL");
+		// SIGKILL cannot run cleanup; recover the lock after the installer has exited.
+		if (signal === "KILL") rmSync(lock, { recursive: true });
+		const retry = await install("1.0.0");
+		expect(retry.code, retry.output).toBe(0);
+		expect(execFileSync(publicCommand, ["--version"], { encoding: "utf8" })).toBe("1.0.0\n");
+		expect(readFileSync(userData, "utf8")).toBe("keep credentials");
+		expect(existsSync(lock)).toBe(false);
 	});
 
 	it("repairs missing assets on reinstall without replacing files used by an existing process", async () => {
