@@ -68,6 +68,23 @@ describe("compaction file-op extraction", () => {
 		expect(fileOps.edited.size).toBe(0);
 	});
 
+	it("caps kernel file lists to keep summary blocks bounded", () => {
+		const fileOps = createFileOps();
+		const diffs = Array.from({ length: 250 }, (_, i) => ({
+			path: `pkg/file-${String(i).padStart(3, "0")}.ts`,
+			oldStr: "a",
+			newStr: "b",
+		}));
+		extractFileOpsFromMessage(toolResult({ diffs }) as never, fileOps);
+		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+		expect(modifiedFiles).toHaveLength(200);
+		expect(modifiedFiles[0]).toBe("pkg/file-000.ts");
+		expect(modifiedFiles[199]).toBe("pkg/file-199.ts");
+		expect(modifiedFiles).not.toContain("pkg/file-249.ts");
+		const summary = formatFileOperations(readFiles, modifiedFiles);
+		expect(summary).not.toContain("pkg/file-249.ts");
+	});
+
 	it("feeds kernel edits into modified-files for summaries", () => {
 		const fileOps = createFileOps();
 		extractFileOpsFromMessage(

@@ -74,13 +74,23 @@ function extractFileOpsFromToolResult(message: AgentMessage, fileOps: FileOperat
 }
 
 /**
+ * Maximum files kept per summary block, so a single oversized kernel
+ * result cannot produce a file list larger than the model context limit.
+ */
+const FILE_LIST_MAX_ENTRIES = 200;
+
+/**
  * Compute final file lists from file operations.
  * Returns readFiles (files only read, not modified) and modifiedFiles.
+ * Both lists are capped at FILE_LIST_MAX_ENTRIES (sorted, then truncated).
  */
 export function computeFileLists(fileOps: FileOperations): { readFiles: string[]; modifiedFiles: string[] } {
 	const modified = new Set([...fileOps.edited, ...fileOps.written]);
-	const readOnly = [...fileOps.read].filter((f) => !modified.has(f)).sort();
-	const modifiedFiles = [...modified].sort();
+	const readOnly = [...fileOps.read]
+		.filter((f) => !modified.has(f))
+		.sort()
+		.slice(0, FILE_LIST_MAX_ENTRIES);
+	const modifiedFiles = [...modified].sort().slice(0, FILE_LIST_MAX_ENTRIES);
 	return { readFiles: readOnly, modifiedFiles };
 }
 
