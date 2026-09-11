@@ -1,10 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S npx tsx
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TELEMETRY_CONTRACT } from "../packages/coding-agent/src/core/telemetry-contract.ts";
 
 const DEFAULT_BUNDLE = new URL("../packages/coding-agent/docs/telemetry-dashboards.json", import.meta.url);
-const DEFAULT_CONTRACT = new URL("../packages/coding-agent/docs/telemetry-contract.json", import.meta.url);
 const MANAGED_TAG = "prime-agent-telemetry-eng-5933";
 
 export async function readDashboardBundle() {
@@ -12,7 +12,7 @@ export async function readDashboardBundle() {
 }
 
 export async function readTelemetryContract() {
-	return JSON.parse(await readFile(DEFAULT_CONTRACT, "utf8"));
+	return TELEMETRY_CONTRACT;
 }
 
 export function validateDashboardBundle(bundle, contract) {
@@ -243,7 +243,7 @@ export async function main(args = process.argv.slice(2)) {
 	const supported = new Set(["--check", "--preflight", "--apply", "--legacy-only", "--include-alerts", "--help"]);
 	if (args.some((arg) => !supported.has(arg))) throw new Error("Unknown option; use --help");
 	if (args.includes("--help")) {
-		console.log("Usage: node scripts/publish-telemetry-dashboards.mjs [--check | --preflight | --apply] [--legacy-only] [--include-alerts]\nDefault --check validates local definitions without network access. --preflight performs read-only API validation. --apply explicitly writes reviewed insights after all preflight checks. POSTHOG_PERSONAL_API_KEY is required for API access. New charts require observed deployed schema revisions and eligible query rows. --include-alerts also creates disabled native alerts without subscribers; review thresholds and choose recipients in PostHog before enabling.");
+		console.log("Usage: npx tsx scripts/publish-telemetry-dashboards.mjs [--check | --preflight | --apply] [--legacy-only] [--include-alerts]\nDefault --check validates local definitions without network access. --preflight performs read-only API validation. --apply explicitly writes reviewed insights after all preflight checks. POSTHOG_PERSONAL_API_KEY is required for API access. New charts require observed deployed schema revisions and eligible query rows. --include-alerts also creates disabled native alerts without subscribers; review thresholds and choose recipients in PostHog before enabling.");
 		return;
 	}
 	const modes = ["--check", "--preflight", "--apply"].filter((flag) => args.includes(flag));

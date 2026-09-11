@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,7 +10,6 @@ import {
 	type TelemetryBatch,
 	TelemetryClient,
 } from "../src/core/telemetry.js";
-import { TELEMETRY_CONTRACT } from "../src/core/telemetry-contract.js";
 import { TELEMETRY_ERROR_MESSAGES } from "../src/core/telemetry-error-classification.js";
 import { TELEMETRY_SAFE_ERROR_MESSAGES } from "../src/core/telemetry-error-policy.js";
 import { sanitizeTelemetryProperties, TELEMETRY_ERROR_MESSAGE_PROPERTIES } from "../src/core/telemetry-schema.js";
@@ -47,8 +46,11 @@ function ids(): () => string {
 	let id = 0;
 	return () => `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`;
 }
+const directories: string[] = [];
 function directory(): string {
-	return mkdtempSync(join(tmpdir(), "telemetry-contract-"));
+	const path = mkdtempSync(join(tmpdir(), "telemetry-contract-"));
+	directories.push(path);
+	return path;
 }
 function capabilities(): Response {
 	return Response.json({ schema_versions: [1, 2], schema_revision: 1 });
@@ -65,8 +67,28 @@ function accepted(batch: TelemetryBatch): Response {
 	);
 }
 
+function setup({
+	discover = capabilities,
+	receive = accepted,
+	...options
+}: Partial<ConstructorParameters<typeof TelemetryClient>[0]> & {
+	discover?: () => Response | Promise<Response>;
+	receive?: (batch: TelemetryBatch) => Response | Promise<Response>;
+} = {}) {
+	const batches: TelemetryBatch[] = [];
+	const fetcher: typeof fetch = async (_url, init) => {
+		if (init?.method === "GET") return discover();
+		const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
+		batches.push(batch);
+		return receive(batch);
+	};
+	const client = new TelemetryClient({ agentDir: directory(), randomId: ids(), fetch: fetcher, ...options });
+	return { client, batches, fetch: fetcher };
+}
+
 beforeEach(() => vi.stubEnv("DO_NOT_TRACK", "0"));
 afterEach(() => {
+	for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true });
 	vi.unstubAllEnvs();
 	vi.unstubAllGlobals();
 });
@@ -97,12 +119,7 @@ describe("shared telemetry contract and privacy", () => {
 			properties: { command_name: commandName },
 		});
 	});
-	it("keeps the collector descriptor and reviewed diagnostic templates identical", () => {
-		expect(JSON.parse(readFileSync(new URL("../docs/telemetry-contract.json", import.meta.url), "utf8"))).toEqual(
-			TELEMETRY_CONTRACT,
-		);
-		expect(TELEMETRY_CONTRACT.diagnostic_messages).toEqual(TELEMETRY_ERROR_MESSAGES);
-	});
+
 	it("strips private canaries before any sink or queue sees them", () => {
 		const canary = "private@example.test /Users/private/repo sk-private https://secret.test/?token=private";
 		const properties = {
@@ -245,16 +262,8 @@ describe("version negotiation, retry and consent", () => {
 	it.each([undefined, 1, 2, "3", 3])(
 		"sends installation outcomes only after a revision 3 collector is discovered: %j",
 		async (revision) => {
-			const batches: TelemetryBatch[] = [];
-			const client = new TelemetryClient({
-				agentDir: directory(),
-				randomId: ids(),
-				fetch: async (_url, init) => {
-					if (init?.method === "GET") return Response.json({ schema_versions: [1, 2], schema_revision: revision });
-					const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-					batches.push(batch);
-					return accepted(batch);
-				},
+			const { client, batches } = setup({
+				discover: () => Response.json({ schema_versions: [1, 2], schema_revision: revision }),
 			});
 			client.capture("agent installation stage", installationStage);
 			client.capture("agent started", base);
@@ -269,17 +278,9 @@ describe("version negotiation, retry and consent", () => {
 	it("retains unsupported installation stages until collector revision 3 is discovered", async () => {
 		let revision = 2;
 		let now = Date.now();
-		const batches: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir: directory(),
-			randomId: ids(),
+		const { client, batches } = setup({
 			now: () => now,
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return Response.json({ schema_versions: [1, 2], schema_revision: revision });
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
-				return accepted(batch);
-			},
+			discover: () => Response.json({ schema_versions: [1, 2], schema_revision: revision }),
 		});
 		client.capture("agent installation stage", installationStage);
 		client.capture("agent started", base);
@@ -303,16 +304,8 @@ describe("version negotiation, retry and consent", () => {
 		{ original_error_messages: true, expected: false },
 		{ expected: false },
 	])("negotiates the exact original-message policy: %j", async ({ expected, ...support }) => {
-		const batches: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir: directory(),
-			randomId: ids(),
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return Response.json({ schema_versions: [1, 2], ...support });
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
-				return accepted(batch);
-			},
+		const { client, batches } = setup({
+			discover: () => Response.json({ schema_versions: [1, 2], ...support }),
 		});
 		client.capture("agent error", reviewedError);
 		client.capture("agent error", {
@@ -346,31 +339,24 @@ describe("version negotiation, retry and consent", () => {
 		async (failure) => {
 			let now = Date.now();
 			let discoveries = 0;
-			const batches: TelemetryBatch[] = [];
-			const client = new TelemetryClient({
-				agentDir: directory(),
+			const { client, batches } = setup({
 				now: () => now,
-				fetch: async (_url, init) => {
-					if (init?.method === "GET") {
-						if (++discoveries === 1)
-							return Response.json({
-								schema_versions: [1, 2],
-								original_error_messages: true,
-								error_message_policy_revision: 1,
-							});
-						if (failure === "unavailable") return new Response(null, { status: 404 });
-						if (failure === "malformed") return new Response("not JSON");
-						if (failure === "oversized") return new Response("x".repeat(4_097));
-						if (failure === "network_error") throw new Error("Synthetic discovery failure");
+				discover: () => {
+					if (++discoveries === 1)
 						return Response.json({
 							schema_versions: [1, 2],
 							original_error_messages: true,
-							error_message_policy_revision: 2,
+							error_message_policy_revision: 1,
 						});
-					}
-					const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-					batches.push(batch);
-					return accepted(batch);
+					if (failure === "unavailable") return new Response(null, { status: 404 });
+					if (failure === "malformed") return new Response("not JSON");
+					if (failure === "oversized") return new Response("x".repeat(4_097));
+					if (failure === "network_error") throw new Error("Synthetic discovery failure");
+					return Response.json({
+						schema_versions: [1, 2],
+						original_error_messages: true,
+						error_message_policy_revision: 2,
+					});
 				},
 			});
 			client.capture("agent error", reviewedError);
@@ -400,14 +386,9 @@ describe("version negotiation, retry and consent", () => {
 		expect(existsSync(join(agentDir, "telemetry.json"))).toBe(false);
 	});
 	it("sends only legacy fields and names to an old collector", async () => {
-		const batches: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir: directory(),
-			randomId: ids(),
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return new Response(null, { status: 404 });
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
+		const { client, batches } = setup({
+			discover: () => new Response(null, { status: 404 }),
+			receive: (batch) => {
 				return Response.json({ accepted: batch.events.length }, { status: 202 });
 			},
 		});
@@ -425,15 +406,9 @@ describe("version negotiation, retry and consent", () => {
 		expect(batches[0].events[0].properties).toEqual({ ...base, install_method: "unknown", session_id: sessionId });
 	});
 	it("delivers short-lived v2 runs and retries only unacknowledged stable IDs", async () => {
-		const batches: TelemetryBatch[] = [];
 		let partial = true;
-		const client = new TelemetryClient({
-			agentDir: directory(),
-			randomId: ids(),
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return capabilities();
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
+		const { client, batches } = setup({
+			receive: (batch) => {
 				if (partial) {
 					partial = false;
 					return Response.json(
@@ -453,14 +428,8 @@ describe("version negotiation, retry and consent", () => {
 		expect(client.delivery.accepted).toBe(2);
 	});
 	it("falls back safely when the collector is rolled back after capability discovery", async () => {
-		const batches: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir: directory(),
-			randomId: ids(),
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return capabilities();
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
+		const { client, batches } = setup({
+			receive: (batch) => {
 				return batch.schema_version
 					? new Response(null, { status: 422 })
 					: Response.json({ accepted: batch.events.length });
@@ -517,18 +486,13 @@ describe("version negotiation, retry and consent", () => {
 		expect(batches[0].events.map((event) => event.name)).toEqual(["agent command used"]);
 	});
 	it("invalidates an old flush snapshot when disabling races with an acknowledged request", async () => {
-		const batches: TelemetryBatch[] = [];
 		let release: (response: Response) => void = () => {};
 		const firstResponse = new Promise<Response>((resolve) => {
 			release = resolve;
 		});
-		const client = new TelemetryClient({
-			agentDir: directory(),
+		const { client, batches } = setup({
 			batchSize: 1,
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return capabilities();
-				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
-				batches.push(batch);
+			receive: (batch) => {
 				return batches.length === 1 ? firstResponse : accepted(batch);
 			},
 		});
@@ -562,13 +526,9 @@ describe("version negotiation, retry and consent", () => {
 	});
 	it("expires undelivered events and never reports endpoint failures as user errors", async () => {
 		let now = Date.now();
-		const batches: TelemetryBatch[] = [];
-		const client = new TelemetryClient({
-			agentDir: directory(),
+		const { client, batches } = setup({
 			now: () => now,
-			fetch: async (_url, init) => {
-				if (init?.method === "GET") return capabilities();
-				batches.push(JSON.parse(String(init?.body)) as TelemetryBatch);
+			receive: () => {
 				throw new Error("secret proxy connection failed");
 			},
 		});

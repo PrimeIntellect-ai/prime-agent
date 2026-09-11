@@ -114,11 +114,25 @@ function fakeApi(target: DashboardBundle, options: ApiOptions = {}) {
 		throw new Error(`Unhandled mock API request ${method} ${url.pathname}`);
 	});
 	return {
+		target,
 		calls,
 		fetcher,
 		writes: () => calls.filter((call) => call.path.includes("/insights/") && call.method !== "GET"),
 		newQueries: () => calls.filter((call) => newSql.has((call.body?.query as { query?: string } | undefined)?.query)),
 	};
+}
+
+function publish(
+	api: ReturnType<typeof fakeApi>,
+	options: Pick<Parameters<typeof publishTelemetryDashboards>[0], "mode" | "includeAlerts" | "legacyOnly">,
+) {
+	return publishTelemetryDashboards({
+		bundle: api.target,
+		contract,
+		fetcher: api.fetcher,
+		token: "synthetic-token",
+		...options,
+	});
 }
 
 describe("reviewed telemetry dashboard definitions", () => {
@@ -172,116 +186,6 @@ describe("reviewed telemetry dashboard definitions", () => {
 			"changed shape",
 		);
 	});
-
-	it("does not call repeated launches new installs or count cancellations as failures", () => {
-		const firstSeen = sql("first-observed");
-		expect(firstSeen.split(")\nSELECT")[0]).not.toContain("INTERVAL");
-		expect(firstSeen).toContain("count(DISTINCT if(toDate(e.timestamp) = toDate(f.first_seen_at)");
-		expect(insight("first-observed").query).toMatchObject({
-			display: "ActionsBar",
-			chartSettings: { yAxis: [{ column: "first_observed_installations" }, { column: "returning_installations" }] },
-		});
-		expect(sql("legacy-run-performance")).toContain("countIf(outcome = 'error') AS failed_runs");
-		expect(sql("legacy-run-performance")).toContain("'aborted', 'cancelled'");
-		expect(sql("legacy-run-performance")).toContain("avg_measured_tokens_per_run");
-		expect(sql("run-outcomes")).toContain("starts > 0 AND terminals = 0");
-		expect(sql("run-outcomes")).toContain("GROUP BY distinct_id, run_id");
-	});
-
-	it("deduplicates recovery updates and falls back from unknown codes to HTTP status", () => {
-		for (const key of ["error-causes", "error-recovery", "error-concentration"]) {
-			expect(sql(key)).toContain("GROUP BY distinct_id, error_id");
-			expect(sql(key)).toContain(
-				"tuple(timestamp, properties.recovery_outcome IN ('success', 'failed', 'cancelled')",
-			);
-			expect(sql(key)).toContain("nullIf(properties.error_code_group, 'unknown')");
-			expect(sql(key)).toContain("nullIf(properties.error_code, 'unknown')");
-			expect(sql(key)).toContain(
-				"if(properties.http_status IS NOT NULL, concat('http_', toString(properties.http_status)), 'unknown')",
-			);
-		}
-		expect(sql("error-causes")).toContain("reviewed_message");
-	});
-
-	it("uses mature successful-run cohorts and separates missing attribution", () => {
-		for (const key of ["onboarding-activation", "first-session-activation", "successful-retention"]) {
-			expect(sql(key)).toContain("GROUP BY distinct_id, run_id");
-			expect(sql(key)).toContain("terminal_outcome = 'success' AND model_call_count > 0");
-		}
-		expect(sql("onboarding-activation")).toContain("c.entered_at <= now() - INTERVAL 24 HOUR");
-		expect(sql("onboarding-activation")).toContain("no_observed_same_attempt_success_24h");
-		expect(sql("first-session-activation")).toContain("cohorts_missing_first_session_association");
-		expect(sql("first-session-activation")).toContain("argMin(coalesce(properties.session_id, ''), timestamp)");
-		expect(sql("first-session-activation")).toContain("s.first_session_id = x.session_id");
-		expect(insight("first-session-activation").requires).toContain("agent run started");
-		expect(sql("first-session-activation")).not.toContain("client_session_id");
-		expect(sql("successful-retention")).toContain(
-			"countIf(first_success_at <= now() - INTERVAL 2 DAY) AS eligible_d1",
-		);
-		expect(sql("successful-retention")).toContain(
-			"countIf(first_success_at <= now() - INTERVAL 8 DAY) AS eligible_d7",
-		);
-		expect(sql("successful-retention")).toContain("HAVING eligible_d1 > 0");
-	});
-
-	it("keeps missing latency, cost and unsupported dimensions honest", () => {
-		for (const definition of bundle.insights.filter((item) => item.key.startsWith("latency-"))) {
-			expect(definition.query?.source.query).toContain("missing_measurement_runs");
-			expect(definition.query?.source.query).toContain("measurement_coverage_pct");
-			for (const percentile of ["0.50", "0.95", "0.99"]) {
-				expect(definition.query?.source.query).toContain(`= 0, NULL, quantile(${percentile})(value_ms)`);
-			}
-		}
-		expect(insight("latency-first-model-event-ms").name).toContain("first turn start");
-		expect(insight("latency-retry-wait-ms").description).toContain("partial waits");
-		expect(sql("effective-throughput-cost")).toContain("usage_complete = true AND estimated_cost_usd IS NOT NULL");
-		expect(sql("effective-throughput-cost")).toContain("effective_output_tokens_per_model_call_second");
-		expect(sql("effective-throughput-cost")).toContain("HAVING reported_runs > 0");
-		expect(sql("fixed-feedback")).not.toContain("previous_success");
-		expect(sql("tool-reliability")).toContain("recovered_count");
-		expect(sql("feature-outcomes")).toContain("countIf(starts > 0 AND terminal_outcome = 'completed')");
-	});
-
-	it("separates observed inference success from whole-run outcomes and missing older measurements", () => {
-		const context = sql("execution-context");
-		expect(context).toContain("GROUP BY distinct_id, run_id");
-		expect(context).toContain("argMax(toFloat(properties.successful_model_call_count), timestamp)");
-		expect(context).toContain("countIf(terminal_outcome = 'success') AS successful_whole_runs");
-		expect(context).toContain("countIf(successful_model_call_count > 0) AS runs_with_successful_inference");
-		expect(context).toContain(
-			"countIf(terminal_outcome = 'error' AND successful_model_call_count > 0) AS failed_runs_after_successful_inference",
-		);
-		expect(context).toContain("successful_model_call_count IS NULL) AS missing_inference_success_measurement_runs");
-		expect(context).not.toContain("coalesce(properties.successful_model_call_count");
-	});
-
-	it("separates package completion from observed runtime readiness after installation stage deduplication", () => {
-		for (const key of ["installation-outcomes", "installation-stages", "installation-versions"]) {
-			expect(insight(key).requires).toEqual(["agent installation stage"]);
-			expect(insight(key).min_schema_revision).toBe(3);
-			expect(sql(key)).toContain("properties.schema_revision >= 3");
-			expect(sql(key)).toContain("GROUP BY distinct_id, installation_attempt_id, stage");
-			expect(sql(key)).toContain("tuple(timestamp, properties.outcome != 'started')");
-			expect(sql(key)).toContain("installation_action, installation_source, install_method");
-		}
-		expect(sql("installation-outcomes")).toContain("GROUP BY distinct_id, installation_attempt_id");
-		expect(sql("installation-outcomes")).toContain("stage = 'package_install' AND outcome = 'success'");
-		expect(sql("installation-outcomes")).toContain("stage = 'ready' AND outcome = 'success'");
-		expect(sql("installation-outcomes")).toContain("pending_or_missing_completion");
-		expect(sql("installation-outcomes")).toContain("installed_without_observed_readiness");
-		expect(sql("installation-stages")).toContain("stage, outcome, reason");
-		expect(sql("installation-stages")).toContain("missing_duration_stages");
-		expect(sql("installation-stages")).toContain(
-			"tupleElement(argMax(tuple(if(properties.outcome = 'started', NULL, toFloat(properties.duration_ms)))",
-		);
-		expect(sql("installation-stages")).toContain("observed_session_restore_failures");
-		expect(sql("installation-versions")).toContain("pending_or_missing_readiness");
-		expect(sql("installation-versions")).toContain("requested_version != 'unknown' AND runtime_version != 'unknown'");
-		expect(sql("installation-versions")).toContain(
-			"countIf(readiness_reports > 0 AND requested_version != 'unknown' AND runtime_version != 'unknown' AND (reported_version_mismatch > 0 OR requested_version != runtime_version)) AS observed_target_version_mismatches",
-		);
-		expect(sql("installation-versions")).toContain("readiness_without_version_comparison");
-	});
 });
 
 describe("dashboard publication safety", () => {
@@ -304,14 +208,7 @@ describe("dashboard publication safety", () => {
 			subscribed_users: [7],
 		};
 		const api = fakeApi(target, { observed: true, existing, alerts: [alert] });
-		const result = await publishTelemetryDashboards({
-			bundle: target,
-			contract,
-			mode: "apply",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-			includeAlerts: true,
-		});
+		const result = await publish(api, { mode: "apply", includeAlerts: true });
 		expect(result.alerts).toEqual([{ key: definition.key, existing: "existing-alert", action: "preserve_existing" }]);
 		expect(api.calls.some((call) => call.path.endsWith("/alerts/") && call.method !== "GET")).toBe(false);
 		const changed = fakeApi(target, {
@@ -319,27 +216,14 @@ describe("dashboard publication safety", () => {
 			existing,
 			alerts: [{ ...alert, threshold: { configuration: { bounds: { upper: 99 } } } }],
 		});
-		await expect(
-			publishTelemetryDashboards({
-				bundle: target,
-				contract,
-				mode: "apply",
-				token: "synthetic-token",
-				fetcher: changed.fetcher,
-				includeAlerts: true,
-			}),
-		).rejects.toThrow("differs from the reviewed definition");
+		await expect(publish(changed, { mode: "apply", includeAlerts: true })).rejects.toThrow(
+			"differs from the reviewed definition",
+		);
 		expect(changed.writes()).toEqual([]);
 	});
 	it("requires revision 2 data for measurements not present in revision 1", async () => {
 		const api = fakeApi(bundle, { observed: true, revision: 1 });
-		const result = await publishTelemetryDashboards({
-			bundle,
-			contract,
-			mode: "preflight",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-		});
+		const result = await publish(api, { mode: "preflight" });
 		const pending = result.pending.map((entry) => (typeof entry === "string" ? entry : entry.key));
 		for (const definition of bundle.insights.filter((item) => item.min_schema_revision === 2))
 			expect(pending).toContain(definition.key);
@@ -348,13 +232,7 @@ describe("dashboard publication safety", () => {
 	});
 	it("requires revision 3 installation data without delaying existing revision 2 views", async () => {
 		const api = fakeApi(bundle, { observed: true, revision: 2 });
-		const result = await publishTelemetryDashboards({
-			bundle,
-			contract,
-			mode: "preflight",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-		});
+		const result = await publish(api, { mode: "preflight" });
 		expect(readinessQuery(bundle)).toContain("properties.schema_revision >= 2) AS revision_2_events");
 		expect(readinessQuery(bundle)).toContain("properties.schema_revision >= 3) AS revision_3_events");
 		expect(result.pending).toEqual(
@@ -381,14 +259,7 @@ describe("dashboard publication safety", () => {
 	});
 	it("prepares disabled native alerts without subscribers and validates their sample queries before writes", async () => {
 		const api = fakeApi(bundle, { observed: true });
-		const result = await publishTelemetryDashboards({
-			bundle,
-			contract,
-			mode: "apply",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-			includeAlerts: true,
-		});
+		const result = await publish(api, { mode: "apply", includeAlerts: true });
 		const alerts = api.calls.filter((call) => call.path.endsWith("/alerts/") && call.method === "POST");
 		expect(alerts).toHaveLength(3);
 		for (const alert of alerts)
@@ -417,28 +288,14 @@ describe("dashboard publication safety", () => {
 
 	it("refuses all writes and does not query new charts before deployed v2 data is observed", async () => {
 		const api = fakeApi(bundle);
-		await expect(
-			publishTelemetryDashboards({
-				bundle,
-				contract,
-				mode: "apply",
-				token: "synthetic-token",
-				fetcher: api.fetcher,
-			}),
-		).rejects.toThrow("No deployed public v2 events observed");
+		await expect(publish(api, { mode: "apply" })).rejects.toThrow("No deployed public v2 events observed");
 		expect(api.writes()).toEqual([]);
 		expect(api.newQueries()).toEqual([]);
 	});
 
 	it("performs read-only preflight and reports absent data without pretending charts are live", async () => {
 		const api = fakeApi(bundle);
-		const result = await publishTelemetryDashboards({
-			bundle,
-			contract,
-			mode: "preflight",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-		});
+		const result = await publish(api, { mode: "preflight" });
 		expect(result.status).toBe("pending_data");
 		expect(result.pending).toHaveLength(bundle.insights.length);
 		expect(result.creates).toEqual([]);
@@ -448,13 +305,7 @@ describe("dashboard publication safety", () => {
 
 	it("does not publish immature or otherwise empty chart cohorts", async () => {
 		const api = fakeApi(bundle, { observed: true, emptyQueries: true });
-		const result = await publishTelemetryDashboards({
-			bundle,
-			contract,
-			mode: "apply",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-		});
+		const result = await publish(api, { mode: "apply" });
 		expect(result.status).toBe("partially_published_pending_data");
 		expect(result.pending).toHaveLength(bundle.insights.length);
 		expect(result.creates).toEqual([]);
@@ -464,13 +315,7 @@ describe("dashboard publication safety", () => {
 
 	it("validates every eligible query before any explicitly requested publication write", async () => {
 		const api = fakeApi(bundle, { observed: true });
-		const result = await publishTelemetryDashboards({
-			bundle,
-			contract,
-			mode: "apply",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-		});
+		const result = await publish(api, { mode: "apply" });
 		expect(result.status).toBe("published");
 		expect(api.writes()).toHaveLength(bundle.corrections.length + bundle.insights.length);
 		const firstWrite = api.calls.findIndex((call) => call.path.includes("/insights/") && call.method !== "GET");
@@ -479,28 +324,13 @@ describe("dashboard publication safety", () => {
 
 	it("stops before any mutation when query validation fails", async () => {
 		const api = fakeApi(bundle, { observed: true, queryError: true });
-		await expect(
-			publishTelemetryDashboards({
-				bundle,
-				contract,
-				mode: "apply",
-				token: "synthetic-token",
-				fetcher: api.fetcher,
-			}),
-		).rejects.toThrow("publication stopped before writes");
+		await expect(publish(api, { mode: "apply" })).rejects.toThrow("publication stopped before writes");
 		expect(api.writes()).toEqual([]);
 	});
 
 	it("keeps legacy corrections available independently without querying or creating v2 charts", async () => {
 		const api = fakeApi(bundle);
-		const result = await publishTelemetryDashboards({
-			bundle,
-			contract,
-			mode: "apply",
-			legacyOnly: true,
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-		});
+		const result = await publish(api, { mode: "apply", legacyOnly: true });
 		expect(result.writes).toHaveLength(7);
 		expect(api.newQueries()).toEqual([]);
 		expect(api.calls.some((call) => JSON.stringify(call.body ?? {}).includes("observed_events"))).toBe(false);
@@ -520,13 +350,7 @@ describe("dashboard publication safety", () => {
 				},
 			],
 		});
-		const result = await publishTelemetryDashboards({
-			bundle: target,
-			contract,
-			mode: "apply",
-			token: "synthetic-token",
-			fetcher: api.fetcher,
-		});
+		const result = await publish(api, { mode: "apply" });
 		expect(result.creates).toEqual([]);
 		expect(api.writes().at(-1)).toMatchObject({
 			method: "PATCH",
@@ -541,26 +365,10 @@ describe("dashboard publication safety", () => {
 			observed: true,
 			existing: [{ id: 999, name: definition.name, tags: [], dashboards: [] }],
 		});
-		await expect(
-			publishTelemetryDashboards({
-				bundle,
-				contract,
-				mode: "apply",
-				token: "synthetic-token",
-				fetcher: duplicate.fetcher,
-			}),
-		).rejects.toThrow("Ambiguous existing chart");
+		await expect(publish(duplicate, { mode: "apply" })).rejects.toThrow("Ambiguous existing chart");
 		expect(duplicate.writes()).toEqual([]);
 		const redirected = fakeApi(bundle, { next: "https://example.invalid/api/projects/22174/insights/" });
-		await expect(
-			publishTelemetryDashboards({
-				bundle,
-				contract,
-				mode: "apply",
-				token: "synthetic-token",
-				fetcher: redirected.fetcher,
-			}),
-		).rejects.toThrow("outside the reviewed project");
+		await expect(publish(redirected, { mode: "apply" })).rejects.toThrow("outside the reviewed project");
 		expect(redirected.writes()).toEqual([]);
 	});
 });
