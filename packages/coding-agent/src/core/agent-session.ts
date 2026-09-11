@@ -200,7 +200,6 @@ import type { AsyncBashCompletionDetails } from "./messages.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-	type AsyncBashCompletionDetails,
 	type CustomMessage,
 	createAsyncBashCompletionMessage,
 	createHarnessDigestMessage,
