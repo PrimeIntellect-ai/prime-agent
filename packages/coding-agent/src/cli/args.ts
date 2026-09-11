@@ -171,7 +171,7 @@ export function parseArgs(args: string[]): Args {
 				result.thinking = level;
 			} else {
 				result.diagnostics.push({
-					type: "warning",
+					type: "error",
 					message: `Invalid thinking level "${level}". Valid values: ${THINKING_LEVELS.join(", ")}`,
 				});
 			}

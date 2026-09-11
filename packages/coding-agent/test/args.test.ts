@@ -231,6 +231,15 @@ describe("parseArgs", () => {
 			expect(result.thinking).toBe("high");
 		});
 
+		test("rejects an invalid --thinking level as a hard error", () => {
+			const result = parseArgs(["--thinking", "hig"]);
+			expect(result.thinking).toBeUndefined();
+			expect(result.diagnostics).toContainEqual({
+				type: "error",
+				message: 'Invalid thinking level "hig". Valid values: off, minimal, low, medium, high, xhigh, max',
+			});
+		});
+
 		test("parses --models as comma-separated list", () => {
 			const result = parseArgs(["--models", "gpt-4o,claude-sonnet,gemini-pro"]);
 			expect(result.models).toEqual(["gpt-4o", "claude-sonnet", "gemini-pro"]);
