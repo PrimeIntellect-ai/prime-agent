@@ -143,6 +143,18 @@ describe("rlm.collect typed fan-in", () => {
 		expect(all.results.map((entry) => entry.rlm_child_id)).toContain(handle.rlm_child_id);
 	});
 
+	it("returns only the selected child from a targeted collect", async () => {
+		session = makeSession();
+		const first = await session.runRlmChild("first task", { name: "worker-a" });
+		const second = await session.runRlmChild("second task", { name: "worker-b" });
+		await session.collectRlmChildren([], 10_000);
+
+		const targeted = await session.collectRlmChildren([first.rlm_child_id], 0);
+		expect(targeted.results.map((entry) => entry.rlm_child_id)).toEqual([first.rlm_child_id]);
+		const byName = await session.collectRlmChildren(["worker-b"], 0);
+		expect(byName.results.map((entry) => entry.rlm_child_id)).toEqual([second.rlm_child_id]);
+	});
+
 	it("returns current snapshots on timeout without rejecting", async () => {
 		session = makeSession();
 		const handle = await session.runRlmChild("slow task", { name: "worker-a" });
