@@ -297,33 +297,42 @@ describe("concurrent harness memory persistence", () => {
 		);
 	}
 
-	it.each(["Python", "host"])("refuses to overwrite a lossy persisted decimal from the %s writer", async (writer) => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const dir = join(harness.tempDir, "harness");
-		createHostMemory(dir, "seed-entry");
-		const state = loadHarnessState(dir, "local");
-		state.entries.memory["seed-entry"].metadata = { value: "__LOSSY_NUMBER__" };
-		const statePath = getHarnessStatePath(dir);
-		const lossyRaw = `${JSON.stringify(state, null, 2)}\n`.replace('"__LOSSY_NUMBER__"', "9007199254740991.1");
-		writeFileSync(statePath, lossyRaw);
-		if (writer === "host") {
-			const host = loadHarnessState(dir, "local");
-			applyRefinementProposal(host, proposal("host-entry"), { id: "host-refine", scope: "local" });
-			expect(() => saveHarnessState(dir, host)).toThrow("invalid or unreadable");
-		} else {
-			const python = pythonWriter(dir, "python-entry");
-			try {
-				const result = await python.done;
-				expect(result.code).toBe(1);
-				expect(result.stderr).toContain("invalid or unreadable");
-			} finally {
-				await python.cleanup();
+	it.each([
+		["Python", "9007199254740991.1"],
+		["host", "9007199254740991.1"],
+		["Python", "9007199254740992"],
+		["host", "9007199254740992"],
+	] as const)(
+		"keeps known data readable but refuses an unsafe persisted number from the %s writer (%s)",
+		async (writer, number) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const dir = join(harness.tempDir, "harness");
+			createHostMemory(dir, "seed-entry");
+			const state = loadHarnessState(dir, "local");
+			state.entries.memory["seed-entry"].metadata = { value: "__LOSSY_NUMBER__" };
+			const statePath = getHarnessStatePath(dir);
+			const lossyRaw = `${JSON.stringify(state, null, 2)}\n`.replace('"__LOSSY_NUMBER__"', number);
+			writeFileSync(statePath, lossyRaw);
+			const readable = loadHarnessState(dir, "local");
+			expect(readable.entries.memory["seed-entry"].content).toBe("seed-entry");
+			if (writer === "host") {
+				applyRefinementProposal(readable, proposal("host-entry"), { id: "host-refine", scope: "local" });
+				expect(() => saveHarnessState(dir, readable)).toThrow("invalid or unreadable");
+			} else {
+				const python = pythonWriter(dir, "python-entry");
+				try {
+					const result = await python.done;
+					expect(result.code).toBe(1);
+					expect(result.stderr).toContain("invalid or unreadable");
+				} finally {
+					await python.cleanup();
+				}
 			}
-		}
-		expect(readFileSync(statePath, "utf8")).toBe(lossyRaw);
-		expect(existsSync(`${statePath}.lock`)).toBe(false);
-	});
+			expect(readFileSync(statePath, "utf8")).toBe(lossyRaw);
+			expect(existsSync(`${statePath}.lock`)).toBe(false);
+		},
+	);
 
 	it.each(["metadata", "reference", "arguments"] as const)(
 		"refuses to overwrite non-finite persisted %s values during Python mutations",

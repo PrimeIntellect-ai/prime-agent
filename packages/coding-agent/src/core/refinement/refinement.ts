@@ -455,11 +455,9 @@ function readHarnessStateResult(statePath: string, scope: HarnessScope): { state
 		return { state: emptyHarnessState() };
 	}
 	let parsed: Partial<HarnessState>;
+	let unsafeNumbers = false;
 	try {
 		const source = readFileSync(statePath, "utf8");
-		if (!hasLosslessJsonNumbers(source)) {
-			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
-		}
 		const raw = JSON.parse(source);
 		// loadHarnessState runs on every system-prompt build and before each /refine, so
 		// a corrupt or unreadable (or non-object) state file must degrade to empty rather
@@ -467,22 +465,20 @@ function readHarnessStateResult(statePath: string, scope: HarnessScope): { state
 		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
 			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 		}
-		if (containsUnsafeJsonNumber(raw)) {
-			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
-		}
+		unsafeNumbers = !hasLosslessJsonNumbers(source) || containsUnsafeJsonNumber(raw);
 		parsed = raw as Partial<HarnessState>;
 	} catch {
 		return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 	}
 	const state = emptyHarnessState();
-	let writeError: string | undefined;
+	let writeError = unsafeNumbers ? invalidHarnessStateError() : undefined;
 	if (parsed.schema === undefined) {
 		state.schema = HARNESS_SCHEMA_VERSION;
 	} else if (typeof parsed.schema !== "number" || !Number.isFinite(parsed.schema)) {
 		return { state, writeError: invalidHarnessStateError() };
 	} else {
 		state.schema = parsed.schema;
-		if (parsed.schema !== HARNESS_SCHEMA_VERSION) {
+		if (!writeError && parsed.schema !== HARNESS_SCHEMA_VERSION) {
 			writeError = unsupportedHarnessSchemaError(parsed.schema);
 		}
 	}
