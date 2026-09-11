@@ -12,11 +12,16 @@ import type { AgentRlmHeartbeatController } from "../../src/core/cron-jobs.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SerializedInternals = {
-	_serializedRefine: boolean;
-	_pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
-	_assistantTurnsSinceAutoRefine: number;
-	_lastAutoRefineReviewAt: number;
-	_autoRefineInProgress: boolean;
+	_refinement: {
+		_serializedRefine: boolean;
+		_pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
+		_auto: {
+			_assistantTurnsSinceAutoRefine: number;
+			_lastAutoRefineReviewAt: number;
+			_autoRefineInProgress: boolean;
+		};
+	};
+
 	_rlmHeartbeatController?: unknown;
 	_agentMessageController?: unknown;
 	_agentObserveController?: unknown;
@@ -64,7 +69,7 @@ describe("Serialized refine config integration (unit)", () => {
 		harnesses.push(harness);
 
 		const internals = harness.session as unknown as SerializedInternals;
-		expect(internals._serializedRefine).toBe(true);
+		expect(internals._refinement._serializedRefine).toBe(true);
 	});
 
 	it("serializedRefine=false (default) produces a session with _serializedRefine=false", async () => {
@@ -74,7 +79,7 @@ describe("Serialized refine config integration (unit)", () => {
 		harnesses.push(harness);
 
 		const internals = harness.session as unknown as SerializedInternals;
-		expect(internals._serializedRefine).toBe(false);
+		expect(internals._refinement._serializedRefine).toBe(false);
 	});
 
 	it("real autonomous loop crosses threshold and resumes with serialized refine", async () => {
@@ -94,12 +99,16 @@ describe("Serialized refine config integration (unit)", () => {
 		harnesses.push(harness);
 
 		const internals = harness.session as unknown as SerializedInternals & {
-			_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
-			_applyRefine: (plan: unknown, opts: unknown, abort: AbortController) => Promise<unknown>;
+			_refinement: {
+				_execution: {
+					_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
+					_applyRefine: (plan: unknown, opts: unknown, abort: AbortController) => Promise<unknown>;
+				};
+			};
 		};
 
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "p", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockResolvedValue({
+		vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({ id: "p", proposal: { edits: [] } });
+		vi.spyOn(internals._refinement._execution, "_applyRefine").mockResolvedValue({
 			id: "refine_test",
 			summary: "test",
 			rationale: "test",
@@ -111,19 +120,19 @@ describe("Serialized refine config integration (unit)", () => {
 		// Turn 1: counter goes to 1 (< threshold 2, no refine)
 		harness.setResponses([fauxAssistantMessage("response 1")]);
 		await harness.session.prompt("prompt 1");
-		expect(internals._assistantTurnsSinceAutoRefine).toBe(1);
+		expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(1);
 
 		// Turn 2: counter goes to 2 (>= threshold 2, serialized checkpoint fires)
 		harness.setResponses([fauxAssistantMessage("response 2")]);
 		await harness.session.prompt("prompt 2");
 
 		// After the checkpoint, counter is reset to 0.
-		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
+		expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(0);
 
 		// Turn 3: counter goes to 1 again (< threshold, loop continues)
 		harness.setResponses([fauxAssistantMessage("response 3")]);
 		await harness.session.prompt("prompt 3");
-		expect(internals._assistantTurnsSinceAutoRefine).toBe(1);
+		expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(1);
 
 		// Reviewer called exactly once (at turn 2).
 		expect(reviewer).toHaveBeenCalledTimes(1);
@@ -183,7 +192,11 @@ describe("Serialized refine controller availability (unit)", () => {
 		harnesses.push(harness);
 
 		const internals = harness.session as unknown as SerializedInternals & {
-			_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
+			_refinement: {
+				_execution: {
+					_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
+				};
+			};
 		};
 
 		// Initially not in flight.
@@ -195,7 +208,7 @@ describe("Serialized refine controller availability (unit)", () => {
 		const planPromise = new Promise<void>((resolve) => {
 			resolvePlan = resolve;
 		});
-		vi.spyOn(internals, "_planRefine").mockImplementation(async () => {
+		vi.spyOn(internals._refinement._execution, "_planRefine").mockImplementation(async () => {
 			await planPromise;
 			return { id: "p", proposal: { edits: [] } };
 		});
@@ -216,8 +229,8 @@ describe("Serialized refine controller availability (unit)", () => {
 
 		// Run the checkpoint to consume the background plan.
 		await (
-			harness.session as unknown as { _runSerializedRefineCheckpoint: () => Promise<void> }
-		)._runSerializedRefineCheckpoint();
+			harness.session as unknown as { _refinement: { _runSerializedRefineCheckpoint: () => Promise<void> } }
+		)._refinement._runSerializedRefineCheckpoint();
 
 		// After the checkpoint, nothing should be in flight.
 		const statusAfter = harness.session.handleRefineHostRequest("refine.status");
@@ -262,12 +275,16 @@ describe("PR #503 model preservation (unit)", () => {
 		harnesses.push(harness);
 
 		const internals = harness.session as unknown as SerializedInternals & {
-			_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
-			_applyRefine: (plan: unknown, opts: unknown, abort: AbortController) => Promise<unknown>;
+			_refinement: {
+				_execution: {
+					_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
+					_applyRefine: (plan: unknown, opts: unknown, abort: AbortController) => Promise<unknown>;
+				};
+			};
 		};
 
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "p", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockResolvedValue({
+		vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({ id: "p", proposal: { edits: [] } });
+		vi.spyOn(internals._refinement._execution, "_applyRefine").mockResolvedValue({
 			id: "refine_test",
 			summary: "test",
 			rationale: "test",
@@ -277,7 +294,7 @@ describe("PR #503 model preservation (unit)", () => {
 		});
 
 		const modelBefore = harness.session.model;
-		internals._assistantTurnsSinceAutoRefine = 1;
+		internals._refinement._auto._assistantTurnsSinceAutoRefine = 1;
 
 		await harness.session.prompt("test");
 		// Wait for the checkpoint to complete.

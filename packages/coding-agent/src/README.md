@@ -88,6 +88,26 @@ Preserve the policy differences: direct prompts flush shell output before valida
 
 `session/prepared-actions.ts` contains prepared action types, delivery records, recovery contracts, input copying, action factories, and queue projections. It has no session dependency. Primary messages retain their identity for durable-delivery checks; separately stored input blocks and prefix messages retain their existing copy behavior. Recovery format version 1 and the public exports from `AgentSession` stay unchanged.
 
+## Session context
+
+| File | Responsibility |
+| --- | --- |
+| `session/compaction.ts` | Manual and automatic compaction lifecycle, pending requests, cancellation, thresholds, and overflow recovery. |
+| `session/compaction-execution.ts` | Summary generation, extension interception, request accounting, persistence, and context rebuild ordering. |
+| `session/refinement.ts` | Refinement admission, planning and application barriers, serialized plan ownership, and disposal drains. |
+| `session/auto-refinement.ts` | Review triggers, cooldowns, pending reviews, timers, and automatic operation cleanup. |
+| `session/refinement-execution.ts` | Planning against current dependencies, applying harness edits, and persisting outcomes and notices. |
+| `session/continuation.ts` | Resuming work after compaction, settlement, cancellation, and ownership of continuation messages. |
+
+Each owner keeps its mutable state and cleanup together. Typed host operations connect the owners to current model, authentication, extensions, storage, and scheduling. `AgentSession` composes them and retains public methods, events, and decisions that cross features, including goal and autonomous continuation admission. The summary algorithms and harness storage remain in their existing `core/` feature modules.
+
+Preserve these boundaries when changing context behavior:
+
+- Compaction releases its operation and reconnects event handling before resuming work. Summarization request accounting completes before the transcript append; failed persistence must preserve the existing live outcome disclosure.
+- Refinement planning may overlap active work. Applying a plan waits for the relevant agent, event, compaction, and branch operations to settle, and rechecks their identities before mutating context. Serialized checkpoints claim a background plan once.
+- A cancelled continuation settles its own waiters. Late results cannot clear a replacement operation or consume its messages. The commit lease is released before awaiting a continued agent turn, and checkpoint waiters are removed when cancellation wins.
+- Public session methods delegate without additional asynchronous wrappers. Optional waits retain their original positions, and dependency callbacks read current runtime state when invoked.
+
 ## Validation
 
 Controller tests live in `test/goals/`. Session integration coverage remains in `test/suite/agent-session-goal.test.ts`, `test/suite/agent-session-compaction-continuation.test.ts`, and `test/goal-continuation-quiescence.test.ts`.
@@ -95,5 +115,7 @@ Controller tests live in `test/goals/`. Session integration coverage remains in 
 Scheduler and commit-fence tests live in `test/session/`. Existing queue, action-contract, action-race, and compaction suites cover the integration with `AgentSession`, including pause, cancellation, restart, branch navigation, and goal continuation.
 
 Shell-owner tests also live in `test/session/`. Session bash/persistence, prompt, queue, and side-question regression suites retain end-to-end coverage of scheduling and transcript behavior using the faux provider and controlled shell operations.
+
+Compaction and continuation owner tests in `test/session/` exercise lifecycle and cancellation boundaries. Compaction, refinement, serialized refinement, queue, concurrency, and semantic-edge suites cover their integration with session persistence, goals, and disposal. `test/suite/session-refinement-owner.test.ts` checks the refinement owner boundary using the shared faux-provider harness.
 
 Run the focused files from the coding-agent package root with the repository's prescribed Vitest command, then run `npm run check` from the repository root. Use faux providers for session tests.

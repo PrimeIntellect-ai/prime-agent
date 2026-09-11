@@ -29,6 +29,7 @@ import {
 	saveHarnessState,
 } from "../../src/core/refinement/index.js";
 import { parseSessionSlashCommand } from "../../src/core/slash-commands.js";
+import type { SessionContinuation } from "../../src/session/continuation.js";
 import {
 	conversationMessages,
 	createHarness,
@@ -42,21 +43,28 @@ import { createDeferred, createWaitingHarness, gatedHook, withStreaming } from "
 type AutoRefineReason = "turn_interval" | "compact";
 
 type AutoRefineInternals = {
-	_maybeAutoRefine(reason: AutoRefineReason): Promise<void>;
-	_scheduleAutoRefine(reason: AutoRefineReason): void;
-	_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
-	_scheduleAutoRefineAfterAgentEnd(): void;
+	_refinement: {
+		_invalidatePendingAutoRefineForBranchChange(): Promise<void>;
+		_auto: {
+			_maybeAutoRefine(reason: AutoRefineReason): Promise<void>;
+			_scheduleAutoRefine(reason: AutoRefineReason): void;
+			_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
+			_scheduleAutoRefineAfterAgentEnd(): void;
+			_assistantTurnsSinceAutoRefine: number;
+			_lastAutoRefineReviewAt: number;
+			_compactAutoRefinePending: boolean;
+			_turnIntervalAutoRefinePending: boolean;
+			_pendingAutoRefineReview?: unknown;
+			_autoRefineInProgress: boolean;
+			_autoRefineBranchVersion: number;
+		};
+	};
+
 	_schedulePostCompactionContinue(continueAfterSessionInput?: boolean): void;
-	_invalidatePendingAutoRefineForBranchChange(): Promise<void>;
+
 	_cancelPostCompactionContinue(): void;
-	_assistantTurnsSinceAutoRefine: number;
-	_lastAutoRefineReviewAt: number;
-	_compactAutoRefinePending: boolean;
-	_turnIntervalAutoRefinePending: boolean;
-	_postCompactionContinuationScheduled: boolean;
-	_pendingAutoRefineReview?: unknown;
-	_autoRefineInProgress: boolean;
-	_autoRefineBranchVersion: number;
+
+	_continuation: Pick<SessionContinuation, "isScheduled">;
 };
 
 type SteeringStopInternals = {
@@ -131,7 +139,7 @@ describe("AgentSession queue characterization", () => {
 
 		await harness.session.prompt("fail once");
 
-		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
+		expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(0);
 	});
 
 	it.each([
@@ -225,13 +233,20 @@ describe("AgentSession queue characterization", () => {
 			const reviewer = vi.fn(async () => review);
 			const harness = await createAutoRefineHarness({ settings, autoRefineReviewer: reviewer });
 			harnesses.push(harness);
-			const refine = vi.spyOn(harness.session, "refine").mockResolvedValue(emptyRefinementResult());
+			const refine = vi
+				.spyOn(
+					(harness.session as unknown as { _refinement: Pick<typeof harness.session, "refine"> })._refinement,
+					"refine",
+				)
+				.mockResolvedValue(emptyRefinementResult());
 			const internals = harness.session as unknown as AutoRefineInternals;
-			internals._assistantTurnsSinceAutoRefine = turns;
-			const scheduleAutoRefine = vi.spyOn(internals, "_scheduleAutoRefine").mockImplementation(() => {});
+			internals._refinement._auto._assistantTurnsSinceAutoRefine = turns;
+			const scheduleAutoRefine = vi
+				.spyOn(internals._refinement._auto, "_scheduleAutoRefine")
+				.mockImplementation(() => {});
 			if (queuedMessages) vi.spyOn(harness.session.agent, "hasQueuedMessages").mockReturnValue(true);
 
-			await internals._maybeAutoRefine(reason);
+			await internals._refinement._auto._maybeAutoRefine(reason);
 
 			if (expectedReviewContext !== undefined) {
 				expect(reviewer).toHaveBeenCalledWith(expectedReviewContext, expect.any(AbortSignal));
@@ -247,8 +262,10 @@ describe("AgentSession queue characterization", () => {
 					);
 				}
 			}
-			if (turnsAfter !== undefined) expect(internals._assistantTurnsSinceAutoRefine).toBe(turnsAfter);
-			if (compactPendingAfter !== undefined) expect(internals._compactAutoRefinePending).toBe(compactPendingAfter);
+			if (turnsAfter !== undefined)
+				expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(turnsAfter);
+			if (compactPendingAfter !== undefined)
+				expect(internals._refinement._auto._compactAutoRefinePending).toBe(compactPendingAfter);
 			if (scheduleCalledWith !== undefined) expect(scheduleAutoRefine).toHaveBeenCalledWith(scheduleCalledWith);
 		},
 	);
@@ -257,29 +274,29 @@ describe("AgentSession queue characterization", () => {
 		{
 			name: "waits for planned post-compaction continuation",
 			act: (internals: AutoRefineInternals, expectSchedule: (called: boolean) => void) => {
-				internals._scheduleAutoRefineAfterCompaction(true);
-				expect(internals._compactAutoRefinePending).toBe(true);
+				internals._refinement._auto._scheduleAutoRefineAfterCompaction(true);
+				expect(internals._refinement._auto._compactAutoRefinePending).toBe(true);
 				expectSchedule(false);
-				internals._scheduleAutoRefineAfterAgentEnd();
-				expect(internals._compactAutoRefinePending).toBe(true);
+				internals._refinement._auto._scheduleAutoRefineAfterAgentEnd();
+				expect(internals._refinement._auto._compactAutoRefinePending).toBe(true);
 			},
 		},
 		{
 			name: "waits until the scheduled post-compaction continuation starts",
 			act: (internals: AutoRefineInternals, expectSchedule: (called: boolean) => void) => {
-				internals._compactAutoRefinePending = true;
-				internals._postCompactionContinuationScheduled = true;
-				internals._scheduleAutoRefineAfterAgentEnd();
+				internals._refinement._auto._compactAutoRefinePending = true;
+				const scheduled = vi.spyOn(internals._continuation, "isScheduled", "get").mockReturnValue(true);
+				internals._refinement._auto._scheduleAutoRefineAfterAgentEnd();
 				expectSchedule(false);
-				internals._postCompactionContinuationScheduled = false;
-				internals._scheduleAutoRefineAfterAgentEnd();
+				scheduled.mockRestore();
+				internals._refinement._auto._scheduleAutoRefineAfterAgentEnd();
 			},
 		},
 		{
 			name: "runs immediately when no post-compaction continuation is planned",
 			act: (internals: AutoRefineInternals) => {
-				internals._scheduleAutoRefineAfterCompaction(false);
-				expect(internals._compactAutoRefinePending).toBe(false);
+				internals._refinement._auto._scheduleAutoRefineAfterCompaction(false);
+				expect(internals._refinement._auto._compactAutoRefinePending).toBe(false);
 			},
 		},
 	])("auto-refine compact hook $name", async ({ act }) => {
@@ -288,7 +305,9 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		const scheduleAutoRefine = vi.spyOn(internals, "_scheduleAutoRefine").mockImplementation(() => {});
+		const scheduleAutoRefine = vi
+			.spyOn(internals._refinement._auto, "_scheduleAutoRefine")
+			.mockImplementation(() => {});
 
 		act(internals, (called) =>
 			called ? expect(scheduleAutoRefine).toHaveBeenCalled() : expect(scheduleAutoRefine).not.toHaveBeenCalled(),
@@ -313,22 +332,22 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		internals._assistantTurnsSinceAutoRefine = 2;
+		internals._refinement._auto._assistantTurnsSinceAutoRefine = 2;
 
 		try {
-			const compactReview = internals._maybeAutoRefine("compact");
+			const compactReview = internals._refinement._auto._maybeAutoRefine("compact");
 			await Promise.resolve();
-			await internals._maybeAutoRefine("turn_interval");
+			await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
-			expect(internals._turnIntervalAutoRefinePending).toBe(true);
+			expect(internals._refinement._auto._turnIntervalAutoRefinePending).toBe(true);
 
 			compactReviewGate.resolve();
 			await compactReview;
 			await vi.runOnlyPendingTimersAsync();
 
 			expect(reviewer.mock.calls.map(([context]) => context.reason)).toEqual(["compact", "turn_interval"]);
-			expect(internals._turnIntervalAutoRefinePending).toBe(false);
-			expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
+			expect(internals._refinement._auto._turnIntervalAutoRefinePending).toBe(false);
+			expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(0);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -353,11 +372,11 @@ describe("AgentSession queue characterization", () => {
 
 		internals._schedulePostCompactionContinue();
 		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(1));
-		expect(internals._postCompactionContinuationScheduled).toBe(true);
+		expect(internals._continuation.isScheduled).toBe(true);
 
 		activeRunSettled.resolve();
 		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(2));
-		expect(internals._postCompactionContinuationScheduled).toBe(false);
+		expect(internals._continuation.isScheduled).toBe(false);
 	});
 
 	it("does not let a failed cancelled continuation reject its replacement", async () => {
@@ -412,11 +431,11 @@ describe("AgentSession queue characterization", () => {
 
 		try {
 			internals._schedulePostCompactionContinue();
-			await internals._invalidatePendingAutoRefineForBranchChange();
+			await internals._refinement._invalidatePendingAutoRefineForBranchChange();
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).not.toHaveBeenCalled();
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._continuation.isScheduled).toBe(false);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -443,7 +462,7 @@ describe("AgentSession queue characterization", () => {
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).not.toHaveBeenCalled();
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._continuation.isScheduled).toBe(false);
 			expect(harness.session.getFollowUpMessages()).toEqual(["queued across abort"]);
 		} finally {
 			vi.useRealTimers();
@@ -464,7 +483,7 @@ describe("AgentSession queue characterization", () => {
 			"Session is too short to compact",
 		);
 
-		expect(internals._postCompactionContinuationScheduled).toBe(true);
+		expect(internals._continuation.isScheduled).toBe(true);
 		internals._cancelPostCompactionContinue();
 		idle.resolve();
 	});
@@ -475,39 +494,44 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		internals._pendingAutoRefineReview = {
+		internals._refinement._auto._pendingAutoRefineReview = {
 			reason: "turn_interval",
 			review: { shouldRefine: true, rationale: "durable lesson" },
 		};
 		let guardWasSetDuringRefine = false;
-		const refine = vi.spyOn(harness.session, "refine").mockImplementation(async () => {
-			guardWasSetDuringRefine = internals._autoRefineInProgress;
-			throw new Error("refine failed");
-		});
+		const refine = vi
+			.spyOn(
+				(harness.session as unknown as { _refinement: Pick<typeof harness.session, "refine"> })._refinement,
+				"refine",
+			)
+			.mockImplementation(async () => {
+				guardWasSetDuringRefine = internals._refinement._auto._autoRefineInProgress;
+				throw new Error("refine failed");
+			});
 
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
 		expect(refine).toHaveBeenCalledWith(
 			expect.objectContaining({ instructions: expect.stringContaining("durable lesson") }),
 			{ trigger: "auto" },
 		);
 		expect(guardWasSetDuringRefine).toBe(true);
-		expect(internals._autoRefineInProgress).toBe(false);
-		expect(internals._pendingAutoRefineReview).toBeDefined();
+		expect(internals._refinement._auto._autoRefineInProgress).toBe(false);
+		expect(internals._refinement._auto._pendingAutoRefineReview).toBeDefined();
 		// The failure stamps the cooldown so the retained pending review does not
 		// retry on every agent end.
-		expect(internals._lastAutoRefineReviewAt).toBeGreaterThan(0);
+		expect(internals._refinement._auto._lastAutoRefineReviewAt).toBeGreaterThan(0);
 
 		refine.mockResolvedValueOnce(emptyRefinementResult());
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
 		expect(refine).toHaveBeenCalledTimes(1);
-		expect(internals._pendingAutoRefineReview).toBeDefined();
+		expect(internals._refinement._auto._pendingAutoRefineReview).toBeDefined();
 
-		internals._lastAutoRefineReviewAt = 0;
-		await internals._maybeAutoRefine("turn_interval");
+		internals._refinement._auto._lastAutoRefineReviewAt = 0;
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
-		expect(internals._pendingAutoRefineReview).toBeUndefined();
+		expect(internals._refinement._auto._pendingAutoRefineReview).toBeUndefined();
 	});
 
 	it("keeps the turn counter and stamps the cooldown when an approved immediate refine fails", async () => {
@@ -518,17 +542,20 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		internals._assistantTurnsSinceAutoRefine = 2;
-		vi.spyOn(harness.session, "refine").mockRejectedValueOnce(new Error("refine failed"));
+		internals._refinement._auto._assistantTurnsSinceAutoRefine = 2;
+		vi.spyOn(
+			(harness.session as unknown as { _refinement: Pick<typeof harness.session, "refine"> })._refinement,
+			"refine",
+		).mockRejectedValueOnce(new Error("refine failed"));
 
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
 		expect(reviewer).toHaveBeenCalledWith(
 			{ reason: "turn_interval", turnsSinceLastReview: 2 },
 			expect.any(AbortSignal),
 		);
-		expect(internals._assistantTurnsSinceAutoRefine).toBe(2);
-		expect(internals._lastAutoRefineReviewAt).toBeGreaterThan(0);
+		expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(2);
+		expect(internals._refinement._auto._lastAutoRefineReviewAt).toBeGreaterThan(0);
 	});
 
 	it("does not refine when a review resolves after the session is disposed", async () => {
@@ -547,10 +574,15 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		internals._assistantTurnsSinceAutoRefine = 1;
-		const refine = vi.spyOn(harness.session, "refine").mockResolvedValue(emptyRefinementResult());
+		internals._refinement._auto._assistantTurnsSinceAutoRefine = 1;
+		const refine = vi
+			.spyOn(
+				(harness.session as unknown as { _refinement: Pick<typeof harness.session, "refine"> })._refinement,
+				"refine",
+			)
+			.mockResolvedValue(emptyRefinementResult());
 
-		const autoRefinePromise = internals._maybeAutoRefine("turn_interval");
+		const autoRefinePromise = internals._refinement._auto._maybeAutoRefine("turn_interval");
 		expect(reviewer).toHaveBeenCalledTimes(1);
 		const entriesBeforeDispose = harness.sessionManager.getEntries().length;
 		harness.session.dispose();
@@ -559,11 +591,11 @@ describe("AgentSession queue characterization", () => {
 		await autoRefinePromise;
 
 		expect(refine).not.toHaveBeenCalled();
-		expect(internals._pendingAutoRefineReview).toBeUndefined();
+		expect(internals._refinement._auto._pendingAutoRefineReview).toBeUndefined();
 		expect(harness.sessionManager.getEntries().length).toBe(entriesBeforeDispose);
 
 		// Disposal also invalidates any newly scheduled auto-refine.
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 		expect(reviewer).toHaveBeenCalledTimes(1);
 	});
 
@@ -577,14 +609,14 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		internals._assistantTurnsSinceAutoRefine = 1;
+		internals._refinement._auto._assistantTurnsSinceAutoRefine = 1;
 
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
 		expect(reviewer).toHaveBeenCalledTimes(1);
-		expect(internals._lastAutoRefineReviewAt).toBeGreaterThan(0);
+		expect(internals._refinement._auto._lastAutoRefineReviewAt).toBeGreaterThan(0);
 
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
 		expect(reviewer).toHaveBeenCalledTimes(1);
 	});
@@ -595,17 +627,22 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		internals._pendingAutoRefineReview = {
+		internals._refinement._auto._pendingAutoRefineReview = {
 			reason: "turn_interval",
 			review: { shouldRefine: true, rationale: "durable lesson" },
 		};
-		internals._lastAutoRefineReviewAt = Date.now();
-		const refine = vi.spyOn(harness.session, "refine").mockResolvedValue(emptyRefinementResult());
+		internals._refinement._auto._lastAutoRefineReviewAt = Date.now();
+		const refine = vi
+			.spyOn(
+				(harness.session as unknown as { _refinement: Pick<typeof harness.session, "refine"> })._refinement,
+				"refine",
+			)
+			.mockResolvedValue(emptyRefinementResult());
 
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
 		expect(refine).not.toHaveBeenCalled();
-		expect(internals._pendingAutoRefineReview).toBeDefined();
+		expect(internals._refinement._auto._pendingAutoRefineReview).toBeDefined();
 	});
 
 	it("serializes concurrent refine calls", async () => {
@@ -838,13 +875,20 @@ describe("AgentSession queue characterization", () => {
 		const harness = await makeHarness();
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		internals._assistantTurnsSinceAutoRefine = 1;
-		const refine = vi.spyOn(harness.session, "refine").mockResolvedValue(emptyRefinementResult());
-		const scheduleAutoRefine = vi.spyOn(internals, "_scheduleAutoRefine").mockImplementation(() => {});
+		internals._refinement._auto._assistantTurnsSinceAutoRefine = 1;
+		const refine = vi
+			.spyOn(
+				(harness.session as unknown as { _refinement: Pick<typeof harness.session, "refine"> })._refinement,
+				"refine",
+			)
+			.mockResolvedValue(emptyRefinementResult());
+		const scheduleAutoRefine = vi
+			.spyOn(internals._refinement._auto, "_scheduleAutoRefine")
+			.mockImplementation(() => {});
 
-		await internals._maybeAutoRefine("turn_interval");
-		internals._scheduleAutoRefineAfterCompaction(false);
-		internals._scheduleAutoRefineAfterAgentEnd();
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
+		internals._refinement._auto._scheduleAutoRefineAfterCompaction(false);
+		internals._refinement._auto._scheduleAutoRefineAfterAgentEnd();
 
 		expect(skipReviewer).not.toHaveBeenCalled();
 		if (expectRefineChecked) expect(refine).not.toHaveBeenCalled();
@@ -860,9 +904,9 @@ describe("AgentSession queue characterization", () => {
 		state.model = undefined;
 		const internals = harness.session as unknown as AutoRefineInternals;
 
-		await internals._maybeAutoRefine("compact");
+		await internals._refinement._auto._maybeAutoRefine("compact");
 
-		expect(internals._compactAutoRefinePending).toBe(true);
+		expect(internals._refinement._auto._compactAutoRefinePending).toBe(true);
 	});
 
 	it.each([
@@ -878,13 +922,13 @@ describe("AgentSession queue characterization", () => {
 			});
 			harnesses.push(harness);
 			const internals = harness.session as unknown as AutoRefineInternals;
-			internals._assistantTurnsSinceAutoRefine = turns;
-			internals._lastAutoRefineReviewAt = Date.now();
+			internals._refinement._auto._assistantTurnsSinceAutoRefine = turns;
+			internals._refinement._auto._lastAutoRefineReviewAt = Date.now();
 
-			await internals._maybeAutoRefine(reason);
+			await internals._refinement._auto._maybeAutoRefine(reason);
 
 			expect(reviewer).not.toHaveBeenCalled();
-			expect(internals[pendingFlag]).toBe(true);
+			expect(internals._refinement._auto[pendingFlag]).toBe(true);
 		},
 	);
 
@@ -1812,7 +1856,7 @@ describe("AgentSession queue characterization", () => {
 	});
 
 	it("keeps cleared prompts out of the handoff snapshot during the refine wait", async () => {
-		let sessionInternals: { _refineInFlight?: Promise<void> };
+		let sessionInternals: { _refinement: { _refineInFlight?: Promise<void> } };
 		let clearDuringRefineWait: (() => void) | undefined;
 		const harness = await createHarness({
 			extensionFactories: [
@@ -1822,12 +1866,12 @@ describe("AgentSession queue characterization", () => {
 						// message inside that window; the handoff snapshot must not
 						// deliver it.
 						let releaseRefine: (() => void) | undefined;
-						sessionInternals._refineInFlight = new Promise<void>((resolve) => {
+						sessionInternals._refinement._refineInFlight = new Promise<void>((resolve) => {
 							releaseRefine = resolve;
 						});
 						setTimeout(() => {
 							clearDuringRefineWait?.();
-							sessionInternals._refineInFlight = undefined;
+							sessionInternals._refinement._refineInFlight = undefined;
 							releaseRefine?.();
 						}, 0);
 						return {};
@@ -1836,7 +1880,7 @@ describe("AgentSession queue characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		sessionInternals = harness.session as unknown as { _refineInFlight?: Promise<void> };
+		sessionInternals = harness.session as unknown as { _refinement: { _refineInFlight?: Promise<void> } };
 		harness.setResponses([fauxAssistantMessage("kept response")]);
 
 		const clearedAgentMessage = agentPromptText("agentmsg_cleared", "cleared");

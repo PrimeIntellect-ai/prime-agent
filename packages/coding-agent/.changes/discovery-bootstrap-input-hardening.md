@@ -1,0 +1,1 @@
+- Fixed excessive processing time for malformed Codex model URLs and prevented Python skill import names from being interpreted as code during kernel setup.

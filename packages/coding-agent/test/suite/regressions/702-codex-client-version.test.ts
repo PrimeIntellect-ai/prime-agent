@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { ModelRegistry } from "../../../src/core/model-registry.js";
 
@@ -24,6 +24,43 @@ describe("issue #702 codex model discovery client version", () => {
 				rmSync(dir, { recursive: true, force: true });
 			}
 		}
+	});
+
+	it.each([
+		["ordinary", "https://example.com", "/codex/models"],
+		["trailing slashes", "https://example.com///", "/codex/models"],
+		["Codex endpoint", "https://example.com/codex///", "/codex/models"],
+		["responses endpoint", "https://example.com/codex/responses///", "/codex/models"],
+		["internal slashes", "https://example.com/a///b/", "/a///b/codex/models"],
+		["line terminator", "https://example.com/codex/\n", "/codex//codex/models"],
+		[
+			"long nonmatching slash run",
+			`https://example.com/${"/".repeat(40_000)}x`,
+			`/${"/".repeat(40_000)}x/codex/models`,
+		],
+	])("preserves discovery URL construction for %s", async (_label, baseUrl, expectedPath) => {
+		const registry = ModelRegistry.inMemory(
+			AuthStorage.inMemory({
+				"openai-codex": {
+					type: "oauth",
+					access: codexAccessToken("account-123"),
+					refresh: "refresh-token",
+					expires: Date.now() + 60 * 60 * 1000,
+					accountId: "account-123",
+				},
+			}),
+		);
+		registry.registerProvider("openai-codex", { baseUrl });
+		const fetchCatalog = vi.fn<typeof fetch>(
+			async () => new Response(JSON.stringify({ models: [] }), { status: 200 }),
+		);
+		globalThis.fetch = fetchCatalog;
+		await registry.getExecutableModels();
+		expect(fetchCatalog).toHaveBeenCalledOnce();
+		const requestedUrl = new URL(String(fetchCatalog.mock.calls[0]![0]));
+		expect(requestedUrl.origin).toBe("https://example.com");
+		expect(requestedUrl.pathname).toBe(expectedPath);
+		expect(requestedUrl.searchParams.get("client_version")).toMatch(/^\d+\.\d+\.\d+$/);
 	});
 
 	it("reports a Codex CLI client version on the discovery request instead of the package version", async () => {

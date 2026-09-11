@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { SessionManager } from "../../src/core/session-manager.js";
+import type { SessionCompaction } from "../../src/session/compaction.js";
+import type { SessionContinuation } from "../../src/session/continuation.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
@@ -22,11 +24,7 @@ type SessionWithCompactionInternals = {
 	) => Promise<void>;
 	_runAutoCompaction: (reason: "overflow" | "threshold" | "requested", willRetry: boolean) => Promise<void>;
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
-	_persistCompactionOutcome: (
-		reason: "overflow" | "threshold" | "requested",
-		outcome: "skipped" | "cancelled" | "failed",
-		message: string,
-	) => void;
+	_compaction: SessionCompaction;
 };
 
 function createUsage(totalTokens: number) {
@@ -351,7 +349,7 @@ describe("AgentSession compaction characterization", () => {
 		const internals = harness.session as unknown as {
 			_schedulePostCompactionContinue(): void;
 			_cancelPostCompactionContinue(): void;
-			_postCompactionContinuationScheduled: boolean;
+			_continuation: SessionContinuation;
 		};
 		try {
 			await harness.session.prompt("one");
@@ -360,7 +358,7 @@ describe("AgentSession compaction characterization", () => {
 
 			await harness.session.compact();
 
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(internals._continuation.isScheduled).toBe(true);
 		} finally {
 			internals._cancelPostCompactionContinue();
 		}
@@ -474,10 +472,15 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as {
+			_refinement: {
+				_auto: {
+					_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
+				};
+			};
+
 			_cancelPostCompactionContinue(): void;
-			_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
 		};
-		const scheduleAutoRefineSpy = vi.spyOn(internals, "_scheduleAutoRefineAfterCompaction");
+		const scheduleAutoRefineSpy = vi.spyOn(internals._refinement._auto, "_scheduleAutoRefineAfterCompaction");
 		try {
 			await harness.session.prompt("one");
 			await harness.session.prompt("two");
@@ -578,10 +581,15 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.followUp("preparing across compaction", undefined, { resumeIfIdle: true });
 		await vi.waitFor(() => expect(preparationReached).toHaveBeenCalledOnce());
 		const internals = harness.session as unknown as SessionWithCompactionInternals & {
+			_refinement: {
+				_auto: {
+					_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
+				};
+			};
+
 			_cancelPostCompactionContinue(): void;
-			_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
 		};
-		const scheduleAutoRefineSpy = vi.spyOn(internals, "_scheduleAutoRefineAfterCompaction");
+		const scheduleAutoRefineSpy = vi.spyOn(internals._refinement._auto, "_scheduleAutoRefineAfterCompaction");
 		try {
 			await internals._runAutoCompaction("requested", false);
 			expect(scheduleAutoRefineSpy).toHaveBeenCalledWith(true);
@@ -689,7 +697,7 @@ describe("AgentSession compaction characterization", () => {
 				shouldContinueAfterThreshold: boolean,
 				queuedMessages: AgentMessage[],
 			): void;
-			_postCompactionContinuationMessages: AgentMessage[];
+			_continuation: SessionContinuation;
 		};
 		const firstAssistant = createAssistant(harness, { stopReason: "toolUse", totalTokens: 10_000 });
 		const secondAssistant = createAssistant(harness, { stopReason: "toolUse", totalTokens: 10_000 });
@@ -703,7 +711,7 @@ describe("AgentSession compaction characterization", () => {
 		sessionInternals._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(true, [secondQueued!]);
 
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([firstQueued]);
+		expect(sessionInternals._continuation.messages).toEqual([firstQueued]);
 		expect(harness.session.getFollowUpMessages()).toHaveLength(1);
 	});
 
@@ -1066,7 +1074,7 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
 			_schedulePostCompactionContinue(): void;
-			_postCompactionContinuationMessages: AgentMessage[];
+			_continuation: SessionContinuation;
 		};
 		const steeringMessage = {
 			role: "user",
@@ -1078,7 +1086,7 @@ describe("AgentSession compaction characterization", () => {
 			content: [{ type: "text", text: "autonomous follow-up" }],
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		sessionInternals._postCompactionContinuationMessages = [autonomousMessage];
+		sessionInternals._continuation.track(autonomousMessage);
 		harness.session.agent.state.messages = [{ ...fauxAssistantMessage("done"), timestamp: Date.now() - 1000 }];
 		harness.session.agent.steer(steeringMessage);
 		harness.session.agent.followUp(autonomousMessage);
@@ -1089,7 +1097,7 @@ describe("AgentSession compaction characterization", () => {
 		await vi.advanceTimersByTimeAsync(100);
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([autonomousMessage]);
+		expect(sessionInternals._continuation.messages).toEqual([autonomousMessage]);
 		expect(followUpSpy).toHaveBeenCalledWith(autonomousMessage);
 	});
 
@@ -1119,8 +1127,7 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
 			_schedulePostCompactionContinue(continueAfterSessionInput?: boolean): void;
-			_postCompactionContinuationMessages: AgentMessage[];
-			_postCompactionContinuationScheduled: boolean;
+			_continuation: SessionContinuation;
 			_createPreparedTurnAction(
 				schedule: "followUp",
 				text: string,
@@ -1134,7 +1141,7 @@ describe("AgentSession compaction characterization", () => {
 			content: [{ type: "text", text }],
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		if (tracked) sessionInternals._postCompactionContinuationMessages = [continuation];
+		if (tracked) sessionInternals._continuation.track(continuation);
 		harness.setResponses([fauxAssistantMessage(response)]);
 		sessionInternals._admitSessionInput(
 			sessionInternals._createPreparedTurnAction("followUp", text, undefined, {
@@ -1148,8 +1155,8 @@ describe("AgentSession compaction characterization", () => {
 		await vi.advanceTimersByTimeAsync(200);
 
 		expect(continueSpy).toHaveBeenCalledTimes(continueAfterSessionInput ? 1 : 0);
-		expect(sessionInternals._postCompactionContinuationScheduled).toBe(false);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([]);
+		expect(sessionInternals._continuation.isScheduled).toBe(false);
+		expect(sessionInternals._continuation.messages).toEqual([]);
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			content: [{ type: "text", text: response }],
@@ -1171,15 +1178,14 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as {
 			_schedulePostCompactionContinue(): void;
 			_cancelPostCompactionContinue(): void;
-			_postCompactionContinuationMessages: AgentMessage[];
-			_postCompactionContinuationScheduled: boolean;
+			_continuation: SessionContinuation;
 		};
 		const queuedMessage = {
 			role: "user",
 			content: [{ type: "text", text: "autonomous follow-up" }],
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		sessionInternals._postCompactionContinuationMessages = [queuedMessage];
+		sessionInternals._continuation.track(queuedMessage);
 		harness.session.agent.state.messages = [
 			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
 		];
@@ -1194,8 +1200,8 @@ describe("AgentSession compaction characterization", () => {
 		sessionInternals._schedulePostCompactionContinue();
 		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(1));
 
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
-		expect(sessionInternals._postCompactionContinuationScheduled).toBe(true);
+		expect(sessionInternals._continuation.messages).toEqual([queuedMessage]);
+		expect(sessionInternals._continuation.isScheduled).toBe(true);
 		sessionInternals._cancelPostCompactionContinue();
 		activeRunSettled.resolve();
 	});
@@ -1206,14 +1212,14 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as {
 			_schedulePostCompactionContinue(): void;
 			_cancelPostCompactionContinue(): void;
-			_postCompactionContinuationMessages: AgentMessage[];
+			_continuation: SessionContinuation;
 		};
 		const queuedMessage = {
 			role: "user",
 			content: [{ type: "text", text: "autonomous follow-up" }],
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		sessionInternals._postCompactionContinuationMessages = [queuedMessage];
+		sessionInternals._continuation.track(queuedMessage);
 		const staleRun = createDeferred();
 		const replacementRun = createDeferred();
 		const continueSpy = vi
@@ -1229,19 +1235,22 @@ describe("AgentSession compaction characterization", () => {
 
 		staleRun.resolve();
 		await new Promise<void>(setImmediate);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
+		expect(sessionInternals._continuation.messages).toEqual([queuedMessage]);
 
 		replacementRun.resolve();
 		await harness.session.waitForHeadlessIdle();
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([]);
+		expect(sessionInternals._continuation.messages).toEqual([]);
 	});
 
 	it("waits for an in-flight refine application before continuing", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
+			_refinement: {
+				_refineInFlight: Promise<void> | undefined;
+			};
+
 			_schedulePostCompactionContinue(): void;
-			_refineInFlight: Promise<void> | undefined;
 		};
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 		const pause = harness.session.acquireQueuedWorkPause();
@@ -1250,12 +1259,12 @@ describe("AgentSession compaction characterization", () => {
 
 		// Refine enters its apply phase while the runner waits out the pause.
 		const refineApply = createDeferred();
-		sessionInternals._refineInFlight = refineApply.promise;
+		sessionInternals._refinement._refineInFlight = refineApply.promise;
 		pause.release();
 		await new Promise<void>(setImmediate);
 		expect(continueSpy).not.toHaveBeenCalled();
 
-		sessionInternals._refineInFlight = undefined;
+		sessionInternals._refinement._refineInFlight = undefined;
 		refineApply.resolve();
 		await harness.session.waitForHeadlessIdle();
 		expect(continueSpy).toHaveBeenCalledTimes(1);
@@ -1569,7 +1578,7 @@ describe("AgentSession compaction characterization", () => {
 		});
 
 		expect(() =>
-			internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed"),
+			internals._compaction.endUnsuccessfully("requested", "failed", "Requested compaction failed"),
 		).not.toThrow();
 		// The live outcome message discloses that it was not saved.
 		expect(harness.session.messages.at(-1)).toMatchObject({
@@ -1641,7 +1650,7 @@ describe("AgentSession compaction characterization", () => {
 		vi.spyOn(harness.sessionManager, "_persist").mockImplementationOnce(() => {
 			throw new Error("disk full");
 		});
-		internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed");
+		internals._compaction.endUnsuccessfully("requested", "failed", "Requested compaction failed");
 
 		// Compaction reloads agent.state.messages from the session file; the
 		// memory-only disclosure must survive.

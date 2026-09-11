@@ -217,15 +217,19 @@ describe("AgentSession session_before_refine extension hook", () => {
 		await harness.session.prompt("hello").catch(() => {});
 
 		const internals = harness.session as unknown as {
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+			_refinement: {
+				_execution: {
+					_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+				};
+			};
 		};
 		// The handler runs but does not short-circuit: planning proceeds to the
 		// built-in planner LLM call, which fails here (no faux response queued)
 		// rather than being skipped.
 		const refineAbort = new AbortController();
-		await expect(internals._planRefine({ instructions: "x" }, refineAbort.signal)).rejects.not.toThrow(
-			RefineSkippedError,
-		);
+		await expect(
+			internals._refinement._execution._planRefine({ instructions: "x" }, refineAbort.signal),
+		).rejects.not.toThrow(RefineSkippedError);
 		expect(handlerCalls).toBe(1);
 	});
 
@@ -246,22 +250,26 @@ describe("AgentSession session_before_refine extension hook", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as {
-			_maybeAutoRefine(reason: "turn_interval"): Promise<void>;
-			_assistantTurnsSinceAutoRefine: number;
-			_turnIntervalAutoRefinePending: boolean;
-			_pendingAutoRefineReview?: unknown;
+			_refinement: {
+				_auto: {
+					_maybeAutoRefine(reason: "turn_interval"): Promise<void>;
+					_assistantTurnsSinceAutoRefine: number;
+					_turnIntervalAutoRefinePending: boolean;
+					_pendingAutoRefineReview?: unknown;
+				};
+			};
 		};
-		internals._assistantTurnsSinceAutoRefine = 1;
+		internals._refinement._auto._assistantTurnsSinceAutoRefine = 1;
 
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 
 		expect(handlerCalls).toBe(1);
-		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
-		expect(internals._turnIntervalAutoRefinePending).toBe(false);
-		expect(internals._pendingAutoRefineReview).toBeUndefined();
+		expect(internals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(0);
+		expect(internals._refinement._auto._turnIntervalAutoRefinePending).toBe(false);
+		expect(internals._refinement._auto._pendingAutoRefineReview).toBeUndefined();
 		expect(harness.eventsOfType("refine_failed")).toHaveLength(0);
 
-		await internals._maybeAutoRefine("turn_interval");
+		await internals._refinement._auto._maybeAutoRefine("turn_interval");
 		expect(handlerCalls).toBe(1);
 	});
 
@@ -289,10 +297,20 @@ describe("AgentSession session_before_refine extension hook", () => {
 		await harness.session.prompt("hello").catch(() => {});
 
 		const internals = harness.session as unknown as {
-			_runSerializedAutoRefineReview(reason: "compact" | "turn_interval", branchVersion: number): Promise<void>;
-			_autoRefineBranchVersion: number;
+			_refinement: {
+				_auto: {
+					_runSerializedAutoRefineReview(
+						reason: "compact" | "turn_interval",
+						branchVersion: number,
+					): Promise<void>;
+					_autoRefineBranchVersion: number;
+				};
+			};
 		};
-		await internals._runSerializedAutoRefineReview("turn_interval", internals._autoRefineBranchVersion);
+		await internals._refinement._auto._runSerializedAutoRefineReview(
+			"turn_interval",
+			internals._refinement._auto._autoRefineBranchVersion,
+		);
 
 		expect(events).toHaveLength(1);
 		expect(events[0]?.preparation.trigger).toBe("auto");
