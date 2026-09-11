@@ -63,7 +63,7 @@ export class GoalController {
 		this._setState(emptyGoalState());
 	}
 
-	pause(reason = "Paused by user"): void {
+	pause(): void {
 		if (this._state.status !== "active") {
 			this._onUpdate(this.current);
 			return;
@@ -72,7 +72,7 @@ export class GoalController {
 			...this._withAccountedWallClock(),
 			active: false,
 			status: "paused",
-			lastReason: reason,
+			lastReason: "Paused by user",
 			lastError: undefined,
 		});
 	}
