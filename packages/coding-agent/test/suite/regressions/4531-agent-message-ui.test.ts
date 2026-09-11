@@ -23,7 +23,7 @@ import {
 import { IPythonCellComponent } from "../../../src/modes/interactive/components/ipython-cell.js";
 import { formatQueuedMessagePreview, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
-import { createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
+import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 function createPayload(message: string): AgentSessionMessagePayload {
 	return {
@@ -89,7 +89,7 @@ describe("ENG-4531 agent message UI", () => {
 		await harness.session.agent.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual([]);
-		expect(harness.session.messages[0]).toMatchObject({
+		expect(conversationMessages(harness.session)[0]).toMatchObject({
 			role: "custom",
 			customType: "agent_message",
 			display: true,
@@ -113,7 +113,7 @@ describe("ENG-4531 agent message UI", () => {
 		await harness.session.agent.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual([prompt]);
-		expect(harness.session.messages[0]?.role).toBe("user");
+		expect(conversationMessages(harness.session)[0]?.role).toBe("user");
 	});
 
 	it("preserves structured messages passed through the normal prompt path", async () => {
@@ -130,7 +130,7 @@ describe("ENG-4531 agent message UI", () => {
 		await harness.session.agent.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual([]);
-		expect(harness.session.messages[0]).toMatchObject({
+		expect(conversationMessages(harness.session)[0]).toMatchObject({
 			role: "custom",
 			customType: "agent_message",
 			details: { id: "agentmsg_4531", message: "Run the idle-session review." },
@@ -152,7 +152,9 @@ describe("ENG-4531 agent message UI", () => {
 			customType: "agent_message",
 			details: { id: "agentmsg_4531", message: "Use shard seven." },
 		});
-		expect(harness.session.clearQueuedUserMessagesMatching(isAgentSessionMessagePrompt)).toEqual({
+		// New-format prompts carry no id in text: clearing keys on the queued customMessage's customType.
+		expect(isAgentSessionMessagePrompt(prompt)).toBe(false);
+		expect(harness.session.clearQueuedAgentMessages()).toEqual({
 			steering: [],
 			followUp: [prompt],
 		});

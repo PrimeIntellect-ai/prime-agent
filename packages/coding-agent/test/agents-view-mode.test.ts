@@ -816,6 +816,45 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("shows the recorded model on inactive saved sessions and keeps '-' without one", () => {
+		const saved = (id: string, model?: { provider: string; modelId: string }) => ({
+			path: `/tmp/${id}.jsonl`,
+			id,
+			cwd: "/tmp",
+			created: new Date("2026-01-01T00:00:00Z"),
+			modified: new Date("2026-01-01T00:00:00Z"),
+			messageCount: 1,
+			firstMessage: "hello",
+			allMessagesText: "hello",
+			...(model ? { model } : {}),
+		});
+		const records = reconcileUnifiedSessions(
+			[],
+			[saved("with-model", { provider: "prime-inference", modelId: "glm-4.7" }), saved("bare")],
+		);
+		const rows = buildAgentsViewRows(records);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		Reflect.set(view, "selectedIndex", -1);
+		try {
+			const render = (id: string) =>
+				stripAnsi(invoke("renderRow", view, rows.find((row) => row.summary.sessionId === id)!, 120) as string);
+			expect(render("with-model")).toContain("glm-4.7");
+			expect(render("bare")).toMatch(/\s-\s/);
+			expect(render("bare")).not.toContain("glm-4.7");
+			// The actions panel shows the same recorded model instead of "unknown".
+			Reflect.set(
+				view,
+				"selectedIndex",
+				rows.findIndex((row) => row.summary.sessionId === "with-model"),
+			);
+			const actions = (invoke("renderActions", view, 120) as string[]).map(stripAnsi).join("\n");
+			expect(actions).toContain("Model: prime-inference/glm-4.7");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("renders one column header across status groups without repeating subagent hints", () => {
 		const summaries = [
 			summary({
@@ -863,7 +902,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("keeps collapsed inactive sessions out of navigation and reveals them for search", () => {
+	it("always renders inactive sessions; search is the only filter", () => {
 		const live = summary({ sessionName: "live" });
 		const saved = summary({
 			id: "saved",
@@ -874,8 +913,11 @@ describe("AgentsViewMode", () => {
 			rosterStatus: "inactive",
 			lifecycle: "archived",
 		});
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		// The stale pre-removal collapse flag must be ignored.
+		const persistentState = { savedCatalogLoaded: true, inactiveExpanded: false } as AgentsViewPersistentState;
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
 		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
+		const showsSaved = () => rows().some((row) => row.summary.sessionId === saved.sessionId);
 		try {
 			Reflect.set(view, "lastListedSummaries", [live]);
 			Reflect.set(view, "savedSessions", [
@@ -892,17 +934,12 @@ describe("AgentsViewMode", () => {
 				},
 			]);
 			invoke("reconcileCatalogs", view);
-			expect(rows().map((row) => row.summary.sessionId)).toEqual([live.sessionId]);
-			invoke("moveSelection", view, 1);
-			expect(rows()[Reflect.get(view, "selectedIndex") as number]?.summary.sessionId).toBe(live.sessionId);
+			expect(showsSaved()).toBe(true);
+			// The removed Alt+I chord must not hide anything.
 			view.handleInput("\x1bi");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
-			view.handleInput("\x1bi");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
-			invoke("setSearchQuery", view, "archive-match");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
-			invoke("setSearchQuery", view, "");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
+			expect(showsSaved()).toBe(true);
+			invoke("setSearchQuery", view, "no-such-session");
+			expect(showsSaved()).toBe(false);
 		} finally {
 			stopThemeWatcher();
 		}

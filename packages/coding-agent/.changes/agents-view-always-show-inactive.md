@@ -1,0 +1,1 @@
+- Removed the inactive-session collapse (Alt+I): inactive sessions always render in the agents view, and search remains the filter.

@@ -8,10 +8,17 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
-import type { AppliedRefinementEdit, HarnessScope, RefinementResult } from "./refinement/refinement.js";
+import {
+	type AppliedRefinementEdit,
+	formatRefinementNoticeBody,
+	type HarnessScope,
+	type RefinementResult,
+} from "./refinement/refinement.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
 
-export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
+export const COMPACTION_SUMMARY_PREFIX = `[compaction-summary]
+
+The conversation history before this point was compacted into the following summary:
 
 <summary>
 `;
@@ -19,7 +26,9 @@ export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this p
 export const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
-export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
+export const BRANCH_SUMMARY_PREFIX = `[branch-summary]
+
+The following is a summary of a branch that this conversation came back from:
 
 <summary>
 `;
@@ -33,10 +42,21 @@ export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
 export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
+export const REFINEMENT_NOTICE_CUSTOM_TYPE = "refinement_notice";
+export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
 export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Shell message received";
+
+/**
+ * Names and other metadata interpolated into a `[<kind> ...]` header line must not
+ * carry the characters that delimit the header itself (brackets, newlines, commas,
+ * or the relationship separator ":").
+ */
+export function sanitizeMessageHeaderValue(value: string): string {
+	return value.replace(/[\s,:[\]]+/g, " ").trim();
+}
 
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
@@ -91,6 +111,47 @@ export interface RefinementOutcomeMessage extends CustomMessage<RefinementOutcom
 	details: RefinementOutcomeDetails;
 }
 
+/** How a refinement was initiated: reviewer-triggered auto-refine, the /refine slash command, or the model's own refine.run(). */
+export type RefinementSource = "auto" | "user" | "self";
+
+export interface RefinementNoticeDetails extends RefinementOutcomeDetails {
+	source: RefinementSource;
+}
+
+export interface RefinementNoticeMessage extends CustomMessage<RefinementNoticeDetails> {
+	customType: typeof REFINEMENT_NOTICE_CUSTOM_TYPE;
+	content: string;
+	details: RefinementNoticeDetails;
+}
+
+export interface HarnessDigestDetails {
+	digest: string;
+}
+
+export const HARNESS_DIGEST_PREFIX = `[harness-digest]
+
+The persistent memories produced across this session so far:
+
+<harness_state>
+`;
+
+export const HARNESS_DIGEST_SUFFIX = `
+</harness_state>`;
+
+export function createHarnessDigestMessage(
+	digest: string,
+	timestamp = Date.now(),
+): CustomMessage<HarnessDigestDetails> {
+	return {
+		role: "custom",
+		customType: HARNESS_DIGEST_CUSTOM_TYPE,
+		content: HARNESS_DIGEST_PREFIX + digest + HARNESS_DIGEST_SUFFIX,
+		display: false,
+		details: { digest },
+		timestamp,
+	};
+}
+
 export interface RlmChildFailureDetails {
 	childId: string;
 	sessionName: string;
@@ -129,12 +190,9 @@ export function createAsyncBashCompletionMessage(
 	return {
 		role: "custom",
 		customType: ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-		content: `${ASYNC_BASH_COMPLETION_PREVIEW_LABEL}.
-Source: bash
-Command completed (pid ${details.pid}, exit code ${details.exitCode}).
-Command: ${JSON.stringify(details.command)}
+		content: `[bash-done pid:${details.pid} exit:${details.exitCode}]
 
-Inspect the saved BashHandle with .poll(), .output(), or .tail(), then continue the task.`,
+Command: ${JSON.stringify(details.command)}`,
 		display: true,
 		details,
 		timestamp,
@@ -148,7 +206,9 @@ export function createRlmChildFailureMessage(
 	return {
 		role: "custom",
 		customType: RLM_CHILD_FAILURE_CUSTOM_TYPE,
-		content: `RLM child ${details.sessionName} (${details.childId}) failed: ${details.error}`,
+		content: `[child-failed child:${sanitizeMessageHeaderValue(details.sessionName)}]
+
+${details.error}`,
 		display: true,
 		details,
 		timestamp,
@@ -159,10 +219,11 @@ export function createRlmChildTerminalNoticeMessage(
 	details: RlmChildTerminalNoticeDetails,
 	timestamp = Date.now(),
 ): CustomMessage<RlmChildTerminalNoticeDetails> {
+	const childName = sanitizeMessageHeaderValue(details.sessionName);
 	const content =
 		details.kind === "cancelled"
-			? `RLM child ${details.sessionName} (${details.childId}) was cancelled${details.reason ? `: ${details.reason}` : ""}`
-			: `RLM child ${details.sessionName} (${details.childId}) completed without sending a reply${details.lastAssistantTextPreview ? `. Last assistant text: ${details.lastAssistantTextPreview}` : ""}`;
+			? `[child-exited: cancelled child:${childName}]${details.reason ? `\n\n${details.reason}` : ""}`
+			: `[child-exited: no-reply child:${childName}]${details.lastAssistantTextPreview ? `\n\nLast assistant text: ${details.lastAssistantTextPreview}` : ""}`;
 	return {
 		role: "custom",
 		customType: RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
@@ -230,6 +291,8 @@ export interface CompactionSummaryMessage {
 	retainedMessageCount?: number;
 	/** User instructions that guided the summary (from `/compact <instructions>`) */
 	customInstructions?: string;
+	/** Harness digest snapshot rendered before the summary in LLM context. Attached mechanically at compaction, never summarized. */
+	harnessDigest?: string;
 	timestamp: number;
 }
 
@@ -295,6 +358,7 @@ export function createCompactionSummaryMessage(
 	timestamp: string,
 	customInstructions?: string,
 	retainedMessageCount?: number,
+	harnessDigest?: string,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
@@ -302,6 +366,7 @@ export function createCompactionSummaryMessage(
 		tokensBefore,
 		retainedMessageCount,
 		customInstructions,
+		harnessDigest,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -388,6 +453,29 @@ export function createRefinementOutcomeMessage(
 			scope: result.scope ?? "local",
 			...(result.rollbackOf ? { rollbackOf: result.rollbackOf } : {}),
 			edits: result.appliedEdits,
+		},
+		timestamp,
+	};
+}
+
+/** Model-facing refinement notice: passes convertToLlm (unlike the refinement_outcome audit entry); display false because the TUI renders the outcome message. */
+export function createRefinementNoticeMessage(
+	result: RefinementResult,
+	source: RefinementSource,
+	timestamp = Date.now(),
+): RefinementNoticeMessage {
+	return {
+		role: "custom",
+		customType: REFINEMENT_NOTICE_CUSTOM_TYPE,
+		content: `[${source}-refinement]\n\n${formatRefinementNoticeBody(result)}`,
+		display: false,
+		details: {
+			refinementId: result.id,
+			summary: result.summary,
+			scope: result.scope ?? "local",
+			...(result.rollbackOf ? { rollbackOf: result.rollbackOf } : {}),
+			edits: result.appliedEdits,
+			source,
 		},
 		timestamp,
 	};
@@ -487,14 +575,16 @@ export function isRefinementOutcomeMessage(message: unknown): message is Refinem
 	);
 }
 
-export function createHeartbeatPromptMessage(
-	job: AgentCronJob,
-	timestamp = Date.now(),
-): CustomMessage<HeartbeatPromptDetails> {
+export interface HeartbeatPromptMessage extends CustomMessage<HeartbeatPromptDetails> {
+	customType: typeof HEARTBEAT_PROMPT_CUSTOM_TYPE;
+	content: string;
+}
+
+export function createHeartbeatPromptMessage(job: AgentCronJob, timestamp = Date.now()): HeartbeatPromptMessage {
 	return {
 		role: "custom",
 		customType: HEARTBEAT_PROMPT_CUSTOM_TYPE,
-		content: job.prompt,
+		content: `[heartbeat: ${sanitizeMessageHeaderValue(job.schedule.expression)} run#${job.runCount}]\n\n${job.prompt}`,
 		display: true,
 		details: {
 			jobId: job.id,
@@ -551,14 +641,21 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
 						timestamp: m.timestamp,
 					};
-				case "compactionSummary":
+				case "compactionSummary": {
+					const digestBlock = m.harnessDigest
+						? `${HARNESS_DIGEST_PREFIX}${m.harnessDigest}${HARNESS_DIGEST_SUFFIX}\n\n`
+						: "";
 					return {
 						role: "user",
 						content: [
-							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
+							{
+								type: "text" as const,
+								text: digestBlock + COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX,
+							},
 						],
 						timestamp: m.timestamp,
 					};
+				}
 				case "user":
 				case "assistant":
 				case "toolResult":

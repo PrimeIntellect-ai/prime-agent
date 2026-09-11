@@ -42,12 +42,12 @@ import {
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
 	AGENT_MESSAGE_SKILL_NAME,
 	type AgentFamilyCatalogEntry,
-	type AgentFamilyRosterResult,
 	type AgentSessionMessage,
 	type AgentSessionMessageAgentSummary,
 	type AgentSessionMessageController,
 	type AgentSessionMessageListResult,
 	type AgentSessionMessageReceipt,
+	agentFamilyMemberName,
 	assertAgentMessageQueueCapacity,
 	assertAgentSessionNameAvailable,
 	assertDirectAgentMessageTarget,
@@ -87,9 +87,12 @@ import {
 	addAutonomousUsage,
 	autonomousStatus,
 	createAutonomousRuntimeState,
+	isUnlimitedAutonomousLimit,
 	nextAutonomousContinuation,
 	refreshAutonomousQualityGates,
 	setAutonomousEnabled,
+	setAutonomousLimits,
+	UNLIMITED_AUTONOMOUS_LIMIT,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
@@ -175,22 +178,27 @@ import {
 	convertToLlm,
 	createAsyncBashCompletionMessage,
 	createCompactionOutcomeMessage,
+	createHarnessDigestMessage,
 	createHeartbeatPromptMessage,
+	createRefinementNoticeMessage,
 	createRefinementOutcomeMessage,
 	createRlmChildFailureMessage,
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
 	createSessionSlashCommandResultMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
+	type HarnessDigestDetails,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
+	type RefinementSource,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
-import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
+import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./prompt-templates.js";
 import {
 	isAgentLifecycleFailure,
 	isFauxProviderQueueExhausted,
@@ -205,6 +213,7 @@ import {
 	type AutoRefineReview,
 	appendGlobalRefinement,
 	applyRefinementProposal,
+	formatHarnessStateForPrompt,
 	generateRefinementId,
 	getGlobalHarnessStateDir,
 	getLocalHarnessStateDir,
@@ -527,6 +536,7 @@ export type SerializedBackgroundPlanResult =
 			options: { instructions?: string; rollbackId?: string; global?: boolean };
 			abort: AbortController;
 			branchVersion: number;
+			source: Exclude<RefinementSource, "user">;
 	  }
 	| { status: "skip"; explicit?: boolean }
 	| { status: "invalidated"; branchVersion: number }
@@ -915,7 +925,7 @@ type GoalSlashCommand =
 	| { kind: "resume" }
 	| { kind: "start"; objective: string; tokenBudget?: number };
 
-type AutonomousSlashCommand = { kind: "status" } | { kind: "on" } | { kind: "off" };
+type AutonomousSlashCommand = { kind: "status" } | { kind: "on"; config?: AgentAutonomousConfig } | { kind: "off" };
 
 import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
@@ -1028,6 +1038,111 @@ function parseGoalBudgetValue(value: string): number {
 		throw new Error("Goal token budget must be a positive integer.");
 	}
 	return budget;
+}
+
+const AUTONOMOUS_STATUS_NUMBER_FORMAT = new Intl.NumberFormat("en-US");
+
+const AUTONOMOUS_BUDGET_USAGE =
+	"Usage: /autonomous [status|off] or /autonomous on [--max-continuations <n|unlimited>] [--max-turns <n|unlimited>] [--max-tokens <n|unlimited>] [--timeout-ms <n|unlimited>] [--gate <command>] [--gate-retries <n>] [--gate-timeout-ms <n>]";
+
+// `/autonomous` budget flags mirror the `--autonomous-*` CLI options. The CLI
+// spelling (`--autonomous-max-continuations`) is accepted as an alias so the
+// exact CLI budget flags also work from the slash command.
+const AUTONOMOUS_BUDGET_FLAGS: ReadonlySet<string> = new Set([
+	"max-continuations",
+	"max-turns",
+	"max-tokens",
+	"timeout-ms",
+	"gate",
+	"gate-retries",
+	"gate-timeout-ms",
+]);
+
+function parseAutonomousBudgetInt(flag: string, value: string, allowUnlimited = false): number {
+	if (allowUnlimited && value.toLowerCase() === "unlimited") {
+		return UNLIMITED_AUTONOMOUS_LIMIT;
+	}
+	// Commas and underscores are accepted as digit separators (100,000,000).
+	const digits = value.replace(/[,_]/g, "");
+	if (!/^[1-9]\d*$/.test(digits)) {
+		throw new Error(
+			`--${flag} must be a positive integer${allowUnlimited ? ' or "unlimited"' : ""}. ${AUTONOMOUS_BUDGET_USAGE}`,
+		);
+	}
+	return Number(digits);
+}
+
+function parseAutonomousBudgetOptions(tokens: string[]): AgentAutonomousConfig {
+	const config: AgentAutonomousConfig = {};
+	const gateCommands: string[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i]!;
+		if (!token.startsWith("--")) {
+			throw new Error(`Unexpected autonomous argument: ${token}. ${AUTONOMOUS_BUDGET_USAGE}`);
+		}
+		const equalsIndex = token.indexOf("=");
+		const rawFlag = equalsIndex === -1 ? token : token.slice(0, equalsIndex);
+		const inlineValue = equalsIndex === -1 ? undefined : token.slice(equalsIndex + 1);
+		const flag = rawFlag.startsWith("--autonomous-") ? rawFlag.slice("--autonomous-".length) : rawFlag.slice(2);
+		if (!AUTONOMOUS_BUDGET_FLAGS.has(flag)) {
+			throw new Error(`Unknown autonomous budget flag: ${rawFlag}. ${AUTONOMOUS_BUDGET_USAGE}`);
+		}
+		let value = inlineValue;
+		if (value === undefined) {
+			const next = tokens[i + 1];
+			if (next === undefined || next.startsWith("--")) {
+				throw new Error(`Missing value for ${rawFlag}. ${AUTONOMOUS_BUDGET_USAGE}`);
+			}
+			value = next;
+			i++;
+		}
+		if (value === "") {
+			throw new Error(`Missing value for ${rawFlag}. ${AUTONOMOUS_BUDGET_USAGE}`);
+		}
+		switch (flag) {
+			case "gate":
+				gateCommands.push(value);
+				break;
+			case "gate-retries":
+				config.gates = config.gates ?? {};
+				config.gates.maxRetries = parseAutonomousBudgetInt(flag, value);
+				break;
+			case "gate-timeout-ms":
+				config.gates = config.gates ?? {};
+				config.gates.timeoutMs = parseAutonomousBudgetInt(flag, value);
+				break;
+			case "max-continuations":
+				config.maxContinuations = parseAutonomousBudgetInt(flag, value, true);
+				break;
+			case "max-turns":
+				config.maxTurns = parseAutonomousBudgetInt(flag, value, true);
+				break;
+			case "max-tokens":
+				config.maxTokens = parseAutonomousBudgetInt(flag, value, true);
+				break;
+			case "timeout-ms":
+				config.timeoutMs = parseAutonomousBudgetInt(flag, value, true);
+				break;
+		}
+	}
+	if (gateCommands.length > 0) {
+		config.gates = { ...config.gates, commands: gateCommands };
+	}
+	// Named budget flags define the whole budget: any limit the user did not
+	// name stops cutting the run short. With no budget flags at all, the
+	// configured or default limits still apply.
+	if (
+		config.maxContinuations !== undefined ||
+		config.maxTurns !== undefined ||
+		config.maxTokens !== undefined ||
+		config.timeoutMs !== undefined
+	) {
+		config.maxContinuations ??= UNLIMITED_AUTONOMOUS_LIMIT;
+		config.maxTurns ??= UNLIMITED_AUTONOMOUS_LIMIT;
+		config.maxTokens ??= UNLIMITED_AUTONOMOUS_LIMIT;
+		config.timeoutMs ??= UNLIMITED_AUTONOMOUS_LIMIT;
+	}
+	return config;
 }
 
 export function compactRlmText(text: string, maxLength = 160): string {
@@ -1190,6 +1305,8 @@ export class AgentSession {
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
 	private readonly _unpersistedOutcomes: CustomMessage[] = [];
+	/** Fresh/empty contexts defer digest injection to the first committed turn so untouched sessions stay empty. */
+	private _harnessDigestPending = false;
 
 	private _bashAbortControllers = new Set<AbortController>();
 	private _userBashRunning = false;
@@ -1402,6 +1519,7 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		this._ensureHarnessDigestContext();
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -1871,10 +1989,21 @@ export class AgentSession {
 						(record): record is DeliveryRecord & { message: CustomMessage } =>
 							(record.role === "next_turn" || (payload.acceptedAgentMessage && record.role === "prefix")) &&
 							record.message.role === "custom" &&
+							record.message.customType !== HARNESS_DIGEST_CUSTOM_TYPE &&
 							!record.durable,
 					)
 					.map((record) => cloneCustomMessage(record.message));
 				restorableMessages.push(...restorable);
+				// Lazy injection owns digest delivery: a cancelled turn re-arms it
+				// instead of restoring a possibly stale digest message.
+				if (
+					payload.records.some(
+						(record) =>
+							record.message.role === "custom" && record.message.customType === HARNESS_DIGEST_CUSTOM_TYPE,
+					)
+				) {
+					this._harnessDigestPending = true;
+				}
 				if (dispatched) {
 					payload.captureRunMessages = new Set(payload.records.map((record) => record.message));
 					this.agent.state.messages = this.agent.state.messages.filter(
@@ -2074,23 +2203,38 @@ export class AgentSession {
 	private _parseAutonomousSlashCommand(text: string): AutonomousSlashCommand | undefined {
 		const command = parseSessionSlashCommand(text);
 		if (command?.name !== "autonomous") return undefined;
-		const rest = command.args.toLowerCase();
-		if (!rest || rest === "status") {
+		const tokens = parseCommandArgs(command.args);
+		if (tokens.length === 0 || tokens[0]!.toLowerCase() === "status") {
+			if (tokens.length > 1) {
+				throw new Error(`Unexpected autonomous argument: ${tokens[1]}. ${AUTONOMOUS_BUDGET_USAGE}`);
+			}
 			return { kind: "status" };
 		}
-		if (rest === "on" || rest === "enable" || rest === "enabled") {
-			return { kind: "on" };
+		const subcommand = tokens[0]!.toLowerCase();
+		if (subcommand === "on" || subcommand === "enable" || subcommand === "enabled") {
+			return { kind: "on", config: parseAutonomousBudgetOptions(tokens.slice(1)) };
 		}
-		if (rest === "off" || rest === "disable" || rest === "disabled") {
+		if (subcommand === "off" || subcommand === "disable" || subcommand === "disabled") {
+			if (tokens.length > 1) {
+				throw new Error(`Unexpected autonomous argument: ${tokens[1]}. ${AUTONOMOUS_BUDGET_USAGE}`);
+			}
 			return { kind: "off" };
 		}
-		throw new Error("Usage: /autonomous [on|off|status]");
+		throw new Error(AUTONOMOUS_BUDGET_USAGE);
 	}
 
 	private _formatAutonomousStatus(): string {
 		const status = this.getAutonomousStatus();
 		const state = status.enabled ? "on" : "off";
-		return `Autonomous mode: ${state}. Continuations: ${status.continuationsUsed}/${status.limits.maxContinuations}. Turns: ${status.turnsUsed}/${status.limits.maxTurns}. Tokens: ${status.tokensUsed}/${status.limits.maxTokens}.`;
+		const elapsedSeconds = status.startedAt ? Math.round((Date.now() - status.startedAt) / 1000) : 0;
+		const gateSummary =
+			status.gates.commands.length > 0 ? status.gates.commands.map((command) => `"${command}"`).join(", ") : "none";
+		const formatCount = (value: number): string =>
+			isUnlimitedAutonomousLimit(value) ? "unlimited" : AUTONOMOUS_STATUS_NUMBER_FORMAT.format(value);
+		const timeBudget = isUnlimitedAutonomousLimit(status.limits.timeoutMs)
+			? "unlimited"
+			: `${AUTONOMOUS_STATUS_NUMBER_FORMAT.format(Math.round(status.limits.timeoutMs / 1000))}s`;
+		return `[autonomous-status: ${state}]\n\nContinuations: ${formatCount(status.continuationsUsed)}/${formatCount(status.limits.maxContinuations)}. Turns: ${formatCount(status.turnsUsed)}/${formatCount(status.limits.maxTurns)}. Tokens: ${formatCount(status.tokensUsed)}/${formatCount(status.limits.maxTokens)}. Time: ${elapsedSeconds}s/${timeBudget}. Gates: ${gateSummary}.`;
 	}
 
 	private _emitAutonomousStatus(): void {
@@ -2120,6 +2264,7 @@ export class AgentSession {
 		}
 		if (command.kind === "on") {
 			setAutonomousEnabled(this._autonomousState, true, { cwd: this._cwd });
+			setAutonomousLimits(this._autonomousState, command.config);
 		} else if (command.kind === "off") {
 			setAutonomousEnabled(this._autonomousState, false);
 			this._clearQueuedAutonomousContinuations();
@@ -2485,7 +2630,7 @@ export class AgentSession {
 		if (pending) {
 			this._pendingRequestedRefine = undefined;
 			try {
-				await this._runSerializedRefine(pending);
+				await this._runSerializedRefine(pending, "self");
 			} catch (error) {
 				this._emitRefineFailed(error);
 			}
@@ -2631,7 +2776,7 @@ export class AgentSession {
 		});
 		this._refineInFlight = applySettled;
 		try {
-			await this._applyRefine(bgResult.plan, bgResult.options, bgResult.abort);
+			await this._applyRefine(bgResult.plan, bgResult.options, bgResult.abort, bgResult.source);
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {
@@ -2744,6 +2889,7 @@ export class AgentSession {
 				options: planOptions,
 				abort: refineAbort,
 				branchVersion,
+				source: skipReview ? "self" : "auto",
 			};
 		} catch (error) {
 			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
@@ -2778,7 +2924,7 @@ export class AgentSession {
 			rollbackId?: string;
 			global?: boolean;
 		},
-		trigger: "manual" | "auto" = "manual",
+		source: Exclude<RefinementSource, "user">,
 	): Promise<void> {
 		if (this._disposed || this._disposing) {
 			return;
@@ -2803,7 +2949,7 @@ export class AgentSession {
 		const refineAbort = new AbortController();
 		this._refineAbortController = refineAbort;
 
-		const planRun = this._planRefine(options, refineAbort.signal, trigger);
+		const planRun = this._planRefine(options, refineAbort.signal, source === "auto" ? "auto" : "manual");
 		const planSettled = planRun.then(
 			() => undefined,
 			() => undefined,
@@ -2840,7 +2986,7 @@ export class AgentSession {
 		});
 		this._refineInFlight = applySettled;
 		try {
-			await this._applyRefine(plan, options, refineAbort);
+			await this._applyRefine(plan, options, refineAbort, source);
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {
@@ -3194,7 +3340,7 @@ export class AgentSession {
 				}
 				return {
 					scheduled: true,
-					note: "Refinement runs when the current turn ends; the harness rebuilds the system prompt and resumes you automatically. Continue working normally.",
+					note: "Refinement runs when the current turn ends; applied edits are appended to your context as a refinement notice and you resume automatically. Continue working normally.",
 				};
 			}
 			default:
@@ -3299,18 +3445,11 @@ export class AgentSession {
 	handleAgentMessageHostRequest(
 		type: string,
 		payload: Record<string, unknown> = {},
-	):
-		| Promise<AgentSessionMessageListResult | AgentSessionMessageReceipt | AgentFamilyRosterResult>
-		| AgentSessionMessageListResult
-		| AgentFamilyRosterResult {
+	): Promise<AgentSessionMessageReceipt> {
 		if (!this._agentMessageController) {
 			throw new Error("agent messaging is not available in this session");
 		}
 		switch (type) {
-			case "agent_message.list_agents":
-				if (!this._agentMessageController.roster)
-					throw new Error("agent family roster is not available in this session");
-				return this._agentMessageController.roster();
 			case "agent_message.send": {
 				if (typeof payload.target !== "string") {
 					throw new Error("agent_message.send target must be a string");
@@ -4093,7 +4232,7 @@ export class AgentSession {
 			const pending = this._pendingRequestedRefine;
 			this._pendingRequestedRefine = undefined;
 			try {
-				await this._runSerializedRefine(pending);
+				await this._runSerializedRefine(pending, "self");
 			} catch {
 				// Best-effort drain; refinement errors must not block disposal.
 			}
@@ -4513,7 +4652,6 @@ export class AgentSession {
 			allowRecursion: this._rlmDepth < this._rlmMaxDepth,
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
-			harnessState: this._loadMergedHarnessState(),
 			genericMcpServers: this._mcpManager?.getEnabledPersistentGenericServers(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
@@ -4755,7 +4893,7 @@ export class AgentSession {
 
 	async promptHeartbeat(job: AgentCronJob, options?: PromptOptions): Promise<void> {
 		const message = createHeartbeatPromptMessage(job);
-		await this._promptInjectedMessage(job.prompt, message, {
+		await this._promptInjectedMessage(message.content, message, {
 			...options,
 			followUpQueueKey: options?.followUpQueueKey ?? `heartbeat:${job.id}`,
 			resumeIfIdle: true,
@@ -6101,8 +6239,14 @@ export class AgentSession {
 		const firstTurn = activeTurns()[0];
 		if (!firstTurn) return;
 		const executionPolicy = firstTurn.payload.executionPolicy;
+		// The digest is never parked as pending context; lazy injection re-arms instead.
+		const parkNextTurnMessages = (messages: CustomMessage[]) => {
+			const parked = messages.filter((message) => message.customType !== HARNESS_DIGEST_CUSTOM_TYPE);
+			if (parked.length !== messages.length) this._harnessDigestPending = true;
+			this._pendingNextTurnMessages.unshift(...parked);
+		};
 		const restoreNextTurnContext = () => {
-			this._pendingNextTurnMessages.unshift(...nextTurnMessages);
+			parkNextTurnMessages(nextTurnMessages);
 			nextTurnMessages = [];
 		};
 		try {
@@ -6168,6 +6312,15 @@ export class AgentSession {
 					if (executionPolicy.nextTurnContextTiming === "commit") {
 						nextTurnMessages = this._takePendingNextTurnMessages();
 					}
+					if (this._harnessDigestPending) {
+						// The first-turn digest rides the turn's delivery records so a
+						// cancelled first turn strips it with the rest of the turn.
+						this._harnessDigestPending = false;
+						const digest = this._harnessDigest();
+						if (this._latestContextHarnessDigest() !== digest) {
+							nextTurnMessages = [createHarnessDigestMessage(digest), ...nextTurnMessages];
+						}
+					}
 					const contextRecords = nextTurnMessages.map((message) =>
 						this._createDeliveryRecord(turns[0].id, "next_turn", message),
 					);
@@ -6213,7 +6366,7 @@ export class AgentSession {
 			this._forgetConsumedPostCompactionContinuations(turns.map((action) => primaryDeliveryRecord(action).message));
 		} catch (error) {
 			const delivered = new Set(this.agent.state.messages);
-			this._pendingNextTurnMessages.unshift(...nextTurnMessages.filter((message) => !delivered.has(message)));
+			parkNextTurnMessages(nextTurnMessages.filter((message) => !delivered.has(message)));
 			for (const action of actions) {
 				if (action.payload.kind === "turn") {
 					action.payload.records = action.payload.records.filter((record) => record.role !== "next_turn");
@@ -6481,10 +6634,22 @@ export class AgentSession {
 
 	clearQueuedAgentMessages(): { steering: string[]; followUp: string[] } {
 		this._agentMessageClearEpoch++;
-		return this.clearQueuedUserMessagesMatching(isAgentSessionMessagePrompt);
+		// customType identifies agent messages; the text parser covers persisted pre-grammar prompts.
+		return this._clearQueuedTurnActionsMatching(
+			(action) =>
+				isAgentSessionMessage(primaryDeliveryRecord(action).message) ||
+				isAgentSessionMessagePrompt(action.payload.text),
+		);
 	}
 
 	clearQueuedUserMessagesMatching(predicate: (text: string) => boolean): { steering: string[]; followUp: string[] } {
+		return this._clearQueuedTurnActionsMatching((action) => predicate(action.payload.text));
+	}
+
+	private _clearQueuedTurnActionsMatching(matches: (action: QueuedSessionAction) => boolean): {
+		steering: string[];
+		followUp: string[];
+	} {
 		const ownedActions = this._actionStore.ownedActions();
 		const dispatchedTurnCount = ownedActions.filter(
 			(action) =>
@@ -6495,7 +6660,7 @@ export class AgentSession {
 			(action) =>
 				action.payload.kind === "turn" &&
 				action.agentMessageId !== undefined &&
-				predicate(action.payload.text) &&
+				matches(action) &&
 				(action.lifecycle.state === "queued" ||
 					action.lifecycle.state === "selected" ||
 					action.lifecycle.state === "preparing" ||
@@ -7474,9 +7639,9 @@ export class AgentSession {
 				? ` Variables above the per-variable snapshot limit were removed: ${pruned.join(", ")}.`
 				: "";
 		const content = [
-			"<ipython_state>",
+			"[python-state]",
+			"",
 			`Your Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.${prunedDetail}${detail}`,
-			"</ipython_state>",
 		].join("\n");
 		const message = {
 			role: "custom" as const,
@@ -7499,7 +7664,7 @@ export class AgentSession {
 	}
 
 	private _onIpythonStateRestored(result: RestoreResult): void {
-		const lines = ["<ipython_state_restored>"];
+		const lines = ["[python-state-restored]", ""];
 		if (result.restored.length > 0) {
 			lines.push(
 				`Your Python kernel state was revived from your previous session. These names are available again: ${result.restored.join(", ")}.`,
@@ -7514,7 +7679,6 @@ export class AgentSession {
 				`These could not be restored and must be recreated if needed: ${result.failed.map((f) => f.name).join(", ")}.`,
 			);
 		}
-		lines.push("</ipython_state_restored>");
 		void this.sendCustomMessage(
 			{
 				customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
@@ -7545,7 +7709,8 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		if (!options.skipAbort) await this.abort();
 		let didCompact = false;
-		this._compactionAbortController = new AbortController();
+		const compactionAbort = new AbortController();
+		this._compactionAbortController = compactionAbort;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
@@ -7568,7 +7733,7 @@ export class AgentSession {
 				apiKey,
 				headers,
 				customInstructions,
-				signal: this._compactionAbortController.signal,
+				signal: compactionAbort.signal,
 			});
 
 			this._emit({
@@ -7610,13 +7775,21 @@ export class AgentSession {
 			this._scheduleSessionInputPump();
 			if (didCompact) {
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+				if (this._goalState.status === "active" && !compactionAbort.signal.aborted) {
+					this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages();
+					this.resumeQueuedWork();
+					if (this.agent.hasQueuedMessages()) this._schedulePostCompactionContinue();
+				}
 				if (hadPostCompactionContinue) {
 					this._schedulePostCompactionContinue(continueAfterSessionInput);
 				}
 				// Queued agent or session-owned inputs resume the loop; defer refine
 				// behind them instead of interleaving it before their turns.
 				this._scheduleAutoRefineAfterCompaction(
-					hadPostCompactionContinue || this.agent.hasQueuedMessages() || this.unfinishedActionCount > 0,
+					this._goalContinuationAwaitsRlmWork ||
+						hadPostCompactionContinue ||
+						this.agent.hasQueuedMessages() ||
+						this.unfinishedActionCount > 0,
 				);
 			}
 		}
@@ -7735,6 +7908,7 @@ export class AgentSession {
 				this._semanticEdges.finishRequest(requestId);
 			}
 			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
+			// Attached mechanically; the digest never flows through the summarizer LLM.
 			this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
@@ -7743,6 +7917,7 @@ export class AgentSession {
 				fromExtension,
 				customInstructions,
 				usage,
+				this._harnessDigest(),
 			);
 		} catch (error) {
 			compactionSettled = true;
@@ -7866,7 +8041,7 @@ export class AgentSession {
 		const pending = this._pendingRequestedRefine;
 		if (!pending) return false;
 		this._pendingRequestedRefine = undefined;
-		void this.refine(pending).catch((error) => this._emitRefineFailed(error));
+		void this.refine(pending, { source: "self" }).catch((error) => this._emitRefineFailed(error));
 		return true;
 	}
 
@@ -8242,6 +8417,65 @@ export class AgentSession {
 		);
 	}
 
+	/** The compact harness digest delivered at cold context boundaries (session start, resume, compaction head). */
+	private _harnessDigest(): string {
+		const tools = this.getActiveToolNames();
+		const hasIpython = tools.includes("ipython");
+		const visibleSkills = this._modelVisibleSkills().filter((skill) => !skill.disableModelInvocation);
+		const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
+		return formatHarnessStateForPrompt(this._loadMergedHarnessState(), {
+			includeIpythonExamples: hasIpython,
+			includeShellExamples: tools.includes("bash"),
+			includeRefineExamples: hasIpython && hasRefineSkill,
+		});
+	}
+
+	/** Cold-boundary digest delivery: empty contexts defer to the first committed turn (untouched sessions must stay empty); non-empty contexts append only when the newest in-context digest mismatches disk. */
+	private _ensureHarnessDigestContext(): void {
+		if (this.agent.state.messages.length === 0) {
+			this._harnessDigestPending = true;
+			return;
+		}
+		this._harnessDigestPending = false;
+		this._appendHarnessDigestIfStale();
+	}
+
+	private _appendHarnessDigestIfStale(): void {
+		const digest = this._harnessDigest();
+		if (this._latestContextHarnessDigest() === digest) return;
+		const message = createHarnessDigestMessage(digest);
+		try {
+			this.sessionManager.appendCustomMessageEntryWithRollback(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
+		} catch {
+			// Unpersisted session: context-only injection.
+		}
+		this.agent.state.messages.push(message);
+	}
+
+	private _latestContextHarnessDigest(): string | undefined {
+		// Retained pre-compaction messages follow the compaction head, so recency is by timestamp, not position.
+		let latest: { timestamp: number; digest: string } | undefined;
+		for (const message of this.agent.state.messages) {
+			let digest: string | undefined;
+			if (message.role === "custom" && message.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
+				digest = (message.details as HarnessDigestDetails | undefined)?.digest;
+			} else if (message.role === "compactionSummary") {
+				digest = message.harnessDigest;
+			} else {
+				continue;
+			}
+			if (digest !== undefined && (!latest || message.timestamp >= latest.timestamp)) {
+				latest = { timestamp: message.timestamp, digest };
+			}
+		}
+		return latest?.digest;
+	}
+
 	/** Global harness state overlaid with this session's local state, when persisted. */
 	private _loadMergedHarnessState(): HarnessState {
 		const localHarnessStateDir = this._localHarnessStateDir();
@@ -8272,7 +8506,7 @@ export class AgentSession {
 			rollbackId?: string;
 			global?: boolean;
 		} = {},
-		internal: { skipAbort?: boolean; trigger?: "manual" | "auto" } = {},
+		internal: { skipAbort?: boolean; trigger?: "manual" | "auto"; source?: RefinementSource } = {},
 	): Promise<RefinementResult> {
 		// Queued /refine executes from the session-input pump between turns;
 		// refine never aborts the agent (planning is backgrounded and the apply
@@ -8365,7 +8599,12 @@ export class AgentSession {
 			if (this._disposed || refineAbort.signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
-			return await this._applyRefine(plan, options, refineAbort);
+			return await this._applyRefine(
+				plan,
+				options,
+				refineAbort,
+				internal.source ?? (internal.trigger === "auto" ? "auto" : "user"),
+			);
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {
@@ -8486,7 +8725,16 @@ export class AgentSession {
 	}
 
 	private _recordRefinementOutcome(result: RefinementResult): void {
-		const message = createRefinementOutcomeMessage(result);
+		this._appendDurableRefineMessage(createRefinementOutcomeMessage(result));
+	}
+
+	/** In-context notice for an applied refinement. Refinements with zero applied edits emit nothing. */
+	private _recordRefinementNotice(result: RefinementResult, source: RefinementSource): void {
+		if (!result.appliedEdits.some((edit) => edit.applied)) return;
+		this._appendDurableRefineMessage(createRefinementNoticeMessage(result, source));
+	}
+
+	private _appendDurableRefineMessage(message: CustomMessage): void {
 		try {
 			this.sessionManager.appendCustomMessageEntryWithRollback(
 				message.customType,
@@ -8512,6 +8760,7 @@ export class AgentSession {
 		plan: RefinementPlan,
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
 		refineAbort: AbortController,
+		source: RefinementSource,
 	): Promise<RefinementResult> {
 		if (this._disposed) {
 			throw new Error("Cannot refine a disposed session.");
@@ -8587,8 +8836,8 @@ export class AgentSession {
 				if (!refinementAuditAppendError) throw error;
 			}
 			if (refinementAuditAppendError) throw refinementAuditAppendError.error;
-			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-			this.agent.state.systemPrompt = this._baseSystemPrompt;
+			// The prompt stays byte-identical so the provider prefix cache survives; the notice carries the change.
+			this._recordRefinementNotice(result, source);
 			try {
 				this._emit({ type: "refine_complete", result });
 			} catch {
@@ -9508,12 +9757,16 @@ export class AgentSession {
 				.filter((skill) => !skill.disableModelInvocation)
 				.map((skill) => skill.name),
 		);
-		if (this._agentMessageController && visibleKernelSkillNames.has(AGENT_MESSAGE_SKILL_NAME)) {
+		const messageController = this._agentMessageController;
+		if (messageController && visibleKernelSkillNames.has(AGENT_MESSAGE_SKILL_NAME)) {
 			Object.assign(
 				handlers,
 				createAgentMessageHostHandlers({
-					roster: async () =>
-						(await this.handleAgentMessageHostRequest("agent_message.list_agents")) as AgentFamilyRosterResult,
+					family: async () => {
+						if (!messageController.family)
+							throw new Error("agent family roster is not available in this session");
+						return messageController.family();
+					},
 					awaitPendingChildPublication: (selector) => this._awaitPendingRlmChildPublication(selector),
 					sendAgentMessage: async (input) => {
 						const receipt = (await this.handleAgentMessageHostRequest("agent_message.send", {
@@ -9522,13 +9775,13 @@ export class AgentSession {
 						})) as AgentSessionMessageReceipt;
 						if (this._rlmDepth > 0) {
 							let addressedParent = input.receiverRole === "parent";
-							if (input.receiverRole === undefined && this._agentMessageController?.roster) {
+							if (input.receiverRole === undefined && messageController.family) {
 								try {
-									const roster = await this._agentMessageController.roster();
-									addressedParent = roster.entries.some(
-										(entry) =>
-											entry.relationship === "parent" &&
-											(entry.id === input.target || entry.name === input.target),
+									addressedParent = (await messageController.family()).some(
+										(member) =>
+											member.relationship === "parent" &&
+											(member.entry.id === input.target ||
+												agentFamilyMemberName(member.entry) === input.target),
 									);
 								} catch {
 									addressedParent = false;
@@ -10685,7 +10938,7 @@ export class AgentSession {
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
-			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
+			throw new Error(`Unsupported rlm.spawn kwargs: ${unsupportedKwargs.sort().join(", ")}`);
 		}
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
@@ -12047,6 +12300,8 @@ export class AgentSession {
 			this.agent.state.messages = sessionContext.messages;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
+			// Context rebuild = cold boundary: refresh the digest like resume.
+			this._ensureHarnessDigestContext();
 			this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();

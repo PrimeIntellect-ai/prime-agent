@@ -137,6 +137,8 @@ export interface AgentConnectionSavedSessionInfo {
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
 	usage?: SessionUsageSummary;
+	/** Last recorded provider/model selector; absent for sessions that never ran a model. */
+	model?: { provider: string; modelId: string };
 }
 
 export type AgentConnectionSessionListProgress = (loaded: number, total: number) => void;

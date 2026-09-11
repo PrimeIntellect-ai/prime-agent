@@ -4137,8 +4137,8 @@ describe("InteractiveMode post-login model preparation", () => {
 		maxTokens: 128000,
 	} as AgentConnectionModel;
 
-	test("persists GLM 5.2 before model selection after Prime Inference login", async () => {
-		const fallbackModel = { ...loginPrimeModel, id: "z-ai/glm-5.2", name: "GLM 5.2" };
+	test("persists GLM 5.3 before model selection after Prime Inference login", async () => {
+		const fallbackModel = { ...loginPrimeModel, id: "z-ai/glm-5.3", name: "GLM 5.3" };
 		const flushSettings = vi.fn(async () => {});
 		const fakeThis = Object.create(InteractiveMode.prototype) as LoginHarness;
 		fakeThis.invalidateConnectionModels = vi.fn();

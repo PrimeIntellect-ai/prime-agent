@@ -128,6 +128,8 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	fromHook?: boolean;
 	customInstructions?: string;
 	usage?: Usage;
+	/** Harness digest snapshot taken at compaction time; rendered before the summary in LLM context. */
+	harnessDigest?: string;
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
@@ -241,12 +243,19 @@ export interface SessionContext {
 	model: { provider: string; modelId: string } | null;
 }
 
+export interface SessionModelRef {
+	provider: string;
+	modelId: string;
+}
+
 export interface SessionInfo {
 	path: string;
 	id: string;
 	cwd: string;
 	name?: string;
 	state?: SessionState;
+	/** Last model the session ran with, from model_change entries and assistant messages. */
+	model?: SessionModelRef;
 	parentSessionPath?: string;
 	rlmDepth: number;
 	created: Date;
@@ -513,6 +522,7 @@ export function buildSessionContext(
 				compaction.timestamp,
 				compaction.customInstructions,
 				retainedMessages.length,
+				compaction.harnessDigest,
 			),
 			...retainedMessages,
 		);
@@ -1039,6 +1049,7 @@ function extractOversizedMessageSummary(line: string): {
 
 interface SessionScanAccumulator {
 	header?: SessionHeader;
+	model?: SessionModelRef;
 	/** The first parsed entry was not a session header; appends cannot repair this. */
 	invalid: boolean;
 	messageCount: number;
@@ -1270,6 +1281,10 @@ function foldSessionScanLine(acc: SessionScanAccumulator, lineBuffer: Buffer): v
 	if (entry.type === "agent_status") {
 		acc.agentStatus = (entry as AgentStatusEntry).status;
 	}
+	if (entry.type === "model_change") {
+		const modelEntry = entry as ModelChangeEntry;
+		acc.model = { provider: modelEntry.provider, modelId: modelEntry.modelId };
+	}
 	if (entry.type === "child_usage_attributed") {
 		const attribution = entry as ChildUsageAttributionEntry;
 		if (acc.assistantUsageById.has(attribution.targetId)) {
@@ -1297,6 +1312,12 @@ function foldSessionScanLine(acc: SessionScanAccumulator, lineBuffer: Buffer): v
 	const message = (entry as SessionMessageEntry).message;
 	if (message.role === "assistant" && (message as { usage?: Usage }).usage) {
 		acc.assistantUsageById.set(entry.id, (message as { usage: Usage }).usage);
+	}
+	if (message.role === "assistant") {
+		const assistant = message as { provider?: string; model?: string };
+		if (typeof assistant.provider === "string" && typeof assistant.model === "string") {
+			acc.model = { provider: assistant.provider, modelId: assistant.model };
+		}
 	}
 	if (!isMessageWithContent(message)) return;
 	if (message.role !== "user" && message.role !== "assistant") return;
@@ -1345,6 +1366,7 @@ function snapshotSessionInfo(
 		cwd,
 		name: acc.name,
 		state: acc.state,
+		model: acc.model,
 		parentSessionPath,
 		rlmDepth,
 		created: new Date(header.timestamp),
@@ -1753,6 +1775,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		customInstructions?: string,
 		usage?: Usage,
+		harnessDigest?: string,
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1766,6 +1789,7 @@ export class SessionManager {
 			fromHook,
 			customInstructions,
 			usage,
+			harnessDigest,
 		};
 		this._appendEntry(entry);
 		return entry.id;

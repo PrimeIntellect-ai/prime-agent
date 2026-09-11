@@ -13,12 +13,12 @@ from rlm import host_request
 
 
 async def list_agents() -> dict[str, Any]:
-    """List active daemon sessions visible to this agent."""
+    """List the full nuclear family: parent, siblings, children, active or not."""
     return await host_request("agent_observe.list")
 
 
 async def get_agent(target: str) -> dict[str, Any]:
-    """Read one active session summary by active id, session id/name, or suffix."""
+    """Read one live session summary by active id, session id/name, or suffix."""
     if not isinstance(target, str):
         raise TypeError(f"target must be str, got {type(target).__name__}")
     return await host_request("agent_observe.get", {"target": target})

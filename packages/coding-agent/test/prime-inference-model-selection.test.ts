@@ -3,8 +3,8 @@ import { describe, expect, test } from "vitest";
 import { resolvePrimeInferencePostLoginModelAction } from "../src/core/prime-inference-model-selection.js";
 
 const glmModel: Model<"openai-completions"> = {
-	id: "z-ai/glm-5.2",
-	name: "GLM 5.2",
+	id: "z-ai/glm-5.3",
+	name: "GLM 5.3",
 	api: "openai-completions",
 	provider: "prime-inference",
 	baseUrl: "https://api.pinference.ai/api/v1",
@@ -21,7 +21,7 @@ const registry = {
 };
 
 describe("Prime Inference post-login model selection", () => {
-	test("selects GLM 5.2 as a fallback and opens the model picker", () => {
+	test("selects GLM 5.3 as a fallback and opens the model picker", () => {
 		const action = resolvePrimeInferencePostLoginModelAction(
 			{
 				status: "success",
