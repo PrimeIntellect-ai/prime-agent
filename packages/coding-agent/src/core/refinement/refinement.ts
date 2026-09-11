@@ -422,6 +422,9 @@ export function saveHarnessState(harnessStateDir: string, state: HarnessState): 
 	withHarnessFileLock(targetPath, () => {
 		const latestRead = readHarnessStateResult(targetPath, scope);
 		if (latestRead.writeError) throw new Error(latestRead.writeError);
+		if (typeof state.schema !== "number" || !Number.isFinite(state.schema)) {
+			throw new Error(invalidHarnessStateError());
+		}
 		if (state.schema !== HARNESS_SCHEMA_VERSION) {
 			throw new Error(unsupportedHarnessSchemaError(state.schema));
 		}

@@ -255,7 +255,7 @@ describe("concurrent harness memory persistence", () => {
 		try {
 			const result = await python.done;
 			expect(result.code).toBe(1);
-			expect(result.stderr).toContain("supports schema 1");
+			expect(result.stderr).toContain("not overwritten");
 			expect(loadHarnessState(dir)).toEqual(accepted);
 			expect(existsSync(`${getHarnessStatePath(dir)}.lock`)).toBe(false);
 			createHostMemory(dir, "after-rejection");

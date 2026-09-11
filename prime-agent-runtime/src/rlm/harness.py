@@ -409,6 +409,10 @@ class HarnessState:
         target_path = Path(os.path.realpath(self.file_path))
         try:
             self._ensure_local_writable()
+            if type(self.schema) not in (int, float) or (
+                isinstance(self.schema, float) and not isfinite(self.schema)
+            ):
+                raise RuntimeError(_invalid_harness_state_error())
             if self.schema != _HARNESS_SCHEMA_VERSION:
                 raise RuntimeError(_unsupported_harness_schema_error(self.schema))
             with _harness_file_lock(target_path):

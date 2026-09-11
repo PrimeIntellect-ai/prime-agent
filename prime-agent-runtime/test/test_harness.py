@@ -396,6 +396,18 @@ class HarnessStateTest(unittest.TestCase):
                 state.create_memory("Rejected", "Must not discard future data.", id="rejected")
             self.assertEqual(state_path.read_text(encoding="utf-8"), raw)
 
+    def test_boolean_schema_cannot_bypass_write_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Preserved", "Must survive.", id="preserved")
+            raw = state_path.read_text(encoding="utf-8")
+            state.schema = True
+
+            with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
+                state.save()
+            self.assertEqual(state_path.read_text(encoding="utf-8"), raw)
+
     def test_update_skill_preserves_omitted_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
