@@ -7,6 +7,7 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	Spacer,
+	sanitizeTerminalText,
 	Text,
 	truncateToWidth,
 	visibleWidth,
@@ -79,7 +80,7 @@ class CollapsedThinkingRow implements Component {
  * non-empty line, stripped of markdown emphasis and truncated.
  */
 export function thinkingRecap(thinking: string, fallback: string, maxWidth = 120): string {
-	const lines = thinking
+	const lines = sanitizeTerminalText(thinking)
 		.split("\n")
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0);
@@ -365,7 +366,8 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	private createErrorComponent(message: string, prefix?: string): Component {
+	private createErrorComponent(rawMessage: string, prefix?: string): Component {
+		const message = sanitizeTerminalText(rawMessage);
 		const inlineLoginRecovery = formatInlineLoginRecoveryMessage(message);
 		if (inlineLoginRecovery) {
 			const text = prefix ? `${prefix}: ${inlineLoginRecovery}` : inlineLoginRecovery;

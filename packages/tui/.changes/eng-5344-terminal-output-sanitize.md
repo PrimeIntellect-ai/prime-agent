@@ -1,0 +1,1 @@
+- Fixed Markdown rendering passing terminal control sequences from untrusted text through to the terminal; escape sequences now render as visible `␛` text, and clickable link targets are limited to http, https, mailto and locally resolved file links ([ENG-5344](https://linear.app/primeintellect/issue/ENG-5344)).

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, sanitizeTerminalText, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { expandCollapseHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
@@ -175,7 +175,8 @@ function formatDuration(ms: number): string {
 }
 
 function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
-	const command = str(args?.command);
+	const rawCommand = str(args?.command);
+	const command = rawCommand === null ? null : sanitizeTerminalText(rawCommand);
 	const timeout = args?.timeout as number | undefined;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 	let commandDisplay: string;

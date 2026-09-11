@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import { getImageDimensions, imageFallback } from "@earendil-works/pi-tui";
+import { getImageDimensions, imageFallback, sanitizeTerminalText } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { sanitizeBinaryOutput } from "../../utils/shell.js";
 
@@ -38,7 +38,9 @@ export function getTextOutput(
 	const textBlocks = result.content.filter((c) => c.type === "text");
 	const imageBlocks = result.content.filter((c) => c.type === "image");
 
-	let output = textBlocks.map((c) => sanitizeBinaryOutput(stripAnsi(c.text || "")).replace(/\r/g, "")).join("\n");
+	let output = textBlocks
+		.map((c) => sanitizeTerminalText(sanitizeBinaryOutput(stripAnsi(c.text || "")).replace(/\r/g, "")))
+		.join("\n");
 
 	const includeImageDimensions = options.includeImageDimensions ?? true;
 	if (imageBlocks.length > 0 && !showImages) {

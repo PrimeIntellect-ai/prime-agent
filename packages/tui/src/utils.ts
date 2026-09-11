@@ -929,6 +929,37 @@ export function stripAnsi(str: string): string {
 	return result.join("");
 }
 
+// C0 controls other than \t and \n, DEL, and C1 controls (U+0080–U+009F, which
+// UTF-8 terminals interpret as CSI/OSC/DCS introducers). ESC is included so the
+// whole class can be detected in one pass.
+const UNSAFE_TERMINAL_TEXT_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/;
+const VISIBLE_ESCAPE = "␛";
+
+/**
+ * Make untrusted text safe to hand to the terminal.
+ *
+ * Model, tool and file text must never carry control sequences into the
+ * renderer: strips C0 controls (except `\n` and `\t`), DEL and C1 controls, and
+ * replaces ESC with a visible `␛` so any ESC-initiated sequence (CSI, OSC, DCS,
+ * APC, PM, SOS, SS2/SS3, two-byte escapes) degrades to plain text instead of
+ * executing. Renderer-owned styling must be applied after this call.
+ */
+export function sanitizeTerminalText(text: string): string {
+	if (!UNSAFE_TERMINAL_TEXT_REGEX.test(text)) {
+		return text;
+	}
+	let result = "";
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code === 0x1b) {
+			result += VISIBLE_ESCAPE;
+		} else if (code < 0x20 ? code === 0x09 || code === 0x0a : code < 0x7f || code > 0x9f) {
+			result += text[i];
+		}
+	}
+	return result;
+}
+
 /**
  * Check if a character is whitespace.
  */

@@ -1,5 +1,13 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Box, type Component, Container, Spacer, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	Spacer,
+	sanitizeTerminalText,
+	Text,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
@@ -201,7 +209,7 @@ function formatEditCall(
 ): string {
 	const invalidArg = invalidArgText(theme);
 	const rawPath = str(args?.file_path ?? args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath) : null;
+	const path = rawPath !== null ? sanitizeTerminalText(shortenPath(rawPath)) : null;
 	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
@@ -224,7 +232,7 @@ function formatEditResult(
 		if (!errorText || errorText === previewError) {
 			return undefined;
 		}
-		return theme.fg("error", errorText);
+		return theme.fg("error", sanitizeTerminalText(errorText));
 	}
 
 	const resultDiff = result.details?.diff;

@@ -3,6 +3,7 @@ import {
 	Container,
 	type MarkdownTheme,
 	Spacer,
+	sanitizeTerminalText,
 	Text,
 	truncateToWidth,
 	visibleWidth,
@@ -13,7 +14,7 @@ import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
 function collapseText(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
+	return sanitizeTerminalText(text).replace(/\s+/g, " ").trim();
 }
 
 /** `◆ <label> · <participant>[ · <preview>]` summary line shared by received and sent agent-message UI. */
@@ -34,10 +35,12 @@ export function agentMessagePreview(prefixWidth: number, message: string): strin
 export function agentMessageBodyLines(message: string, width: number): string[] {
 	const safeWidth = Math.max(1, width);
 	const textWidth = Math.max(1, safeWidth - 4);
-	const bodyLines = message.split("\n").flatMap((line) => {
-		const wrapped = wrapTextWithAnsi(line, textWidth);
-		return wrapped.length > 0 ? wrapped : [""];
-	});
+	const bodyLines = sanitizeTerminalText(message)
+		.split("\n")
+		.flatMap((line) => {
+			const wrapped = wrapTextWithAnsi(line, textWidth);
+			return wrapped.length > 0 ? wrapped : [""];
+		});
 	return bodyLines.map((line, index) => {
 		const prefix = index === 0 ? theme.fg("dim", "╰─ ") : "   ";
 		return truncateToWidth(` ${prefix}${theme.fg("customMessageText", line)}`, safeWidth, "");

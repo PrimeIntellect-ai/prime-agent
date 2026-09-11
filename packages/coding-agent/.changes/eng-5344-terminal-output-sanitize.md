@@ -1,0 +1,1 @@
+- Fixed assistant text, thinking, tool output and link targets being able to send terminal control sequences (clipboard writes, screen clears, title changes) to the terminal ([ENG-5344](https://linear.app/primeintellect/issue/ENG-5344)).

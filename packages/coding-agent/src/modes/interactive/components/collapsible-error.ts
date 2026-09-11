@@ -1,4 +1,10 @@
-import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	sanitizeTerminalText,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { theme } from "../theme/theme.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
@@ -12,7 +18,7 @@ export interface CollapsibleErrorOptions {
 }
 
 export function normalizeErrorDetails(text: string): string {
-	return stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+	return sanitizeTerminalText(stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n")).trimEnd();
 }
 
 interface ErrorDetailLine {

@@ -1,4 +1,4 @@
-import { Container, Loader, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, Loader, Spacer, sanitizeTerminalText, Text, type TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import {
 	DEFAULT_MAX_BYTES,
@@ -70,7 +70,7 @@ export class BashExecutionComponent extends Container {
 
 	appendOutput(chunk: string): void {
 		// Note: binary data is already sanitized in tui-renderer.ts executeBashCommand
-		const clean = stripAnsi(chunk).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+		const clean = sanitizeTerminalText(stripAnsi(chunk).replace(/\r\n/g, "\n").replace(/\r/g, "\n"));
 
 		const newLines = clean.split("\n");
 		if (this.outputLines.length > 0 && newLines.length > 0) {

@@ -133,4 +133,4 @@ export {
 	TUI,
 	type TuiStopOptions,
 } from "./tui.js";
-export { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.js";
+export { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.js";
