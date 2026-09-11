@@ -99,13 +99,22 @@ export function parseArgs(args: string[]): Args {
 			result.help = true;
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
-		} else if (arg === "--mode" && i + 1 < args.length) {
-			const mode = args[++i];
-			if (mode === "text" || mode === "json" || mode === "rpc" || mode === "acp" || mode === "daemon") {
-				result.mode = mode;
+		} else if (arg === "--mode") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				const mode = args[++i];
+				if (mode === "text" || mode === "json" || mode === "rpc" || mode === "acp" || mode === "daemon") {
+					result.mode = mode;
+				} else {
+					result.diagnostics.push({
+						type: "error",
+						message: `Invalid --mode "${mode}". Valid values: text, json, rpc, acp, daemon`,
+					});
+				}
 			}
-		} else if (arg === "--daemon-socket" && i + 1 < args.length) {
-			result.daemonSocket = args[++i];
+		} else if (arg === "--daemon-socket") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.daemonSocket = args[++i];
+			}
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;
 		} else if (arg === "--resume" || arg === "-r") {
@@ -128,52 +137,74 @@ export function parseArgs(args: string[]): Args {
 			} else {
 				result.resume = value;
 			}
-		} else if (arg === "--provider" && i + 1 < args.length) {
-			result.provider = args[++i];
-		} else if (arg === "--model" && i + 1 < args.length) {
-			result.model = args[++i];
-		} else if (arg === "--api-key" && i + 1 < args.length) {
-			result.apiKey = args[++i];
-		} else if (arg === "--cwd" && i + 1 < args.length) {
-			result.cwd = args[++i];
-		} else if (arg === "--system-prompt" && i + 1 < args.length) {
-			result.systemPrompt = args[++i];
-		} else if (arg === "--append-system-prompt" && i + 1 < args.length) {
-			result.appendSystemPrompt = result.appendSystemPrompt ?? [];
-			result.appendSystemPrompt.push(args[++i]);
+		} else if (arg === "--provider") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.provider = args[++i];
+			}
+		} else if (arg === "--model") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.model = args[++i];
+			}
+		} else if (arg === "--api-key") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.apiKey = args[++i];
+			}
+		} else if (arg === "--cwd") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.cwd = args[++i];
+			}
+		} else if (arg === "--system-prompt") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.systemPrompt = args[++i];
+			}
+		} else if (arg === "--append-system-prompt") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.appendSystemPrompt = result.appendSystemPrompt ?? [];
+				result.appendSystemPrompt.push(args[++i]);
+			}
 		} else if (arg === "--no-session") {
 			result.noSession = true;
-		} else if (arg === "--fork" && i + 1 < args.length) {
-			result.fork = args[++i];
-		} else if (arg === "--session-dir" && i + 1 < args.length) {
-			result.sessionDir = args[++i];
-		} else if (arg === "--models" && i + 1 < args.length) {
-			result.models = args[++i].split(",").map((s) => s.trim());
+		} else if (arg === "--fork") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.fork = args[++i];
+			}
+		} else if (arg === "--session-dir") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.sessionDir = args[++i];
+			}
+		} else if (arg === "--models") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.models = args[++i].split(",").map((s) => s.trim());
+			}
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
 			result.noBuiltinTools = true;
-		} else if ((arg === "--tools" || arg === "-t") && i + 1 < args.length) {
-			result.tools = args[++i]
-				.split(",")
-				.map((s) => s.trim())
-				.filter((name) => name.length > 0);
-			const removedTools = result.tools.filter((name) => REMOVED_BUILTIN_TOOL_NAMES.has(name));
-			if (removedTools.length > 0) {
-				result.diagnostics.push({
-					type: "error",
-					message: `Unknown built-in tool(s): ${removedTools.join(", ")}. Available built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}`,
-				});
+		} else if (arg === "--tools" || arg === "-t") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.tools = args[++i]
+					.split(",")
+					.map((s) => s.trim())
+					.filter((name) => name.length > 0);
+				const removedTools = result.tools.filter((name) => REMOVED_BUILTIN_TOOL_NAMES.has(name));
+				if (removedTools.length > 0) {
+					result.diagnostics.push({
+						type: "error",
+						message: `Unknown built-in tool(s): ${removedTools.join(", ")}. Available built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}`,
+					});
+				}
 			}
-		} else if (arg === "--thinking" && i + 1 < args.length) {
-			const level = args[++i];
-			if (isValidThinkingLevel(level)) {
-				result.thinking = level;
-			} else {
-				result.diagnostics.push({
-					type: "warning",
-					message: `Invalid thinking level "${level}". Valid values: ${THINKING_LEVELS.join(", ")}`,
-				});
+		} else if (arg === "--thinking") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				const level = args[++i];
+				if (isValidThinkingLevel(level)) {
+					result.thinking = level;
+				} else {
+					result.diagnostics.push({
+						type: "warning",
+						message: `Invalid thinking level "${level}". Valid values: ${THINKING_LEVELS.join(", ")}`,
+					});
+				}
 			}
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
@@ -199,20 +230,28 @@ export function parseArgs(args: string[]): Args {
 				type: "error",
 				message: `--export was removed. Use "${APP_NAME} session export <file> [output]".`,
 			});
-		} else if ((arg === "--extension" || arg === "-e") && i + 1 < args.length) {
-			result.extensions = result.extensions ?? [];
-			result.extensions.push(args[++i]);
+		} else if (arg === "--extension" || arg === "-e") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.extensions = result.extensions ?? [];
+				result.extensions.push(args[++i]);
+			}
 		} else if (arg === "--no-extensions" || arg === "-ne") {
 			result.noExtensions = true;
-		} else if (arg === "--skill" && i + 1 < args.length) {
-			result.skills = result.skills ?? [];
-			result.skills.push(args[++i]);
-		} else if (arg === "--prompt-template" && i + 1 < args.length) {
-			result.promptTemplates = result.promptTemplates ?? [];
-			result.promptTemplates.push(args[++i]);
-		} else if (arg === "--theme" && i + 1 < args.length) {
-			result.themes = result.themes ?? [];
-			result.themes.push(args[++i]);
+		} else if (arg === "--skill") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.skills = result.skills ?? [];
+				result.skills.push(args[++i]);
+			}
+		} else if (arg === "--prompt-template") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.promptTemplates = result.promptTemplates ?? [];
+				result.promptTemplates.push(args[++i]);
+			}
+		} else if (arg === "--theme") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.themes = result.themes ?? [];
+				result.themes.push(args[++i]);
+			}
 		} else if (arg === "--no-skills" || arg === "-ns") {
 			result.noSkills = true;
 		} else if (arg === "--no-prompt-templates" || arg === "-np") {

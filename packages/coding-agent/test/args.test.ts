@@ -671,3 +671,73 @@ describe("parseArgs", () => {
 		});
 	});
 });
+
+describe("value flags require values", () => {
+	test("--model without a value is an error, not an extension flag", () => {
+		const result = parseArgs(["--model"]);
+		expect(result.model).toBeUndefined();
+		expect(result.unknownFlags.has("model")).toBe(false);
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--model requires a value",
+		});
+	});
+
+	test("value flags followed by another flag report missing values", () => {
+		const result = parseArgs(["--model", "--provider", "anthropic"]);
+		expect(result.provider).toBe("anthropic");
+		expect(result.model).toBeUndefined();
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--model requires a value",
+		});
+	});
+
+	test.each([
+		"--provider",
+		"--api-key",
+		"--cwd",
+		"--fork",
+		"--session-dir",
+		"--models",
+		"--daemon-socket",
+		"--system-prompt",
+	])("%s without a value reports a missing-value error", (flag) => {
+		const result = parseArgs([flag]);
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: `${flag} requires a value`,
+		});
+		expect(result.unknownFlags.has(flag.slice(2))).toBe(false);
+	});
+
+	test("invalid --mode reports valid values instead of being ignored", () => {
+		const result = parseArgs(["--mode", "interactive"]);
+		expect(result.mode).toBeUndefined();
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: 'Invalid --mode "interactive". Valid values: text, json, rpc, acp, daemon',
+		});
+	});
+
+	test("--mode still accepts valid values", () => {
+		const result = parseArgs(["--mode", "json"]);
+		expect(result.mode).toBe("json");
+		expect(result.diagnostics.some((d) => d.type === "error")).toBe(false);
+	});
+
+	test("list-style flags without values report missing values", () => {
+		const result = parseArgs(["--theme"]);
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--theme requires a value",
+		});
+	});
+
+	test("values are still consumed when present", () => {
+		const result = parseArgs(["--model", "claude-sonnet-4-5", "--fork", "abc"]);
+		expect(result.model).toBe("claude-sonnet-4-5");
+		expect(result.fork).toBe("abc");
+		expect(result.diagnostics.some((d) => d.type === "error")).toBe(false);
+	});
+});
