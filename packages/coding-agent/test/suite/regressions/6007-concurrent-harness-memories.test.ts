@@ -335,7 +335,7 @@ describe("concurrent harness memory persistence", () => {
 			createHostMemory(dir, "seed-entry");
 			const statePath = getHarnessStatePath(dir);
 			const malformed = JSON.parse(readFileSync(statePath, "utf8"));
-			malformed.entries.memory["seed-entry"].foo = 42;
+			malformed.entries.memory.foo = 42;
 			const malformedRaw = `${JSON.stringify(malformed, null, 2)}\n`;
 			writeFileSync(statePath, malformedRaw);
 			if (writer === "host") {
