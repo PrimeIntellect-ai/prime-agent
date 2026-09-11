@@ -1,0 +1,1 @@
+- Escaping the onboarding splash or failing its login no longer permanently skips onboarding; the guide reruns on the next launch until a model is configured.
