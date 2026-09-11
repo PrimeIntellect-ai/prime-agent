@@ -112,7 +112,7 @@ export class ShellCompletionComponent implements Component {
 	constructor(
 		private readonly message: CustomMessage,
 		private attached = false,
-		private readonly options: { shouldAddLeadingSpace?: () => boolean } = {},
+		private readonly options: { shouldAddLeadingSpace?: (expanded: boolean) => boolean } = {},
 	) {}
 	setAttached(): void {
 		this.attached = true;
@@ -133,14 +133,15 @@ export class ShellCompletionComponent implements Component {
 			? `${label} · pid ${completion?.details.pid} · ${formatShellCompletionTime(this.message.timestamp)}`
 			: `${completion?.details.exitCode ? "✗" : "✓"} ${label}`;
 		const header = truncateToWidth(theme.fg(color, ` ${heading}`), width, "");
-		if (!this.expanded) return [header];
+		const leadingSpace = this.options.shouldAddLeadingSpace?.(this.expanded) ?? this.expanded;
+		if (!this.expanded) return leadingSpace ? ["", header] : [header];
 		const raw = completion
 			? shellCompletionText(completion)
 			: typeof this.message.content === "string"
 				? this.message.content
 				: JSON.stringify(this.message.content);
 		const lines = [header, ...new Text(raw, 1, 0).render(width)];
-		return (this.options.shouldAddLeadingSpace?.() ?? true) ? ["", ...lines] : lines;
+		return leadingSpace ? ["", ...lines] : lines;
 	}
 }
 

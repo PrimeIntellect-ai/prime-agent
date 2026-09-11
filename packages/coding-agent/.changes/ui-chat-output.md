@@ -13,3 +13,4 @@
 - Fixed multiline Python string colors across source lines and narrow wrapping, and kept embedded string content out of collapsed code previews.
 - Changed expanded Python cells to nest input directly under the summary, align marked output beneath it, and separate full tool and message blocks.
 - Fixed unwanted gaps between compact tool and agent-message rows when empty assistant messages or hidden thinking appear between them.
+- Fixed missing separation between refinement notices and subsequent collapsed background shell completions.
