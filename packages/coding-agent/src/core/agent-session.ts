@@ -458,11 +458,7 @@ export interface ExtensionBindings {
 	onError?: ExtensionErrorListener;
 }
 
-export type {
-	AutoRefineReviewer,
-	AutoRefineReviewRequest,
-	SerializedBackgroundPlanResult,
-} from "../session/refinement.js";
+export type { AutoRefineReviewer, AutoRefineReviewRequest } from "../session/refinement.js";
 export interface PromptOptions {
 	expandPromptTemplates?: boolean;
 	images?: ImageContent[];
