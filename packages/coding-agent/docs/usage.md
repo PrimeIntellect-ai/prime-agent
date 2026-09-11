@@ -104,17 +104,17 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
 Normal interactive sessions are persistent agents backed by isolated worker processes. Closing the TUI detaches the client; use `prime-agent agents`, `prime-agent list`, or `prime-agent attach <agent>` to find and reattach to running work. `prime-agent stop <agent>` stops one root agent, while `prime-agent shutdown` stops all workers and the local supervisor.
 
-Within a session, the model can delegate through the `rlm` callable already available in the Python REPL:
+Within a session, the model can delegate through the `rlm` object already available in the Python REPL:
 
 ```python
 # Spawn independent children. Each call returns at admission with a child handle,
 # never the child's answer.
-review = await rlm(
+review = await rlm.spawn(
     "Review authentication and reply to the parent with findings.",
     name="auth-reviewer",
 )
-tests = await rlm("Find missing regression tests and reply to the parent.", name="test-reviewer")
-docs = await rlm("Find stale public documentation and reply to the parent.", name="docs-reviewer")
+tests = await rlm.spawn("Find missing regression tests and reply to the parent.", name="test-reviewer")
+docs = await rlm.spawn("Find stale public documentation and reply to the parent.", name="docs-reviewer")
 
 # Children reply from their own sessions with:
 # await agent_message.send(message, receiver_role="parent")
@@ -258,6 +258,8 @@ prime-agent --no-extensions -e ./my-extension.ts
 ### Autonomous Options
 
 Autonomous mode is a host policy for unattended work. It starts disabled. `--autonomous` enables it, and supplying any `--autonomous-*` sub-option also enables it. The host starts each enabled run with fresh continuation, turn, token, and elapsed-time counters.
+
+Interactive sessions set the same budget from the `/autonomous` slash command: `/autonomous on` accepts every budget option above using the flag name without the `--autonomous-` prefix (`--max-continuations`, `--max-turns`, `--max-tokens`, `--timeout-ms`, `--gate`, `--gate-retries`, `--gate-timeout-ms`), plus the full CLI spellings as aliases. For example, `/autonomous on --max-continuations 10 --gate "npm run check"` enables a ten-continuation run instead of the default three. Values follow the same positive-integer rules, may use `--flag=<value>` or `--flag <value>`, and accept `,` or `_` as digit separators, so `--max-tokens 100,000,000,000` and `--max-tokens 100_000_000_000` both work. The four budget limits also accept `unlimited` to remove that cap. Named budget flags define the whole budget: any limit you do not name becomes unlimited, so only the flags you pass (plus gates) decide when the run stops — for example, `/autonomous on --max-tokens 100,000` runs until that token budget is spent. With no budget flags at all, the configured or default limits still apply. A run with every budget limit unlimited and no gates has no automatic stopping point, so pair it with a gate or an explicit large budget.
 
 | Option | Behavior, units, and default |
 |--------|------------------------------|

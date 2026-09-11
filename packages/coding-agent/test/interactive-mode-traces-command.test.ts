@@ -1,3 +1,4 @@
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentTraceUploadAllResult, AgentTraceUploadResult } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -24,6 +25,7 @@ interface TracesCommandContext {
 
 interface TracesCommandPrototype {
 	handleTracesCommand(this: TracesCommandContext, text: string): Promise<void>;
+	getTracesArgumentCompletions(prefix: string): AutocompleteItem[] | null;
 }
 
 const prototype = InteractiveMode.prototype as unknown as TracesCommandPrototype;
@@ -141,5 +143,49 @@ describe("InteractiveMode /traces", () => {
 		expect(context.showStatus).toHaveBeenCalledWith("Trace upload cancelled.");
 		expect(context.showStatus).not.toHaveBeenCalledWith(expect.stringContaining("Uploaded 0 of 2"));
 		expect(context.traceUploadAllAbortController).toBeUndefined();
+	});
+
+	describe("argument autocomplete", () => {
+		it("lists every subcommand for an empty prefix", () => {
+			const items = prototype.getTracesArgumentCompletions("");
+
+			expect(items?.map((item) => item.value)).toEqual([
+				"status",
+				"on",
+				"off",
+				"preview",
+				"upload",
+				"upload-current",
+				"upload-all",
+				"login",
+			]);
+			const statusItem = items?.find((item) => item.value === "status");
+			expect(statusItem?.label).toBe("status");
+			expect(statusItem?.description).toBe("Show trace sharing status");
+		});
+
+		it("filters subcommands by prefix", () => {
+			const items = prototype.getTracesArgumentCompletions("up");
+
+			expect(items?.map((item) => item.value)).toEqual(["upload", "upload-current", "upload-all"]);
+		});
+
+		it("matches a single subcommand exactly", () => {
+			const items = prototype.getTracesArgumentCompletions("status");
+
+			expect(items?.map((item) => item.value)).toEqual(["status"]);
+		});
+
+		it("filters case-insensitively", () => {
+			const items = prototype.getTracesArgumentCompletions("LOGIN");
+
+			expect(items?.map((item) => item.value)).toEqual(["login"]);
+		});
+
+		it("returns null for an unknown prefix", () => {
+			const items = prototype.getTracesArgumentCompletions("xyz");
+
+			expect(items).toBeNull();
+		});
 	});
 });

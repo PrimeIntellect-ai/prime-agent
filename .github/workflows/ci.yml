@@ -149,6 +149,14 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: ${{ matrix.command }}
 
+      - name: Test benchmark harness
+        if: matrix.name == 'runtime python'
+        working-directory: scripts/benchmarks
+        run: |
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked python -m unittest discover -s tests -v
+
   build-check-test:
     name: build-check-test
     if: always() && needs.trust.outputs.allowed == 'true'

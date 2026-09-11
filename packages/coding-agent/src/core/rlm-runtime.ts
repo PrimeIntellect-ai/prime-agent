@@ -5,7 +5,7 @@ import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 
-/** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
+/** Request emitted by `rlm.spawn`; cellSourceCode preserves the spawning cell for display. */
 export interface RlmRunRequest {
 	prompt: string;
 	kwargs: Record<string, unknown>;
@@ -73,6 +73,13 @@ interface AsyncBashCompletionRequest {
 }
 
 type AsyncBashCompletionHandler = (request: AsyncBashCompletionRequest) => void | Promise<void>;
+
+interface AsyncBashConsumedRequest {
+	pid: number;
+	command: string;
+}
+
+type AsyncBashConsumedHandler = (request: AsyncBashConsumedRequest) => void | Promise<void>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -81,7 +88,7 @@ const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
 
-export function normalizeRequestedRlmSubagentSessionName(value: unknown, operation = "rlm.run"): string | undefined {
+export function normalizeRequestedRlmSubagentSessionName(value: unknown, operation = "rlm.spawn"): string | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
@@ -100,7 +107,7 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown, operati
 
 export function normalizeRequestedRlmSubagentThinkingLevel(
 	value: unknown,
-	operation = "rlm.run",
+	operation = "rlm.spawn",
 ): ThinkingLevel | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -115,7 +122,7 @@ export function normalizeRequestedRlmSubagentThinkingLevel(
 	return level as ThinkingLevel;
 }
 
-export function normalizeRequestedRlmSubagentModel(value: unknown, operation = "rlm.run"): string | undefined {
+export function normalizeRequestedRlmSubagentModel(value: unknown, operation = "rlm.spawn"): string | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
@@ -201,7 +208,7 @@ export function createRlmCreateSessionHostHandler(handler: RlmCreateSessionHandl
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.prompt !== "string") {
-			throw new Error("rlm.run prompt must be a string");
+			throw new Error("rlm.spawn prompt must be a string");
 		}
 		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
 		const cellSourceCode = typeof payload.cellSourceCode === "string" ? payload.cellSourceCode : undefined;
@@ -228,6 +235,21 @@ export function createAsyncBashCompletionHostHandler(handler: AsyncBashCompletio
 			throw new Error("bash.completed exitCode must be an integer");
 		}
 		await handler({ pid, command, exitCode });
+		return {};
+	};
+}
+
+/** The kernel read a finished command's result, so its completion notice is stale. */
+export function createAsyncBashConsumedHostHandler(handler: AsyncBashConsumedHandler): HostRequestHandler {
+	return async (payload) => {
+		const { pid, command } = payload;
+		if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+			throw new Error("bash.consumed pid must be a positive integer");
+		}
+		if (typeof command !== "string" || !command) {
+			throw new Error("bash.consumed command must be a non-empty string");
+		}
+		await handler({ pid, command });
 		return {};
 	};
 }

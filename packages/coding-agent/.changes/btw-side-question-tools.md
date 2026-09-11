@@ -1,0 +1,1 @@
+- Changed `/btw` side questions to declare the session's tools without allowing their use: the request now matches the main conversation's cached prefix byte for byte (tools included), any tool call gets an error result instead of executing, and the side thread's first turn explains that it is a `/btw` side conversation with tools deactivated.

@@ -519,7 +519,7 @@ dependencies = ["httpx"]
 		writeFakePython(overridePython, ["dill"]);
 		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
 
-		await expect(ensureKernelPython()).rejects.toThrow(/current prime-agent-runtime with callable rlm\.run/);
+		await expect(ensureKernelPython()).rejects.toThrow(/current prime-agent-runtime with callable rlm\.spawn/);
 	});
 
 	it("rejects PRIME_AGENT_KERNEL_PYTHON with a legacy harness API", async () => {
@@ -542,7 +542,7 @@ dependencies = ["httpx"]
 		);
 		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
 
-		await expect(ensureKernelPython()).rejects.toThrow(/current prime-agent-runtime with callable rlm\.run/);
+		await expect(ensureKernelPython()).rejects.toThrow(/current prime-agent-runtime with callable rlm\.spawn/);
 	});
 
 	it("fails an invalid PRIME_AGENT_KERNEL_PYTHON without bootstrapping", async () => {

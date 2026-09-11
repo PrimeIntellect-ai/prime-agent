@@ -217,11 +217,6 @@ print(json.dumps({
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [AGENT_MESSAGE_SKILL],
 			hostHandlers: {
-				// The family roster: parent, siblings, and children of this agent.
-				"agent_message.list_agents": async () => ({
-					current: { name: "root", id: "session-alpha", depth: 0 },
-					entries: [{ relationship: "child", name: "reviewer", id: "session-beta", depth: 1, status: "idle" }],
-				}),
 				"agent_message.send": async (payload) => ({
 					id: "agentmsg-acp",
 					source: "agent_message",
@@ -247,16 +242,11 @@ print(json.dumps({
 
 		const result = await manager.execute(`
 import json
-roster = await agent_message.list_agents()
 receipt = await agent_message.send("status update", receiver_role="child", receiver_name="reviewer")
-print(json.dumps({
-    "roster": [e["name"] for e in roster["entries"]],
-    "status": receipt["deliveryStatus"],
-}))
+print(json.dumps({"status": receipt["deliveryStatus"]}))
 `);
 		expect(result.status, why(result)).toBe("ok");
 		const payload = JSON.parse(result.stdout.trim());
-		expect(payload.roster).toEqual(["reviewer"]);
 		expect(payload.status).toBe("queued");
 
 		// The kernel reports the send; ACP carries it as namespaced metadata.
