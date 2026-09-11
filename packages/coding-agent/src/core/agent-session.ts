@@ -199,6 +199,7 @@ import type { McpManager } from "./mcp/mcp-manager.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+	type AsyncBashCompletionDetails,
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
 	type CustomMessage,
