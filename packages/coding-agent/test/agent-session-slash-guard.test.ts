@@ -135,6 +135,55 @@ describe("AgentSession slash-command typo guard", () => {
 		}
 	});
 
+	it("passes through short path-like tokens that only weakly resemble a command", async () => {
+		const { agent, resourceLoader } = createSession();
+		const authStorage = AuthStorage.create(join(tempDir, "auth7.json"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const { SessionManager } = await import("../src/core/session-manager.js");
+		const { SettingsManager } = await import("../src/core/settings-manager.js");
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions7")),
+			settingsManager: SettingsManager.create(tempDir, tempDir),
+			cwd: tempDir,
+			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models7.json")),
+			resourceLoader,
+		});
+		try {
+			// "tmp" differs from "mcp" by two characters; short tokens only match
+			// on a single-character typo, so this prompt reaches the model.
+			await session.prompt("/tmp notes for the cleanup");
+			expect(promptCalls).toEqual(["/tmp notes for the cleanup"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("still rejects single-character typos of short commands", async () => {
+		const { agent, resourceLoader } = createSession();
+		const authStorage = AuthStorage.create(join(tempDir, "auth8.json"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const { SessionManager } = await import("../src/core/session-manager.js");
+		const { SettingsManager } = await import("../src/core/settings-manager.js");
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions8")),
+			settingsManager: SettingsManager.create(tempDir, tempDir),
+			cwd: tempDir,
+			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models8.json")),
+			resourceLoader,
+		});
+		try {
+			// "log" is one insertion away from the /logs builtin.
+			await expect(session.prompt("/log rotate policies")).rejects.toThrow(
+				"Unknown command: /log. Did you mean /logs?",
+			);
+			expect(promptCalls).toEqual([]);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("passes through slash-prefixed prompts without a near command match", async () => {
 		const { agent, resourceLoader } = createSession();
 		const authStorage = AuthStorage.create(join(tempDir, "auth3.json"));

@@ -294,7 +294,11 @@ export function findSlashCommandSuggestion(input: string, candidates: readonly s
 			closest = { candidate, distance };
 		}
 	}
-	if (!closest || closest.distance > Math.max(2, Math.floor(input.length / 3))) {
+	// Very short tokens match only on a single-character typo: two-character
+	// tolerance on a three-character token lets unrelated path-like words
+	// (tmp vs mcp) masquerade as command typos.
+	const threshold = input.length <= 3 ? 1 : Math.max(2, Math.floor(input.length / 3));
+	if (!closest || closest.distance > threshold) {
 		return undefined;
 	}
 	return closest.candidate;
