@@ -146,6 +146,60 @@ describe("client-owned PostHog errors", () => {
 		await client.flush();
 		expect(batches[1].events).toEqual([batches[0].events[0]]);
 	});
+	it.each([false, true])("retains error pairs during slow discovery (retry: %s)", async (retry) => {
+		let now = Date.now();
+		let discoveries = 0;
+		let finishDiscovery!: (response: Response) => void;
+		const delayed = new Promise<Response>((resolve) => {
+			finishDiscovery = resolve;
+		});
+		const batches: TelemetryBatch[] = [];
+		const client = new TelemetryClient({
+			agentDir: mkdtempSync(join(tmpdir(), "telemetry-posthog-discovery-")),
+			now: () => now,
+			fetch: async (_url, init) => {
+				if (init?.method === "GET") return retry && ++discoveries === 1 ? Response.json(support) : delayed;
+				const batch = JSON.parse(String(init?.body)) as TelemetryBatch;
+				batches.push(batch);
+				return retry && batches.length === 1
+					? Response.json({ accepted_ids: [batch.events[0].id], retry_ids: [batch.events[1].id] })
+					: accepted(batch);
+			},
+		});
+		client.capture(source.name, source.properties);
+		if (retry) {
+			await client.flush();
+			now += 60_001;
+		}
+		await client.flush({ timeoutMs: 30 });
+		expect(batches).toHaveLength(retry ? 1 : 0);
+		finishDiscovery(Response.json(support));
+		await client.flush();
+		expect(batches).toHaveLength(retry ? 2 : 1);
+		if (retry) expect(batches[1].events).toEqual([batches[0].events[1]]);
+		else expect(batches[0].events.map((event) => event.name)).toEqual(["agent error", "$exception"]);
+		expect(client.delivery.accepted).toBe(2);
+		await client.flush();
+		expect(batches).toHaveLength(retry ? 2 : 1);
+	});
+	it.each(["network", "unavailable", "rollback"])("counts transport records on %s failures", async (failure) => {
+		let calls = 0;
+		const { client, batches } = setup(support, (batch) => {
+			if (++calls > 1) return accepted(batch);
+			if (failure === "network") throw new Error("network unavailable");
+			return new Response(null, { status: failure === "rollback" ? 422 : 503 });
+		});
+		client.capture(source.name, source.properties);
+		await client.flush();
+		expect(batches[0].events).toHaveLength(2);
+		expect(client.delivery.retries).toBe(2);
+		expect(client.delivery.unavailable).toBe(failure === "rollback" ? 0 : 2);
+		if (failure !== "rollback") {
+			await client.flush();
+			expect(client.delivery.accepted).toBe(2);
+		}
+		client.clearPending();
+	});
 	it("handles a rollback to an older collector that rejects native events", async () => {
 		const { client, batches } = setup(support, (batch) =>
 			Response.json({

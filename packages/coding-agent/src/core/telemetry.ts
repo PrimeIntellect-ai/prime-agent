@@ -594,11 +594,15 @@ export class TelemetryClient implements TelemetrySink {
 		const deadline = performance.now() + timeoutMs;
 		if (this.discovery) {
 			let timer: ReturnType<typeof setTimeout> | undefined;
-			const needsInstallationSupport = this.queue.some((entry) => entry.event.name === "agent installation stage");
+			const needsDiscovery = this.queue.some(
+				(entry) =>
+					entry.event.name === "agent installation stage" ||
+					(entry.event.name === "agent error" && entry.event.properties.error_event_kind === "occurrence"),
+			);
 			await Promise.race([
 				this.discovery,
 				new Promise<void>((resolve) => {
-					timer = setTimeout(resolve, needsInstallationSupport ? timeoutMs : Math.min(250, timeoutMs / 2));
+					timer = setTimeout(resolve, needsDiscovery ? timeoutMs : Math.min(250, timeoutMs / 2));
 					timer.unref?.();
 				}),
 			]);
@@ -623,13 +627,18 @@ export class TelemetryClient implements TelemetrySink {
 		) {
 			const version2 = this.supportsV2;
 			const installationId = this.installationId;
-			const entries = pending
-				.splice(0, this.batchSize)
-				.filter((entry) =>
-					entry.event.name === "agent installation stage"
-						? version2 && this.supportsInstallationOutcomes
-						: version2 || isLegacyTelemetryEvent(entry.event.name),
-				);
+			const entries = pending.splice(0, this.batchSize).filter((entry) => {
+				// An unresolved capability refresh must not retire an unsent exception.
+				if (
+					this.discovery &&
+					entry.event.name === "agent error" &&
+					entry.event.properties.error_event_kind === "occurrence"
+				)
+					return false;
+				return entry.event.name === "agent installation stage"
+					? version2 && this.supportsInstallationOutcomes
+					: version2 || isLegacyTelemetryEvent(entry.event.name);
+			});
 			if (!entries.length) continue;
 			const groups = entries.map((entry) => {
 				const event = entry.event;
@@ -678,12 +687,12 @@ export class TelemetryClient implements TelemetrySink {
 				this.supportsOriginalErrorMessages = false;
 				this.supportsPostHogExceptions = false;
 				this.nextDiscoveryAt = this.now() + 60_000;
-				this.delivery.retries += groups.length;
+				this.delivery.retries += events.length;
 				return;
 			}
 			if (!response?.ok) {
-				this.delivery.unavailable += groups.length;
-				this.delivery.retries += groups.length;
+				this.delivery.unavailable += events.length;
+				this.delivery.retries += events.length;
 				return;
 			}
 			const accepted = new Set<string>();
