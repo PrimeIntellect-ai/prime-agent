@@ -111,9 +111,9 @@ import {
 	SessionManager,
 } from "../../core/session-manager.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
-import type { SessionStats } from "../../core/session-stats.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import type { SessionStats } from "../../session/context/session-stats.js";
 import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";

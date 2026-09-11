@@ -1,7 +1,7 @@
 import { type BashResult, executeBashWithOperations } from "../../core/bash-executor.js";
 import type { UserBashEvent, UserBashEventResult } from "../../core/extensions/types.js";
-import type { BashExecutionMessage } from "../../core/messages.js";
 import { type BashOperations, createLocalBashOperations } from "../../core/tools/bash.js";
+import type { BashExecutionMessage } from "../context/messages.js";
 
 export interface ExecuteBashOptions {
 	excludeFromContext?: boolean;

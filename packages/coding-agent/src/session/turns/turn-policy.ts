@@ -4,12 +4,12 @@ import type {
 	ShouldStopAfterTurnContext,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import { shouldCompact } from "../../core/compaction/index.js";
 import { getLatestCompactionEntry, type SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
-import type { SessionCompaction } from "../compaction/compaction.js";
+import type { SessionCompaction } from "../compaction/controller.js";
+import { shouldCompact } from "../compaction/summary.js";
 import type { GoalController } from "../goals/controller.js";
-import type { SessionRefinement } from "../refinement/refinement.js";
+import type { SessionRefinement } from "../refinement/controller.js";
 import type { SessionAutonomousContinuation } from "./autonomous-continuation.js";
 
 export interface SessionTurnPolicyHost {

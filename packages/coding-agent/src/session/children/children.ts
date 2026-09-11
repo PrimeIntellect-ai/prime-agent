@@ -10,7 +10,6 @@ import {
 	formatAgentSessionNameUnavailable,
 } from "../../core/agent-messages.js";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.js";
-import type { CustomMessage } from "../../core/messages.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -26,6 +25,7 @@ import {
 	type SubagentRuntimeHost,
 } from "../../core/rlm-runtime.js";
 import type { SemanticEdgeRecorder } from "../../core/semantic-edges.js";
+import type { CustomMessage } from "../context/messages.js";
 import { buildChildList, snapshotChildRun, snapshotRetainedChild } from "./child-projection.js";
 import { launchChildTask } from "./child-run.js";
 import {

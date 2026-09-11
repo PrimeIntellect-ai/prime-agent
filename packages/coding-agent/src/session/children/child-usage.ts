@@ -7,7 +7,7 @@ import type {
 	SessionManager,
 	SessionMessageEntry,
 } from "../../core/session-manager.js";
-import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } from "../../core/usage.js";
+import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } from "../context/usage.js";
 
 export interface ChildUsageHost {
 	sessionManager: Pick<SessionManager, "getEntries" | "appendChildUsageAttribution">;

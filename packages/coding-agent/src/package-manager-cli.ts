@@ -45,7 +45,6 @@ import {
 import type { SessionActionRecoverySnapshot } from "./core/agent-session.js";
 import { SESSION_ACTION_RECOVERY_FORMAT_VERSION } from "./core/agent-session.js";
 import type { AgentSessionRuntimeMetadata } from "./core/agent-session-runtime.js";
-import { type CustomMessage, isSessionSlashCommand } from "./core/messages.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { DaemonClient, type DaemonHello } from "./modes/daemon/daemon-client.js";
@@ -67,6 +66,7 @@ import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
+import { type CustomMessage, isSessionSlashCommand } from "./session/context/messages.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
 

@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, UserMessage } from "@earendil-works/pi-ai";
+import type { CustomMessage } from "../session/context/messages.js";
 import type { InputSource } from "./extensions/index.js";
-import type { CustomMessage } from "./messages.js";
 import type { SessionSlashCommand } from "./slash-commands.js";
 
 export type DeliveryPolicy = "next_turn_boundary" | "when_run_idle";

@@ -16,11 +16,11 @@ import {
 	setAutonomousLimits,
 	UNLIMITED_AUTONOMOUS_LIMIT,
 } from "../../core/autonomous.js";
-import type { CustomMessage } from "../../core/messages.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { parseSessionSlashCommand } from "../../core/slash-commands.js";
-import type { SessionCompaction } from "../compaction/compaction.js";
+import type { SessionCompaction } from "../compaction/controller.js";
+import type { CustomMessage } from "../context/messages.js";
 import type { SessionInputAdmission } from "../input/input-admission.js";
 import { createPreparedTurnAction, primaryDeliveryRecord, type QueuedSessionAction } from "../prepared-actions.js";
 import type { SessionContinuation } from "./continuation.js";

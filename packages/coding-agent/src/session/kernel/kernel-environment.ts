@@ -2,10 +2,10 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuthStorage } from "../../core/auth-storage.js";
-import { getGlobalHarnessStateDir, getLocalHarnessStateDir } from "../../core/refinement/index.js";
 import { resolveConfigValue } from "../../core/resolve-config-value.js";
 import type { ResourceLoader } from "../../core/resource-loader.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "../../core/websearch-credential.js";
+import { getGlobalHarnessStateDir, getLocalHarnessStateDir } from "../refinement/harness-state.js";
 
 export interface KernelEnvironmentHost {
 	agentDir?: string;

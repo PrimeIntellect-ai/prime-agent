@@ -3,12 +3,6 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent, UserMessage } from "@earendil-works/pi-ai";
 import { AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL, isAgentSessionMessage } from "../core/agent-messages.js";
 import type { ExtensionRunner, InputSource } from "../core/extensions/index.js";
-import {
-	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-	type AsyncBashCompletionDetails,
-	type CustomMessage,
-} from "../core/messages.js";
 import type {
 	DeliveryPolicy,
 	DeliveryRecord,
@@ -18,6 +12,12 @@ import type {
 	WakePolicy,
 } from "../core/session-action-store.js";
 import type { SessionSlashCommand } from "../core/slash-commands.js";
+import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+	type AsyncBashCompletionDetails,
+	type CustomMessage,
+} from "./context/messages.js";
 import { createTurnExecutionPolicy, type TurnExecutionPolicy } from "./turns/turn-preparation.js";
 
 export type QueuedAgentMessage = UserMessage | CustomMessage;

@@ -2,13 +2,6 @@ import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { isAgentSessionMessage, isAgentSessionMessagePrompt } from "../../core/agent-messages.js";
 import {
-	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-	type AsyncBashCompletionDetails,
-	type CustomMessage,
-	HARNESS_DIGEST_CUSTOM_TYPE,
-	isSessionSlashCommandMessage,
-} from "../../core/messages.js";
-import {
 	type ActionStore,
 	type DeliveryPolicy,
 	type DeliveryRecord,
@@ -20,6 +13,13 @@ import {
 	type SessionActionSnapshot,
 } from "../../core/session-action-store.js";
 import { parseSessionSlashCommand } from "../../core/slash-commands.js";
+import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+	type AsyncBashCompletionDetails,
+	type CustomMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
+	isSessionSlashCommandMessage,
+} from "../context/messages.js";
 import {
 	cloneCustomMessage,
 	type createPreparedTurnAction,

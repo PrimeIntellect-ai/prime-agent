@@ -1,17 +1,17 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
-import { calculateContextTokens, estimateContextTokens } from "../../core/compaction/index.js";
+import type { ContextUsage } from "../../core/extensions/index.js";
+import { getLatestCompactionEntry, type SessionEntry, type SessionManager } from "../../core/session-manager.js";
 import {
 	type ContextTreeNode,
 	type ContextWindowResolver,
 	computeOwnAndTotalUsage,
 	loadContextTreeChildFromDisk,
 	loadContextTreeChildrenFromDisk,
-} from "../../core/context-tree.js";
-import type { ContextUsage } from "../../core/extensions/index.js";
-import { getLatestCompactionEntry, type SessionEntry, type SessionManager } from "../../core/session-manager.js";
-import type { SessionStats } from "../../core/session-stats.js";
-import { emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "../../core/usage.js";
+} from "./context-tree.js";
+import type { SessionStats } from "./session-stats.js";
+import { calculateContextTokens, estimateContextTokens } from "./token-estimate.js";
+import { emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 
 export interface ContextViewChild {
 	id: string;

@@ -14,7 +14,6 @@ import type {
 	TurnStartEvent,
 } from "../../core/extensions/index.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
-import type { RefinementResult } from "../../core/refinement/index.js";
 import {
 	type ActionStore,
 	type SessionActionSnapshot,
@@ -22,10 +21,11 @@ import {
 } from "../../core/session-action-store.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { RlmChildAgentSnapshot } from "../children/child-types.js";
-import type { SessionCompaction, SessionCompactionEvent } from "../compaction/compaction.js";
+import type { SessionCompaction, SessionCompactionEvent } from "../compaction/controller.js";
 import type { GoalState } from "../goals/contracts.js";
 import { primaryDeliveryRecord, type QueuedSessionAction } from "../prepared-actions.js";
-import type { SessionRefinement } from "../refinement/refinement.js";
+import type { SessionRefinement } from "../refinement/controller.js";
+import type { RefinementResult } from "../refinement/types.js";
 import type { SessionBashEvent } from "../tools/bash.js";
 import type { SessionRetry, SessionRetryEvent } from "./retry.js";
 

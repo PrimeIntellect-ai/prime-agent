@@ -18,11 +18,11 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
-import type { CustomMessage } from "../../core/messages.js";
 import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
-import type { SessionUsageSummary } from "../../core/usage.js";
+import type { CustomMessage } from "../../session/context/messages.js";
+import type { SessionUsageSummary } from "../../session/context/usage.js";
 import type {
 	AgentConnectionAgentStatus,
 	AgentConnectionHeartbeat,

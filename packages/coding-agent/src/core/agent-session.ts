@@ -18,17 +18,25 @@ import {
 } from "../session/children/child-types.js";
 import { SessionChildUsage } from "../session/children/child-usage.js";
 import { SessionChildren } from "../session/children/children.js";
-import { SessionCompaction } from "../session/compaction/compaction.js";
+import { SessionCompaction } from "../session/compaction/controller.js";
 import {
 	type CompactionExecutionHost,
 	type CompactionExecutionOptions,
 	performSessionCompaction,
-} from "../session/compaction/compaction-execution.js";
+} from "../session/compaction/execution.js";
+import { COMPACT_SKILL_NAME, type CompactionResult } from "../session/compaction/types.js";
 import { type ContextViewChild, SessionContextView } from "../session/context/context-view.js";
 import { SessionExport } from "../session/context/export.js";
 import { SessionHarnessContext } from "../session/context/harness-context.js";
 import { SessionHistoryNavigation } from "../session/context/history-navigation.js";
+import {
+	type CustomMessage,
+	createHeartbeatPromptMessage,
+	type RefinementSource,
+} from "../session/context/messages.js";
 import { SessionPendingContext } from "../session/context/pending-context.js";
+import type { BuildSystemPromptOptions } from "../session/context/system-prompt.js";
+import { calculateContextTokens } from "../session/context/token-estimate.js";
 import {
 	type ExtensionBindings,
 	installExtensionToolHooks,
@@ -61,7 +69,8 @@ import { handleAgentMessageHostRequest } from "../session/kernel/message-host-re
 import { handleAgentObserveHostRequest } from "../session/kernel/observe-host-requests.js";
 import { SessionModelSelection } from "../session/models/model-selection.js";
 import { type QueuedSessionAction, visibleSessionActionProjection } from "../session/prepared-actions.js";
-import { type AutoRefineReviewer, SessionRefinement } from "../session/refinement/refinement.js";
+import { type AutoRefineReviewer, SessionRefinement } from "../session/refinement/controller.js";
+import { REFINE_SKILL_NAME, type RefinementResult } from "../session/refinement/types.js";
 import { type ExecuteBashOptions, type RunUserBashOptions, SessionBash } from "../session/tools/bash.js";
 import { SessionTools } from "../session/tools/tools.js";
 import { SessionAutonomousContinuation } from "../session/turns/autonomous-continuation.js";
@@ -87,7 +96,6 @@ import {
 } from "./agent-observe.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { BashResult } from "./bash-executor.js";
-import { COMPACT_SKILL_NAME, type CompactionResult, calculateContextTokens } from "./compaction/index.js";
 import type { AgentCronJob, AgentRlmHeartbeatController } from "./cron-jobs.js";
 import type {
 	ExtensionRunner,
@@ -99,11 +107,9 @@ import type {
 import type { HostRequestHandlers } from "./kernel/index.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
-import { type CustomMessage, createHeartbeatPromptMessage, type RefinementSource } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import type { PromptTemplate } from "./prompt-templates.js";
 import { providerRetryPolicy } from "./provider-retry.js";
-import { REFINE_SKILL_NAME, type RefinementResult } from "./refinement/index.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import type {
 	CreateRlmSubagentRuntimeOptions,
@@ -119,7 +125,6 @@ import { ActionStore, type RuntimeActivity } from "./session-action-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
-import type { BuildSystemPromptOptions } from "./system-prompt.js";
 import type { IpythonKernelProvisioner } from "./tools/ipython.js";
 
 export type {
@@ -128,8 +133,9 @@ export type {
 	RlmChildAgentStatus,
 } from "../session/children/child-types.js";
 export { compactRlmText, rlmChildLabel } from "../session/children/child-types.js";
-export type { CompactionReason } from "../session/compaction/compaction.js";
-export { CompactionSkippedError } from "../session/compaction/compaction-execution.js";
+export type { CompactionReason } from "../session/compaction/controller.js";
+export { CompactionSkippedError } from "../session/compaction/execution.js";
+export type { SessionStats } from "../session/context/session-stats.js";
 export type { GoalState, GoalStatus } from "../session/goals/contracts.js";
 export {
 	SESSION_ACTION_RECOVERY_FORMAT_VERSION,
@@ -138,10 +144,9 @@ export {
 	type SessionActionRecoveryRecord,
 	type SessionActionRecoverySnapshot,
 } from "../session/prepared-actions.js";
-export { RefineSkippedError } from "../session/refinement/refinement.js";
+export { RefineSkippedError } from "../session/refinement/controller.js";
 export type { AgentSessionEvent, AgentSessionEventListener } from "../session/turns/events.js";
 export type { TurnExecutionPolicy } from "../session/turns/turn-preparation.js";
-export type { SessionStats } from "./session-stats.js";
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-blocks.js";
 
 export interface AgentSessionConfig {
@@ -217,7 +222,7 @@ export interface AgentSessionConfig {
 export type { ExtensionBindings } from "../session/extensions/extensions.js";
 export type { PromptOptions } from "../session/input/prompt-submission.js";
 export type { ModelCycleResult } from "../session/models/model-selection.js";
-export type { AutoRefineReviewer, AutoRefineReviewRequest } from "../session/refinement/refinement.js";
+export type { AutoRefineReviewer, AutoRefineReviewRequest } from "../session/refinement/controller.js";
 
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 

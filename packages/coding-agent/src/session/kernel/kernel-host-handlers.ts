@@ -14,7 +14,6 @@ import {
 } from "../../core/agent-observe.js";
 import type { HostRequestHandlers } from "../../core/kernel/index.js";
 import type { McpManager } from "../../core/mcp/mcp-manager.js";
-import type { AsyncBashCompletionDetails } from "../../core/messages.js";
 import {
 	createAsyncBashCompletionHostHandler,
 	createAsyncBashConsumedHostHandler,
@@ -30,6 +29,7 @@ import {
 	type RlmSpawnHandle,
 } from "../../core/rlm-runtime.js";
 import type { Skill } from "../../core/skills.js";
+import type { AsyncBashCompletionDetails } from "../context/messages.js";
 
 type ObserveResult = AgentObserveListResult | AgentObserveAgentSnapshot | AgentObserveRecentMessagesResult;
 export interface SessionKernelOperations {

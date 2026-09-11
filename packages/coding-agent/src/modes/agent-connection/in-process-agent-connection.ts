@@ -5,8 +5,6 @@ import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
-import type { CompactionResult } from "../../core/compaction/index.js";
-import type { ContextTreeNode } from "../../core/context-tree.js";
 import type {
 	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
@@ -16,11 +14,13 @@ import type {
 import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
-import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
-import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import type { CompactionResult } from "../../session/compaction/types.js";
+import type { ContextTreeNode } from "../../session/context/context-tree.js";
+import type { SessionStats } from "../../session/context/session-stats.js";
+import type { RefinementResult } from "../../session/refinement/types.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
 import {
 	createAgentConnectionCommands,

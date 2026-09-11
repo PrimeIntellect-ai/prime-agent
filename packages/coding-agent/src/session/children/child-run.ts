@@ -1,11 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AGENT_MESSAGE_CUSTOM_TYPE, type AgentSessionMessage } from "../../core/agent-messages.js";
 import type { AgentSession } from "../../core/agent-session.js";
-import {
-	type CustomMessage,
-	createRlmChildFailureMessage,
-	createRlmChildTerminalNoticeMessage,
-} from "../../core/messages.js";
 import type {
 	CreateRlmSubagentRuntimeOptions,
 	RlmSpawnHandle,
@@ -13,6 +8,11 @@ import type {
 	RlmSubagentRuntime,
 	SubagentRuntimeHost,
 } from "../../core/rlm-runtime.js";
+import {
+	type CustomMessage,
+	createRlmChildFailureMessage,
+	createRlmChildTerminalNoticeMessage,
+} from "../context/messages.js";
 import {
 	compactRlmText,
 	createChildDeferred,

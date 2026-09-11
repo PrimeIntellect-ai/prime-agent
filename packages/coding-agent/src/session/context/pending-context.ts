@@ -1,8 +1,3 @@
-import {
-	type CustomMessage,
-	RLM_CHILD_FAILURE_CUSTOM_TYPE,
-	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
-} from "../../core/messages.js";
 import type { ActionStore, DeliveryRecord } from "../../core/session-action-store.js";
 import { waitForPromiseOrAbort } from "../../utils/wait-for-abort.js";
 import type { SessionCommitFence, SessionCommitLease } from "../input/commit-fence.js";
@@ -14,6 +9,11 @@ import {
 	type QueuedSessionAction,
 } from "../prepared-actions.js";
 import { createTurnExecutionPolicy } from "../turns/turn-preparation.js";
+import {
+	type CustomMessage,
+	RLM_CHILD_FAILURE_CUSTOM_TYPE,
+	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+} from "./messages.js";
 
 export interface SessionPendingContextHost {
 	getScheduler(): Pick<SessionInputScheduler, "admissionPaused" | "suspended" | "queuedWorkPauseCount">;

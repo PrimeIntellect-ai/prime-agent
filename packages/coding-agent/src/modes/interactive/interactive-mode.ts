@@ -97,21 +97,6 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
 import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
-import {
-	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-	bashOutputToText,
-	COMPACTION_OUTCOME_CUSTOM_TYPE,
-	type CustomMessage,
-	createHeartbeatPromptMessage,
-	HEARTBEAT_PROMPT_PREVIEW_LABEL,
-	isCompactionOutcomeMessage,
-	isRefinementOutcomeMessage,
-	isSessionSlashCommandMessage,
-	isSessionSlashCommandResultMessage,
-	REFINEMENT_OUTCOME_CUSTOM_TYPE,
-	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
-	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
-} from "../../core/messages.js";
 import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.js";
 import { parseNewSessionCommand } from "../../core/new-session-command.js";
 import { resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
@@ -134,6 +119,21 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
+import {
+	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+	bashOutputToText,
+	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	type CustomMessage,
+	createHeartbeatPromptMessage,
+	HEARTBEAT_PROMPT_PREVIEW_LABEL,
+	isCompactionOutcomeMessage,
+	isRefinementOutcomeMessage,
+	isSessionSlashCommandMessage,
+	isSessionSlashCommandResultMessage,
+	REFINEMENT_OUTCOME_CUSTOM_TYPE,
+	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
+	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
+} from "../../session/context/messages.js";
 import {
 	emptyGoalState,
 	formatGoalUsage,

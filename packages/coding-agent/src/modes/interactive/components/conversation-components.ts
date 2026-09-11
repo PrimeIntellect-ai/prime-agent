@@ -10,7 +10,7 @@ import {
 	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
-} from "../../../core/messages.js";
+} from "../../../session/context/messages.js";
 import { AgentMessageComponent } from "./agent-message.js";
 import { AssistantMessageComponent } from "./assistant-message.js";
 import { BashExecutionComponent } from "./bash-execution.js";

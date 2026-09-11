@@ -21,29 +21,6 @@ export {
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
 } from "./core/auth-storage.js";
-// Compaction
-export {
-	type BranchPreparation,
-	type BranchSummaryResult,
-	type CollectEntriesResult,
-	type CompactionResult,
-	type CutPointResult,
-	calculateContextTokens,
-	collectEntriesForBranchSummary,
-	compact,
-	DEFAULT_COMPACTION_SETTINGS,
-	estimateTokens,
-	type FileOperations,
-	findCutPoint,
-	findTurnStartIndex,
-	type GenerateBranchSummaryOptions,
-	generateBranchSummary,
-	generateSummary,
-	getLastAssistantUsage,
-	prepareBranchEntries,
-	serializeConversation,
-	shouldCompact,
-} from "./core/compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.js";
 // Extension system
 export type {
@@ -140,7 +117,6 @@ export {
 } from "./core/extensions/index.js";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.js";
-export { convertToLlm } from "./core/messages.js";
 export { ModelRegistry } from "./core/model-registry.js";
 export type {
 	PackageManager,
@@ -151,12 +127,6 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.js";
 export { DefaultPackageManager } from "./core/package-manager.js";
-export type {
-	HarnessState,
-	RefinementEdit,
-	RefinementProposal,
-	RefinementResult,
-} from "./core/refinement/index.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
 // SDK for programmatic usage
@@ -216,7 +186,6 @@ export {
 	type SessionStateStatus,
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.js";
-export type { SessionStats } from "./core/session-stats.js";
 export {
 	type CompactionSettings,
 	type ImageSettings,
@@ -399,6 +368,30 @@ export {
 	Theme,
 	type ThemeColor,
 } from "./modes/interactive/theme/theme.js";
+export {
+	compact,
+	findCutPoint,
+	findTurnStartIndex,
+	generateSummary,
+	shouldCompact,
+} from "./session/compaction/summary.js";
+export { type CompactionResult, type CutPointResult, DEFAULT_COMPACTION_SETTINGS } from "./session/compaction/types.js";
+// Compaction
+export {
+	type BranchPreparation,
+	type BranchSummaryResult,
+	type CollectEntriesResult,
+	collectEntriesForBranchSummary,
+	type GenerateBranchSummaryOptions,
+	generateBranchSummary,
+	prepareBranchEntries,
+} from "./session/context/branch-summary.js";
+export { serializeConversation } from "./session/context/conversation-text.js";
+export type { FileOperations } from "./session/context/file-tracking.js";
+export { convertToLlm } from "./session/context/messages.js";
+export type { SessionStats } from "./session/context/session-stats.js";
+export { calculateContextTokens, estimateTokens, getLastAssistantUsage } from "./session/context/token-estimate.js";
+export type { HarnessState, RefinementEdit, RefinementProposal, RefinementResult } from "./session/refinement/types.js";
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.js";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.js";

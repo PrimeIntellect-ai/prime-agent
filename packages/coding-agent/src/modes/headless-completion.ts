@@ -15,7 +15,7 @@ import {
 	REFINEMENT_NOTICE_CUSTOM_TYPE,
 	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	type SessionSlashCommandResultMessage,
-} from "../core/messages.js";
+} from "../session/context/messages.js";
 
 export function latestAutonomousGateAttempt(status: AgentAutonomousStatus): number {
 	return Math.max(status.lastGateFailure?.attempt ?? 0, 0, ...Object.values(status.gateAttempts));

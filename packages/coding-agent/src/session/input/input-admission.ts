@@ -6,8 +6,8 @@ import {
 	isAgentSessionMessage,
 } from "../../core/agent-messages.js";
 import type { InputSource } from "../../core/extensions/index.js";
-import type { CustomMessage } from "../../core/messages.js";
 import type { ActionStore, ActionTicket } from "../../core/session-action-store.js";
+import type { CustomMessage } from "../context/messages.js";
 import {
 	createPreparedTurnAction,
 	primaryDeliveryRecord,

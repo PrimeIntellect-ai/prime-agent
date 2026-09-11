@@ -7,7 +7,7 @@ import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-ser
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
-import type { SessionUsageSummary } from "../../core/usage.js";
+import type { SessionUsageSummary } from "../../session/context/usage.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
