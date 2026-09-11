@@ -6,9 +6,9 @@ import * as acp from "@agentclientprotocol/sdk";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { VERSION } from "../../config.js";
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import type { AgentAutonomousStatus } from "../../session/autonomy/autonomous.js";
+import type { AgentSessionRuntime } from "../../session/runtime/runtime.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnection,

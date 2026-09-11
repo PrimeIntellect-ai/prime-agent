@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentSession } from "../../session/agent-session.js";
+import type { AgentSessionRuntime } from "../../session/runtime/runtime.js";
 import type {
 	AgentConnectionArtifactReference,
 	AgentConnectionArtifactType,

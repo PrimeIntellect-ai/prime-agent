@@ -1,4 +1,4 @@
-import { ensureKernelPython } from "./core/kernel/bootstrap.js";
+import { ensureKernelPython } from "./kernel/bootstrap.js";
 import { ensureTool } from "./utils/tools-manager.js";
 
 const bootstrapKernel = process.env.PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL === "1";

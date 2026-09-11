@@ -1,2 +1,2 @@
-export { ReplKernelManager } from "./repl-manager.js";
-export * from "./shared.js";
+// Compatibility export; implementation lives with its feature owner.
+export * from "../../kernel/index.js";

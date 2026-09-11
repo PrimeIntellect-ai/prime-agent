@@ -1,4 +1,4 @@
-import type { HostRequestHandler } from "../../core/kernel/index.js";
+import type { HostRequestHandler } from "../../kernel/contracts.js";
 
 interface AsyncBashCompletionRequest {
 	pid: number;

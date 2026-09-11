@@ -7,13 +7,13 @@
  */
 
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
 import {
 	type AgentAutonomousStatus,
 	type AutonomousLimitReason,
 	autonomousLimitReason,
 } from "../session/autonomy/autonomous.js";
+import type { AgentSessionRuntime } from "../session/runtime/runtime.js";
 import { killTrackedDetachedChildren } from "../utils/shell.js";
 import { InProcessAgentConnection } from "./agent-connection/in-process-agent-connection.js";
 import type { AgentConnection } from "./agent-connection/types.js";

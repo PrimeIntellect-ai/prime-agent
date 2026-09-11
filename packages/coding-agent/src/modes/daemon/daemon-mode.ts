@@ -64,14 +64,6 @@ import {
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
 } from "../../core/agent-observe.js";
-import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
-import {
-	type AgentSessionRuntime,
-	type AgentSessionRuntimeDisposeOptions,
-	type AgentSessionRuntimeMetadata,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../core/agent-session-runtime.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -109,6 +101,14 @@ import type {
 } from "../../session/children/runtime-contracts.js";
 import type { SessionStats } from "../../session/context/session-stats.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../session/input/prompt-admission.js";
+import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../session/runtime/config.js";
+import {
+	type AgentSessionRuntime,
+	type AgentSessionRuntimeDisposeOptions,
+	type AgentSessionRuntimeMetadata,
+	type CreateAgentSessionRuntimeFactory,
+	createAgentSessionRuntime,
+} from "../../session/runtime/runtime.js";
 import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
