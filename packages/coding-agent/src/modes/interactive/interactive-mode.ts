@@ -4756,12 +4756,20 @@ export class InteractiveMode {
 					await this.handleSideQuestion(commandArgs);
 					return;
 				}
-				if (commandName === "settings" && !commandArgs) {
+				if (commandName === "settings") {
+					if (commandArgs) {
+						this.showError("Usage: /settings");
+						return;
+					}
 					await this.showSettingsSelector();
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "scoped-models" && !commandArgs) {
+				if (commandName === "scoped-models") {
+					if (commandArgs) {
+						this.showError("Usage: /scoped-models");
+						return;
+					}
 					this.editor.setText("");
 					await this.showModelsSelector();
 					return;
@@ -4796,12 +4804,20 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "share" && !commandArgs) {
+				if (commandName === "share") {
+					if (commandArgs) {
+						this.showError("Usage: /share");
+						return;
+					}
 					await this.handleShareCommand();
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "copy" && !commandArgs) {
+				if (commandName === "copy") {
+					if (commandArgs) {
+						this.showError("Usage: /copy");
+						return;
+					}
 					await this.handleCopyCommand();
 					this.editor.setText("");
 					return;
@@ -4816,13 +4832,21 @@ export class InteractiveMode {
 					await this.handleRlmMaxDepthCommand(commandArgs);
 					return;
 				}
-				if (commandName === "session" && !commandArgs) {
+				if (commandName === "session") {
+					if (commandArgs) {
+						this.showError("Usage: /session");
+						return;
+					}
 					this.echoLocalCommand(text);
 					await this.handleSessionCommand();
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "system-prompt" && !commandArgs) {
+				if (commandName === "system-prompt") {
+					if (commandArgs) {
+						this.showError("Usage: /system-prompt");
+						return;
+					}
 					this.echoLocalCommand(text);
 					await this.handleSystemPromptCommand();
 					this.editor.setText("");
@@ -4833,13 +4857,21 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "context" && !commandArgs) {
+				if (commandName === "context") {
+					if (commandArgs) {
+						this.showError("Usage: /context");
+						return;
+					}
 					this.echoLocalCommand(text);
 					await this.handleContextCommand();
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "logs" && !commandArgs) {
+				if (commandName === "logs") {
+					if (commandArgs) {
+						this.showError("Usage: /logs");
+						return;
+					}
 					this.echoLocalCommand(text);
 					this.handleLogsCommand();
 					this.editor.setText("");
@@ -4851,44 +4883,76 @@ export class InteractiveMode {
 					return;
 				}
 				if (commandName === "heartbeats") {
+					if (commandArgs) {
+						this.showError("Usage: /heartbeats");
+						return;
+					}
 					this.editor.setText("");
 					await this.showHeartbeatManager();
 					return;
 				}
-				if (commandName === "changelog" && !commandArgs) {
+				if (commandName === "changelog") {
+					if (commandArgs) {
+						this.showError("Usage: /changelog");
+						return;
+					}
 					this.echoLocalCommand(text);
 					this.handleChangelogCommand();
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "hotkeys" && !commandArgs) {
+				if (commandName === "hotkeys") {
+					if (commandArgs) {
+						this.showError("Usage: /hotkeys");
+						return;
+					}
 					this.echoLocalCommand(text);
 					this.handleHotkeysCommand();
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "fork" && !commandArgs) {
+				if (commandName === "fork") {
+					if (commandArgs) {
+						this.showError("Usage: /fork");
+						return;
+					}
 					this.editor.setText("");
 					await this.showUserMessageSelector();
 					return;
 				}
-				if (commandName === "clone" && !commandArgs) {
+				if (commandName === "clone") {
+					if (commandArgs) {
+						this.showError("Usage: /clone");
+						return;
+					}
 					this.editor.setText("");
 					await this.handleCloneCommand();
 					return;
 				}
-				if (commandName === "tree" && !commandArgs) {
+				if (commandName === "tree") {
+					if (commandArgs) {
+						this.showError("Usage: /tree");
+						return;
+					}
 					this.editor.setText("");
 					restorePromptStashAfterSubmit = false;
 					await this.showTreeSelector();
 					return;
 				}
-				if (commandName === "login" && !commandArgs) {
+				if (commandName === "login") {
+					if (commandArgs) {
+						this.showError("Usage: /login");
+						return;
+					}
 					this.editor.setText("");
 					await this.showConfigurationMenu("providers");
 					return;
 				}
-				if (commandName === "logout" && !commandArgs) {
+				if (commandName === "logout") {
+					if (commandArgs) {
+						this.showError("Usage: /logout");
+						return;
+					}
 					this.editor.setText("");
 					await this.showLogoutSelector();
 					return;
@@ -4926,7 +4990,11 @@ export class InteractiveMode {
 					await this.handleResumeCommand(commandArgs);
 					return;
 				}
-				if (commandName === "reload" && !commandArgs) {
+				if (commandName === "reload") {
+					if (commandArgs) {
+						this.showError("Usage: /reload");
+						return;
+					}
 					this.editor.setText("");
 					await this.handleReloadCommand();
 					return;
@@ -4955,7 +5023,11 @@ export class InteractiveMode {
 					this.setFullscreenMode(enable);
 					return;
 				}
-				if (commandName === "debug" && !commandArgs) {
+				if (commandName === "debug") {
+					if (commandArgs) {
+						this.showError("Usage: /debug");
+						return;
+					}
 					await this.handleDebugCommand();
 					this.editor.setText("");
 					return;
