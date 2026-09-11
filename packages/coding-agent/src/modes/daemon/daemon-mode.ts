@@ -805,7 +805,10 @@ export class AgentDaemon {
 
 	private hasOngoingSessionWork(): boolean {
 		for (const state of this.sessions.values()) {
-			if (state.runtime.session.isStreaming || state.runtime.session.isCompacting) {
+			// Same predicate the daemon reports as isSessionActive: retrying,
+			// bash/kernel background work, refinement, compaction settlement,
+			// and queued actions must all keep holding the worker.
+			if (state.runtime.session.isSessionActive) {
 				return true;
 			}
 		}
