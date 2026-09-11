@@ -326,6 +326,38 @@ describe("concurrent harness memory persistence", () => {
 		},
 	);
 
+	it.each(["Python", "host"])(
+		"refuses to overwrite malformed schema-1 entry data from the %s writer",
+		async (writer) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const dir = join(harness.tempDir, "harness");
+			createHostMemory(dir, "seed-entry");
+			const statePath = getHarnessStatePath(dir);
+			const malformed = JSON.parse(readFileSync(statePath, "utf8"));
+			malformed.entries.memory["seed-entry"].foo = 42;
+			const malformedRaw = `${JSON.stringify(malformed, null, 2)}\n`;
+			writeFileSync(statePath, malformedRaw);
+			if (writer === "host") {
+				const host = loadHarnessState(dir, "local");
+				applyRefinementProposal(host, proposal("host-entry"), { id: "host-refine", scope: "local" });
+				expect(() => saveHarnessState(dir, host)).toThrow("invalid or unreadable");
+			} else {
+				const python = pythonWriter(dir, "python-entry");
+				try {
+					const result = await python.done;
+					expect(result.code).toBe(1);
+					expect(result.stderr).toContain("invalid or unreadable");
+				} finally {
+					await python.cleanup();
+				}
+			}
+			expect(loadHarnessState(dir, "local").entries.memory["seed-entry"].content).toBe("seed-entry");
+			expect(readFileSync(statePath, "utf8")).toBe(malformedRaw);
+			expect(existsSync(`${statePath}.lock`)).toBe(false);
+		},
+	);
+
 	it.each([
 		["Python", "reset"],
 		["Python", "rewrite"],

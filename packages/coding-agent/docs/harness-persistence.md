@@ -4,7 +4,7 @@ The TypeScript refinement host and Python harness use the same adjacent `harness
 
 Both writers support schema `1`. Known entries remain readable from a newer schema, but mutations are rejected without changing the file so unknown fields and entry kinds cannot be discarded. Schema changes are accepted only after the implementation's supported version is updated.
 
-Malformed files, including legacy JSON containing `NaN`, infinity, or an unrepresentable numeric value, produce an empty read view so the session can continue. TypeScript and Python both reject mutations until the file is repaired or removed, and leave its bytes unchanged. New writes containing non-finite numbers also fail before replacing the previous state.
+Malformed files, including structurally invalid schema-1 data and legacy JSON containing `NaN`, infinity, or an unrepresentable numeric value, remain readable where possible so the session can continue. TypeScript and Python both reject mutations until the file is repaired or removed, and leave its bytes unchanged. New writes containing non-finite numbers also fail before replacing the previous state.
 
 Python generates distinct default refinement event IDs for concurrent calls. A pending refinement append fails if another writer has reset or rewritten the existing history. A memory save that leaves its refinement history unchanged preserves that accepted history replacement.
 

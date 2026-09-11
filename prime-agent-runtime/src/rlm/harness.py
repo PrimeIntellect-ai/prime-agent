@@ -28,6 +28,7 @@ HarnessScope = Literal["local", "global"]
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
 _HARNESS_SCHEMA_VERSION = 1
+_MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 
@@ -210,6 +211,75 @@ class RefinementEvent:
 
 _ENTRY_FIELDS = {field.name for field in fields(HarnessEntry)}
 _REFINEMENT_FIELDS = {field.name for field in fields(RefinementEvent)}
+_STATE_FIELDS = {"schema", "entries", "refinements"}
+
+
+def _contains_unsafe_json_number(value: object) -> bool:
+    if type(value) is int:
+        return abs(value) > _MAX_SAFE_JSON_INTEGER
+    if type(value) is float:
+        return not isfinite(value)
+    if isinstance(value, list):
+        return any(_contains_unsafe_json_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_unsafe_json_number(item) for item in value.values())
+    return False
+
+
+def _is_writable_harness_entry(value: object, entry_id: str, kind: HarnessKind) -> bool:
+    if not isinstance(value, dict) or not set(value).issubset(_ENTRY_FIELDS):
+        return False
+    if value.get("id") != entry_id or value.get("kind") != kind:
+        return False
+    if not isinstance(value.get("title"), str) or not isinstance(value.get("content"), str):
+        return False
+    if "path" in value and not isinstance(value["path"], str):
+        return False
+    if "scope" in value and value["scope"] not in ("local", "global"):
+        return False
+    for name in ("source", "created_at", "updated_at"):
+        if name in value and not isinstance(value[name], str):
+            return False
+    if "version" in value and type(value["version"]) is not int:
+        return False
+    for name in ("reference", "arguments", "metadata"):
+        if name in value and not isinstance(value[name], dict):
+            return False
+    return True
+
+
+def _is_writable_harness_refinement(value: object) -> bool:
+    if not isinstance(value, dict) or not set(value).issubset(_REFINEMENT_FIELDS):
+        return False
+    if not isinstance(value.get("id"), str) or not isinstance(value.get("trigger"), str):
+        return False
+    changes = value.get("changes")
+    if not isinstance(changes, list) or not all(isinstance(change, str) for change in changes):
+        return False
+    for name in ("evidence", "outcome", "created_at"):
+        if name in value and not isinstance(value[name], str):
+            return False
+    return True
+
+
+def _is_writable_harness_data(value: object) -> bool:
+    if not isinstance(value, dict) or not set(value).issubset(_STATE_FIELDS):
+        return False
+    if _contains_unsafe_json_number(value):
+        return False
+    raw_entries = value.get("entries", {})
+    if not isinstance(raw_entries, dict) or not set(raw_entries).issubset(_KINDS):
+        return False
+    for kind in _KINDS:
+        records = raw_entries.get(kind, {})
+        if not isinstance(records, dict):
+            return False
+        if not all(_is_writable_harness_entry(entry, str(entry_id), kind) for entry_id, entry in records.items()):
+            return False
+    raw_refinements = value.get("refinements", [])
+    return isinstance(raw_refinements, list) and all(
+        _is_writable_harness_refinement(event) for event in raw_refinements
+    )
 
 
 def _validate_python_skill_reference(reference: dict[str, Any] | None) -> dict[str, Any]:
@@ -324,6 +394,8 @@ class HarnessState:
         self.schema = schema
         if self._load_error is None and schema != _HARNESS_SCHEMA_VERSION:
             self._load_error = _unsupported_harness_schema_error(schema)
+        if self._load_error is None and not _is_writable_harness_data(data):
+            self._load_error = _invalid_harness_state_error()
 
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         raw_entries = data.get("entries", {})
@@ -415,6 +487,8 @@ class HarnessState:
                 raise RuntimeError(_invalid_harness_state_error())
             if self.schema != _HARNESS_SCHEMA_VERSION:
                 raise RuntimeError(_unsupported_harness_schema_error(self.schema))
+            if not _is_writable_harness_data(self._serialize()):
+                raise RuntimeError(_invalid_harness_state_error())
             with _harness_file_lock(target_path):
                 latest = HarnessState(target_path, scope=self.scope)
                 latest._ensure_local_writable()

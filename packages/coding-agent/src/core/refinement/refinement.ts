@@ -275,11 +275,84 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
-function containsNonFiniteNumber(value: unknown): boolean {
-	if (typeof value === "number") return !Number.isFinite(value);
-	if (Array.isArray(value)) return value.some(containsNonFiniteNumber);
+function containsUnsafeJsonNumber(value: unknown): boolean {
+	if (typeof value === "number") {
+		return !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value));
+	}
+	if (Array.isArray(value)) return value.some(containsUnsafeJsonNumber);
 	const record = objectRecord(value);
-	return record ? Object.values(record).some(containsNonFiniteNumber) : false;
+	return record ? Object.values(record).some(containsUnsafeJsonNumber) : false;
+}
+
+const HARNESS_STATE_FIELDS = new Set(["schema", "entries", "refinements"]);
+const HARNESS_ENTRY_FIELDS = new Set([
+	"id",
+	"kind",
+	"title",
+	"content",
+	"path",
+	"scope",
+	"reference",
+	"arguments",
+	"metadata",
+	"source",
+	"created_at",
+	"updated_at",
+	"version",
+]);
+const HARNESS_REFINEMENT_FIELDS = new Set(["id", "trigger", "changes", "evidence", "outcome", "created_at"]);
+
+function hasOnlyFields(record: Record<string, unknown>, fields: ReadonlySet<string>): boolean {
+	return Object.keys(record).every((key) => fields.has(key));
+}
+
+function isWritableHarnessEntry(value: unknown, id: string, kind: RefinementKind): boolean {
+	const entry = objectRecord(value);
+	if (!entry || !hasOnlyFields(entry, HARNESS_ENTRY_FIELDS)) return false;
+	if (entry.id !== id || entry.kind !== kind) return false;
+	if (typeof entry.title !== "string" || typeof entry.content !== "string") return false;
+	if (entry.path !== undefined && typeof entry.path !== "string") return false;
+	if (entry.scope !== undefined && entry.scope !== "local" && entry.scope !== "global") return false;
+	if (entry.source !== undefined && typeof entry.source !== "string") return false;
+	if (entry.created_at !== undefined && typeof entry.created_at !== "string") return false;
+	if (entry.updated_at !== undefined && typeof entry.updated_at !== "string") return false;
+	if (entry.version !== undefined && (typeof entry.version !== "number" || !Number.isInteger(entry.version))) {
+		return false;
+	}
+	for (const field of ["reference", "arguments", "metadata"] as const) {
+		if (entry[field] !== undefined && !objectRecord(entry[field])) return false;
+	}
+	return true;
+}
+
+function isWritableHarnessRefinement(value: unknown): boolean {
+	const event = objectRecord(value);
+	if (!event || !hasOnlyFields(event, HARNESS_REFINEMENT_FIELDS)) return false;
+	if (typeof event.id !== "string" || typeof event.trigger !== "string") return false;
+	if (!Array.isArray(event.changes) || event.changes.some((change) => typeof change !== "string")) return false;
+	for (const field of ["evidence", "outcome", "created_at"] as const) {
+		if (event[field] !== undefined && typeof event[field] !== "string") return false;
+	}
+	return true;
+}
+
+function isWritableHarnessState(value: unknown): boolean {
+	const state = objectRecord(value);
+	if (!state || !hasOnlyFields(state, HARNESS_STATE_FIELDS) || containsUnsafeJsonNumber(state)) return false;
+	const emptyEntries = emptyHarnessState().entries;
+	const entries = state.entries === undefined ? {} : objectRecord(state.entries);
+	if (!entries || Object.keys(entries).some((kind) => !Object.hasOwn(emptyEntries, kind))) return false;
+	for (const kind of Object.keys(emptyEntries) as RefinementKind[]) {
+		const records = entries[kind] === undefined ? {} : objectRecord(entries[kind]);
+		if (!records) return false;
+		if (Object.entries(records).some(([id, entry]) => !isWritableHarnessEntry(entry, id, kind))) return false;
+	}
+	if (state.refinements !== undefined) {
+		if (!Array.isArray(state.refinements) || state.refinements.some((event) => !isWritableHarnessRefinement(event))) {
+			return false;
+		}
+	}
+	return true;
 }
 
 function invalidHarnessStateError(): string {
@@ -352,7 +425,7 @@ function readHarnessStateResult(statePath: string, scope: HarnessScope): { state
 		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
 			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 		}
-		if (containsNonFiniteNumber(raw)) {
+		if (containsUnsafeJsonNumber(raw)) {
 			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 		}
 		parsed = raw as Partial<HarnessState>;
@@ -370,6 +443,9 @@ function readHarnessStateResult(statePath: string, scope: HarnessScope): { state
 		if (parsed.schema !== HARNESS_SCHEMA_VERSION) {
 			writeError = unsupportedHarnessSchemaError(parsed.schema);
 		}
+	}
+	if (!writeError && !isWritableHarnessState(parsed)) {
+		writeError = invalidHarnessStateError();
 	}
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const records = parsed.entries?.[kind];
@@ -428,7 +504,7 @@ export function saveHarnessState(harnessStateDir: string, state: HarnessState): 
 		if (state.schema !== HARNESS_SCHEMA_VERSION) {
 			throw new Error(unsupportedHarnessSchemaError(state.schema));
 		}
-		if (containsNonFiniteNumber(state)) throw new Error(invalidHarnessStateError());
+		if (!isWritableHarnessState(state)) throw new Error(invalidHarnessStateError());
 		const latest = latestRead.state;
 		const merged = mergeHarnessStateChanges(snapshot?.state ?? emptyHarnessState(), state, latest);
 		const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;

@@ -231,47 +231,45 @@ class HarnessStateTest(unittest.TestCase):
             titles = [entry.title for entry in HarnessState(real_path).entries["memory"].values()]
             self.assertEqual(titles, ["Seed", "Through alias"])
 
-    def test_load_ignores_unknown_json_keys(self) -> None:
+    def test_load_tolerates_malformed_fields_but_refuses_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"
-            state_path.write_text(
-                json.dumps(
-                    {
-                        "schema": 1,
-                        "entries": {
-                            "memory": {
-                                "known": {
-                                    "id": "mismatched",
-                                    "kind": "skill",
-                                    "title": "Known memory",
-                                    "content": "Loaded despite extra keys.",
-                                    "path": 123,
-                                    "source": None,
-                                    "version": "2",
-                                    "metadata": "not a dict",
-                                    "unexpected": True,
-                                },
-                                "missing_content": {
-                                    "title": "Missing content",
-                                }
-                            }
-                        },
-                        "refinements": [
-                            {
-                                "id": "refine_extra",
-                                "trigger": "extra keys",
-                                "changes": [1, "loaded"],
-                                "ignored": "value",
+            raw = json.dumps(
+                {
+                    "schema": 1,
+                    "entries": {
+                        "memory": {
+                            "known": {
+                                "id": "mismatched",
+                                "kind": "skill",
+                                "title": "Known memory",
+                                "content": "Loaded despite extra keys.",
+                                "path": 123,
+                                "source": None,
+                                "version": "2",
+                                "metadata": "not a dict",
+                                "unexpected": True,
                             },
-                            {
-                                "id": "refine_missing_changes",
-                                "trigger": "missing changes",
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
+                            "missing_content": {
+                                "title": "Missing content",
+                            },
+                        }
+                    },
+                    "refinements": [
+                        {
+                            "id": "refine_extra",
+                            "trigger": "extra keys",
+                            "changes": [1, "loaded"],
+                            "ignored": "value",
+                        },
+                        {
+                            "id": "refine_missing_changes",
+                            "trigger": "missing changes",
+                        },
+                    ],
+                }
             )
+            state_path.write_text(raw, encoding="utf-8")
 
             state = HarnessState(state_path)
 
@@ -289,8 +287,9 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(len(state.refinements), 1)
             self.assertIn("1, loaded", state.overview())
 
-            updated = state.update_memory("known", "Known memory", "Updated content.")
-            self.assertEqual(updated.version, 3)
+            with self.assertRaisesRegex(RuntimeError, "invalid or unreadable"):
+                state.update_memory("known", "Known memory", "Updated content.")
+            self.assertEqual(state_path.read_text(encoding="utf-8"), raw)
 
     def test_skill_arguments_are_first_class(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
