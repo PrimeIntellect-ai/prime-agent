@@ -121,7 +121,6 @@ export interface AgentsViewModeOptions {
 	createUiServicesForSession?: (summary: SessionSummary) => Promise<InteractiveModeUiServices>;
 	migratedProviders?: string[];
 	modelFallbackMessage?: string;
-	startupModelId?: string;
 	verbose?: boolean;
 	recoverDaemon?: () => Promise<void>;
 	reconnectTimeoutMs?: number;
@@ -2567,7 +2566,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
 		const cells = [
 			formatTableCell(title, layout.nameWidth),
-			formatTableCell(theme.fg("muted", formatSessionModel(row.summary)), layout.modelWidth),
+			formatTableCell(theme.fg("muted", formatSessionModel(row)), layout.modelWidth),
 		];
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
 		cells.push(theme.fg("dim", details));
@@ -2794,10 +2793,7 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
 	const detailsWidth = costWidth + 2 + ageWidth;
 	const available = Math.max(0, width - detailsWidth - 4);
-	const desiredModelWidth = sessions.reduce(
-		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
-		12,
-	);
+	const desiredModelWidth = sessions.reduce((size, row) => Math.max(size, visibleWidth(formatSessionModel(row))), 12);
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
@@ -2835,9 +2831,16 @@ function formatTableCell(value: string, width: number): string {
 	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
-function formatSessionModel(summary: SessionSummary): string {
-	const id = summary.model?.id;
-	return id ? id.replace(/^[^/]+\//, "") || id : "-";
+// Model ids can embed a provider path ("moonshotai/kimi-k2"); the column shows
+// the bare model name plus the thinking level ("kimi-k2:high") when one is
+// active — "off" reads as noise, so it and absent levels render bare (saved
+// rows carry no level).
+function formatSessionModel(row: AgentsViewRow): string {
+	const id = row.summary.model?.id ?? row.record?.saved?.model?.modelId;
+	if (!id) return "-";
+	const bare = id.slice(id.lastIndexOf("/") + 1) || id;
+	const level = row.summary.thinkingLevel;
+	return level && level !== "off" ? `${bare}:${level}` : bare;
 }
 
 function formatSessionDuration(summary: SessionSummary): string {

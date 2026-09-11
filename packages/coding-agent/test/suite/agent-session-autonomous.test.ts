@@ -7,8 +7,10 @@ import {
 	addAutonomousUsage,
 	createAutonomousRuntimeState,
 	DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT,
+	isUnlimitedAutonomousLimit,
 	nextAutonomousContinuation,
 	shouldAutonomouslyContinue,
+	UNLIMITED_AUTONOMOUS_LIMIT,
 } from "../../src/core/autonomous.js";
 import type { AgentCronJob } from "../../src/core/cron-jobs.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
@@ -66,7 +68,10 @@ describe("AgentSession autonomous mode", () => {
 			"Which package manager should I use?",
 			"I inspected the repo and used npm.",
 		]);
-		expect(getUserTexts(harness)).toEqual(["fix the project", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"fix the project",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			continuationsUsed: 1,
@@ -88,7 +93,10 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("run the private eval");
 
-		expect(getUserTexts(harness)).toEqual(["run the private eval", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"run the private eval",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			continuationsUsed: 1,
@@ -112,7 +120,10 @@ describe("AgentSession autonomous mode", () => {
 			"Can you confirm the test command?",
 			"Can you confirm whether to run lint too?",
 		]);
-		expect(getUserTexts(harness)).toEqual(["make the change", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"make the change",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
@@ -160,6 +171,182 @@ describe("AgentSession autonomous mode", () => {
 			(message) => message.role === "custom" && message.customType === "autonomous_status",
 		);
 		expect(statusMessages).toHaveLength(2);
+		expect(getMessageText(statusMessages[0]).startsWith("[autonomous-status: on]\n\n")).toBe(true);
+		expect(getMessageText(statusMessages[1]).startsWith("[autonomous-status: off]\n\n")).toBe(true);
+	});
+
+	it("applies user-defined budget flags when enabling autonomous mode", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			"/autonomous on --max-continuations 5 --max-turns 25 --max-tokens 250000 --timeout-ms 600000",
+		);
+
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			continuationsUsed: 0,
+			turnsUsed: 0,
+			tokensUsed: 0,
+			limits: {
+				maxContinuations: 5,
+				maxTurns: 25,
+				maxTokens: 250_000,
+				timeoutMs: 600_000,
+			},
+		});
+	});
+
+	it("continues through a user-defined continuation budget instead of the default three", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses(
+			Array.from({ length: 8 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
+		);
+
+		await harness.session.prompt("/autonomous on --max-continuations 5");
+		await harness.session.prompt("make the change");
+
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			continuationsUsed: 5,
+			limits: { maxContinuations: 5 },
+		});
+	});
+
+	it("accepts the CLI autonomous flag spellings and inline values", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			'/autonomous on --autonomous-max-continuations=7 --autonomous-gate "npm test" --autonomous-gate-retries=2 --autonomous-gate-timeout-ms 45000',
+		);
+
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			limits: { maxContinuations: 7 },
+			gates: {
+				commands: ["npm test"],
+				maxRetries: 2,
+				timeoutMs: 45_000,
+			},
+		});
+	});
+
+	it("bounds the run only by the named budget flags", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt("/autonomous on --max-tokens 100,000");
+
+		// Only the named budget limit applies; the unnamed ones stop cutting the run short.
+		expect(harness.session.getAutonomousStatus().limits).toEqual({
+			maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTokens: 100_000,
+			timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
+		});
+	});
+
+	it("keeps defaults when no budget flags are named and appends repeated gates", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt('/autonomous on --gate "npm run lint" --gate "npm test"');
+
+		const status = harness.session.getAutonomousStatus();
+		expect(status.limits).toEqual({
+			maxContinuations: 3,
+			maxTurns: 12,
+			maxTokens: 80_000,
+			timeoutMs: 1_800_000,
+		});
+		expect(status.gates.commands).toEqual(["npm run lint", "npm test"]);
+	});
+
+	it("accepts large budgets written with digit separators", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			"/autonomous on --max-tokens 100,000,000,000 --max-continuations 1_000 --max-turns 10,000 --timeout-ms 3,600,000",
+		);
+
+		expect(harness.session.getAutonomousStatus().limits).toEqual({
+			maxContinuations: 1_000,
+			maxTurns: 10_000,
+			maxTokens: 100_000_000_000,
+			timeoutMs: 3_600_000,
+		});
+		const statusMessages = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "autonomous_status",
+		);
+		expect(getMessageText(statusMessages[0])).toContain("Tokens: 0/100,000,000,000");
+	});
+
+	it("supports unlimited budget values", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await harness.session.prompt(
+			"/autonomous on --max-continuations unlimited --max-turns unlimited --max-tokens unlimited --timeout-ms unlimited",
+		);
+
+		expect(harness.session.getAutonomousStatus().limits).toEqual({
+			maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTokens: UNLIMITED_AUTONOMOUS_LIMIT,
+			timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
+		});
+		const statusMessages = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "autonomous_status",
+		);
+		const statusText = getMessageText(statusMessages[0]);
+		expect(statusText).toContain("Continuations: 0/unlimited");
+		expect(statusText).toContain("Time: 0s/unlimited");
+	});
+
+	it("continues an unlimited-continuation run past the default three", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses(
+			Array.from({ length: 6 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
+		);
+
+		await harness.session.prompt("/autonomous on --max-continuations unlimited --max-turns unlimited");
+		await harness.session.prompt("make the change");
+
+		const status = harness.session.getAutonomousStatus();
+		expect(isUnlimitedAutonomousLimit(status.limits.maxContinuations)).toBe(true);
+		expect(status.continuationsUsed).toBe(6);
+	});
+
+	it("rejects invalid budget flags without enabling autonomous mode", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		for (const input of [
+			"/autonomous on --max-continuations 0",
+			"/autonomous on --max-continuations",
+			"/autonomous on --speed 10",
+			"/autonomous on --gate-retries unlimited",
+			"/autonomous off --max-continuations 2",
+		]) {
+			await harness.session.prompt(input);
+		}
+		const commandErrors = harness.session.messages
+			.filter((message) => message.role === "custom" && message.customType === "session_slash_command_result")
+			.map((message) => (message as { content: string }).content);
+		expect(commandErrors).toEqual([
+			expect.stringContaining('--max-continuations must be a positive integer or "unlimited"'),
+			expect.stringContaining("Missing value for --max-continuations"),
+			expect.stringContaining("Unknown autonomous budget flag: --speed"),
+			expect.stringContaining("--gate-retries must be a positive integer."),
+			expect.stringContaining("Unexpected autonomous argument: --max-continuations"),
+		]);
+
+		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
 	});
 
 	it("continues when the assistant tries to finish without terminal evidence", async () => {
@@ -171,7 +358,10 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("make the change");
 
-		expect(getUserTexts(harness)).toEqual(["make the change", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual([
+			"make the change",
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		]);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
@@ -198,7 +388,9 @@ describe("AgentSession autonomous mode", () => {
 		await harness.session.prompt("make the change");
 
 		expect(getUserTexts(harness)[0]).toBe("make the change");
-		expect(getUserTexts(harness).slice(1)).toContain(DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT);
+		expect(getUserTexts(harness).slice(1)).toContain(
+			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBeGreaterThan(0);
 	});
 
@@ -259,8 +451,9 @@ describe("AgentSession autonomous mode", () => {
 		await harness.session.prompt("make the change");
 
 		const users = getUserTexts(harness);
-		expect(users[1]).toContain("Autonomous quality gate failed");
-		expect(users[1]).toContain("gate failed");
+		expect(users[1].startsWith("[autonomous-continuation: gate-failed]\n\nAutonomous quality gate failed")).toBe(
+			true,
+		);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 

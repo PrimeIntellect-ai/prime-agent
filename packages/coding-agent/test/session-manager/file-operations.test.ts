@@ -827,6 +827,35 @@ describe("readSessionInfo incremental scans", () => {
 	});
 	const line = (entry: unknown) => `${JSON.stringify(entry)}\n`;
 
+	it("scans the last recorded model from model_change entries and assistant messages", async () => {
+		const file = join(tempDir, "model.jsonl");
+		writeFileSync(
+			file,
+			[
+				line(header),
+				line({ type: "model_change", id: "mc1", parentId: null, provider: "openai", modelId: "gpt-4o" }),
+				line(msg("m1", "mc1", "user", "hi")),
+				line({
+					type: "message",
+					id: "m2",
+					parentId: "m1",
+					message: {
+						role: "assistant",
+						content: "x",
+						timestamp: 1,
+						provider: "prime-inference",
+						model: "glm-4.7",
+					},
+				}),
+			].join(""),
+		);
+		expect((await readSessionInfo(file))?.model).toEqual({ provider: "prime-inference", modelId: "glm-4.7" });
+
+		const bare = join(tempDir, "bare.jsonl");
+		writeFileSync(bare, line(header));
+		expect((await readSessionInfo(bare))?.model).toBeUndefined();
+	});
+
 	it("coalesces concurrent unchanged readers and gives post-append readers the fresh snapshot", async () => {
 		const file = join(tempDir, "serialized.jsonl");
 		let content = line(header);

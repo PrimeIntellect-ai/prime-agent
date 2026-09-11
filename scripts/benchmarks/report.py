@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import statistics
+from collections import Counter
 from dataclasses import dataclass
+from typing import Literal
 
 from schema import Metric, Observation, Report
 
@@ -32,16 +34,22 @@ class Definition:
     unit: str
     absolute: float
     relative: float
-    better: str
-    worse: str
+
+
+@dataclass(frozen=True)
+class Comparison:
+    main: str
+    head: str
+    change: str
+    outcome: Literal["improved", "regressed", "no clear change", "incomplete", "unavailable"]
 
 
 METRICS = (
-    Definition("cold", "Cold startup", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
-    Definition("warm", "Warm startup", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
-    Definition("install", "Installation", 1, "s", 1, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
-    Definition("bundle", "Compressed release artifacts", 1e-6, "MB", 65536, 0.005, "smaller", "larger"),
-    Definition("disk", "Installed footprint", 1e-6, "MB", 1048576, 0.01, "smaller", "larger"),
+    Definition("cold", "Cold startup", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR),
+    Definition("warm", "Warm startup", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR),
+    Definition("install", "Installation", 1, "s", 1, PERFORMANCE_NOISE_FLOOR),
+    Definition("bundle", "Compressed release artifacts", 1e-6, "MB", 65536, 0.005),
+    Definition("disk", "Installed footprint", 1e-6, "MB", 1048576, 0.01),
     Definition(
         "rss",
         "Idle memory, summed RSS",
@@ -49,8 +57,6 @@ METRICS = (
         "MB",
         10485760,
         PERFORMANCE_NOISE_FLOOR,
-        "less memory",
-        "more memory",
     ),
 )
 RUNTIME_METRICS = (
@@ -61,8 +67,6 @@ RUNTIME_METRICS = (
         "ms",
         0.005,
         PERFORMANCE_NOISE_FLOOR,
-        "faster",
-        "slower",
     ),
     Definition(
         "kernel_exec",
@@ -71,19 +75,11 @@ RUNTIME_METRICS = (
         "ms",
         0.0001,
         PERFORMANCE_NOISE_FLOOR,
-        "faster",
-        "slower",
     ),
-    Definition("bash", "Empty bash command", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"),
-    Definition(
-        "git_status", "Bash git status", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
-    ),
-    Definition(
-        "output", "Bash 32 KiB output", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
-    ),
-    Definition(
-        "mixed", "35 cells / 9 shell calls", 1000, "ms", 0.005, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
-    ),
+    Definition("bash", "Empty bash command", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR),
+    Definition("git_status", "Bash git status", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR),
+    Definition("output", "Bash 32 KiB output", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR),
+    Definition("mixed", "35 cells / 9 shell calls", 1000, "ms", 0.005, PERFORMANCE_NOISE_FLOOR),
     Definition(
         "interrupt",
         "Python interrupt to done",
@@ -91,15 +87,9 @@ RUNTIME_METRICS = (
         "ms",
         0.0005,
         PERFORMANCE_NOISE_FLOOR,
-        "faster",
-        "slower",
     ),
-    Definition(
-        "snapshot", "Python state snapshot", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
-    ),
-    Definition(
-        "restore", "Python state restore", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR, "faster", "slower"
-    ),
+    Definition("snapshot", "Python state snapshot", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR),
+    Definition("restore", "Python state restore", 1000, "ms", 0.001, PERFORMANCE_NOISE_FLOOR),
     Definition(
         "kernel_rss",
         "Python idle RSS",
@@ -107,8 +97,6 @@ RUNTIME_METRICS = (
         "MB",
         1048576,
         PERFORMANCE_NOISE_FLOOR,
-        "less memory",
-        "more memory",
     ),
     Definition(
         "loaded_rss",
@@ -117,8 +105,6 @@ RUNTIME_METRICS = (
         "MB",
         1048576,
         PERFORMANCE_NOISE_FLOOR,
-        "less memory",
-        "more memory",
     ),
 )
 
@@ -169,38 +155,61 @@ def number(value: float, definition: Definition, signed: bool = False) -> str:
     return f"{scaled:+,.{precision}f}" if signed else f"{scaled:,.{precision}f}"
 
 
+def change_color(relative_change: float | None, regressed: bool) -> str:
+    muted, vivid = ((170, 106, 101), (229, 72, 77)) if regressed else ((102, 129, 109), (31, 146, 78))
+    intensity = min(abs(relative_change), 1.0) if relative_change is not None else 0.0
+    channels = (round(start + (end - start) * intensity) for start, end in zip(muted, vivid, strict=True))
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
 def comparison(
     definition: Definition, baseline: list[Observation], candidate: list[Observation], expected: int
-) -> tuple[str, str, str, str, str]:
+) -> Comparison:
     left, right = values(baseline), values(candidate)
     main = statistics.median(left) if left else None
     head = statistics.median(right) if right else None
     main_text = "—" if main is None else f"{number(main, definition)} {definition.unit}"
     head_text = "—" if head is None else f"{number(head, definition)} {definition.unit}"
     if main is None or head is None:
-        return main_text, head_text, "—", "N/A", "unavailable"
+        return Comparison(main_text, head_text, "—", "unavailable")
     delta = head - main
-    percentage = f"{delta / main * 100:+.2f}%" if main else "N/A"
+    relative_change = delta / main if main else None
+    percentage = f"{relative_change * 100:+.2f}%" if relative_change is not None else "N/A"
+    change = f"{number(delta, definition, True)} {definition.unit} ({percentage})"
     if len(left) != expected or len(right) != expected:
-        return (
-            main_text,
-            head_text,
-            f"— {number(delta, definition, True)} {definition.unit}",
-            percentage,
-            "incomplete",
-        )
+        return Comparison(main_text, head_text, f"{change}; incomplete", "incomplete")
     threshold = max(definition.absolute, main * definition.relative, spread(left), spread(right))
-    signal, outcome = "≈", "no clear change"
-    if abs(delta) > threshold:
-        signal, outcome = ("↑", definition.worse) if delta > 0 else ("↓", definition.better)
-    change = f"{signal} {number(delta, definition, True)} {definition.unit}"
-    if signal == "↑":
-        change, outcome = f"**{change}**", f"**{outcome}**"
-    return main_text, head_text, change, percentage, outcome
+    if abs(delta) <= threshold:
+        return Comparison(main_text, head_text, f"≈ {change}", "no clear change")
+    signal = "↑" if delta > 0 else "↓"
+    color = change_color(relative_change, regressed=delta > 0)
+    text = f"{signal} {change}".replace("%", r"\%")
+    colored = rf"$`\textcolor{{{color}}}{{\textsf{{{text}}}}}`$"
+    return Comparison(main_text, head_text, colored, "regressed" if delta > 0 else "improved")
+
+
+def comparisons(report: Report) -> dict[Metric, Comparison]:
+    results = {}
+    for definition in (*METRICS, *RUNTIME_METRICS):
+        expected = report.config.install_trials if definition.key == "install" else report.config.trials
+        if definition.key in ("bundle", "disk"):
+            expected = 1
+        results[definition.key] = comparison(
+            definition,
+            report.main.metrics.get(definition.key, []),
+            report.pr_head.metrics.get(definition.key, []),
+            expected,
+        )
+    return results
 
 
 def render(report: Report) -> str:
     run_url = f"https://github.com/{report.repository}/actions/runs/{report.run_id}"
+    result_link = (
+        f"[Run, logs, and downloadable raw results]({run_url})"
+        if report.pr
+        else "Local run; raw results are stored beside this report."
+    )
     lines = [
         MARKER,
         f"<!-- run:{report.run_id}:{report.attempt} head:{report.head_sha} -->",
@@ -208,16 +217,29 @@ def render(report: Report) -> str:
         f"### Prime Agent performance — {report.status}",
         "",
         f"PR `{report.head_sha[:8]}` compared with main `{report.base_sha[:8]}`.",
-        *(
-            ["Waiting for contributor vouch before credentials or sandboxes are allocated.", ""]
-            if report.status == "pending-trust"
-            else []
-        ),
-        "↓ improved · ↑ regressed · ≈ no clear change · — unavailable",
         "",
-        "| Metric | Main | This PR | Change | Change % | Result |",
-        "| --- | ---: | ---: | ---: | ---: | --- |",
     ]
+    if report.status in ("running", "pending-trust"):
+        message = (
+            "Waiting for contributor vouch before credentials or sandboxes are allocated."
+            if report.status == "pending-trust"
+            else "Benchmarking the latest PR commit. Results will appear here when this run finishes."
+        )
+        return "\n".join([*lines, message, "", result_link, ""])
+    results = comparisons(report)
+    counts = Counter(result.outcome for result in results.values())
+    summary = [f"{counts[outcome]} {outcome}" for outcome in ("regressed", "improved", "no clear change")]
+    summary.extend(
+        f"{counts[outcome]} {outcome}" for outcome in ("incomplete", "unavailable") if counts[outcome]
+    )
+    lines.extend(
+        [
+            f"**Overall: {' · '.join(summary)}.**",
+            "",
+            "| Metric | Main | This PR | Change |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
     for definition in (*METRICS, *RUNTIME_METRICS):
         if definition == RUNTIME_METRICS[0]:
             lines.extend(
@@ -225,30 +247,17 @@ def render(report: Report) -> str:
                     "",
                     "**Python runtime**",
                     "",
-                    "| Metric | Main | This PR | Change | Change % | Result |",
-                    "| --- | ---: | ---: | ---: | ---: | --- |",
+                    "| Metric | Main | This PR | Change |",
+                    "| --- | ---: | ---: | ---: |",
                 ]
             )
-        expected = report.config.install_trials if definition.key == "install" else report.config.trials
-        if definition.key in ("bundle", "disk"):
-            expected = 1
-        cells = comparison(
-            definition,
-            report.main.metrics.get(definition.key, []),
-            report.pr_head.metrics.get(definition.key, []),
-            expected,
-        )
-        lines.append(f"| {definition.title} | {' | '.join(cells)} |")
+        result = results[definition.key]
+        lines.append(f"| {definition.title} | {result.main} | {result.head} | {result.change} |")
     compute = sum(s.estimated_usd for s in report.sandboxes)
     cost_text = (
         f"**Sandbox cost: ~${compute:.4f}** — no inference calls."
         if report.sandboxes
         else "Cost pending or unavailable; sandbox usage has not been collected."
-    )
-    result_link = (
-        f"[Run, logs, and downloadable raw results]({run_url})"
-        if report.pr
-        else "Local run; raw results are stored beside this report."
     )
     lines.extend(
         [

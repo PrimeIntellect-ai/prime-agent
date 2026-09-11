@@ -16,7 +16,9 @@ import {
 } from "./refinement/refinement.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
 
-export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
+export const COMPACTION_SUMMARY_PREFIX = `[compaction-summary]
+
+The conversation history before this point was compacted into the following summary:
 
 <summary>
 `;
@@ -24,7 +26,9 @@ export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this p
 export const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
-export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
+export const BRANCH_SUMMARY_PREFIX = `[branch-summary]
+
+The following is a summary of a branch that this conversation came back from:
 
 <summary>
 `;
@@ -43,7 +47,16 @@ export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
-export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Shell message received";
+export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Background command finished";
+
+/**
+ * Names and other metadata interpolated into a `[<kind> ...]` header line must not
+ * carry the characters that delimit the header itself (brackets, newlines, commas,
+ * or the relationship separator ":").
+ */
+export function sanitizeMessageHeaderValue(value: string): string {
+	return value.replace(/[\s,:[\]]+/g, " ").trim();
+}
 
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
@@ -115,7 +128,9 @@ export interface HarnessDigestDetails {
 	digest: string;
 }
 
-export const HARNESS_DIGEST_PREFIX = `The persistent memories produced across this session so far:
+export const HARNESS_DIGEST_PREFIX = `[harness-digest]
+
+The persistent memories produced across this session so far:
 
 <harness_state>
 `;
@@ -175,12 +190,9 @@ export function createAsyncBashCompletionMessage(
 	return {
 		role: "custom",
 		customType: ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-		content: `${ASYNC_BASH_COMPLETION_PREVIEW_LABEL}.
-Source: bash
-Command completed (pid ${details.pid}, exit code ${details.exitCode}).
-Command: ${JSON.stringify(details.command)}
+		content: `[bash-done pid:${details.pid} exit:${details.exitCode}]
 
-Inspect the saved BashHandle with .poll(), .output(), or .tail(), then continue the task.`,
+Command: ${JSON.stringify(details.command)}`,
 		display: true,
 		details,
 		timestamp,
@@ -194,7 +206,9 @@ export function createRlmChildFailureMessage(
 	return {
 		role: "custom",
 		customType: RLM_CHILD_FAILURE_CUSTOM_TYPE,
-		content: `RLM child ${details.sessionName} (${details.childId}) failed: ${details.error}`,
+		content: `[child-failed child:${sanitizeMessageHeaderValue(details.sessionName)}]
+
+${details.error}`,
 		display: true,
 		details,
 		timestamp,
@@ -205,10 +219,11 @@ export function createRlmChildTerminalNoticeMessage(
 	details: RlmChildTerminalNoticeDetails,
 	timestamp = Date.now(),
 ): CustomMessage<RlmChildTerminalNoticeDetails> {
+	const childName = sanitizeMessageHeaderValue(details.sessionName);
 	const content =
 		details.kind === "cancelled"
-			? `RLM child ${details.sessionName} (${details.childId}) was cancelled${details.reason ? `: ${details.reason}` : ""}`
-			: `RLM child ${details.sessionName} (${details.childId}) completed without sending a reply${details.lastAssistantTextPreview ? `. Last assistant text: ${details.lastAssistantTextPreview}` : ""}`;
+			? `[child-exited: cancelled child:${childName}]${details.reason ? `\n\n${details.reason}` : ""}`
+			: `[child-exited: no-reply child:${childName}]${details.lastAssistantTextPreview ? `\n\nLast assistant text: ${details.lastAssistantTextPreview}` : ""}`;
 	return {
 		role: "custom",
 		customType: RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
@@ -560,14 +575,16 @@ export function isRefinementOutcomeMessage(message: unknown): message is Refinem
 	);
 }
 
-export function createHeartbeatPromptMessage(
-	job: AgentCronJob,
-	timestamp = Date.now(),
-): CustomMessage<HeartbeatPromptDetails> {
+export interface HeartbeatPromptMessage extends CustomMessage<HeartbeatPromptDetails> {
+	customType: typeof HEARTBEAT_PROMPT_CUSTOM_TYPE;
+	content: string;
+}
+
+export function createHeartbeatPromptMessage(job: AgentCronJob, timestamp = Date.now()): HeartbeatPromptMessage {
 	return {
 		role: "custom",
 		customType: HEARTBEAT_PROMPT_CUSTOM_TYPE,
-		content: job.prompt,
+		content: `[heartbeat: ${sanitizeMessageHeaderValue(job.schedule.expression)} run#${job.runCount}]\n\n${job.prompt}`,
 		display: true,
 		details: {
 			jobId: job.id,

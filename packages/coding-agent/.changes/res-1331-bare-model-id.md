@@ -1,0 +1,1 @@
+- Changed the agents view model column to show the bare model name, stripping provider paths embedded in the model id.
