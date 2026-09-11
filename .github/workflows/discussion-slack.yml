@@ -14,25 +14,20 @@ on:
       - .github/workflows/discussion-slack.yml
       - .github/scripts/discussion-notifier/**
 
-permissions:
-  contents: read
-  discussions: read
-  actions: read
+permissions: {}
 
 jobs:
   check:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: python3 -m unittest discover -s .github/scripts/discussion-notifier -p 'test_*.py'
-      - name: Verify public discussion access with the workflow token
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 .github/scripts/discussion-notifier/notify.py probe
 
   notify:
     if: >-
@@ -41,6 +36,10 @@ jobs:
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      discussions: read
+      actions: read
     concurrency:
       group: prime-discussion-notifications
       cancel-in-progress: false
@@ -53,6 +52,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Verify discussion access with the workflow token
+        run: python3 .github/scripts/discussion-notifier/notify.py probe
       - name: Plan notifications
         env:
           SLACK_WEBHOOK_URL: ${{ env.DRY_RUN != 'true' && secrets.SLACK_DISCUSSION_WEBHOOK_URL || '' }}
