@@ -469,6 +469,54 @@ export function resolveCliModel(options: {
 	};
 }
 
+export async function resolveCliModelFromCatalog(options: {
+	cliProvider?: string;
+	cliModel?: string;
+	apiKey?: string;
+	modelRegistry: ModelRegistry;
+}): Promise<ResolveCliModelResult> {
+	let resolved = resolveCliModel(options);
+	if (!options.cliModel) return resolved;
+	const { modelRegistry } = options;
+	if (options.apiKey && resolved.model) {
+		modelRegistry.authStorage.setRuntimeApiKey(resolved.model.provider, options.apiKey);
+		modelRegistry.refresh();
+		resolved = resolveCliModel(options);
+	}
+	if (resolved.model && modelRegistry.find(resolved.model.provider, resolved.model.id)) return resolved;
+	// Discovery never holds up startup, including a cache miss.
+	await modelRegistry.refreshAvailableModels();
+	resolved = resolveCliModel(options);
+	if (
+		resolved.model &&
+		isPrivatePrimeInferenceModel(resolved.model) &&
+		!modelRegistry.find(resolved.model.provider, resolved.model.id)
+	) {
+		return {
+			model: undefined,
+			warning: undefined,
+			error: `Model "${resolved.model.provider}/${resolved.model.id}" is not available for the current Prime team.`,
+		};
+	}
+	return resolved;
+}
+
+/** Resolve an explicit selection from local state, waiting for discovery only on a miss. */
+export async function resolveModelForSelection(
+	provider: string,
+	modelId: string,
+	modelRegistry: ModelRegistry,
+): Promise<Model<Api> | undefined> {
+	const find = (availableModels: Model<Api>[]) =>
+		availableModels.find((candidate) => candidate.provider === provider && candidate.id === modelId) ??
+		// Stale-auth lookup must not clear the lockout; session.setModel validates and commits recovery.
+		(modelRegistry.getProviderAuthStatus(provider).source === "stale"
+			? modelRegistry.find(provider, modelId)
+			: undefined);
+	const local = find(await modelRegistry.refreshAvailableModels());
+	return local ?? find(await modelRegistry.refreshAvailableModels({ background: false }));
+}
+
 export interface InitialModelResult {
 	model: Model<Api> | undefined;
 	thinkingLevel: ThinkingLevel;
@@ -548,21 +596,26 @@ export async function findInitialModel(options: {
 	}
 	const availableModels = await getAvailableModels();
 	if (defaultProvider && defaultModelId) {
-		// Rebuild from the provider template when the saved id is missing from this
-		// build's snapshot (e.g. prime-inference catalog churn), so it survives updates.
+		const savedPrivateModel = isPrivatePrimeInferenceModel({ provider: defaultProvider, id: defaultModelId });
 		const found =
 			availableModels.find(
 				(candidate) => candidate.provider === defaultProvider && candidate.id === defaultModelId,
-			) ??
-			(!isPrivatePrimeInferenceModel({ provider: defaultProvider, id: defaultModelId })
-				? buildFallbackModel(defaultProvider, defaultModelId, availableModels)
-				: undefined);
+			) ?? (savedPrivateModel ? await modelRegistry.resolveSavedPrivateModel(defaultModelId) : undefined);
 		if (found) {
 			model = found;
 			if (defaultThinkingLevel) {
 				thinkingLevel = defaultThinkingLevel;
 			}
 			return { model, thinkingLevel, fallbackMessage: undefined };
+		}
+		if (savedPrivateModel || !modelRegistry.find(defaultProvider, defaultModelId)) {
+			return {
+				model: undefined,
+				thinkingLevel,
+				fallbackMessage: savedPrivateModel
+					? unavailableSavedPrivateModelMessage(defaultProvider, defaultModelId)
+					: missingSavedModelMessage(defaultProvider, defaultModelId),
+			};
 		}
 	}
 	if (availableModels.length > 0) {
@@ -573,6 +626,14 @@ export async function findInitialModel(options: {
 		return { model: availableModels[0], thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
 	}
 	return { model: undefined, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+}
+
+function missingSavedModelMessage(provider: string, modelId: string): string {
+	return `Saved model ${provider}/${modelId} has no local catalog metadata. Catalogs refresh in the background; use /model to select it when available.`;
+}
+
+function unavailableSavedPrivateModelMessage(provider: string, modelId: string): string {
+	return `Could not restore saved model ${provider}/${modelId} (model is not available yet). Check authentication or use /model to retry or select another model.`;
 }
 
 /**
@@ -586,9 +647,10 @@ export async function restoreModelFromSession(
 	modelRegistry: ModelRegistry,
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
 	const availableModels = await modelRegistry.refreshAvailableModels();
-	const restoredModel = availableModels.find(
-		(candidate) => candidate.provider === savedProvider && candidate.id === savedModelId,
-	);
+	const savedPrivateModel = isPrivatePrimeInferenceModel({ provider: savedProvider, id: savedModelId });
+	const restoredModel =
+		availableModels.find((candidate) => candidate.provider === savedProvider && candidate.id === savedModelId) ??
+		(savedPrivateModel ? await modelRegistry.resolveSavedPrivateModel(savedModelId) : undefined);
 
 	if (restoredModel) {
 		if (shouldPrintMessages) {
@@ -596,7 +658,25 @@ export async function restoreModelFromSession(
 		}
 		return { model: restoredModel, fallbackMessage: undefined };
 	}
+	if (savedPrivateModel) {
+		const fallbackMessage = unavailableSavedPrivateModelMessage(savedProvider, savedModelId);
+		if (shouldPrintMessages) console.error(chalk.yellow(fallbackMessage));
+		return { model: undefined, fallbackMessage };
+	}
 	const registeredModel = modelRegistry.find(savedProvider, savedModelId);
+	if (!registeredModel) {
+		if (
+			currentModel?.provider === savedProvider &&
+			currentModel.id === savedModelId &&
+			!isPrivatePrimeInferenceModel(currentModel) &&
+			modelRegistry.hasConfiguredAuth(currentModel)
+		) {
+			return { model: currentModel, fallbackMessage: undefined };
+		}
+		const fallbackMessage = missingSavedModelMessage(savedProvider, savedModelId);
+		if (shouldPrintMessages) console.error(chalk.yellow(fallbackMessage));
+		return { model: undefined, fallbackMessage };
+	}
 	const reason = !registeredModel
 		? "model no longer exists"
 		: !modelRegistry.hasConfiguredAuth(registeredModel)

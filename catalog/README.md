@@ -1,0 +1,19 @@
+# Prime Agent model catalog
+
+`models.v1.json` is the curated list of models offered through existing providers other than Prime Inference. Prime Inference uses `https://api.pinference.ai/api/v1/models`, authenticated when credentials are available; that response includes both public and authorized private models.
+
+To add, update, or remove a model, edit this JSON and open a PR. Copy an entry for the same provider and API, then set the model ID, name, limits, pricing (USD per million tokens), modalities, reasoning controls, and any required compatibility settings. Inclusion in this file is the whitelist: upstream model directories are not loaded wholesale at runtime. The initial list preserves the models already shipped with Prime Agent.
+
+Run `npx tsx packages/ai/scripts/validate-model-catalog.ts` from the repository root. CI rejects invalid metadata, duplicate entries, credentials, and transports the client does not implement. Provider/API/base URL combinations must match an existing built-in transport. Adding a new provider implementation still requires a client release.
+
+After merge, clients fetch the stable URL `https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/catalog/models.v1.json`. Catalog-only changes do not trigger binary releases. The client fetching this catalog must be released once; subsequent model metadata changes need only a catalog PR. Revert a catalog PR to roll back the list.
+
+Both catalogs use the same cache implementation with two independent snapshots beside the user's `models.json`: `provider-model-catalog.v1.json` and `prime-inference-catalog.v1.json`. The Prime snapshot is scoped to the current credentials and team, or public when signed out. It is a full catalog, not a separate private-model overlay. Credentials are never written into either cache.
+
+The client displays validated cached data immediately, with bundled models as the first-run fallback. It refreshes in the background at startup, every six hours, and when the model/provider menu opens or switches to either tab. Concurrent requests are coalesced and ETags avoid redownloading unchanged data. A visible menu preserves search, selection, and the selected row's position. Closing a menu does not cancel a useful cache refresh.
+
+Model selection, cycling, startup, and Prime model lookups use local metadata while refreshes run. Credential and team changes also schedule a coalesced background refresh. Command-based credentials are resolved asynchronously for discovery; model availability checks never execute them. A saved model whose metadata is missing from both the cache and install snapshot is reported as unavailable locally until it can be selected from the refreshed picker. Its saved ID is retained, and another model's limits are not substituted.
+
+Every packaged install includes `dist/models.bundled.json` (beside the executable for standalone binaries). The asset build combines this repository's curated provider list with the public Prime Inference catalog; if Prime is unavailable during packaging, it uses the compiled Prime definitions. `PI_OFFLINE=1` also builds from those local definitions. No credentials or internal model entitlements are included. Installation and first-run onboarding read this immutable JSON locally, without waiting for either catalog request. Validated local caches take precedence, and background refresh updates those caches rather than modifying the install asset. Source checkouts read the curated JSON and compiled Prime definitions directly.
+
+Network errors and invalid responses retain the last good snapshot. `PI_OFFLINE=1` disables catalog requests. Logout, changed credentials, or a team switch cannot reuse another scope's private entries; an authentication rejection clears that scope's cached access. Local `models.json` settings and extension providers take precedence. Refreshing metadata does not change the active model of an existing session.

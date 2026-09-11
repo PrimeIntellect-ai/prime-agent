@@ -2,7 +2,11 @@ import { type AutocompleteProvider, setKeybindings, type TUI } from "@earendil-w
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
-import type { AgentConnectionModel, AgentConnectionModelCatalog } from "../../../src/modes/agent-connection/types.js";
+import type {
+	AgentConnection,
+	AgentConnectionModel,
+	AgentConnectionModelCatalog,
+} from "../../../src/modes/agent-connection/types.js";
 import { ModelSelectorComponent } from "../../../src/modes/interactive/components/model-selector.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
@@ -10,7 +14,7 @@ import { getModelArgumentCompletions } from "../../../src/modes/model-autocomple
 import { createHarness, type Harness } from "../harness.js";
 
 interface ConnectionAuthRefreshHarness {
-	agentConnection: { getModelCatalog(): Promise<AgentConnectionModelCatalog> };
+	agentConnection: Pick<AgentConnection, "getAvailableModels" | "getModelCatalog">;
 	connectionModelCatalog: AgentConnectionModel[];
 	connectionConfiguredProviders: Set<string>;
 	connectionModelsFetchedAt: number;
@@ -117,13 +121,18 @@ describe("ENG-4575 model authentication", () => {
 		expect(row).not.toContain("sign in");
 	});
 
-	test("refetches configured providers after authentication changes", async () => {
+	test("refreshes local authentication status before a pending catalog request completes", async () => {
 		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
 		harnesses.push(harness);
 		const model = { ...harness.getModel("base")!, provider: "openai" } as AgentConnectionModel;
+		let finishRefresh: (() => void) | undefined;
+		const liveModels = new Promise<AgentConnectionModel[]>((resolve) => {
+			finishRefresh = () => resolve([]);
+		});
+		const getAvailableModels = vi.fn(() => liveModels);
 		const getModelCatalog = vi.fn(async () => ({ models: [model], configuredProviders: [] }));
 		const fakeThis = Object.create(InteractiveMode.prototype) as ConnectionAuthRefreshHarness;
-		fakeThis.agentConnection = { getModelCatalog };
+		fakeThis.agentConnection = { getAvailableModels, getModelCatalog };
 		fakeThis.connectionModelCatalog = [model];
 		fakeThis.connectionConfiguredProviders = new Set([model.provider]);
 		fakeThis.connectionModelsFetchedAt = Date.now();
@@ -132,10 +141,14 @@ describe("ENG-4575 model authentication", () => {
 
 		await fakeThis.refreshConnectionModelsAfterAuthChange();
 
+		expect(getAvailableModels).toHaveBeenCalledOnce();
 		expect(getModelCatalog).toHaveBeenCalledOnce();
+		expect(getModelCatalog.mock.invocationCallOrder[0]).toBeLessThan(getAvailableModels.mock.invocationCallOrder[0]!);
 		expect(fakeThis.connectionConfiguredProviders).toEqual(new Set());
 		expect(fakeThis.getAvailableConnectionModels()).toEqual([]);
 		expect(fakeThis.connectionModelCatalog).toEqual([model]);
+		finishRefresh?.();
+		await vi.waitFor(() => expect(getModelCatalog).toHaveBeenCalledTimes(2));
 	});
 
 	test("returns the full public catalog to catalog-facing selectors", async () => {
@@ -144,6 +157,7 @@ describe("ENG-4575 model authentication", () => {
 		const model = { ...harness.getModel("base")!, provider: "openai" } as AgentConnectionModel;
 		const fakeThis = Object.create(InteractiveMode.prototype) as ConnectionAuthRefreshHarness;
 		fakeThis.agentConnection = {
+			getAvailableModels: vi.fn(async () => []),
 			getModelCatalog: vi.fn(async () => ({ models: [model], configuredProviders: [] })),
 		};
 		fakeThis.connectionModelCatalog = [];

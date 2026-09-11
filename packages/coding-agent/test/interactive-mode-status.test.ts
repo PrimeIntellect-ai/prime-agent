@@ -2217,7 +2217,10 @@ describe("InteractiveMode startup onboarding warnings", () => {
 
 describe("InteractiveMode model candidates", () => {
 	type ModelCandidatesHarness = {
-		agentConnection: { getModelCatalog: () => Promise<AgentConnectionModelCatalog> };
+		agentConnection: {
+			getModelCatalog: () => Promise<AgentConnectionModelCatalog>;
+			getAvailableModels: () => Promise<AgentConnectionModel[]>;
+		};
 		connectionModelCatalog: AgentConnectionModel[];
 		connectionConfiguredProviders: Set<string>;
 		connectionModelsFetchedAt: number;
@@ -2242,11 +2245,12 @@ describe("InteractiveMode model candidates", () => {
 			name: id,
 		}) as AgentConnectionModel;
 
-	test("loads unscoped model candidates through AgentConnection", async () => {
+	test("loads local unscoped candidates while the connection refresh is pending", async () => {
 		const model = createModel("openai", "gpt-5.5");
+		const refresh = createDeferred<AgentConnectionModel[]>();
 		const getModelCatalog = vi.fn(async () => ({ models: [model], configuredProviders: [model.provider] }));
 		const fakeThis: ModelCandidatesHarness = {
-			agentConnection: { getModelCatalog },
+			agentConnection: { getModelCatalog, getAvailableModels: vi.fn(() => refresh.promise) },
 			connectionModelCatalog: [],
 			connectionConfiguredProviders: new Set(),
 			connectionModelsFetchedAt: 0,
@@ -2265,6 +2269,9 @@ describe("InteractiveMode model candidates", () => {
 		expect(result).toEqual([model]);
 		expect(getModelCatalog).toHaveBeenCalledTimes(1);
 		expect(fakeThis.getAvailableConnectionModels()).toEqual([model]);
+		refresh.resolve([model]);
+		await flushAsyncWork();
+		expect(getModelCatalog).toHaveBeenCalledTimes(2);
 	});
 
 	test("uses connection state for scoped model candidates", async () => {
@@ -2274,7 +2281,7 @@ describe("InteractiveMode model candidates", () => {
 			return { models: [available], configuredProviders: [available.provider] };
 		});
 		const fakeThis: ModelCandidatesHarness = {
-			agentConnection: { getModelCatalog },
+			agentConnection: { getModelCatalog, getAvailableModels: vi.fn(async () => []) },
 			connectionModelCatalog: [],
 			connectionConfiguredProviders: new Set(),
 			connectionModelsFetchedAt: 0,
@@ -2343,6 +2350,7 @@ describe("InteractiveMode model selection persistence", () => {
 	type ModelSelectorOverlayHarness = {
 		agentConnection: {
 			getModelCatalog(): Promise<AgentConnectionModelCatalog>;
+			getAvailableModels(): Promise<AgentConnectionModel[]>;
 			setModel(provider: string, modelId: string): Promise<void>;
 		};
 		connectionModelCatalog: AgentConnectionModel[];
@@ -2439,13 +2447,18 @@ describe("InteractiveMode model selection persistence", () => {
 			),
 		} as unknown as ModelRegistry;
 		const fakeThis = Object.create(InteractiveMode.prototype) as ModelSelectorOverlayHarness;
+		let refreshedModels = options.connectionModels;
 		fakeThis.agentConnection = {
+			getAvailableModels: vi.fn(async () => {
+				refreshedModels = options.getAvailableModels
+					? await options.getAvailableModels()
+					: options.connectionModels;
+				return refreshedModels;
+			}),
 			getModelCatalog:
 				options.getModelCatalog ??
 				vi.fn(async () => {
-					const models = options.getAvailableModels
-						? await options.getAvailableModels()
-						: options.connectionModels;
+					const models = refreshedModels;
 					return {
 						models: options.catalogModels ?? models,
 						configuredProviders: options.configuredProviders
@@ -2632,25 +2645,28 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(fakeThis.showError).not.toHaveBeenCalled();
 	});
 
-	test("opens the model selector before live model refresh resolves", async () => {
-		const cachedModel = createModel("openai", "gpt-5.5");
-		const liveModels = createDeferred<AgentConnectionModel[]>();
-		const getAvailableModels = vi.fn(() => liveModels.promise);
-		const { fakeThis, getSelector } = createSelectorOverlayHarness({
-			connectionModels: [cachedModel],
-			getAvailableModels,
-		});
+	test.each(["models", "providers"] as const)(
+		"opens the %s picker before live model refresh resolves",
+		async (tab) => {
+			const cachedModel = createModel("openai", "gpt-5.5");
+			const liveModels = createDeferred<AgentConnectionModel[]>();
+			const getAvailableModels = vi.fn(() => liveModels.promise);
+			const { fakeThis, getSelector } = createSelectorOverlayHarness({
+				connectionModels: [cachedModel],
+				getAvailableModels,
+			});
 
-		const result = fakeThis.showConfigurationMenu("models");
+			const result = fakeThis.showConfigurationMenu(tab);
 
-		expect(fakeThis.showFullPaneOverlay).toHaveBeenCalledTimes(1);
-		expect(getAvailableModels).toHaveBeenCalledTimes(1);
+			expect(fakeThis.showFullPaneOverlay).toHaveBeenCalledTimes(1);
+			expect(getAvailableModels).toHaveBeenCalledTimes(1);
 
-		getSelector().handleInput("\x1b");
-		liveModels.resolve([cachedModel]);
+			getSelector().handleInput("\x1b");
+			liveModels.resolve([cachedModel]);
 
-		await expect(result).resolves.toBeUndefined();
-	});
+			await expect(result).resolves.toBeUndefined();
+		},
+	);
 
 	test("updates the model selector from an already in-flight refresh", async () => {
 		const alpha = createModel("openai", "alpha");
@@ -2688,18 +2704,22 @@ describe("InteractiveMode model selection persistence", () => {
 		await expect(result).resolves.toBeUndefined();
 	});
 
-	test("refreshes cached candidates for exact model misses", async () => {
+	test("returns an exact model miss immediately and refreshes candidates in the background", async () => {
 		const alpha = createModel("openai", "alpha");
 		const beta = createModel("openai", "beta");
-		const getAvailableModels = vi.fn(async () => [beta]);
+		const liveModels = createDeferred<AgentConnectionModel[]>();
+		const getAvailableModels = vi.fn(() => liveModels.promise);
 		const { fakeThis } = createSelectorOverlayHarness({
 			connectionModels: [alpha],
 			connectionModelsFetchedAt: Date.now(),
 			getAvailableModels,
 		});
 
+		await expect(fakeThis.findExactModelMatch("beta")).resolves.toBeUndefined();
+		expect(getAvailableModels).toHaveBeenCalledTimes(1);
+		liveModels.resolve([beta]);
+		await flushAsyncWork();
 		await expect(fakeThis.findExactModelMatch("beta")).resolves.toEqual(beta);
-
 		expect(getAvailableModels).toHaveBeenCalledTimes(1);
 	});
 
@@ -2765,14 +2785,14 @@ describe("InteractiveMode model selection persistence", () => {
 
 		const result = fakeThis.showConfigurationMenu("models");
 
-		expect(getAvailableModels).not.toHaveBeenCalled();
+		expect(getAvailableModels).toHaveBeenCalledTimes(1);
 		expect(getSelector().render(120).join("\n")).toContain("scoped");
 		expect(fakeThis.getCachedModelCandidates()).toEqual([scopedModel, catalogModel]);
 		await expect(fakeThis.findExactModelMatch("catalog")).resolves.toEqual(catalogModel);
 
 		getSelector().handleInput("\x1bs");
 		expect(getSelector().render(120).join("\n")).toContain("catalog");
-		expect(getAvailableModels).not.toHaveBeenCalled();
+		expect(getAvailableModels).toHaveBeenCalledTimes(1);
 		getSelector().handleInput("\t");
 		expect(getSelector().getActiveTab()).toBe("mcp-connections");
 
@@ -2781,7 +2801,7 @@ describe("InteractiveMode model selection persistence", () => {
 		setKeybindings(previousKeybindings);
 	});
 
-	test("uses a fresh cached model catalog without starting another refresh", async () => {
+	test("shows a fresh cached catalog immediately and refreshes it on every open", async () => {
 		const cachedModel = createModel("openai", "gpt-5.5");
 		const getAvailableModels = vi.fn(async () => [cachedModel]);
 		const { fakeThis, getSelector } = createSelectorOverlayHarness({
@@ -2793,7 +2813,7 @@ describe("InteractiveMode model selection persistence", () => {
 		const result = fakeThis.showConfigurationMenu("models");
 
 		expect(fakeThis.showFullPaneOverlay).toHaveBeenCalledTimes(1);
-		expect(getAvailableModels).not.toHaveBeenCalled();
+		expect(getAvailableModels).toHaveBeenCalledTimes(1);
 
 		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
@@ -2855,9 +2875,10 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(hide).toHaveBeenCalledTimes(1);
 	});
 
-	test("authenticates an unavailable model provider before applying the model", async () => {
+	test("applies a model after authentication while catalog refresh is pending", async () => {
 		const model = createModel("openai", "gpt-5.5");
 		const provider: AuthSelectorProvider = { id: "openai", name: "OpenAI", authType: "api_key" };
+		const liveModels = createDeferred<AgentConnectionModel[]>();
 		let authenticated = false;
 		const getModelCatalog = vi.fn(async () => ({
 			models: [model],
@@ -2879,6 +2900,7 @@ describe("InteractiveMode model selection persistence", () => {
 			configuredProviders: [],
 			connectionModelsFetchedAt: Date.now(),
 			getModelCatalog,
+			getAvailableModels: () => liveModels.promise,
 			providerOptions: [provider],
 			loginProvider,
 			applySelectedModel,
@@ -2894,6 +2916,8 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(applySelectedModel).toHaveBeenCalledWith(model);
 		expect(hide).toHaveBeenCalledTimes(1);
 		await expect(result).resolves.toBeUndefined();
+		liveModels.resolve([model]);
+		await flushAsyncWork();
 	});
 
 	test("keeps the model selector open when provider authentication is cancelled", async () => {
@@ -2986,6 +3010,7 @@ describe("InteractiveMode model selection persistence", () => {
 			invalidateConnectionModelRefresh(): void;
 		};
 		fakeThis.agentConnection = {
+			getAvailableModels: vi.fn(async () => []),
 			getModelCatalog,
 			getState: vi.fn(async () => createConnectionState()),
 			getCommands: vi.fn(async () => []),
@@ -3012,6 +3037,7 @@ describe("InteractiveMode model selection persistence", () => {
 		fakeThis.applyConnectionStateSnapshot = vi.fn();
 
 		const staleRefresh = fakeThis.getConnectionAvailableModels();
+		await flushAsyncWork();
 		await fakeThis.refreshConnectionCatalog();
 		oldModels.resolve({ models: [oldModel], configuredProviders: [oldModel.provider] });
 

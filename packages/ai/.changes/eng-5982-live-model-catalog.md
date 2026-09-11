@@ -1,0 +1,2 @@
+- Added validation for the curated model catalog used to publish model updates independently of client releases.
+- Reduced startup overhead when validating model catalog snapshots.

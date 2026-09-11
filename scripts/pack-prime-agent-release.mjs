@@ -140,6 +140,9 @@ function requireBuiltPackage(packageDir) {
 	if (!existsSync(dist)) {
 		throw new Error(`Missing ${dist}. Run npm run build before packing a release.`);
 	}
+	if (packageDir === "coding-agent" && !existsSync(join(dist, "models.bundled.json"))) {
+		throw new Error("Missing bundled model catalog. Run the coding-agent copy-assets step before packing.");
+	}
 }
 
 function copyIfExists(source, target) {

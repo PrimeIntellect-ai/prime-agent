@@ -14,6 +14,10 @@ describe("ModelRegistry", () => {
 	let authStorage: AuthStorage;
 
 	beforeEach(() => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(null, { status: 503 })),
+		);
 		tempDir = join(tmpdir(), `pi-test-model-registry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = join(tempDir, "models.json");
@@ -606,6 +610,7 @@ describe("ModelRegistry", () => {
 
 	describe("live Prime Inference models", () => {
 		test("loads the cache without replacing external providers and applies local overrides", () => {
+			const externalModels = getModelsForProvider(ModelRegistry.inMemory(authStorage), "openrouter");
 			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
 			const catalogEntries = bundled.map((model) => ({
 				id: model.id,
@@ -630,8 +635,13 @@ describe("ModelRegistry", () => {
 				},
 			});
 			writeFileSync(
-				join(tempDir, "prime-inference-models-cache.json"),
-				JSON.stringify({ object: "list", data: catalogEntries }),
+				join(tempDir, "prime-inference-catalog.v1.json"),
+				JSON.stringify({
+					url: "https://api.pinference.ai/api/v1/models",
+					scope: "public",
+					fetchedAt: Date.now(),
+					payload: { object: "list", data: catalogEntries },
+				}),
 			);
 			writeRawModelsJson({
 				"prime-inference": {
@@ -647,7 +657,7 @@ describe("ModelRegistry", () => {
 				contextWindow: 123_456,
 				cost: { input: 1, output: 2 },
 			});
-			expect(getModelsForProvider(registry, "openrouter")).toHaveLength(getModels("openrouter").length);
+			expect(getModelsForProvider(registry, "openrouter")).toEqual(externalModels);
 		});
 
 		test("restores cached authorized deployment metadata without waiting for the network", async () => {
@@ -678,7 +688,9 @@ describe("ModelRegistry", () => {
 			);
 			const firstRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
 			expect(
-				(await firstRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+				(await firstRegistry.refreshAvailableModels({ background: false })).find(
+					(model) => model.id === privateRoute.id,
+				),
 			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
 
 			vi.stubGlobal(
@@ -689,7 +701,9 @@ describe("ModelRegistry", () => {
 			);
 			const restoredRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
 			expect(
-				(await restoredRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
+				(await restoredRegistry.refreshAvailableModels({ background: false })).find(
+					(model) => model.id === privateRoute.id,
+				),
 			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
 		});
 	});
@@ -1600,7 +1614,7 @@ describe("ModelRegistry", () => {
 				"missing credentials",
 				"active credentials",
 				"rotated credentials",
-			] as const)("recovers stale Prime CLI private-model access but invalidates it after %s", async (change) => {
+			] as const)("scopes cached Prime CLI private-model access after %s", async (change) => {
 				vi.stubEnv("PRIME_API_KEY", "");
 				vi.stubEnv("PRIME_TEAM_ID", "");
 				vi.stubEnv("PI_OFFLINE", "0");
@@ -1630,7 +1644,9 @@ describe("ModelRegistry", () => {
 				);
 				try {
 					registry.registerProvider("unrelated-extension", { baseUrl: "https://unused.invalid" });
-					const model = (await registry.refreshAvailableModels()).find((candidate) => candidate.id === modelId)!;
+					const model = (await registry.refreshAvailableModels({ background: false })).find(
+						(candidate) => candidate.id === modelId,
+					)!;
 					expect(model).toBeDefined();
 					expect(
 						fetchSpy.mock.calls.filter(([, init]) => new Headers(init?.headers).has("Authorization")),
@@ -1639,7 +1655,10 @@ describe("ModelRegistry", () => {
 
 					registry.unregisterProvider("unrelated-extension");
 					await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(true);
-					await Promise.all([registry.refreshAvailableModels(), registry.refreshAvailableModels()]);
+					await Promise.all([
+						registry.refreshAvailableModels({ background: false }),
+						registry.refreshAvailableModels({ background: false }),
+					]);
 					expect(registry.find("prime-inference", modelId)).toEqual(model);
 
 					expect(cliAuth.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "team-a" });
@@ -1672,16 +1691,34 @@ describe("ModelRegistry", () => {
 							break;
 					}
 					registry.refresh();
-					expect(registry.find("prime-inference", modelId)).toBeUndefined();
-					await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(false);
+					if (change === "active credentials") expect(registry.find("prime-inference", modelId)).toEqual(model);
+					else expect(registry.find("prime-inference", modelId)).toBeUndefined();
+					await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(
+						change === "active credentials",
+					);
 					expect(
 						fetchSpy.mock.calls.filter(([, init]) => new Headers(init?.headers).has("Authorization")),
-					).toHaveLength(1);
+					).toHaveLength(change === "active credentials" || change === "rotated credentials" ? 3 : 2);
 				} finally {
 					fetchSpy.mockRestore();
 					vi.unstubAllEnvs();
 				}
 			});
+
+			async function authorizePrivateRoute(registry: ModelRegistry) {
+				vi.stubGlobal(
+					"fetch",
+					vi.fn(async (url) =>
+						url === "https://api.pinference.ai/api/v1/models"
+							? new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }))
+							: new Response(null, { status: 503 }),
+					),
+				);
+				const models = await registry.refreshAvailableModels({ background: false });
+				const model = models.find((candidate) => candidate.id === "internal/glm-5.2-fast");
+				if (!model) throw new Error("Expected authorized private model");
+				return model;
+			}
 
 			test("preserves stale-auth entitlements only for the same prime-inference team", async () => {
 				authStorage.setRuntimeApiKey("prime-inference", "prime-key");
@@ -1689,38 +1726,26 @@ describe("ModelRegistry", () => {
 					.spyOn(authStorage, "getProviderHeaders")
 					.mockReturnValue({ "X-Prime-Team-ID": "team-a" });
 				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
-				const internals = registry as unknown as {
-					authorizedPrivatePrimeInferenceModelIds: Set<string>;
-					authorizedPrivatePrimeInferenceTeamId: string | undefined;
-				};
-				internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
-				internals.authorizedPrivatePrimeInferenceTeamId = "team-a";
+				const model = await authorizePrivateRoute(registry);
 				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-
-				await registry.refreshAvailableModels();
-				expect(internals.authorizedPrivatePrimeInferenceModelIds.has("internal/private-model")).toBe(true);
-
-				// A team switch invalidates entitlements fetched for the old team.
+				await registry.refreshAvailableModels({ background: false });
+				await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(true);
 				headerSpy.mockReturnValue({ "X-Prime-Team-ID": "team-b" });
-				await registry.refreshAvailableModels();
-				expect(internals.authorizedPrivatePrimeInferenceModelIds.size).toBe(0);
+				await registry.refreshAvailableModels({ background: false });
+				await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(false);
 			});
 
 			test("concurrent stale-auth refreshes do not drop preserved entitlements", async () => {
 				authStorage.setRuntimeApiKey("prime-inference", "prime-key");
-				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 				vi.spyOn(authStorage, "getProviderHeaders").mockReturnValue({ "X-Prime-Team-ID": "team-a" });
-				const internals = registry as unknown as {
-					authorizedPrivatePrimeInferenceModelIds: Set<string>;
-					authorizedPrivatePrimeInferenceTeamId: string | undefined;
-				};
-				internals.authorizedPrivatePrimeInferenceTeamId = "team-a";
-				internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const model = await authorizePrivateRoute(registry);
 				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-
-				await Promise.all([registry.refreshAvailableModels(), registry.refreshAvailableModels()]);
-
-				expect(internals.authorizedPrivatePrimeInferenceModelIds.has("internal/private-model")).toBe(true);
+				await Promise.all([
+					registry.refreshAvailableModels({ background: false }),
+					registry.refreshAvailableModels({ background: false }),
+				]);
+				await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(true);
 			});
 
 			test("provider auth status reports command apiKey values from models.json without executing them", () => {

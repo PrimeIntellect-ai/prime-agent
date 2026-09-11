@@ -33,7 +33,7 @@ function lockOutProvider(harness: Harness, provider: string): void {
 
 const privateModelHarnessOptions = {
 	provider: "prime-inference",
-	models: [{ id: "regular-model" }, { id: "internal/private-model" }],
+	models: [{ id: "regular-model" }, { id: "internal/private-model" }, { id: "internal/unauthorized-model" }],
 	settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
 };
 
@@ -42,6 +42,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -297,23 +298,44 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		harnesses.push(harness);
 		const registry = harness.session.modelRegistry;
 		vi.spyOn(harness.authStorage, "getProviderHeaders").mockReturnValue({ "X-Prime-Team-ID": "test-team" });
+		vi.stubEnv("PI_OFFLINE", "0");
+		const fetchCatalog = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+			if (url !== "https://api.pinference.ai/api/v1/models") return new Response(null, { status: 503 });
+			return new Response(
+				JSON.stringify({
+					data: harness.models
+						.filter((model) => model.id !== "internal/unauthorized-model")
+						.map((model) => ({
+							id: model.id,
+							pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+							specs: {
+								context_window: model.contextWindow,
+								max_output_tokens: model.maxTokens,
+								supports_reasoning: model.reasoning,
+								modalities: { input: model.input, output: ["text"] },
+							},
+						})),
+				}),
+			);
+		});
+		const availableModels = await registry.refreshAvailableModels({ background: false });
+		expect(availableModels.some((model) => model.id === "internal/private-model")).toBe(true);
+		expect(availableModels.some((model) => model.id === "internal/unauthorized-model")).toBe(false);
+		fetchCatalog.mockClear();
 		lockOutProvider(harness, "prime-inference");
 		const privateModel = harness.models.find((model) => model.id === "internal/private-model");
+		const unauthorizedModel = harness.models.find((model) => model.id === "internal/unauthorized-model");
 		expect(privateModel).toBeDefined();
+		expect(unauthorizedModel).toBeDefined();
 
 		// Not team-authorized: validation rejects BEFORE any clear.
-		await expect(harness.session.setModel(privateModel!)).rejects.toThrow("not available");
+		await expect(harness.session.setModel(unauthorizedModel!)).rejects.toThrow("not available");
 		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({ source: "stale" });
 
-		const internals = registry as unknown as {
-			authorizedPrivatePrimeInferenceModelIds: Set<string>;
-			authorizedPrivatePrimeInferenceTeamId: string | undefined;
-		};
-		internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
-		internals.authorizedPrivatePrimeInferenceTeamId = "test-team";
 		// Refreshes during the stale window run keyless; they must preserve the
 		// cached entitlements the explicit re-selection validates against.
-		await registry.refreshAvailableModels();
+		await registry.refreshAvailableModels({ background: false });
+		expect(fetchCatalog.mock.calls.some(([url]) => url === "https://api.pinference.ai/api/v1/models")).toBe(false);
 
 		await harness.session.setModel(privateModel!);
 

@@ -12,7 +12,7 @@ import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefi
 import { McpManager } from "./mcp/mcp-manager.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
-import { findInitialModel } from "./model-resolver.js";
+import { findInitialModel, restoreModelFromSession } from "./model-resolver.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
@@ -182,16 +182,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let modelFallbackMessage: string | undefined;
 
 	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
-			model = restoredModel;
-		}
-		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
-		}
+		const restored = await restoreModelFromSession(
+			existingSession.model.provider,
+			existingSession.model.modelId,
+			undefined,
+			false,
+			modelRegistry,
+		);
+		model = restored.model;
+		modelFallbackMessage = restored.fallbackMessage;
 	}
 
-	if (!model) {
+	if (!model && !(hasExistingSession && existingSession.model)) {
 		const result = await findInitialModel({
 			scopedModels: [],
 			isContinuing: hasExistingSession,
@@ -201,8 +203,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelRegistry,
 		});
 		model = result.model;
+		modelFallbackMessage = result.fallbackMessage ?? modelFallbackMessage;
 		if (!model) {
-			modelFallbackMessage = formatNoModelsAvailableMessage();
+			modelFallbackMessage ??= formatNoModelsAvailableMessage();
 		} else if (modelFallbackMessage) {
 			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 		}

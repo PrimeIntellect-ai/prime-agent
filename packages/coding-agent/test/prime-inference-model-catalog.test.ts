@@ -1,20 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 import {
 	buildPrimeInferenceModels,
 	mergePrimeInferenceModels,
 	PRIME_INFERENCE_BASE_URL,
-	refreshPrimeInferenceModels,
 } from "../src/core/prime-inference-model-catalog.js";
-import {
-	fetchAuthorizedPrivatePrimeInferenceModels,
-	isPrivatePrimeInferenceModel,
-} from "../src/core/prime-inference-models.js";
+import { isPrivatePrimeInferenceModel, parsePrimeInferenceCatalogModels } from "../src/core/prime-inference-models.js";
 
-const directories: string[] = [];
 const model = (id: string, provider = "prime-inference"): Model<"openai-completions"> => ({
 	id,
 	name: `Bundled ${id}`,
@@ -55,12 +47,6 @@ const payloadEntry = (
 	display_name: `Live ${id}`,
 	pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
 	specs,
-});
-
-const response = (...data: unknown[]) => new Response(JSON.stringify({ object: "list", data }));
-
-afterEach(() => {
-	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 describe("Prime Inference model catalog", () => {
@@ -134,62 +120,43 @@ describe("Prime Inference model catalog", () => {
 		expect(mergePrimeInferenceModels([external, model("removed")], [live])).toEqual([external, live]);
 	});
 
-	test("caches valid responses and falls back to the cache", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-models-"));
-		directories.push(directory);
-		const cachePath = join(directory, "cache.json");
-		const bundled = [model("vendor/model")];
-		const fetched = await refreshPrimeInferenceModels(cachePath, bundled, {
-			fetchFn: vi.fn(async () => response(payloadEntry("vendor/model"))),
-		});
-		expect(fetched?.[0]?.name).toBe("Live vendor/model");
-		expect(JSON.parse(readFileSync(cachePath, "utf8")).data).toHaveLength(1);
-		const fallback = await refreshPrimeInferenceModels(cachePath, bundled, {
-			fetchFn: vi.fn(async () => {
-				throw new Error("offline");
-			}),
-		});
-		expect(fallback?.[0]?.name).toBe("Live vendor/model");
+	test("uses a complete authenticated response for public and private routes", () => {
+		const models = parsePrimeInferenceCatalogModels(
+			{
+				data: [
+					payloadEntry("public/model"),
+					payloadEntry("internal/model"),
+					payloadEntry("dev/model"),
+					payloadEntry("poolside/model:deployment"),
+					payloadEntry("internal/incomplete", null),
+				],
+			},
+			[],
+			true,
+		);
+		expect(models.map(({ id }) => id)).toEqual([
+			"public/model",
+			"internal/model",
+			"dev/model",
+			"poolside/model:deployment",
+		]);
 	});
 
-	test("uses authenticated responses only for private routes with complete metadata", async () => {
-		const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-			expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer secret");
-			expect(new Headers(init?.headers).get("X-Prime-Team-ID")).toBe("team");
-			return response(
-				payloadEntry("public/model"),
-				payloadEntry("internal/model"),
-				payloadEntry("dev/model"),
-				payloadEntry("poolside/model:deployment"),
-				payloadEntry("internal/incomplete", null),
-			);
-		});
-		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
-			"secret",
-			{ "X-Prime-Team-ID": "team" },
-			new Set(["public/model"]),
-			fetchFn,
+	test("uses bundled metadata for known private routes in older endpoint responses", () => {
+		const models = parsePrimeInferenceCatalogModels(
+			{ data: [{ id: "internal/glm-5.2-fast" }] },
+			[model("public/model")],
+			true,
 		);
-		expect(models.map(({ id }) => id)).toEqual(["internal/model", "dev/model", "poolside/model:deployment"]);
+		expect(models.map(({ id }) => id)).toEqual(["public/model", "internal/glm-5.2-fast"]);
 	});
 
-	test("uses bundled metadata to authorize an existing private route", async () => {
-		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
-			"secret",
-			{ "X-Prime-Team-ID": "team" },
-			new Set(),
-			vi.fn(async () => response({ id: "internal/glm-5.2-fast" })),
+	test("never includes private routes in the unauthenticated catalog", () => {
+		const models = parsePrimeInferenceCatalogModels(
+			{ data: [payloadEntry("public/model"), payloadEntry("internal/model")] },
+			[model("public/model")],
+			false,
 		);
-		expect(models.map(({ id }) => id)).toEqual(["internal/glm-5.2-fast"]);
-	});
-
-	test("treats rejected authenticated requests as no private access", async () => {
-		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
-			"bad",
-			{ "X-Prime-Team-ID": "team" },
-			new Set(),
-			vi.fn(async () => new Response(null, { status: 403 })),
-		);
-		expect(models).toEqual([]);
+		expect(models.map(({ id }) => id)).toEqual(["public/model"]);
 	});
 });

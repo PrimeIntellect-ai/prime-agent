@@ -42,6 +42,7 @@ function getAliases(): Record<string, string> {
 
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
+	const typeboxSchemaEntry = require.resolve("typebox/schema");
 	const typeboxValueEntry = require.resolve("typebox/value");
 
 	const packagesRoot = path.resolve(__dirname, "../../../../");
@@ -72,9 +73,11 @@ function getAliases(): Record<string, string> {
 		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
+		"typebox/schema": typeboxSchemaEntry,
 		"typebox/value": typeboxValueEntry,
 		"@sinclair/typebox": typeboxEntry,
 		"@sinclair/typebox/compile": typeboxCompileEntry,
+		"@sinclair/typebox/schema": typeboxSchemaEntry,
 		"@sinclair/typebox/value": typeboxValueEntry,
 	};
 

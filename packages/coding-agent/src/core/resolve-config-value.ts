@@ -3,10 +3,59 @@
  * Used by auth-storage.ts and model-registry.ts.
  */
 
-import { execSyncHidden, spawnSyncHidden } from "../utils/child-process.js";
+import { execFileHidden, execSyncHidden, spawnSyncHidden } from "../utils/child-process.js";
 import { getShellConfig } from "../utils/shell.js";
 
 const commandResultCache = new Map<string, string | undefined>();
+const pendingCommands = new Map<string, Promise<string | undefined>>();
+
+/** Read the last resolved value without running credential commands on UI paths. */
+export function peekConfigValue(config: string): string | undefined {
+	return config.startsWith("!") ? commandResultCache.get(config) : resolveEnvOrLiteral(config);
+}
+
+export async function resolveConfigValueAsync(
+	config: string,
+	options: { force?: boolean } = {},
+): Promise<string | undefined> {
+	if (!config.startsWith("!")) return resolveEnvOrLiteral(config);
+	const pending = pendingCommands.get(config);
+	if (pending) return pending;
+	const cached = commandResultCache.get(config);
+	if (!options.force && cached !== undefined) return cached;
+	const promise = executeCommandAsync(config.slice(1)).then((value) => {
+		// A failed refresh must not reuse an old key or prevent the next request from retrying.
+		if (value === undefined) commandResultCache.delete(config);
+		else commandResultCache.set(config, value);
+		return value;
+	});
+	pendingCommands.set(config, promise);
+	try {
+		return await promise;
+	} finally {
+		if (pendingCommands.get(config) === promise) pendingCommands.delete(config);
+	}
+}
+
+async function executeCommandAsync(command: string): Promise<string | undefined> {
+	const execute = (file: string, args: string[], shell: boolean) =>
+		new Promise<{ missing: boolean; value?: string }>((resolve) => {
+			const child = execFileHidden(file, args, { shell, encoding: "utf8", timeout: 10_000 }, (error, stdout) => {
+				resolve({ missing: error?.code === "ENOENT", value: error ? undefined : stdout.trim() || undefined });
+			});
+			child.stdin?.end();
+		});
+	try {
+		if (process.platform === "win32") {
+			const { shell, args } = getShellConfig();
+			const result = await execute(shell, [...args, command], false);
+			if (!result.missing) return result.value;
+		}
+		return (await execute(command, [], true)).value;
+	} catch {
+		return undefined;
+	}
+}
 
 /**
  * Resolve a config value (API key, header value, etc.) to an actual value.

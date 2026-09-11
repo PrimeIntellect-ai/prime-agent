@@ -58,7 +58,13 @@ import type { ExtensionFactory } from "./core/extensions/types.js";
 import { KeybindingsManager } from "./core/keybindings.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
-import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
+import {
+	findInitialModel,
+	resolveCliModelFromCatalog,
+	resolveModelScope,
+	restoreModelFromSession,
+	type ScopedModel,
+} from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
@@ -529,17 +535,17 @@ export async function createSessionManager(
 	return readOnly ? SessionManager.inMemory(cwd, sessionDir) : SessionManager.create(cwd, sessionDir);
 }
 
-function buildSessionOptions(
+async function buildSessionOptions(
 	config: AgentSessionRuntimeConfig,
 	scopedModels: ScopedModel[],
 	hasExistingSession: boolean,
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
-): {
+): Promise<{
 	options: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
-} {
+}> {
 	const options: CreateAgentSessionOptions = {};
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	let cliThinkingFromModel = false;
@@ -548,9 +554,10 @@ function buildSessionOptions(
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
 	if (config.model) {
-		const resolved = resolveCliModel({
+		const resolved = await resolveCliModelFromCatalog({
 			cliProvider: config.provider,
 			cliModel: config.model,
+			apiKey: config.apiKey,
 			modelRegistry,
 		});
 		if (resolved.warning) {
@@ -862,7 +869,7 @@ async function prepareRuntimeServices(options: {
 		options: sessionOptions,
 		cliThinkingFromModel,
 		diagnostics: sessionOptionDiagnostics,
-	} = buildSessionOptions(
+	} = await buildSessionOptions(
 		config,
 		scopedModels,
 		sessionManager.buildSessionContext().messages.length > 0,
@@ -905,16 +912,18 @@ async function resolvePreparedStartupModel(options: {
 	let modelFallbackMessage: string | undefined;
 
 	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
-			model = restoredModel;
-		}
-		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
-		}
+		const restored = await restoreModelFromSession(
+			existingSession.model.provider,
+			existingSession.model.modelId,
+			undefined,
+			false,
+			modelRegistry,
+		);
+		model = restored.model;
+		modelFallbackMessage = restored.fallbackMessage;
 	}
 
-	if (!model) {
+	if (!model && !(hasExistingSession && existingSession.model)) {
 		const result = await findInitialModel({
 			scopedModels: prepared.scopedModels,
 			isContinuing: hasExistingSession,
@@ -924,8 +933,9 @@ async function resolvePreparedStartupModel(options: {
 			modelRegistry,
 		});
 		model = result.model;
+		modelFallbackMessage = result.fallbackMessage ?? modelFallbackMessage;
 		if (!model) {
-			modelFallbackMessage = formatNoModelsAvailableMessage();
+			modelFallbackMessage ??= formatNoModelsAvailableMessage();
 		} else if (modelFallbackMessage) {
 			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 		}

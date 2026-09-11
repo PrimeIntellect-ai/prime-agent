@@ -120,6 +120,7 @@ for platform in "${PLATFORMS[@]}"; do
     cp package.json binaries/$platform/
     cp README.md binaries/$platform/
     cp CHANGELOG.md binaries/$platform/
+    cp dist/models.bundled.json binaries/$platform/
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm binaries/$platform/
     mkdir -p binaries/$platform/theme
     cp dist/modes/interactive/theme/*.json binaries/$platform/theme/

@@ -87,6 +87,7 @@ import {
 	resolveHeartbeatStreamingBehavior,
 	shouldDeferHeartbeatCronJob,
 } from "../../core/cron-jobs.js";
+import { resolveModelForSelection } from "../../core/model-resolver.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
@@ -4941,7 +4942,7 @@ export class AgentDaemon {
 			case "get_available_models": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_available_models", {
-					models: await state.runtime.session.modelRegistry.refreshAvailableModels(),
+					models: await state.runtime.session.modelRegistry.refreshAvailableModels({ background: false }),
 				});
 			}
 
@@ -5058,16 +5059,7 @@ export class AgentDaemon {
 			case "set_model": {
 				const state = this.getSessionState(command.activeSessionId);
 				const session = state.runtime.session;
-				const availableModels = await session.modelRegistry.refreshAvailableModels();
-				const model =
-					availableModels.find(
-						(candidate) => candidate.provider === command.provider && candidate.id === command.modelId,
-					) ??
-					// Stale-auth providers are excluded from the available list; the lookup
-					// never mutates stale state (session.setModel owns the clear).
-					(session.modelRegistry.getProviderAuthStatus(command.provider).source === "stale"
-						? session.modelRegistry.find(command.provider, command.modelId)
-						: undefined);
+				const model = await resolveModelForSelection(command.provider, command.modelId, session.modelRegistry);
 				if (!model) {
 					throw new Error(`Model not found: ${command.provider}/${command.modelId}`);
 				}

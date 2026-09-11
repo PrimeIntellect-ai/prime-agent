@@ -6,6 +6,17 @@ import { createHarness } from "../harness.js";
 
 const provider = "faux-eng-4649";
 
+function stubModelEndpoint(urlFragment: string, fetchModels: typeof fetch): void {
+	vi.stubGlobal(
+		"fetch",
+		vi.fn<typeof fetch>((input, init) =>
+			String(input).includes(urlFragment)
+				? fetchModels(input, init)
+				: Promise.resolve(new Response(null, { status: 404 })),
+		),
+	);
+}
+
 function openAICodexToken(accountId: string): string {
 	const payload = Buffer.from(
 		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
@@ -84,7 +95,7 @@ describe("ENG-4649 subagent model selection", () => {
 					headers: { "content-type": "application/json" },
 				}),
 		);
-		vi.stubGlobal("fetch", fetchModels);
+		stubModelEndpoint("/codex/models?client_version=", fetchModels);
 		try {
 			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
 			const discovered = await harness.session.findRlmModels("", 20);
@@ -110,16 +121,14 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
-	it("includes private Prime models authorized for the selected team", async () => {
+	it("includes private Prime models after background discovery authorizes the selected team", async () => {
 		const harness = await createHarness({ provider, models: [{ id: "parent-model" }] });
-		const fetchModels = vi.fn(
-			async () =>
-				new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }), {
-					status: 200,
-					headers: { "content-type": "application/json" },
-				}),
-		);
-		vi.stubGlobal("fetch", fetchModels);
+		let finishDiscovery!: () => void;
+		const discovery = new Promise<Response>((resolve) => {
+			finishDiscovery = () => resolve(new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] })));
+		});
+		const fetchModels = vi.fn(() => discovery);
+		stubModelEndpoint("https://api.pinference.ai/api/v1/models", fetchModels);
 		try {
 			harness.authStorage.set("prime-inference", {
 				type: "api_key",
@@ -127,10 +136,17 @@ describe("ENG-4649 subagent model selection", () => {
 				primeTeam: { teamId: "engineering-team", name: "Prime Engineering" },
 			});
 
-			const discovered = await harness.session.findRlmModels("glm 5.2", 8);
-			expect(discovered.models.map((model) => model.selector)).toContain("prime-inference/internal/glm-5.2-fast");
+			const pending = await harness.session.findRlmModels("glm 5.2", 8);
+			expect(pending.models.map((model) => model.selector)).not.toContain("prime-inference/internal/glm-5.2-fast");
+			await vi.waitFor(() => expect(fetchModels).toHaveBeenCalledOnce());
+			finishDiscovery();
+			await vi.waitFor(async () => {
+				const discovered = await harness.session.findRlmModels("glm 5.2", 8);
+				expect(discovered.models.map((model) => model.selector)).toContain("prime-inference/internal/glm-5.2-fast");
+			});
 			expect(fetchModels).toHaveBeenCalledOnce();
 		} finally {
+			finishDiscovery();
 			vi.unstubAllGlobals();
 			harness.cleanup();
 		}
@@ -148,7 +164,7 @@ describe("ENG-4649 subagent model selection", () => {
 				}),
 			)
 			.mockRejectedValueOnce(new Error("offline"));
-		vi.stubGlobal("fetch", fetchModels);
+		stubModelEndpoint("/codex/models?client_version=", fetchModels);
 		let now = Date.now();
 		const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
 		try {
@@ -171,7 +187,7 @@ describe("ENG-4649 subagent model selection", () => {
 		const codexProvider = "openai-codex";
 		const harness = await createHarness({ provider: codexProvider, models: [{ id: "parent-model" }] });
 		const fetchModels = vi.fn().mockRejectedValue(new Error("offline"));
-		vi.stubGlobal("fetch", fetchModels);
+		stubModelEndpoint("/codex/models?client_version=", fetchModels);
 		try {
 			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
 			await expect(harness.session.findRlmModels("parent", 8)).resolves.toEqual({ models: [] });

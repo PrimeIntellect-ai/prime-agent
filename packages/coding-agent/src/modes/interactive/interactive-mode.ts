@@ -113,6 +113,7 @@ import {
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 } from "../../core/messages.js";
+import { MODEL_CATALOG_REFRESH_INTERVAL_MS } from "../../core/model-catalog-cache.js";
 import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.js";
 import { parseNewSessionCommand } from "../../core/new-session-command.js";
 import { resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
@@ -1064,6 +1065,7 @@ export class InteractiveMode {
 	private connectionModelsFetchedAt = 0;
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
+	private closeConfigurationMenu?: () => void;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
 	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
@@ -1543,7 +1545,7 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 
-		await this.updateAvailableProviderCount();
+		void this.updateAvailableProviderCount().catch(() => {});
 	}
 
 	private updateTerminalTitle(): void {
@@ -7785,11 +7787,8 @@ export class InteractiveMode {
 			return undefined;
 		}
 
-		try {
-			return findExactModelReferenceMatch(searchTerm, await refreshPromise);
-		} catch {
-			return undefined;
-		}
+		void refreshPromise.catch(() => {});
+		return undefined;
 	}
 
 	private async applySelectedModel(model: AgentConnectionModel): Promise<void> {
@@ -7864,21 +7863,35 @@ export class InteractiveMode {
 		return this.connectionModelCatalog.filter((model) => this.connectionConfiguredProviders.has(model.provider));
 	}
 
-	private async getConnectionAvailableModels(): Promise<AgentConnectionModel[]> {
+	private async getConnectionAvailableModels(
+		options: { waitForRefresh?: boolean } = {},
+	): Promise<AgentConnectionModel[]> {
+		if (!options.waitForRefresh) {
+			const version = this.connectionModelsRefreshVersion;
+			const catalog = await this.agentConnection.getModelCatalog();
+			if (version !== this.connectionModelsRefreshVersion) return this.getAvailableConnectionModels();
+			this.applyConnectionModelCatalog(catalog);
+			void this.getConnectionAvailableModels({ waitForRefresh: true }).catch(() => {});
+			return this.getAvailableConnectionModels();
+		}
 		const inFlight = this.connectionModelsRefreshInFlight;
 		if (inFlight && inFlight.version === this.connectionModelsRefreshVersion) {
 			return [...(await inFlight.promise)];
 		}
 
 		const version = this.connectionModelsRefreshVersion;
-		const promise = this.agentConnection.getModelCatalog().then((catalog) => {
-			if (version !== this.connectionModelsRefreshVersion) {
+		const connection = this.agentConnection;
+		const promise = connection
+			.getAvailableModels()
+			.then(() => connection.getModelCatalog())
+			.then((catalog) => {
+				if (version !== this.connectionModelsRefreshVersion) {
+					return this.getAvailableConnectionModels();
+				}
+				this.applyConnectionModelCatalog(catalog);
+				this.connectionModelsFetchedAt = Date.now();
 				return this.getAvailableConnectionModels();
-			}
-			this.applyConnectionModelCatalog(catalog);
-			this.connectionModelsFetchedAt = Date.now();
-			return this.getAvailableConnectionModels();
-		});
+			});
 		this.connectionModelsRefreshInFlight = { version, promise };
 
 		try {
@@ -7909,7 +7922,8 @@ export class InteractiveMode {
 	private getModelSelectorRefreshPromise(
 		options: { force?: boolean } = {},
 	): Promise<AgentConnectionModel[]> | undefined {
-		const refreshCatalog = () => this.getConnectionAvailableModels().then(() => this.getCachedModelCandidates());
+		const refreshCatalog = () =>
+			this.getConnectionAvailableModels({ waitForRefresh: true }).then(() => this.getCachedModelCandidates());
 		if (this.connectionModelsRefreshInFlight) {
 			return refreshCatalog();
 		}
@@ -8145,6 +8159,7 @@ export class InteractiveMode {
 	}
 
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
+		this.closeConfigurationMenu?.();
 		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
 		const providerOptions = authFlows.getLoginProviderOptions();
@@ -8155,9 +8170,11 @@ export class InteractiveMode {
 			let hidden = false;
 			let removed = false;
 			let menu: ConfigurationMenuComponent;
+			let refreshTimer: ReturnType<typeof setInterval> | undefined;
 			const hide = () => {
 				if (removed) return;
 				removed = true;
+				if (refreshTimer) clearInterval(refreshTimer);
 				hidden = true;
 				handle?.hide();
 				this.ui.requestRender();
@@ -8178,9 +8195,11 @@ export class InteractiveMode {
 			const finish = () => {
 				if (settled) return;
 				settled = true;
+				if (this.closeConfigurationMenu === finish) this.closeConfigurationMenu = undefined;
 				hide();
 				resolve();
 			};
+			this.closeConfigurationMenu = finish;
 			const refreshModels = (force: boolean) => {
 				const refreshPromise = this.getModelSelectorRefreshPromise({ force });
 				if (!refreshPromise) return;
@@ -8269,9 +8288,18 @@ export class InteractiveMode {
 					})();
 				},
 				onCancel: finish,
+				onOpenCatalogTab: () => refreshModels(true),
 			});
 			handle = this.showFullPaneOverlay(menu, 96);
-			refreshModels(initialModelSearch !== undefined);
+			refreshModels(true);
+			refreshTimer = setInterval(() => {
+				if (!this.isInitialized) {
+					if (refreshTimer) clearInterval(refreshTimer);
+					return;
+				}
+				refreshModels(true);
+			}, MODEL_CATALOG_REFRESH_INTERVAL_MS);
+			refreshTimer.unref();
 		});
 	}
 
@@ -10139,6 +10167,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		this.closeConfigurationMenu?.();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
 		this.clearEscapeRepeat();

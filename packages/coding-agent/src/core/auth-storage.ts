@@ -30,7 +30,12 @@ import {
 	savePrimeCliApiKey,
 	savePrimeCliTeamSelection,
 } from "./prime-inference-auth.js";
-import { resolveConfigValue, resolveConfigValueUncached } from "./resolve-config-value.js";
+import {
+	peekConfigValue,
+	resolveConfigValue,
+	resolveConfigValueAsync,
+	resolveConfigValueUncached,
+} from "./resolve-config-value.js";
 
 export type PrimeTeamCredential = {
 	teamId: string;
@@ -100,6 +105,8 @@ type AuthApiKeyResult = {
 	apiKey?: string;
 	sourceToken?: AuthSourceToken;
 };
+
+type AuthReadOptions = { includeFallback?: boolean; resolveCommands?: boolean };
 
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
@@ -277,6 +284,7 @@ export class AuthStorage {
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
+	private changeListeners = new Set<() => void>();
 
 	private constructor(
 		private storage: AuthStorageBackend,
@@ -300,6 +308,15 @@ export class AuthStorage {
 		return AuthStorage.fromStorage(storage, options);
 	}
 
+	onChange(listener: () => void): () => void {
+		this.changeListeners.add(listener);
+		return () => this.changeListeners.delete(listener);
+	}
+
+	private notifyChanged(): void {
+		for (const listener of this.changeListeners) listener();
+	}
+
 	/**
 	 * Set a runtime API key override (not persisted to disk).
 	 * Used for CLI --api-key flag.
@@ -307,6 +324,7 @@ export class AuthStorage {
 	setRuntimeApiKey(provider: string, apiKey: string): void {
 		this.clearStaleAuthSource(provider, "runtime");
 		this.runtimeOverrides.set(provider, apiKey);
+		this.notifyChanged();
 	}
 
 	/**
@@ -315,6 +333,7 @@ export class AuthStorage {
 	removeRuntimeApiKey(provider: string): void {
 		this.clearStaleAuthSource(provider, "runtime");
 		this.runtimeOverrides.delete(provider);
+		this.notifyChanged();
 	}
 
 	/**
@@ -323,6 +342,7 @@ export class AuthStorage {
 	 */
 	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
 		this.fallbackResolver = resolver;
+		this.notifyChanged();
 	}
 
 	private recordError(error: unknown): void {
@@ -506,21 +526,31 @@ export class AuthStorage {
 		});
 	}
 
-	private getAuthSourceCandidates(provider: string, options?: { includeFallback?: boolean }): AuthSourceCandidate[] {
+	private getAuthSourceCandidates(provider: string, options?: AuthReadOptions): AuthSourceCandidate[] {
 		const fallbackCandidate =
 			options?.includeFallback === false ? undefined : this.getFallbackAuthCandidate(provider);
+		const credential = this.data[provider];
+		const storedCandidate = this.getStoredAuthCandidate(provider, {
+			resolvedCommandValue:
+				options?.resolveCommands === false && credential?.type === "api_key"
+					? peekConfigValue(credential.key)
+					: undefined,
+		});
+		if (storedCandidate && options?.resolveCommands === false) {
+			storedCandidate.resolveValueFingerprint = undefined;
+		}
 		const candidates =
 			provider === PRIME_INFERENCE_PROVIDER_ID
 				? [
 						this.getRuntimeAuthCandidate(provider),
 						this.getEnvironmentAuthCandidate(provider),
 						this.getPrimeCliAuthCandidate(provider),
-						this.getStoredAuthCandidate(provider),
+						storedCandidate,
 						fallbackCandidate,
 					]
 				: [
 						this.getRuntimeAuthCandidate(provider),
-						this.getStoredAuthCandidate(provider),
+						storedCandidate,
 						this.getEnvironmentAuthCandidate(provider),
 						fallbackCandidate,
 					];
@@ -533,7 +563,7 @@ export class AuthStorage {
 			return false;
 		}
 		const valueFingerprint = candidate.valueFingerprint ?? candidate.resolveValueFingerprint?.();
-		return Boolean(valueFingerprint && matchingStale.some((token) => token.valueFingerprint === valueFingerprint));
+		return !valueFingerprint || matchingStale.some((token) => token.valueFingerprint === valueFingerprint);
 	}
 
 	private getMatchingStaleAuthSources(provider: string, candidate: AuthSourceCandidate): AuthSourceToken[] {
@@ -548,7 +578,7 @@ export class AuthStorage {
 
 	private getAvailableAuthCandidate(
 		provider: string,
-		options?: { includeFallback?: boolean },
+		options?: AuthReadOptions,
 	): { candidate?: AuthSourceCandidate; hasStaleCandidate: boolean } {
 		let hasStaleCandidate = false;
 		for (const candidate of this.getAuthSourceCandidates(provider, options)) {
@@ -569,8 +599,8 @@ export class AuthStorage {
 		};
 	}
 
-	private getAuthStatusFromCandidates(provider: string): AuthStatus {
-		const { candidate, hasStaleCandidate } = this.getAvailableAuthCandidate(provider);
+	private getAuthStatusFromCandidates(provider: string, options?: AuthReadOptions): AuthStatus {
+		const { candidate, hasStaleCandidate } = this.getAvailableAuthCandidate(provider, options);
 		if (candidate) {
 			return this.toAuthStatus(candidate);
 		}
@@ -601,8 +631,8 @@ export class AuthStorage {
 		};
 	}
 
-	getCurrentAuthSourceToken(provider: string): AuthSourceToken | undefined {
-		const { candidate } = this.getAvailableAuthCandidate(provider);
+	getCurrentAuthSourceToken(provider: string, options?: AuthReadOptions): AuthSourceToken | undefined {
+		const { candidate } = this.getAvailableAuthCandidate(provider, options);
 		if (!candidate) {
 			return undefined;
 		}
@@ -625,12 +655,13 @@ export class AuthStorage {
 			stale.push(token);
 		}
 		this.staleAuthSources.set(token.provider, stale);
+		this.notifyChanged();
 		return true;
 	}
 
 	/** Forget every stale marking for a provider (explicit user re-selection). */
 	clearAuthStale(provider: string): void {
-		this.staleAuthSources.delete(provider);
+		if (this.staleAuthSources.delete(provider)) this.notifyChanged();
 	}
 
 	private clearStaleAuthSource(provider: string, source: ActiveAuthStatusSource): void {
@@ -657,6 +688,7 @@ export class AuthStorage {
 	 * Reload credentials from storage.
 	 */
 	reload(): void {
+		const previous = JSON.stringify(this.data);
 		let content: string | undefined;
 		try {
 			this.storage.withLock((current) => {
@@ -665,6 +697,7 @@ export class AuthStorage {
 			});
 			this.data = this.parseStorageData(content);
 			this.loadError = null;
+			if (previous !== JSON.stringify(this.data)) this.notifyChanged();
 		} catch (error) {
 			this.loadError = error as Error;
 			this.recordError(error);
@@ -706,6 +739,7 @@ export class AuthStorage {
 		this.clearStaleAuthSource(provider, "stored");
 		this.data[provider] = credential;
 		this.persistProviderChange(provider, credential);
+		this.notifyChanged();
 	}
 
 	/**
@@ -715,6 +749,7 @@ export class AuthStorage {
 		this.clearStaleAuthSource(provider, "stored");
 		delete this.data[provider];
 		this.persistProviderChange(provider, undefined);
+		this.notifyChanged();
 	}
 
 	/**
@@ -734,6 +769,7 @@ export class AuthStorage {
 		delete this.data[provider];
 		// Post-success only: a failed removal must not make a stale-marked credential selectable again.
 		this.clearStaleAuthSource(provider, "stored");
+		this.notifyChanged();
 	}
 
 	/**
@@ -754,15 +790,15 @@ export class AuthStorage {
 	 * Check if any form of auth is configured for a provider.
 	 * Unlike getApiKey(), this doesn't refresh OAuth tokens.
 	 */
-	hasAuth(provider: string): boolean {
-		return this.getAvailableAuthCandidate(provider).candidate !== undefined;
+	hasAuth(provider: string, options?: AuthReadOptions): boolean {
+		return this.getAvailableAuthCandidate(provider, options).candidate !== undefined;
 	}
 
 	/**
 	 * Return auth status without exposing credential values or refreshing tokens.
 	 */
-	getAuthStatus(provider: string): AuthStatus {
-		return this.getAuthStatusFromCandidates(provider);
+	getAuthStatus(provider: string, options?: AuthReadOptions): AuthStatus {
+		return this.getAuthStatusFromCandidates(provider, options);
 	}
 
 	/**
@@ -854,6 +890,7 @@ export class AuthStorage {
 			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
 		});
 
+		this.notifyChanged();
 		return result;
 	}
 
@@ -867,7 +904,7 @@ export class AuthStorage {
 	 */
 	async getApiKeyWithSourceToken(
 		providerId: string,
-		options?: { includeFallback?: boolean },
+		options?: { includeFallback?: boolean; refreshCommands?: boolean },
 	): Promise<AuthApiKeyResult> {
 		// Runtime overrides take precedence over stored credentials and environment keys.
 		const runtimeCandidate = this.getRuntimeAuthCandidate(providerId);
@@ -907,13 +944,20 @@ export class AuthStorage {
 		const cred = this.data[providerId];
 
 		if (cred?.type === "api_key") {
-			const storedCandidate = this.getStoredAuthCandidate(providerId);
+			let storedCandidate = this.getStoredAuthCandidate(providerId);
+			const apiKey = await resolveConfigValueAsync(cred.key, {
+				force:
+					options?.refreshCommands ||
+					(storedCandidate !== undefined &&
+						this.getMatchingStaleAuthSources(providerId, storedCandidate).length > 0),
+			});
+			const current = this.data[providerId];
+			if (current?.type !== "api_key" || current.key !== cred.key) return {};
+			if (cred.key.startsWith("!")) {
+				if (apiKey === undefined) return {};
+				storedCandidate = this.getStoredAuthCandidate(providerId, { resolvedCommandValue: apiKey });
+			}
 			if (storedCandidate && !this.isAuthSourceStale(providerId, storedCandidate)) {
-				const hasStaleRecord = this.getMatchingStaleAuthSources(providerId, storedCandidate).length > 0;
-				const apiKey =
-					cred.key.startsWith("!") && hasStaleRecord
-						? resolveConfigValueUncached(cred.key)
-						: resolveConfigValue(cred.key);
 				const sourceToken =
 					apiKey === undefined
 						? undefined
@@ -1002,7 +1046,10 @@ export class AuthStorage {
 		return {};
 	}
 
-	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
+	async getApiKey(
+		providerId: string,
+		options?: { includeFallback?: boolean; refreshCommands?: boolean },
+	): Promise<string | undefined> {
 		const result = await this.getApiKeyWithSourceToken(providerId, options);
 		return result.apiKey;
 	}
@@ -1018,6 +1065,7 @@ export class AuthStorage {
 		if (this.isPrimeCliConfigEnabled()) {
 			try {
 				savePrimeCliTeamSelection(team, this.getEnabledPrimeCliConfigPath());
+				this.notifyChanged();
 			} catch (error) {
 				this.recordError(error);
 				throw error;
@@ -1055,6 +1103,7 @@ export class AuthStorage {
 			if (this.data[PRIME_INFERENCE_PROVIDER_ID]) {
 				this.remove(PRIME_INFERENCE_PROVIDER_ID);
 			}
+			this.notifyChanged();
 			return;
 		}
 
@@ -1077,7 +1126,7 @@ export class AuthStorage {
 		}
 
 		const credential = this.data[PRIME_INFERENCE_PROVIDER_ID];
-		const authSource = this.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source;
+		const authSource = this.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID, { resolveCommands: false }).source;
 		if (authSource === "runtime" || authSource === "environment") {
 			return undefined;
 		}

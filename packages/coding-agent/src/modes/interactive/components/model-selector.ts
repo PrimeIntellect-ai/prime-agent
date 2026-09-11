@@ -146,6 +146,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private activeModels: ModelItem[] = [];
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
+	private visibleStartIndex = 0;
+	private selectedRowOffset?: number;
 	private searchQuery = "";
 	private currentModel?: Model<any>;
 	private modelRegistry: ModelRegistry;
@@ -254,6 +256,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		availableModels = this.availableModels,
 		configuredProviders = this.configuredProviders,
 	): void {
+		if (
+			availableModels !== undefined &&
+			JSON.stringify([currentModel, availableModels, [...(configuredProviders ?? [])].sort()]) ===
+				JSON.stringify([this.currentModel, this.availableModels, [...(this.configuredProviders ?? [])].sort()])
+		)
+			return;
+		const previousIndex = this.selectedIndex;
+		this.selectedRowOffset = this.selectedIndex - this.visibleStartIndex;
 		this.currentModel = currentModel;
 		this.availableModels = availableModels;
 		this.configuredProviders = configuredProviders;
@@ -267,9 +277,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const selectedIndex = this.filteredModels.findIndex((item) => this.getModelKey(item) === selectedKey);
 			if (selectedIndex >= 0) {
 				this.selectedIndex = selectedIndex;
-				this.updateList();
+			} else {
+				this.selectedIndex = Math.min(previousIndex, Math.max(0, this.filteredModels.length - 1));
 			}
 		}
+		this.updateList();
 
 		this.tui.requestRender();
 	}
@@ -431,8 +443,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const selectedModelIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 		const startIndex = Math.max(
 			0,
-			Math.min(selectedModelIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible),
+			Math.min(
+				selectedModelIndex - Math.min(this.selectedRowOffset ?? Math.floor(maxVisible / 2), maxVisible - 1),
+				this.filteredModels.length - maxVisible,
+			),
 		);
+		this.visibleStartIndex = startIndex;
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
 
 		// Show visible slice of filtered models
@@ -484,6 +500,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	handleInput(keyData: string): void {
+		this.selectedRowOffset = undefined;
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "app.model.toggleScope")) {
 			if (this.scopedModelItems.length > 0) {

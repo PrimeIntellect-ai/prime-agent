@@ -473,7 +473,7 @@ describe("default model selection", () => {
 		expect(result.model?.id).toBe("openai/gpt-5.5");
 	});
 
-	test("findInitialModel rebuilds a saved default missing from the model snapshot when the provider is authed", async () => {
+	test("findInitialModel reports missing saved metadata without borrowing another model's limits", async () => {
 		const primeSnapshotModel: Model<"anthropic-messages"> = {
 			id: "openai/gpt-5.5",
 			name: "GPT 5.5 (Prime Inference)",
@@ -501,8 +501,10 @@ describe("default model selection", () => {
 			modelRegistry: registry,
 		});
 
-		expect(result.model?.provider).toBe("prime-inference");
-		expect(result.model?.id).toBe("anthropic/claude-opus-4.6");
+		expect(result.model).toBeUndefined();
+		expect(result.fallbackMessage).toContain(
+			"prime-inference/anthropic/claude-opus-4.6 has no local catalog metadata",
+		);
 	});
 
 	test("findInitialModel does not rebuild a saved default for an unauthed provider", async () => {
@@ -533,7 +535,7 @@ describe("default model selection", () => {
 			modelRegistry: registry,
 		});
 
-		expect(result.model?.provider).toBe("prime-inference");
-		expect(result.model?.id).toBe("openai/gpt-5.5");
+		expect(result.model).toBeUndefined();
+		expect(result.fallbackMessage).toContain("anthropic/claude-ghost-9 has no local catalog metadata");
 	});
 });
