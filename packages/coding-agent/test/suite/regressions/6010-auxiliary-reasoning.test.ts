@@ -70,11 +70,14 @@ describe("auxiliary reasoning settings", () => {
 		parent.state.thinkingLevel = testCase.parentLevel;
 		const parentMessages = structuredClone(parent.state.messages);
 		const observed: SimpleStreamOptions[] = [];
+		// Side questions reuse the main thread's prompt cache, so they keep the
+		// session level instead of the auxiliary clamp the first two calls use.
+		const expectedLevels: ThinkingLevel[] = [testCase.expectedLevel, testCase.expectedLevel, testCase.parentLevel];
 		harness.setResponses(
-			[JSON.stringify(proposal), JSON.stringify(review), "Side answer"].map((text) => (_context, options) => {
+			[JSON.stringify(proposal), JSON.stringify(review), "Side answer"].map((text, index) => (_context, options) => {
 				const request = options as SimpleStreamOptions;
 				observed.push(request);
-				if (request.reasoning !== testCase.expectedLevel) {
+				if (request.reasoning !== expectedLevels[index]) {
 					return fauxAssistantMessage("", {
 						stopReason: "error",
 						errorMessage: `Unsupported auxiliary reasoning: ${request.reasoning}`,
@@ -131,7 +134,7 @@ describe("auxiliary reasoning settings", () => {
 			noRetry,
 		).done;
 		expect(events.at(-1)).toMatchObject({ status: "complete", answer: "Side answer" });
-		expect(observed.map((options) => options.reasoning)).toEqual(Array(3).fill(testCase.expectedLevel));
+		expect(observed.map((options) => options.reasoning)).toEqual(expectedLevels);
 		expect(observed[0].maxTokens).toBe(testCase.expectedLevel === "off" ? 32_000 : model.maxTokens);
 		expect(observed[1].maxTokens).toBe(testCase.expectedLevel === "off" ? 4_096 : model.maxTokens);
 		expect(parent.state.thinkingLevel).toBe(testCase.parentLevel);

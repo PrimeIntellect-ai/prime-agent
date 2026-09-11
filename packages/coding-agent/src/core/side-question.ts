@@ -6,7 +6,6 @@ import {
 	type ProviderRetryPolicy,
 } from "./provider-retry.js";
 import { unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
-import { getAuxiliaryThinkingLevel } from "./thinking-levels.js";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -97,7 +96,9 @@ export function startSideQuestion(
 			model,
 			systemPrompt: parent.state.systemPrompt,
 			messages: [...structuredClone(parent.state.messages), ...previousTurnMessages],
-			thinkingLevel: getAuxiliaryThinkingLevel(model, parent.state.thinkingLevel),
+			// Anthropic message-level caching keys on the thinking parameters, so a
+			// different level here would re-read the whole cloned conversation.
+			thinkingLevel: parent.state.thinkingLevel,
 			serviceTier: parent.state.serviceTier,
 			// Providers serialize the tool declarations ahead of the system prompt and
 			// messages, so an empty list here would miss the main thread's cache entirely.
