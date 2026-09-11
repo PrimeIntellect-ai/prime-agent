@@ -214,6 +214,43 @@ describe("ENG-4509 side questions", () => {
 
 			expect(harness.faux.state.callCount - callsBefore).toBe(3);
 			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "Checking." });
+			// Streamed text must never be wiped mid-run by textless updates.
+			const running = events.filter((event) => event.status === "running");
+			const firstText = running.findIndex((event) => event.answer !== "");
+			expect(firstText).toBeGreaterThanOrEqual(0);
+			expect(running.slice(firstText).every((event) => event.answer !== "")).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("derives the answer from finished turns when a retried run ends on tool calls", async () => {
+		const harness = await createHarness({ tools: [probe] });
+		try {
+			harness.setResponses([fauxAssistantMessage("main answer")]);
+			await harness.session.prompt("Main context message.");
+			harness.setResponses([
+				fauxAssistantMessage([{ type: "text", text: "Checking." }, fauxToolCall("probe", {})], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Almost 42", { stopReason: "error", errorMessage: "500 Internal Server Error" }),
+				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
+			]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"retry-2",
+				"Survives a failed turn?",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				{ enabled: true, maxRetries: 3, baseDelayMs: 1, maxRetryDelayMs: 60_000 },
+			);
+			await run.done;
+			// The failed turn's streamed partial is not the outcome; finished turns are.
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "Checking." });
 		} finally {
 			harness.cleanup();
 		}
