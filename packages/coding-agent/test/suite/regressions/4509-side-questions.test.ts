@@ -1,6 +1,8 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
+import { Type } from "typebox";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type SideQuestionEvent, startSideQuestion } from "../../../src/core/side-question.js";
 import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
@@ -23,7 +25,7 @@ describe("ENG-4509 side questions", () => {
 		initTheme("dark");
 	});
 
-	it("uses the current context without tools or session persistence", async () => {
+	it("uses the current context without session persistence", async () => {
 		const harness = await createHarness({ systemPrompt: "Remember relevant project context." });
 		try {
 			harness.setResponses([fauxAssistantMessage("The codename is kestrel.")]);
@@ -39,7 +41,6 @@ describe("ENG-4509 side questions", () => {
 			harness.setResponses([
 				(context, options) => {
 					expect(context.systemPrompt).toBe(systemPromptBefore);
-					expect(context.tools).toEqual([]);
 					expect(context.messages.map(getMessageText)).toEqual([
 						expect.stringContaining("The persistent memories produced across this session so far:"),
 						"The project codename is kestrel.",
@@ -89,10 +90,9 @@ describe("ENG-4509 side questions", () => {
 						"first side answer",
 						expect.stringContaining("Second side question?"),
 					]);
-					expect(context.tools).toEqual([]);
 					// The instruction is repeated only on the first side turn.
-					expect(texts[3]).toContain("Answer this side question");
-					expect(texts[5]).not.toContain("Answer this side question");
+					expect(texts[3]).toContain("asked this via `/btw`");
+					expect(texts[5]).not.toContain("asked this via `/btw`");
 					return fauxAssistantMessage("second side answer");
 				},
 			]);
@@ -110,6 +110,93 @@ describe("ENG-4509 side questions", () => {
 			await run.done;
 
 			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "second side answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("sends the session's tool declarations but blocks their execution", async () => {
+		let executions = 0;
+		const probe: AgentTool = {
+			name: "probe",
+			label: "Probe",
+			description: "Records executions",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions += 1;
+				return { content: [{ type: "text", text: "executed" }], details: {} };
+			},
+		};
+		const harness = await createHarness({ tools: [probe] });
+		try {
+			let mainTools: unknown;
+			harness.setResponses([
+				(context) => {
+					mainTools = context.tools;
+					return fauxAssistantMessage("main answer");
+				},
+			]);
+			await harness.session.prompt("Main context message.");
+
+			let secondTurnTexts: string[] = [];
+			harness.setResponses([
+				(context) => {
+					// Providers serialize the tools ahead of the cached prefix, so the side
+					// request must declare the main thread's tools unchanged.
+					expect(context.tools).toEqual(mainTools);
+					return fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" });
+				},
+				(context) => {
+					secondTurnTexts = context.messages.map(getMessageText);
+					return fauxAssistantMessage("answered from context");
+				},
+			]);
+
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(harness.session.agent, "tools-1", "Which tool would you use?", (event) => {
+				events.push(event);
+			});
+			await run.done;
+
+			expect(executions).toBe(0);
+			expect(secondTurnTexts.some((text) => text.includes("Tools are deactivated in this side thread"))).toBe(true);
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "answered from context" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("stops after three turns when the model keeps calling tools", async () => {
+		const probe: AgentTool = {
+			name: "probe",
+			label: "Probe",
+			description: "Never executes",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "executed" }], details: {} }),
+		};
+		const harness = await createHarness({ tools: [probe] });
+		try {
+			harness.setResponses([fauxAssistantMessage("main answer")]);
+			await harness.session.prompt("Main context message.");
+
+			const callsBefore = harness.faux.state.callCount;
+			harness.setResponses([
+				fauxAssistantMessage([{ type: "text", text: "Checking." }, fauxToolCall("probe", {})], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage("unreachable fourth turn"),
+			]);
+
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(harness.session.agent, "tools-2", "Keep trying?", (event) => {
+				events.push(event);
+			});
+			await run.done;
+
+			expect(harness.faux.state.callCount - callsBefore).toBe(3);
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "Checking." });
 		} finally {
 			harness.cleanup();
 		}
@@ -159,7 +246,6 @@ describe("ENG-4509 side questions", () => {
 					return fauxAssistantMessage("main complete");
 				},
 				(context) => {
-					expect(context.tools).toEqual([]);
 					expect(context.messages.map(getMessageText)).toEqual([
 						expect.stringContaining("The persistent memories produced across this session so far:"),
 						"Run the main task.",
