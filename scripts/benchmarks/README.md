@@ -128,9 +128,9 @@ sessions directory, session artifacts, and spawn ledger from scratch, so trials 
 
 The fixture set is fixed and mirrors a long-lived install: 194 top-level sessions (3 large —
 one of them a very large ~40 MB transcript — 150 medium, 40 small fan-out children of the chain
-root, and the root itself) plus a chain of 6 nested subagent sessions. Large sessions hold 2,000
-user/assistant/toolResult triples (~5 MB of JSONL each), the very large one 16,000 (~40 MB),
-medium sessions 120, and each subagent 400. Content is synthetic but shaped like real transcripts
+root, and the root itself) plus a chain of 6 nested subagent sessions. Large sessions hold 1,999
+user/assistant/toolResult triples (~5 MB of JSONL each), the very large one 15,999 (~40 MB),
+medium sessions 119, and each subagent 399. Content is synthetic but shaped like real transcripts
 (thinking, tool calls, tool output). The subagent chain and the fan-out are linked through the
 same spawn-ledger records the daemon replays (~46 edges), so roster hydration, catalog scanning,
 and saved-session paths are exercised at a scale where regressions are visible. No inference is

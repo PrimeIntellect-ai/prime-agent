@@ -338,7 +338,7 @@ def render(report: Report) -> str:
             "Kernel RSS covers the isolated Python process; loaded RSS follows the pandas workload.",
             "UI trials use a fresh fixture set: 194 top-level sessions including one ~40 MB transcript,",
             "40 ledger fan-out children, and a 6-deep subagent chain (~46 spawn edges).",
-            "Large fixtures hold 2,000 message triples (~5 MB JSONL); medium 120; subagents 400 each.",
+            "Large fixtures hold 1,999 complete triples (~5 MB JSONL); medium 119; subagents 399 each.",
             "Interactions: cold --resume of a large session, warm /resume switch, left-arrow to agents view,",
             "roster settle with many saved sessions, search-and-open of another large session, and opening",
             "the chain parent, then a clear-expand-step drill into the live chain to depth 6.",
