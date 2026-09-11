@@ -228,8 +228,8 @@ import {
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
 import {
-	countDirectSubagentStatuses,
 	countRosterSubagentStatuses,
+	countSubtreeSubagentStatuses,
 	SubagentSummaryLine,
 } from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
@@ -6054,7 +6054,7 @@ export class InteractiveMode {
 						sessionId: this.connectionState?.sessionId,
 						sessionFile: this.connectionState?.sessionFile,
 					})
-				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId),
+				: countSubtreeSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}

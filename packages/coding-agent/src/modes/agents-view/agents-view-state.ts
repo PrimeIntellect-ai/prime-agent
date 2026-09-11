@@ -646,6 +646,50 @@ export function isDirectAgentChild(
 	return parent.sessionFile !== undefined && parentKeys.has(fileIdentity(parent.sessionFile));
 }
 
+// The parent side of isDirectAgentChild: the keys by which a session is referenced as a parent.
+function parentIdentityKeys(summary: {
+	activeSessionId?: string | undefined;
+	sessionId?: string | undefined;
+	sessionFile?: string | undefined;
+}): string[] {
+	return [
+		summary.activeSessionId !== undefined ? `active:${summary.activeSessionId}` : undefined,
+		summary.sessionId !== undefined ? `session:${summary.sessionId}` : undefined,
+		summary.sessionFile !== undefined ? fileIdentity(summary.sessionFile) : undefined,
+	].filter((key): key is string => key !== undefined);
+}
+
+/**
+ * Every subagent summary descending from the parent session, breadth-first over the shared parent
+ * linkage. Rows of any lifecycle link so live descendants stay reachable; callers decide what counts.
+ */
+export function collectSubagentDescendantSummaries(
+	summaries: Iterable<SessionSummary>,
+	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
+): SessionSummary[] {
+	const rowsByParentKey = new Map<string, SessionSummary[]>();
+	for (const summary of summaries) {
+		if (summary.runtimeKind !== "subagent") continue;
+		for (const key of getParentKeys(summary)) {
+			const siblings = rowsByParentKey.get(key) ?? [];
+			siblings.push(summary);
+			rowsByParentKey.set(key, siblings);
+		}
+	}
+	const descendants: SessionSummary[] = [];
+	const linked = new Set<SessionSummary>();
+	const keyQueue = [...parentIdentityKeys(parent)];
+	for (let index = 0; index < keyQueue.length; index++) {
+		for (const row of rowsByParentKey.get(keyQueue[index]!) ?? []) {
+			if (linked.has(row)) continue;
+			linked.add(row);
+			descendants.push(row);
+			keyQueue.push(...parentIdentityKeys(row));
+		}
+	}
+	return descendants;
+}
+
 export function getAgentsViewSummaryIdentity(summary: SessionSummary): string {
 	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
 		return `agent:${rosterAgentIdForSummary(summary)}`;
