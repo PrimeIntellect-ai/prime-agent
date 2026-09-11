@@ -114,6 +114,8 @@ import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import { reportTelemetryError, withTelemetryErrorContext } from "../../core/telemetry-errors.js";
+import { sanitizeTelemetryInputMetadata } from "../../core/telemetry-input.js";
 import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
@@ -264,6 +266,35 @@ export type {
 export { defaultDaemonSocketPath } from "./daemon-socket.js";
 
 const structuredLog = getLogger("coding-agent.daemon");
+const TELEMETRY_SESSION_COMMANDS = new Set<DaemonCommand["type"]>([
+	"prompt",
+	"prompt_and_wait",
+	"steer",
+	"follow_up",
+	"resume_queue",
+	"abort",
+	"abort_bash",
+	"abort_compaction",
+	"abort_branch_summary",
+	"abort_retry",
+	"compact",
+	"refine",
+	"set_model",
+	"cycle_model",
+	"set_thinking_level",
+	"cycle_thinking_level",
+	"set_service_tier",
+	"replace_acp_mcp_servers",
+	"execute_bash",
+	"execute_bash_and_wait",
+	"start_side_question",
+	"abort_side_question",
+	"mutate_queued_message",
+	"clear_queue",
+	"abort_and_clear_queue",
+	"acquire_session_input_pause",
+	"release_session_input_pause",
+]);
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
 const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
 const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
@@ -3404,9 +3435,7 @@ export class AgentDaemon {
 			...(entry.repliedSinceTask !== undefined ? { repliedSinceTask: entry.repliedSinceTask } : {}),
 			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
 			...(entry.rlmChildId ? { rlmChildId: entry.rlmChildId } : {}),
-			...(entry.firstMessage
-				? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) }
-				: {}),
+			...(entry.firstMessage ? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) } : {}),
 		};
 	}
 
@@ -3482,7 +3511,11 @@ export class AgentDaemon {
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 			...(latest
 				? {
-						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, AGENT_OBSERVE_PREVIEW_MAX_CHARS),
+						latestMessage: createAgentObserveMessagePreview(
+							latest,
+							messages.length - 1,
+							AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+						),
 					}
 				: {}),
 		};
@@ -4062,6 +4095,44 @@ export class AgentDaemon {
 		command: DaemonCommand,
 		onPromptHandlerOwnsAdmission: () => void = () => {},
 	): Promise<DaemonResponse | undefined> {
+		const state =
+			TELEMETRY_SESSION_COMMANDS.has(command.type) && "activeSessionId" in command && command.activeSessionId
+				? this.sessions.get(command.activeSessionId)
+				: undefined;
+		if (!state?.runtime.services?.agentDir || !state.runtime.session.settingsManager)
+			return this.handleSessionCommand(client, command, onPromptHandlerOwnsAdmission);
+		const context = {
+			agentDir: state.runtime.services.agentDir,
+			settingsManager: state.runtime.session.settingsManager,
+			executionMode: state.runtime.runtimeConfig?.executionMode,
+			telemetryDisabled: state.runtime.runtimeConfig?.telemetryDisabled,
+		};
+		return withTelemetryErrorContext(context, async () => {
+			try {
+				return await this.handleSessionCommand(client, command, onPromptHandlerOwnsAdmission);
+			} catch (error) {
+				if (!(error instanceof PromptAdmissionCancelledError)) {
+					const input =
+						"telemetryInput" in command ? sanitizeTelemetryInputMetadata(command.telemetryInput) : undefined;
+					reportTelemetryError({
+						error,
+						component: "daemon",
+						operation: "request",
+						stage: "unknown",
+						inputId: input?.inputId,
+						clientSessionId: input?.clientSessionId,
+					});
+				}
+				throw error;
+			}
+		});
+	}
+
+	private async handleSessionCommand(
+		client: DaemonSocketClient,
+		command: DaemonCommand,
+		onPromptHandlerOwnsAdmission: () => void,
+	): Promise<DaemonResponse | undefined> {
 		if ("agentMessageId" in command && command.agentMessageId === "") {
 			throw new Error("agentMessageId must not be empty");
 		}
@@ -4448,6 +4519,7 @@ export class AgentDaemon {
 					throw error;
 				}
 				const options: PromptOptions = {
+					telemetryInput: command.telemetryInput,
 					content: command.content,
 					images: command.images,
 					streamingBehavior: command.streamingBehavior,

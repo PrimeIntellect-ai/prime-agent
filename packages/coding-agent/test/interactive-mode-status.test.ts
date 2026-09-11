@@ -25,6 +25,7 @@ import { createSessionSlashCommandMessage, createSessionSlashCommandResultMessag
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import type { TelemetryUiInputAttempt } from "../src/core/telemetry-journeys.js";
 import { emptyUsage } from "../src/core/usage.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
@@ -33,6 +34,7 @@ import type {
 	AgentConnectionHeartbeat,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
+	AgentConnectionPromptOptions,
 	AgentConnectionResourceDiagnostic,
 	AgentConnectionResourceSnapshot,
 	AgentConnectionSessionContext,
@@ -583,7 +585,18 @@ describe("InteractiveMode.renderSessionContext", () => {
 	});
 });
 
-type SubmitHandlerHarness = {
+type InputTelemetryHarness = {
+	beginInputTelemetry(): TelemetryUiInputAttempt | undefined;
+	promptWithTelemetry(
+		text: string,
+		options: AgentConnectionPromptOptions,
+		attempt?: TelemetryUiInputAttempt,
+	): Promise<void>;
+};
+
+const inputTelemetryMethods = InteractiveMode.prototype as unknown as InputTelemetryHarness;
+
+type SubmitHandlerHarness = InputTelemetryHarness & {
 	defaultEditor: {
 		onSubmit?: (text: string) => Promise<void>;
 	};
@@ -635,6 +648,8 @@ type SubmitHandlerHarness = {
 
 function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {}): SubmitHandlerHarness {
 	const fakeThis: SubmitHandlerHarness = {
+		beginInputTelemetry: inputTelemetryMethods.beginInputTelemetry,
+		promptWithTelemetry: inputTelemetryMethods.promptWithTelemetry,
 		defaultEditor: {},
 		editor: { getText: vi.fn(() => ""), setText: vi.fn(), addToHistory: vi.fn() },
 		clearSideQuestion: vi.fn(),
@@ -3318,6 +3333,8 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	): Record<string, unknown> & { getUserInput: ReturnType<typeof vi.fn> } {
 		return {
 			init: vi.fn(async () => {}),
+			beginInputTelemetry: inputTelemetryMethods.beginInputTelemetry,
+			promptWithTelemetry: inputTelemetryMethods.promptWithTelemetry,
 			restorePromptStashOnOpen: vi.fn(),
 			options: { agentsViewOwnsStartupNotices: true, ...options },
 			modelRegistry: { getError: vi.fn(() => undefined) },

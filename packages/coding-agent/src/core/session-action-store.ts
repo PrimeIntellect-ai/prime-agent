@@ -85,6 +85,17 @@ const TERMINAL_STATES = new Set<ActionLifecycle["state"]>(["completed", "failed"
 const ACTIVE_STATES = new Set<ActionLifecycle["state"]>(["selected", "preparing", "committing", "running"]);
 const CLEARABLE_STATES = new Set<ActionLifecycle["state"]>(["queued", "selected", "preparing"]);
 
+export type SessionActionObserver = (action: SessionAction, previousState?: ActionLifecycle["state"]) => void;
+const actionObservers = new WeakMap<SessionAction, SessionActionObserver>();
+
+function notifyActionObserver(action: SessionAction, previousState?: ActionLifecycle["state"]): void {
+	try {
+		actionObservers.get(action)?.(action, previousState);
+	} catch {
+		// Optional observers must not change scheduling or ticket settlement.
+	}
+}
+
 function isClearable(action: SessionAction): boolean {
 	return CLEARABLE_STATES.has(action.lifecycle.state);
 }
@@ -124,6 +135,7 @@ export function transitionSessionAction(
 		}
 	}
 	action.lifecycle = next;
+	notifyActionObserver(action, previous);
 }
 
 export type AdmissionDisposition = "starts_when_admitted" | "queued";
@@ -210,10 +222,19 @@ export class ActionStore<TAction extends SessionAction = SessionAction> {
 	private readonly whenRunIdle: TAction[] = [];
 	private readonly tickets = new Map<string, ActionTicketController>();
 
+	constructor(private readonly observer?: SessionActionObserver) {}
+
+	private observe(action: TAction): void {
+		if (!this.observer) return;
+		actionObservers.set(action, this.observer);
+		notifyActionObserver(action);
+	}
+
 	enqueue(action: TAction): void {
 		this.assertNewAction(action);
 		this.list(action.delivery).push(action);
 		this.tickets.set(action.id, new ActionTicketController(action.id));
+		this.observe(action);
 	}
 
 	enqueueFront(action: TAction): void {
@@ -222,6 +243,7 @@ export class ActionStore<TAction extends SessionAction = SessionAction> {
 		const firstQueued = list.findIndex((item) => item.lifecycle.state === "queued");
 		list.splice(firstQueued < 0 ? list.length : firstQueued, 0, action);
 		this.tickets.set(action.id, new ActionTicketController(action.id));
+		this.observe(action);
 	}
 
 	selectFirst(): TAction | undefined {
@@ -317,6 +339,7 @@ export class ActionStore<TAction extends SessionAction = SessionAction> {
 		const index = list.indexOf(action);
 		if (index >= 0) list.splice(index, 1);
 		this.tickets.delete(action.id);
+		actionObservers.delete(action);
 	}
 
 	private actions(policy?: DeliveryPolicy): readonly TAction[] {

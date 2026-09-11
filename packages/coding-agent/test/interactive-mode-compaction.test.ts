@@ -16,11 +16,16 @@ const startCompactionLoader = Reflect.get(InteractiveMode.prototype, "startCompa
 	customInstructions?: string,
 ) => void;
 
+const observeCancellationIdle = Reflect.get(InteractiveMode.prototype, "observeCancellationIdle") as (
+	this: unknown,
+) => void;
+
 function createFakeThis(overrides: Record<string, unknown> = {}) {
 	return {
 		isInitialized: true,
 		footer: { invalidate: vi.fn() },
 		updateConnectionStateFromEvent: vi.fn(),
+		observeCancellationIdle,
 		activityTracker: new AgentActivityTracker(),
 		updateWorkingLoaderMessage: vi.fn(),
 		autoCompactionLoader: undefined,

@@ -131,6 +131,26 @@ describe("ActionStore selection", () => {
 });
 
 describe("session action lifecycle", () => {
+	it("observes committed lifecycle changes and isolates a failing observer", () => {
+		const observed: string[] = [];
+		const store = new ActionStore((action, previous) => {
+			observed.push(`${previous ?? "new"}:${action.lifecycle.state}`);
+			if (action.lifecycle.state === "preparing") throw new Error("observer failure");
+		});
+		const action = turn("private prompt");
+		store.enqueue(action);
+		store.selectFirst();
+		transitionSessionAction(action, { state: "preparing" });
+		store.rollback(action);
+		store.remove((candidate) => candidate === action);
+		expect(observed).toEqual([
+			"new:queued",
+			"queued:selected",
+			"selected:preparing",
+			"preparing:queued",
+			"queued:cancelled",
+		]);
+	});
 	it("guards legal transitions and rejects post-dispatch rollback without non-delivery proof", () => {
 		const action = turn("hello");
 		transitionSessionAction(action, { state: "selected" });

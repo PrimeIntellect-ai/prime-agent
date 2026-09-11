@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { OAuthAuthInfo } from "@earendil-works/pi-ai";
+import { reportTelemetryError } from "./telemetry-errors.js";
 
 export const PRIME_INFERENCE_PROVIDER_ID = "prime-inference";
 export const PRIME_INFERENCE_PROVIDER_NAME = "Prime Inference";
@@ -48,6 +49,7 @@ export type PrimeCliConfig = {
 export type PrimeInferenceLoginCallbacks = {
 	onAuth: (info: OAuthAuthInfo) => void;
 	onProgress?: (message: string) => void;
+	onValidation?: (result: { outcome: "completed" | "failed"; durationMs: number; scope: "identity_scope" }) => void;
 	signal?: AbortSignal;
 };
 
@@ -129,7 +131,8 @@ function readPrimeCliConfigData(configPath: string): Record<string, unknown> {
 			if (isRecord(parsed)) {
 				data = parsed;
 			}
-		} catch {
+		} catch (error) {
+			reportTelemetryError({ error, component: "configuration", operation: "load", stage: "configuration" });
 			data = {};
 		}
 	}
@@ -641,6 +644,49 @@ function formatAccessFailure(result: Exclude<PrimeInferenceAccessResult, { ok: t
 	return `${status}${result.message}`;
 }
 
+async function observeLoginValidation(
+	check: () => Promise<PrimeInferenceAccessResult>,
+	callbacks: PrimeInferenceLoginCallbacks,
+	provider: string,
+): Promise<PrimeInferenceAccessResult> {
+	const startedAt = performance.now();
+	let outcome: "completed" | "failed" = "failed";
+	try {
+		const result = await check();
+		if (result.ok) outcome = "completed";
+		else if (!callbacks.signal?.aborted)
+			reportTelemetryError({
+				error: result,
+				component: "authentication",
+				operation: "validate",
+				stage: "authentication",
+				provider,
+			});
+		return result;
+	} catch (error) {
+		if (!callbacks.signal?.aborted)
+			reportTelemetryError({
+				error,
+				component: "authentication",
+				operation: "validate",
+				stage: "authentication",
+				provider,
+			});
+		throw error;
+	} finally {
+		try {
+			if (!callbacks.signal?.aborted)
+				callbacks.onValidation?.({
+					outcome,
+					durationMs: Math.max(0, performance.now() - startedAt),
+					scope: "identity_scope",
+				});
+		} catch {
+			// Observability must not change login behavior.
+		}
+	}
+}
+
 export async function loginPrimeInference(
 	callbacks: PrimeInferenceLoginCallbacks,
 	options: PrimeInferenceLoginOptions = {},
@@ -651,12 +697,18 @@ export async function loginPrimeInference(
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
 	if (config.apiKey) {
+		const existingApiKey = config.apiKey;
 		callbacks.onProgress?.("Checking existing Prime CLI credentials...");
-		const access = await checkPrimeInferenceAccess(config.apiKey, config.baseUrl, {
-			fetchFn,
-			requestTimeoutMs,
-			signal: callbacks.signal,
-		});
+		const access = await observeLoginValidation(
+			() =>
+				checkPrimeInferenceAccess(existingApiKey, config.baseUrl, {
+					fetchFn,
+					requestTimeoutMs,
+					signal: callbacks.signal,
+				}),
+			callbacks,
+			PRIME_INFERENCE_PROVIDER_ID,
+		);
 		if (access.ok) {
 			throwIfCancelled(callbacks.signal);
 			return { apiKey: config.apiKey, source: "prime-cli" };
@@ -671,13 +723,20 @@ export async function loginPrimeInference(
 	const apiKey = await runPrimeBrowserLogin(config, callbacks, fetchFn, requestTimeoutMs, pollIntervalMs);
 	throwIfCancelled(callbacks.signal);
 	callbacks.onProgress?.("Checking Prime Inference access...");
-	const access = await checkPrimeInferenceAccess(apiKey, config.baseUrl, {
-		fetchFn,
-		requestTimeoutMs,
-		signal: callbacks.signal,
-	});
+	const access = await observeLoginValidation(
+		() =>
+			checkPrimeInferenceAccess(apiKey, config.baseUrl, {
+				fetchFn,
+				requestTimeoutMs,
+				signal: callbacks.signal,
+			}),
+		callbacks,
+		PRIME_INFERENCE_PROVIDER_ID,
+	);
 	if (!access.ok) {
-		throw new Error(`Prime API key does not have Prime Inference access (${formatAccessFailure(access)})`);
+		throw new Error(`Prime API key does not have Prime Inference access (${formatAccessFailure(access)})`, {
+			cause: access,
+		});
 	}
 
 	throwIfCancelled(callbacks.signal);
@@ -695,12 +754,18 @@ export async function loginPrimeAgentTraces(
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
 	if (config.apiKey) {
+		const existingApiKey = config.apiKey;
 		callbacks.onProgress?.("Checking existing Prime CLI credentials...");
-		const access = await checkPrimeAgentTracesAccess(config.apiKey, traceConfig.baseUrl, {
-			fetchFn,
-			requestTimeoutMs,
-			signal: callbacks.signal,
-		});
+		const access = await observeLoginValidation(
+			() =>
+				checkPrimeAgentTracesAccess(existingApiKey, traceConfig.baseUrl, {
+					fetchFn,
+					requestTimeoutMs,
+					signal: callbacks.signal,
+				}),
+			callbacks,
+			PRIME_AGENT_TRACES_PROVIDER_ID,
+		);
 		if (access.ok) {
 			throwIfCancelled(callbacks.signal);
 			return { apiKey: config.apiKey, source: "prime-cli" };
@@ -722,13 +787,20 @@ export async function loginPrimeAgentTraces(
 	);
 	throwIfCancelled(callbacks.signal);
 	callbacks.onProgress?.("Checking Prime Agent trace access...");
-	const access = await checkPrimeAgentTracesAccess(apiKey, traceConfig.baseUrl, {
-		fetchFn,
-		requestTimeoutMs,
-		signal: callbacks.signal,
-	});
+	const access = await observeLoginValidation(
+		() =>
+			checkPrimeAgentTracesAccess(apiKey, traceConfig.baseUrl, {
+				fetchFn,
+				requestTimeoutMs,
+				signal: callbacks.signal,
+			}),
+		callbacks,
+		PRIME_AGENT_TRACES_PROVIDER_ID,
+	);
 	if (!access.ok) {
-		throw new Error(`Prime API key does not have Prime Agent trace access (${formatAccessFailure(access)})`);
+		throw new Error(`Prime API key does not have Prime Agent trace access (${formatAccessFailure(access)})`, {
+			cause: access,
+		});
 	}
 
 	throwIfCancelled(callbacks.signal);

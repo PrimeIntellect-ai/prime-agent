@@ -75,7 +75,13 @@ import {
 	SessionManager,
 } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
-import { isTelemetryEnabled } from "./core/telemetry.js";
+import { captureTelemetryEvent, isTelemetryEnabled } from "./core/telemetry.js";
+import {
+	flushTelemetryErrorReporting,
+	initializeTelemetryErrorReporting,
+	reportTelemetryError,
+} from "./core/telemetry-errors.js";
+import { observeInstalledRuntimeReady } from "./core/telemetry-installation.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
@@ -158,6 +164,13 @@ function collectSettingsDiagnostics(
 
 function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {
 	for (const diagnostic of diagnostics) {
+		if (diagnostic.type === "error")
+			reportTelemetryError({
+				error: diagnostic.message,
+				component: "configuration",
+				operation: "load",
+				stage: "configuration",
+			});
 		const color = diagnostic.type === "error" ? chalk.red : diagnostic.type === "warning" ? chalk.yellow : chalk.dim;
 		const prefix = diagnostic.type === "error" ? "Error: " : diagnostic.type === "warning" ? "Warning: " : "";
 		console.error(color(`${prefix}${diagnostic.message}`));
@@ -816,14 +829,23 @@ async function prepareRuntimeServices(options: {
 	extensionFactories?: ExtensionFactory[];
 	sessionOptionsOverride?: CreateAgentSessionOptions;
 }): Promise<PreparedRuntimeServices> {
+	const startedAt = performance.now();
 	const { config, sessionManager } = options;
 	const effectiveAgentDir = config.agentDir ?? options.agentDir;
+	const settingsManager = SettingsManager.create(options.cwd, effectiveAgentDir);
+	initializeTelemetryErrorReporting({
+		agentDir: effectiveAgentDir,
+		settingsManager,
+		executionMode: config.executionMode,
+		telemetryDisabled: config.telemetryDisabled,
+	});
 	const authStorage = AuthStorage.create(join(effectiveAgentDir, "auth.json"), {
 		usePrimeCliConfig: effectiveAgentDir === options.agentDir,
 	});
 	const services = await createAgentSessionServices({
 		cwd: options.cwd,
 		agentDir: effectiveAgentDir,
+		settingsManager,
 		authStorage,
 		extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
 		// Subagents share the parent's Herdr pane; their own reporter would race
@@ -845,7 +867,22 @@ async function prepareRuntimeServices(options: {
 			extensionFactories: options.extensionFactories,
 		},
 	});
-	const { settingsManager, modelRegistry, resourceLoader } = services;
+	const { modelRegistry, resourceLoader } = services;
+	if (!config.telemetryDisabled) {
+		captureTelemetryEvent({
+			agentDir: effectiveAgentDir,
+			settingsManager,
+			executionMode: config.executionMode,
+			name: "agent startup stage",
+			properties: {
+				stage: "configuration_load",
+				outcome: "completed",
+				duration_ms: performance.now() - startedAt,
+				startup_kind: "unknown",
+				timing_scope: "system_work",
+			},
+		});
+	}
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 		...services.diagnostics,
 		...collectSettingsDiagnostics(settingsManager, "runtime creation"),
@@ -1052,6 +1089,7 @@ export function findActiveDaemonSessionSummaryForSessionFile(
 async function createDaemonClientConnection(options: {
 	socketPath: string;
 	config: AgentSessionRuntimeConfig;
+	telemetrySettingsManager: SettingsManager;
 	sessionPath?: string;
 	continueRecent?: boolean;
 	activeSessionId?: string;
@@ -1060,10 +1098,12 @@ async function createDaemonClientConnection(options: {
 	supportsExtensionUi?: boolean;
 }): Promise<{ connection: DaemonAgentConnection; summary: SessionSummary }> {
 	// Caller must have awaited ensureInteractiveDaemonRunning for this socket.
+	const startedAt = performance.now();
+	let outcome: "completed" | "failed" = "failed";
 	const client = new DaemonClient(options.socketPath);
-	await client.connect();
 
 	try {
+		await client.connect();
 		const attach = async (summary: SessionSummary) => {
 			const connection = await DaemonAgentConnection.attach(client, getDaemonSummaryActiveSessionId(summary), {
 				closeClientOnDispose: true,
@@ -1074,6 +1114,7 @@ async function createDaemonClientConnection(options: {
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
 				telemetryDisabled: options.config.telemetryDisabled,
 			});
+			outcome = "completed";
 			return { connection, summary };
 		};
 
@@ -1119,6 +1160,25 @@ async function createDaemonClientConnection(options: {
 	} catch (error) {
 		client.close();
 		throw error;
+	} finally {
+		if (!options.config.telemetryDisabled)
+			captureTelemetryEvent({
+				agentDir: options.config.agentDir ?? getAgentDir(),
+				settingsManager: options.telemetrySettingsManager,
+				executionMode: options.config.executionMode,
+				name: "agent startup stage",
+				properties: {
+					stage: "session_attach",
+					outcome,
+					duration_ms: performance.now() - startedAt,
+					startup_kind: options.activeSessionId
+						? "warm_attach"
+						: options.sessionPath || options.continueRecent
+							? "resumed"
+							: "cold",
+					timing_scope: "system_work",
+				},
+			});
 	}
 }
 
@@ -1248,6 +1308,11 @@ export async function main(args: string[], options?: MainOptions) {
 
 	const agentDir = getAgentDir();
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	initializeTelemetryErrorReporting({
+		agentDir,
+		settingsManager: startupSettingsManager,
+		executionMode: appMode === "daemon" ? undefined : appMode,
+	});
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
@@ -1302,8 +1367,10 @@ export async function main(args: string[], options?: MainOptions) {
 				{ fallbackOnError: !publicCommand.attachAgent },
 			);
 		} catch (error) {
+			reportTelemetryError({ error, component: "daemon", operation: "attach", stage: "startup" });
 			const message = error instanceof Error ? error.message : String(error);
 			console.error(chalk.red(`Error: Could not look up active agent '${resumeSelector}': ${message}`));
+			await flushTelemetryErrorReporting();
 			process.exit(1);
 		}
 	}
@@ -1330,12 +1397,14 @@ export async function main(args: string[], options?: MainOptions) {
 			if (!(error instanceof SessionSelectorError)) {
 				throw error;
 			}
+			reportTelemetryError({ error, component: "session", operation: "load", stage: "startup" });
 			const suggestion =
 				error instanceof SessionSelectorNotFoundError && error.suggestion
 					? ` Did you mean '${error.suggestion}'?`
 					: "";
 			console.error(chalk.red(`Error: ${error.message}.${suggestion}`));
 			console.error(chalk.dim(`Open ${APP_NAME} and press left-arrow to browse sessions.`));
+			await flushTelemetryErrorReporting();
 			process.exit(1);
 		}
 	}
@@ -1361,6 +1430,12 @@ export async function main(args: string[], options?: MainOptions) {
 			? startupSettingsManager
 			: SettingsManager.create(sessionManager.getCwd(), agentDir);
 	const telemetryDisabled = isTelemetryEnabled(telemetrySettingsManager) ? undefined : true;
+	initializeTelemetryErrorReporting({
+		agentDir,
+		settingsManager: telemetrySettingsManager,
+		executionMode: appMode === "daemon" ? undefined : appMode,
+		telemetryDisabled,
+	});
 	const defaultSessionConfig = runtimeConfigFromArgs(
 		parsed,
 		sessionManager.getCwd(),
@@ -1431,6 +1506,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 		reportDiagnostics(prepared.diagnostics);
 		if (prepared.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+			await flushTelemetryErrorReporting();
 			process.exit(1);
 		}
 		time("prepareInteractiveServices");
@@ -1517,6 +1593,7 @@ export async function main(args: string[], options?: MainOptions) {
 			({ connection, summary } = await createDaemonClientConnection({
 				socketPath: daemonSocketPath,
 				config: defaultSessionConfig,
+				telemetrySettingsManager,
 				activeSessionId: activeDaemonSessionSummary
 					? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
 					: undefined,
@@ -1527,7 +1604,9 @@ export async function main(args: string[], options?: MainOptions) {
 			}));
 		} catch (error) {
 			if (error instanceof DaemonSessionCreateError) {
+				reportTelemetryError({ error, component: "daemon", operation: "attach", stage: "startup" });
 				console.error(chalk.red(`Error: ${error.message}`));
+				await flushTelemetryErrorReporting();
 				process.exit(1);
 			}
 			throw error;
@@ -1538,6 +1617,8 @@ export async function main(args: string[], options?: MainOptions) {
 			: resolveAttachModelFallbackMessage(summary, startupModel.modelFallbackMessage);
 
 		const interactiveMode = new InteractiveMode({
+			startupStartedAt: 0,
+			startupKind: isFreshDefaultSession ? "cold" : activeDaemonSessionSummary ? "warm_attach" : "resumed",
 			agentConnection,
 			daemonSocketPath,
 			uiServices: daemonUiServices,
@@ -1606,6 +1687,7 @@ export async function main(args: string[], options?: MainOptions) {
 			({ connection, summary } = await createDaemonClientConnection({
 				socketPath: daemonSocketPath,
 				config: defaultSessionConfig,
+				telemetrySettingsManager,
 				sessionPath: parsed.noSession ? undefined : sessionManager.getSessionFile(),
 				continueRecent: parsed.continue,
 				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession),
@@ -1614,7 +1696,9 @@ export async function main(args: string[], options?: MainOptions) {
 			}));
 		} catch (error) {
 			if (error instanceof SessionAlreadyActiveError || error instanceof DaemonSessionCreateError) {
+				reportTelemetryError({ error, component: "daemon", operation: "attach", stage: "startup" });
 				console.error(chalk.red(`Error: ${error.message}`));
+				await flushTelemetryErrorReporting();
 				process.exit(1);
 			}
 			throw error;
@@ -1623,6 +1707,7 @@ export async function main(args: string[], options?: MainOptions) {
 		reportDiagnostics(diagnostics);
 		if (diagnostics.some((diagnostic) => diagnostic.type === "error")) {
 			await connection.dispose();
+			await flushTelemetryErrorReporting();
 			process.exit(1);
 		}
 		if (!summary.model) {
@@ -1633,16 +1718,44 @@ export async function main(args: string[], options?: MainOptions) {
 
 		printTimings();
 		if (appMode === "rpc") {
-			return await runRpcModeWithConnection(connection);
+			const onReady = () =>
+				observeInstalledRuntimeReady({
+					agentDir,
+					settingsManager: telemetrySettingsManager,
+					cwd,
+					readyKind: "headless",
+					executionMode: appMode,
+				});
+			return await runRpcModeWithConnection(connection, { onReady });
 		}
 		if (appMode === "acp") {
-			return await runAcpModeWithConnection(connection);
+			const onReady = () =>
+				observeInstalledRuntimeReady({
+					agentDir,
+					settingsManager: telemetrySettingsManager,
+					cwd,
+					readyKind: "headless",
+					executionMode: appMode,
+				});
+			return await runAcpModeWithConnection(connection, { onReady });
 		}
+		const onReady =
+			appMode === "print" || appMode === "json"
+				? () =>
+						observeInstalledRuntimeReady({
+							agentDir,
+							settingsManager: telemetrySettingsManager,
+							cwd,
+							readyKind: "headless",
+							executionMode: appMode,
+						})
+				: undefined;
 		const exitCode = await runPrintModeWithConnection(connection, {
 			mode: toPrintOutputMode(appMode),
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			onReady,
 		});
 		stopThemeWatcher();
 		restoreStdout();
@@ -1662,7 +1775,9 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 	} catch (error) {
 		if (error instanceof SessionAlreadyActiveError) {
+			reportTelemetryError({ error, component: "session", operation: "load", stage: "startup" });
 			console.error(chalk.red(`Error: ${error.message}`));
+			await flushTelemetryErrorReporting();
 			process.exit(1);
 		}
 		throw error;
@@ -1702,6 +1817,7 @@ export async function main(args: string[], options?: MainOptions) {
 	time("resolveModelScope");
 	reportDiagnostics(runtime.diagnostics);
 	if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+		await flushTelemetryErrorReporting();
 		process.exit(1);
 	}
 	time("createAgentSession");
@@ -1713,10 +1829,26 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime);
+		const onReady = () =>
+			observeInstalledRuntimeReady({
+				agentDir,
+				cwd,
+				settingsManager,
+				readyKind: "headless",
+				executionMode: appMode,
+			});
+		await runRpcMode(runtime, { onReady });
 	} else if (appMode === "acp") {
 		printTimings();
-		await runAcpMode(runtime);
+		const onReady = () =>
+			observeInstalledRuntimeReady({
+				agentDir,
+				cwd,
+				settingsManager,
+				readyKind: "headless",
+				executionMode: appMode,
+			});
+		await runAcpMode(runtime, { onReady });
 	} else if (appMode === "interactive") {
 		if (explicitAgentsView || parsed.resume === true) {
 			console.error(chalk.yellow("Warning: the agents view needs the daemon; opening a normal chat instead"));
@@ -1732,6 +1864,8 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		const interactiveMode = new InteractiveMode({
+			startupStartedAt: 0,
+			startupKind: parsed.resume || parsed.continue || parsed.fork ? "resumed" : "cold",
 			agentConnection: new InProcessAgentConnection(runtime),
 			localSessionHost: createInteractiveModeLocalSessionHost(runtime),
 			promptStashStore: new ClientPromptStashStore(),
@@ -1764,11 +1898,23 @@ export async function main(args: string[], options?: MainOptions) {
 		await interactiveMode.run();
 	} else {
 		printTimings();
+		const onReady =
+			appMode === "print" || appMode === "json"
+				? () =>
+						observeInstalledRuntimeReady({
+							agentDir,
+							cwd,
+							settingsManager,
+							readyKind: "headless",
+							executionMode: appMode,
+						})
+				: undefined;
 		const exitCode = await runPrintMode(runtime, {
 			mode: toPrintOutputMode(appMode),
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			onReady,
 		});
 		stopThemeWatcher();
 		restoreStdout();

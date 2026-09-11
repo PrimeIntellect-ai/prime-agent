@@ -270,6 +270,7 @@ export type ResolvedRequestAuth =
 			ok: true;
 			apiKey?: string;
 			headers?: Record<string, string>;
+			authSource?: AuthStatus["source"];
 	  }
 	| {
 			ok: false;
@@ -1477,6 +1478,7 @@ export class ModelRegistry {
 			return {
 				ok: true,
 				apiKey,
+				authSource: apiKey === undefined ? undefined : authSourceToken?.source,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
 			};
 		} catch (error) {

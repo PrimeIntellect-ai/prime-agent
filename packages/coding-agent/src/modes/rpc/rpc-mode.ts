@@ -4,6 +4,7 @@
 
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import { reportTelemetryError, withTelemetryErrorContext } from "../../core/telemetry-errors.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {
@@ -31,22 +32,36 @@ export type {
 	RpcSessionState,
 } from "./rpc-types.js";
 
-interface RpcModeConnectionOptions {
+export interface RpcModeLifecycleOptions {
+	onReady?: () => Promise<void>;
+}
+
+interface RpcModeConnectionOptions extends RpcModeLifecycleOptions {
 	bindHeadlessExtensions?: (options: {
 		uiContext: ReturnType<typeof createRpcExtensionUiBridge>["uiContext"];
 		shutdownHandler: () => void;
 	}) => Promise<void>;
 }
 
-export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runRpcMode(
+	runtimeHost: AgentSessionRuntime,
+	options: RpcModeLifecycleOptions = {},
+): Promise<never> {
 	const connection = new InProcessAgentConnection(runtimeHost);
-	return runRpcModeWithConnectionInternal(connection, {
-		bindHeadlessExtensions: (options) => connection.bindHeadlessExtensions(options),
-	});
+	const run = () =>
+		runRpcModeWithConnectionInternal(connection, {
+			...options,
+			bindHeadlessExtensions: (options) => connection.bindHeadlessExtensions(options),
+		});
+	const context = runtimeHost.services?.telemetryErrorContext;
+	return context ? withTelemetryErrorContext({ ...context, executionMode: "rpc" }, run) : run();
 }
 
-export async function runRpcModeWithConnection(connection: AgentConnection): Promise<never> {
-	return runRpcModeWithConnectionInternal(connection);
+export async function runRpcModeWithConnection(
+	connection: AgentConnection,
+	options: RpcModeLifecycleOptions = {},
+): Promise<never> {
+	return runRpcModeWithConnectionInternal(connection, options);
 }
 
 async function runRpcModeWithConnectionInternal(
@@ -65,16 +80,25 @@ async function runRpcModeWithConnectionInternal(
 		(data === undefined
 			? { id, type: "response", command, success: true }
 			: { id, type: "response", command, success: true, data }) as RpcResponse;
-	const error = (id: string | undefined, command: string, message: string): RpcResponse => ({
-		id,
-		type: "response",
-		command,
-		success: false,
-		error: message,
-	});
+	const error = (id: string | undefined, command: string, message: string, cause: unknown = message): RpcResponse => {
+		reportTelemetryError({
+			error: cause,
+			component: "rpc",
+			operation: command === "parse" ? "parse" : "execute",
+			stage: "background",
+		});
+		return {
+			id,
+			type: "response",
+			command,
+			success: false,
+			error: message,
+		};
+	};
 
 	let shutdownRequested = false;
 	let shuttingDown = false;
+	let ready: Promise<void> | undefined;
 	let detachInput = () => {};
 	let inputEnded = false;
 	let promptResponsePending = false;
@@ -133,6 +157,12 @@ async function runRpcModeWithConnectionInternal(
 			return;
 		}
 		if (event.type === "extension_error") {
+			reportTelemetryError({
+				error: event.error,
+				component: "extensions",
+				operation: "execute",
+				stage: "background",
+			});
 			outputConnectionEvent({
 				type: "extension_error",
 				extensionPath: event.extensionPath,
@@ -171,6 +201,8 @@ async function runRpcModeWithConnectionInternal(
 			return;
 		}
 		if (event.type === "closed") {
+			if (event.error)
+				reportTelemetryError({ error: event.error, component: "rpc", operation: "connect", stage: "background" });
 			void shutdown(event.error ? 1 : 0);
 		}
 	});
@@ -194,6 +226,7 @@ async function runRpcModeWithConnectionInternal(
 		process.stdin.pause();
 		await Promise.allSettled([...observations.keys()].map((activeSessionId) => stopObservation(activeSessionId)));
 		await connection.dispose();
+		await ready;
 		process.exit(exitCode);
 	}
 
@@ -449,6 +482,7 @@ async function runRpcModeWithConnectionInternal(
 					undefined,
 					"parse",
 					`Failed to parse command: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+					parseError,
 				),
 			);
 			return;
@@ -485,6 +519,7 @@ async function runRpcModeWithConnectionInternal(
 						command.id,
 						command.type,
 						commandError instanceof Error ? commandError.message : String(commandError),
+						commandError,
 					),
 				);
 			} finally {
@@ -548,6 +583,11 @@ async function runRpcModeWithConnectionInternal(
 			process.stdin.off("end", onInputEnd);
 		};
 	})();
+	try {
+		ready = options.onReady?.().catch(() => {});
+	} catch {
+		// Optional readiness reporting must not change RPC behavior.
+	}
 
 	return new Promise(() => {});
 }

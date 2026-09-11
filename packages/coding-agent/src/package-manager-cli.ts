@@ -48,6 +48,7 @@ import type { AgentSessionRuntimeMetadata } from "./core/agent-session-runtime.j
 import { type CustomMessage, isSessionSlashCommand } from "./core/messages.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
+import { beginInstallationTelemetry, type TelemetryInstallationAttempt } from "./core/telemetry-installation.js";
 import { DaemonClient, type DaemonHello } from "./modes/daemon/daemon-client.js";
 import {
 	DAEMON_PROTOCOL_VERSION,
@@ -438,9 +439,16 @@ function setSelfUpdateNoChangeExitCode(): void {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : undefined;
 }
 
-async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
+async function getSelfUpdatePlan(force: boolean, telemetry?: TelemetryInstallationAttempt): Promise<SelfUpdatePlan> {
+	telemetry?.stage("release_lookup", "started");
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION);
+		telemetry?.setTargetVersion(latestRelease?.version);
+		telemetry?.stage(
+			"release_lookup",
+			latestRelease ? "success" : "unavailable",
+			latestRelease ? undefined : "release_lookup_failed",
+		);
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
 		const installSpec = latestRelease?.installSpec ?? packageName;
 		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
@@ -452,7 +460,8 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 		) {
 			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}
-	} catch {
+	} catch (error) {
+		telemetry?.fail("release_lookup", error, "release_lookup_failed");
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
 	}
 
@@ -476,9 +485,11 @@ async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 				if (code === 0) {
 					resolve();
 				} else if (signal) {
-					reject(new Error(`${step.display} terminated by signal ${signal}`));
+					reject(Object.assign(new Error(`${step.display} terminated by signal ${signal}`), { signal }));
 				} else {
-					reject(new Error(`${step.display} exited with code ${code ?? "unknown"}`));
+					reject(
+						Object.assign(new Error(`${step.display} exited with code ${code ?? "unknown"}`), { exitCode: code }),
+					);
 				}
 			});
 		});
@@ -954,10 +965,12 @@ async function restoreNextTurnMessages(
 interface RestoreDaemonUpdateRestartSessionResult {
 	restored: boolean;
 	resumed: boolean;
+	incomplete: boolean;
 	failureMessage?: string;
 }
 
 interface RestoreDaemonUpdateRestartResult extends DaemonUpdateRestartCounts {
+	incompleteRestores: number;
 	failures: DaemonUpdateRestartFailure[];
 }
 
@@ -1001,7 +1014,7 @@ async function restoreDaemonUpdateRestartSession(
 	);
 	if (!createResponse.success) {
 		console.error(chalk.yellow(`Warning: could not restore ${session.sessionFile}: ${createResponse.error}`));
-		return { restored: false, resumed: false, failureMessage: createResponse.error };
+		return { restored: false, resumed: false, incomplete: false, failureMessage: createResponse.error };
 	}
 	const activeSessionId = readCreatedActiveSessionId(createResponse.data);
 	restoredActiveSessionIds.set(session.activeSessionId, activeSessionId);
@@ -1035,8 +1048,13 @@ async function restoreDaemonUpdateRestartSession(
 			);
 		}
 	}
-	await restoreNextTurnMessages(client, activeSessionId, session.sessionFile, session.queue.nextTurn);
-	if (!session.shouldResume) return { restored: true, resumed: false };
+	let incomplete = !(await restoreNextTurnMessages(
+		client,
+		activeSessionId,
+		session.sessionFile,
+		session.queue.nextTurn,
+	));
+	if (!session.shouldResume) return { restored: true, resumed: false, incomplete };
 
 	const needsContinuationPrompt =
 		session.wasStreaming ||
@@ -1055,6 +1073,7 @@ async function restoreDaemonUpdateRestartSession(
 		if (response.success) {
 			restoredQueuedWork = true;
 		} else {
+			incomplete = true;
 			console.error(
 				chalk.yellow(`Warning: could not restore queued actions for ${session.sessionFile}: ${response.error}`),
 			);
@@ -1077,6 +1096,7 @@ async function restoreDaemonUpdateRestartSession(
 			120000,
 		);
 		if (!promptResponse.success) {
+			incomplete = true;
 			console.error(chalk.yellow(`Warning: could not resume ${session.sessionFile}: ${promptResponse.error}`));
 		} else {
 			resumedSession = true;
@@ -1087,12 +1107,13 @@ async function restoreDaemonUpdateRestartSession(
 		if (response.success) {
 			resumedSession = true;
 		} else {
+			incomplete = true;
 			console.error(
 				chalk.yellow(`Warning: could not resume queued work for ${session.sessionFile}: ${response.error}`),
 			);
 		}
 	}
-	return { restored: true, resumed: resumedSession };
+	return { restored: true, resumed: resumedSession, incomplete };
 }
 
 async function restoreDaemonUpdateRestart(
@@ -1103,11 +1124,12 @@ async function restoreDaemonUpdateRestart(
 ): Promise<RestoreDaemonUpdateRestartResult> {
 	const restoredActiveSessionIds = new Map<string, string>();
 	if (manifest.sessions.length === 0) {
-		return { total: 0, restored: 0, resumed: 0, failed: 0, failures: [] };
+		return { total: 0, restored: 0, resumed: 0, failed: 0, incompleteRestores: 0, failures: [] };
 	}
 	const client = new DaemonClient(socketPath);
 	let restored = 0;
 	let resumed = 0;
+	const incompleteSessions = new Set<string>();
 	const failures: DaemonUpdateRestartFailure[] = [];
 	try {
 		await client.connect(10000);
@@ -1121,6 +1143,7 @@ async function restoreDaemonUpdateRestart(
 				);
 				if (result.restored) {
 					restored++;
+					if (result.incomplete) incompleteSessions.add(session.activeSessionId);
 				}
 				if (result.resumed) {
 					resumed++;
@@ -1141,6 +1164,7 @@ async function restoreDaemonUpdateRestart(
 				restored,
 				resumed,
 				failed: failures.length,
+				incompleteRestores: incompleteSessions.size,
 				failures: [...failures],
 			});
 		}
@@ -1156,6 +1180,7 @@ async function restoreDaemonUpdateRestart(
 		restored,
 		resumed,
 		failed: manifest.sessions.length - restored,
+		incompleteRestores: incompleteSessions.size,
 		failures,
 	};
 }
@@ -1249,6 +1274,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 			statusWriter.update({
 				phase: activeStatus.phase,
 				counts: activeStatus.counts,
+				incompleteRestores: activeStatus.incompleteRestores,
 				...(activeStatus.predecessor ? { predecessor: activeStatus.predecessor } : {}),
 				...(activeStatus.successor ? { successor: activeStatus.successor } : {}),
 				...(activeStatus.failures ? { failures: activeStatus.failures } : {}),
@@ -1259,8 +1285,8 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 		shutdownAdmission = await acquireDaemonShutdownAdmission();
 		const daemonProbe = await probeRunningDaemonSessions(options.socketPath);
 		const reportRestoreProgress = (progress: RestoreDaemonUpdateRestartResult) => {
-			const { failures, ...counts } = progress;
-			statusWriter.update({ counts, failures });
+			const { failures, incompleteRestores, ...counts } = progress;
+			statusWriter.update({ counts, failures, incompleteRestores });
 		};
 		let predecessor: DaemonUpdateRestartProcessIdentity | undefined;
 		if (daemonProbe.reachable) {
@@ -1307,10 +1333,11 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 								options.originActiveSessionId,
 								reportRestoreProgress,
 							);
-							const { failures: restoreFailures, ...counts } = restoreResult;
+							const { failures: restoreFailures, incompleteRestores, ...counts } = restoreResult;
 							clearPreparedDaemonUpdateRestartManifest(options.socketPath, options.agentDir);
 							statusWriter.update({
 								counts,
+								incompleteRestores,
 								...(restoreFailures.length > 0 ? { failures: restoreFailures } : {}),
 							});
 						} catch {
@@ -1347,6 +1374,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 
 		let counts: DaemonUpdateRestartCounts = { total: 0, restored: 0, resumed: 0, failed: 0 };
 		let failures: DaemonUpdateRestartFailure[] = [];
+		let incompleteRestores = 0;
 		if (manifest) {
 			const restoreResult = await restoreDaemonUpdateRestart(
 				options.socketPath,
@@ -1361,11 +1389,13 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 				failed: restoreResult.failed,
 			};
 			failures = restoreResult.failures;
+			incompleteRestores = restoreResult.incompleteRestores;
 			clearPreparedDaemonUpdateRestartManifest(options.socketPath, options.agentDir);
 		}
 		statusWriter.update({
 			phase: "complete",
 			counts,
+			incompleteRestores,
 			...(failures.length > 0 ? { failures } : {}),
 			message:
 				counts.failed > 0
@@ -1498,6 +1528,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 			process.stdout.write(chalk.dim(`${event.message}\n`));
 		}
 	});
+	let installation: TelemetryInstallationAttempt | undefined;
 
 	try {
 		switch (options.command) {
@@ -1565,8 +1596,10 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
+					installation = beginInstallationTelemetry({ agentDir, settingsManager, source: "cli", cwd });
+					const selfUpdatePlan = await getSelfUpdatePlan(options.force, installation);
 					if (!selfUpdatePlan.shouldRun) {
+						installation?.finish("skipped", "up_to_date");
 						setSelfUpdateNoChangeExitCode();
 						return true;
 					}
@@ -1577,6 +1610,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						selfUpdatePlan.packageName,
 					);
 					if (!selfUpdateCommand) {
+						installation?.finish("unavailable", "unsupported_install");
 						printSelfUpdateUnavailable(
 							selfUpdateNpmCommand,
 							selfUpdatePlan.installSpec,
@@ -1586,24 +1620,33 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						return true;
 					}
 					// Confirm before the install, since upgrading the daemon afterward stops and resumes busy work.
+					installation?.stage("requirements", "started");
 					const daemonSocketPath = resolveUpdateDaemonSocketPath(options.daemonSocketPath);
 					const daemonProbe = await probeRunningDaemonSessions(daemonSocketPath);
 					if (!(await confirmDaemonSessionLossBeforeUpdate(daemonProbe, options.force))) {
+						installation?.stage("requirements", "cancelled", "declined");
+						installation?.finish("cancelled", "declined");
 						if (process.stdin.isTTY) {
 							console.log(chalk.dim("Update cancelled."));
 						}
 						process.exitCode = 1;
 						return true;
 					}
+					installation?.stage("requirements", "success");
+					installation?.stage("package_install", "started");
 					try {
 						await runSelfUpdate(selfUpdateCommand);
 					} catch (error: unknown) {
+						installation?.fail("package_install", error, "install_failed");
+						installation?.finish("failed", "install_failed");
 						const message = error instanceof Error ? error.message : "Unknown package command error";
 						console.error(chalk.red(`Error: ${message}`));
 						printSelfUpdateFallback(selfUpdateCommand);
 						process.exitCode = 1;
 						return true;
 					}
+					installation?.installed();
+					installation?.finish("success");
 					const versionChange = selfUpdatePlan.targetVersion
 						? ` from v${VERSION} to v${selfUpdatePlan.targetVersion}`
 						: "";
@@ -1612,14 +1655,17 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						return true;
 					}
 					try {
+						installation?.stage("daemon_restart", "started");
 						const status = await launchDaemonUpdateRestartCoordinator({
 							socketPath: daemonSocketPath,
 							agentDir,
 							cwd,
 							originActiveSessionId: process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV],
 						});
+						installation?.restartResult(status);
 						reportDaemonUpdateRestartStatus(status);
 					} catch (error: unknown) {
+						installation?.fail("daemon_restart", error, "daemon_restart_failed");
 						console.error(
 							chalk.yellow(
 								`Warning: updated, but could not coordinate the daemon restart (${formatUnknownError(error)}).`,
@@ -1631,9 +1677,15 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 			}
 		}
 	} catch (error: unknown) {
+		installation?.fail("requirements", error, "unknown");
+		installation?.finish("failed", "unknown");
 		const message = error instanceof Error ? error.message : "Unknown package command error";
 		console.error(chalk.red(`Error: ${message}`));
 		process.exitCode = 1;
 		return true;
+	} finally {
+		await installation?.flush();
+		installation?.dispose();
 	}
+	return true;
 }

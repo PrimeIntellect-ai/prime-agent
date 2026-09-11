@@ -37,6 +37,7 @@ describe("classifyStreamFailure", () => {
 	test.each([
 		["overloaded_error", undefined, "overloaded"],
 		[undefined, 529, "overloaded"],
+		["authentication_error", 529, "overloaded"],
 		["rate_limit_error", undefined, "rate_limit"],
 		["usage_limit_reached", undefined, "rate_limit"],
 		["usage_not_included", 403, "rate_limit"],
@@ -52,9 +53,17 @@ describe("classifyStreamFailure", () => {
 		["permission_error", 403, "permission"],
 		["PermissionDeniedError", 403, "permission"],
 		[undefined, 403, "permission"],
+		["authentication_error", 403, "permission"],
+		["permission_error", undefined, "permission"],
 		["invalid_request_error", undefined, "invalid_request"],
 		["api_error", undefined, "server_error"],
+		["server_error", undefined, "server_error"],
+		["service_unavailable", undefined, "server_error"],
 		[undefined, 503, "server_error"],
+		["authentication_error", 503, "server_error"],
+		["authentication_error", 402, "invalid_request"],
+		["insufficient_funds", 402, "invalid_request"],
+		["insufficient_quota", 402, "invalid_request"],
 		["something_else", undefined, "unknown"],
 	])("classifies %s / %s as %s", (type, status, expected) => {
 		expect(classifyStreamFailure(type, status)).toBe(expected);
@@ -81,6 +90,18 @@ describe("streamFailureFromStopReason", () => {
 });
 
 describe("extractStreamFailureInfo", () => {
+	test("keeps a specific billing reason ahead of a generic authentication type", () => {
+		const error = Object.assign(new Error("Authenticated API key has insufficient funds"), {
+			status: 402,
+			error: { type: "authentication_error", code: "insufficient_funds" },
+		});
+		expect(extractStreamFailureInfo(error)).toMatchObject({
+			kind: "invalid_request",
+			providerErrorType: "insufficient_funds",
+			status: 402,
+		});
+	});
+
 	test("passes through StreamFailureError info", () => {
 		const info = { kind: "overloaded" as const, requestId: "req_1" };
 		expect(extractStreamFailureInfo(new StreamFailureError("x", info))).toBe(info);

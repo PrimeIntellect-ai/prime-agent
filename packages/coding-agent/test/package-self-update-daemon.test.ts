@@ -7,6 +7,7 @@ import {
 	acquireDaemonUpdateRestartCoordinator,
 	type DaemonUpdateRestartStatus,
 	DaemonUpdateRestartStatusWriter,
+	readDaemonUpdateRestartStatus,
 	waitForActiveDaemonUpdateRestartCoordinator,
 } from "../src/cli/daemon-update-restart.js";
 import {
@@ -156,6 +157,7 @@ const mockState = vi.hoisted(() => ({
 	helloWaitFailures: 0,
 	restoreActionFailures: 0,
 	restoreNextTurnFailures: 0,
+	resumeQueueFailures: 0,
 	socketPath: "",
 	successorProcessStartId: "replacement-start" as string | undefined,
 	successorSocketPath: undefined as string | undefined,
@@ -377,6 +379,10 @@ vi.mock("../src/modes/daemon/daemon-client.js", () => ({
 				mockState.restoreNextTurnFailures--;
 				return { success: false, error: "restore failed" };
 			}
+			if (request.type === "resume_queue" && mockState.resumeQueueFailures > 0) {
+				mockState.resumeQueueFailures--;
+				return { success: false, error: "resume failed" };
+			}
 			if (request.type === "prompt" && mockState.promptFailures > 0) {
 				mockState.promptFailures--;
 				return { success: false, error: "prompt failed" };
@@ -499,6 +505,7 @@ describe("self-update daemon restart", () => {
 		mockState.requestPayloads = [];
 		mockState.restoreActionFailures = 0;
 		mockState.restoreNextTurnFailures = 0;
+		mockState.resumeQueueFailures = 0;
 		mockState.spawnExitCodes = [];
 		mockState.shutdownResult = true;
 		mkdirSync(agentDir, { recursive: true });
@@ -655,47 +662,68 @@ describe("self-update daemon restart", () => {
 		}
 	});
 
-	it("waits for the active coordinator before a concurrent loser completes", async () => {
-		const activeStatusPath = join(agentDir, "active-status.json");
-		const activeStatus = new DaemonUpdateRestartStatusWriter(
-			activeStatusPath,
-			"active-request",
-			mockState.socketPath,
-		);
-		activeStatus.update({ phase: "preparing" });
-		const activeLease = await acquireDaemonUpdateRestartCoordinator({
-			requestId: "active-request",
-			socketPath: mockState.socketPath,
-			statusPath: activeStatusPath,
-		});
-		let settled = false;
-		try {
-			const loser = runDaemonUpdateRestartCoordinator({
+	it.each([undefined, 0, 1])(
+		"preserves active-coordinator restoration coverage %s for a concurrent follower",
+		async (incompleteRestores) => {
+			const activeStatusPath = join(agentDir, "active-status.json");
+			const activeStatus = new DaemonUpdateRestartStatusWriter(
+				activeStatusPath,
+				"active-request",
+				mockState.socketPath,
+			);
+			activeStatus.update({ phase: "preparing" });
+			const activeLease = await acquireDaemonUpdateRestartCoordinator({
+				requestId: "active-request",
 				socketPath: mockState.socketPath,
-				agentDir,
-				statusPath: join(agentDir, "loser-status.json"),
-			}).finally(() => {
-				settled = true;
+				statusPath: activeStatusPath,
 			});
+			let settled = false;
+			try {
+				const loser = runDaemonUpdateRestartCoordinator({
+					socketPath: mockState.socketPath,
+					agentDir,
+					statusPath: join(agentDir, "loser-status.json"),
+				}).finally(() => {
+					settled = true;
+				});
 
-			await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-			expect(settled).toBe(false);
-			activeStatus.update({
-				phase: "complete",
-				counts: { total: 1, restored: 1, resumed: 0, failed: 0 },
-				message: "active coordinator completed",
-			});
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+				expect(settled).toBe(false);
+				activeStatus.update({
+					phase: "complete",
+					counts: { total: 1, restored: 1, resumed: 0, failed: 0 },
+					message: "active coordinator completed",
+					incompleteRestores,
+				});
 
-			await expect(loser).resolves.toMatchObject({
-				phase: "complete",
-				counts: { total: 1, restored: 1, resumed: 0, failed: 0 },
-				message: "active coordinator completed",
-			});
-			expect(mockState.calls).not.toContain("probe-daemon");
-		} finally {
-			await activeLease.release();
-		}
-	});
+				await expect(loser).resolves.toMatchObject({
+					phase: "complete",
+					counts: { total: 1, restored: 1, resumed: 0, failed: 0 },
+					message: "active coordinator completed",
+					incompleteRestores,
+				});
+				expect(readDaemonUpdateRestartStatus(join(agentDir, "loser-status.json"))?.incompleteRestores).toBe(
+					incompleteRestores,
+				);
+				expect(mockState.calls).not.toContain("probe-daemon");
+			} finally {
+				await activeLease.release();
+			}
+		},
+	);
+
+	it.each([undefined, -1, 0.5, "private text", 2])(
+		"ignores unavailable or invalid optional restoration metadata %s",
+		(incompleteRestores) => {
+			const statusPath = join(agentDir, "optional-restoration.json");
+			const writer = new DaemonUpdateRestartStatusWriter(statusPath, "optional-restoration", mockState.socketPath);
+			writer.update({ phase: "complete", counts: { total: 1, restored: 1, resumed: 0, failed: 0 } });
+			writeFileSync(statusPath, JSON.stringify({ ...writer.current(), incompleteRestores }));
+			const status = readDaemonUpdateRestartStatus(statusPath);
+			expect(status).toMatchObject({ phase: "complete", counts: { total: 1, restored: 1, resumed: 0, failed: 0 } });
+			expect(status?.incompleteRestores).toBeUndefined();
+		},
+	);
 
 	it("returns a terminal status written immediately before coordinator exit", async () => {
 		const statusPath = join(agentDir, "exit-race-status.json");
@@ -871,6 +899,7 @@ describe("self-update daemon restart", () => {
 				counts: { total: 1, restored: 1, resumed: 0, failed: 0 },
 			});
 			expect(mockState.requestPayloads.map((request) => request.type)).toContain("restore_next_turn");
+			expect(mockState.lastCoordinatorStatus?.incompleteRestores).toBe(0);
 		} finally {
 			errorSpy.mockRestore();
 		}
@@ -1075,6 +1104,128 @@ describe("self-update daemon restart", () => {
 
 			expect(mockState.requestPayloads.some((request) => request.type === "restore_actions")).toBe(true);
 			expect(mockState.requestPayloads.some((request) => request.type === "prompt")).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+			logSpy.mockRestore();
+		}
+	});
+
+	it.each(["restore_next_turn", "restore_actions", "prompt", "resume_queue"])(
+		"reports a negative %s reply as incomplete restoration without changing legacy counts",
+		async (requestType) => {
+			mockState.prepareManifest = createAcceptedRecoveryManifest([
+				{ role: "custom", customType: "context", content: "private context", display: false, timestamp: 1 },
+			]);
+			const session = mockState.prepareManifest.sessions[0];
+			if (requestType === "restore_next_turn") {
+				mockState.restoreNextTurnFailures = 1;
+				session.shouldResume = false;
+			} else if (requestType === "restore_actions") mockState.restoreActionFailures = 1;
+			else if (requestType === "prompt") {
+				mockState.promptFailures = 1;
+				session.queue.actions.actions[0].payload.acceptedBeforeCompletion = false;
+			} else mockState.resumeQueueFailures = 1;
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			const progressSpy = vi.spyOn(DaemonUpdateRestartStatusWriter.prototype, "update");
+			try {
+				await performUpdateAndRunCoordinator();
+				expect(mockState.lastCoordinatorStatus).toMatchObject({
+					phase: "complete",
+					incompleteRestores: 1,
+					counts: {
+						total: 1,
+						restored: 1,
+						resumed: requestType === "restore_next_turn" || requestType === "resume_queue" ? 0 : 1,
+						failed: 0,
+					},
+				});
+				expect(
+					progressSpy.mock.calls.some(
+						([update]) =>
+							update.phase === undefined && update.incompleteRestores === 1 && update.counts?.failed === 0,
+					),
+				).toBe(true);
+				expect(
+					readDaemonUpdateRestartStatus(join(agentDir, "update-restarts", "test-status.json"))?.incompleteRestores,
+				).toBe(1);
+				expect(process.exitCode).toBeUndefined();
+				expect(errorSpy).toHaveBeenCalled();
+			} finally {
+				progressSpy.mockRestore();
+				errorSpy.mockRestore();
+				logSpy.mockRestore();
+			}
+		},
+	);
+
+	it("counts a recreated session only once when multiple restoration requests fail", async () => {
+		mockState.prepareManifest = createAcceptedRecoveryManifest([
+			{ role: "custom", customType: "context", content: "private context", display: false, timestamp: 1 },
+		]);
+		mockState.restoreNextTurnFailures = 1;
+		mockState.restoreActionFailures = 1;
+		mockState.promptFailures = 1;
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await performUpdateAndRunCoordinator();
+			expect(mockState.lastCoordinatorStatus).toMatchObject({
+				phase: "complete",
+				incompleteRestores: 1,
+				counts: { total: 1, restored: 1, resumed: 0, failed: 0 },
+			});
+			expect(errorSpy).toHaveBeenCalledTimes(3);
+		} finally {
+			errorSpy.mockRestore();
+			logSpy.mockRestore();
+		}
+	});
+
+	it.each(["restore_next_turn", "restore_actions", "prompt", "resume_queue"])(
+		"keeps thrown %s requests exclusively in the legacy failed count",
+		async (requestType) => {
+			mockState.prepareManifest = createAcceptedRecoveryManifest([
+				{ role: "custom", customType: "context", content: "private context", display: false, timestamp: 1 },
+			]);
+			const session = mockState.prepareManifest.sessions[0];
+			if (requestType === "prompt") session.queue.actions.actions[0].payload.acceptedBeforeCompletion = false;
+			if (requestType === "restore_actions") mockState.restoreNextTurnFailures = 1;
+			mockState.requestThrowTypes = [requestType];
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				await performUpdateAndRunCoordinator();
+				expect(mockState.lastCoordinatorStatus).toMatchObject({
+					phase: "complete",
+					incompleteRestores: 0,
+					counts: { total: 1, restored: 0, resumed: 0, failed: 1 },
+				});
+				expect(mockState.lastCoordinatorStatus?.failures).toEqual([
+					{ sessionFile: session.sessionFile, message: `${requestType} failed` },
+				]);
+				expect(process.exitCode).toBeUndefined();
+			} finally {
+				errorSpy.mockRestore();
+				logSpy.mockRestore();
+			}
+		},
+	);
+
+	it("retains incomplete restoration metadata when fallback restoration cannot stop the predecessor", async () => {
+		mockState.prepareManifest = createAcceptedRecoveryManifest();
+		mockState.restoreActionFailures = 1;
+		mockState.shutdownResult = false;
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await performUpdateAndRunCoordinator();
+			expect(mockState.lastCoordinatorStatus).toMatchObject({
+				phase: "failed",
+				incompleteRestores: 1,
+				counts: { total: 1, restored: 1, resumed: 1, failed: 0 },
+				message: expect.stringContaining("Could not stop the predecessor"),
+			});
 		} finally {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();

@@ -19,6 +19,7 @@ import {
 	getDaemonCommandCompatibilities,
 	isDaemonMutatingCommand,
 	meetsDaemonCommandCompatibility,
+	omitUnsupportedTelemetryInput,
 } from "./daemon-protocol.js";
 import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
 
@@ -56,6 +57,10 @@ interface PendingDaemonRequest {
 	recoverable: boolean;
 	/** Re-checked against the new hello before a reconnect replay. */
 	compatibilities: readonly DaemonCommandCompatibility[];
+	prepareReplay?: (hello: DaemonHello) => {
+		wireData: string;
+		compatibilities: readonly DaemonCommandCompatibility[];
+	};
 }
 
 function daemonEndpointDetails(socketPath: string): string {
@@ -339,6 +344,7 @@ export class DaemonClient {
 			);
 		}
 		const hello = this.helloMessage ?? (await this.waitForHello());
+		command = omitUnsupportedTelemetryInput(command, hello);
 		const compatibilities = getDaemonCommandCompatibilities(command);
 		const missingCompatibility = compatibilities.find(
 			(compatibility) => !meetsDaemonCommandCompatibility(hello, compatibility),
@@ -408,6 +414,18 @@ export class DaemonClient {
 				recoverable: options.recoverable !== false,
 				compatibilities,
 			};
+			if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.telemetryInput) {
+				pending.prepareReplay = (hello) => {
+					const compatible = omitUnsupportedTelemetryInput(fullCommand as DaemonCommand, hello);
+					const wire = publicEnvelopeProtocolVersion
+						? { ...(wireCommand as DaemonCommandEnvelope), command: compatible }
+						: compatible;
+					return {
+						wireData: serializeJsonLine(wire),
+						compatibilities: getDaemonCommandCompatibilities(compatible),
+					};
+				};
+			}
 			this.pendingRequests.set(id, pending);
 			this.armPendingRequestTimeout(id, pending);
 			this.socket!.write(wireData);
@@ -470,6 +488,11 @@ export class DaemonClient {
 						continue;
 					}
 					pending.awaitingReconnect = false;
+					if (pending.prepareReplay) {
+						const replay = pending.prepareReplay(message);
+						pending.wireData = replay.wireData;
+						pending.compatibilities = replay.compatibilities;
+					}
 					const missingCompatibility = pending.compatibilities.find(
 						(compatibility) => !meetsDaemonCommandCompatibility(message, compatibility),
 					);

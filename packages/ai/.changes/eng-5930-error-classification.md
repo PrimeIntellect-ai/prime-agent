@@ -1,0 +1,1 @@
+- Fixed structured billing and provider availability failures being classified as credential failures.

@@ -1,5 +1,6 @@
 import { type LogEntry, setLogSink, stringifyLogEntry } from "@earendil-works/pi-ai";
 import { appendRotatingLog, getAgentLogPath } from "../config.js";
+import { reportTelemetryLogEntry } from "./telemetry-errors.js";
 
 const AGENT_LOG_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -11,6 +12,7 @@ export function setLogContext(fields: Record<string, unknown>): void {
 }
 
 export function writeFileLogEntry(entry: LogEntry): void {
+	reportTelemetryLogEntry(entry);
 	appendRotatingLog(getAgentLogPath(), stringifyLogEntry({ ...entry, ...context }), AGENT_LOG_MAX_BYTES);
 }
 

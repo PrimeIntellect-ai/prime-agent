@@ -24,6 +24,7 @@ import {
 	parseSlashCommand,
 	resolveBuiltinSlashCommandName,
 } from "../../core/slash-commands.js";
+import { observeInstalledRuntimeReady } from "../../core/telemetry-installation.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
@@ -917,7 +918,15 @@ export class AgentsViewMode implements Component, Focusable {
 		}, WORKING_ICON_INTERVAL_MS);
 		this.animationTimer.unref?.();
 
-		return runPromise;
+		const installationReady = observeInstalledRuntimeReady({
+			agentDir: this.options.config.agentDir ?? getAgentDir(),
+			cwd: this.options.config.cwd ?? this.options.uiServices.getInitialCwd(),
+			settingsManager: this.options.uiServices.settingsManager,
+			telemetryDisabled: this.options.config.telemetryDisabled,
+			readyKind: "interactive",
+			executionMode: "interactive",
+		});
+		return runPromise.finally(() => installationReady);
 	}
 
 	handleInput(data: string): void {

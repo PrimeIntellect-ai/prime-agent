@@ -307,6 +307,8 @@ import {
 } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { classifyTelemetryError } from "./telemetry-error-classification.js";
+import { observeTelemetryAction, observeTelemetryInput, type TelemetryInputMetadata } from "./telemetry-input.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
@@ -549,6 +551,7 @@ export type SerializedBackgroundPlanResult =
 export type AutoRefineReviewer = (request: AutoRefineReviewRequest, signal?: AbortSignal) => Promise<AutoRefineReview>;
 
 export interface PromptOptions {
+	telemetryInput?: TelemetryInputMetadata;
 	expandPromptTemplates?: boolean;
 	images?: ImageContent[];
 	streamingBehavior?: "steer" | "followUp";
@@ -1246,7 +1249,9 @@ export class AgentSession {
 	private _agentEventQueue: Promise<void> = Promise.resolve();
 
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
-	private readonly _actionStore = new ActionStore<QueuedSessionAction>();
+	private readonly _actionStore = new ActionStore<QueuedSessionAction>((action, previousState) =>
+		observeTelemetryAction(this, action, previousState),
+	);
 	private _sessionInputPump: Promise<void> = Promise.resolve();
 	private _sessionInputPumpRequested = false;
 	// Invalidates preparation when a branch pause starts and finishes before its next await resumes.
@@ -3795,7 +3800,7 @@ export class AgentSession {
 		if (!message || message.stopReason !== "error" || !message.errorMessage) {
 			return;
 		}
-		if (!isLikelyAuthenticationError(message.errorMessage)) {
+		if (!isLikelyAuthenticationError(message.errorMessage, message)) {
 			return;
 		}
 		message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
@@ -5132,7 +5137,11 @@ export class AgentSession {
 		}
 	}
 
-	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+	private _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		return observeTelemetryInput(this, options?.telemetryInput, () => this._promptImpl(text, options));
+	}
+
+	private async _promptImpl(text: string, options?: InternalPromptOptions): Promise<void> {
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
@@ -11533,8 +11542,15 @@ export class AgentSession {
 
 	private _isConcreteProviderAuthFailure(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
-		// Only the provider's structured classification counts as an auth failure.
-		return this._getProviderStreamFailureKind(message) === "auth";
+		const { error_subtype: subtype, http_status: status } = classifyTelemetryError(message);
+		if (subtype === "credential_invalid" || subtype === "credential_expired" || subtype === "credential_missing") {
+			return true;
+		}
+		// A structured auth verdict still drives recovery when telemetry cannot identify the rejection reason.
+		return (
+			this._getProviderStreamFailureKind(message) === "auth" &&
+			(subtype === "authentication_rejected" || (subtype === "unknown" && status === null))
+		);
 	}
 
 	private _captureRetryAuthFailureSource(message: AssistantMessage): AuthSourceToken | undefined {

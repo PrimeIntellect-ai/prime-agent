@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { getDocsPath } from "../config.js";
+import { classifyTelemetryError } from "./telemetry-error-classification.js";
 
 const UNKNOWN_PROVIDER = "unknown";
 export const LOGIN_RECOVERY_MESSAGE = "Run /login to update credentials.";
@@ -44,7 +45,15 @@ export function formatAuthenticationFailedMessage(provider: string): string {
 	);
 }
 
-export function isLikelyAuthenticationError(message: string): boolean {
+export function isLikelyAuthenticationError(message: string, evidence?: unknown): boolean {
+	if (evidence !== undefined) {
+		const classification = classifyTelemetryError(evidence);
+		if (classification.classification_source !== "unknown") {
+			return ["credential_invalid", "credential_expired", "credential_missing"].includes(
+				classification.error_subtype,
+			);
+		}
+	}
 	return (
 		/\b(401|403)\b/i.test(message) ||
 		/unauthorized|forbidden|invalid[_ -]?api[_ -]?key|api key.*invalid/i.test(message) ||

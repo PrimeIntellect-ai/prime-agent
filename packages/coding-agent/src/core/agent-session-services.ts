@@ -20,6 +20,7 @@ import { semanticEdgeLedgerPath } from "./semantic-edges.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
+import { captureTelemetryError, type TelemetryErrorContext, withTelemetryErrorContext } from "./telemetry-errors.js";
 
 export interface AgentSessionRuntimeDiagnostic {
 	type: "info" | "warning" | "error";
@@ -90,6 +91,7 @@ export interface AgentSessionServices {
 	resourceLoader: ResourceLoader;
 	mcpManager: McpManager;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+	telemetryErrorContext?: TelemetryErrorContext;
 }
 
 function applyExtensionFlagValues(
@@ -145,8 +147,15 @@ export async function createAgentSessionServices(
 ): Promise<AgentSessionServices> {
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
-	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	const telemetryErrorContext: TelemetryErrorContext = {
+		agentDir,
+		settingsManager,
+		telemetryDisabled: options.telemetryDisabled,
+	};
+	const authStorage =
+		options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"), { telemetryErrorContext });
+	authStorage.setTelemetryErrorContext(telemetryErrorContext);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 
 	// MCP integrations: registers OAuth providers and gates the built-in
@@ -154,6 +163,7 @@ export async function createAgentSessionServices(
 	const mcpManager = new McpManager({
 		authStorage,
 		getUserServers: () => settingsManager.getGlobalMcpServers(),
+		telemetryErrorContext,
 	});
 	// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
 	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
@@ -178,7 +188,18 @@ export async function createAgentSessionServices(
 		settingsManager,
 		extraBuiltinSkillOverrides: () => mcpManager.getDisabledBuiltinSkillOverrides(),
 	});
-	await resourceLoader.reload();
+	try {
+		await withTelemetryErrorContext(telemetryErrorContext, () => resourceLoader.reload());
+	} catch (error) {
+		captureTelemetryError({
+			...telemetryErrorContext,
+			error,
+			component: "configuration",
+			operation: "load",
+			stage: "configuration",
+		});
+		throw error;
+	}
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	if (
@@ -189,15 +210,31 @@ export async function createAgentSessionServices(
 		diagnostics.push({
 			type: "info",
 			message:
-				"Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
+				"Prime Agent sends pseudonymous usage, timing, and error reports to Prime Intellect via PostHog by default. Error reports include codes, reviewed Prime Agent messages, and fixed system diagnostics. Prompts, responses, tool content, credentials, paths, logs, and stacks are excluded. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
 		});
 		settingsManager.setTelemetryNoticeShown(true);
 	}
 	const extensionsResult = resourceLoader.getExtensions();
+	for (const failure of extensionsResult.errors) {
+		captureTelemetryError({
+			...telemetryErrorContext,
+			error: failure.error,
+			component: "extensions",
+			operation: "load",
+			stage: "configuration",
+		});
+	}
 	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
 		try {
 			modelRegistry.registerProvider(name, config);
 		} catch (error) {
+			captureTelemetryError({
+				...telemetryErrorContext,
+				error,
+				component: "extensions",
+				operation: "load",
+				stage: "configuration",
+			});
 			const message = error instanceof Error ? error.message : String(error);
 			diagnostics.push({
 				type: "error",
@@ -217,12 +254,21 @@ export async function createAgentSessionServices(
 		resourceLoader,
 		mcpManager,
 		diagnostics,
+		telemetryErrorContext,
 	};
 }
 
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
+	const telemetryErrorContext: TelemetryErrorContext = {
+		...options.services.telemetryErrorContext,
+		agentDir: options.services.agentDir,
+		settingsManager: options.services.settingsManager,
+		executionMode: options.executionMode,
+		telemetryDisabled: options.telemetryDisabled ?? options.services.telemetryErrorContext?.telemetryDisabled,
+	};
+	options.services.authStorage.setTelemetryErrorContext(telemetryErrorContext);
 	installAgentTraceUpload(options.sessionManager, {
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
@@ -231,44 +277,46 @@ export async function createAgentSessionFromServices(
 			sessionArtifactDir: options.sessionManager.getSessionArtifactDir(),
 		}),
 	});
-	const result = await createAgentSession({
-		cwd: options.services.cwd,
-		agentDir: options.services.agentDir,
-		authStorage: options.services.authStorage,
-		settingsManager: options.services.settingsManager,
-		modelRegistry: options.services.modelRegistry,
-		resourceLoader: options.services.resourceLoader,
-		mcpManager: options.services.mcpManager,
-		sessionManager: options.sessionManager,
-		model: options.model,
-		thinkingLevel: options.thinkingLevel,
-		serviceTier: options.serviceTier,
-		scopedModels: options.scopedModels,
-		tools: options.tools,
-		noTools: options.noTools,
-		customTools: options.customTools,
-		initialActiveToolNames: options.initialActiveToolNames,
-		allowedToolNames: options.allowedToolNames,
-		includeGoals: options.includeGoals,
-		includeCompactSkill: options.includeCompactSkill,
-		agentMessageController: options.agentMessageController,
-		agentObserveController: options.agentObserveController,
-		rlmDepth: options.rlmDepth,
-		rlmMaxDepth: options.rlmMaxDepth,
-		rlmSessionDir: options.rlmSessionDir,
-		rlmParentNodeId: options.rlmParentNodeId,
-		rlmParentAgent: options.rlmParentAgent,
-		semanticParentSessionId: options.semanticParentSessionId,
-		semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
-		subagentRuntimeHost: options.subagentRuntimeHost,
-		rlmHeartbeatController: options.rlmHeartbeatController,
-		sessionStartEvent: options.sessionStartEvent,
-		prewarmIpythonKernel: options.prewarmIpythonKernel,
-		autonomous: options.autonomous,
-		serializedRefine: options.serializedRefine,
-		initialGoal: options.initialGoal,
-	});
-	if (result.session.rlmDepth === 0 && !options.telemetryDisabled) {
+	const result = await withTelemetryErrorContext(telemetryErrorContext, () =>
+		createAgentSession({
+			cwd: options.services.cwd,
+			agentDir: options.services.agentDir,
+			authStorage: options.services.authStorage,
+			settingsManager: options.services.settingsManager,
+			modelRegistry: options.services.modelRegistry,
+			resourceLoader: options.services.resourceLoader,
+			mcpManager: options.services.mcpManager,
+			sessionManager: options.sessionManager,
+			model: options.model,
+			thinkingLevel: options.thinkingLevel,
+			serviceTier: options.serviceTier,
+			scopedModels: options.scopedModels,
+			tools: options.tools,
+			noTools: options.noTools,
+			customTools: options.customTools,
+			initialActiveToolNames: options.initialActiveToolNames,
+			allowedToolNames: options.allowedToolNames,
+			includeGoals: options.includeGoals,
+			includeCompactSkill: options.includeCompactSkill,
+			agentMessageController: options.agentMessageController,
+			agentObserveController: options.agentObserveController,
+			rlmDepth: options.rlmDepth,
+			rlmMaxDepth: options.rlmMaxDepth,
+			rlmSessionDir: options.rlmSessionDir,
+			rlmParentNodeId: options.rlmParentNodeId,
+			rlmParentAgent: options.rlmParentAgent,
+			semanticParentSessionId: options.semanticParentSessionId,
+			semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
+			subagentRuntimeHost: options.subagentRuntimeHost,
+			rlmHeartbeatController: options.rlmHeartbeatController,
+			sessionStartEvent: options.sessionStartEvent,
+			prewarmIpythonKernel: options.prewarmIpythonKernel,
+			autonomous: options.autonomous,
+			serializedRefine: options.serializedRefine,
+			initialGoal: options.initialGoal,
+		}),
+	);
+	if (result.session.rlmDepth === 0 && !telemetryErrorContext.telemetryDisabled) {
 		installAgentTelemetry(result.session, {
 			agentDir: options.services.agentDir,
 			settingsManager: options.services.settingsManager,
