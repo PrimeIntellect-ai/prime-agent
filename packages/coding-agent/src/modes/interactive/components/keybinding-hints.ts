@@ -78,7 +78,7 @@ export function rawKeyHint(key: string, description: string): string {
 }
 
 export function formatConversationDetailStatus(allOutput: boolean, details: boolean): string {
-	const label = allOutput ? "All output" : details ? "Details" : "Collapsed";
+	const label = allOutput ? "Expanded" : details ? "Details" : "Collapsed";
 	const key = keyText("app.tools.expand", { primaryOnly: true });
 	return `${label} mode${key ? ` (${key} to ${allOutput ? "collapse" : "expand"})` : ""}`;
 }

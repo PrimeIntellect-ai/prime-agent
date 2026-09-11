@@ -45,7 +45,7 @@ describe("conversation detail status", () => {
 		for (const expected of [
 			"Collapsed mode (Ctrl+O to expand)",
 			"Details mode (Ctrl+O to expand)",
-			"All output mode (Ctrl+O to collapse)",
+			"Expanded mode (Ctrl+O to collapse)",
 			"Collapsed mode (Ctrl+O to expand)",
 		]) {
 			expect(mode.getPromptContextLabel(120)).toBe(theme.fg("dim", expected));
@@ -61,17 +61,17 @@ describe("conversation detail status", () => {
 		setKeybindings(new KeybindingsManager({ "app.tools.expand": ["ctrl+e", "alt+e"] }));
 		expect(formatConversationDetailStatus(false, false)).toBe("Collapsed mode (Ctrl+E to expand)");
 		expect(formatConversationDetailStatus(false, true)).toBe("Details mode (Ctrl+E to expand)");
-		expect(formatConversationDetailStatus(true, true)).toBe("All output mode (Ctrl+E to collapse)");
+		expect(formatConversationDetailStatus(true, true)).toBe("Expanded mode (Ctrl+E to collapse)");
 		setKeybindings(new KeybindingsManager({ "app.tools.expand": [] }));
 		expect(formatConversationDetailStatus(false, false)).toBe("Collapsed mode");
 		expect(formatConversationDetailStatus(false, true)).toBe("Details mode");
-		expect(formatConversationDetailStatus(true, true)).toBe("All output mode");
+		expect(formatConversationDetailStatus(true, true)).toBe("Expanded mode");
 	});
 
 	it("reflects extension expansion setters", () => {
 		const mode = createMode();
 		mode.setToolsExpanded(true);
-		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("All output mode (Ctrl+O to collapse)");
+		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("Expanded mode (Ctrl+O to collapse)");
 		mode.setToolsExpanded(false);
 		expect(stripAnsi(mode.getPromptContextLabel(120)!)).toBe("Collapsed mode (Ctrl+O to expand)");
 	});
