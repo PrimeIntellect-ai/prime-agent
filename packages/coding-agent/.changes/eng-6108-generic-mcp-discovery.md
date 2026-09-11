@@ -1,0 +1,3 @@
+- Added a bundled `mcp` skill that teaches catalog search, connection checks, schema inspection, generic tool calls, and error handling for any MCP service.
+- Added discovery APIs to the pre-imported `mcp` module: `list_plugins`, `search_plugins`, `list_connections`, `search_tools`, and `describe_tool`, with bounded pages, cursor-safe tool discovery, and no credentials in inventory results.
+- Removed the bespoke Linear and Notion Python integration packages; those services now use the generic `mcp` module and connection records like every other service.
