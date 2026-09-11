@@ -58,15 +58,6 @@ export function sanitizeMessageHeaderValue(value: string): string {
 	return value.replace(/[\s,:[\]]+/g, " ").trim();
 }
 
-/**
- * Names and other metadata interpolated into a `[<kind> ...]` header line must not
- * carry the characters that delimit the header itself (brackets, newlines, commas,
- * or the relationship separator ":").
- */
-export function sanitizeMessageHeaderValue(value: string): string {
-	return value.replace(/[\s,:[\]]+/g, " ").trim();
-}
-
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
 	commandEntryId?: string;
