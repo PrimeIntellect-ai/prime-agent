@@ -52,9 +52,10 @@ and other missing tools. Their setup time and disk usage are outside the install
 - **Installation:** the normal installer and Python/tool bootstrap in three new user homes, each
   with empty npm and uv caches. Unpublished candidate release tarballs are served over loopback;
   npm/Python dependencies use the real network. This does not measure public release-CDN latency.
-- **Compressed artifacts:** total bytes of the four tarballs produced by the release packer, using
-  an identical synthetic version and download origin for both sides. External registry dependencies
-  are not included in these tarballs.
+- **Compressed artifacts:** total bytes of the four npm tarballs and, for revisions with compiled
+  release support, the Linux x64 archive. Both sides use the same synthetic version and download
+  origin. This includes the npm fallback packages, but excludes other platforms and external registry
+  dependencies. The result records which formats were built.
 - **Installed footprint:** apparent bytes added after first use in the first fresh home, including stock Python,
   runtime, and tool assets; excluding download caches, session history, and logs. Shared system
   dependencies supplied by the base image and the fixture repository are excluded.
@@ -64,6 +65,11 @@ and other missing tools. Their setup time and disk usage are outside the install
   shared pages.
 
 Startup and memory use 10 trials per revision. Installation uses three; sizes are measured once.
+Compiled revisions provision pinned Bun tooling and build their Linux x64 archive during untimed
+setup. The installer selects its normal default from the available artifacts; the harness does not
+force Node or compiled mode. Loopback downloads use the installer's explicit test exception, while
+external downloads retain normal HTTPS checks. Harness changes must land on `main` before CI uses
+them, including when benchmarking the Bun migration stack.
 Stock tools, skills, daemon, persistence, and Python bootstrap remain enabled. Homes contain no
 credentials, extensions, MCP servers, or personal skills. The onboarding splash is marked as already
 shown before timing, so startup measures the editor rather than waiting for a person to sign in.
