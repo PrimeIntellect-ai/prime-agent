@@ -2694,9 +2694,8 @@ export class AgentsViewMode implements Component, Focusable {
 		const rightAction = selected?.kind === "subagent-summary" ? (selected.expanded ? "collapse" : "expand") : "open";
 		const hints = [
 			`${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate`,
-			`${keyText("tui.select.confirm")} ${rightAction}`,
+			`${keyText("tui.select.confirm")}/${keyText("app.agents.open")} ${rightAction}`,
 			`${keyText("app.agents.new")} new`,
-			`${keyText("app.agents.open")} ${rightAction}`,
 			this.scopeRootSummary ? `${keyText("app.agents.back")} parent` : undefined,
 		]
 			.filter((hint): hint is string => hint !== undefined)
