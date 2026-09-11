@@ -71,15 +71,24 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 }
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
+/**
+ * Tool-result summaries also keep the tail of the text. Tool output is
+ * tail-heavy: exit errors, stack traces, and log tails appear at the end,
+ * so a head-only cut would systematically drop the diagnostic content an
+ * agent most needs after compaction.
+ */
+const TOOL_RESULT_TAIL_CHARS = 500;
 
 /**
  * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
+ * Keeps the beginning and the end within the same total budget, marking
+ * the elided middle.
  */
-function truncateForSummary(text: string, maxChars: number): string {
+function truncateForSummary(text: string, maxChars: number, tailChars: number): string {
 	if (text.length <= maxChars) return text;
-	const truncatedChars = text.length - maxChars;
-	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+	const headChars = maxChars - tailChars;
+	const elided = text.length - headChars - tailChars;
+	return `${text.slice(0, headChars)}\n\n[... ${elided} characters truncated; first ${headChars} and last ${tailChars} kept ...]\n\n${text.slice(text.length - tailChars)}`;
 }
 
 /**
@@ -137,7 +146,7 @@ export function serializeConversation(messages: Message[]): string {
 				.map((c) => c.text)
 				.join("");
 			if (content) {
-				parts.push(`[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
+				parts.push(`[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_TAIL_CHARS)}`);
 			}
 		}
 	}

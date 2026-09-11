@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import { serializeConversation } from "../src/core/compaction/utils.js";
 
 describe("serializeConversation", () => {
-	it("should truncate long tool results", () => {
-		const longContent = "x".repeat(5000);
+	it("should truncate long tool results keeping head and tail", () => {
+		const head = "A".repeat(1500);
+		const middle = "B".repeat(3000);
+		const tail = "T".repeat(500);
+		const longContent = head + middle + tail;
 		const messages: Message[] = [
 			{
 				role: "toolResult",
@@ -19,9 +22,13 @@ describe("serializeConversation", () => {
 		const result = serializeConversation(messages);
 
 		expect(result).toContain("[Tool result]:");
-		expect(result).toContain("[... 3000 more characters truncated]");
-		expect(result).not.toContain("x".repeat(3000));
-		expect(result).toContain("x".repeat(2000));
+		// The head (setup/output context) survives...
+		expect(result).toContain(head);
+		// ...the tail survives (errors and log tails live at the end)...
+		expect(result).toContain(tail);
+		// ...and the marker records exactly how much was elided.
+		expect(result).toContain("[... 3000 characters truncated; first 1500 and last 500 kept ...]");
+		expect(result).not.toContain("B".repeat(10));
 	});
 
 	it("should not truncate short tool results", () => {
