@@ -635,18 +635,7 @@ function getParentKeys(summary: SessionSummary): string[] {
 	].filter((key): key is string => key !== undefined);
 }
 
-/** Direct-child linkage over getParentKeys, shared by the view tree and the chat subagents bar. */
-export function isDirectAgentChild(
-	child: SessionSummary,
-	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
-): boolean {
-	const parentKeys = new Set(getParentKeys(child));
-	if (parent.activeSessionId !== undefined && parentKeys.has(`active:${parent.activeSessionId}`)) return true;
-	if (parent.sessionId !== undefined && parentKeys.has(`session:${parent.sessionId}`)) return true;
-	return parent.sessionFile !== undefined && parentKeys.has(fileIdentity(parent.sessionFile));
-}
-
-// The parent side of isDirectAgentChild: the keys by which a session is referenced as a parent.
+// The parent side of getParentKeys: the keys by which a session is referenced as a parent.
 function parentIdentityKeys(summary: {
 	activeSessionId?: string | undefined;
 	sessionId?: string | undefined;

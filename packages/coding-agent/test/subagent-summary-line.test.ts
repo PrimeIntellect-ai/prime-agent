@@ -3,7 +3,6 @@ import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
-import { isDirectAgentChild } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import {
 	countRosterSubagentStatuses,
@@ -327,7 +326,6 @@ describe("SubagentSummaryLine", () => {
 			parentSessionId: "other-root",
 			rosterStatus: "running",
 		} as SessionSummary;
-		expect(isDirectAgentChild(rosterChild, { sessionId: "root-session" })).toBe(true);
 		expect(
 			countRosterSubagentStatuses(
 				[rosterChild, grandchild, greatGrandchild, archivedChild, archivedGrandchild, foreign],
