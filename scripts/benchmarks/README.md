@@ -1,8 +1,9 @@
 # PR performance benchmarks
 
-Each push to an open, vouched PR starts an informational Prime Agent benchmark. Multiple commits in
-one push produce one run for the final head. Draft PRs are included. A two-second debounce and
-per-PR cancellation avoid finishing obsolete runs. `workflow_dispatch` reruns an open PR by number.
+Each push to an open, vouched PR starts an informational Prime Agent benchmark, including PRs targeting
+another branch in a stack. Multiple commits in one push produce one run for the final head. Draft PRs
+are included. A two-second debounce and per-PR cancellation avoid finishing obsolete runs.
+`workflow_dispatch` reruns an open PR by number.
 Identical automatic requests reuse the completed comment when both SHAs, harness, and configuration
 match. Manual dispatch and GitHub reruns force fresh measurements. Unvouched authors
 receive a pending-trust comment; a maintainer can rerun after vouching.
@@ -10,6 +11,7 @@ receive a pending-trust comment; a maintainer can rerun after vouching.
 The controller resolves current `main` and the PR head to full SHAs, builds both in separate Prime
 sandboxes, and alternates their measurements. Both use the same trusted harness revision, image
 digest and resource allocation. No performance gate blocks merging.
+The baseline is always current `main`, not the PR's target branch or merge base.
 
 ## Enable in GitHub
 
@@ -20,6 +22,11 @@ No inference key, model configuration, or login is required.
 The workflows must first land on `main`: both `pull_request_target` and the completion listener run
 trusted default-branch code. Trigger `Prime Agent benchmarks` manually with an open PR number after
 configuring the sandbox secret. The first rollout should include a main-versus-main calibration.
+
+The request checks out the event's `GITHUB_SHA`, which GitHub resolves to the default-branch commit for
+[`pull_request_target`](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/),
+including stacked PRs. The benchmark job uses that exact harness SHA. Manual dispatch is allowed only
+from `main`.
 
 No credentials are injected into the sandboxes. The sandbox control key and GitHub token stay on the
 trusted controller; a separate publisher owns GitHub comment write permission. No PR checkout,

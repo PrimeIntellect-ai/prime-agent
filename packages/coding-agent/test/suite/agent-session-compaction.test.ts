@@ -129,7 +129,7 @@ describe("AgentSession compaction characterization", () => {
 			expect.objectContaining({
 				role: "custom",
 				customType: "ipython_state",
-				content: expect.stringContaining("were removed: large_text"),
+				content: expect.stringMatching(/^\[python-state\]\n\n.*were removed: large_text/s),
 			}),
 		);
 		expect(result.summary).toBe("summary from extension");
@@ -256,10 +256,8 @@ describe("AgentSession compaction characterization", () => {
 		expect((head as { summary: string }).summary).not.toContain("# Continual Harness State");
 		// Memories-first rendering in LLM context: digest preamble before the summary wrapper.
 		const text = getMessageText(convertToLlm([head!])[0]);
-		expect(text.indexOf("The persistent memories produced across this session so far:")).toBe(0);
-		expect(text.indexOf("# Continual Harness State")).toBeLessThan(
-			text.indexOf("was compacted into the following summary"),
-		);
+		expect(text.indexOf("[harness-digest]")).toBe(0);
+		expect(text.indexOf("# Continual Harness State")).toBeLessThan(text.indexOf("[compaction-summary]"));
 
 		// Update-merge path: the second compaction head carries the digest too.
 		harness.setResponses([

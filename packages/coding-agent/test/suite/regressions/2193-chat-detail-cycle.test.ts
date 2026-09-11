@@ -193,13 +193,13 @@ describe("conversation detail cycle", () => {
 				expect(text).toContain("Work before notification.");
 				expect(text).toContain("Work after notification.");
 				if (detail === "all") {
-					expect(text.match(/Shell message received\./g)).toHaveLength(1);
+					expect(text.match(/\[bash-done pid:42 exit:0\]/g)).toHaveLength(1);
 					for (const line of notice.content.split("\n").filter(Boolean)) expect(text).toContain(line);
 					const launch = text.indexOf("h = bash");
 					const work = text.indexOf("Work before notification.");
 					const output = text.indexOf("FULL_TOOL_OUTPUT");
 					const waiting = text.indexOf("Waiting for notification.");
-					const notification = text.indexOf("Shell message received.");
+					const notification = text.indexOf("[bash-done pid:42 exit:0]");
 					const after = text.indexOf("Work after notification.");
 					expect(launch).toBeGreaterThanOrEqual(0);
 					expect(work).toBeGreaterThan(launch);
@@ -208,15 +208,15 @@ describe("conversation detail cycle", () => {
 					expect(notification).toBeGreaterThan(waiting);
 					expect(after).toBeGreaterThan(notification);
 				} else {
-					expect(text).not.toContain("Shell message received.");
+					expect(text).not.toContain("[bash-done pid:42 exit:0]");
 					expect(text).not.toContain("Background shell command");
 				}
 				cycle(mode);
 			}
-			expect(render(mode)).not.toContain("Shell message received.");
+			expect(render(mode)).not.toContain("[bash-done pid:42 exit:0]");
 			cycle(mode);
 			cycle(mode);
-			expect(render(mode).match(/Shell message received\./g)).toHaveLength(1);
+			expect(render(mode).match(/\[bash-done pid:42 exit:0\]/g)).toHaveLength(1);
 		}
 		expect(JSON.stringify(context.messages)).toBe(source);
 		expect(readFileSync(sessionFile, "utf8")).toBe(savedTrace);

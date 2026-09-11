@@ -59,9 +59,7 @@ describe("#617 subagent terminal agent messages", () => {
 				childId: spawned.rlm_child_id,
 				sessionName: childSessionName,
 			},
-			content: expect.stringContaining(
-				`RLM child ${childSessionName} (${spawned.rlm_child_id}) completed without sending a reply`,
-			),
+			content: expect.stringContaining(`[child-exited: no-reply child:${childSessionName}]`),
 		});
 	});
 

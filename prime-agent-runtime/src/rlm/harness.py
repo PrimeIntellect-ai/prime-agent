@@ -4,7 +4,7 @@ The state model is intentionally small: it records prompt notes, memory,
 skills, subagent specs, and refinement events in the session-local harness
 store by default; pass ``global_=True`` for the cross-session global store.
 Execution still belongs to Prime Agent's TypeScript host and the existing
-``rlm.run`` recursion bridge.
+``rlm.spawn`` recursion bridge.
 """
 
 from __future__ import annotations
@@ -746,7 +746,7 @@ class HarnessState:
             "Call contract: installed Python skills use await <skill_import>(...) or a matching shell CLI; "
             "harness skill entries are Python REPL skills and must include a Python reference plus arguments. "
             "Spawn a subagent spec by composing a concise task prompt and calling "
-            "handle = await rlm('sub-task'); admission returns immediately with rlm_child_id, name, session_dir, "
+            "handle = await rlm.spawn('sub-task', name='worker'); admission returns immediately with rlm_child_id, name, session_dir, "
             "and model, never the child's answer. Results arrive only through explicit agent_message replies or "
             "files; children reply with await agent_message.send(message, receiver_role='parent'). Use "
             "await rlm.list_subagents() to recover direct child handles and await agent_message.send(..., "

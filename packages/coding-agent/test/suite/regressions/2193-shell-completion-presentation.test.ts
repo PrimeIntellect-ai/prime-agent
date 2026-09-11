@@ -105,7 +105,7 @@ describe("#2193 shell completion presentation", () => {
 		expect(render(live)).toBe(render(replay));
 		for (const line of notice.content.split("\n").filter(Boolean)) expect(render([live[1]!])).toContain(line);
 		expect(render([launch])).toContain("launch output");
-		expect(render([launch])).not.toContain("Shell message received.");
+		expect(render([launch])).not.toContain("[bash-done ");
 		expect(render([live[1]!])).toContain("pid 42");
 		expect(JSON.stringify(messages)).toBe(serialized);
 		expect(readFileSync(sessionFile, "utf8")).toBe(trace);
@@ -196,8 +196,8 @@ describe("#2193 shell completion presentation", () => {
 		expand(replay);
 		expand([launch, event]);
 		expect(render([replay[1]!])).toBe(render([launch]));
-		expect(render([launch])).not.toContain("Source: bash");
-		expect(render([event])).toContain("Source: bash");
+		expect(render([launch])).not.toContain("[bash-done ");
+		expect(render([event])).toContain("[bash-done ");
 		expect(JSON.stringify(messages)).toBe(serialized);
 	});
 	it("keeps ambiguous, failed, complex, or mismatched assignment launches standalone", () => {
@@ -266,8 +266,8 @@ describe("#2193 shell completion presentation", () => {
 		const secondNotice = { ...completion(), content: "second raw completion" };
 		const second = createShellCompletionComponent(secondNotice, [launch, first])!;
 		expand([launch, first, second]);
-		expect(render([launch])).not.toContain("Shell message received.");
-		expect(render([first])).toContain("Shell message received.");
+		expect(render([launch])).not.toContain("[bash-done ");
+		expect(render([first])).toContain("[bash-done ");
 		expect(render([second])).toContain("second raw completion");
 	});
 	it("matches escaped literal commands exactly and recognizes already finished handles", () => {
@@ -298,10 +298,10 @@ describe("#2193 shell completion presentation", () => {
 		const event = createShellCompletionComponent(notice, [launch])!;
 		expand([launch, event]);
 		expect(render([launch, event])).toContain("unknown time");
-		expect(render([launch])).not.toContain("Source: bash");
-		expect(render([event])).toContain("Source: bash");
+		expect(render([launch])).not.toContain("[bash-done ");
+		expect(render([event])).toContain("[bash-done ");
 		const malformed = createShellCompletionComponent({ ...notice, details: { pid: "42" } }, [])!;
 		expand([malformed]);
-		expect(render([malformed])).toContain("Source: bash");
+		expect(render([malformed])).toContain("[bash-done ");
 	});
 });

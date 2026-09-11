@@ -427,7 +427,7 @@ describe("ENG-4649 subagent model selection", () => {
 		});
 		try {
 			await expect(harness.session.runRlmChild("bad type", { model: 42 })).rejects.toThrow(
-				"rlm.run model must be a string",
+				"rlm.spawn model must be a string",
 			);
 			await expect(
 				harness.session.runRlmChild("unknown model", { model: `${provider}/missing-model` }),
