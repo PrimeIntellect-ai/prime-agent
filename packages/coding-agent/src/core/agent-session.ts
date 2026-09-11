@@ -8432,7 +8432,9 @@ export class AgentSession {
 		const terms = new Map<string, number>();
 		const addText = (text: string | undefined, weight: number) => {
 			if (!text) return;
-			for (const raw of text.toLowerCase().split(/[^a-z0-9]+/)) {
+			// ASCII word runs and non-ASCII runs (CJK and other scripts) both
+			// become terms, so persisted non-Latin content stays searchable.
+			for (const raw of text.toLowerCase().match(/[a-z0-9]+|[^\s\p{ASCII}]+/gu) ?? []) {
 				if (raw.length < 4) continue;
 				if (terms.size >= 48 && !terms.has(raw)) return;
 				if (!terms.has(raw)) terms.set(raw, weight);

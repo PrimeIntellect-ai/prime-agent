@@ -1060,6 +1060,14 @@ class HarnessSearchTest(unittest.TestCase):
             limited = state.search("worktree", kind="prompt", limit=1)
             self.assertEqual(len(limited), 1)
 
+    def test_search_matches_non_ascii_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tokyo note", "Tokyo meeting notes.", id="tokyo")
+
+            results = state.search("Tokyo meeting")
+            self.assertEqual([entry.id for entry in results], ["tokyo"])
+
     def test_search_drops_zero_score_entries_and_validates_args(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")

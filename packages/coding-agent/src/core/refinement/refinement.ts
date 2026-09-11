@@ -483,16 +483,17 @@ export function scoreHarnessEntryForQuery(entry: HarnessEntry, terms: HarnessQue
 	if (terms.size === 0) return 0;
 	const title = searchableField(entry.title);
 	const content = searchableField(entry.content);
-	const path = searchableField(entry.path);
-	const id = searchableField(entry.id);
+	const identifier = `${searchableField(entry.path)} ${searchableField(entry.id)}`;
 	let score = 0;
 	for (const [term, weight] of terms) {
 		// One match per field counts once per term: coverage over distinct
-		// fields matters more than repetition inside a single field.
+		// fields matters more than repetition inside a single field. Path
+		// and id form a single identifier slot: the id is often embedded in
+		// the path, so matching both is one signal, not two.
 		let fields = 0;
 		if (title.includes(term)) fields += 1;
 		if (content.includes(term)) fields += 1;
-		if (path.includes(term) || id.includes(term)) fields += 1;
+		if (identifier.includes(term)) fields += 1;
 		if (fields > 0) score += weight * (1 + (fields - 1) * 0.5);
 	}
 	return score;

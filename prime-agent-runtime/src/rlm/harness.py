@@ -808,7 +808,9 @@ class HarnessState:
             raise TypeError(f"query must be str, got {type(query).__name__}")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise TypeError("limit must be a positive int")
-        terms = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) >= 3]
+        # ASCII word runs and non-ASCII runs (CJK and other scripts) both
+        # become terms, so persisted non-Latin content stays searchable.
+        terms = re.findall(r"[a-z0-9]{3,}|[^\sa-z0-9]+", query.lower())
         if not terms:
             return []
 
