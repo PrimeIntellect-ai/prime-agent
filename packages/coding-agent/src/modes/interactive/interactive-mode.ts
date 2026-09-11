@@ -4071,6 +4071,8 @@ export class InteractiveMode {
 			void this.handleDebugCommand();
 		};
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
+		this.defaultEditor.onAction("app.model.cycleForward", () => this.handleModelCycle("forward"));
+		this.defaultEditor.onAction("app.model.cycleBackward", () => this.handleModelCycle("backward"));
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
@@ -7953,6 +7955,21 @@ export class InteractiveMode {
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
 				return false;
+			});
+	}
+
+	private handleModelCycle(direction: "forward" | "backward"): void {
+		void this.agentConnection
+			.cycleModel(direction)
+			.then((result) => {
+				if (!result) {
+					this.showStatus("No scoped models available to cycle (see /scoped-models)");
+					return;
+				}
+				this.showStatus(`Model: ${result.model.provider}/${result.model.id}`);
+			})
+			.catch((error) => {
+				this.showError(error instanceof Error ? error.message : String(error));
 			});
 	}
 

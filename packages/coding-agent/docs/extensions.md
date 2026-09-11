@@ -327,7 +327,7 @@ user sends another prompt ◄─────────────────
   ├─► session_before_tree (can cancel or customize)
   └─► session_tree
 
-/model or Ctrl+P (model selection/cycling)
+/model or Alt+M (model selection/cycling)
   ├─► thinking_level_select (if model change changes/clamps thinking level)
   └─► model_select
 
@@ -669,7 +669,7 @@ Header availability depends on provider and transport. Providers that abstract H
 
 #### model_select
 
-Fired when the model changes via `/model` command, model cycling (`Ctrl+P`), or session restore.
+Fired when the model changes via `/model` command, model cycling (`Alt+M`), or session restore.
 
 ```typescript
 pi.on("model_select", async (event, ctx) => {
