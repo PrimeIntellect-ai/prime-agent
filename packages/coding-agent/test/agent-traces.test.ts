@@ -149,11 +149,8 @@ describe("agent trace upload", () => {
 		delete process.env.PRIME_API_BASE_URL;
 	});
 
-	// Fire-and-forget trace uploads keep writing under ENV_AGENT_DIR after the
-	// test body observes its effect and returns; a synchronous rmSync in
-	// afterEach races those straggler writes and failed two unrelated PRs'
-	// CI with ENOTEMPTY. Flush the async queue first, then retry the removal
-	// so a straggler window cannot fail the suite.
+	// Fire-and-forget trace uploads can still be writing under ENV_AGENT_DIR
+	// when the test body returns, so cleanup flushes them and retries removal.
 	async function flushAsyncWork(): Promise<void> {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		await new Promise<void>((resolve) => setImmediate(resolve));
@@ -175,6 +172,11 @@ describe("agent trace upload", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		vi.useRealTimers();
+		// Flush straggler uploads and remove the temp dir while ENV_AGENT_DIR
+		// still points at it, so late writes land inside the dir being removed.
+		if (tempDir && existsSync(tempDir)) {
+			await rmTempDirSafely(tempDir);
+		}
 		if (originalAgentDir === undefined) {
 			delete process.env[ENV_AGENT_DIR];
 		} else {
@@ -199,9 +201,6 @@ describe("agent trace upload", () => {
 			delete process.env.PRIME_API_BASE_URL;
 		} else {
 			process.env.PRIME_API_BASE_URL = originalPrimeBaseUrl;
-		}
-		if (tempDir && existsSync(tempDir)) {
-			await rmTempDirSafely(tempDir);
 		}
 	});
 
