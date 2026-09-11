@@ -11,9 +11,7 @@ export interface ObservedTelemetryInput {
 }
 
 interface InputState extends ObservedTelemetryInput {
-	queuedAt?: number;
-	preparingAt?: number;
-	dispatchedAt?: number;
+	phase?: { kind: "queueWaitMs" | "preparationMs"; startedAt: number };
 	hasAction: boolean;
 	terminal: boolean;
 }
@@ -63,20 +61,13 @@ export class TelemetryInputTracker {
 		});
 	}
 
-	private finishQueue(input: InputState, at: number, outcome = "success"): void {
-		if (input.queuedAt === undefined) return;
-		const duration = Math.max(0, at - input.queuedAt);
-		input.queueWaitMs = (input.queueWaitMs ?? 0) + duration;
-		input.queuedAt = undefined;
-		this.timing(input, "queue_wait", duration, outcome);
-	}
-
-	private finishPreparation(input: InputState, at: number, outcome = "success"): void {
-		if (input.preparingAt === undefined) return;
-		const duration = Math.max(0, at - input.preparingAt);
-		input.preparationMs = (input.preparationMs ?? 0) + duration;
-		input.preparingAt = undefined;
-		this.timing(input, "local_preparation", duration, outcome);
+	private finishPhase(input: InputState, at: number, outcome = "success"): void {
+		if (!input.phase) return;
+		const { kind, startedAt } = input.phase;
+		const duration = Math.max(0, at - startedAt);
+		input[kind] = (input[kind] ?? 0) + duration;
+		input.phase = undefined;
+		this.timing(input, kind === "queueWaitMs" ? "queue_wait" : "local_preparation", duration, outcome);
 	}
 
 	observe(observation: TelemetryInputObservation): void {
@@ -112,27 +103,28 @@ export class TelemetryInputTracker {
 		input.hasAction = true;
 		switch (action.state) {
 			case "queued":
-				this.finishPreparation(input, at, "unknown");
-				input.queuedAt ??= at;
+				if (input.phase?.kind !== "queueWaitMs") {
+					this.finishPhase(input, at, "unknown");
+					input.phase = { kind: "queueWaitMs", startedAt: at };
+				}
 				this.dispatchingInputs.delete(metadata.inputId);
 				this.stage(input, "queued", "started", at);
 				break;
 			case "selected":
 			case "preparing":
-				this.finishQueue(input, at);
-				if (input.preparingAt === undefined) {
-					input.preparingAt = at;
+				if (input.phase?.kind !== "preparationMs") {
+					this.finishPhase(input, at);
+					input.phase = { kind: "preparationMs", startedAt: at };
 					this.stage(input, "preparation", "started", at);
 				}
 				break;
 			case "committing":
-				this.finishPreparation(input, at);
-				input.dispatchedAt = at;
+				this.finishPhase(input, at);
 				if (action.kind === "turn") this.dispatchingInputs.add(metadata.inputId);
 				this.stage(input, "dispatch", "success", at);
 				break;
 			case "running":
-				this.finishPreparation(input, at);
+				this.finishPhase(input, at);
 				this.stage(input, "admitted", "success", at);
 				break;
 			case "completed":
@@ -149,8 +141,7 @@ export class TelemetryInputTracker {
 
 	private finish(input: InputState, outcome: string, at: number, error?: unknown): void {
 		input.terminal = true;
-		this.finishQueue(input, at, outcome);
-		this.finishPreparation(input, at, outcome);
+		this.finishPhase(input, at, outcome);
 		this.stage(input, "terminal", outcome, at);
 		this.dispatchingInputs.delete(input.metadata.inputId);
 		if (outcome === "error") {

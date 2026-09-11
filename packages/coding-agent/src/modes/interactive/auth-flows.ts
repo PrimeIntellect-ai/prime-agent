@@ -168,6 +168,23 @@ export class ProviderAuthFlows {
 		}
 	}
 
+	private observeConfiguredCredentials(providerId: string, method: TelemetryAcquisitionMethod): void {
+		this.observeAuth({
+			providerId,
+			method,
+			stage: "credential_discovery",
+			outcome: "configured",
+			validationScope: "configuration",
+		});
+		this.observeAuth({
+			providerId,
+			method,
+			stage: "credential_validation",
+			outcome: "unavailable",
+			validationScope: "unchecked",
+		});
+	}
+
 	private reportAuthError(error: unknown, providerId: string, operation: "login" | "logout" | "discover"): void {
 		try {
 			this.host.onAuthError?.(error, providerId, operation);
@@ -464,20 +481,7 @@ export class ProviderAuthFlows {
 				this.host.showStatus(`${providerName} credentials were not detected. Configure them, then reopen /model.`);
 				return { status: "cancelled" };
 			}
-			this.observeAuth({
-				providerId,
-				stage: "credential_discovery",
-				outcome: "configured",
-				method: "external_credentials",
-				validationScope: "configuration",
-			});
-			this.observeAuth({
-				providerId,
-				stage: "credential_validation",
-				outcome: "unavailable",
-				method: "external_credentials",
-				validationScope: "unchecked",
-			});
+			this.observeConfiguredCredentials(providerId, "external_credentials");
 			return await this.completeExternalProviderSetup(providerId, providerName);
 		} catch (error: unknown) {
 			closeDialog();
@@ -970,20 +974,7 @@ export class ProviderAuthFlows {
 			}
 
 			this.host.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
-			this.observeAuth({
-				providerId,
-				stage: "credential_discovery",
-				outcome: "configured",
-				method: "api_key_entry",
-				validationScope: "configuration",
-			});
-			this.observeAuth({
-				providerId,
-				stage: "credential_validation",
-				outcome: "unavailable",
-				method: "api_key_entry",
-				validationScope: "unchecked",
-			});
+			this.observeConfiguredCredentials(providerId, "api_key_entry");
 
 			closeDialog();
 			return await this.completeProviderAuthentication(providerId, providerName, "api_key", undefined, kind);
@@ -1107,20 +1098,7 @@ export class ProviderAuthFlows {
 				signal: dialog.signal,
 			});
 
-			this.observeAuth({
-				providerId,
-				stage: "credential_discovery",
-				outcome: "configured",
-				method: "oauth",
-				validationScope: "configuration",
-			});
-			this.observeAuth({
-				providerId,
-				stage: "credential_validation",
-				outcome: "unavailable",
-				method: "oauth",
-				validationScope: "unchecked",
-			});
+			this.observeConfiguredCredentials(providerId, "oauth");
 			closeDialog();
 			return await this.completeProviderAuthentication(providerId, providerName, "oauth", undefined, kind);
 		} catch (error: unknown) {
