@@ -2592,10 +2592,15 @@ export class InteractiveMode {
 				this.applyHeartbeatCatalog(heartbeats);
 				if (!this.heartbeatRefreshRequested) return;
 			}
-			// A further heartbeats_changed event starts the next refresh.
 		})().finally(() => {
 			if (this.heartbeatRefreshPromise === refresh) {
 				this.heartbeatRefreshPromise = undefined;
+				// The drain bound was hit with a newer heartbeats_changed
+				// pending: schedule the follow-up refresh so the catalog
+				// converges instead of staying stale until the next event.
+				if (this.heartbeatRefreshRequested) {
+					void this.refreshHeartbeatCatalog().catch(() => undefined);
+				}
 			}
 		});
 		this.heartbeatRefreshPromise = refresh;
@@ -6431,14 +6436,22 @@ export class InteractiveMode {
 		// Tool definitions only enrich rendering: components fall back to
 		// cached or missing definitions. A transient control-plane failure here
 		// must not abort the render (a resync render aborts into an empty chat).
+		let toolDefinitionWarning: string | undefined;
 		try {
 			await this.preloadToolDefinitions(toolNames);
 		} catch (error) {
-			this.showWarning(`Could not load tool definitions: ${error instanceof Error ? error.message : String(error)}`);
+			toolDefinitionWarning = `Could not load tool definitions: ${
+				error instanceof Error ? error.message : String(error)
+			}`;
 		}
 
 		if (options.clearChat) {
 			this.chatContainer.clear();
+		}
+
+		// Shown after clearChat so rebuild/resync renders keep the warning.
+		if (toolDefinitionWarning) {
+			this.showWarning(toolDefinitionWarning);
 		}
 
 		if (options.updateFooter) {
@@ -6521,8 +6534,10 @@ export class InteractiveMode {
 					// Match tool results to pending tool components
 					const component = renderedPendingTools.get(message.toolCallId);
 					if (component) {
-						component.updateResult(message);
+						// Delete first: a throwing updateResult must not leave the
+						// completed result reported as still pending.
 						renderedPendingTools.delete(message.toolCallId);
+						component.updateResult(message);
 					}
 				} else {
 					// All other messages use standard rendering
