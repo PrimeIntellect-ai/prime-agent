@@ -1,5 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { Type } from "typebox";
@@ -165,6 +165,28 @@ describe("ENG-4509 side questions", () => {
 		}
 	});
 
+	it("answers empty when the terminal turn is textless without tool calls", async () => {
+		const harness = await createHarness({ tools: [probe] });
+		try {
+			harness.setResponses([fauxAssistantMessage("main answer")]);
+			await harness.session.prompt("Main context message.");
+			harness.setResponses([
+				fauxAssistantMessage([{ type: "text", text: "Checking." }, fauxToolCall("probe", {})], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("", { stopReason: "stop" }),
+			]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(harness.session.agent, "tools-3", "Empty finish?", (event) => {
+				events.push(event);
+			});
+			await run.done;
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("stops after three turns when the model keeps calling tools", async () => {
 		const harness = await createHarness({ tools: [probe] });
 		try {
@@ -176,7 +198,11 @@ describe("ENG-4509 side questions", () => {
 				fauxAssistantMessage([{ type: "text", text: "Checking." }, fauxToolCall("probe", {})], {
 					stopReason: "toolUse",
 				}),
-				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
+				// This turn streams thinking before its tool call, so its mid-turn updates
+				// are textless while the first turn's answer is the run's only text.
+				fauxAssistantMessage([fauxThinking("still stuck"), fauxToolCall("probe", {})], {
+					stopReason: "toolUse",
+				}),
 				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
 			]);
 

@@ -122,6 +122,12 @@ export function startSideQuestion(
 	});
 
 	const clonedMessageCount = sideAgent.state.messages.length;
+	// A turn-capped run can end on tool results, so its outcome lives in the
+	// assistant turns it appended rather than in its last message.
+	const assistantTurns = () =>
+		sideAgent.state.messages
+			.slice(clonedMessageCount)
+			.filter((message): message is AssistantMessage => message.role === "assistant");
 	let answer = "";
 	let abortRequested = false;
 	let started = false;
@@ -129,12 +135,13 @@ export function startSideQuestion(
 	const emit = (status: SideQuestionStatus, errorMessage?: string) =>
 		onEvent({ id, question, answer, status, ...(errorMessage ? { errorMessage } : {}) });
 
+	// Streaming events carry one partial turn at a time, so they only fill in text
+	// as it arrives; the answer of the whole run is derived from its finished turns.
 	const unsubscribe = sideAgent.subscribe(async (event) => {
 		if (event.type !== "message_update" && event.type !== "message_end") {
 			return;
 		}
 		const nextAnswer = readAssistantText(event.message);
-		// A turn that only calls tools carries no text; keep the answer written so far.
 		if (!nextAnswer || nextAnswer === answer) {
 			return;
 		}
@@ -153,7 +160,7 @@ export function startSideQuestion(
 			started = true;
 			// Standalone side agents bypass the session auto-retry loop; retry here instead.
 			let promptedOnce = false;
-			await completeWithProviderRetry(
+			const finalTurn = await completeWithProviderRetry(
 				async () => {
 					if (promptedOnce) {
 						// Session-loop recovery: drop the failed assistant turn and re-run.
@@ -163,16 +170,11 @@ export function startSideQuestion(
 						promptedOnce = true;
 						await sideAgent.prompt(prompt);
 					}
-					// A turn-capped run can end on tool results, so the outcome of the run
-					// is its last assistant turn rather than its last message.
-					const last = sideAgent.state.messages
-						.slice(clonedMessageCount)
-						.filter((message) => message.role === "assistant")
-						.at(-1);
+					const last = assistantTurns().at(-1);
 					if (!last) {
 						throw new Error(sideAgent.state.errorMessage || "Side question produced no assistant message");
 					}
-					return last as AssistantMessage;
+					return last;
 				},
 				{ policy: retry, signal: retryAbortController.signal },
 			);
@@ -184,6 +186,11 @@ export function startSideQuestion(
 				await emit("error", sideAgent.state.errorMessage);
 				return;
 			}
+			// A run that ends on a tool turn was answered in an earlier turn; a textless
+			// final turn without tool calls is a genuinely empty answer.
+			answer = finalTurn.content.some((block) => block.type === "toolCall")
+				? (assistantTurns().map(readAssistantText).filter(Boolean).at(-1) ?? "")
+				: readAssistantText(finalTurn);
 			await emit("complete");
 		})
 		.catch(async (error) => {
