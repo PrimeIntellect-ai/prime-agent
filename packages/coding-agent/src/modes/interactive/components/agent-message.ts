@@ -45,17 +45,15 @@ class AgentMessageBodyComponent implements Component {
 export class AgentMessageComponent extends Container {
 	private readonly content = new Container();
 	private readonly header = new Text("", 1, 0);
-	private readonly suppressLeadingSpace: boolean;
 	private readonly shouldAddLeadingSpace?: (expanded: boolean) => boolean;
 	private expanded = false;
 
 	constructor(
 		private readonly message: AgentSessionMessage,
 		_markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		options: { suppressLeadingSpace?: boolean; shouldAddLeadingSpace?: (expanded: boolean) => boolean } = {},
+		options: { shouldAddLeadingSpace?: (expanded: boolean) => boolean } = {},
 	) {
 		super();
-		this.suppressLeadingSpace = options.suppressLeadingSpace ?? false;
 		this.shouldAddLeadingSpace = options.shouldAddLeadingSpace;
 		this.addChild(this.content);
 		this.updateDisplay();
@@ -63,7 +61,7 @@ export class AgentMessageComponent extends Container {
 
 	override render(width: number): string[] {
 		const lines = super.render(width);
-		const leadingSpace = this.shouldAddLeadingSpace?.(this.expanded) ?? !this.suppressLeadingSpace;
+		const leadingSpace = this.shouldAddLeadingSpace?.(this.expanded) ?? true;
 		return leadingSpace ? ["", ...lines] : lines;
 	}
 

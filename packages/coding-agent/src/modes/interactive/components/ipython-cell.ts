@@ -670,7 +670,9 @@ export class IPythonCellComponent implements Component {
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
 			if (this.state.expanded) this.addBlank(lines, width);
 			this.addPlain(lines, truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"));
-			if (this.state.expanded) lines.push(...agentMessageBodyLines(message.message, width));
+			if (this.state.expanded) {
+				for (const line of agentMessageBodyLines(message.message, width)) lines.push(line);
+			}
 		}
 	}
 
@@ -685,20 +687,12 @@ export class IPythonCellComponent implements Component {
 		if (hasCode) {
 			this.addPlain(lines, "");
 		}
-		let index = 0;
 		for (const [path, edits] of diffsByPath) {
-			index += 1;
-			this.renderFileDiff(lines, width, path, edits, index === diffsByPath.size);
+			this.renderFileDiff(lines, width, path, edits);
 		}
 	}
 
-	private renderFileDiff(
-		lines: string[],
-		width: number,
-		path: string,
-		edits: readonly DiffDisplay[],
-		showHint: boolean,
-	): void {
+	private renderFileDiff(lines: string[], width: number, path: string, edits: readonly DiffDisplay[]): void {
 		const language = getLanguageFromPath(path);
 		// The outer inset matches ordinary chat text; renderer gutters stay intact.
 		const indent = FILE_CHANGE_DIFF_INDENT.slice(0, Math.max(0, width - 1));
@@ -723,8 +717,7 @@ export class IPythonCellComponent implements Component {
 			}
 		});
 
-		const hint = showHint ? this.state.editDiffsExpanded === true : undefined;
-		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, hint, width));
+		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, width));
 
 		for (const row of rows) {
 			lines.push(row);

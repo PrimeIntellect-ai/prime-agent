@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (all required)",
+			"description": "Theme color definitions (mdBody defaults to text)",
 			"required": [
 				"accent",
 				"border",
@@ -60,7 +60,6 @@
 				"toolPanelBg",
 				"toolTitle",
 				"toolOutput",
-				"mdBody",
 				"mdHeading",
 				"mdLink",
 				"mdLinkUrl",
@@ -195,7 +194,7 @@
 				},
 				"mdBody": {
 					"$ref": "#/$defs/colorValue",
-					"description": "Markdown body text (assistant output)"
+					"description": "Markdown body text (assistant output); defaults to text"
 				},
 				"mdHeading": {
 					"$ref": "#/$defs/colorValue",

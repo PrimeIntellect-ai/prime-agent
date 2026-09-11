@@ -44,7 +44,6 @@ export interface ConversationComponentsOptions {
 	getToolDefinition: (name: string) => ToolExecutionDefinition | undefined;
 	markdownTheme?: MarkdownTheme;
 	hideThinkingBlock?: boolean;
-	hiddenThinkingLabel?: string;
 	toolsExpanded?: boolean;
 	editDiffsExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
@@ -165,17 +164,11 @@ export function buildConversationComponents(
 	for (const message of messages) {
 		if (message.role === "assistant") {
 			components.push(
-				new AssistantMessageComponent(
-					message,
-					options.hideThinkingBlock ?? false,
-					options.markdownTheme,
-					options.hiddenThinkingLabel ?? "Thinking:",
-					{
-						cwd: options.cwd,
-						expanded,
-						precededByToolActivity: createConversationSpacing(components).precededByToolActivity,
-					},
-				),
+				new AssistantMessageComponent(message, options.hideThinkingBlock ?? false, options.markdownTheme, {
+					cwd: options.cwd,
+					expanded,
+					precededByToolActivity: createConversationSpacing(components).precededByToolActivity,
+				}),
 			);
 			for (const content of message.content) {
 				if (content.type !== "toolCall") {

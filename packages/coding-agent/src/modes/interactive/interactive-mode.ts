@@ -982,8 +982,6 @@ export class InteractiveMode {
 	private contextUsageTokenBaseline = 0;
 	// Refresh ordering: a stale failure must never clobber a newer success.
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
-	private readonly defaultHiddenThinkingLabel = "Thinking:";
-	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private ctrlCExitHintExpiresAt = 0;
 	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -3560,17 +3558,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private setHiddenThinkingLabel(label?: string): void {
-		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-			}
-		}
-		if (this.streamingComponent) {
-			this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-		}
-		this.ui.requestRender();
+	private setHiddenThinkingLabel(_label?: string): void {
+		// Retain the extension/daemon UI hook; conversation thinking no longer has a heading.
 	}
 
 	private setExtensionWidget(
@@ -3655,7 +3644,6 @@ export class InteractiveMode {
 		if (this.loadingAnimation) {
 			this.updateWorkingLoaderMessage();
 		}
-		this.setHiddenThinkingLabel();
 	}
 
 	private static readonly MAX_WIDGET_LINES = 10;
@@ -5835,7 +5823,6 @@ export class InteractiveMode {
 			undefined,
 			this.hideThinkingBlock,
 			this.getMarkdownThemeWithSettings(),
-			this.hiddenThinkingLabel,
 			{
 				expanded: this.toolOutputExpanded,
 				precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,
@@ -6481,7 +6468,6 @@ export class InteractiveMode {
 					message,
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
-					this.hiddenThinkingLabel,
 					{
 						expanded: this.toolOutputExpanded,
 						precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,

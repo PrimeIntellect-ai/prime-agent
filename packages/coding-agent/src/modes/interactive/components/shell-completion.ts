@@ -58,11 +58,14 @@ function readLiteralShellLaunch(code: string): { command: string; assignmentOnly
 	const launch = code
 		.trim()
 		.split("\n")
-		.filter((line) => !/^(?:from rlm import bash|import rlm)\s*$/.test(line));
-	// Restrict to a single top-level launch, optionally followed by its variable.
-	const call = /^(?:([A-Za-z_]\w*)\s*=\s*)?(?:rlm\.)?bash\(\s*(.*)\s*\)\s*$/.exec(launch[0] ?? "");
+		.filter((line) => line.trim() && !/^(?:from rlm import bash|import rlm)\s*$/.test(line));
+	// Split delimiters before matching the prefix so long malformed arguments cannot backtrack.
+	const source = launch[0]?.trimEnd() ?? "";
+	const open = source.indexOf("(");
+	if (open < 0 || !source.endsWith(")")) return undefined;
+	const call = /^(?:([A-Za-z_]\w*)\s*=\s*)?(?:rlm\.)?bash$/.exec(source.slice(0, open));
 	if (!call || (launch.length > 1 && (launch.length !== 2 || launch[1]?.trim() !== call[1]))) return undefined;
-	const command = readPythonString(call[2]?.trim() ?? "");
+	const command = readPythonString(source.slice(open + 1, -1).trim());
 	return command === undefined ? undefined : { command, assignmentOnly: !!call[1] && launch.length === 1 };
 }
 

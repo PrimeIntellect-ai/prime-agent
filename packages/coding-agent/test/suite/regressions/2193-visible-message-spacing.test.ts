@@ -278,7 +278,6 @@ describe("visible conversation spacing", () => {
 					fauxAssistantMessage(call(`pending-${index}`), { stopReason: "toolUse" }),
 					true,
 					undefined,
-					"",
 					{ precededByToolActivity: spacing.precededByToolActivity },
 				),
 			);

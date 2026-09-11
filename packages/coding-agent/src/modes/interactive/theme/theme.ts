@@ -64,7 +64,7 @@ const ThemeJsonSchema = Type.Object({
 		toolTitle: ColorValueSchema,
 		toolOutput: ColorValueSchema,
 		// Markdown (11 colors)
-		mdBody: ColorValueSchema,
+		mdBody: Type.Optional(ColorValueSchema),
 		mdHeading: ColorValueSchema,
 		mdLink: ColorValueSchema,
 		mdLinkUrl: ColorValueSchema,
@@ -759,7 +759,10 @@ function loadThemeJson(name: string): ThemeJson {
 
 function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string): Theme {
 	const colorMode = mode ?? detectColorMode();
-	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
+	const resolvedColors = resolveThemeColors(
+		{ ...themeJson.colors, mdBody: themeJson.colors.mdBody ?? themeJson.colors.text },
+		themeJson.vars,
+	);
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
 	const bgColorKeys: Set<string> = new Set([

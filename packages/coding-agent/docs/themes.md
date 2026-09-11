@@ -144,13 +144,13 @@ vim ~/.prime/agent/themes/my-theme.json
 
 - `name` is required and must be unique.
 - `vars` is optional. Define reusable colors here, then reference them in `colors`.
-- `colors` must define all 56 required tokens.
+- `colors` must define all required tokens. `mdBody` is optional and defaults to `text`.
 
 The `$schema` field enables editor auto-completion and validation.
 
 ## Color Tokens
 
-Every theme must define all 56 color tokens. There are no optional colors.
+Every theme must define the color tokens below except `mdBody`, which defaults to `text` when omitted.
 
 ### Core UI (11 colors)
 
@@ -189,7 +189,7 @@ Every theme must define all 56 color tokens. There are no optional colors.
 
 | Token | Purpose |
 |-------|---------|
-| `mdBody` | Assistant output body text |
+| `mdBody` | Assistant output body text (optional; defaults to `text`) |
 | `mdHeading` | Headings |
 | `mdLink` | Link text |
 | `mdLinkUrl` | Link URL |

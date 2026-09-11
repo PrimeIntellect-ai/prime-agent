@@ -251,13 +251,12 @@ class EditChangeSummaryComponent implements Component {
 		private readonly rawPath: string,
 		private readonly cwd: string,
 		private readonly change: { added: number; removed: number },
-		private readonly diffsExpanded: boolean | undefined,
 		private readonly diffLines: readonly string[] | undefined,
 	) {}
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const lines = [formatFileChangeSummaryLine(this.rawPath, this.cwd, this.change, this.diffsExpanded, safeWidth)];
+		const lines = [formatFileChangeSummaryLine(this.rawPath, this.cwd, this.change, safeWidth)];
 		if (this.diffLines !== undefined) {
 			for (const line of this.diffLines) {
 				for (const row of wrapTextWithAnsi(line, safeWidth)) {
@@ -301,7 +300,6 @@ function buildEditCallComponent(
 			rawPath ?? "...",
 			cwd,
 			change,
-			expanded,
 			expanded ? renderDiff(component.preview.diff).split("\n") : undefined,
 		),
 	);
