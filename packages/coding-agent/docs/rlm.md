@@ -11,7 +11,7 @@ flowchart LR
     kernel["Persistent Python kernel"]
     data["Files · data · shell commands"]
     skills["Python-backed skills"]
-    children["rlm(...) child agents"]
+    children["rlm.spawn(...) child agents"]
     answer["Answer or next turn"]
 
     task --> parent
@@ -63,10 +63,10 @@ Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and 
 
 ### 2. Subagents are native RLM calls
 
-The callable `rlm` object is preloaded in the kernel. Spawn a child with a direct call:
+The `rlm` object is preloaded in the kernel. Spawn a child with `rlm.spawn`, which requires a `name`:
 
 ```python
-handle = await rlm("Review the authentication flow for security issues", name="auth-reviewer")
+handle = await rlm.spawn("Review the authentication flow for security issues", name="auth-reviewer")
 print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 ```
 
@@ -75,12 +75,12 @@ The call returns immediately after task admission with a child handle; it never 
 Spawn independent children in separate calls and end the turn instead of awaiting completion:
 
 ```python
-api_review = await rlm("Review the public API", name="api-reviewer")
-test_review = await rlm("Review the test coverage", name="test-reviewer")
-integration_audit = await rlm("Run the slow integration audit", name="integration-audit")
+api_review = await rlm.spawn("Review the public API", name="api-reviewer")
+test_review = await rlm.spawn("Review the test coverage", name="test-reviewer")
+integration_audit = await rlm.spawn("Run the slow integration audit", name="integration-audit")
 ```
 
-Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. Children reply when an answer is needed:
+Results arrive only through explicit `agent_message` replies or files, never as an `rlm.spawn()` return value. Children reply when an answer is needed:
 
 ```python
 await agent_message.send(message, receiver_role="parent")
@@ -126,7 +126,7 @@ For a skill named `release-audit`, the model can call:
 report = await release_audit(repository=".", target_version="0.4.0")
 ```
 
-This makes Python-backed skills a superset of instruction-only skills: they can provide guidance, scripts, references, dependencies, typed callables, and optional shell commands. They may also call `rlm(...)` themselves when a capability needs recursive delegation.
+This makes Python-backed skills a superset of instruction-only skills: they can provide guidance, scripts, references, dependencies, typed callables, and optional shell commands. They may also call `rlm.spawn(...)` themselves when a capability needs recursive delegation.
 
 Only skill metadata is placed in the startup prompt. The agent loads the full `SKILL.md` when the task matches, then inspects and calls the documented Python API. See [Skills](skills.md) for discovery, packaging, and the built-in skill-creation workflow.
 

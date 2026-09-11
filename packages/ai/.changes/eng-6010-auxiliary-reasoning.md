@@ -1,0 +1,1 @@
+- Fixed budget-based Claude requests sending thinking budgets below the provider minimum when the output limit is small.

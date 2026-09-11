@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
 import { realpathIfPresentSync, writeFileAtomicSync } from "../../utils/atomic-file.js";
@@ -9,6 +9,7 @@ import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import type { CustomEntry } from "../session-manager.js";
+import { getAuxiliaryThinkingLevel } from "../thinking-levels.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 
@@ -128,7 +129,7 @@ Continual harness components:
 - prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.
 - memory: durable facts, decisions, failures, preferences, and outcomes.
 - skill: installed Python REPL skill. Skill create/update edits MUST include a \`reference\` object with \`{"type":"python"}\`, a Python import, and a callable or call pattern; they also MUST include an \`arguments\` object describing accepted inputs, required fields, defaults, and constraints. Use \`{}\` for \`arguments\` only when the Python callable truly needs no external inputs. Include the RLM-native call form \`await <skill_import>(...)\`.
-- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm("sub-task")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
+- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm.spawn("sub-task", name="worker")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
 
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
@@ -177,24 +178,59 @@ Return JSON only:
   "instructions": "optional concise instructions for /refine if shouldRefine is true"
 }`;
 
-/**
- * Output budgets are derived from the selected model instead of fixed literals.
- * /refine input scales with harness size (entry overview, refinement history, and
- * the trajectory slice), so a constant output cap silently truncates exactly the
- * large multi-edit proposals that matter most. Math.min keeps small models honest.
- */
+// These caps apply only with reasoning off; thinking and JSON otherwise share the model's output budget.
 const REFINEMENT_MAX_OUTPUT_TOKENS = 32_000;
 const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS = 4_096;
+const REFINEMENT_CONTEXT_OVERHEAD_TOKENS = 1_024;
 
 const TRUNCATED_JSON_ERROR =
 	"the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
-function refinementMaxOutputTokens(model: Model<any>): number {
-	return Math.min(model.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS);
+function refinementInputTokenBound(text: string): number {
+	// One token per UTF-8 byte bounds byte-based tokenizers, including dense or unusual text.
+	return Buffer.byteLength(text, "utf8");
 }
 
-function autoRefineReviewMaxOutputTokens(model: Model<any>): number {
-	return Math.min(model.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
+function refinementRequest(
+	model: Model<Api>,
+	systemPrompt: string,
+	conversationText: string,
+	buildPrompt: (conversation: string) => string,
+	outputReserve: number,
+): { model: Model<Api>; userPrompt: string } {
+	const systemReserve = refinementInputTokenBound(systemPrompt) + REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
+	const inputBudget =
+		model.contextWindow - Math.min(model.maxTokens, outputReserve, Math.floor(model.contextWindow / 2));
+	let userPrompt = buildPrompt(conversationText);
+	if (systemReserve + refinementInputTokenBound(userPrompt) > inputBudget && conversationText.length > 0) {
+		const promptForLength = (length: number): string => {
+			let start = conversationText.length - length;
+			const first = conversationText.charCodeAt(start);
+			if (first >= 0xdc00 && first <= 0xdfff) start++;
+			return buildPrompt(
+				`[Earlier conversation omitted to fit the model context.]\n${conversationText.slice(start)}`,
+			);
+		};
+		let low = 0;
+		let high = conversationText.length;
+		while (low < high) {
+			const length = Math.ceil((low + high) / 2);
+			if (systemReserve + refinementInputTokenBound(promptForLength(length)) <= inputBudget) low = length;
+			else high = length - 1;
+		}
+		userPrompt = promptForLength(low);
+	}
+	const maxTokens = Math.min(
+		model.maxTokens,
+		model.contextWindow - systemReserve - refinementInputTokenBound(userPrompt),
+	);
+	if (maxTokens <= 0) {
+		throw new Error(
+			"Refinement prompt leaves no room for output in the model's context window; retry with a smaller request.",
+		);
+	}
+	// Bound the request's model ceiling too: some adapters add thinking tokens before clamping to it.
+	return { model: { ...model, maxTokens }, userPrompt };
 }
 
 function now(): string {
@@ -458,7 +494,7 @@ export function formatHarnessStateForPrompt(
 			: "When to refine the continual harness: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep continual harness edits small and evidence-backed.",
 		"",
 		includeIpythonExamples
-			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm('sub-task')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
+			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
 			: options.includeShellExamples
 				? "Call contract: use installed skills as shell commands when available (for example `<skill_import> ...`). Continual harness entries are routing/context hints only in sessions without the Python REPL; do not use Python `await`, `asyncio`, or `rlm` examples unless the prompt also documents a Python kernel."
 				: "Call contract: continual harness entries are routing/context hints only in sessions without the Python REPL or shell access; do not use Python `await`, `asyncio`, `rlm`, or shell skill commands unless the prompt also documents those interfaces.",
@@ -476,7 +512,7 @@ export function formatHarnessStateForPrompt(
 		// REPL sessions, include the native `rlm` invocation hint.
 		if (kind === "subagent" && entries.length > 0 && includeIpythonExamples) {
 			lines.push(
-				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and spawning with \`await rlm('<task>')\`; admission returns a child handle, never the answer)`,
+				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and spawning with \`await rlm.spawn('<task>', name='<worker>')\`; admission returns a child handle, never the answer)`,
 			);
 		} else {
 			lines.push(`${kind}: ${entries.length}`);
@@ -910,32 +946,43 @@ export async function planRefinement(
 	const scopeInstruction = options.global
 		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
 		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed.";
-	const userPrompt = [
-		`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
-		`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
-		`<conversation>\n${conversationText}\n</conversation>`,
-		`<scope_policy>\n${scopeInstruction}\n</scope_policy>`,
-		options.instructions ? `<user_refine_instructions>\n${options.instructions}\n</user_refine_instructions>` : "",
-		"Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale.",
-	]
-		.filter(Boolean)
-		.join("\n\n");
+	const buildPrompt = (conversation: string): string =>
+		[
+			`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
+			`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
+			`<conversation>\n${conversation}\n</conversation>`,
+			`<scope_policy>\n${scopeInstruction}\n</scope_policy>`,
+			options.instructions ? `<user_refine_instructions>\n${options.instructions}\n</user_refine_instructions>` : "",
+			"Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale.",
+		]
+			.filter(Boolean)
+			.join("\n\n");
+	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
+	const { model: requestModel, userPrompt } = refinementRequest(
+		model,
+		REFINEMENT_SYSTEM_PROMPT,
+		conversationText,
+		buildPrompt,
+		reasoning === "off" ? REFINEMENT_MAX_OUTPUT_TOKENS : model.maxTokens,
+	);
+	const maxTokens =
+		reasoning === "off" ? Math.min(requestModel.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : requestModel.maxTokens;
 
-	// /refine requires a parseable JSON object in the final text. Some reasoning-capable
-	// OpenAI-compatible models can spend the response on visible thinking and return no
-	// final text, which makes otherwise successful daemon /refine calls fail parsing.
-	// Keep the refinement request non-reasoning regardless of the interactive session
-	// thinking level so the model uses its output budget for the JSON object.
-	void thinkingLevel;
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
-				model,
+				requestModel,
 				{
 					systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+				{
+					reasoning,
+					maxTokens,
+					signal,
+					apiKey,
+					headers,
+				},
 			),
 		{ policy: options.retry, signal },
 	);
@@ -980,33 +1027,49 @@ export async function reviewAutoRefine(
 	retry?: ProviderRetryPolicy,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
-	const userPrompt = [
-		`<trigger>
+	const buildPrompt = (conversation: string): string =>
+		[
+			`<trigger>
 ${context.reason}; ${context.turnsSinceLastReview} assistant turns since last auto-refine review
 </trigger>`,
-		`<current_harness_state>
+			`<current_harness_state>
 ${overviewForPrompt(state)}
 </current_harness_state>`,
-		`<refinement_history>
+			`<refinement_history>
 ${historyForPrompt(history)}
 </refinement_history>`,
-		`<conversation>
-${conversationText}
+			`<conversation>
+${conversation}
 </conversation>`,
-		"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
-	].join("\n\n");
-	// Auto-refine review requires parseable JSON. Keep it non-reasoning so
-	// reasoning-capable models use final text budget for the JSON object.
-	void thinkingLevel;
+			"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
+		].join("\n\n");
+	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
+	const { model: requestModel, userPrompt } = refinementRequest(
+		model,
+		AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
+		conversationText,
+		buildPrompt,
+		reasoning === "off" ? AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS : model.maxTokens,
+	);
+	const maxTokens =
+		reasoning === "off"
+			? Math.min(requestModel.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS)
+			: requestModel.maxTokens;
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
-				model,
+				requestModel,
 				{
 					systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+				{
+					reasoning,
+					maxTokens,
+					signal,
+					apiKey,
+					headers,
+				},
 			),
 		{ policy: retry, signal },
 	);

@@ -14,11 +14,6 @@ ReceiverRole = Literal["parent", "sibling", "child"]
 _MESSAGE_DISPLAY_MIME = "application/vnd.prime-agent.agent-message+json"
 
 
-async def list_agents() -> dict[str, Any]:
-    """List this agent's parent, siblings, and children, including inactive family."""
-    return await host_request("agent_message.list_agents")
-
-
 async def send(
     message: str,
     broadcast_message: str | None = None,

@@ -59,6 +59,17 @@ export const DEFAULT_AUTONOMOUS_GATES: Required<AgentAutonomousGateConfig> = {
 	timeoutMs: 5 * 60 * 1000,
 };
 
+/**
+ * JSON-safe sentinel meaning "no cap". Limit checks compare usage against the
+ * configured value, so this stays finite and serializes to JSON while no
+ * realistic run can ever reach it.
+ */
+export const UNLIMITED_AUTONOMOUS_LIMIT = Number.MAX_SAFE_INTEGER;
+
+export function isUnlimitedAutonomousLimit(value: number): boolean {
+	return value >= UNLIMITED_AUTONOMOUS_LIMIT;
+}
+
 const MAX_GATE_OUTPUT_CHARS = 6000;
 const MAX_CHILD_PROCESS_OUTPUT_CHARS = 1024 * 1024;
 
@@ -150,6 +161,31 @@ export function setAutonomousEnabled(
 		state.gateAttempts = {};
 		state.lastGateFailure = undefined;
 		state.lastGateFailureSnapshot = undefined;
+	}
+}
+
+/**
+ * Apply user-provided budget and gate options to a live runtime state.
+ * Only fields present in `config` change; unspecified fields keep the state's
+ * current values, which come from the session/CLI configuration or defaults.
+ */
+export function setAutonomousLimits(state: AutonomousRuntimeState, config?: AgentAutonomousConfig): void {
+	if (!config) {
+		return;
+	}
+	state.limits.maxContinuations = normalizeLimit(config.maxContinuations, state.limits.maxContinuations);
+	state.limits.maxTurns = normalizeLimit(config.maxTurns, state.limits.maxTurns);
+	state.limits.maxTokens = normalizeLimit(config.maxTokens, state.limits.maxTokens);
+	state.limits.timeoutMs = normalizeLimit(config.timeoutMs, state.limits.timeoutMs);
+	if (config.continuationPrompt?.trim()) {
+		state.continuationPrompt = config.continuationPrompt.trim();
+	}
+	if (config.gates) {
+		if (config.gates.commands !== undefined) {
+			state.gates.commands = [...config.gates.commands];
+		}
+		state.gates.maxRetries = normalizeLimit(config.gates.maxRetries, state.gates.maxRetries);
+		state.gates.timeoutMs = normalizeLimit(config.gates.timeoutMs, state.gates.timeoutMs);
 	}
 }
 

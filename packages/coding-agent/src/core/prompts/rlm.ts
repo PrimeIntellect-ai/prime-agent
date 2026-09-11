@@ -48,7 +48,7 @@ const REPL_CONTROL_PROMPT = [
 	"",
 	"Terminology: continual harness names the persisted prompt, memory, skill, and subagent layer; RLM names the runtime, Python REPL kernel, and native call interface exposed to the model.",
 	"",
-	"RLM-native call contract: installed Python skills are pre-imported modules. Read the matching SKILL.md and call its documented function, such as `await <skill_import>.<function>(...)`; when a CLI exists, use `<skill_import> ...` from shell. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a reusable delegation spec with `await rlm('sub-task')`; admission returns a child handle immediately. Results arrive only through an available messaging capability or files, never as an `rlm()` return value. Do not invent non-native wrappers such as `call_skill(...)` or `run_subagent(...)`.",
+	"RLM-native call contract: installed Python skills are pre-imported modules. Read the matching SKILL.md and call its documented function, such as `await <skill_import>.<function>(...)`; when a CLI exists, use `<skill_import> ...` from shell. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a reusable delegation spec with `await rlm.spawn('sub-task', name='worker')`; admission returns a child handle immediately. Results arrive only through an available messaging capability or files, never as an `rlm.spawn()` return value. Do not invent non-native wrappers such as `call_skill(...)` or `run_subagent(...)`.",
 ].join("\n");
 
 export interface ChildAgentDoctrineOptions {
@@ -149,24 +149,27 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	if (depth === 0 && hasIpython) {
 		parts.push(
 			"",
-			"From a daemon-backed depth-0 session, use `await rlm.create_session('task', name='researcher')` to start a separate top-level session. The call returns after the daemon creates the session and accepts its first prompt. Inline and nested sessions cannot use it. `rlm(...)` still creates a child.",
+			"From a daemon-backed depth-0 session, use `await rlm.create_session('task', name='researcher')` to start a separate top-level session. The call returns after the daemon creates the session and accepts its first prompt. Inline and nested sessions cannot use it. `rlm.spawn(...)` still creates a child.",
 		);
 	}
 
 	if (allowRecursion && hasIpython) {
 		parts.push(
 			"",
-			"A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
-			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
+			"An `rlm` object is already in your global namespace. `await rlm.spawn('sub-task', name='api-reviewer')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
+			"`name` is required: choose a stable child name that is unique among siblings.",
 			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.",
+		);
+		parts.push(
+			hasAgentObserve
+				? "Use `await agent_observe.list_agents()` to discover family, including inactive members, and `await rlm.list_subagents()` to recover direct child handles."
+				: "Use `await rlm.list_subagents()` to recover direct child handles after admission.",
 		);
 		if (hasAgentMessage) {
 			parts.push(
 				"Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply.",
-				"Use `await agent_message.list_agents()` to discover family and `await rlm.list_subagents()` to recover direct child handles. Use `agent_message.send(..., receiver_role='child', receiver_name=child.name)` for follow-ups.",
+				"Use `agent_message.send(..., receiver_role='child', receiver_name=child.name)` for follow-ups.",
 			);
-		} else {
-			parts.push("Use `await rlm.list_subagents()` to recover direct child handles after admission.");
 		}
 		if (hasAgentObserve) {
 			parts.push(
@@ -196,7 +199,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 /**
  * Supplemental sub-agent delegation guidance, appended after the base RLM
  * prompt (see system-prompt.ts). The recursion block covers the mechanics
- * (`rlm(...)` admission and handle management); this block adds the
+ * (`rlm.spawn(...)` admission and handle management); this block adds the
  * when and why in the same When -> Why -> menu order Claude Code's Agent tool
  * uses. The subagent-spec menu itself renders just after this, inside the
  * harness-state block.
@@ -207,7 +210,7 @@ export function buildSubagentGuidance(
 	const lines = [
 		"# Delegating to sub-agents",
 		"",
-		"Spawn independent, self-contained work with `handle = await rlm('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.",
+		"Spawn independent, self-contained work with `handle = await rlm.spawn('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.",
 	];
 	if (options.hasAgentMessage) {
 		lines.push(

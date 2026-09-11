@@ -440,7 +440,9 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("inspect another API", { name: "api-reviewer" })).rejects.toThrow(
 			'Agent name "api-reviewer" is unavailable: an agent of that name already exists at depth 1 under this parent',
 		);
-		await expect(root.runRlmChild("invalid name", { name: "   " })).rejects.toThrow("rlm.run name must not be empty");
+		await expect(root.runRlmChild("invalid name", { name: "   " })).rejects.toThrow(
+			"rlm.spawn name must not be empty",
+		);
 		await expect(root.runRlmChild("reserved name", { name: "all" })).rejects.toThrow(
 			"Broadcast agent messaging is not supported",
 		);
@@ -907,10 +909,9 @@ describe("AgentSession rlm recursion", () => {
 			depth: 1,
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "child", id: "child-session", depth: 1 },
-					entries: [{ relationship: "parent", name: "parent", id: "parent-session", depth: 0, status: "idle" }],
-				}),
+				family: async () => [
+					{ relationship: "parent", entry: { id: "parent-session", name: "parent", depth: 0, status: "idle" } },
+				],
 				sendAgentMessage,
 			},
 		});
@@ -941,24 +942,25 @@ describe("AgentSession rlm recursion", () => {
 			message: input.message,
 			deliveryStatus: "delivered" as const,
 		}));
-		const roster = vi.fn(() => ({
-			current: { name: "root", id: root.sessionId, depth: 0 },
-			entries: publishedChild
+		const family = vi.fn(async () =>
+			publishedChild
 				? [
 						{
 							relationship: "child" as const,
-							name: publishedChild.sessionName ?? publishedChild.sessionId,
-							id: publishedChild.sessionId,
-							depth: 1,
-							status: "running" as const,
+							entry: {
+								id: publishedChild.sessionId,
+								name: publishedChild.sessionName ?? publishedChild.sessionId,
+								depth: 1,
+								status: "running" as const,
+							},
 						},
 					]
 				: [],
-		}));
+		);
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster,
+				family,
 				sendAgentMessage,
 			},
 			subagentRuntimeHost: {
@@ -987,12 +989,12 @@ describe("AgentSession rlm recursion", () => {
 			receiver_name: spawned.rlm_child_id,
 		});
 		await sleep(0);
-		expect(roster).not.toHaveBeenCalled();
+		expect(family).not.toHaveBeenCalled();
 		expect(sendAgentMessage).not.toHaveBeenCalled();
 		publishChild?.();
 
 		await expect(pendingSend).resolves.toMatchObject({ message: "hello" });
-		expect(roster).toHaveBeenCalledTimes(1);
+		expect(family).toHaveBeenCalledTimes(1);
 		expect(sendAgentMessage).toHaveBeenCalledWith(
 			expect.objectContaining({ target: publishedChild?.sessionId, message: "hello" }),
 		);
@@ -1010,18 +1012,17 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [
-						{
-							relationship: "child" as const,
-							name: child.sessionName ?? child.sessionId,
+				family: async () => [
+					{
+						relationship: "child" as const,
+						entry: {
 							id: child.sessionId,
+							name: child.sessionName ?? child.sessionId,
 							depth: 1,
 							status: "idle" as const,
 						},
-					],
-				}),
+					},
+				],
 				sendAgentMessage,
 			},
 			subagentRuntimeHost: {
@@ -1051,10 +1052,7 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [],
-				}),
+				family: async () => [],
 				sendAgentMessage: async () => {
 					throw new Error("unexpected send");
 				},
@@ -1090,18 +1088,12 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [
-						{
-							relationship: "child" as const,
-							name: "shared-child",
-							id: "healthy-child-session",
-							depth: 1,
-							status: "idle" as const,
-						},
-					],
-				}),
+				family: async () => [
+					{
+						relationship: "child" as const,
+						entry: { id: "healthy-child-session", name: "shared-child", depth: 1, status: "idle" as const },
+					},
+				],
 				sendAgentMessage,
 			},
 			subagentRuntimeHost: {
@@ -1143,10 +1135,7 @@ describe("AgentSession rlm recursion", () => {
 		const root = createSession({
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "root", id: root.sessionId, depth: 0 },
-					entries: [],
-				}),
+				family: async () => [],
 				sendAgentMessage: async () => {
 					throw new Error("unexpected send");
 				},
@@ -1175,18 +1164,12 @@ describe("AgentSession rlm recursion", () => {
 	});
 
 	it("marks a broadcast delivery to the parent as replied without reloading the roster", async () => {
-		const roster = vi.fn(() => ({
-			current: { name: "child", id: "child-session", depth: 1 },
-			entries: [
-				{
-					relationship: "parent" as const,
-					name: "parent",
-					id: "parent-session",
-					depth: 0,
-					status: "idle" as const,
-				},
-			],
-		}));
+		const family = vi.fn(async () => [
+			{
+				relationship: "parent" as const,
+				entry: { id: "parent-session", name: "parent", depth: 0, status: "idle" as const },
+			},
+		]);
 		const sendAgentMessage = vi.fn(async () => ({
 			id: "agentmsg-broadcast-reply",
 			source: "agent_message" as const,
@@ -1198,7 +1181,7 @@ describe("AgentSession rlm recursion", () => {
 			depth: 1,
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster,
+				family,
 				sendAgentMessage,
 			},
 		});
@@ -1209,7 +1192,7 @@ describe("AgentSession rlm recursion", () => {
 		await expect(send({ target: "all", message: "status" })).resolves.toMatchObject({
 			receipts: [{ message: "status" }],
 		});
-		expect(roster).toHaveBeenCalledTimes(1);
+		expect(family).toHaveBeenCalledTimes(1);
 		expect(child.repliedToParentSinceTask).toBe(true);
 	});
 
@@ -1444,10 +1427,9 @@ describe("AgentSession rlm recursion", () => {
 			rlmSessionDir: join(tempDir, "replying-child"),
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({
-					current: { name: "reply-worker", id: child.sessionId, depth: 1 },
-					entries: [{ relationship: "parent", name: "parent", id: "parent-session", depth: 0, status: "idle" }],
-				}),
+				family: async () => [
+					{ relationship: "parent", entry: { id: "parent-session", name: "parent", depth: 0, status: "idle" } },
+				],
 				sendAgentMessage: async () => ({
 					id: "agentmsg-reply-before-follow-up",
 					source: "agent_message",
@@ -1759,7 +1741,7 @@ describe("AgentSession rlm recursion", () => {
 			rlmSessionDir: join(tempDir, "paused-terminal-child"),
 			agentMessageController: {
 				listAgents: () => ({ agents: [] }),
-				roster: () => ({ current: { name: "child", id: "child", depth: 1 }, entries: [] }),
+				family: async () => [],
 				sendAgentMessage: synthesizedAgentMessageSend,
 			},
 			streamFn: (_model, context) => {
@@ -2923,7 +2905,7 @@ describe("AgentSession rlm recursion", () => {
 
 		const promptPromise = root.prompt("start");
 		await waitFor(() => seenSystemPrompts.length === 1);
-		expect(seenSystemPrompts[0]!).toContain("A callable `rlm`");
+		expect(seenSystemPrompts[0]!).toContain("An `rlm` object");
 
 		await root.setRlmMaxDepth(0);
 		await root.steer("continue after max-depth update");
@@ -2931,7 +2913,7 @@ describe("AgentSession rlm recursion", () => {
 		await promptPromise;
 
 		expect(seenSystemPrompts).toHaveLength(2);
-		expect(seenSystemPrompts[1]!).not.toContain("A callable `rlm`");
+		expect(seenSystemPrompts[1]!).not.toContain("An `rlm` object");
 	});
 
 	it("rehydrates chat max depth ahead of reconstruction config", async () => {
@@ -2956,10 +2938,10 @@ describe("AgentSession rlm recursion", () => {
 			if (!baselineLeafId) throw new Error("Missing baseline branch leaf");
 
 			await root.setRlmMaxDepth(2);
-			expect(root.systemPrompt).toContain("A callable `rlm`");
+			expect(root.systemPrompt).toContain("An `rlm` object");
 			await root.navigateTree(baselineLeafId, { summarize: false });
 			expect(root.getRlmMaxDepthStatus()).toEqual({ maxDepth: 0, source: "env" });
-			expect(root.systemPrompt).not.toContain("A callable `rlm`");
+			expect(root.systemPrompt).not.toContain("An `rlm` object");
 		} finally {
 			vi.unstubAllEnvs();
 		}
@@ -3089,7 +3071,7 @@ describe("AgentSession rlm recursion", () => {
 			});
 			expect(resumed.sessionManager.getLeafId()).toBe(baselineLeafId);
 			expect(resumed.rlmMaxDepth).toBe(0);
-			expect(resumed.systemPrompt).not.toContain("A callable `rlm`");
+			expect(resumed.systemPrompt).not.toContain("An `rlm` object");
 		} finally {
 			vi.unstubAllEnvs();
 		}
@@ -3135,7 +3117,7 @@ describe("AgentSession rlm recursion", () => {
 		expect(grandchild?.rlmMaxDepth).toBe(3);
 
 		await root.setRlmMaxDepth(0);
-		expect(root.systemPrompt).not.toContain("A callable `rlm`");
+		expect(root.systemPrompt).not.toContain("An `rlm` object");
 		await expect(root.runRlmChild("blocked at root")).rejects.toThrow(
 			"RLM recursion depth limit reached (RLM_DEPTH=0, RLM_MAX_DEPTH=0)",
 		);
@@ -3259,21 +3241,21 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("nested")).rejects.toThrow("RLM recursion depth limit reached");
 	});
 
-	it("rejects unsupported rlm.run kwargs loudly", async () => {
+	it("rejects unsupported rlm.spawn kwargs loudly", async () => {
 		const root = createSession();
 
 		await expect(root.runRlmChild("nested", { temperature: 0 })).rejects.toThrow(
-			"Unsupported rlm.run kwargs: temperature",
+			"Unsupported rlm.spawn kwargs: temperature",
 		);
 	});
 
-	it("rejects a non-string rlm.run thinking kwarg", async () => {
+	it("rejects a non-string rlm.spawn thinking kwarg", async () => {
 		const root = createSession();
 
-		await expect(root.runRlmChild("nested", { thinking: 3 })).rejects.toThrow("rlm.run thinking must be a string");
+		await expect(root.runRlmChild("nested", { thinking: 3 })).rejects.toThrow("rlm.spawn thinking must be a string");
 	});
 
-	it("rejects an unknown rlm.run thinking level", async () => {
+	it("rejects an unknown rlm.spawn thinking level", async () => {
 		const root = createSession();
 		await expect(root.runRlmChild("nested", { thinking: "ultra" })).rejects.toThrow("must be one of");
 	});
@@ -4671,7 +4653,7 @@ import rlm
 
 async def _delayed_rlm():
     await asyncio.sleep(0.05)
-    return await rlm.run("detached child after idle")
+    return await rlm.spawn("detached child after idle", name="detached-worker")
 
 _task = asyncio.create_task(_delayed_rlm())
 print("scheduled")

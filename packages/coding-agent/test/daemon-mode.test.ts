@@ -29,7 +29,11 @@ import {
 	DEFAULT_AGENT_MESSAGE_MAX_CHARS,
 	sessionNameReservationKey,
 } from "../src/core/agent-messages.js";
-import type { AgentObserveController } from "../src/core/agent-observe.js";
+import {
+	AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+	type AgentObserveController,
+	type AgentObserveListResult,
+} from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -1048,10 +1052,10 @@ describe("daemon mode helpers", () => {
 
 			expect((await internals.listPassiveRlmSubagents()).map(({ entry }) => entry.childId)).toContain("child-1");
 			expect((await internals.findPassiveRlmSubagent("real-worker"))?.entry.childId).toBe("child-1");
-			const roster = await internals.createAgentMessageController(() => parentState).roster?.();
-			const passiveRosterEntry = roster?.entries.find((entry) => entry.name === "real-worker");
-			expect(passiveRosterEntry).toMatchObject({ relationship: "child", status: "inactive" });
-			expect(passiveRosterEntry).not.toHaveProperty("repliedSinceTask");
+			const family = await internals.createAgentMessageController(() => parentState).family?.();
+			const passiveMember = family?.find((member) => member.entry.name === "real-worker");
+			expect(passiveMember).toMatchObject({ relationship: "child", entry: { status: "inactive" } });
+			expect(passiveMember?.entry).not.toHaveProperty("repliedSinceTask");
 			const listed = await internals.buildSessionListWithPassiveRlmSubagents(
 				[parentState],
 				await SessionManager.listAll(undefined, sessionDir),
@@ -1160,9 +1164,12 @@ describe("daemon mode helpers", () => {
 			expect((await internals.listPassiveRlmSubagents()).map(({ entry }) => entry)).toContainEqual(
 				expect.objectContaining({ childId: fixture.childId, status: "running" }),
 			);
-			await expect(internals.createAgentMessageController(() => parentState).roster?.()).resolves.toMatchObject({
-				entries: [expect.objectContaining({ relationship: "child", name: "renamed-worker" })],
-			});
+			await expect(internals.createAgentMessageController(() => parentState).family?.()).resolves.toEqual([
+				expect.objectContaining({
+					relationship: "child",
+					entry: expect.objectContaining({ name: "renamed-worker" }),
+				}),
+			]);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -2154,15 +2161,18 @@ describe("daemon mode helpers", () => {
 		);
 		const listAll = vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
 		try {
-			const handlers = createAgentMessageHostHandlers(internals.createAgentMessageController(() => source));
-			const roster = await handlers["agent_message.list_agents"]!({});
-			expect(roster.current).toMatchObject({ name: "Source", id: "session-source", depth: 0 });
-			expect(roster.entries).toContainEqual({
+			const controller = internals.createAgentMessageController(() => source);
+			const handlers = createAgentMessageHostHandlers({ ...controller, family: async () => controller.family!() });
+			await expect(controller.family!()).resolves.toContainEqual({
 				relationship: "sibling",
-				name: "Remote",
-				id: "session-remote",
-				depth: 0,
-				status: "idle",
+				entry: {
+					id: "session-remote",
+					name: "Remote",
+					depth: 0,
+					status: "idle",
+					cwd: "/tmp/remote",
+					activeSessionId: remoteSelector,
+				},
 			});
 			await expect(
 				handlers["agent_message.send"]!({
@@ -3093,6 +3103,99 @@ describe("daemon mode helpers", () => {
 		expect((await internals.createAgentObserveListResult(targetState)).current.status).toBe("compacting");
 	});
 
+	it("lists inactive family members in the agent-observe roster", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const currentState = makeState("current");
+		currentState.runtime = {
+			...currentState.runtime,
+			cwd: "/tmp",
+			diagnostics: [],
+			modelFallbackMessage: undefined,
+			session: {
+				sessionId: "session-current",
+				sessionName: "Current",
+				sessionFile: "/tmp/current.jsonl",
+				sessionManager: { getCwd: () => "/tmp" },
+				isStreaming: false,
+				isCompacting: false,
+				isSessionActive: false,
+				unfinishedActionCount: 0,
+				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+				messages: [],
+				state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+				hasRunningRlmChildren: () => false,
+			},
+		} as never;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAgentFamilyCatalog: ReturnType<typeof vi.fn>;
+			createAgentObserveListResult(current: ActiveSessionState): Promise<AgentObserveListResult>;
+		};
+		internals.sessions.set(currentState.activeSessionId, currentState);
+		internals.createAgentFamilyCatalog = vi.fn(async () => [
+			{ id: "session-current", name: "Current", depth: 0, status: "running", sessionPath: "/tmp/current.jsonl" },
+			{
+				id: "session-archived",
+				name: "archivist",
+				depth: 0,
+				status: "inactive",
+				sessionPath: "/tmp/archivist.jsonl",
+				cwd: "/tmp/archivist",
+				messageCount: 3,
+				firstMessage: "x".repeat(1000),
+			},
+			{
+				id: "session-remote",
+				name: "peer",
+				depth: 0,
+				status: "running",
+				sessionPath: "/tmp/peer.jsonl",
+				cwd: "/tmp/peer",
+				activeSessionId: "remote-active",
+			},
+		]);
+
+		const listed = await internals.createAgentObserveListResult(currentState);
+		expect(listed.agents).toEqual([
+			{
+				relationship: "sibling",
+				sessionId: "session-archived",
+				sessionName: "archivist",
+				runtimeKind: "top-level",
+				cwd: "/tmp/archivist",
+				status: "inactive",
+				isCurrent: false,
+				isStreaming: false,
+				isCompacting: false,
+				attachedClients: 0,
+				messageCount: 3,
+				queuedCount: 0,
+				isSessionActive: false,
+				firstMessage: "x".repeat(AGENT_OBSERVE_PREVIEW_MAX_CHARS),
+			},
+			{
+				activeSessionId: "remote-active",
+				relationship: "sibling",
+				sessionId: "session-remote",
+				sessionName: "peer",
+				runtimeKind: "top-level",
+				cwd: "/tmp/peer",
+				status: "running",
+				isCurrent: false,
+				isStreaming: false,
+				isCompacting: false,
+				attachedClients: 0,
+				queuedCount: 0,
+				isSessionActive: true,
+			},
+		]);
+	});
+
 	it("canonicalizes symlinked family paths before comparison", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-family-paths-"));
 		try {
@@ -3325,11 +3428,12 @@ describe("daemon mode helpers", () => {
 		const messaging = internals.createAgentMessageController(() => child);
 		const observe = internals.createAgentObserveController(() => child);
 
-		expect((await observe.listAgents()).agents.map((agent) => agent.activeSessionId)).toEqual([
-			"root",
-			"child",
-			"sibling",
-			"grandchild",
+		const observed = await observe.listAgents();
+		expect(observed.current.activeSessionId).toBe("child");
+		expect(observed.agents.map((agent) => [agent.relationship, agent.activeSessionId])).toEqual([
+			["parent", "root"],
+			["sibling", "sibling"],
+			["child", "grandchild"],
 		]);
 		await expect(observe.getAgent("cousin")).rejects.toThrow(
 			"Agent reach is limited to parent, siblings, and children",
@@ -4332,9 +4436,10 @@ describe("daemon mode helpers", () => {
 					const controller = options.sessionOptions?.agentMessageController;
 					const result = await controller?.listAgents();
 					expect(result?.current?.activeSessionId).toBeTruthy();
-					await expect(controller?.roster?.()).resolves.toMatchObject({
-						current: { id: session.sessionId },
-					});
+					// The catalog must resolve around the binding session, which is the selection
+					// origin and therefore never one of its own family members.
+					const family = await controller?.family?.();
+					expect(family?.some((member) => member.entry.id === session.sessionId)).toBe(false);
 					listedAgentsDuringBind++;
 				});
 				return {
@@ -5045,25 +5150,25 @@ describe("daemon mode helpers", () => {
 				}
 			).createAgentObserveController(() => parentState);
 			const observedAgents = await observeController.listAgents();
-			expect(observedAgents.agents).toContainEqual(
-				expect.objectContaining({
-					activeSessionId: expect.any(String),
-					sessionName: "renamed-worker",
-					runtimeKind: "subagent",
-					status: "idle",
-					messageCount: 1,
-					rlmChildId: fixture.childId,
-				}),
-			);
+			const observedChild = observedAgents.agents.find((agent) => agent.sessionName === "renamed-worker");
+			expect(observedChild).toMatchObject({
+				relationship: "child",
+				runtimeKind: "subagent",
+				status: "inactive",
+				isSessionActive: false,
+				messageCount: 1,
+				rlmChildId: fixture.childId,
+			});
+			expect(observedChild).not.toHaveProperty("activeSessionId");
 			expect(fixture.createRuntime).toHaveBeenCalledOnce();
 
 			const messageController = internals.createAgentMessageController(() => parentState);
-			await expect(messageController.roster?.()).resolves.toMatchObject({
-				current: { id: parentState.runtime.session.sessionId, depth: 0 },
-				entries: [
-					expect.objectContaining({ relationship: "child", name: "renamed-worker", depth: 1, status: "inactive" }),
-				],
-			});
+			await expect(messageController.family?.()).resolves.toEqual([
+				expect.objectContaining({
+					relationship: "child",
+					entry: expect.objectContaining({ name: "renamed-worker", depth: 1, status: "inactive" }),
+				}),
+			]);
 			await expect(
 				messageController.assertSessionNameAvailable?.({
 					name: "renamed-worker",
