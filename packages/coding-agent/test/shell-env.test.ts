@@ -3,7 +3,10 @@ import { getShellEnv } from "../src/utils/shell.js";
 
 const GUARD_VARS: Record<string, string> = {
 	GIT_EDITOR: "true",
+	GIT_SEQUENCE_EDITOR: "true",
 	GIT_TERMINAL_PROMPTS: "0",
+	GIT_ASKPASS: "true",
+	SSH_ASKPASS_REQUIRE: "never",
 	EDITOR: "true",
 	VISUAL: "true",
 	PAGER: "cat",
@@ -11,7 +14,18 @@ const GUARD_VARS: Record<string, string> = {
 	DEBIAN_FRONTEND: "noninteractive",
 };
 
-const KEPT = ["GIT_EDITOR", "GIT_TERMINAL_PROMPTS", "EDITOR", "VISUAL", "PAGER", "GIT_PAGER", "DEBIAN_FRONTEND"];
+const KEPT = [
+	"GIT_EDITOR",
+	"GIT_SEQUENCE_EDITOR",
+	"GIT_TERMINAL_PROMPTS",
+	"GIT_ASKPASS",
+	"SSH_ASKPASS_REQUIRE",
+	"EDITOR",
+	"VISUAL",
+	"PAGER",
+	"GIT_PAGER",
+	"DEBIAN_FRONTEND",
+];
 
 describe("getShellEnv", () => {
 	const saved: Record<string, string | undefined> = {};
@@ -44,11 +58,15 @@ describe("getShellEnv", () => {
 	it("overrides inherited terminal settings instead of honoring them", () => {
 		process.env.EDITOR = "vim";
 		process.env.PAGER = "less";
+		process.env.GIT_SEQUENCE_EDITOR = "vim";
 		const env = getShellEnv();
 		// stdin is never a TTY for agent shells, so an inherited EDITOR/PAGER is
 		// exactly the hang this guard prevents; it must be replaced, not kept.
 		expect(env.EDITOR).toBe("true");
 		expect(env.PAGER).toBe("cat");
+		// GIT_SEQUENCE_EDITOR outranks GIT_EDITOR for `git rebase -i`, so an
+		// inherited value would still hang the interactive todo editor.
+		expect(env.GIT_SEQUENCE_EDITOR).toBe("true");
 	});
 
 	it("keeps unrelated inherited variables intact", () => {
