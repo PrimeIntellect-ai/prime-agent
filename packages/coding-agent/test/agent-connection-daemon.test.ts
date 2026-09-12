@@ -2863,6 +2863,80 @@ describe("DaemonAgentConnection", () => {
 		expect(resyncs).toBe(1);
 	});
 
+	it.each([
+		["reconnect", "attach"],
+		["reconnect", "snapshot"],
+		["reconnect", "backoff"],
+		["update", "attach"],
+		["update", "snapshot"],
+		["update", "backoff"],
+	] as const)("stops %s after a terminal close during %s", async (recovery, stage) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			recoverDaemon: async () => undefined,
+			reconnectTimeoutMs: 1000,
+		});
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		try {
+			await connection.attach();
+			fakeClient.updateRestartSessions = [{ activeSessionId: "active-1", sessionId: "session-current" }];
+			const request = fakeClient.request.bind(fakeClient);
+			vi.spyOn(fakeClient, "request").mockImplementation(async (...args) => {
+				const response = await request(...args);
+				if (args[0].type === "attach") {
+					if (stage === "backoff") throw new Error("attach temporarily unavailable");
+					if (stage === "attach") await gate;
+				}
+				return response;
+			});
+			const getInitialSnapshot = connection.getInitialSnapshot.bind(connection);
+			const snapshotRead = vi.spyOn(connection, "getInitialSnapshot").mockImplementation(async (...args) => {
+				const snapshot = await getInitialSnapshot(...args);
+				if (stage === "snapshot") await gate;
+				return snapshot;
+			});
+			const events: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				events.push(event);
+			});
+			fakeClient.connected = false;
+			fakeClient.emitClose(
+				recovery === "update"
+					? new DaemonSocketClosedError("/tmp/fake.sock", "update")
+					: new Error("Daemon socket closed"),
+			);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(fakeClient.requests.filter((request) => request.type === "attach")).toHaveLength(2);
+			if (stage === "snapshot") expect(snapshotRead).toHaveBeenCalledOnce();
+			const requestCount = fakeClient.requests.length;
+			const reconnectCount = fakeClient.reconnectCount;
+			const resetCount = fakeClient.resetTransportCount;
+			const closeCount = fakeClient.closeCount;
+			fakeClient.emitMessage({ type: "session_closed", activeSessionId: "active-1", reason: "killed" });
+			release();
+			await vi.advanceTimersByTimeAsync(120100);
+			expect(fakeClient.requests).toHaveLength(requestCount);
+			expect(fakeClient.reconnectCount).toBe(reconnectCount);
+			expect(fakeClient.resetTransportCount).toBe(resetCount);
+			expect(fakeClient.closeCount).toBe(closeCount);
+			expect(events).toEqual([
+				expect.objectContaining({ type: "connection_status", status: "reconnecting" }),
+				expect.objectContaining({
+					type: "closed",
+					error: expect.stringContaining("The daemon stopped this agent session."),
+				}),
+			]);
+		} finally {
+			release();
+			await connection.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	it("does not reconnect after disposal while daemon recovery is pending", async () => {
 		const fakeClient = new FakeDaemonClient();
 		let finishRecovery: (() => void) | undefined;
@@ -4218,6 +4292,10 @@ describe("DaemonAgentConnection deferred session events", () => {
 			});
 			const rejected = vi.fn();
 			const resolved = vi.fn();
+			const events: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				events.push(event);
+			});
 			const pendingAttach = connection.attach().then(resolved, rejected);
 			try {
 				if (timing !== "before response") await nextMessageLoopTurn();
@@ -4247,6 +4325,49 @@ describe("DaemonAgentConnection deferred session events", () => {
 					(connection as unknown as { snapshotAssemblies: Map<string, unknown> }).snapshotAssemblies.size,
 				).toBe(0);
 				expect(fakeClient.closeCount).toBe(0);
+				for (const purpose of ["attach", "replacement", "resync"] as const) {
+					fakeClient.emitMessage({
+						type: "session_snapshot_begin",
+						activeSessionId: "active-1",
+						snapshotId: purpose,
+						snapshot: result.snapshot,
+						messageCount: 1,
+						targetChunkBytes: 512 * 1024,
+						purpose,
+					});
+					fakeClient.emitMessage({
+						type: "session_snapshot_chunk",
+						activeSessionId: "active-1",
+						snapshotId: purpose,
+						index: 0,
+						messages: [{ role: "user", content: "late transcript", timestamp: 1 }],
+					});
+					fakeClient.emitMessage({
+						type: "session_snapshot_end",
+						activeSessionId: "active-1",
+						snapshotId: purpose,
+						chunkCount: 1,
+						lastEventSequence: 12,
+					});
+				}
+				fakeClient.emitMessage({
+					type: "session_snapshot_failed",
+					activeSessionId: "active-1",
+					snapshotId: "failed-after-close",
+					error: "stream closed",
+				});
+				expect(
+					(connection as unknown as { snapshotAssemblies: Map<string, unknown> }).snapshotAssemblies.size,
+				).toBe(0);
+				fakeClient.emitMessage({ type: "session_closed", activeSessionId: "active-1", reason: "killed" });
+				await nextMessageLoopTurn();
+				expect(
+					(connection as unknown as { snapshotAssemblies: Map<string, unknown> }).snapshotAssemblies.size,
+				).toBe(0);
+				expect(events).toEqual([expect.objectContaining({ type: "closed" })]);
+				const requestCount = fakeClient.requests.length;
+				await expect(connection.attach()).rejects.toThrow("closed");
+				expect(fakeClient.requests).toHaveLength(requestCount);
 			} finally {
 				await connection.dispose();
 				await pendingAttach;
