@@ -624,7 +624,11 @@ export class AuthStorage {
 		if (!content) {
 			return {};
 		}
-		return JSON.parse(content) as AuthStorageData;
+		const data: unknown = JSON.parse(content);
+		if (typeof data !== "object" || data === null || Array.isArray(data)) {
+			throw new Error("Invalid auth storage: expected a JSON object");
+		}
+		return data as AuthStorageData;
 	}
 
 	/**

@@ -89,6 +89,87 @@ describe("ENG-6058 production identity isolation", () => {
 		});
 	});
 
+	test.each(["[]", "[1]", "null", '""', '"fake-secret"', "0", "1", "true", "false", "{", "   "])(
+		"rejects non-record or malformed Agent auth at startup without changing it: %s",
+		(content) => {
+			const authPath = join(harness.tempDir, "invalid-auth.json");
+			writeFileSync(authPath, content);
+			const auth = AuthStorage.create(authPath);
+			expect(auth.drainErrors()).toHaveLength(1);
+			expect(auth.list()).toEqual([]);
+			const changes = [
+				() => auth.setPrimeInferenceApiKey("replacement"),
+				() => auth.setPrimeInferenceTeamSelection({ teamId: "team", name: "Team" }),
+				() => auth.logout("prime-inference"),
+			];
+			for (const change of changes) {
+				expect(change).toThrow();
+				expect(readFileSync(authPath, "utf8")).toBe(content);
+				expect(auth.list()).toEqual([]);
+			}
+			if (content === '"fake-secret"') {
+				expect(auth.drainErrors().map((error) => error.message)).toEqual([
+					"Invalid auth storage: expected a JSON object",
+					"Invalid auth storage: expected a JSON object",
+				]);
+			}
+		},
+	);
+
+	test.each(["[]", "[1]", "null", '""', '"fake-secret"', "0", "1", "true", "false", "{", "   "])(
+		"rejects current invalid disk data, retains stale identity, and permits repaired-file retry: %s",
+		(content) => {
+			const authPath = join(harness.tempDir, "changed-auth.json");
+			const auth = AuthStorage.create(authPath);
+			auth.setPrimeInferenceApiKey("old-key", { teamId: "old-team", name: "Old" });
+			const original = auth.get("prime-inference");
+			expect(auth.markAuthStale("prime-inference")).toBe(true);
+			writeFileSync(authPath, content);
+			const changes = [
+				() => auth.setPrimeInferenceApiKey("replacement"),
+				() => auth.setPrimeInferenceTeamSelection(null, "old-key"),
+				() => auth.logout("prime-inference"),
+			];
+			for (const change of changes) {
+				expect(change).toThrow();
+				expect(readFileSync(authPath, "utf8")).toBe(content);
+				expect(auth.get("prime-inference")).toEqual(original);
+				expect(auth.getAuthStatus("prime-inference").source).toBe("stale");
+			}
+			auth.reload();
+			expect(auth.get("prime-inference")).toEqual(original);
+			expect(auth.getAuthStatus("prime-inference").source).toBe("stale");
+			expect(auth.drainErrors()).toHaveLength(3);
+			writeFileSync(authPath, "{}");
+			auth.setPrimeInferenceApiKey("repaired-key");
+			expect(auth.getAuthStatus("prime-inference")).toEqual({ configured: true, source: "stored" });
+			expect(AuthStorage.create(authPath).get("prime-inference")).toEqual({
+				type: "api_key",
+				key: "repaired-key",
+				primeTeam: null,
+			});
+		},
+	);
+
+	test.each(["{}", '{"constructor":null,"__proto__":{"preserved":true},"unknown-provider":{"future":true}}'])(
+		"preserves valid JSON object records without prototype-shape assumptions: %s",
+		(content) => {
+			const authPath = join(harness.tempDir, "object-auth.json");
+			writeFileSync(authPath, content);
+			const auth = AuthStorage.create(authPath);
+			expect(auth.drainErrors()).toEqual([]);
+			auth.setPrimeInferenceApiKey("object-key");
+			expect(AuthStorage.create(authPath).get("prime-inference")).toEqual({
+				type: "api_key",
+				key: "object-key",
+				primeTeam: null,
+			});
+			auth.setPrimeInferenceTeamSelection({ teamId: "team", name: "Team" }, "object-key");
+			auth.logout("prime-inference");
+			expect(JSON.parse(readFileSync(authPath, "utf8"))).toEqual(JSON.parse(content));
+		},
+	);
+
 	test("snapshots a validated production key and file team only on explicit login", async () => {
 		const configPath = join(harness.tempDir, "config.json");
 		const authPath = join(harness.tempDir, "auth.json");
