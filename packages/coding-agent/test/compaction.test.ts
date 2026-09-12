@@ -6,6 +6,7 @@ import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	buildSummarizationPrompt,
+	CONTEXT_CAP_FLOOR_MARGIN,
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
@@ -14,6 +15,7 @@ import {
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
+	resolveContextCap,
 	shouldCompact,
 } from "../src/core/compaction/index.js";
 import {
@@ -282,6 +284,48 @@ describe("shouldCompact", () => {
 		};
 
 		expect(shouldCompact(95000, 0, settings)).toBe(false);
+	});
+
+	it("fires at the cap on a long-window model and stays window-relative on a short one", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+			maxContextTokens: 50000,
+		};
+
+		expect(shouldCompact(50001, 200000, settings)).toBe(true);
+		expect(shouldCompact(50000, 200000, settings)).toBe(false);
+		// window - reserve (40000) is below the cap, so the window still wins
+		expect(shouldCompact(40001, 50000, settings)).toBe(true);
+		expect(shouldCompact(40000, 50000, settings)).toBe(false);
+	});
+
+	it("never fires from the cap when compaction is disabled", () => {
+		const settings: CompactionSettings = {
+			enabled: false,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+			maxContextTokens: 50000,
+		};
+
+		expect(shouldCompact(190000, 200000, settings)).toBe(false);
+	});
+
+	it("clamps a sub-floor cap to keepRecentTokens + reserveTokens + margin", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+			maxContextTokens: 1000,
+		};
+		const floor = 20000 + 10000 + CONTEXT_CAP_FLOOR_MARGIN;
+
+		expect(resolveContextCap(settings)).toEqual({ cap: floor, clamped: true });
+		expect(shouldCompact(floor + 1, 200000, settings)).toBe(true);
+		expect(shouldCompact(floor, 200000, settings)).toBe(false);
+
+		expect(resolveContextCap({ ...settings, maxContextTokens: floor })).toEqual({ cap: floor, clamped: false });
 	});
 });
 

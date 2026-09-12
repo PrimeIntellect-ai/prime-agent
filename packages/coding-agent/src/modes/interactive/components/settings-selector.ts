@@ -2,6 +2,8 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Transport } from "@earendil-works/pi-ai";
 import {
 	Container,
+	getKeybindings,
+	Input,
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
@@ -32,6 +34,7 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	compactionMaxContextTokens: number | undefined;
 	idleEvictionMinutes: IdleEvictionMinutes;
 	showImages: boolean;
 	autoResizeImages: boolean;
@@ -59,6 +62,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onCompactionMaxContextTokensChange: (maxContextTokens: number | undefined) => void;
 	onIdleEvictionMinutesChange: (value: IdleEvictionMinutes) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
@@ -123,6 +127,48 @@ class WarningSettingsSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.settingsList.handleInput(data);
+	}
+}
+
+class NumberInputSubmenu extends Container {
+	private input: Input;
+	private onSubmit: (value: string) => void;
+	private onCancelCallback: () => void;
+
+	constructor(
+		title: string,
+		description: string,
+		currentValue: string,
+		onSubmit: (value: string) => void,
+		onCancel: () => void,
+	) {
+		super();
+
+		this.onSubmit = onSubmit;
+		this.onCancelCallback = onCancel;
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", description), 0, 0));
+		this.addChild(new Spacer(1));
+
+		this.input = new Input();
+		this.input.setValue(currentValue);
+		this.addChild(this.input);
+
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", "  Enter to save · esc to go back"), 0, 0));
+	}
+
+	handleInput(data: string): void {
+		const kb = getKeybindings();
+		if (kb.matches(data, "tui.select.confirm") || data === "\n") {
+			this.onSubmit(this.input.getValue().trim());
+		} else if (kb.matches(data, "tui.select.cancel")) {
+			this.onCancelCallback();
+		} else {
+			this.input.handleInput(data);
+		}
 	}
 }
 
@@ -204,6 +250,32 @@ export class SettingsSelectorComponent extends Container {
 				description: "Automatically compact context when it gets too large",
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "compaction-max-context-tokens",
+				label: "Auto-compact context cap",
+				description: "Auto-compact once context reaches this many tokens (global setting; empty = unset)",
+				currentValue:
+					config.compactionMaxContextTokens === undefined ? "unset" : String(config.compactionMaxContextTokens),
+				submenu: (currentValue, done) =>
+					new NumberInputSubmenu(
+						"Auto-compact Context Cap",
+						"Context tokens at which auto-compaction triggers. Leave empty to unset.",
+						currentValue === "unset" ? "" : currentValue,
+						(value) => {
+							if (value === "") {
+								done("unset");
+								return;
+							}
+							const parsed = Number(value);
+							if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed) || parsed <= 0) {
+								done();
+								return;
+							}
+							done(String(parsed));
+						},
+						() => done(),
+					),
 			},
 			{
 				id: "idle-eviction-minutes",
@@ -441,6 +513,11 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "compaction-max-context-tokens":
+						callbacks.onCompactionMaxContextTokensChange(
+							newValue === "unset" ? undefined : parseInt(newValue, 10),
+						);
 						break;
 					case "idle-eviction-minutes":
 						callbacks.onIdleEvictionMinutesChange(newValue === "off" ? "off" : Number(newValue));

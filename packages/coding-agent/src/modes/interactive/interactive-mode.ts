@@ -80,6 +80,7 @@ import {
 	uploadAllAgentTraces,
 } from "../../core/agent-traces.js";
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
+import type { ContextLimitStatus } from "../../core/context-limit.js";
 import {
 	type AgentCronJob,
 	type AgentHeartbeatManagementAction,
@@ -4657,6 +4658,11 @@ export class InteractiveMode {
 					await this.handleRlmMaxDepthCommand(commandArgs);
 					return;
 				}
+				if (commandName === "context-limit") {
+					this.editor.setText("");
+					await this.handleContextLimitCommand(commandArgs);
+					return;
+				}
 				if (commandName === "session" && !commandArgs) {
 					this.echoLocalCommand(text);
 					await this.handleSessionCommand();
@@ -7387,6 +7393,9 @@ export class InteractiveMode {
 		try {
 			state = await this.agentConnection.getState();
 			this.applyConnectionStateSnapshot(state);
+			// A daemon worker writes settings-file values (e.g. the context cap) in its
+			// own process; re-read so the menu shows what is on disk.
+			await this.settingsManager.reload();
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
@@ -7395,6 +7404,7 @@ export class InteractiveMode {
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: state.autoCompactionEnabled,
+					compactionMaxContextTokens: this.settingsManager.getCompactionMaxContextTokens()?.maxContextTokens,
 					idleEvictionMinutes: this.settingsManager.getIdleEvictionMinutes(),
 					showImages: this.settingsManager.getShowImages(),
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
@@ -7426,6 +7436,13 @@ export class InteractiveMode {
 							this.showError(error instanceof Error ? error.message : String(error));
 						});
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onCompactionMaxContextTokensChange: (maxContextTokens) => {
+						void this.agentConnection
+							.setContextLimit(maxContextTokens ?? null, { scope: "global" })
+							.catch((error) => {
+								this.showError(error instanceof Error ? error.message : String(error));
+							});
 					},
 					onIdleEvictionMinutesChange: (value) => {
 						this.settingsManager.setIdleEvictionMinutes(value);
@@ -9131,6 +9148,59 @@ export class InteractiveMode {
 		}
 	}
 
+	private async handleContextLimitCommand(args: string): Promise<void> {
+		const arg = args.trim();
+		try {
+			if (!arg) {
+				this.showContextLimitStatus(await this.agentConnection.getContextLimitStatus());
+				return;
+			}
+			if (arg === "off") {
+				const status = await this.agentConnection.setContextLimit(null);
+				this.showContextLimitStatus(status, "Session context limit cleared");
+				return;
+			}
+			if (!/^\d+$/.test(arg)) {
+				this.showWarning("Usage: /context-limit [tokens|off]");
+				return;
+			}
+			const status = await this.agentConnection.setContextLimit(Number(arg));
+			this.showContextLimitStatus(status, "Session context limit set");
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private showContextLimitStatus(status: ContextLimitStatus, header?: string): void {
+		const lines: string[] = [];
+		if (header) lines.push(header);
+		lines.push(
+			`Model context window: ${status.contextWindow > 0 ? status.contextWindow.toLocaleString() : "unknown"} tokens`,
+		);
+		lines.push(`Reserve tokens: ${status.reserveTokens.toLocaleString()}`);
+		if (status.maxContextTokens === undefined) {
+			lines.push("Configured cap: none");
+		} else {
+			lines.push(`Configured cap: ${status.maxContextTokens.toLocaleString()} tokens (${status.source})`);
+			if (status.clamped && status.effectiveCap !== undefined) {
+				lines.push(
+					`Cap raised to ${status.effectiveCap.toLocaleString()} tokens (below keepRecentTokens + reserveTokens + 8192)`,
+				);
+			}
+		}
+		lines.push(
+			status.compactAt === null
+				? "Auto-compacts at: unknown (no context window)"
+				: `Auto-compacts at: ${status.compactAt.toLocaleString()} tokens${status.enabled ? "" : " (auto-compaction disabled)"}`,
+		);
+		lines.push(
+			`Current context: ${status.contextTokens === null ? "unknown" : `${status.contextTokens.toLocaleString()} tokens`}`,
+		);
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("dim", lines.join("\n")), 1, 0));
+		this.ui.requestRender();
+	}
+
 	private async handleSessionCommand(): Promise<void> {
 		const stats = await this.agentConnection.getSessionStats();
 		const sessionName = this.getCurrentSessionName();
@@ -9452,6 +9522,12 @@ export class InteractiveMode {
 			const tree = await this.agentConnection.getContextTree();
 			const width = Math.max(60, Math.min(this.ui.terminal.columns - 2, 120));
 			info = formatContextTree(tree, width);
+			// Older daemons without the command degrade to the plain tree.
+			const limit = await this.agentConnection.getContextLimitStatus().catch(() => undefined);
+			if (limit && limit.compactAt !== null && limit.enabled) {
+				const source = limit.source === "none" ? "context window - reserve" : `cap: ${limit.source}`;
+				info += `\n${theme.fg("dim", "Auto-compacts at:")} ${formatTokenCount(limit.compactAt)} tokens ${theme.fg("dim", `(${source})`)}`;
+			}
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;

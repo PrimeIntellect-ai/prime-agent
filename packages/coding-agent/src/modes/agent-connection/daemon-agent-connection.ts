@@ -8,6 +8,7 @@ import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
+import type { ContextLimitStatus } from "../../core/context-limit.js";
 import type { ContextTreeNode } from "../../core/context-tree.js";
 import type {
 	AgentCronJob,
@@ -1491,6 +1492,22 @@ export class DaemonAgentConnection implements AgentConnection {
 			activeSessionId: this.activeSessionId,
 			maxDepth,
 			global: options?.global,
+		});
+	}
+
+	async getContextLimitStatus() {
+		return this.requestData<ContextLimitStatus>({
+			type: "get_context_limit_status",
+			activeSessionId: this.activeSessionId,
+		});
+	}
+
+	async setContextLimit(maxContextTokens: number | null, options?: { scope?: "session" | "global" }) {
+		return this.requestData<ContextLimitStatus>({
+			type: "set_context_limit",
+			activeSessionId: this.activeSessionId,
+			maxContextTokens,
+			scope: options?.scope,
 		});
 	}
 

@@ -119,6 +119,32 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	/** Optional hard cap on context tokens before auto-compaction triggers. */
+	maxContextTokens?: number;
+}
+
+/** Headroom added above keepRecentTokens + reserveTokens so a capped compaction always frees room. */
+export const CONTEXT_CAP_FLOOR_MARGIN = 8192;
+
+export interface ResolvedContextCap {
+	cap: number;
+	/** True when the configured cap was below the anti-thrash floor and was raised to it. */
+	clamped: boolean;
+}
+
+/** Resolve the configured max-context-tokens cap, raising sub-floor values to the anti-thrash floor. */
+export function resolveContextCap(settings: CompactionSettings): ResolvedContextCap | undefined {
+	if (settings.maxContextTokens === undefined) return undefined;
+	const floor = settings.keepRecentTokens + settings.reserveTokens + CONTEXT_CAP_FLOOR_MARGIN;
+	if (settings.maxContextTokens < floor) return { cap: floor, clamped: true };
+	return { cap: settings.maxContextTokens, clamped: false };
+}
+
+/** Context-token point at which auto-compaction fires: min(window - reserve, effective cap). */
+export function compactionTriggerTokens(contextWindow: number, settings: CompactionSettings): number {
+	const windowTrigger = contextWindow - settings.reserveTokens;
+	const cap = resolveContextCap(settings);
+	return cap ? Math.min(windowTrigger, cap.cap) : windowTrigger;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
@@ -220,7 +246,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
 	if (contextWindow <= 0) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	return contextTokens > compactionTriggerTokens(contextWindow, settings);
 }
 /**
  * Estimate token count for a message using chars/4 heuristic.

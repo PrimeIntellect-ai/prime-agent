@@ -13,6 +13,7 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
+	maxContextTokens?: number; // no default - optional hard cap on context tokens before auto-compaction
 	agentCallable?: boolean; // default: true - expose the compact skill so the model can request compaction
 }
 
@@ -893,11 +894,34 @@ export class SettingsManager {
 		return this.settings.compaction?.agentCallable ?? true;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionMaxContextTokens(): { maxContextTokens: number; source: "project" | "global" } | undefined {
+		const project = this.projectSettings.compaction?.maxContextTokens;
+		if (project !== undefined) return { maxContextTokens: project, source: "project" };
+		const global = this.globalSettings.compaction?.maxContextTokens;
+		if (global !== undefined) return { maxContextTokens: global, source: "global" };
+		return undefined;
+	}
+
+	setCompactionMaxContextTokens(maxContextTokens: number | undefined): void {
+		if (!this.globalSettings.compaction) {
+			this.globalSettings.compaction = {};
+		}
+		this.globalSettings.compaction.maxContextTokens = maxContextTokens;
+		this.markModified("compaction", "maxContextTokens");
+		this.save();
+	}
+
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		maxContextTokens?: number;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			maxContextTokens: this.getCompactionMaxContextTokens()?.maxContextTokens,
 		};
 	}
 

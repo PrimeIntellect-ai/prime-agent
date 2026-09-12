@@ -81,6 +81,15 @@ describe("Input component", () => {
 		});
 	});
 
+	describe("setValue", () => {
+		it("places the cursor at the end so typed text appends", () => {
+			const input = new Input();
+			input.setValue("1000");
+			input.handleInput("5");
+			assert.strictEqual(input.getValue(), "10005");
+		});
+	});
+
 	describe("Kill ring", () => {
 		it("Ctrl+W saves deleted text to kill ring and Ctrl+Y yanks it", () => {
 			const input = new Input();

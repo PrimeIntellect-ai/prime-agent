@@ -8,6 +8,7 @@ import {
 } from "../core/autonomous.js";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
 	type CompactionOutcomeMessage,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 	isCompactionOutcomeMessage,
@@ -45,7 +46,8 @@ export function selectHeadlessTerminalResult(messages: readonly AgentMessage[]):
 			(message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
 				message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE ||
 				message.customType === REFINEMENT_NOTICE_CUSTOM_TYPE ||
-				message.customType === HARNESS_DIGEST_CUSTOM_TYPE)
+				message.customType === HARNESS_DIGEST_CUSTOM_TYPE ||
+				message.customType === CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE)
 		) {
 			index--;
 			continue;

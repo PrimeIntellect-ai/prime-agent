@@ -125,6 +125,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		argumentHint: "[status|on|off|preview|upload|upload-current|upload-all|login]",
 	},
 	{ name: "context", description: "Show token, cost, and context usage for agent and sub-agents" },
+	{
+		name: "context-limit",
+		description: "Set, view, or clear the session's auto-compaction context-token cap",
+		argumentHint: "[tokens|off]",
+		takesArgument: true,
+	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{
 		name: "update",

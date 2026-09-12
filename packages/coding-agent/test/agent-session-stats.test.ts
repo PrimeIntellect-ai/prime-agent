@@ -48,9 +48,11 @@ function createUserMessage(text: string, timestamp: number) {
 	};
 }
 
-function createSession() {
-	const settingsManager = SettingsManager.inMemory();
-	const sessionManager = SessionManager.inMemory();
+function createSession(
+	options: { settings?: Parameters<typeof SettingsManager.inMemory>[0]; sessionManager?: SessionManager } = {},
+) {
+	const settingsManager = SettingsManager.inMemory(options.settings);
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const session = new AgentSession({
@@ -70,7 +72,7 @@ function createSession() {
 		resourceLoader: createTestResourceLoader(),
 	});
 
-	return { session, sessionManager };
+	return { session, sessionManager, settingsManager };
 }
 
 function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
@@ -138,6 +140,65 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
 		} finally {
 			session.dispose();
+		}
+	});
+});
+
+describe("AgentSession context limit", () => {
+	it("computes the usage percentage against the capped window", () => {
+		const { session, sessionManager } = createSession({ settings: { compaction: { maxContextTokens: 50000 } } });
+
+		try {
+			sessionManager.appendMessage(createUserMessage("hello", 1));
+			sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+			syncAgentMessages(session, sessionManager);
+
+			const usage = session.getContextUsage();
+			expect(usage?.contextWindow).toBe(50000);
+			expect(usage?.percent).toBe((200 / 50000) * 100);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("writes a global-scope limit to settings without creating a session override", () => {
+		const { session, sessionManager, settingsManager } = createSession();
+
+		try {
+			const status = session.setContextLimit(60000, { scope: "global" });
+			expect(status).toMatchObject({ maxContextTokens: 60000, source: "global" });
+			expect(settingsManager.getCompactionMaxContextTokens()).toEqual({ maxContextTokens: 60000, source: "global" });
+			expect(session.getContextUsage()?.contextWindow).toBe(60000);
+			expect(sessionManager.getBranch().some((entry) => entry.type === "custom")).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("persists the session override, restores it on reload, and prefers it over settings", () => {
+		const sessionManager = SessionManager.inMemory();
+		const { session } = createSession({ settings: { compaction: { maxContextTokens: 50000 } }, sessionManager });
+
+		try {
+			const status = session.setContextLimit(100000);
+			expect(status).toMatchObject({ maxContextTokens: 100000, source: "chat" });
+			expect(session.getContextUsage()?.contextWindow).toBe(100000);
+		} finally {
+			session.dispose();
+		}
+
+		const { session: reloaded } = createSession({
+			settings: { compaction: { maxContextTokens: 50000 } },
+			sessionManager,
+		});
+		try {
+			expect(reloaded.getContextLimitStatus()).toMatchObject({ maxContextTokens: 100000, source: "chat" });
+
+			const cleared = reloaded.setContextLimit(null);
+			expect(cleared).toMatchObject({ maxContextTokens: 50000, source: "global" });
+			expect(reloaded.getContextUsage()?.contextWindow).toBe(50000);
+		} finally {
+			reloaded.dispose();
 		}
 	});
 });

@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentAutonomousStatus } from "../src/core/autonomous.js";
 import {
+	CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
 	createCompactionOutcomeMessage,
 	createCustomMessage,
 	createHarnessDigestMessage,
@@ -242,6 +243,22 @@ describe("runPrintMode", () => {
 		const digest = createHarnessDigestMessage("# Continual Harness State\n\nmemory: 0");
 
 		expect(selectHeadlessTerminalResult([assistant, digest])).toEqual({
+			primary: assistant,
+			compactionOutcomes: [],
+		});
+	});
+
+	it("selects the final answer past a trailing clamp notice", () => {
+		const assistant = createAssistantMessage({ text: "final answer" });
+		const notice = createCustomMessage(
+			CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
+			"cap raised",
+			true,
+			undefined,
+			new Date().toISOString(),
+		);
+
+		expect(selectHeadlessTerminalResult([assistant, notice])).toEqual({
 			primary: assistant,
 			compactionOutcomes: [],
 		});

@@ -6,6 +6,7 @@ import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../src/core/age
 import { createGoalContextMessage, type GoalState } from "../src/core/goals.js";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE,
 	type CustomMessage,
 	convertToLlm,
 	createAsyncBashCompletionMessage,
@@ -185,6 +186,7 @@ describe("session command messages", () => {
 				customMessage(SESSION_SLASH_COMMAND_CUSTOM_TYPE),
 				customMessage(SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE),
 				customMessage(COMPACTION_OUTCOME_CUSTOM_TYPE),
+				customMessage(CONTEXT_CAP_CLAMP_NOTICE_CUSTOM_TYPE),
 			]),
 		).toEqual([]);
 	});
