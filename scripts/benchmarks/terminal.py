@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import termios
 import time
@@ -11,6 +12,7 @@ import pyte
 
 # Bound input-handler detection delay without adding a fixed wait to fast startup.
 PROBE_INTERVAL = 0.02
+MAX_PENDING_INPUT = 65_536
 
 QUERIES = {
     "\x1b[6n": "\x1b[1;1R",
@@ -80,13 +82,32 @@ class Terminal:
             dimensions=(40, 120),
             echo=False,
         )
-        self.child.delaybeforesend = 0
-        self.display = Display(self.child.send)
+        os.set_blocking(self.child.child_fd, False)
+        self._pending_input = b""
+        self.display = Display(self._send)
         self.transcript = transcript
         self.raw: list[str] = []
         self.bytes = 0
 
+    def _send(self, text: str) -> None:
+        data = text.encode("utf-8")
+        if len(self._pending_input) + len(data) > MAX_PENDING_INPUT:
+            raise RuntimeError("Terminal input queue exceeds 64 KiB")
+        self._pending_input += data
+        self._flush_input()
+
+    def _flush_input(self) -> None:
+        # Never wait for a raw-mode child to read. The next pump retries the exact tail.
+        if not self._pending_input:
+            return
+        try:
+            written = os.write(self.child.child_fd, self._pending_input)
+        except (BlockingIOError, InterruptedError):
+            return
+        self._pending_input = self._pending_input[written:]
+
     def pump(self) -> bool:
+        self._flush_input()
         try:
             chunk = self.child.read_nonblocking(65536, timeout=0.005)
         except pexpect.TIMEOUT:
@@ -131,6 +152,7 @@ class Terminal:
                     # returns to the insertion point, allowing any empty-editor placeholder.
                     if (
                         updated
+                        and not self._pending_input
                         and (cursor.y, cursor.x) == origin
                         and not any(probe in self.display.text() for probe in probes)
                     ):
@@ -147,17 +169,17 @@ class Terminal:
                             column = line.find(probes[-1])
                             if column >= 0:
                                 origin = (row, column)
-                                self.child.send(erase)
+                                self._send(erase)
                                 needs_clear = False
                                 stage = "editor probe cleanup"
                                 break
-                if echoed is None and now >= next_probe:
+                if echoed is None and not self._pending_input and now >= next_probe:
                     # Raw mode can precede the editor's input handler. Balanced retries
                     # replace dropped/partial probes without accumulating editor text.
                     if needs_clear:
-                        self.child.send(erase)
+                        self._send(erase)
                     probe = "b" + secrets.token_hex(4) + "r"
-                    self.child.send(probe)
+                    self._send(probe)
                     probes.append(probe)
                     needs_clear = True
                     next_probe = now + PROBE_INTERVAL
@@ -168,7 +190,9 @@ class Terminal:
         finally:
             if needs_clear:
                 try:
-                    self.child.send(erase)
+                    # Drop unsent retries; cleanup must not extend the shared deadline.
+                    self._pending_input = b""
+                    self._send(erase)
                 except (OSError, pexpect.EOF):
                     pass
 
@@ -178,10 +202,11 @@ class Terminal:
         self.transcript.with_suffix(".txt").write_text(snapshot)
         try:
             if self.child.isalive():
-                self.child.sendcontrol("c")
+                self._pending_input = b""
+                self._send("\x03")
                 time.sleep(0.15)
                 if self.child.isalive():
-                    self.child.sendcontrol("c")
+                    self._send("\x03")
         except (OSError, pexpect.EOF):
             pass
         finally:

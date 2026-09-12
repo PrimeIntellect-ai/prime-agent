@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import termios
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pexpect
 
-from terminal import PROBE_INTERVAL, Display, Terminal
+from terminal import MAX_PENDING_INPUT, PROBE_INTERVAL, Display, Terminal
 
 
 class Clock:
@@ -113,12 +115,14 @@ class ReadinessTests(unittest.TestCase):
         terminal = Terminal.__new__(Terminal)
         terminal.started = clock.now - 0.2  # Include spawn overhead, not just ready() time.
         terminal.child = child
-        terminal.display = Display(child.send)
+        terminal._pending_input = b""
+        terminal.display = Display(terminal._send)
         terminal.raw = []
         terminal.bytes = 0
         self.addCleanup(patch.stopall)
         patch("terminal.time.perf_counter", clock).start()
         patch("terminal.termios.tcgetattr", child.attrs).start()
+        patch("terminal.os.write", side_effect=lambda _fd, data: child.send(data.decode())).start()
         # Different deterministic generations let the tests detect stale/buffered probes.
         patch("terminal.secrets.token_hex", side_effect=(f"{i:08x}" for i in range(1000))).start()
         return terminal, child, clock
@@ -215,6 +219,103 @@ class ReadinessTests(unittest.TestCase):
             terminal.ready(seconds=0.4)
         self.assertLess(clock.now - editor.start, 0.41)
 
+    def test_saturated_writes_bound_retries_and_final_cleanup(self):
+        terminal, editor, clock = self.launch()
+        with patch("terminal.os.write", side_effect=BlockingIOError) as write:
+            with self.assertRaisesRegex(TimeoutError, "editor input rendering"):
+                terminal.ready(seconds=0.2)
+        self.assertLess(clock.now - editor.start, 0.21)
+        self.assertEqual(editor.sent, [])
+        self.assertEqual(terminal._pending_input, b"\x7f" * 10)
+        # One queued probe is retried, not an ever-growing list of probe generations.
+        self.assertTrue(all(call.args[1] == b"b00000000r" for call in write.call_args_list[:-1]))
+        self.assertEqual(write.call_args_list[-1].args[1], b"\x7f" * 10)
+        self.assertLess(write.call_count, 50)
+
+    def test_query_reply_backpressure_cannot_block_pump_or_readiness(self):
+        terminal, editor, clock = self.launch(label="\x1b[6n")
+        with patch("terminal.os.write", side_effect=BlockingIOError) as write:
+            with self.assertRaises(TimeoutError):
+                terminal.ready(seconds=0.2)
+        self.assertLess(clock.now - editor.start, 0.21)
+        self.assertEqual(editor.sent, [])
+        self.assertEqual(terminal._pending_input, b"\x1b[1;1R")
+        self.assertTrue(all(call.args[1] == b"\x1b[1;1R" for call in write.call_args_list))
+
+    def test_pending_cleanup_cannot_pass_on_an_empty_redraw(self):
+        terminal, editor, clock = self.launch()
+
+        def write(_fd, data):
+            if data.startswith(b"\x7f"):
+                # An unrelated redraw looks empty, but none of the erase reached stdin.
+                editor.schedule(clock.now, "\x1b[3;1H\x1b[2K> ")
+                raise BlockingIOError
+            return editor.send(data.decode())
+
+        with patch("terminal.os.write", side_effect=write):
+            with self.assertRaisesRegex(TimeoutError, "editor probe cleanup"):
+                terminal.ready(seconds=0.2)
+        self.assertEqual(editor.editor, "b00000000r")
+        self.assertEqual(terminal._pending_input, b"\x7f" * 10)
+
+    def test_failed_cleanup_write_does_not_mask_original_failure(self):
+        terminal, editor, _ = self.launch(exit_after=0.015, accept_after=1)
+
+        def write(_fd, data):
+            if data.startswith(b"\x7f"):
+                raise OSError("PTY closed")
+            return editor.send(data.decode())
+
+        with patch("terminal.os.write", side_effect=write):
+            with self.assertRaisesRegex(RuntimeError, "exited before the measurement completed"):
+                terminal.ready()
+
+
+class InputQueueTests(unittest.TestCase):
+    def setUp(self):
+        self.terminal = Terminal.__new__(Terminal)
+        self.terminal.child = SimpleNamespace(child_fd=123)
+        self.terminal._pending_input = b""
+
+    def test_short_writes_eagain_and_eintr_preserve_ordered_suffixes(self):
+        with patch("terminal.os.write", side_effect=[3, BlockingIOError, InterruptedError, 2, 3]) as write:
+            self.terminal._send("abcdef")
+            self.assertEqual(self.terminal._pending_input, b"def")
+            self.terminal._send("gh")
+            self.assertEqual(self.terminal._pending_input, b"defgh")
+            self.terminal._flush_input()
+            self.assertEqual(self.terminal._pending_input, b"defgh")
+            self.terminal._flush_input()
+            self.assertEqual(self.terminal._pending_input, b"fgh")
+            self.terminal._flush_input()
+            self.assertEqual(self.terminal._pending_input, b"")
+            self.terminal._flush_input()
+        self.assertEqual(
+            [call.args[1] for call in write.call_args_list],
+            [b"abcdef", b"defgh", b"defgh", b"defgh", b"fgh"],
+        )
+
+    def test_zero_progress_does_not_spin_or_drop_bytes(self):
+        with patch("terminal.os.write", return_value=0) as write:
+            self.terminal._send("probe")
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(self.terminal._pending_input, b"probe")
+
+    def test_query_flood_cannot_grow_the_pending_queue_without_bound(self):
+        display = Display(self.terminal._send)
+        with patch("terminal.os.write", side_effect=BlockingIOError):
+            self.terminal._send("x" * MAX_PENDING_INPUT)
+            with self.assertRaisesRegex(RuntimeError, "Terminal input queue exceeds 64 KiB"):
+                display.feed("\x1b[6n")
+        self.assertEqual(self.terminal._pending_input, b"x" * MAX_PENDING_INPUT)
+
+    def test_pump_flushes_writes_even_when_child_has_no_output(self):
+        self.terminal.child.read_nonblocking = Mock(side_effect=pexpect.TIMEOUT("no output"))
+        with patch("terminal.os.write", side_effect=[BlockingIOError, 3]):
+            self.terminal._send("abc")
+            self.assertFalse(self.terminal.pump())
+        self.assertEqual(self.terminal._pending_input, b"")
+
 
 PTY_FIXTURE = r"""
 import os, select, sys, termios, time, tty
@@ -253,6 +354,52 @@ while True:
 """
 
 
+SATURATED_PTY = r"""
+import os, pathlib, signal, sys, time
+from terminal import Terminal
+root = pathlib.Path(sys.argv[1])
+def guard(_signum, _frame):
+    raise RuntimeError('saturated PTY exceeded outer guard')
+signal.signal(signal.SIGALRM, guard)
+signal.setitimer(signal.ITIMER_REAL, 2, 2)
+terminal = Terminal(
+    [sys.executable, '-c', "import os,time,tty; tty.setraw(0); os.write(1,b'raw-ready'); time.sleep(60)"],
+    root, os.environ.copy(), root / 'saturated',
+)
+try:
+    deadline = time.perf_counter() + 1
+    while 'raw-ready' not in terminal.display.text():
+        assert time.perf_counter() < deadline, 'fixture did not enter raw mode'
+        terminal.pump()
+    fd = terminal.child.child_fd
+    was_blocking = os.get_blocking(fd)
+    os.set_blocking(fd, False)
+    try:
+        while True:
+            os.write(fd, b'x' * 4096)
+    except BlockingIOError:
+        pass
+    finally:
+        os.set_blocking(fd, was_blocking)
+    started = time.perf_counter()
+    try:
+        terminal.ready(seconds=0.15)
+        raise AssertionError('unresponsive editor was marked ready')
+    except TimeoutError as error:
+        assert 'editor input rendering' in str(error), str(error)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.5, elapsed
+    started = time.perf_counter()
+    terminal.close()
+    assert time.perf_counter() - started < 1.5, 'close blocked on saturated PTY'
+    assert not terminal.child.isalive()
+    print(f'saturated ready timed out in {elapsed:.3f}s; close stopped child')
+finally:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    terminal.child.close(force=True)
+"""
+
+
 class RealPTYReadinessTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -271,6 +418,17 @@ class RealPTYReadinessTests(unittest.TestCase):
         )
         self.addCleanup(terminal.close)
         return terminal
+
+    def test_saturated_real_pty_respects_ready_and_close_bounds(self):
+        result = subprocess.run(
+            [sys.executable, "-c", SATURATED_PTY, str(self.root)],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            timeout=6,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("close stopped child", result.stdout)
 
     def test_real_pty_delayed_raw_mode_and_input_handler(self):
         terminal = self.launch()
