@@ -244,7 +244,10 @@ import {
 	RefinementOutcomeMessageComponent,
 } from "./components/refinement-outcome-message.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
-import { ServiceCatalogPickerComponent } from "./components/service-catalog-picker.js";
+import {
+	ServiceCatalogPickerComponent,
+	type ServiceCatalogPickerOptions,
+} from "./components/service-catalog-picker.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
 import { SideQuestionComponent } from "./components/side-question.js";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.js";
@@ -1076,6 +1079,7 @@ export class InteractiveMode {
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
+	private closeServiceCatalogPicker: (() => void) | undefined;
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
@@ -3523,6 +3527,7 @@ export class InteractiveMode {
 
 	private resetExtensionUI(): void {
 		this.closeConfigurationMenu?.();
+		this.closeServiceCatalogPicker?.();
 		this.cancelActiveConnectionExtensionUiRequests();
 		this.closeHeartbeatManager();
 		if (this.extensionSelector) {
@@ -8008,6 +8013,7 @@ export class InteractiveMode {
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
 		if (this.configurationModelSelection) return this.configurationModelSelection;
 		this.closeConfigurationMenu?.();
+		this.closeServiceCatalogPicker?.();
 		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
 		const providerOptions = authFlows.getLoginProviderOptions();
@@ -8769,6 +8775,37 @@ export class InteractiveMode {
 		await this.showServiceCatalogPicker((args ?? "").trim() || undefined);
 	}
 
+	private selectServiceCatalogRow(
+		views: readonly McpPluginView[],
+		options: Omit<ServiceCatalogPickerOptions, "getRows"> = {},
+	): Promise<McpPluginView | undefined> {
+		this.closeConfigurationMenu?.();
+		this.closeServiceCatalogPicker?.();
+		return new Promise((resolve) => {
+			this.showSelector((done) => {
+				let settled = false;
+				const finish = (selection?: McpPluginView) => {
+					if (settled) return;
+					settled = true;
+					const ownsEditor = this.editorContainer.children.includes(picker);
+					if (ownsEditor) done();
+					if (this.closeServiceCatalogPicker === close) this.closeServiceCatalogPicker = undefined;
+					this.ui.requestRender();
+					// A stale selection settles as cancellation without replacing the
+					// next picker or starting an operation from its old row.
+					resolve(ownsEditor ? selection : undefined);
+				};
+				const close = () => finish();
+				const picker = new ServiceCatalogPickerComponent(views, finish, close, {
+					...options,
+					getRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
+				});
+				this.closeServiceCatalogPicker = close;
+				return { component: picker, focus: picker };
+			});
+		});
+	}
+
 	private async showServiceCatalogPicker(initialSearch?: string): Promise<void> {
 		const { services, views, diagnostics } = this.buildServiceCatalogViews();
 		// Wiring problems (a declared local source that vanished, duplicate ids,
@@ -8816,40 +8853,19 @@ export class InteractiveMode {
 			}
 		}
 
-		await new Promise<void>((resolve) => {
-			let handle: OverlayHandle | undefined;
-			let settled = false;
-			const close = () => {
-				if (settled) return;
-				settled = true;
-				handle?.hide();
-				this.ui.requestRender();
-				resolve();
-			};
-			const picker = new ServiceCatalogPickerComponent(
-				views,
-				(service) => {
-					void (async () => {
-						close();
-						// Every configured id is off-limits for new account ids.
-						const knownIds = new Set<string>([
-							...services.map((entry) => entry.serviceId),
-							...Object.keys(userServers),
-						]);
-						if (service.connectionIds.length > 0) {
-							await this.showAccountPickerForService(service, targets.get(service.serviceId), {
-								knownIds,
-							});
-							return;
-						}
-						await this.connectServiceFromPicker(service, targets.get(service.serviceId), { knownIds });
-					})();
-				},
-				() => close(),
-				{ getRows: () => this.ui.terminal.rows, ...(initialSearch ? { initialSearch } : {}) },
-			);
-			handle = showFullPaneOverlay(this.ui, picker, 78);
-		});
+		const service = await this.selectServiceCatalogRow(views, { initialSearch });
+		if (!service) return;
+		try {
+			// Every configured id is off-limits for new account ids.
+			const knownIds = new Set<string>([...services.map((entry) => entry.serviceId), ...Object.keys(userServers)]);
+			if (service.connectionIds.length > 0) {
+				await this.showAccountPickerForService(service, targets.get(service.serviceId), { knownIds });
+				return;
+			}
+			await this.connectServiceFromPicker(service, targets.get(service.serviceId), { knownIds });
+		} catch {
+			this.showError("MCP connection action did not complete. Try again.");
+		}
 	}
 
 	/**
@@ -8906,42 +8922,24 @@ export class InteractiveMode {
 			connectable: true,
 			setupHint: undefined,
 		});
-		await new Promise<void>((resolve) => {
-			let handle: OverlayHandle | undefined;
-			let settled = false;
-			const close = () => {
-				if (settled) return;
-				settled = true;
-				handle?.hide();
-				this.ui.requestRender();
-				resolve();
-			};
-			const picker = new ServiceCatalogPickerComponent(
-				accountCards,
-				(card) => {
-					void (async () => {
-						close();
-						if (card.connectionIds.length === 0) {
-							await this.connectServiceFromPicker(card, target, {
-								catalogServiceId,
-								addAccount: true,
-								knownIds: options.knownIds,
-							});
-							return;
-						}
-						await this.connectServiceFromPicker(card, target, { catalogServiceId });
-					})();
-				},
-				() => close(),
-				{
-					getRows: () => this.ui.terminal.rows,
-					title: `Accounts — ${service.label}`,
-					subtitle: "Enter reconnects or disconnects that account; the last row adds another.",
-					hideSearch: true,
-				},
-			);
-			handle = showFullPaneOverlay(this.ui, picker, 60);
+		const card = await this.selectServiceCatalogRow(accountCards, {
+			title: `Accounts — ${service.label}`,
+			mode: "accounts",
 		});
+		if (!card) return;
+		try {
+			if (card.connectionIds.length === 0) {
+				await this.connectServiceFromPicker(card, target, {
+					catalogServiceId,
+					addAccount: true,
+					knownIds: options.knownIds,
+				});
+				return;
+			}
+			await this.connectServiceFromPicker(card, target, { catalogServiceId });
+		} catch {
+			this.showError("MCP connection action did not complete. Try again.");
+		}
 	}
 
 	/**
@@ -10803,6 +10801,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
 		this.closeConfigurationMenu?.();
+		this.closeServiceCatalogPicker?.();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
 		this.clearEscapeRepeat();
