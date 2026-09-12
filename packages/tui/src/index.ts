@@ -102,6 +102,7 @@ export {
 	encodeKitty,
 	getCapabilities,
 	getCellDimensions,
+	getCellDimensionsVersion,
 	getGifDimensions,
 	getImageDimensions,
 	getJpegDimensions,

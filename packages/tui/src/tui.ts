@@ -1037,8 +1037,8 @@ export class TUI extends Container {
 		}
 
 		setCellDimensions({ widthPx, heightPx });
-		// Invalidate all components so images re-render with correct dimensions.
-		this.invalidate();
+		// Images keep the cell-dimensions version in their cache key, so a change
+		// here re-renders only image components on the next frame.
 		this.requestRender();
 		return true;
 	}
