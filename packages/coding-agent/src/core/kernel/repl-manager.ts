@@ -7,7 +7,11 @@ import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
 import { spawnHidden } from "../../utils/child-process.js";
-import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
+import {
+	reapKernelOrphanProcesses,
+	reapKernelOrphanProcessesSync,
+	recordOrphanProcessState,
+} from "../orphan-process-journal.js";
 import { ensureKernelPython } from "./bootstrap.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
@@ -207,6 +211,7 @@ export class ReplKernelManager {
 	private pendingRestore = false;
 	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
+	private readonly orphanCleanupTasks = new Map<number, Promise<void>>();
 
 	constructor(options: KernelManagerOptions) {
 		this.options = {
@@ -444,12 +449,11 @@ export class ReplKernelManager {
 			if (this.child !== child) return;
 			this.appendKernelDiagnostic(`spawn error: ${err.message}`);
 			this.state = "shutdown";
-			liveKernels.delete(this);
 			// Fail a pending start() promptly instead of letting it ride out the
 			// ready timeout. cleanupResources clears readyDeferred, so reject first;
 			// a late error after ready resolved is a no-op on the settled promise.
 			this.readyDeferred?.reject(err);
-			this.cleanupResources();
+			this.cleanupExitedChild();
 		});
 
 		child.on("exit", (code, signal) => {
@@ -458,12 +462,20 @@ export class ReplKernelManager {
 				this.appendKernelDiagnostic(`unexpected exit code=${code} signal=${signal}`);
 			}
 			this.state = "shutdown";
-			liveKernels.delete(this);
 			// This exit is part of an in-flight graceful shutdown(): that call owns the
 			// teardown and runs cleanupResources itself. Cleaning up here would bump the
 			// generation and misread the owning shutdown as superseded.
 			if (this.gracefulShutdownGeneration === this.startGeneration) return;
-			this.cleanupResources();
+			this.cleanupExitedChild();
+		});
+	}
+
+	private cleanupExitedChild(): void {
+		const cleanupGeneration = this.startGeneration + 1;
+		void this.cleanupResources().finally(() => {
+			// A replacement start re-adds this manager before spawning and advances
+			// the generation. Its live child must stay tracked for process-exit cleanup.
+			if (this.startGeneration === cleanupGeneration) liveKernels.delete(this);
 		});
 	}
 
@@ -651,8 +663,9 @@ export class ReplKernelManager {
 		this.pendingRebootstrap = true;
 		this.pendingRestore = true;
 		this.state = "shutdown";
-		liveKernels.delete(this);
-		this.cleanupResources("SIGKILL");
+		void this.cleanupResources("SIGKILL").finally(() => {
+			if (this.state === "idle" && !this.child) liveKernels.delete(this);
+		});
 		this.state = "idle";
 	}
 
@@ -993,9 +1006,21 @@ export class ReplKernelManager {
 				return;
 			}
 			execution.status = "aborted";
+			if (opts.killOnAbortTimeout) {
+				execution.stderr +=
+					`${execution.stderr ? "\n" : ""}Python kernel was killed because the interrupted cell did not stop. ` +
+					"Live Python state was lost. The next call starts a new kernel and may restore the last saved snapshot.";
+				if (execution.stderr.length > execution.maxChars) {
+					execution.stderr = execution.stderr.slice(0, execution.maxChars);
+					execution.stderrTruncated = true;
+				}
+			}
 			// The execution stays active until its done event arrives; clearing it
 			// early would let a new cell race the interrupted one (see busy-after-interrupt).
 			this.resolveExecution(execution, { clearActive: false });
+			if (opts.killOnAbortTimeout) {
+				void this.kill();
+			}
 		};
 		const onAbort = () => {
 			void this.interrupt().catch(() => undefined);
@@ -1279,7 +1304,7 @@ export class ReplKernelManager {
 		await this.writeLine({ type: "interrupt", id: requestId });
 	}
 
-	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
+	private releaseResources(killSignal: NodeJS.Signals): number | undefined {
 		this.startGeneration++; // any teardown invalidates in-flight starts
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
@@ -1292,6 +1317,7 @@ export class ReplKernelManager {
 		const child = this.child;
 		this.child = undefined;
 		this.readyDeferred = undefined;
+		let kernelPid: number | undefined;
 		if (child) {
 			child.stdin?.destroy();
 			child.stdout?.destroy();
@@ -1303,6 +1329,7 @@ export class ReplKernelManager {
 				child.stderr?.destroy();
 			}
 			const pid = child.pid;
+			kernelPid = pid;
 			let signaled = false;
 			try {
 				signaled = child.kill(killSignal);
@@ -1311,11 +1338,29 @@ export class ReplKernelManager {
 			}
 			// Inactive only when the signal proved the pid still named our un-reaped child.
 			if (pid !== undefined && signaled) recordOrphanProcessState(pid, false);
-			// A killed/crashed kernel cannot run its own shutdown hook, so the host
-			// reaps the bash() process groups it journaled under this kernel pid.
-			if (pid !== undefined) reapKernelOrphanProcesses(pid);
 		}
 		this.startPromise = undefined;
+		return kernelPid;
+	}
+
+	private async cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+		const pid = this.releaseResources(killSignal);
+		// A killed/crashed kernel cannot run its own shutdown hook, so the host
+		// reaps the bash() process groups it journaled under this kernel pid.
+		if (pid !== undefined && !this.orphanCleanupTasks.has(pid)) {
+			const task = reapKernelOrphanProcesses(pid).finally(() => {
+				if (this.orphanCleanupTasks.get(pid) === task) this.orphanCleanupTasks.delete(pid);
+			});
+			this.orphanCleanupTasks.set(pid, task);
+		}
+		await Promise.allSettled([...this.orphanCleanupTasks.values()]);
+	}
+
+	private cleanupResourcesSync(killSignal: NodeJS.Signals = "SIGTERM"): void {
+		const pid = this.releaseResources(killSignal);
+		const kernelPids = new Set(this.orphanCleanupTasks.keys());
+		if (pid !== undefined) kernelPids.add(pid);
+		for (const kernelPid of kernelPids) reapKernelOrphanProcessesSync(kernelPid);
 	}
 
 	private async waitForKernelExit(): Promise<void> {
@@ -1367,9 +1412,9 @@ export class ReplKernelManager {
 
 	private async performShutdown(opts: KernelShutdownOptions): Promise<boolean> {
 		if (this.state === "shutdown") {
-			liveKernels.delete(this);
 			if (this.gracefulShutdownGeneration === this.startGeneration) return false;
-			this.cleanupResources();
+			await this.cleanupResources();
+			liveKernels.delete(this);
 			return true;
 		}
 		// Captured before any await: teardowns and newer starts bump the counter.
@@ -1381,7 +1426,6 @@ export class ReplKernelManager {
 		// Protocol shutdown first: the runtime closes MCP servers and kills live bash() process groups a bare hard-kill would leak.
 		const protocolShutdownAvailable = this.state === "running";
 		this.state = "shutdown";
-		liveKernels.delete(this);
 		this.gracefulShutdownGeneration = generation;
 
 		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
@@ -1429,7 +1473,8 @@ export class ReplKernelManager {
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
 			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			if (!this.startStale(generation)) {
-				this.cleanupResources();
+				await this.cleanupResources();
+				liveKernels.delete(this);
 				performedCleanup = true;
 			}
 		}
@@ -1465,8 +1510,11 @@ export class ReplKernelManager {
 	async kill(): Promise<void> {
 		this.supersedeProtocolRepair();
 		this.state = "shutdown";
-		liveKernels.delete(this);
-		this.cleanupResources("SIGKILL");
+		try {
+			await this.cleanupResources("SIGKILL");
+		} finally {
+			liveKernels.delete(this);
+		}
 	}
 
 	/**
@@ -1637,7 +1685,7 @@ export class ReplKernelManager {
 		this.supersedeProtocolRepair();
 		this.state = "shutdown";
 		liveKernels.delete(this);
-		this.cleanupResources();
+		this.cleanupResourcesSync();
 	}
 
 	get isRunning(): boolean {

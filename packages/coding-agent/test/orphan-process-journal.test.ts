@@ -9,6 +9,7 @@ import {
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
 	reapKernelOrphanProcesses,
+	reapKernelOrphanProcessesSync,
 	recordOrphanProcessState,
 	shouldReapOrphanProcess,
 } from "../src/core/orphan-process-journal.js";
@@ -150,6 +151,37 @@ describe("orphan process journal", () => {
 		const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
 		await exited;
 		expect(child.signalCode).toBe("SIGKILL");
+	});
+
+	it("synchronously reaps a real process group for process-exit cleanup", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
+		tempDirs.push(directory);
+		const path = join(directory, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
+
+		const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+		child.unref();
+		const childPid = child.pid;
+		expect(childPid).toBeTypeOf("number");
+		const kernelPid = 999_999;
+		appendFileSync(
+			path,
+			`${JSON.stringify({
+				version: 1,
+				pid: childPid,
+				ownerPid: process.pid,
+				kernelPid,
+				processStartId: getProcessStartId(childPid!),
+				active: true,
+				recordedAt: new Date().toISOString(),
+			})}\n`,
+		);
+
+		reapKernelOrphanProcessesSync(kernelPid);
+
+		await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+		expect(child.signalCode).toBe("SIGKILL");
+		expect(readActiveOrphanProcesses(path, process.pid)).toEqual([]);
 	});
 
 	it("win32 reapers ignore identity-free records", async () => {
