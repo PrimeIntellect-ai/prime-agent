@@ -10,9 +10,17 @@ import type { AgentConnectionToolDefinition } from "../../agent-connection/index
 import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
+import {
+	type BackgroundShellHandle,
+	readAssignedShellCommand,
+	readBackgroundShellHandle,
+	type ShellCompletion,
+} from "./shell-completion.js";
 import { ToolPanel } from "./tool-panel.js";
 
 export interface ToolExecutionOptions {
+	shouldAddLeadingSpace?: () => boolean;
 	showImages?: boolean;
 	/** Whether image metadata may parse dimensions from base64 data. */
 	includeImageDimensions?: boolean;
@@ -78,11 +86,11 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
-	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
 	private showExpandHint = true;
 	private showImages: boolean;
 	private includeImageDimensions: boolean;
+	private readonly shouldAddLeadingSpace?: () => boolean;
 	private isPartial = true;
 	private toolDefinition?: ToolExecutionDefinition;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
@@ -97,6 +105,9 @@ export class ToolExecutionComponent extends Container {
 		details?: any;
 	};
 	private hideComponent = false;
+	private shellCompletion?: ShellCompletion;
+	private shellCompletionAmbiguous = false;
+	private readonly resultListeners = new Set<() => void>();
 
 	constructor(
 		toolName: string,
@@ -115,6 +126,7 @@ export class ToolExecutionComponent extends Container {
 		this.builtInToolDefinition = createReplayBuiltInToolDefinition(toolName, cwd, toolDefinition);
 		this.showImages = options.showImages ?? true;
 		this.includeImageDimensions = options.includeImageDimensions ?? true;
+		this.shouldAddLeadingSpace = options.shouldAddLeadingSpace;
 		this.ui = ui;
 		this.cwd = cwd;
 
@@ -205,7 +217,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private createCallFallback(): Component {
-		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
+		return new Text(theme.fg("toolTitle", this.toolName), 0, 0);
 	}
 
 	private createResultFallback(): Component | undefined {
@@ -213,7 +225,7 @@ export class ToolExecutionComponent extends Container {
 		if (!output) {
 			return undefined;
 		}
-		return new Text(theme.fg("toolOutput", output), 0, 0);
+		return new Text(theme.fg("toolOutput", this.formatFallbackPreview(output)), 0, 0);
 	}
 
 	updateArgs(args: any): void {
@@ -258,6 +270,54 @@ export class ToolExecutionComponent extends Container {
 		this.result = sentAgentMessages.length > 0 ? { ...result, details: { ...details, sentAgentMessages } } : result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
+		for (const listener of this.resultListeners) listener();
+	}
+
+	getBackgroundShellHandle(): BackgroundShellHandle | undefined {
+		return this.shouldUseIpythonRenderer() && !this.isPartial && !this.result?.isError
+			? readBackgroundShellHandle(getIpythonCodeFromArgs(this.args), this.result?.details)
+			: undefined;
+	}
+
+	getAssignedShellCommand(): string | undefined {
+		return this.shouldUseIpythonRenderer() && !this.isPartial && !this.result?.isError
+			? readAssignedShellCommand(getIpythonCodeFromArgs(this.args), this.result?.details)
+			: undefined;
+	}
+
+	hasRunningBackgroundShell(): boolean {
+		const handle = this.getBackgroundShellHandle();
+		return (
+			handle !== undefined &&
+			handle.exitCode === undefined &&
+			this.shellCompletion === undefined &&
+			!this.shellCompletionAmbiguous
+		);
+	}
+
+	markShellCompletionAmbiguous(): void {
+		if (!this.hasRunningBackgroundShell()) return;
+		this.shellCompletionAmbiguous = true;
+		this.updateDisplay();
+		this.ui.requestRender();
+	}
+
+	onResultUpdate(listener: () => void): () => void {
+		this.resultListeners.add(listener);
+		return () => this.resultListeners.delete(listener);
+	}
+
+	isResultPending(): boolean {
+		return this.isPartial;
+	}
+
+	attachShellCompletion(completion: ShellCompletion): boolean {
+		if (this.shellCompletion) return false;
+		this.shellCompletion = completion;
+		this.shellCompletionAmbiguous = false;
+		this.updateDisplay();
+		this.ui.requestRender();
+		return true;
 	}
 
 	appendSentAgentMessage(message: KernelSentAgentMessage): void {
@@ -272,14 +332,6 @@ export class ToolExecutionComponent extends Container {
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
-		this.updateDisplay();
-	}
-
-	setAgentMessagesExpanded(expanded: boolean): void {
-		if (this.agentMessagesExpanded === expanded) {
-			return;
-		}
-		this.agentMessagesExpanded = expanded;
 		this.updateDisplay();
 	}
 
@@ -323,7 +375,10 @@ export class ToolExecutionComponent extends Container {
 		if (this.isStatusAnimating() && !this.usesSelfRenderShell()) {
 			this.contentPanel.setHeader(this.panelHeader());
 		}
-		return super.render(width);
+		const lines = super.render(width);
+		return this.expanded && this.shouldUseIpythonRenderer() && this.shouldAddLeadingSpace?.()
+			? ["", ...lines]
+			: lines;
 	}
 
 	private isStatusAnimating(): boolean {
@@ -350,12 +405,14 @@ export class ToolExecutionComponent extends Container {
 			if (this.shouldUseIpythonRenderer()) {
 				const state = {
 					code: getIpythonCodeFromArgs(this.args),
+					backgroundShell: this.getBackgroundShellHandle(),
+					shellCompletion: this.shellCompletion,
+					shellCompletionAmbiguous: this.shellCompletionAmbiguous,
 					content: this.result?.content,
 					details: this.result?.details,
 					isPartial: this.isPartial,
 					isError: this.result?.isError ?? false,
 					expanded: this.expanded,
-					agentMessagesExpanded: this.agentMessagesExpanded,
 					editDiffsExpanded: this.editDiffsExpanded,
 					executionStarted: this.executionStarted,
 					argsComplete: this.argsComplete,
@@ -505,15 +562,22 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	private formatFallbackPreview(text: string): string {
+		if (this.expanded) return text;
+		const lines = text.split("\n");
+		if (lines.length <= 3) return text;
+		return `${lines.slice(0, 3).join("\n")}\n${theme.fg("dim", `… ${lines.length - 3} more lines`)}${this.showExpandHint ? ` ${expandCollapseHint("app.tools.expand", false)}` : ""}`;
+	}
+
 	private formatToolExecution(): string {
 		const parts: string[] = [];
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
-			parts.push(content);
+			parts.push(this.formatFallbackPreview(content));
 		}
 		const output = this.getTextOutput();
 		if (output) {
-			parts.push(output);
+			parts.push(this.formatFallbackPreview(output));
 		}
 		return parts.join("\n\n");
 	}

@@ -1,11 +1,10 @@
 import { Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { customMessageLabel, ExpandableCustomMessageBox } from "./expandable-custom-message.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
+import { ExpandableEventMessage } from "./expandable-event-message.js";
 
-/** Compaction summary card: full markdown summary when expanded. */
-export class CompactionSummaryMessageComponent extends ExpandableCustomMessageBox {
+/** Compact context outcome with the full markdown summary available on demand. */
+export class CompactionSummaryMessageComponent extends ExpandableEventMessage {
 	constructor(
 		private readonly message: CompactionSummaryMessage,
 		private readonly markdownTheme: MarkdownTheme = getMarkdownTheme(),
@@ -16,32 +15,25 @@ export class CompactionSummaryMessageComponent extends ExpandableCustomMessageBo
 
 	protected updateDisplay(): void {
 		this.clear();
+		this.addChild(new Text(theme.fg("refinementHeader", "◆ Context compacted"), 1, 0));
+		const summary = this.message.summary.trim()
+			? this.message.summary
+			: "No summary was recorded for this compaction.";
+		if (!this.expanded) {
+			this.addSummary(summary, undefined, "refinementSummary");
+			return;
+		}
+
+		this.addChild(
+			new Markdown(summary, 1, 0, this.markdownTheme, {
+				color: (text: string) => theme.fg("refinementSummary", text),
+			}),
+		);
 
 		const tokenStr = this.message.tokensBefore.toLocaleString();
-		const label = customMessageLabel("compaction");
-		this.addChild(new Text(label, 0, 0));
-		this.addChild(new Spacer(1));
-
 		const instructions = this.message.customInstructions;
-		if (this.expanded) {
-			let header = `**Compacted from ${tokenStr} tokens**\n\n`;
-			if (instructions) {
-				header += `**Focus:** ${instructions}\n\n`;
-			}
-			this.addChild(
-				new Markdown(header + this.message.summary, 0, 0, this.markdownTheme, {
-					color: (text: string) => theme.fg("customMessageText", text),
-				}),
-			);
-		} else {
-			const focus = instructions ? ` · focus: ${instructions}` : "";
-			this.addChild(
-				new Text(
-					`${theme.fg("customMessageText", `Compacted from ${tokenStr} tokens${focus}`)} ${expandCollapseHint("app.tools.expand", false)}`,
-					0,
-					0,
-				),
-			);
-		}
+		const focus = instructions ? ` · focus: ${instructions}` : "";
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", `Compacted from ${tokenStr} tokens${focus}`), 1, 0));
 	}
 }

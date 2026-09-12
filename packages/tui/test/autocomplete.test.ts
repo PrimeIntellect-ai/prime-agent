@@ -205,7 +205,31 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.deepStrictEqual(applied, {
 				lines: ["Please use /help later"],
 				cursorLine: 0,
-				cursorCol: "Please use /help ".length,
+				cursorCol: "Please use /help".length,
+			});
+		});
+
+		it("completes argument-taking commands into the parameter position and others bare", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "model", description: "Select model" },
+					{ name: "goal", description: "Set a goal", takesArgument: true },
+				],
+				"/tmp",
+			);
+
+			const bare = provider.applyCompletion(["/mo"], 0, 3, { value: "model", label: "model" }, "/mo");
+			assert.deepStrictEqual(bare, {
+				lines: ["/model"],
+				cursorLine: 0,
+				cursorCol: "/model".length,
+			});
+
+			const spaced = provider.applyCompletion(["/go"], 0, 3, { value: "goal", label: "goal" }, "/go");
+			assert.deepStrictEqual(spaced, {
+				lines: ["/goal "],
+				cursorLine: 0,
+				cursorCol: "/goal ".length,
 			});
 		});
 	});

@@ -1,0 +1,10 @@
+- Moved muted conversation detail status directly above the prompt beside an ellipsized recap, with one blank line separating the row from the chat.
+- Showed model IDs with colon-separated lowercase effort and context usage in the bottom-right tray.
+- Kept fast mode beside model and effort, renamed session navigation to manage, and removed the repeated shortcut guide hint below the prompt.
+- Hid the tray and subagents summary while pickers are open and showed depth only for subagent sessions.
+- Kept slash command autocomplete completion-only: Tab or Enter completes the command, and pressing Enter again runs it.
+- Removed unsolicited feature-discovery tips during agent runs and example prompts from the startup splash and editor.
+- Removed the extra blank line above recap and detail status when no extension widget is shown.
+- Kept the tray and subagent summary visible during slash-command autocomplete while hiding them for actual pickers.
+- Renamed conversation detail states to Collapsed mode, Details mode, and Expanded mode.
+- Prevented hidden subagent summaries from taking focus while a picker is open.

@@ -3404,9 +3404,7 @@ export class AgentDaemon {
 			...(entry.repliedSinceTask !== undefined ? { repliedSinceTask: entry.repliedSinceTask } : {}),
 			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
 			...(entry.rlmChildId ? { rlmChildId: entry.rlmChildId } : {}),
-			...(entry.firstMessage
-				? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) }
-				: {}),
+			...(entry.firstMessage ? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) } : {}),
 		};
 	}
 
@@ -3482,7 +3480,11 @@ export class AgentDaemon {
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 			...(latest
 				? {
-						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, AGENT_OBSERVE_PREVIEW_MAX_CHARS),
+						latestMessage: createAgentObserveMessagePreview(
+							latest,
+							messages.length - 1,
+							AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+						),
 					}
 				: {}),
 		};
@@ -4939,19 +4941,17 @@ export class AgentDaemon {
 			}
 
 			case "get_available_models": {
-				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_available_models", {
-					models: await state.runtime.session.modelRegistry.refreshAvailableModels(),
-				});
+				const { session } = this.getSessionState(command.activeSessionId).runtime;
+				const models = await session.modelRegistry.refreshAvailableModels();
+				session.refreshModelMetadata();
+				return success(command.id, "get_available_models", { models });
 			}
 
 			case "get_model_catalog": {
-				const state = this.getSessionState(command.activeSessionId);
-				return success(
-					command.id,
-					"get_model_catalog",
-					await state.runtime.session.modelRegistry.refreshModelCatalog(),
-				);
+				const { session } = this.getSessionState(command.activeSessionId).runtime;
+				const catalog = await session.modelRegistry.refreshModelCatalog();
+				session.refreshModelMetadata();
+				return success(command.id, "get_model_catalog", catalog);
 			}
 
 			case "get_queue": {

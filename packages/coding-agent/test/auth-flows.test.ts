@@ -7,7 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished,
 import { ENV_AGENT_DIR } from "../src/config.js";
 import { createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import type { ModelRegistry } from "../src/core/model-registry.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -259,6 +259,19 @@ describe("ProviderAuthFlows", () => {
 			expect(readFileSync(primeConfigPath, "utf8")).toBe(original);
 		},
 	);
+
+	it("includes xAI subscription and API-key entries from the provider registry", () => {
+		const { host } = createHost(AuthStorage.inMemory());
+		const flows = new ProviderAuthFlows({
+			...host,
+			modelRegistry: ModelRegistry.inMemory(host.modelRegistry.authStorage),
+		});
+
+		expect(flows.getLoginProviderOptions().filter((provider) => provider.id === "xai")).toEqual([
+			{ id: "xai", name: "xAI (Grok)", authType: "oauth" },
+			{ id: "xai", name: "xAI (Grok)", authType: "api_key" },
+		]);
+	});
 
 	it("opens login on the requested MCP Connections category", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });

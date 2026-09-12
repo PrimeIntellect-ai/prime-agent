@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (all required)",
+			"description": "Theme color definitions (mdBody defaults to text; refinement colors have purple defaults)",
 			"required": [
 				"accent",
 				"border",
@@ -160,6 +160,14 @@
 					"$ref": "#/$defs/colorValue",
 					"description": "Custom message type label color"
 				},
+				"refinementHeader": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Harness refinement status (defaults to purple)"
+				},
+				"refinementSummary": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Harness refinement semantic summary (defaults to softer purple)"
+				},
 				"toolPendingBg": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool execution box (pending state)"
@@ -191,6 +199,10 @@
 				"toolOutput": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool execution box output text color"
+				},
+				"mdBody": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Markdown body text (assistant output); defaults to text"
 				},
 				"mdHeading": {
 					"$ref": "#/$defs/colorValue",

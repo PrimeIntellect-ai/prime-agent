@@ -1,9 +1,10 @@
 import type { AutocompleteProvider, EditorTheme, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import stripAnsi from "strip-ansi";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
-import { initTheme, type ThemeColor, theme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, preloadCodeHighlighter, type ThemeColor, theme } from "../src/modes/interactive/theme/theme.js";
 
 const passthrough = (text: string) => text;
 
@@ -58,6 +59,10 @@ const autocompleteProvider: AutocompleteProvider = {
 };
 
 describe("CustomEditor", () => {
+	beforeAll(async () => {
+		await preloadCodeHighlighter();
+	});
+
 	beforeEach(() => {
 		setKeybindings(new KeybindingsManager());
 		vi.clearAllMocks();
@@ -79,28 +84,41 @@ describe("CustomEditor", () => {
 		expect(editor.getText()).toBe("/");
 	});
 
-	it("inserts a newline for a raw \\n byte instead of firing the ctrl+j edit-diff action", () => {
+	it("inserts a newline for a raw \\n byte instead of firing the conversation detail action", () => {
 		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		const toggleEditDiffs = vi.fn();
-		editor.onAction("app.edits.expand", toggleEditDiffs);
+		const cycleDetail = vi.fn();
+		editor.onAction("app.tools.expand", cycleDetail);
 
 		editor.handleInput("a");
 		editor.handleInput("\n");
 		editor.handleInput("b");
 
-		expect(toggleEditDiffs).not.toHaveBeenCalled();
+		expect(cycleDetail).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("a\nb");
 	});
 
-	it("still fires the edit-diff action for kitty CSI-u ctrl+j", () => {
+	it("fires the conversation detail action for kitty CSI-u Ctrl+O", () => {
 		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		const toggleEditDiffs = vi.fn();
-		editor.onAction("app.edits.expand", toggleEditDiffs);
+		const cycleDetail = vi.fn();
+		editor.onAction("app.tools.expand", cycleDetail);
 
-		editor.handleInput("\x1b[106;5u");
+		editor.handleInput("\x1b[111;5u");
 
-		expect(toggleEditDiffs).toHaveBeenCalledOnce();
+		expect(cycleDetail).toHaveBeenCalledOnce();
 		expect(editor.getText()).toBe("");
+	});
+
+	it("uses the configured conversation detail binding and releases the old default", () => {
+		const keybindings = new KeybindingsManager({ "app.tools.expand": "ctrl+e" });
+		const editor = new CustomEditor(fakeTui, editorTheme, keybindings);
+		const cycleDetail = vi.fn();
+		editor.onAction("app.tools.expand", cycleDetail);
+		editor.handleInput("\x0f");
+		expect(cycleDetail).not.toHaveBeenCalled();
+		editor.handleInput("\x05");
+		expect(cycleDetail).toHaveBeenCalledOnce();
+		expect(keybindings.getEffectiveConfig()).not.toHaveProperty("app.edits.expand");
+		expect(keybindings.getEffectiveConfig()).not.toHaveProperty("app.thinking.toggle");
 	});
 
 	it("routes Escape through its handler while dismissing autocomplete", async () => {
@@ -264,6 +282,22 @@ describe("CustomEditor", () => {
 		expect(lines[1]).toContain("x".repeat(37));
 		expect(lines[1]).not.toContain("x".repeat(38));
 		expect(lines[1]).toContain("...");
+	});
+
+	it("updates placeholder and queue header alignment when editor padding changes", () => {
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager(), {
+			placeholder: "type to start",
+		});
+		editor.getHeaderLine = () => "queued message";
+
+		for (const padding of [5, 1]) {
+			editor.setPaddingX(padding);
+			const lines = editor.render(40).map((line) => stripAnsi(line));
+
+			expect(lines[1]!.indexOf("queued message")).toBe(padding);
+			expect(lines[3]!.indexOf("type to start")).toBe(padding + 3);
+			expect(lines.every((line) => visibleWidth(line) === 40)).toBe(true);
+		}
 	});
 
 	it("keeps the surface background across truncation resets in the header line", () => {

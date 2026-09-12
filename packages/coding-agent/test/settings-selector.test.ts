@@ -23,7 +23,6 @@ const config: SettingsConfig = {
 	availableThinkingLevels: ["off"],
 	currentTheme: "dark",
 	availableThemes: ["dark"],
-	hideThinkingBlock: false,
 	mermaidRenderingMode: "streaming",
 	treeFilterMode: "user-only",
 	showHardwareCursor: false,
@@ -49,7 +48,6 @@ const callbacks: SettingsCallbacks = {
 	onTransportChange: () => {},
 	onThinkingLevelChange: () => {},
 	onThemeChange: () => {},
-	onHideThinkingBlockChange: () => {},
 	onMermaidRenderingModeChange: () => {},
 	onTreeFilterModeChange: () => {},
 	onShowHardwareCursorChange: () => {},
@@ -66,6 +64,12 @@ const callbacks: SettingsCallbacks = {
 describe("SettingsSelectorComponent", () => {
 	beforeAll(() => {
 		initTheme("dark");
+	});
+
+	test("does not offer a separate hide-thinking setting", () => {
+		const component = new SettingsSelectorComponent(config, callbacks);
+		for (const character of "hide thinking") component.getSettingsList().handleInput(character);
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("Hide thinking");
 	});
 
 	test("shows the image metadata toggle without a terminal graphics protocol", () => {

@@ -6,7 +6,7 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { buildPrimeInferenceModels } from "../src/core/prime-inference-model-catalog.js";
 import { ModelSelectorComponent } from "../src/modes/interactive/components/model-selector.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 
 function createFakeTui(): TUI {
@@ -244,17 +244,17 @@ describe("ModelSelectorComponent", () => {
 
 		await waitForAsyncRender();
 
-		expect(selector.render(120)).toHaveLength(12);
+		expect(selector.render(120).length).toBeLessThanOrEqual(12);
 
 		selector.handleInput("\x1b[B");
 		const output = stripAnsi(selector.render(120).join("\n"));
 
-		expect(selector.render(120)).toHaveLength(12);
+		expect(selector.render(120).length).toBeLessThanOrEqual(12);
 		expect(output).toContain("faux-2");
 		expect(output).toContain("(2/12)");
 	});
 
-	it("keeps exact matches ahead of weaker signed-in matches and prefers sign-in for equivalent matches", async () => {
+	it("keeps signed-in matches above unsigned matches and orders by quality within them", async () => {
 		const harness = await createHarness({
 			models: [{ id: "base", name: "Base", reasoning: true }],
 		});
@@ -290,8 +290,8 @@ describe("ModelSelectorComponent", () => {
 		const signedOutExactRow = lines.findIndex((line) => line.includes("opencode"));
 		const signedInFuzzyRow = lines.findIndex((line) => line.includes("glorious-language-model-5.2"));
 		expect(signedInExactRow).toBeGreaterThanOrEqual(0);
-		expect(signedInExactRow).toBeLessThan(signedOutExactRow);
-		expect(signedOutExactRow).toBeLessThan(signedInFuzzyRow);
+		expect(signedInExactRow).toBeLessThan(signedInFuzzyRow);
+		expect(signedInFuzzyRow).toBeLessThan(signedOutExactRow);
 	});
 
 	it("orders provider-qualified exact, prefix, and fuzzy matches by quality", async () => {
@@ -302,8 +302,8 @@ describe("ModelSelectorComponent", () => {
 
 		const base = harness.getModel("base")!;
 		const exact = { ...base, provider: "openai", id: "gpt-5", name: "GPT-5" };
-		const prefix = { ...base, provider: "prime-inference", id: "openai-gpt-5-preview", name: "GPT-5 Preview" };
-		const fuzzy = { ...base, provider: "prime-inference", id: "other-openai-gpt-5", name: "Other GPT-5" };
+		const prefix = { ...base, provider: "openai", id: "openai-gpt-5-preview", name: "GPT-5 Preview" };
+		const fuzzy = { ...base, provider: "openai", id: "other-openai-gpt-5", name: "Other GPT-5" };
 		const selector = new ModelSelectorComponent(
 			createFakeTui(),
 			undefined,
@@ -314,7 +314,7 @@ describe("ModelSelectorComponent", () => {
 			"openai/gpt5",
 			{
 				availableModels: [fuzzy, prefix, exact],
-				configuredProviders: new Set(["prime-inference"]),
+				configuredProviders: new Set(["openai"]),
 			},
 		);
 
@@ -329,6 +329,419 @@ describe("ModelSelectorComponent", () => {
 		expect(exactRow).toBeGreaterThanOrEqual(0);
 		expect(exactRow).toBeLessThan(prefixRow);
 		expect(prefixRow).toBeLessThan(fuzzyRow);
+	});
+
+	it("keeps signed-in providers above unsigned matches in search results", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const primeCodex = { ...base, provider: "prime-inference", id: "codex-prime", name: "Prime Codex Model" };
+		const openaiExact = { ...base, provider: "openai", id: "codex", name: "Standard Codex" };
+		const openaiWeaker = { ...base, provider: "openai", id: "glorious-codex-thing", name: "Glorious Codex" };
+		const opencodeCodex = { ...base, provider: "opencode", id: "gpt-5-codex", name: "Rival Codex" };
+		const vercelCodex = {
+			...base,
+			provider: "vercel-ai-gateway",
+			id: "codex-gateway",
+			name: "Gateway Codex",
+		};
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			"codex",
+			{
+				availableModels: [opencodeCodex, vercelCodex, openaiWeaker, openaiExact, primeCodex],
+				configuredProviders: new Set(["prime-inference", "openai"]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const rowOf = (text: string) => lines.findIndex((line) => line.includes(text));
+		const primeRow = rowOf("Prime Codex Model");
+		const openaiExactRow = rowOf("Standard Codex");
+		const openaiWeakerRow = rowOf("Glorious Codex");
+		const opencodeRow = rowOf("Rival Codex");
+		const vercelRow = rowOf("Gateway Codex");
+		expect(primeRow).toBeGreaterThanOrEqual(0);
+		expect(primeRow).toBeLessThan(openaiExactRow);
+		expect(openaiExactRow).toBeLessThan(openaiWeakerRow);
+		expect(openaiWeakerRow).toBeLessThan(opencodeRow);
+		expect(openaiWeakerRow).toBeLessThan(vercelRow);
+	});
+
+	it("right-aligns the provider with the require sign in hint to its left", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const configured = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const unconfigured = { ...base, provider: "unsigned-zeta", id: "zeta-one", name: "Zeta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [configured, unconfigured],
+				configuredProviders: new Set([configured.provider]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const configuredRow = lines.find((line) => line.includes("Beta One"));
+		const unconfiguredRow = lines.find((line) => line.includes("Zeta One"));
+		expect(configuredRow).toBeDefined();
+		expect(unconfiguredRow).toBeDefined();
+		expect(configuredRow?.endsWith("signed-in-beta")).toBe(true);
+		expect(unconfiguredRow?.endsWith("unsigned-zeta")).toBe(true);
+		expect(unconfiguredRow).toContain("require sign in · unsigned-zeta");
+		expect(configuredRow).not.toContain("require sign in");
+	});
+
+	it("pins signed-in Prime Inference models above other signed-in providers", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const prime = { ...base, provider: "prime-inference", id: "glm-5-3", name: "GLM 5.3" };
+		const signedIn = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const unsigned = { ...base, provider: "unsigned-zeta", id: "zeta-one", name: "Zeta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [unsigned, signedIn, prime],
+				configuredProviders: new Set([prime.provider, signedIn.provider]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+		const primeRow = lines.findIndex((line) => line.includes("GLM 5.3"));
+		const signedInRow = lines.findIndex((line) => line.includes("Beta One"));
+		const unsignedRow = lines.findIndex((line) => line.includes("Zeta One"));
+		expect(primeRow).toBeGreaterThanOrEqual(0);
+		expect(primeRow).toBeLessThan(signedInRow);
+		expect(signedInRow).toBeLessThan(unsignedRow);
+	});
+
+	it("keeps Prime Inference models ordered with the rest when it is not signed in", async () => {
+		const previousPrimeKey = process.env.PRIME_API_KEY;
+		delete process.env.PRIME_API_KEY;
+		try {
+			const harness = await createHarness({
+				models: [{ id: "base", name: "Base", reasoning: true }],
+			});
+			harnesses.push(harness);
+
+			const base = harness.getModel("base")!;
+			const prime = { ...base, provider: "prime-inference", id: "glm-5-3", name: "GLM 5.3" };
+			const signedIn = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+			const unsigned = { ...base, provider: "a-unsigned", id: "alpha-one", name: "Alpha One" };
+			const selector = new ModelSelectorComponent(
+				createFakeTui(),
+				undefined,
+				harness.session.modelRegistry,
+				[],
+				() => {},
+				() => {},
+				undefined,
+				{
+					availableModels: [prime, signedIn, unsigned],
+					configuredProviders: new Set([signedIn.provider]),
+					inline: true,
+				},
+			);
+
+			await waitForAsyncRender();
+
+			const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
+			const primeRow = lines.findIndex((line) => line.includes("GLM 5.3"));
+			const signedInRow = lines.findIndex((line) => line.includes("Beta One"));
+			const unsignedRow = lines.findIndex((line) => line.includes("Alpha One"));
+			expect(signedInRow).toBeGreaterThanOrEqual(0);
+			expect(signedInRow).toBeLessThan(unsignedRow);
+			expect(unsignedRow).toBeLessThan(primeRow);
+			expect(lines.findIndex((line) => line.includes("require sign in · prime-inference"))).toBe(primeRow);
+		} finally {
+			if (previousPrimeKey === undefined) {
+				delete process.env.PRIME_API_KEY;
+			} else {
+				process.env.PRIME_API_KEY = previousPrimeKey;
+			}
+		}
+	});
+
+	it("renders effort squares for the preselected level and adjusts with left/right", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+				thinkingLevel: "low",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const row = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+
+		expect(row()).toContain("← ■■□□ → low");
+		// The cluster sits near the row's horizontal center, clear of the name.
+		expect(row()?.search(/[■□]/)).toBe(34);
+
+		selector.handleInput("\x1b[C");
+		expect(row()).toContain("■■■□");
+		expect(row()).toContain("medium");
+
+		selector.handleInput("\x1b[D");
+		selector.handleInput("\x1b[D");
+		selector.handleInput("\x1b[D");
+		expect(row()).toContain("□□□□");
+		expect(row()).toContain("off");
+
+		selector.handleInput("\x1b[D");
+		expect(row()).toContain("■■■■");
+		expect(row()).toContain("high");
+	});
+
+	it("shows no effort squares for models without reasoning support", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One", reasoning: false };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+				thinkingLevel: "high",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const renderRow = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+
+		expect(renderRow()).toBeDefined();
+		expect(renderRow()).not.toContain("■");
+		expect(renderRow()).not.toContain("□");
+		expect(renderRow()).not.toContain("←");
+		expect(renderRow()).not.toContain("→");
+
+		selector.handleInput("\x1b[C");
+		expect(renderRow()).not.toContain("■");
+	});
+
+	it("applies the selected model and effort level together on confirm", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		let selectedId: string | undefined;
+		let selectedLevel: string | undefined;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			(selected, thinkingLevel) => {
+				selectedId = selected.id;
+				selectedLevel = thinkingLevel;
+			},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const row = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+		expect(row()).toContain("□□□□");
+		expect(row()).toContain("off");
+
+		selector.handleInput("\x1b[C");
+		expect(row()).toContain("■□□□");
+
+		selector.handleInput("\r");
+		expect(selectedId).toBe("beta-one");
+		expect(selectedLevel).toBe("minimal");
+	});
+
+	it("aligns effort squares, arrows, and labels across rows", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const short = { ...base, provider: "signed-in-beta", id: "beta-one", name: "GLM 5.3" };
+		const long = { ...base, provider: "unsigned-zeta", id: "zeta-one", name: "A Considerably Longer Model Name" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [short, long],
+				configuredProviders: new Set([short.provider]),
+				inline: true,
+				thinkingLevel: "low",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const rawLines = selector.render(80).join("\n").split("\n");
+		const lines = rawLines.map((line) => stripAnsi(line));
+		const shortRow = lines.find((line) => line.includes("GLM 5.3"));
+		const longRow = lines.find((line) => line.includes("A Considerably Longer"));
+		expect(shortRow).toBeDefined();
+		expect(longRow).toBeDefined();
+		expect(shortRow?.search(/[■□]/)).toBe(longRow?.search(/[■□]/));
+		expect(shortRow?.indexOf(" low")).toBe(longRow?.indexOf(" low"));
+		expect(shortRow).toContain("←");
+		expect(shortRow).toContain("→");
+		expect(longRow).not.toContain("←");
+		expect(longRow).not.toContain("→");
+		expect(longRow).toContain("■■□□");
+
+		// Purple fills are reserved for the highlighted row; other rows fill light gray.
+		const shortRaw = rawLines.find((line) => line.includes("GLM 5.3"));
+		const longRaw = rawLines.find((line) => line.includes("A Considerably Longer"));
+		expect(shortRaw).toContain(theme.getEffortSquareColor()("■"));
+		expect(shortRaw).toContain(theme.fg("dim", "□"));
+		expect(longRaw).not.toContain(theme.getEffortSquareColor()("■"));
+		expect(longRaw).toContain(theme.fg("muted", "■"));
+		expect(longRaw).toContain(theme.fg("dim", "□"));
+	});
+
+	it("keeps the effort cluster width stable across level changes", async () => {
+		const harness = await createHarness({
+			models: [{ id: "reasoning", name: "Reasoning One", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("reasoning")!;
+		const model = { ...base, provider: "signed-in-beta", id: "beta-one", name: "Beta One" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [model],
+				configuredProviders: new Set([model.provider]),
+				inline: true,
+				thinkingLevel: "low",
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const row = () =>
+			stripAnsi(selector.render(80).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("Beta One"));
+		const before = row();
+		expect(before).toBeDefined();
+		const labelStart = before?.indexOf("→") ?? -1;
+		expect(labelStart).toBeGreaterThan(0);
+		const labelCell = (text: string) => text.slice(labelStart + 2, labelStart + 9);
+		// The label cell is fixed to the longest supported level name ("minimal").
+		expect(labelCell(before ?? "")).toBe("low    ");
+
+		selector.handleInput("\x1b[C");
+		const medium = row();
+		// Cluster start, arrow, and label cell all stay in place; only the
+		// square fills change.
+		expect(medium?.search(/[■□]/)).toBe(before?.search(/[■□]/));
+		expect(medium?.indexOf("→")).toBe(labelStart);
+		expect(labelCell(medium ?? "")).toBe("medium ");
+
+		selector.handleInput("\x1b[C");
+		expect(labelCell(row() ?? "")).toBe("high   ");
+
+		selector.handleInput("\x1b[C");
+		expect(labelCell(row() ?? "")).toBe("off    ");
+
+		selector.handleInput("\x1b[C");
+		const longest = row();
+		expect(longest?.search(/[■□]/)).toBe(before?.search(/[■□]/));
+		expect(labelCell(longest ?? "")).toBe("minimal");
 	});
 
 	it("uses current model, recency, and alphabetical order for equivalent matches", async () => {

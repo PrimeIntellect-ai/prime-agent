@@ -238,6 +238,13 @@ export interface SlashCommand {
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
 }
 
+function commandTakesArgument(command: SlashCommand | AutocompleteItem): boolean {
+	return (
+		command.takesArgument ??
+		("getArgumentCompletions" in command && typeof command.getArgumentCompletions === "function")
+	);
+}
+
 export interface AutocompleteSuggestions {
 	items: AutocompleteItem[];
 	prefix: string; // What we're matching against (e.g., "/" or "src/")
@@ -311,7 +318,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const aliases = "aliases" in cmd && cmd.aliases ? cmd.aliases : [];
 				const argumentHint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 				const sourceTag = "sourceTag" in cmd && cmd.sourceTag ? cmd.sourceTag : undefined;
-				const takesArgument = "takesArgument" in cmd ? cmd.takesArgument === true : false;
+				const takesArgument = commandTakesArgument(cmd);
 				return {
 					name,
 					searchText: [name, ...aliases].join(" "),
@@ -393,13 +400,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			isQuotedPrefix && hasTrailingQuoteInItem && hasLeadingQuoteAfterCursor ? afterCursor.slice(1) : afterCursor;
 		const slashContext = getSlashCommandContext(lines, cursorLine, cursorCol);
 
-		const isSlashCommand =
-			slashContext?.kind === "name" &&
-			slashContext.prefix === prefix &&
-			this.commands.some((command) => ("name" in command ? command.name : command.value) === item.value);
+		const command = this.commands.find(
+			(command) => ("name" in command ? command.name : command.value) === item.value,
+		);
+		const isSlashCommand = slashContext?.kind === "name" && slashContext.prefix === prefix && command !== undefined;
 		if (isSlashCommand) {
+			const takesArgument = commandTakesArgument(command);
 			const hasSeparatorAfterCursor = /^[ \t]/.test(adjustedAfterCursor);
-			const separator = hasSeparatorAfterCursor ? "" : " ";
+			// Argument commands complete into the parameter position; commands without
+			// arguments complete bare so a following submit runs them as typed.
+			const separator = !takesArgument ? "" : hasSeparatorAfterCursor ? "" : " ";
 			const newLine = `${beforePrefix}/${item.value}${separator}${adjustedAfterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
@@ -407,7 +417,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			return {
 				lines: newLines,
 				cursorLine,
-				cursorCol: beforePrefix.length + item.value.length + 2,
+				cursorCol: beforePrefix.length + item.value.length + (takesArgument ? 2 : 1),
 			};
 		}
 

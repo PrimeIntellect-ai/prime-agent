@@ -2372,8 +2372,6 @@ function invalidatesCachedSnapshot(commandType: DaemonCommandBody["type"]): bool
 		case "get_session_stats":
 		case "get_commands":
 		case "get_resource_snapshot":
-		case "get_model_catalog":
-		case "get_available_models":
 		case "get_queue":
 		case "cron_list":
 		case "heartbeats_list":
