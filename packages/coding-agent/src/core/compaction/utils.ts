@@ -71,15 +71,27 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 }
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
+/**
+ * Characters kept from the end of a truncated tool result. Tool output is
+ * tail-heavy: exit errors, stack traces, and log tails appear at the end.
+ */
+const TOOL_RESULT_TAIL_CHARS = 500;
 
 /**
  * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
+ * Keeps the beginning and the end within the same total budget, marking
+ * the elided middle.
  */
 function truncateForSummary(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
-	const truncatedChars = text.length - maxChars;
-	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+	// The marker's digit counts are largest when the elided and kept sizes hit
+	// the text and budget maxima, so reserve space for that worst case to keep
+	// the result within maxChars.
+	const markerMaxLength =
+		`[... ${text.length} characters truncated; first ${maxChars} and last ${TOOL_RESULT_TAIL_CHARS} kept ...]`.length;
+	const headChars = maxChars - TOOL_RESULT_TAIL_CHARS - markerMaxLength - 4;
+	const elided = text.length - headChars - TOOL_RESULT_TAIL_CHARS;
+	return `${text.slice(0, headChars)}\n\n[... ${elided} characters truncated; first ${headChars} and last ${TOOL_RESULT_TAIL_CHARS} kept ...]\n\n${text.slice(text.length - TOOL_RESULT_TAIL_CHARS)}`;
 }
 
 /**

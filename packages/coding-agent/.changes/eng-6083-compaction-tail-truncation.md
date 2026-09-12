@@ -1,0 +1,1 @@
+- Fixed compaction summaries dropping the tail of tool results: truncated tool output now keeps the last 500 characters so errors and log tails survive compaction.
