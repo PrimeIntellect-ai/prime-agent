@@ -168,7 +168,7 @@ describe("agent session bus", () => {
 		expect(() => assertAgentMessageQueueCapacity(19, 20)).not.toThrow();
 	});
 
-	it("resolves role sends and scopes all broadcasts to the family roster", async () => {
+	it("resolves role sends against the family roster", async () => {
 		const sendAgentMessage = vi.fn(async (input: { target: string; message: string }) => ({
 			id: input.target,
 			source: AGENT_MESSAGE_SOURCE as typeof AGENT_MESSAGE_SOURCE,
@@ -196,71 +196,28 @@ describe("agent session bus", () => {
 			message: "hello",
 			receiverRole: "sibling",
 		});
-
-		sendAgentMessage.mockClear();
-		await expect(handlers["agent_message.send"]!({ target: "all", message: "status" })).resolves.toMatchObject({
-			receipts: [
-				{ id: "root", deliveryStatus: "delivered" },
-				{ id: "sibling", deliveryStatus: "delivered" },
-				{ id: "child", deliveryStatus: "delivered" },
-			],
-		});
-		expect(sendAgentMessage.mock.calls.map(([input]) => input.target)).toEqual(["root", "sibling", "child"]);
-
-		sendAgentMessage.mockClear();
-		await expect(
-			handlers["agent_message.send"]!({
-				target: "all",
-				message: "private",
-				receiver_role: "sibling",
-				receiver_name: "reviewer",
-			}),
-		).rejects.toThrow("broadcast cannot be combined with receiver_role/receiver_name");
-		expect(sendAgentMessage).not.toHaveBeenCalled();
 	});
 
-	it("rejects non-all string targets and the removed roster call at the host boundary", async () => {
+	it("rejects string targets from kernels still using the removed broadcast form, and the removed roster call", async () => {
 		const sendAgentMessage = vi.fn();
 		const handlers = createAgentMessageHostHandlers({
 			family: async () => [],
 			sendAgentMessage,
 		});
 
-		await expect(handlers["agent_message.send"]!({ target: "reviewer", message: "status" })).rejects.toThrow(
-			"use receiver_role and receiver_name",
-		);
+		for (const payload of [
+			{ target: "all", message: "status" },
+			{ target: "reviewer", message: "status" },
+			{ target: "all", message: undefined },
+		]) {
+			await expect(handlers["agent_message.send"]!(payload)).rejects.toThrow(
+				"agent_message.send no longer takes a target or broadcast_message",
+			);
+		}
 		await expect(handlers["agent_message.list_agents"]!({})).rejects.toThrow(
 			"the family roster now lives in agent_observe.list_agents()",
 		);
 		expect(sendAgentMessage).not.toHaveBeenCalled();
-	});
-
-	it("reports individual broadcast failures without rejecting successful receipts", async () => {
-		const sendAgentMessage = vi.fn(async (input: { target: string; message: string }) => {
-			if (input.target === "sibling") throw new Error("rate limited");
-			return {
-				id: input.target,
-				source: AGENT_MESSAGE_SOURCE as typeof AGENT_MESSAGE_SOURCE,
-				target: { activeSessionId: input.target, sessionId: input.target },
-				message: input.message,
-				deliveryStatus: "delivered" as const,
-				deliveredAt: new Date(0).toISOString(),
-			};
-		});
-		const handlers = createAgentMessageHostHandlers({
-			family: async () => [
-				{ relationship: "parent", entry: { id: "root", name: "root", depth: 0, status: "running" } },
-				{ relationship: "sibling", entry: { id: "sibling", name: "reviewer", depth: 1, status: "idle" } },
-			],
-			sendAgentMessage,
-		});
-
-		await expect(handlers["agent_message.send"]!({ target: "all", message: "status" })).resolves.toMatchObject({
-			receipts: [
-				{ id: "root", deliveryStatus: "delivered" },
-				{ target: "sibling", error: "rate limited" },
-			],
-		});
 	});
 
 	it("authorizes exactly one persisted nuclear-family edge", () => {

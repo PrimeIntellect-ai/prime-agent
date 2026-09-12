@@ -99,72 +99,6 @@ print(json.dumps({"has_list_agents": hasattr(agent_message, "list_agents"), "rec
 		expect(requests[0].payload).not.toHaveProperty("from");
 	});
 
-	it("emits successful broadcast receipts and leaves short errors in the result", async () => {
-		provisioner = new IpythonKernelProvisioner(tempDir, {
-			pythonSkills: [bundledAgentMessageSkill()],
-			hostHandlers: {
-				"agent_message.send": async (payload) => ({
-					receipts: [
-						{
-							id: "agentmsg-root",
-							source: "agent_message",
-							target: { activeSessionId: "root", sessionId: "session-root" },
-							message: payload.message,
-							deliveryStatus: "delivered",
-							deliveredAt: "2026-08-03T00:00:00.000Z",
-							deliveryMode: payload.mode,
-						},
-						{ target: "sibling", error: "rate limited" },
-					],
-				}),
-			},
-		});
-
-		const manager = await provisioner.ensure();
-		const result = await manager.execute(`
-import json
-receipt = await agent_message.send("all", "status")
-print(json.dumps(receipt, sort_keys=True))
-`);
-
-		expect(result.status).toBe("ok");
-		expect(JSON.parse(result.stdout.trim())).toMatchObject({
-			receipts: [
-				{ id: "agentmsg-root", deliveryStatus: "delivered" },
-				{ target: "sibling", error: "rate limited" },
-			],
-		});
-		expect(result.sentAgentMessages).toEqual([
-			{
-				id: "agentmsg-root",
-				message: "status",
-				deliveryStatus: "delivered",
-				target: { activeSessionId: "root", sessionId: "session-root" },
-			},
-		]);
-	});
-
-	it("rejects broadcast combined with role selectors before reaching the host", async () => {
-		provisioner = new IpythonKernelProvisioner(tempDir, {
-			pythonSkills: [bundledAgentMessageSkill()],
-			hostHandlers: {
-				"agent_message.send": async () => {
-					throw new Error("should not reach host");
-				},
-			},
-		});
-
-		const manager = await provisioner.ensure();
-		const result = await manager.execute(`
-try:
-    await agent_message.send("all", "secret", receiver_role="sibling", receiver_name="beta")
-except TypeError as error:
-    print(f"TypeError: {error}")
-`);
-		expect(result.status).toBe("ok");
-		expect(result.stdout.trim()).toBe("TypeError: broadcast cannot be combined with receiver_role/receiver_name");
-	});
-
 	it("rejects a positional name target before reaching the host", async () => {
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [bundledAgentMessageSkill()],
@@ -180,12 +114,10 @@ except TypeError as error:
 try:
     await agent_message.send("beta", "done")
 except TypeError as error:
-    print(f"TypeError: {error}")
+    print(type(error).__name__)
 `);
 		expect(result.status).toBe("ok");
-		expect(result.stdout.trim()).toBe(
-			"TypeError: positional agent_message.send targets are not supported; use receiver_role and receiver_name",
-		);
+		expect(result.stdout.trim()).toBe("TypeError");
 	});
 
 	it("does not expose a queueable delivery mode", async () => {

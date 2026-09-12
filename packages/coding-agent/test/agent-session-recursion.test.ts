@@ -1163,39 +1163,6 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => (root as unknown as InspectableRlmSession)._activeRlmChildRuns.size === 0);
 	});
 
-	it("marks a broadcast delivery to the parent as replied without reloading the roster", async () => {
-		const family = vi.fn(async () => [
-			{
-				relationship: "parent" as const,
-				entry: { id: "parent-session", name: "parent", depth: 0, status: "idle" as const },
-			},
-		]);
-		const sendAgentMessage = vi.fn(async () => ({
-			id: "agentmsg-broadcast-reply",
-			source: "agent_message" as const,
-			target: { activeSessionId: "parent-active", sessionId: "parent-session" },
-			message: "status",
-			deliveryStatus: "delivered" as const,
-		}));
-		const child = createSession({
-			depth: 1,
-			agentMessageController: {
-				listAgents: () => ({ agents: [] }),
-				family,
-				sendAgentMessage,
-			},
-		});
-		const handlers = (child as unknown as InspectableRlmSession)._createKernelHostHandlers();
-		const send = handlers["agent_message.send"];
-		if (!send) throw new Error("Missing agent_message.send host handler");
-
-		await expect(send({ target: "all", message: "status" })).resolves.toMatchObject({
-			receipts: [{ message: "status" }],
-		});
-		expect(family).toHaveBeenCalledTimes(1);
-		expect(child.repliedToParentSinceTask).toBe(true);
-	});
-
 	it("routes family messages with sender-perspective labels and resets parent steer reply state", async () => {
 		const parent = createSession();
 		parent.setSessionName("parent");

@@ -534,76 +534,52 @@ export function createAgentMessageHostHandlers(
 			);
 		},
 		"agent_message.send": async (payload) => {
+			if (payload.target !== undefined) {
+				throw new Error(
+					"agent_message.send no longer takes a target or broadcast_message; broadcasting was removed. " +
+						"Restart the Python kernel to load the current agent-message skill, then call " +
+						"send(message, receiver_role=..., receiver_name=...).",
+				);
+			}
 			if (typeof payload.message !== "string") {
 				throw new Error("agent_message.send message must be a string");
 			}
-			let target: string;
-			if (typeof payload.target === "string") {
-				if (payload.target !== "all") {
-					throw new Error(
-						"positional agent_message.send targets are not supported; use receiver_role and receiver_name",
-					);
-				}
-				if (payload.receiver_role !== undefined || payload.receiver_name !== undefined) {
-					throw new Error("agent_message.send broadcast cannot be combined with receiver_role/receiver_name");
-				}
-				const family = await controller.family();
-				const results = await Promise.allSettled(
-					family.map((member) =>
-						controller.sendAgentMessage({
-							target: member.entry.id,
-							message: payload.message as string,
-							receiverRole: member.relationship,
-						}),
-					),
+			const role = payload.receiver_role;
+			if (role !== "parent" && role !== "sibling" && role !== "child") {
+				throw new Error('agent_message.send receiver_role must be "parent", "sibling", or "child"');
+			}
+			const receiverName = payload.receiver_name;
+			if (role === "parent" && receiverName !== undefined && receiverName !== null) {
+				throw new Error("agent_message.send receiver_name must be omitted for parent messages");
+			}
+			if (role !== "parent" && (typeof receiverName !== "string" || !receiverName.trim())) {
+				throw new Error("agent_message.send receiver_name is required for sibling and child messages");
+			}
+			if (!controller.family) throw new Error("agent family roster is not available in this session");
+			const selector = typeof receiverName === "string" ? receiverName.trim() : undefined;
+			const publishedId =
+				role === "child" && selector && controller.awaitPendingChildPublication
+					? await controller.awaitPendingChildPublication(selector)
+					: undefined;
+			const matches = (await controller.family()).filter(
+				(member) =>
+					member.relationship === role &&
+					(role === "parent" ||
+						agentFamilyMemberName(member.entry) === selector ||
+						member.entry.id === selector ||
+						member.entry.id === publishedId),
+			);
+			if (matches.length !== 1) {
+				throw new Error(
+					matches.length === 0
+						? `No ${role} matches ${role === "parent" ? "the current agent" : JSON.stringify(receiverName)}`
+						: `${role} selector ${JSON.stringify(receiverName)} is ambiguous`,
 				);
-				const receipts = results.map((result, index) =>
-					result.status === "fulfilled"
-						? result.value
-						: {
-								target: family[index]!.entry.id,
-								error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-							},
-				);
-				return { receipts } as unknown as Record<string, unknown>;
-			} else {
-				const role = payload.receiver_role;
-				if (role !== "parent" && role !== "sibling" && role !== "child") {
-					throw new Error('agent_message.send receiver_role must be "parent", "sibling", or "child"');
-				}
-				const receiverName = payload.receiver_name;
-				if (role === "parent" && receiverName !== undefined && receiverName !== null) {
-					throw new Error("agent_message.send receiver_name must be omitted for parent messages");
-				}
-				if (role !== "parent" && (typeof receiverName !== "string" || !receiverName.trim())) {
-					throw new Error("agent_message.send receiver_name is required for sibling and child messages");
-				}
-				const selector = typeof receiverName === "string" ? receiverName.trim() : undefined;
-				const publishedId =
-					role === "child" && selector && controller.awaitPendingChildPublication
-						? await controller.awaitPendingChildPublication(selector)
-						: undefined;
-				const matches = (await controller.family()).filter(
-					(member) =>
-						member.relationship === role &&
-						(role === "parent" ||
-							agentFamilyMemberName(member.entry) === selector ||
-							member.entry.id === selector ||
-							member.entry.id === publishedId),
-				);
-				if (matches.length !== 1) {
-					throw new Error(
-						matches.length === 0
-							? `No ${role} matches ${role === "parent" ? "the current agent" : JSON.stringify(receiverName)}`
-							: `${role} selector ${JSON.stringify(receiverName)} is ambiguous`,
-					);
-				}
-				target = matches[0]!.entry.id;
 			}
 			return (await controller.sendAgentMessage({
-				target,
+				target: matches[0]!.entry.id,
 				message: payload.message,
-				receiverRole: payload.receiver_role as AgentFamilyRelationship,
+				receiverRole: role,
 			})) as unknown as Record<string, unknown>;
 		},
 	};
