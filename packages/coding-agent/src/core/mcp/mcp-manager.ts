@@ -133,6 +133,7 @@ export class McpManager {
 						server: integration.server,
 						label: integration.label,
 						url: integration.config.url,
+						allowPrivateNetwork: integration.config.allowPrivateNetwork === true,
 					}),
 				);
 			}

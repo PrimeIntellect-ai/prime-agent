@@ -107,6 +107,11 @@ export type McpServerConfig =
 			bearerTokenEnvVar?: string;
 			/** Use the generic OAuth login flow for this server. */
 			oauth?: boolean;
+			/**
+			 * Allow the OAuth flow to contact loopback, private (RFC 1918), link-local and
+			 * local-network hosts (`localhost`, `*.local`, `*.internal`). Off by default.
+			 */
+			allowPrivateNetwork?: boolean;
 			/** Force-disable even when credentials exist. */
 			enabled?: boolean;
 			enabledTools?: string[];

@@ -445,3 +445,173 @@ describe.sequential("MCP OAuth provider", () => {
 		).rejects.toThrow("dynamic client registration");
 	});
 });
+
+describe.sequential("MCP OAuth provider private-network policy (ENG-5345)", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	const meta = (host: string) => ({
+		issuer: host,
+		authorization_endpoint: `${host}/authorize`,
+		token_endpoint: `${host}/token`,
+		registration_endpoint: `${host}/register`,
+	});
+
+	function stubRoutes(routes: Record<string, () => Response>): string[] {
+		const requested: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown): Promise<Response> => {
+				const url = urlOf(input);
+				requested.push(url);
+				const route = routes[url];
+				return route ? route() : new Response("", { status: 404 });
+			}),
+		);
+		return requested;
+	}
+
+	async function attemptLogin(
+		config: Parameters<typeof createMcpOAuthProvider>[0],
+	): Promise<{ authUrl?: string; error?: string }> {
+		let authUrl: string | undefined;
+		try {
+			await createMcpOAuthProvider(config).login({
+				onAuth: (info) => {
+					authUrl = info.url;
+				},
+				onPrompt: async () => "",
+				onManualCodeInput: async () => {
+					throw new Error("cancelled by test");
+				},
+			});
+		} catch (error) {
+			return { authUrl, error: error instanceof Error ? error.message : String(error) };
+		}
+		return { authUrl };
+	}
+
+	it.each([
+		"https://127.0.0.1/mcp",
+		"https://[::1]/mcp",
+		"https://localhost/mcp",
+		"https://mcp.internal/mcp",
+		"https://mcp.local/mcp",
+		"https://10.0.0.7/mcp",
+		"https://169.254.169.254/mcp",
+		"https://2130706433/mcp",
+		"https://intranet/mcp",
+	])("rejects the non-public MCP endpoint %s before any request", async (url) => {
+		const requested = stubRoutes({});
+		const result = await attemptLogin({ server: "t", url });
+		expect(result.error).toMatch(/MCP endpoint .* private, loopback or local-network host/);
+		expect(result.authUrl).toBeUndefined();
+		expect(requested).toEqual([]);
+	});
+
+	it("rejects protected-resource metadata naming a private authorization server", async () => {
+		const requested = stubRoutes({
+			"https://srv.test/mcp": () => new Response("", { status: 401 }),
+			"https://srv.test/.well-known/oauth-protected-resource/mcp": () =>
+				jsonResponse({ resource: "https://srv.test/mcp", authorization_servers: ["https://10.0.0.7"] }),
+			"https://10.0.0.7/.well-known/oauth-authorization-server": () => jsonResponse(meta("https://10.0.0.7")),
+		});
+		const result = await attemptLogin({ server: "t", url: "https://srv.test/mcp" });
+		expect(result.error).toMatch(/Authorization server issuer https:\/\/10\.0\.0\.7 points at a private/);
+		expect(requested).not.toContain("https://10.0.0.7/.well-known/oauth-authorization-server");
+	});
+
+	it("rejects a WWW-Authenticate resource_metadata pointer on a private host", async () => {
+		const requested = stubRoutes({
+			"https://srv.test/mcp": () =>
+				new Response("", {
+					status: 401,
+					headers: { "WWW-Authenticate": 'Bearer resource_metadata="https://192.168.1.20/prm"' },
+				}),
+			"https://192.168.1.20/prm": () =>
+				jsonResponse({ resource: "https://srv.test/mcp", authorization_servers: ["https://auth.example.org"] }),
+		});
+		const result = await attemptLogin({ server: "t", url: "https://srv.test/mcp" });
+		expect(result.error).toMatch(/resource_metadata https:\/\/192\.168\.1\.20 points at a private/);
+		expect(requested).not.toContain("https://192.168.1.20/prm");
+	});
+
+	it.each(["authorization_endpoint", "token_endpoint", "registration_endpoint"] as const)(
+		"rejects authorization-server metadata whose %s is on a private host",
+		async (field) => {
+			const requested = stubRoutes({
+				"https://srv.test/mcp": () => new Response("", { status: 401 }),
+				"https://srv.test/.well-known/oauth-protected-resource/mcp": () =>
+					jsonResponse({ resource: "https://srv.test/mcp", authorization_servers: ["https://auth.example.org"] }),
+				"https://auth.example.org/.well-known/oauth-authorization-server": () =>
+					jsonResponse({ ...meta("https://auth.example.org"), [field]: "https://[fd00::1]/private" }),
+			});
+			const result = await attemptLogin({ server: "t", url: "https://srv.test/mcp" });
+			expect(result.error).toMatch(/https:\/\/\[fd00::1\] points at a private/);
+			expect(result.authUrl).toBeUndefined();
+			expect(requested).not.toContain("https://[fd00::1]/private");
+		},
+	);
+
+	it("rejects an origin-fallback metadata document that moves the endpoints to a private host", async () => {
+		const requested = stubRoutes({
+			"https://srv.test/.well-known/oauth-authorization-server": () =>
+				jsonResponse({ ...meta("https://srv.test"), token_endpoint: "https://127.0.0.1:8443/token" }),
+		});
+		const result = await attemptLogin({ server: "t", url: "https://srv.test/mcp" });
+		expect(result.error).toMatch(/Token endpoint https:\/\/127\.0\.0\.1:8443 points at a private/);
+		expect(requested).not.toContain("https://127.0.0.1:8443/token");
+	});
+
+	it("keeps a legitimate separate authorization server on another public origin", async () => {
+		const requested = stubRoutes({
+			"https://srv.test/mcp": () => new Response("", { status: 401 }),
+			"https://srv.test/.well-known/oauth-protected-resource/mcp": () =>
+				jsonResponse({ resource: "https://srv.test/mcp", authorization_servers: ["https://auth.example.org"] }),
+			"https://auth.example.org/.well-known/oauth-authorization-server": () =>
+				jsonResponse(meta("https://auth.example.org")),
+			"https://auth.example.org/register": () => jsonResponse({ client_id: "client-1" }),
+		});
+		const result = await attemptLogin({ server: "t", url: "https://srv.test/mcp" });
+		expect(result.authUrl).toMatch(/^https:\/\/auth\.example\.org\/authorize\?/);
+		expect(new URL(result.authUrl ?? "").searchParams.get("resource")).toBe("https://srv.test/mcp");
+		expect(requested).toContain("https://auth.example.org/register");
+	});
+
+	it("allows a private MCP endpoint and authorization server only with allowPrivateNetwork", async () => {
+		const routes = {
+			"https://127.0.0.1/mcp": () => new Response("", { status: 401 }),
+			"https://127.0.0.1/.well-known/oauth-protected-resource/mcp": () =>
+				jsonResponse({ resource: "https://127.0.0.1/mcp", authorization_servers: ["https://10.0.0.7"] }),
+			"https://10.0.0.7/.well-known/oauth-authorization-server": () => jsonResponse(meta("https://10.0.0.7")),
+			"https://10.0.0.7/register": () => jsonResponse({ client_id: "client-2" }),
+		};
+		stubRoutes(routes);
+		const denied = await attemptLogin({ server: "t", url: "https://127.0.0.1/mcp" });
+		expect(denied.authUrl).toBeUndefined();
+		expect(denied.error).toMatch(/allowPrivateNetwork/);
+
+		stubRoutes(routes);
+		const allowed = await attemptLogin({ server: "t", url: "https://127.0.0.1/mcp", allowPrivateNetwork: true });
+		expect(allowed.authUrl).toMatch(/^https:\/\/10\.0\.0\.7\/authorize\?/);
+		expect(new URL(allowed.authUrl ?? "").searchParams.get("resource")).toBe("https://127.0.0.1/mcp");
+	});
+
+	it("refuses to refresh with stored credentials whose issuer is private", async () => {
+		const requested = stubRoutes({});
+		const provider = createMcpOAuthProvider({ server: "t", url: "https://srv.test/mcp" });
+		await expect(
+			provider.refreshToken({
+				access: "a",
+				refresh: "r",
+				expires: 0,
+				endpoint: "https://srv.test/mcp",
+				resource: "https://srv.test/mcp",
+				issuer: "https://10.0.0.7",
+				tokenEndpoint: "https://10.0.0.7/token",
+			} as never),
+		).rejects.toThrow(/Stored authorization server issuer https:\/\/10\.0\.0\.7 points at a private/);
+		expect(requested).toEqual([]);
+	});
+});
