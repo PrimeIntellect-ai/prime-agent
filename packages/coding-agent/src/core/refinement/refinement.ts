@@ -465,6 +465,49 @@ export function formatRefinementNoticeBody(result: RefinementResult): string {
 	return lines.join("\n");
 }
 
+/**
+ * Query terms for relevance-ranked harness digests: term -> weight.
+ * Built by the caller from task signal (goal objective, recent
+ * messages). The ranking is a pure weighted-term overlap over the
+ * entry's searchable fields.
+ */
+export type HarnessQueryTerms = Map<string, number>;
+
+/** Lowercase a possibly malformed persisted field. */
+function searchableField(value: unknown): string {
+	return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+/** Score one harness entry against query terms: weighted term overlap. */
+export function scoreHarnessEntryForQuery(entry: HarnessEntry, terms: HarnessQueryTerms): number {
+	if (terms.size === 0) return 0;
+	const title = searchableField(entry.title);
+	const content = searchableField(entry.content);
+	const identifier = `${searchableField(entry.path)} ${searchableField(entry.id)}`;
+	let score = 0;
+	for (const [term, weight] of terms) {
+		// One match per field counts once per term: coverage over distinct
+		// fields matters more than repetition inside a single field. Path
+		// and id form a single identifier slot: the id is often embedded in
+		// the path, so matching both is one signal, not two.
+		let fields = 0;
+		if (title.includes(term)) fields += 1;
+		if (content.includes(term)) fields += 1;
+		if (identifier.includes(term)) fields += 1;
+		if (fields > 0) score += weight * (1 + (fields - 1) * 0.5);
+	}
+	return score;
+}
+
+function compareRankedHarnessEntries(a: HarnessEntry, b: HarnessEntry, terms: HarnessQueryTerms): number {
+	const scoreDifference = scoreHarnessEntryForQuery(b, terms) - scoreHarnessEntryForQuery(a, terms);
+	if (scoreDifference !== 0) return scoreDifference;
+	// Recency breaks ties; alphabetical order keeps selection deterministic.
+	const recencyDifference = (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0);
+	if (recencyDifference !== 0) return recencyDifference;
+	return [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0"));
+}
+
 export function formatHarnessStateForPrompt(
 	state: HarnessState,
 	options: {
@@ -474,6 +517,9 @@ export function formatHarnessStateForPrompt(
 		includeIpythonExamples?: boolean;
 		includeShellExamples?: boolean;
 		includeRefineExamples?: boolean;
+		/** Select entries by relevance to these terms instead of
+		 * alphabetical order. */
+		queryTerms?: HarnessQueryTerms;
 	} = {},
 ): string {
 	const maxEntriesPerKind = options.maxEntriesPerKind ?? DEFAULT_OVERVIEW_ENTRY_LIMIT;
@@ -501,10 +547,13 @@ export function formatHarnessStateForPrompt(
 		"",
 	];
 
+	const queryTerms = options.queryTerms;
 	let totalEntries = 0;
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const entries = Object.values(state.entries[kind]).sort((a, b) =>
-			[a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
+			queryTerms !== undefined && queryTerms.size > 0
+				? compareRankedHarnessEntries(a, b, queryTerms)
+				: [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
 		);
 		totalEntries += entries.length;
 		// Render subagent specs as a task-shaped roster the model can match against — the
@@ -516,6 +565,9 @@ export function formatHarnessStateForPrompt(
 			);
 		} else {
 			lines.push(`${kind}: ${entries.length}`);
+		}
+		if (queryTerms !== undefined && queryTerms.size > 0 && entries.length > maxEntriesPerKind) {
+			lines.push("(entries ranked by relevance to the current task; see harness.search)");
 		}
 		for (const entry of entries.slice(0, maxEntriesPerKind)) {
 			const argumentsText =

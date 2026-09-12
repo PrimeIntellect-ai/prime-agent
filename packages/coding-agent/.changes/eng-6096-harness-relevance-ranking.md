@@ -1,0 +1,1 @@
+- Changed the continual harness digest from alphabetical truncation to relevance ranking: entries are selected by weighted term overlap with the active goal and recent messages (recency tiebreak), and a `harness.search(query, kind=None, limit=10)` kernel API returns ranked entries on demand.

@@ -14,6 +14,7 @@ import {
 	getLocalHarnessStateDir,
 	getRefinementHistory,
 	getRefinementHistoryPath,
+	type HarnessEntry,
 	type HarnessState,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
@@ -27,6 +28,7 @@ import {
 	type RefinementResult,
 	refineHarness,
 	saveHarnessState,
+	scoreHarnessEntryForQuery,
 } from "../src/core/refinement/index.js";
 import type { CustomEntry } from "../src/core/session-manager.js";
 
@@ -1512,5 +1514,98 @@ describe("global refinement history", () => {
 		});
 
 		expect(plan.rollbackScope).toBe("global");
+	});
+});
+
+describe("harness digest relevance ranking", () => {
+	function makeEntry(id: string, title: string, content: string, updatedAt: string): HarnessEntry {
+		return {
+			id,
+			kind: "memory",
+			title,
+			content,
+			path: "memory",
+			scope: "global",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "test",
+			created_at: updatedAt,
+			updated_at: updatedAt,
+			version: 1,
+		};
+	}
+
+	it("scores weighted term overlap with field coverage", () => {
+		const entry = makeEntry(
+			"repo",
+			"Repository facts",
+			"The checkout lives at ~/repo with worktrees.",
+			"2026-09-01T00:00:00.000Z",
+		);
+		const terms = new Map([
+			["repository", 2],
+			["worktree", 1],
+			["absent-term", 5],
+		]);
+		// "repository" matches the title only -> 2 * 1 = 2.
+		// "worktree" matches content only (1 field) -> 1 * 1 = 1. Total 3.
+		expect(scoreHarnessEntryForQuery(entry, terms)).toBe(3);
+		expect(scoreHarnessEntryForQuery(entry, new Map())).toBe(0);
+	});
+
+	it("selects top-k per kind by relevance instead of alphabetical order", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h"), "local");
+		const irrelevant = makeEntry(
+			"aaa",
+			"Alphabetical first",
+			"Completely unrelated content about tea.",
+			"2026-08-01T00:00:00.000Z",
+		);
+		const relevant = makeEntry(
+			"zzz",
+			"Zebra note",
+			"The worktree workflow for rsi branches matters.",
+			"2026-08-02T00:00:00.000Z",
+		);
+		state.entries.memory.aaa = irrelevant;
+		state.entries.memory.zzz = relevant;
+
+		const ranked = formatHarnessStateForPrompt(state, {
+			maxEntriesPerKind: 1,
+			queryTerms: new Map([["worktree", 1]]),
+		});
+		expect(ranked).toContain("[global:zzz]");
+		expect(ranked).not.toContain("[global:aaa]");
+		expect(ranked).toContain("(entries ranked by relevance");
+
+		// Without query terms, alphabetical selection is unchanged.
+		const alphabetical = formatHarnessStateForPrompt(state, { maxEntriesPerKind: 1 });
+		expect(alphabetical).toContain("[global:aaa]");
+		expect(alphabetical).not.toContain("(entries ranked by relevance");
+	});
+
+	it("tolerates non-string persisted fields", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h3"), "local");
+		const malformed = makeEntry("bad", "Worktree policy", "Worktree guidance.", "2026-08-01T00:00:00.000Z");
+		(malformed as unknown as { title: null }).title = null;
+		state.entries.memory.bad = malformed;
+		expect(() => formatHarnessStateForPrompt(state, { queryTerms: new Map([["worktree", 1]]) })).not.toThrow();
+	});
+
+	it("breaks score ties by recency", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h2"), "local");
+		const older = makeEntry("older", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z");
+		const newer = makeEntry("newer", "Worktree policy 2", "Same worktree signal.", "2026-09-01T00:00:00.000Z");
+		state.entries.memory.older = older;
+		state.entries.memory.newer = newer;
+		const ranked = formatHarnessStateForPrompt(state, {
+			maxEntriesPerKind: 1,
+			queryTerms: new Map([["worktree", 1]]),
+		});
+		const newerIndex = ranked.indexOf("[global:newer]");
+		const olderIndex = ranked.indexOf("[global:older]");
+		expect(newerIndex).toBeGreaterThanOrEqual(0);
+		expect(olderIndex).toBe(-1);
 	});
 });
