@@ -38,6 +38,7 @@ describe("McpManager", () => {
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
 		});
 		const manager = new McpManager({ authStorage });
 		const overrides = manager.getDisabledBuiltinSkillOverrides();
@@ -68,7 +69,7 @@ describe("McpManager", () => {
 			getUserServers: () => ({ acme: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true } }),
 		});
 		const registry = ModelRegistry.create(authStorage, join(tempDir, "models.json"));
-		registry.setOnOAuthProvidersReset(() => manager.registerUserProviders());
+		registry.setOnOAuthProvidersReset(() => manager.registerAllProviders());
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
 		registry.refresh(); // resets registry; hook must re-add the custom provider
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
@@ -130,6 +131,7 @@ describe("McpManager", () => {
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.notion.com/mcp",
 		});
 		// Stored credentials put the catalog service on the generic route.
 		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({
@@ -145,6 +147,7 @@ describe("McpManager", () => {
 			access: "official",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
 		});
 		const manager = new McpManager({
 			authStorage,
@@ -201,6 +204,7 @@ describe("McpManager", () => {
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.notion.com/mcp",
 		});
 		const manager = new McpManager({
 			authStorage,
@@ -389,6 +393,7 @@ describe("McpManager service catalog handlers", () => {
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.notion.com/mcp",
 		});
 		const manager = createManager({ noBackgroundVerification: true });
 		const handlers = manager.hostHandlers();
@@ -441,6 +446,7 @@ describe("McpManager service catalog handlers", () => {
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
 		});
 		const manager = createManager({
 			noBackgroundVerification: true,
@@ -461,12 +467,51 @@ describe("McpManager service catalog handlers", () => {
 		]);
 	});
 
+	it("records an error (reconnect) once when demand-driven verification finds an unbound grant", async () => {
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "legacy-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		const manager = createManager({ getServiceCatalog: () => [CATALOG_SERVICE] });
+		const handlers = manager.hostHandlers();
+		await handlers["mcp.list_plugins"]({});
+		// The fire-and-forget verification settles quickly; poll for the record.
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const record = store.get("acme");
+		expect(record?.status).toBe("error");
+		expect(record?.lastError).toBe("credential-unbound");
+		expect(probeCalls).toEqual([]);
+		// The next listing does not rewrite the record.
+		await handlers["mcp.list_plugins"]({});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(store.get("acme")?.updatedAt).toBe(record?.updatedAt);
+	});
+
+	it("reconciles owned providers atomically: override removal restores the catalog provider in one refresh", () => {
+		const getServices = () => [CATALOG_SERVICE];
+		let userServers: Record<string, { type: "http"; url: string; oauth: boolean }> = {
+			acme: { type: "http", url: "https://user-override.test/mcp", oauth: true },
+		};
+		const manager = createManager({ getServiceCatalog: getServices, getUserServers: () => userServers });
+		manager.registerAllProviders();
+		expect(getOAuthProvider("mcp:acme")?.name).toBe("acme");
+
+		// Removing the user override must restore the catalog provider in ONE refresh.
+		userServers = {};
+		manager.refresh();
+		manager.registerAllProviders();
+		expect(getOAuthProvider("mcp:acme")?.name).toBe("Acme");
+	});
+
 	it("verifies pending connections on demand: a listing triggers a real handshake and the next listing reports it", async () => {
 		authStorage.set("mcp:linear", {
 			type: "oauth",
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
 		});
 		const manager = createManager();
 		const handlers = manager.hostHandlers();
@@ -495,6 +540,7 @@ describe("McpManager service catalog handlers", () => {
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
 		});
 		probeResult = { ok: false, error: "http-unauthorized" };
 		const manager = createManager();
@@ -513,6 +559,7 @@ describe("McpManager service catalog handlers", () => {
 			access: "tok",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.notion.com/mcp",
 		});
 		clientStore.upsert({
 			connectionId: "notion",
@@ -577,6 +624,13 @@ describe("McpManager service catalog handlers", () => {
 		expect(Object.keys(bare.hostHandlers())).not.toContain("mcp.connect");
 
 		const approvals: string[] = [];
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "grant",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
 		const manager = createManager({
 			noBackgroundVerification: true,
 			getServiceCatalog: () => [CATALOG_SERVICE],
@@ -586,9 +640,20 @@ describe("McpManager service catalog handlers", () => {
 			},
 		});
 		const handlers = manager.hostHandlers();
+		// An approved login whose handshake fails reports the failure honestly.
+		probeResult = { ok: false, error: "http-unauthorized" };
+		const failed = (await handlers["mcp.connect"]({ serviceId: "acme" })) as {
+			status: string;
+			message?: string;
+		};
+		expect(failed.status).toBe("error");
+		expect(failed.message).toBe("http-unauthorized");
+
+		// A verified handshake is the only "connected" claim, with the tool count.
+		probeResult = { ok: true, toolCount: 3 };
 		const connected = await handlers["mcp.connect"]({ serviceId: "acme" });
-		expect(connected).toEqual({ status: "connected", connectionId: "acme" });
-		expect(approvals).toEqual(["acme"]);
+		expect(connected).toEqual({ status: "connected", connectionId: "acme", toolCount: 3 });
+		expect(approvals).toEqual(["acme", "acme"]);
 
 		await expect(handlers["mcp.connect"]({ serviceId: "missing" })).rejects.toThrow("Unknown MCP service");
 		await expect(handlers["mcp.connect"]({})).rejects.toThrow("requires a serviceId");

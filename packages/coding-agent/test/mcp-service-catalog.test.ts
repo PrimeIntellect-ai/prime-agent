@@ -35,8 +35,14 @@ function serviceFixture(overrides: Partial<McpServiceDescriptor> = {}): McpServi
 	};
 }
 
-function oauthCredential(expiresInMs = 3600_000) {
-	return { type: "oauth" as const, access: "tok", refresh: "r", expires: Date.now() + expiresInMs };
+function oauthCredential(expiresInMs = 3600_000, endpoint?: string) {
+	return {
+		type: "oauth" as const,
+		access: "tok",
+		refresh: "r",
+		expires: Date.now() + expiresInMs,
+		...(endpoint !== undefined ? { endpoint } : {}),
+	};
 }
 
 describe("service catalog views", () => {
@@ -73,8 +79,8 @@ describe("service catalog views", () => {
 		});
 	});
 
-	it("never reports connected from a stored token alone: legacy grants stay pending", () => {
-		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
+	it("never reports connected from a stored token alone: bound grants without a verified record stay pending", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
 		const views = buildPluginViews({
 			services: [serviceFixture()],
 			userServers: undefined,
@@ -85,8 +91,32 @@ describe("service catalog views", () => {
 		expect(views[0]?.connectionIds).toEqual(["acme"]);
 	});
 
-	it("reports connected only with a verified connection record", () => {
+	it("surfaces an unbound legacy grant as reconnect-required, never pending or connected", () => {
 		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
+	});
+
+	it("surfaces a cross-endpoint grant as reconnect-required", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://other.example/mcp"));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
+	});
+
+	it("reports connected only with a verified connection record", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
 		store.upsert({
 			connectionId: "acme",
 			serviceId: "acme",
@@ -222,7 +252,7 @@ describe("service catalog views", () => {
 	});
 
 	it("builds connection views including pending and user servers, sorted by connectionId", () => {
-		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
 		const connections = buildConnectionViews({
 			services: [serviceFixture()],
 			userServers: {
@@ -301,6 +331,7 @@ describe("verifyMcpConnection", () => {
 			access: "grant-a",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
 		});
 	});
 

@@ -102,6 +102,7 @@ describe("ENG-6108 service catalog connect-then-activate", () => {
 			access: "notion-access",
 			refresh: "notion-refresh",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.notion.com/mcp",
 		});
 		const record = await services.mcpManager.verifyConnection("notion");
 		expect(record.status).toBe("connected");
@@ -147,6 +148,7 @@ describe("ENG-6108 service catalog connect-then-activate", () => {
 			access: "linear-access",
 			refresh: "linear-refresh",
 			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
 		});
 		// No verification yet: the manager's probe is stubbed but never invoked.
 		const handlers = mcpManager.hostHandlers();

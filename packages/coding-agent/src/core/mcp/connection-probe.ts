@@ -33,6 +33,8 @@ export const MCP_PROBE_ERRORS = {
 	UNKNOWN: "verification-failed",
 	/** The grant changed while the probe ran; the result was discarded, nothing persisted. */
 	CREDENTIAL_CHANGED: "credential-changed",
+	/** The stored grant is not bound to this endpoint (ambiguous legacy state); verification refused it. */
+	UNBOUND_CREDENTIAL: "credential-unbound",
 } as const;
 
 export type McpEndpointProbeResult =

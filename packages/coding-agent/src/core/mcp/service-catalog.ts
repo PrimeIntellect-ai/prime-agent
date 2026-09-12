@@ -135,6 +135,7 @@ interface HttpStatusResult {
  */
 function httpConnectionStatus(options: {
 	connectionId: string;
+	endpoint: string;
 	authStorage: AuthStorage;
 	connectionStore: McpConnectionStore;
 	usesOAuth: boolean;
@@ -142,7 +143,7 @@ function httpConnectionStatus(options: {
 	/** Declared no-auth endpoint: dispatchable without credentials (kernel handshakes). */
 	declaredNoAuth?: boolean;
 }): HttpStatusResult {
-	const { connectionId, authStorage, connectionStore, usesOAuth, bearerTokenEnvVar } = options;
+	const { connectionId, endpoint, authStorage, connectionStore, usesOAuth, bearerTokenEnvVar } = options;
 	const record = connectionStore.get(connectionId);
 	if (usesOAuth) {
 		const credential = oauthSnapshot(authStorage, connectionId);
@@ -156,6 +157,15 @@ function httpConnectionStatus(options: {
 				};
 			}
 			return { status: "not_connected" };
+		}
+		// Endpoint binding: a token must prove where it belongs before it counts as
+		// usable — for catalog services and user servers alike. Unbound legacy
+		// grants are ambiguous and demand an explicit reconnect.
+		if (credential.endpoint === undefined || credential.endpoint !== endpoint) {
+			return {
+				status: "error",
+				setupHint: "Stored credentials are not bound to this endpoint. Reconnect required.",
+			};
 		}
 		if (credential.expiresAt !== undefined && credential.expiresAt <= Date.now() && !credential.hasRefresh) {
 			return {
@@ -239,6 +249,7 @@ function catalogServiceView(
 	}
 	const status = httpConnectionStatus({
 		connectionId: service.serviceId,
+		endpoint: service.transport.url,
 		authStorage,
 		connectionStore,
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
@@ -256,7 +267,9 @@ function catalogServiceView(
 		serviceId: service.serviceId,
 		label: service.label,
 		connectionStatus: status.status,
-		connectable: false,
+		// Error (rejected credential, unbound grant) keeps the Reconnect action;
+		// connected/pending rows manage the connection instead of re-logging in.
+		connectable: status.status === "error",
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		connectionIds: status.status === "error" ? [] : [service.serviceId],
@@ -293,6 +306,7 @@ function userServerView(
 	const usesOAuth = config.oauth === true;
 	const status = httpConnectionStatus({
 		connectionId: name,
+		endpoint: config.url,
 		authStorage,
 		connectionStore,
 		usesOAuth,
@@ -473,6 +487,22 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 		updatedAt: now,
 	};
 	try {
+		// Endpoint binding first: a stored token must prove where it belongs before
+		// any token fetch or probe. Unbound or cross-endpoint grants are ambiguous
+		// legacy state and demand an explicit reconnect — never auto-probe.
+		if (usesOAuth) {
+			const credential = authStorage.get(mcpCredentialKey(connectionId));
+			if (credential?.type === "oauth") {
+				const bound = typeof credential.endpoint === "string" ? credential.endpoint : undefined;
+				if (bound === undefined || bound !== endpoint) {
+					record.status = "error";
+					record.lastError = MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL;
+					connectionStore.queueVerifyResult(record, () => true);
+					await connectionStore.flush().catch(() => undefined);
+					return record;
+				}
+			}
+		}
 		// Resolve the token once: the probe and the binding check below both refer to
 		// exactly this grant revision (getApiKey refreshes under its lock first).
 		const token = await resolveConnectionToken(authStorage, connectionId, usesOAuth, bearerTokenEnvVar);
@@ -544,10 +574,13 @@ async function resolveConnectionToken(
 }
 
 /**
- * The current grant revision as a short stable hash. Reads through the storage
- * cache (the writer process is this process in interactive flows), so the flush-time
- * guard observes changes made here; cross-process changes are ordered by the file
- * lock in the same reload cycle the daemon already performs on refresh.
+ * The current grant revision as a short stable hash. Reloads the credential
+ * source first: the probe-to-flush guard must observe logins, logouts, and token
+ * rotations — including ones performed by another process between probe start
+ * and flush — so it never re-reads a cached AuthStorage snapshot. The reload is
+ * one consistent read under the auth.json backend lock; a login racing the flush
+ * itself is resolved by the next verification (documented best-effort, no
+ * cross-process atomicity claim).
  */
 function currentCredentialBindingValue(
 	authStorage: AuthStorage,
@@ -555,6 +588,7 @@ function currentCredentialBindingValue(
 	usesOAuth: boolean,
 	bearerTokenEnvVar: string | undefined,
 ): string {
+	authStorage.reload();
 	if (usesOAuth) {
 		const credential = authStorage.get(mcpCredentialKey(connectionId));
 		return credential?.type === "oauth" && typeof credential.access === "string" ? credential.access : "";

@@ -160,7 +160,7 @@ export async function createAgentSessionServices(
 			getUserServers: () => settingsManager.getGlobalMcpServers(),
 		});
 	// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
-	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
+	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerAllProviders());
 
 	const userExtensionFactories = options.resourceLoaderOptions?.extensionFactories ?? [];
 	// The built-in Herdr reporter defers to Herdr's own file-based integration

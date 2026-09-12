@@ -4,12 +4,13 @@
 
 import { join } from "node:path";
 import { createMcpOAuthProvider, registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
-import { getOAuthProvider, registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { getAgentDir } from "../../config.js";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
 import type { probeMcpEndpoint } from "./connection-probe.js";
+import { MCP_PROBE_ERRORS } from "./connection-probe.js";
 import { type McpConnectionRecord, McpConnectionStore } from "./connection-store.js";
 import {
 	buildConnectionViews,
@@ -85,7 +86,7 @@ export class McpManager {
 	private acpServers = new Map<string, AcpMcpServerConfig>();
 	private acpOwnerId?: string;
 	/** Provider ids we registered for user servers, so refresh can drop removed ones. */
-	private registeredUserProviderIds = new Set<string>();
+	private ownedProviderIds = new Set<string>();
 	private verificationInFlight = new Set<string>();
 
 	constructor(options: McpManagerOptions) {
@@ -183,26 +184,28 @@ export class McpManager {
 	}
 
 	private registerProviders(): void {
-		registerBuiltinMcpOAuthProviders();
-		this.registerCatalogProviders();
-		this.registerUserProviders();
+		this.registerAllProviders();
 	}
 
 	/**
-	 * Register OAuth providers for catalog services beyond the legacy slice. A
-	 * user-declared server that owns the name always wins: no provider is
-	 * registered against the official endpoint for an id the user repointed.
+	 * Atomic, idempotent reconciliation of every OAuth provider this manager owns:
+	 * legacy built-ins, eligible catalog services, and user-declared servers.
+	 * Desired providers are (re-)registered first; only ids we previously owned
+	 * disappear. Safe to run after ModelRegistry.refresh() resets the registry
+	 * (the reset hook) and after settings/catalog changes — override removals
+	 * restore the catalog provider in one pass, leaving no gaps.
 	 */
-	private registerCatalogProviders(): void {
+	registerAllProviders(): void {
+		registerBuiltinMcpOAuthProviders();
+		const desired = new Map<string, ReturnType<typeof createMcpOAuthProvider>>();
 		for (const service of this.services) {
 			if (service.legacyBuiltin) continue;
 			if (service.transport.type !== "http" || !service.transport.url) continue;
 			if (service.setup.status !== "ready") continue;
 			if (service.authStrategy !== "oauth" && service.authStrategy !== "unknown") continue;
 			if (this.isUserOwnedName(service.serviceId)) continue;
-			const id = this.providerId(service.serviceId);
-			if (getOAuthProvider(id)) continue;
-			registerOAuthProvider(
+			desired.set(
+				this.providerId(service.serviceId),
 				createMcpOAuthProvider({
 					server: service.serviceId,
 					label: service.label,
@@ -210,35 +213,29 @@ export class McpManager {
 				}),
 			);
 		}
-	}
-
-	/**
-	 * Register OAuth providers for user-declared (non-catalog) servers. Public so it
-	 * can run after ModelRegistry.refresh() resets the registry — otherwise custom
-	 * `mcp:<server>` providers vanish on every refresh (e.g. post-login).
-	 */
-	registerUserProviders(): void {
-		const current = new Set<string>();
 		for (const integration of this.integrations.values()) {
 			if (!integration.userDeclared || integration.config.type !== "http") continue;
 			if (this.isReservedServerName(integration.server)) continue;
-			const id = this.providerId(integration.server);
-			if (integration.usesOAuth) {
-				current.add(id);
-				registerOAuthProvider(
-					createMcpOAuthProvider({
-						server: integration.server,
-						label: integration.label,
-						url: integration.config.url,
-					}),
-				);
-			}
+			if (!integration.usesOAuth) continue;
+			desired.set(
+				this.providerId(integration.server),
+				createMcpOAuthProvider({
+					server: integration.server,
+					label: integration.label,
+					url: integration.config.url,
+				}),
+			);
 		}
-		// Drop providers for user servers removed since the last registration.
-		for (const id of this.registeredUserProviderIds) {
-			if (!current.has(id)) unregisterOAuthProvider(id);
+		const legacyIds = new Set(
+			this.services.filter((service) => service.legacyBuiltin).map((service) => this.providerId(service.serviceId)),
+		);
+		for (const [id, provider] of desired) {
+			if (!legacyIds.has(id)) registerOAuthProvider(provider);
 		}
-		this.registeredUserProviderIds = current;
+		for (const id of this.ownedProviderIds) {
+			if (!desired.has(id) && !legacyIds.has(id)) unregisterOAuthProvider(id);
+		}
+		this.ownedProviderIds = new Set([...desired.keys(), ...legacyIds]);
 	}
 
 	/** True when valid credentials exist for the integration (drives dispatch eligibility). */
@@ -255,9 +252,9 @@ export class McpManager {
 		}
 		const cred = this.authStorage.get(this.providerId(integration.server));
 		if (cred === undefined) return false;
-		// Builtin URLs are code-constant; only user-declared endpoints can be retargeted, so only their
-		// tokens must prove where they belong. Mismatched or unbound tokens require re-login.
-		if (!integration.userDeclared) return true;
+		// Every stored token must prove where it belongs — catalog services and
+		// user-declared servers alike, matching the kernel's _bound_auth refusal.
+		// Unbound legacy grants and cross-endpoint tokens require explicit reconnect.
 		const endpoint = (cred as { endpoint?: string }).endpoint;
 		return typeof endpoint === "string" && endpoint === integration.config.url;
 	}
@@ -316,12 +313,31 @@ export class McpManager {
 		for (const integration of this.integrations.values()) {
 			if (integration.config.type !== "http") continue;
 			if (integration.userDeclared && this.isReservedServerName(integration.server)) continue;
-			const hasCredentials = integration.usesOAuth
-				? this.authStorage.get(this.providerId(integration.server)) !== undefined
-				: Boolean(
-						integration.config.bearerTokenEnvVar && process.env[integration.config.bearerTokenEnvVar]?.trim(),
-					);
-			if (!hasCredentials) continue;
+			// Only bound, usable credentials may be probed; unbound or cross-endpoint
+			// grants surface as Reconnect and are never auto-probed. The first
+			// demand-driven pass records the unusable state once so /plugins shows
+			// an honest Reconnect instead of a stale pending.
+			if (!this.isAuthed(integration)) {
+				if (integration.usesOAuth && !this.connectionStore.get(integration.server)) {
+					const credential = this.authStorage.get(this.providerId(integration.server));
+					if (credential !== undefined) {
+						const now = Date.now();
+						this.connectionStore.upsert({
+							connectionId: integration.server,
+							serviceId: integration.server,
+							endpoint: integration.config.type === "http" ? integration.config.url : "",
+							label: integration.label,
+							status: "error",
+							createdAt: now,
+							updatedAt: now,
+							lastError: MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL,
+						});
+						void this.connectionStore.flush().catch(() => undefined);
+					}
+				}
+				continue;
+			}
+			if (!integration.usesOAuth && !integration.config.bearerTokenEnvVar) continue;
 			if (integration.config.enabled === false) continue;
 			const record = this.connectionStore.get(integration.server);
 			if (record?.status === "connected") continue;
@@ -447,7 +463,9 @@ export class McpManager {
 				if (!serviceId) throw new Error("mcp.connect requires a serviceId");
 				const view = this.pluginViews().find((plugin) => plugin.serviceId === serviceId);
 				if (!view) throw new Error(`Unknown MCP service: ${serviceId}`);
-				if (!view.connectable) {
+				// The approver seam may run on pending rows (verify a stored grant) and
+				// error rows (re-login), matching the UI's Connect/Reconnect actions.
+				if (!view.connectable && view.connectionStatus !== "pending") {
 					throw new Error(
 						view.setupHint ??
 							`${view.label} cannot be connected automatically (status: ${view.connectionStatus}).`,
@@ -455,8 +473,17 @@ export class McpManager {
 				}
 				const connected = await beginConnect(serviceId);
 				if (!connected) return { status: "cancelled" };
-				// The approver completed the OAuth flow; credentials now exist.
-				return { status: "connected", connectionId: serviceId };
+				// The approver completed the OAuth flow. "Connected" is an honest
+				// claim only after a real handshake over the stored grant verifies.
+				const record = await this.verifyConnection(serviceId);
+				if (record.status !== "connected") {
+					return {
+						status: "error",
+						message: record.lastError ?? "verification-failed",
+						connectionId: serviceId,
+					};
+				}
+				return { status: "connected", connectionId: serviceId, toolCount: record.toolCount };
 			};
 		}
 		return handlers;

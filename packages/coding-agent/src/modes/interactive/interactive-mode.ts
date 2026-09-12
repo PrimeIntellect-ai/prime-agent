@@ -8859,7 +8859,14 @@ export class InteractiveMode {
 		const userServers = this.settingsManager.getGlobalMcpServers() ?? {};
 		const targets = new Map<
 			string,
-			{ url: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean }
+			{
+				url?: string;
+				usesOAuth: boolean;
+				bearerTokenEnvVar?: string;
+				managedBySettings: boolean;
+				transport?: "stdio";
+				name?: string;
+			}
 		>();
 		for (const service of services) {
 			if (service.transport.type === "http" && service.transport.url && !userServers[service.serviceId]) {
@@ -8877,6 +8884,13 @@ export class InteractiveMode {
 					usesOAuth: config.oauth === true,
 					...(config.bearerTokenEnvVar ? { bearerTokenEnvVar: config.bearerTokenEnvVar } : {}),
 					managedBySettings: true,
+				});
+			} else if (config.type === "stdio") {
+				targets.set(name, {
+					usesOAuth: false,
+					managedBySettings: true,
+					transport: "stdio",
+					name,
 				});
 			}
 		}
@@ -8908,8 +8922,38 @@ export class InteractiveMode {
 
 	private async connectServiceFromPicker(
 		service: McpPluginView,
-		target: { url: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean } | undefined,
+		target:
+			| {
+					url?: string;
+					usesOAuth: boolean;
+					bearerTokenEnvVar?: string;
+					managedBySettings: boolean;
+					transport?: "stdio";
+					name?: string;
+			  }
+			| undefined,
 	): Promise<void> {
+		if (target?.transport === "stdio" && target.name) {
+			const serverName = target.name;
+			const config = this.settingsManager.getGlobalMcpServers()?.[serverName];
+			if (!config) {
+				this.showStatus(`${service.label} is no longer present in settings.`);
+				return;
+			}
+			if (config.type !== "stdio" || config.enabled === false) {
+				this.showStatus(
+					`${service.label} is disabled. Re-enable or remove it with /mcp, or edit your settings file.`,
+				);
+				return;
+			}
+			this.settingsManager.setGlobalMcpServer(serverName, { ...config, enabled: false }, true);
+			await this.settingsManager.flush();
+			this.uiServices.refreshMcpProviders?.();
+			await this.reloadAfterMcpChange(
+				`Disabled local server ${service.label}. Manage it with /mcp or your settings file.`,
+			);
+			return;
+		}
 		if (service.connectionStatus === "connected") {
 			if (target?.managedBySettings && !service.usesOAuth) {
 				this.showStatus(
@@ -8926,6 +8970,11 @@ export class InteractiveMode {
 			this.showStatus(service.setupHint ?? `${service.label} cannot be connected automatically in this build.`);
 			return;
 		}
+		const targetUrl = target.url;
+		if (!targetUrl) {
+			this.showStatus(`${service.label} cannot be connected automatically in this build.`);
+			return;
+		}
 		const result = await this.createAuthFlows().runMcpLogin(service.serviceId, service.label);
 		if (result.status !== "success") {
 			return;
@@ -8939,7 +8988,7 @@ export class InteractiveMode {
 				connectionId: service.serviceId,
 				serviceId: service.serviceId,
 				label: service.label,
-				endpoint: target.url,
+				endpoint: targetUrl,
 				usesOAuth: target.usesOAuth,
 				...(target.bearerTokenEnvVar ? { bearerTokenEnvVar: target.bearerTokenEnvVar } : {}),
 			});
