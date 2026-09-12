@@ -1,0 +1,1 @@
+- Fixed heartbeat listing timeouts when multiple clients refresh large saved-session catalogs.
