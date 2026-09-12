@@ -9,7 +9,8 @@ import { primaryDeliveryRecord, type QueuedSessionAction } from "./prepared-acti
 
 export interface SessionInputCheckpointsHost {
 	getFence(): Pick<SessionCommitFence, "isHeldByCurrentContext" | "disposeSignal">;
-	getScheduler(): Pick<SessionInputScheduler, "queuedWorkPauseCount" | "suspended" | "pendingPump" | "requested">;
+	getScheduler(): Pick<SessionInputScheduler, "queuedWorkPauseCount" | "pendingPump" | "requested">;
+	isBusyForInputPump(): boolean;
 	getEventQueue(): Promise<void>;
 	acquireFence(signal?: AbortSignal): Promise<SessionCommitLease>;
 	getStore(): Pick<SessionManager, "flushNow">;
@@ -174,7 +175,8 @@ export class SessionInputCheckpoints {
 	async waitForIdleOrSettlement(settlement?: ContinuationToken): Promise<void> {
 		while (settlement === undefined || this.host.getContinuation().current === settlement) {
 			if (this.actions.queuedActions().length > 0) {
-				if (this.host.getScheduler().suspended || this.host.getScheduler().queuedWorkPauseCount > 0) {
+				// A blocked pump must yield to the work that clears its busy state.
+				if (this.host.isBusyForInputPump()) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;
