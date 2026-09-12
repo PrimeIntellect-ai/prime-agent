@@ -119,9 +119,20 @@ class HarnessStateTest(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "path was renamed to topic"):
                 state.create_memory("Grouped", "content", id="grouped", **{"path": "repo/testing"})
 
-    def test_removed_per_kind_wrappers_name_their_replacement(self) -> None:
+    def test_removed_harness_methods_name_their_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            for name, message in (
+                (
+                    "record_refinement",
+                    "record_refinement was removed; refinement events are recorded automatically when refinements run",
+                ),
+                ("plan_refinement", "plan_refinement was removed; use await refine.run() to schedule a refinement"),
+            ):
+                with self.assertRaises(AttributeError) as caught:
+                    getattr(state, name)
+                self.assertEqual(str(caught.exception), message)
 
             for name, replacement in (
                 ("update_skill", "update_memory(..., kind='skill')"),
@@ -195,7 +206,30 @@ class HarnessStateTest(unittest.TestCase):
             # A plain miss still reports absence rather than a mismatch.
             self.assertFalse(state.delete_memory("absent"))
 
-    def test_persists_entries_and_refinements(self) -> None:
+    def test_engine_recorded_refinements_survive_a_kernel_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            kernel_state = HarnessState(state_path)
+            kernel_state.create_memory("Kernel note", "Written before the refinement.", id="kernel")
+
+            # The refinement engine rewrites the same file from the host process.
+            engine_write = json.loads(state_path.read_text(encoding="utf-8"))
+            engine_write["refinements"] = [
+                {"id": "refine_1", "trigger": "engine pass", "changes": ["create memory:kernel"]}
+            ]
+            state_path.write_text(json.dumps(engine_write), encoding="utf-8")
+            # Guarantee the mtime advances even on coarse-resolution filesystems.
+            future = state_path.stat().st_mtime + 5
+            os.utime(state_path, (future, future))
+
+            kernel_state.create_memory("Later note", "Written after the refinement.", id="later")
+
+            reloaded = HarnessState(state_path)
+            self.assertEqual([event.id for event in reloaded.refinements], ["refine_1"])
+            self.assertIsNotNone(reloaded.get("memory", "later"))
+            self.assertIn("refinements: 1", reloaded.overview())
+
+    def test_persists_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
 
@@ -219,12 +253,6 @@ class HarnessStateTest(unittest.TestCase):
                 kind="subagent",
             )
             state.create_memory("Refinement cadence", "Refine only after repeated evidence.", kind="prompt")
-            event = state.record_refinement(
-                "skill failed twice",
-                ["updated failure_first skill", "added reviewer subagent"],
-                evidence="two failed validations",
-                outcome="next validation passed",
-            )
 
             reloaded = HarnessState(state.file_path)
 
@@ -232,7 +260,6 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(reloaded.get("skill", skill.id).version, 1)
             self.assertEqual(reloaded.get("skill", skill.id).arguments["failure_log"]["type"], "string")
             self.assertEqual(reloaded.get("subagent", subagent.id).metadata["max_turns"], 3)
-            self.assertEqual(reloaded.refinements[0].id, event.id)
             self.assertIn("Prefer focused patches", reloaded.overview())
             self.assertIn(
                 "Call contract: installed Python skills use await <skill_import>(...)",
@@ -245,7 +272,6 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("await rlm.list_subagents()", overview)
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("(engineering, v1)", overview)
-            self.assertIn("refinements: 1", reloaded.overview())
 
     def test_save_failure_preserves_previous_state_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -558,7 +584,6 @@ class HarnessStateTest(unittest.TestCase):
             try:
                 state = HarnessState(in_memory=True)
                 created = state.create_memory("Volatile", "in memory only", id="volatile")
-                state.record_refinement("trigger", ["change"])
 
                 self.assertIsNone(state.file_path)
                 self.assertEqual(created.content, "in memory only")
@@ -997,7 +1022,6 @@ class HarnessStateTest(unittest.TestCase):
                 lambda: package_harness.update_memory("lost", "Lost", "content"),
                 lambda: package_harness.delete_memory("lost"),
                 lambda: package_harness.upsert("memory", "Lost", "content", id="lost"),
-                lambda: package_harness.record_refinement("trigger", ["change"]),
             ):
                 with self.assertRaisesRegex(RuntimeError, "Local harness state requires.*global_=True"):
                     mutate()
@@ -1125,15 +1149,6 @@ class HarnessStateTest(unittest.TestCase):
     def test_callable_rlm_exposes_harness_state_helpers(self) -> None:
         self.assertIs(callable_rlm.harness, package_harness)
         self.assertIs(callable_rlm.get_harness_state, get_harness_state)
-
-    def test_record_refinement_accepts_single_change_string(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = HarnessState(Path(temp_dir) / "harness_state.json")
-
-            event = state.record_refinement("manual cli test", "single change")
-
-            self.assertEqual(event.changes, ["single change"])
-            self.assertEqual(state.refinements[0].changes, ["single change"])
 
     def test_unknown_kind_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
