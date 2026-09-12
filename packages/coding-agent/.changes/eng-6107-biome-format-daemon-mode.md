@@ -1,0 +1,1 @@
+- Formatting-only: applied biome's line-wrapping to `daemon-mode.ts` so the pre-commit hook no longer leaves working-tree drift after every commit.
