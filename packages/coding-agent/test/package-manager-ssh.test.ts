@@ -1,7 +1,10 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pathToFileURL } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CONFIG_DIR_NAME } from "../src/config.js";
 import { DefaultPackageManager } from "../src/core/package-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
@@ -26,7 +29,57 @@ describe("Package Manager git source parsing", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it.each(["--upload-pack=unexpected-command", "relative-project", "project with spaces"])(
+		"keeps the project directory %s a clone operand",
+		async (cwd) => {
+			const originalCwd = process.cwd();
+			process.chdir(tempDir);
+			try {
+				const manager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+				const commands = manager as unknown as {
+					runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void>;
+				};
+				const runCommand = vi.spyOn(commands, "runCommand").mockResolvedValue(undefined);
+				await manager.install("git:git@github.com:user/repo@v1.0.0", { local: true });
+				const target = join(cwd, CONFIG_DIR_NAME, "git", "github.com", "user/repo");
+				expect(runCommand).toHaveBeenNthCalledWith(1, "git", ["clone", "--", "git@github.com:user/repo", target]);
+				expect(runCommand).toHaveBeenNthCalledWith(2, "git", ["checkout", "v1.0.0"], { cwd: target });
+				expect(runCommand).toHaveBeenCalledTimes(2);
+			} finally {
+				process.chdir(originalCwd);
+			}
+		},
+	);
+
+	it("clones into an option-shaped directory with real Git and a local transport", async () => {
+		const remote = join(tempDir, "remote.git");
+		execFileSync("git", ["init", "--bare", "--quiet", remote]);
+		const source = "https://prime-clone-boundary.invalid/owner/repo";
+		const cwd = "--upload-pack=unexpected-command";
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
+		try {
+			const manager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+			const commands = manager as unknown as {
+				runCommand(command: string, args: string[]): Promise<void>;
+			};
+			vi.spyOn(commands, "runCommand").mockImplementation(async (command, args) => {
+				execFileSync(command, ["-c", `url.${pathToFileURL(remote).href}.insteadOf=${source}`, ...args], {
+					cwd: tempDir,
+					stdio: "pipe",
+				});
+			});
+			await manager.install(source, { local: true });
+			expect(existsSync(join(cwd, CONFIG_DIR_NAME, "git", "prime-clone-boundary.invalid", "owner/repo/.git"))).toBe(
+				true,
+			);
+		} finally {
+			process.chdir(originalCwd);
+		}
 	});
 
 	describe("protocol URLs without git: prefix", () => {
