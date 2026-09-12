@@ -222,7 +222,8 @@ export function buildSubagentGuidance(
 		lines.push("Use `agent_observe` for bounded transcript inspection.");
 	}
 	lines.push(
-		"Have children write files and read those files for fan-in.",
+		"Fan-in results with `await rlm.collect(targets, timeout_ms=0)`: it returns typed snapshots of direct children (status, answer preview, error) without steering anyone; an explicit timeout blocks only that call until the children settle or the deadline passes.",
+		"Large child outputs belong in files that you read selectively; `collect` snapshots are previews, not full results.",
 		"Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.",
 	);
 	if (options.includeRefineExamples ?? true) {

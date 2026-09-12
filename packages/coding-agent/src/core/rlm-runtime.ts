@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import type { AgentSession } from "./agent-session.js";
+import type { AgentSession, RlmChildAgentStatus } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
@@ -62,6 +62,27 @@ export interface RlmModelMatch {
 export interface RlmFindModelsResult {
 	models: RlmModelMatch[];
 }
+
+export interface RlmCollectResultEntry {
+	rlm_child_id: string;
+	session_name: string | undefined;
+	session_dir: string;
+	/** Raw run status: queued | running | done | error | cancelled. */
+	status: RlmChildAgentStatus;
+	/** True once the run reached a terminal state (settlement resolved or rejected). */
+	settled: boolean;
+	answer_preview: string | undefined;
+	error: string | undefined;
+	duration_ms: number | undefined;
+	tool_use_count: number | undefined;
+	replied_since_task: boolean | undefined;
+}
+
+export interface RlmCollectResult {
+	results: RlmCollectResultEntry[];
+}
+
+export type RlmCollectHandler = (targets: string[], timeoutMs: number) => Promise<RlmCollectResult>;
 
 export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
 type RlmCreateSessionHandler = (request: RlmCreateSessionRequest) => Promise<RlmCreateSessionResult>;
@@ -284,6 +305,42 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 		}
 		const { subagent, outcome } = await handler(payload.target.trim());
 		return outcome === undefined ? { subagent } : { subagent, outcome };
+	};
+}
+
+/**
+ * Typed fan-in for subagent results: `rlm.collect` waits (bounded) for the
+ * selected direct children's runs to settle and returns result envelopes.
+ * Never steers the parent: a timeout returns the current snapshots instead of
+ * rejecting, so the caller can poll, end the turn, or retry.
+ */
+export function createRlmCollectHostHandler(handler: RlmCollectHandler): HostRequestHandler {
+	return async (payload) => {
+		const rawTargets = payload.targets;
+		if (rawTargets !== undefined && rawTargets !== null && !Array.isArray(rawTargets)) {
+			throw new Error("rlm.collect targets must be an array of child ids or names");
+		}
+		const targets = (rawTargets ?? []).map((target) => {
+			if (typeof target !== "string" || !target.trim()) {
+				throw new Error("rlm.collect targets must be non-empty strings");
+			}
+			return target.trim();
+		});
+		const rawTimeout = payload.timeout_ms;
+		if (rawTimeout === undefined || rawTimeout === null) {
+			const { results } = await handler(targets, 0);
+			return { results };
+		}
+		if (
+			typeof rawTimeout !== "number" ||
+			!Number.isSafeInteger(rawTimeout) ||
+			rawTimeout < 0 ||
+			rawTimeout > 2_147_483_647
+		) {
+			throw new Error("rlm.collect timeout_ms must be a non-negative integer up to 2147483647");
+		}
+		const { results } = await handler(targets, rawTimeout);
+		return { results };
 	};
 }
 
