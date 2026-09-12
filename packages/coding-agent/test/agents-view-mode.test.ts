@@ -15,15 +15,19 @@ import {
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
+import * as agentsViewState from "../src/modes/agents-view/agents-view-state.js";
 import {
 	type AgentsViewRow,
 	buildAgentsViewRows,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
+	type UnifiedSessionRecord,
 } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
+import * as savedSessionCatalog from "../src/modes/daemon/saved-session-catalog.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
+import { WORKING_ICON_INTERVAL_MS } from "../src/modes/interactive/theme/working-icon.js";
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
@@ -87,6 +91,95 @@ function invoke(method: string, self: object, ...args: unknown[]): unknown {
 	const member = Reflect.get(AgentsViewMode.prototype, method) as ((...a: unknown[]) => unknown) | undefined;
 	if (typeof member !== "function") throw new Error(`AgentsViewMode.${method} no longer exists`);
 	return member.call(self, ...args);
+}
+
+function savedSession(id: string): AgentConnectionSavedSessionInfo {
+	return {
+		id,
+		path: `/tmp/${id}.jsonl`,
+		cwd: "/tmp",
+		created: new Date(0),
+		modified: new Date(0),
+		messageCount: 1,
+		firstMessage: id,
+		allMessagesText: id,
+	};
+}
+
+function deferredSavedCatalog() {
+	let resolve!: (sessions: AgentConnectionSavedSessionInfo[]) => void;
+	let reject!: (error: Error) => void;
+	let onSession: ((session: AgentConnectionSavedSessionInfo) => void) | undefined;
+	const promise = new Promise<AgentConnectionSavedSessionInfo[]>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	vi.spyOn(savedSessionCatalog, "listDaemonSavedSessions").mockImplementationOnce(
+		async (_client, _context, _scope, callbacks) => {
+			onSession = callbacks?.onSession;
+			return promise;
+		},
+	);
+	return {
+		resolve,
+		reject,
+		emit(session: AgentConnectionSavedSessionInfo): void {
+			if (!onSession) throw new Error("Saved catalog refresh has not started");
+			onSession(session);
+		},
+	};
+}
+
+function catalogHarness(saved: AgentConnectionSavedSessionInfo[] = [], live: SessionSummary[] = []) {
+	const persistentState: AgentsViewPersistentState = {
+		savedSessions: saved,
+		lastSuccessfulSavedSessions: saved,
+		savedCatalogLoaded: true,
+	};
+	const self = {
+		persistentState,
+		lastListedSummaries: live,
+		savedSessions: saved,
+		lastSuccessfulSavedSessions: saved,
+		heartbeats: [],
+		rows: [] as AgentsViewRow[],
+		selectedIndex: 0,
+		savedCatalogGeneration: 0,
+		heartbeatCatalogGeneration: 0,
+		savedCatalogReady: true,
+		savedCatalogRefreshPending: false,
+		savedCatalogReconcileTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+		stopped: false,
+		inactiveAgentIdentities: new Set<string>(),
+		expandedSubagentParents: new Set<string>(),
+		programShownParents: new Set<string>(),
+		editor: { getText: vi.fn(() => "") },
+		ui: { requestRender: vi.fn(), stop: vi.fn() },
+		requireClient: () => ({}),
+		getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
+		withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+		getFilteredRecords(): UnifiedSessionRecord[] {
+			return invoke("getFilteredRecords", self) as UnifiedSessionRecord[];
+		},
+		reconcileCatalogs: vi.fn((): void => {
+			invoke("reconcileCatalogs", self);
+		}),
+		rebuildRows: vi.fn((): void => {
+			invoke("rebuildRows", self);
+		}),
+		rearmSavedSearchFetch(): void {
+			invoke("rearmSavedSearchFetch", self);
+		},
+		armSavedSearchFetch: vi.fn(),
+		applyPendingAncestorExpansion: vi.fn(),
+		restoreSelection: vi.fn(),
+		syncSelectedRowState: vi.fn(),
+		resolveMissingSelectionAnchor: vi.fn(),
+		clearCtrlCExitHint: vi.fn(),
+		clearDeleteConfirmation: vi.fn(),
+		setStatusMessage: vi.fn(),
+	};
+	return self;
 }
 
 const settingsManager = {
@@ -1673,6 +1766,353 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 
 		expect(runs).toBe(2);
+	});
+});
+
+describe("AgentsViewMode catalog performance", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it("coalesces bursts without copying snapshots per item and flushes during a continuous stream", async () => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		const first = savedSession("first");
+		const updatedFirst = { ...first, path: "/tmp/./first.jsonl", name: "updated first" };
+		const second = savedSession("second");
+		const third = savedSession("third");
+		catalog.emit(first);
+		const firstTimer = self.savedCatalogReconcileTimer;
+		await vi.advanceTimersByTimeAsync(25);
+		catalog.emit(updatedFirst);
+		catalog.emit(second);
+		await vi.advanceTimersByTimeAsync(25);
+		catalog.emit(third);
+		await vi.advanceTimersByTimeAsync(24);
+
+		expect(self.savedSessions).toBe(previous);
+		expect(self.persistentState.savedSessions).toBe(previous);
+		expect(self.savedCatalogReconcileTimer).toBe(firstTimer);
+		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(1);
+
+		await vi.advanceTimersByTimeAsync(1);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		expect(self.savedSessions).toEqual([previous[0], updatedFirst, second, third]);
+		expect(self.persistentState.savedSessions).toBe(self.savedSessions);
+		expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["first", "previous", "second", "third"]);
+		expect(self.rows.find((row) => row.summary.sessionId === "first")?.title).toBe("updated first");
+		expect(self.savedCatalogReady).toBe(false);
+		expect(self.savedCatalogRefreshPending).toBe(true);
+		expect(self.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.persistentState.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+
+		const firstSnapshot = self.savedSessions;
+		const fourth = savedSession("fourth");
+		const fifth = savedSession("fifth");
+		catalog.emit(fourth);
+		await vi.advanceTimersByTimeAsync(50);
+		catalog.emit(fifth);
+		await vi.advanceTimersByTimeAsync(24);
+		expect(self.savedSessions).toBe(firstSnapshot);
+		expect(self.persistentState.savedSessions).toBe(firstSnapshot);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
+		expect(self.savedSessions).toEqual([...firstSnapshot, fourth, fifth]);
+		expect(self.rows).toHaveLength(6);
+		expect(self.savedCatalogRefreshPending).toBe(true);
+
+		catalog.resolve([updatedFirst, second, third, fourth, fifth]);
+		await expect(refresh).resolves.toBe(true);
+	});
+
+	it("publishes the final canonical catalog immediately and cancels its pending batch", async () => {
+		const self = catalogHarness([savedSession("previous")]);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		catalog.emit(savedSession("partial"));
+		const final = [savedSession("canonical")];
+		catalog.resolve(final);
+		await expect(refresh).resolves.toBe(true);
+
+		expect(self.savedSessions).toBe(final);
+		expect(self.lastSuccessfulSavedSessions).toBe(final);
+		expect(self.persistentState.savedSessions).toBe(final);
+		expect(self.persistentState.lastSuccessfulSavedSessions).toBe(final);
+		expect(self.persistentState.savedCatalogLoaded).toBe(true);
+		expect(self.savedCatalogReady).toBe(true);
+		expect(self.savedCatalogRefreshPending).toBe(false);
+		expect(self.rows.map((row) => row.summary.sessionId)).toEqual(["canonical"]);
+		expect(self.resolveMissingSelectionAnchor).toHaveBeenCalledOnce();
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		await vi.advanceTimersByTimeAsync(150);
+		expect(self.savedSessions).toBe(final);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+	});
+
+	it.each([false, true])("restores the last successful catalog after failure (batch flushed: %s)", async (flushed) => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		catalog.emit(savedSession("partial"));
+		if (flushed) {
+			await vi.advanceTimersByTimeAsync(75);
+			expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["partial", "previous"]);
+			catalog.emit(savedSession("pending"));
+		}
+		catalog.reject(new Error("scan failed"));
+		await expect(refresh).resolves.toBe(false);
+
+		expect(self.savedSessions).toBe(previous);
+		expect(self.persistentState.savedSessions).toBe(previous);
+		expect(self.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.persistentState.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.rows.map((row) => row.summary.sessionId)).toEqual(["previous"]);
+		expect(self.savedCatalogReady).toBe(true);
+		expect(self.savedCatalogRefreshPending).toBe(false);
+		expect(self.setStatusMessage).toHaveBeenCalledWith("Failed to load saved sessions: scan failed");
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		await vi.advanceTimersByTimeAsync(150);
+		expect(self.savedSessions).toBe(previous);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(flushed ? 2 : 1);
+	});
+
+	it.each(["success", "failure"])("fences a superseded scan's timer, callback, and terminal %s", async (outcome) => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const older = deferredSavedCatalog();
+		const newer = deferredSavedCatalog();
+		const oldRefresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		older.emit(savedSession("old-partial"));
+		await vi.advanceTimersByTimeAsync(25);
+		const newRefresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		expect(self.savedCatalogGeneration).toBe(2);
+		expect(self.persistentState.savedCatalogGeneration).toBe(2);
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		older.emit(savedSession("old-late"));
+		expect(vi.getTimerCount()).toBe(0);
+		const replacement = savedSession("new-partial");
+		newer.emit(replacement);
+		const newTimer = self.savedCatalogReconcileTimer;
+		if (outcome === "success") older.resolve([savedSession("old-final")]);
+		else older.reject(new Error("old scan failed"));
+		await expect(oldRefresh).resolves.toBe(false);
+		expect(self.savedCatalogReconcileTimer).toBe(newTimer);
+		expect(self.savedCatalogRefreshPending).toBe(true);
+		expect(self.savedCatalogReady).toBe(false);
+		expect(self.resolveMissingSelectionAnchor).not.toHaveBeenCalled();
+		expect(self.setStatusMessage).not.toHaveBeenCalled();
+
+		await vi.advanceTimersByTimeAsync(50);
+		expect(self.savedSessions).toBe(previous);
+		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(25);
+		expect(self.savedSessions).toEqual([...previous, replacement]);
+		expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["new-partial", "previous"]);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		const final = [savedSession("new-final")];
+		newer.resolve(final);
+		await expect(newRefresh).resolves.toBe(true);
+		await vi.advanceTimersByTimeAsync(150);
+		expect(self.savedSessions).toBe(final);
+		expect(self.persistentState.savedSessions).toBe(final);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
+	});
+
+	it.each(["success", "failure"])("finish cancels pending batches and ignores late catalog %s", async (outcome) => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		catalog.emit(savedSession("partial"));
+		expect(vi.getTimerCount()).toBe(1);
+		invoke("finish", self, { type: "exit" });
+		expect(self.stopped).toBe(true);
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		catalog.emit(savedSession("late"));
+		if (outcome === "success") catalog.resolve([savedSession("final")]);
+		else catalog.reject(new Error("late failure"));
+		await expect(refresh).resolves.toBe(false);
+		await vi.advanceTimersByTimeAsync(150);
+
+		expect(self.savedSessions).toBe(previous);
+		expect(self.persistentState.savedSessions).toBe(previous);
+		expect(self.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
+		expect(self.ui.requestRender).not.toHaveBeenCalled();
+		expect(self.resolveMissingSelectionAnchor).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("ticks stale ages and working icons without rebuilding rows or rendering an unchanged idle list", async () => {
+		initTheme("dark");
+		vi.setSystemTime(new Date("2026-01-01T00:00:10Z"));
+		const rows = buildAgentsViewRows([summary({ lastHeardFromAt: "2026-01-01T00:00:00Z" })]);
+		const self = {
+			rows,
+			selectedIndex: -1,
+			workingIconFrame: 0,
+			savedCatalogGeneration: 0,
+			heartbeatCatalogGeneration: 0,
+			persistentState: {
+				rosterClient: { isConnected: true, onMessage: vi.fn(() => vi.fn()) },
+				rosterStore: {
+					attach: vi.fn(async () => true),
+					onUpdate: vi.fn(() => vi.fn()),
+					summaries: () => [],
+				},
+			},
+			ui: {
+				addChild: vi.fn(),
+				setFocus: vi.fn(),
+				start: vi.fn(),
+				enterFullscreen: vi.fn(),
+				requestRender: vi.fn(),
+				invalidate: vi.fn(),
+				stop: vi.fn(),
+			},
+			subscribeToClientClose: vi.fn(),
+			applySessionList: vi.fn(),
+			armSavedSearchFetch: vi.fn(),
+			resolveMissingSelectionAnchor: vi.fn(),
+			refreshHeartbeats: vi.fn(async () => true),
+			loadStartupNotices: vi.fn(),
+			rebuildRows: vi.fn(),
+			clearCtrlCExitHint: vi.fn(),
+			clearDeleteConfirmation: vi.fn(),
+			setStatusMessage: vi.fn(),
+			isPendingDeleteRow: () => false,
+			isPendingKillSubagentRow: () => false,
+			getRowIcon(section: AgentsViewRow["section"]): string {
+				return invoke("getRowIcon", self, section) as string;
+			},
+			formatRowIcon(section: AgentsViewRow["section"], icon: string): string {
+				return invoke("formatRowIcon", self, section, icon) as string;
+			},
+		};
+		const render = (row = self.rows[0]!) => stripAnsi(invoke("renderRow", self, row, 160) as string);
+		const run = invoke("run", self) as Promise<unknown>;
+		try {
+			await vi.advanceTimersByTimeAsync(0);
+			expect(self.ui.start).toHaveBeenCalledOnce();
+			expect(render()).toContain("last heard 10s ago");
+			self.ui.requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(self.ui.requestRender).toHaveBeenCalledTimes(1000 / WORKING_ICON_INTERVAL_MS);
+			expect(self.rebuildRows).not.toHaveBeenCalled();
+			expect(self.rows).toBe(rows);
+			expect(rows[0]?.statusLabel).toBe("last heard 10s ago");
+			expect(render()).toContain("last heard 11s ago");
+			expect(self.workingIconFrame).toBe(0);
+
+			self.rows = buildAgentsViewRows([summary({ activity: "working", isStreaming: true })]);
+			self.ui.requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(WORKING_ICON_INTERVAL_MS);
+			expect(self.workingIconFrame).toBe(1);
+			expect(self.ui.requestRender).toHaveBeenCalledOnce();
+			expect(render()).toContain("◈");
+			expect(render()).not.toContain("thinking");
+
+			self.rows = buildAgentsViewRows([summary()]);
+			self.ui.requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(WORKING_ICON_INTERVAL_MS);
+			expect(self.workingIconFrame).toBe(1);
+			expect(self.ui.requestRender).not.toHaveBeenCalled();
+			expect(self.rebuildRows).not.toHaveBeenCalled();
+
+			const recovering = buildAgentsViewRows([
+				summary({ statusLabel: "recovering", lastHeardFromAt: "2026-01-01T00:00:00Z" }),
+			])[0]!;
+			recovering.heartbeat = { activeCount: 1 };
+			const failed = buildAgentsViewRows([summary({ statusLabel: "failed" })])[0]!;
+			const statusLabel = vi.spyOn(agentsViewState, "getSessionStatusLabel");
+			expect(render(recovering)).toContain("recovering");
+			expect(render(recovering)).not.toContain("last heard");
+			expect(render(failed)).toContain("failed");
+			expect(render()).not.toContain("needs input");
+			expect(statusLabel).toHaveBeenCalledTimes(2);
+			expect(statusLabel).toHaveBeenCalledWith(recovering.summary, recovering.heartbeat);
+		} finally {
+			invoke("finish", self, { type: "exit" });
+			await run;
+		}
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("reuses the catalog index and recursive totals across searches until reconciliation", () => {
+		const parent = summary({ sessionName: "parent", usage: { inputTokens: 0, outputTokens: 0, cost: 1 } });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child",
+			sessionFile: "/tmp/child.jsonl",
+			sessionName: "child",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+			usage: { inputTokens: 0, outputTokens: 0, cost: 2 },
+		});
+		const grandchild = summary({
+			id: "grandchild",
+			activeSessionId: "grandchild",
+			sessionId: "grandchild",
+			sessionFile: "/tmp/grandchild.jsonl",
+			sessionName: "grandchild",
+			runtimeKind: "subagent",
+			parentActiveSessionId: child.activeSessionId,
+			usage: { inputTokens: 0, outputTokens: 0, cost: 4 },
+		});
+		const self = catalogHarness([], [parent, child, grandchild]);
+		const computeRollups = vi.spyOn(agentsViewState, "computeRecursiveRollups");
+		const buildIndex = vi.spyOn(agentsViewState, "buildUnifiedSessionIndex");
+		const filterEmpty = vi.spyOn(agentsViewState, "filterEmptyAgentsViewSessions");
+		const filterSearch = vi.spyOn(agentsViewState, "filterUnifiedSessions");
+		const buildRows = vi.spyOn(agentsViewState, "buildAgentsViewRows");
+		self.reconcileCatalogs();
+		const index = Reflect.get(self, "unifiedIndex");
+		const rollups = Reflect.get(self, "recursiveRollups");
+		expect(rollups).toBeInstanceOf(Map);
+		const parentRow = () => self.rows.find((row) => row.summary.sessionId === parent.sessionId);
+		expect(parentRow()).toMatchObject({ recursiveCost: 7, descendantCount: 2 });
+
+		for (const query of ["parent", "grandchild", "no match", ""]) {
+			self.editor.getText.mockReturnValue(query);
+			invoke("queryChanged", self);
+			expect(Reflect.get(self, "unifiedIndex")).toBe(index);
+			expect(Reflect.get(self, "recursiveRollups")).toBe(rollups);
+			if (query === "no match") expect(self.rows).toEqual([]);
+			else expect(parentRow()).toMatchObject({ recursiveCost: 7, descendantCount: 2 });
+		}
+		expect(computeRollups).toHaveBeenCalledOnce();
+		expect(buildIndex).toHaveBeenCalledOnce();
+		expect(filterEmpty).toHaveBeenCalledTimes(5);
+		expect(filterSearch).toHaveBeenCalledTimes(3);
+		for (const call of [...filterEmpty.mock.calls, ...filterSearch.mock.calls]) expect(call[2]).toBe(index);
+		for (const call of buildRows.mock.calls) expect(call[4]).toBe(rollups);
+
+		self.lastListedSummaries = [
+			parent,
+			child,
+			{ ...grandchild, usage: { inputTokens: 0, outputTokens: 0, cost: 10 } },
+			{ ...child, id: "new", activeSessionId: "new", sessionId: "new", sessionFile: "/tmp/new.jsonl" },
+		];
+		self.reconcileCatalogs();
+		expect(Reflect.get(self, "unifiedIndex")).not.toBe(index);
+		expect(Reflect.get(self, "recursiveRollups")).not.toBe(rollups);
+		expect(computeRollups).toHaveBeenCalledTimes(2);
+		expect(buildIndex).toHaveBeenCalledTimes(2);
+		expect(parentRow()).toMatchObject({ recursiveCost: 15, descendantCount: 3 });
+		self.editor.getText.mockReturnValue("parent");
+		invoke("queryChanged", self);
+		expect(parentRow()).toMatchObject({ recursiveCost: 15, descendantCount: 3 });
+		expect(computeRollups).toHaveBeenCalledTimes(2);
 	});
 });
 

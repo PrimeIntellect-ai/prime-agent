@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, test, vi } from "vitest";
+import { join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
@@ -21,7 +21,12 @@ import {
 	resolveAgentsViewSessionUiServices,
 	shouldReconnectAgentsViewDaemon,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { summaryForUnifiedRecord } from "../src/modes/agents-view/agents-view-state.js";
+import {
+	filterEmptyAgentsViewSessions,
+	getAgentsViewSummaryIdentity,
+	summaryForUnifiedRecord,
+} from "../src/modes/agents-view/agents-view-state.js";
+import * as agentRoster from "../src/modes/daemon/agent-roster.js";
 import {
 	type AgentsViewScopeFrame,
 	aggregateSessionHeartbeats,
@@ -50,6 +55,7 @@ import {
 import { formatAgentDepthLabel } from "../src/modes/interactive/interactive-mode.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import type { Theme } from "../src/modes/interactive/theme/theme.js";
+import * as paths from "../src/utils/paths.js";
 
 function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child", status: "active" | "paused" = "active") {
 	return {
@@ -71,6 +77,196 @@ function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child", st
 }
 
 describe("agents view state", () => {
+	describe("session identity caches", () => {
+		let root: string;
+
+		beforeEach(() => {
+			root = mkdtempSync(join(tmpdir(), "agents-view-path-cache-"));
+		});
+
+		afterEach(() => {
+			vi.restoreAllMocks();
+			rmSync(root, { recursive: true, force: true });
+		});
+
+		test("reuses successful canonical paths across reconciliation and row construction", () => {
+			const real = join(root, "session.jsonl");
+			const alias = join(root, "alias.jsonl");
+			writeFileSync(real, "");
+			symlinkSync(real, alias);
+			const canonicalize = vi.spyOn(paths, "canonicalizePath");
+			const saved = makeSessionInfo({ id: "cached", path: alias });
+			const identity = `file:${realpathSync(real)}`;
+
+			for (let rebuild = 0; rebuild < 3; rebuild++) {
+				const records = reconcileUnifiedSessions([], [saved]);
+				expect(records[0]?.identity).toBe(identity);
+				expect(buildAgentsViewRows(records)[0]?.identity).toBe(identity);
+			}
+			expect(canonicalize.mock.calls).toEqual([[alias], [realpathSync(real)]]);
+		});
+
+		test("caches raw-path fallbacks for missing files", () => {
+			const missing = join(root, "missing.jsonl");
+			const canonicalize = vi.spyOn(paths, "canonicalizePath");
+			const summary = makeSummary({ sessionFile: missing });
+
+			for (let lookup = 0; lookup < 3; lookup++) {
+				expect(getAgentsViewSummaryIdentity(summary)).toBe(`file:${resolve(missing)}`);
+			}
+			expect(canonicalize).toHaveBeenCalledExactlyOnceWith(missing);
+			expect(canonicalize).toHaveReturnedWith(missing);
+		});
+
+		test.each(["missing", "symlink"] as const)("refreshes a cached %s after a fixed one-minute TTL", (kind) => {
+			const first = join(root, "first.jsonl");
+			const second = join(root, "second.jsonl");
+			const alias = join(root, "alias.jsonl");
+			writeFileSync(first, "");
+			writeFileSync(second, "");
+			if (kind === "symlink") symlinkSync(first, alias);
+			const initialIdentity = `file:${kind === "symlink" ? realpathSync(first) : resolve(alias)}`;
+			const summary = makeSummary({ sessionFile: alias });
+			const start = Date.now();
+			const now = vi.spyOn(Date, "now").mockReturnValue(start);
+			const canonicalize = vi.spyOn(paths, "canonicalizePath");
+
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(initialIdentity);
+			if (kind === "symlink") rmSync(alias);
+			symlinkSync(second, alias);
+			now.mockReturnValue(start + 59_999);
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(initialIdentity);
+			expect(canonicalize).toHaveBeenCalledTimes(1);
+
+			now.mockReturnValue(start + 60_000);
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(`file:${realpathSync(second)}`);
+			expect(canonicalize).toHaveBeenCalledTimes(2);
+		});
+
+		test.each(["path", "roster"] as const)("evicts the least recently used %s identity at 4096 entries", (kind) => {
+			vi.spyOn(Date, "now").mockReturnValue(Date.now());
+			const compute =
+				kind === "path"
+					? vi.spyOn(paths, "canonicalizePath").mockImplementation((path) => path)
+					: vi.spyOn(agentRoster, "rosterAgentIdForSummary").mockImplementation((summary) => summary.rlmChildId!);
+			const createSummary = (id: string): SessionSummary =>
+				makeSummary({
+					sessionFile: join(root, `${id}.jsonl`),
+					parentSessionPath: join(root, "parent.jsonl"),
+					runtimeKind: kind === "roster" ? "subagent" : undefined,
+					rlmChildId: id,
+				});
+			const summaries = Array.from({ length: 4096 }, (_, index) => createSummary(String(index)));
+			for (const summary of summaries) getAgentsViewSummaryIdentity(summary);
+			expect(compute).toHaveBeenCalledTimes(4096);
+
+			getAgentsViewSummaryIdentity(summaries[0]!);
+			expect(compute).toHaveBeenCalledTimes(4096);
+			getAgentsViewSummaryIdentity(createSummary("overflow"));
+			expect(compute).toHaveBeenCalledTimes(4097);
+			getAgentsViewSummaryIdentity(summaries[0]!);
+			expect(compute).toHaveBeenCalledTimes(4097);
+			getAgentsViewSummaryIdentity(summaries[1]!);
+			expect(compute).toHaveBeenCalledTimes(4098);
+			expect(compute).toHaveBeenLastCalledWith(kind === "path" ? summaries[1]!.sessionFile : summaries[1]);
+		});
+
+		test.each(["symlink", "missing-file", "missing-directory", "active-parent", "no-parent"] as const)(
+			"caches roster IDs with %s ancestry without changing their identity",
+			(kind) => {
+				const realDirectory = join(root, "real");
+				const aliasDirectory = join(root, "alias");
+				mkdirSync(realDirectory);
+				symlinkSync(realDirectory, aliasDirectory, "dir");
+				const parentPath = join(aliasDirectory, "parent.jsonl");
+				if (kind === "symlink") writeFileSync(parentPath, "");
+				const summary = makeSummary({
+					runtimeKind: "subagent",
+					rlmChildId: "cached-child",
+					parentSessionPath:
+						kind === "active-parent" || kind === "no-parent"
+							? undefined
+							: kind === "missing-directory"
+								? join(root, "missing", "parent.jsonl")
+								: parentPath,
+					parentActiveSessionId: kind === "no-parent" ? undefined : "active-parent",
+				});
+				const originalRosterId = agentRoster.rosterAgentIdForSummary;
+				const identity = `agent:${originalRosterId(summary)}`;
+				const rosterId = vi.spyOn(agentRoster, "rosterAgentIdForSummary");
+
+				for (let rebuild = 0; rebuild < 3; rebuild++) {
+					expect(getAgentsViewSummaryIdentity({ ...summary })).toBe(identity);
+					const records = reconcileUnifiedSessions([{ ...summary }], []);
+					expect(records[0]?.identity).toBe(identity);
+					expect(buildAgentsViewRows(records)[0]?.identity).toBe(identity);
+				}
+				expect(rosterId).toHaveBeenCalledExactlyOnceWith(summary);
+				const otherChild = { ...summary, rlmChildId: "other-child" };
+				expect(getAgentsViewSummaryIdentity(otherChild)).toBe(`agent:${originalRosterId(otherChild)}`);
+				expect(rosterId).toHaveBeenCalledTimes(2);
+			},
+		);
+
+		test("refreshes cached roster IDs after their parent symlink changes and the TTL expires", () => {
+			const first = join(root, "first.jsonl");
+			const second = join(root, "second.jsonl");
+			const alias = join(root, "alias.jsonl");
+			writeFileSync(first, "");
+			writeFileSync(second, "");
+			symlinkSync(first, alias);
+			const summary = makeSummary({ runtimeKind: "subagent", rlmChildId: "child", parentSessionPath: alias });
+			const start = Date.now();
+			const now = vi.spyOn(Date, "now").mockReturnValue(start);
+			const originalRosterId = agentRoster.rosterAgentIdForSummary;
+			const identity = `agent:${originalRosterId(summary)}`;
+			const rosterId = vi.spyOn(agentRoster, "rosterAgentIdForSummary");
+
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(identity);
+			rmSync(alias);
+			symlinkSync(second, alias);
+			now.mockReturnValue(start + 59_999);
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(identity);
+			expect(rosterId).toHaveBeenCalledTimes(1);
+
+			now.mockReturnValue(start + 60_000);
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(`agent:${originalRosterId(summary)}`);
+			expect(rosterId).toHaveBeenCalledTimes(2);
+		});
+
+		test("keeps relative parent roster IDs separate when the working directory changes", () => {
+			const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+			const summary = makeSummary({
+				runtimeKind: "subagent",
+				rlmChildId: "relative-child",
+				parentSessionPath: "parent.jsonl",
+			});
+			const originalRosterId = agentRoster.rosterAgentIdForSummary;
+			const identity = `agent:${originalRosterId(summary)}`;
+			const rosterId = vi.spyOn(agentRoster, "rosterAgentIdForSummary");
+
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(identity);
+			cwd.mockReturnValue(join(root, "other"));
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(`agent:${originalRosterId(summary)}`);
+			cwd.mockReturnValue(root);
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(identity);
+			expect(rosterId).toHaveBeenCalledTimes(2);
+		});
+
+		test("keeps relative path entries separate when the working directory changes", () => {
+			const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+			const canonicalize = vi.spyOn(paths, "canonicalizePath").mockImplementation((path) => resolve(path));
+			const summary = makeSummary({ sessionFile: "relative-session.jsonl" });
+
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(`file:${join(root, "relative-session.jsonl")}`);
+			cwd.mockReturnValue(join(root, "other"));
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(`file:${join(root, "other", "relative-session.jsonl")}`);
+			cwd.mockReturnValue(root);
+			expect(getAgentsViewSummaryIdentity(summary)).toBe(`file:${join(root, "relative-session.jsonl")}`);
+			expect(canonicalize).toHaveBeenCalledTimes(2);
+		});
+	});
+
 	test("classifies a saved orphan with rlmDepth > 0 as a subagent", () => {
 		const saved = {
 			path: "/tmp/sessions/child.jsonl",
@@ -1397,6 +1593,88 @@ describe("agents view state", () => {
 			["child-session", 2],
 			["match-session", 2],
 		]);
+	});
+
+	test.each(["search", "empty"] as const)("reuses a prebuilt index for the %s filter", (kind) => {
+		const rootPath = "/tmp/agents-view-filter-index/root.jsonl";
+		const childPath = "/tmp/agents-view-filter-index/child.jsonl";
+		const records = reconcileUnifiedSessions(
+			[
+				makeSummary({
+					id: "child",
+					activeSessionId: "child",
+					sessionId: "child-session",
+					sessionFile: childPath,
+					parentSessionPath: rootPath,
+					runtimeKind: "subagent",
+				}),
+			],
+			[
+				makeSessionInfo({
+					id: "root-session",
+					path: rootPath,
+					messageCount: 0,
+					firstMessage: "",
+					allMessagesText: "",
+				}),
+				makeSessionInfo({
+					id: "grandchild-session",
+					path: "/tmp/agents-view-filter-index/grandchild.jsonl",
+					parentSessionPath: childPath,
+					rlmDepth: 2,
+					allMessagesText: "Needle",
+				}),
+				makeSessionInfo({
+					id: "empty-session",
+					path: "/tmp/agents-view-filter-index/empty.jsonl",
+					messageCount: 0,
+					firstMessage: "",
+					allMessagesText: "",
+				}),
+				makeSessionInfo({
+					id: "preserved-session",
+					path: "/tmp/agents-view-filter-index/preserved.jsonl",
+					messageCount: 0,
+					firstMessage: "",
+					allMessagesText: "",
+				}),
+			],
+		);
+		const matches = (text: string): boolean => text.includes("Needle");
+		const preserved = new Set(["preserved-session"]);
+		const expected =
+			kind === "search"
+				? filterUnifiedSessions(records, matches)
+				: filterEmptyAgentsViewSessions(records, preserved);
+		expect(expected.map((record) => summaryForUnifiedRecord(record).sessionId)).toEqual([
+			"child-session",
+			"root-session",
+			"grandchild-session",
+			...(kind === "empty" ? ["preserved-session"] : []),
+		]);
+		const index = buildUnifiedSessionIndex(records);
+		const aliasIterators = records.map((record) => vi.spyOn(record.identityAliases, Symbol.iterator));
+		const lookups = vi.spyOn(index.byKey, "get");
+		try {
+			const filtered =
+				kind === "search"
+					? filterUnifiedSessions(records, matches, index)
+					: filterEmptyAgentsViewSessions(records, preserved, index);
+			for (const iterator of aliasIterators) expect(iterator).not.toHaveBeenCalled();
+			expect(lookups).toHaveBeenCalled();
+			expect(filtered).toHaveLength(expected.length);
+			for (const [position, record] of filtered.entries()) expect(record).toBe(expected[position]);
+
+			const subset = records.filter((record) => record.saved?.id !== "root-session");
+			const filteredSubset =
+				kind === "search"
+					? filterUnifiedSessions(subset, matches, index)
+					: filterEmptyAgentsViewSessions(subset, preserved, index);
+			expect(filteredSubset).toEqual(filtered.filter((record) => record.saved?.id !== "root-session"));
+		} finally {
+			for (const iterator of aliasIterators) iterator.mockRestore();
+			lookups.mockRestore();
+		}
 	});
 
 	test("deduplicates and protects sessions across symlink aliases", () => {
