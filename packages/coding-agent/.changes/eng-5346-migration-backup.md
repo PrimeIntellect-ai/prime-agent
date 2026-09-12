@@ -1,0 +1,1 @@
+- Fixed the legacy credential migration to delete `oauth.json` after `auth.json` is verified, merge missing providers into an existing `auth.json`, and clean up or lock down plaintext `oauth.json.migrated` backups on startup.
