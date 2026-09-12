@@ -175,7 +175,8 @@ export class SnapshotTranscriptCache {
 		this.chunkWaiters.clear();
 	}
 
-	waitForChunk(index: number): Promise<Buffer | undefined> {
+	waitForChunk(index: number, signal?: AbortSignal): Promise<Buffer | undefined> {
+		if (signal?.aborted) return Promise.reject(signal.reason);
 		if (this.failure) {
 			return Promise.reject(this.failure);
 		}
@@ -187,8 +188,24 @@ export class SnapshotTranscriptCache {
 		}
 		return new Promise((resolve, reject) => {
 			const waiters = this.chunkWaiters.get(index) ?? [];
-			waiters.push({ resolve, reject });
+			const onAbort = () => {
+				waiters.splice(waiters.indexOf(waiter), 1);
+				if (waiters.length === 0) this.chunkWaiters.delete(index);
+				reject(signal?.reason);
+			};
+			const waiter = {
+				resolve: (buffer: Buffer | undefined) => {
+					signal?.removeEventListener("abort", onAbort);
+					resolve(buffer);
+				},
+				reject: (error: Error) => {
+					signal?.removeEventListener("abort", onAbort);
+					reject(error);
+				},
+			};
+			waiters.push(waiter);
 			this.chunkWaiters.set(index, waiters);
+			signal?.addEventListener("abort", onAbort, { once: true });
 		});
 	}
 

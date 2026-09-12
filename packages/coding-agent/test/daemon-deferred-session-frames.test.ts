@@ -307,6 +307,8 @@ describe("deferred session frames during snapshot streams", () => {
 		"closed",
 		"oversized-closed",
 		"replaced-closed",
+		"pending-closed",
+		"backpressured-closed",
 	];
 	it.each(supervisorScenarios)("supervisor: replay (%s)", async (scenario) => {
 		const overflow = scenario.startsWith("oversized") || scenario.endsWith("-limit");
@@ -329,7 +331,10 @@ describe("deferred session frames during snapshot streams", () => {
 		const socket = new PassThrough();
 		socket.on("error", () => {});
 		const written: string[] = [];
-		socket.on("data", (chunk: Buffer) => written.push(chunk.toString("utf8")));
+		socket.on("data", (chunk: Buffer) => {
+			written.push(chunk.toString("utf8"));
+			if (scenario === "backpressured-closed" && written.length === 1) socket.pause();
+		});
 		const client = socketClient(socket);
 		const internals = supervisor as unknown as {
 			clients: Set<DaemonSocketClient>;
@@ -348,11 +353,17 @@ describe("deferred session frames during snapshot streams", () => {
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
 
-		const messages: AgentMessage[] = [{ role: "user", content: "stable", timestamp: 1 }];
+		const messages: AgentMessage[] = [
+			{
+				role: "user",
+				content: scenario === "backpressured-closed" ? "x".repeat(128 * 1024) : "stable",
+				timestamp: 1,
+			},
+		];
 		const transcript = new SnapshotTranscriptCache({
 			activeSessionId,
 			snapshotId,
-			messages,
+			messages: scenario === "pending-closed" ? undefined : messages,
 			cacheRoot: tmpdir(),
 		});
 		let releaseChunk: () => void = () => {};
@@ -360,12 +371,12 @@ describe("deferred session frames during snapshot streams", () => {
 			releaseChunk = resolve;
 		});
 		const waitForChunk = transcript.waitForChunk.bind(transcript);
-		transcript.waitForChunk = async (index: number) => {
+		transcript.waitForChunk = async (index: number, signal?: AbortSignal) => {
 			if (index === 1) {
 				await chunkGate;
 				if (scenario.startsWith("failed")) throw new Error("snapshot failed");
 			}
-			return waitForChunk(index);
+			return waitForChunk(index, signal);
 		};
 
 		const stream = internals.streamSnapshot(client, worker, streamedResult(), transcript, "attach");
@@ -430,6 +441,10 @@ describe("deferred session frames during snapshot streams", () => {
 		if (scenario.endsWith("detached")) client.attachedActiveSessionIds.delete(activeSessionId);
 		releaseChunk();
 		const error = await completion;
+		if (scenario === "backpressured-closed") {
+			socket.resume();
+			await nextMacroTaskTurn();
+		}
 		if (closed && overflow) internals.handleWorkerFrame(worker, closeFrame);
 		if (scenario.startsWith("failed")) expect(error).toBeInstanceOf(Error);
 		else expect(error).toBeUndefined();
@@ -438,13 +453,16 @@ describe("deferred session frames during snapshot streams", () => {
 		const parsed = lines.map((line) => JSON.parse(line) as { type: string });
 		expect(parsed.map((entry) => entry.type)).toEqual([
 			"session_snapshot_begin",
-			"session_snapshot_chunk",
+			...(scenario === "pending-closed" ? [] : ["session_snapshot_chunk"]),
 			...(closed && !overflow ? ["session_closed"] : []),
-			scenario.startsWith("failed") ? "session_snapshot_failed" : "session_snapshot_end",
+			...(closed && !overflow
+				? []
+				: [scenario.startsWith("failed") ? "session_snapshot_failed" : "session_snapshot_end"]),
 			...(closed && overflow ? ["session_closed"] : []),
 			...(scenario === "attached" ? ["session_event", "session_event"] : []),
 		]);
 		expect(client.deferredSessionPayloads?.size ?? 0).toBe(0);
+		expect(client.snapshotTransferAbortControllers?.size ?? 0).toBe(0);
 		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(
 			!closed && (scenario === "replaced" || scenario === "failed" || overflow) ? 1 : 0,
 		);

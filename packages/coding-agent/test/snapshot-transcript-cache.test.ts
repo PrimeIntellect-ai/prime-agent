@@ -80,6 +80,27 @@ describe("snapshot transcript cache", () => {
 		cache.dispose();
 	});
 
+	it("cancels a pending reader without failing the shared transcript", async () => {
+		const cache = new SnapshotTranscriptCache({
+			activeSessionId: "active-abort",
+			snapshotId: "snapshot-abort",
+			cacheRoot: tempDir(),
+		});
+		const controller = new AbortController();
+		const cancelled = cache.waitForChunk(0, controller.signal);
+		const live = cache.waitForChunk(0);
+		const reason = new Error("session closed");
+		controller.abort(reason);
+		await expect(cancelled).rejects.toBe(reason);
+		const chunk = Buffer.from("chunk");
+		cache.appendEncodedChunk(chunk);
+		await expect(live).resolves.toEqual(chunk);
+		await expect(cache.waitForChunk(0, controller.signal)).rejects.toBe(reason);
+		cache.markComplete();
+		expect(cache.complete).toBe(true);
+		cache.dispose();
+	});
+
 	it("defers disposal until active snapshot readers finish", () => {
 		const cache = new SnapshotTranscriptCache({
 			activeSessionId: "active-d",
