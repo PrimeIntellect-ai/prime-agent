@@ -735,7 +735,10 @@ export class SettingsManager {
 	}
 
 	getAuxiliaryModel(): string | undefined {
-		return this.settings.auxiliaryModel;
+		// Hand-edited or corrupt settings files can persist non-string values; treat
+		// anything malformed as unset so refinement falls back to the session model.
+		const value = this.settings.auxiliaryModel;
+		return typeof value === "string" ? value : undefined;
 	}
 
 	setAuxiliaryModel(selector: string | undefined): void {

@@ -97,9 +97,11 @@ describe("AgentSession refinement auxiliary model", () => {
 				provider: "faux",
 				id: "session-model",
 			});
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining('auxiliaryModel "faux/missing-model" unusable for refinement'),
-			);
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			const [message] = warnSpy.mock.calls[0];
+			expect(message).toContain('auxiliaryModel "faux/missing-model" unusable for refinement');
+			// Caught error details can embed credential material, so they must not be logged.
+			expect(message).not.toContain("unavailable, unauthenticated, or expired");
 		} finally {
 			warnSpy.mockRestore();
 		}

@@ -8447,11 +8447,10 @@ export class AgentSession {
 			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(model);
 			return { model: requestModel, apiKey, headers };
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			console.warn(
-				`Warning: auxiliaryModel "${selector}" unusable for refinement (${reason}); using the session model.`,
-			);
+		} catch {
+			// Error details from the auth stack can embed credential material, so only
+			// the selector is logged (CodeQL js/clear-text-logging).
+			console.warn(`Warning: auxiliaryModel "${selector}" unusable for refinement; using the session model.`);
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
 			return { model: requestModel, apiKey, headers };
 		}
