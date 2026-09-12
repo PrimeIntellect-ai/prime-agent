@@ -215,8 +215,8 @@ describe("ProviderAuthFlows", () => {
 		});
 
 		expect(flows.getLoginProviderOptions().filter((provider) => provider.id === "xai")).toEqual([
-			{ id: "xai", name: "xAI", authType: "oauth" },
-			{ id: "xai", name: "xAI", authType: "api_key" },
+			{ id: "xai", name: "xAI (Grok)", authType: "oauth" },
+			{ id: "xai", name: "xAI (Grok)", authType: "api_key" },
 		]);
 	});
 

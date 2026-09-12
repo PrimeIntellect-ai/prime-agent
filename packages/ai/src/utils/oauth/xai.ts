@@ -183,20 +183,44 @@ export async function refreshXaiToken(refreshToken: string, signal?: AbortSignal
 }
 
 export function getXaiSubscriptionModel(model: Model<Api>): Model<"openai-responses"> | undefined {
-	if (model.provider !== "xai" || model.id !== "grok-4.5") return undefined;
+	if (model.provider !== "xai") return undefined;
+	let thinkingLevelMap = model.thinkingLevelMap;
+	if (!thinkingLevelMap) {
+		switch (model.id) {
+			case "grok-4.3":
+				thinkingLevelMap = { off: "none", minimal: null };
+				break;
+			case "grok-4.5":
+				thinkingLevelMap = { off: null, minimal: null };
+				break;
+			case "grok-4.6":
+				thinkingLevelMap = { off: null, minimal: null, xhigh: "xhigh" };
+				break;
+			default:
+				// Keep reasoning output without sending unverified effort controls.
+				thinkingLevelMap = {
+					off: null,
+					minimal: null,
+					low: null,
+					medium: null,
+					high: null,
+					xhigh: null,
+					max: null,
+				};
+		}
+	}
 	return {
 		...model,
 		api: "openai-responses",
 		baseUrl: "https://api.x.ai/v1",
-		reasoning: true,
-		thinkingLevelMap: { off: null, minimal: null },
+		thinkingLevelMap,
 		compat: { supportsLongCacheRetention: false },
 	};
 }
 
 export const xaiOAuthProvider: OAuthProviderInterface = {
 	id: "xai",
-	name: "xAI",
+	name: "xAI (Grok)",
 	login: loginXai,
 	refreshToken: (credentials) => refreshXaiToken(credentials.refresh),
 	getApiKey: (credentials) => credentials.access,

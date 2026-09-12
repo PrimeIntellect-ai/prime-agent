@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
+import { getModel, getSupportedThinkingLevels } from "../src/models.js";
 import { streamSimpleOpenAIResponses } from "../src/providers/openai-responses.js";
 import type { Context } from "../src/types.js";
 import { getXaiSubscriptionModel } from "../src/utils/oauth/xai.js";
@@ -76,6 +76,49 @@ describe("xAI subscription Responses", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
+	});
+
+	it("preserves model capabilities and sends only verified reasoning efforts", async () => {
+		let body: Record<string, unknown> = {};
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+				body = JSON.parse(await new Request(input, init).text());
+				return sse(textEvents());
+			}),
+		);
+		for (const [id, requested, effort] of [
+			["grok-4.3", undefined, "none"],
+			["grok-4.3", "low", "low"],
+			["grok-4.5", "xhigh", "high"],
+			["grok-4.6", "xhigh", "xhigh"],
+			["grok-4.20-0309-reasoning", "high", undefined],
+			["grok-4.20-0309-non-reasoning", "high", undefined],
+			["grok-build-0.1", "high", undefined],
+		] as const) {
+			const source = getModel("xai", id);
+			const adapted = getXaiSubscriptionModel(source)!;
+			expect(adapted).toMatchObject({ ...source, api: "openai-responses" });
+			const result = await streamSimpleOpenAIResponses(
+				adapted,
+				{
+					messages: [{ role: "user", content: "hello", timestamp: 1 }],
+				},
+				{ apiKey: "test-subscription-token", reasoning: requested },
+			).result();
+			expect(result.stopReason, result.errorMessage).toBe("stop");
+			expect(body.model).toBe(id);
+			if (effort) expect(body.reasoning).toMatchObject({ effort });
+			else expect(body).not.toHaveProperty("reasoning");
+			expect(body.include).toEqual(source.reasoning ? ["reasoning.encrypted_content"] : undefined);
+		}
+		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(getModel("xai", "grok-4.6"))!)).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
+		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(getModel("xai", "grok-build-0.1"))!)).toEqual([]);
 	});
 
 	it("streams interleaved thinking/tool calls and replays a complete second turn", async () => {

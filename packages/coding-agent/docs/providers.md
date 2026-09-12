@@ -42,7 +42,9 @@ Use `/login` and select the xAI subscription entry to open browser sign-in. Comp
 
 Both methods use provider ID `xai` and `https://api.x.ai/v1`. Subscription requests use `/responses`; API-key requests keep the existing `/chat/completions` route and model defaults. Changing authentication updates the current session without requiring model reselection.
 
-Choose a model with `/model` after initial setup. Grok 4.5 is already in the bundled catalog; subscription login does not guarantee access to every listed model. Access depends on your account entitlement. If a model is unavailable or authorization fails, check your plan or use an API key.
+Choose any bundled xAI tool-capable language model with `/model` after initial setup. The same catalog is shown for subscription and API-key login. Subscription requests preserve each model’s reasoning and input capabilities; reasoning-effort controls are limited to verified options. Access and usage limits depend on your account entitlement; listing a model does not guarantee a successful request. If a model is unavailable or authorization fails, check your plan or use an API key.
+
+`grok-code-fast-1` remains a legacy alias for `grok-build-0.1`, not a separate model. Image/video generators and the multi-agent model are not included because they do not support the agent’s custom function tools.
 
 `/logout` removes saved xAI authentication, but does not unset `XAI_API_KEY`; an environment key can remain active after logout.
 

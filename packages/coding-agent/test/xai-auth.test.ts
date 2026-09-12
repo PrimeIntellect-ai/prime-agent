@@ -1,4 +1,4 @@
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel, getModels } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage, type OAuthCredential } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -68,19 +68,43 @@ describe("xAI credential source and request model", () => {
 		});
 	});
 
-	test("rejects unsupported subscription models with API-key login guidance", async () => {
-		storage.set("xai", oauth());
-		expect(
-			registry
-				.getAvailable()
-				.filter((model) => model.provider === "xai")
-				.map((model) => model.id),
-		).toEqual(["grok-4.5"]);
-		await expect(registry.canUseModel(getModel("xai", "grok-4.6"))).resolves.toBe(false);
-		expect(await registry.getApiKeyAndHeaders(getModel("xai", "grok-4.6"))).toMatchObject({
-			ok: false,
-			error: expect.stringContaining("/login and select"),
-		});
+	test("keeps all configured xAI tool models selectable for subscription and API-key auth", async () => {
+		const models = getModels("xai");
+		const customModel = {
+			...getModel("xai", "grok-4.6"),
+			id: "custom-grok",
+			baseUrl: "https://example.invalid/custom",
+			input: ["text"] as ["text"],
+			contextWindow: 1234,
+			maxTokens: 512,
+			thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high" },
+		};
+		const ids = models.map((model) => model.id);
+		for (const credential of [oauth(), { type: "api_key" as const, key: "api-key" }]) {
+			storage.set("xai", credential);
+			expect(
+				registry
+					.getAvailable()
+					.filter((model) => model.provider === "xai")
+					.map((model) => model.id),
+			).toEqual(ids);
+			expect(
+				(await registry.refreshModelCatalog()).models
+					.filter((model) => model.provider === "xai")
+					.map((model) => model.id),
+			).toEqual(ids);
+			for (const model of [...models, customModel]) {
+				await expect(registry.canUseModel(model)).resolves.toBe(true);
+				expect(await registry.getApiKeyAndHeaders(model)).toMatchObject({
+					ok: true,
+					requestModel: {
+						...model,
+						api: credential.type === "oauth" ? "openai-responses" : model.api,
+						baseUrl: credential.type === "oauth" ? "https://api.x.ai/v1" : model.baseUrl,
+					},
+				});
+			}
+		}
 	});
 
 	test("uses the credential type returned with the key even if storage changes before dispatch", async () => {

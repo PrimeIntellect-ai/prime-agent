@@ -830,7 +830,6 @@ export class ModelRegistry {
 	 */
 	getAvailable(): Model<Api>[] {
 		return this.getAll().filter((model) => {
-			if (this.isUsingXaiSubscription(model) && !getXaiSubscriptionModel(model)) return false;
 			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
 				return false;
 			}
@@ -1093,8 +1092,7 @@ export class ModelRegistry {
 		return {
 			models: this.getAll().filter(
 				(model) =>
-					(!this.isUsingXaiSubscription(model) || getXaiSubscriptionModel(model) !== undefined) &&
-					(!isPrivatePrimeInferenceModel(model) || availablePrivateModels.has(`${model.provider}/${model.id}`)),
+					!isPrivatePrimeInferenceModel(model) || availablePrivateModels.has(`${model.provider}/${model.id}`),
 			),
 			configuredProviders: [...new Set(availableModels.map((model) => model.provider))],
 		};
@@ -1102,9 +1100,6 @@ export class ModelRegistry {
 
 	/** `assumeAuthConfigured` validates an explicit stale-provider selection BEFORE the clear commits. */
 	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
-		if (this.isUsingXaiSubscription(model) && !getXaiSubscriptionModel(model)) {
-			return false;
-		}
 		if (options?.assumeAuthConfigured) {
 			// Must be side-effect-free: a keyless refresh would drop the cached entitlements it needs.
 			return !isPrivatePrimeInferenceModel(model) || this.isAuthorizedPrivatePrimeInferenceModel(model);
@@ -1504,7 +1499,7 @@ export class ModelRegistry {
 				if (!requestModel) {
 					return {
 						ok: false,
-						error: `Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login and select the xAI API-key entry.`,
+						error: `Cannot configure "${model.id}" for Grok subscription requests. Select an xAI model or use /login and select the xAI API-key entry.`,
 					};
 				}
 			}
