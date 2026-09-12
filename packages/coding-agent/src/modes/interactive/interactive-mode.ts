@@ -14,7 +14,7 @@ import {
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 import { BUILTIN_MCP_CATALOG, createMcpOAuthProvider } from "@earendil-works/pi-ai/mcp";
-import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -8854,8 +8854,12 @@ export class InteractiveMode {
 		views: McpPluginView[];
 		diagnostics: string[];
 	} {
-		const resolution = resolveServiceCatalogWithDiagnostics(this.settingsManager.getMcpCatalogSources());
+		// Fresh records first: the resolver pins vanished-source services from them.
 		this.getMcpConnectionStore().load();
+		const resolution = resolveServiceCatalogWithDiagnostics(
+			this.settingsManager.getMcpCatalogSources(),
+			this.getMcpConnectionStore().records(),
+		);
 		const views = buildPluginViews({
 			services: resolution.descriptors,
 			userServers: this.settingsManager.getGlobalMcpServers(),
@@ -8931,11 +8935,18 @@ export class InteractiveMode {
 				(service) => {
 					void (async () => {
 						close();
+						// Every configured id is off-limits for new account ids.
+						const knownIds = new Set<string>([
+							...services.map((entry) => entry.serviceId),
+							...Object.keys(userServers),
+						]);
 						if (service.connectionIds.length > 0) {
-							await this.showAccountPickerForService(service, targets.get(service.serviceId));
+							await this.showAccountPickerForService(service, targets.get(service.serviceId), {
+								knownIds,
+							});
 							return;
 						}
-						await this.connectServiceFromPicker(service, targets.get(service.serviceId));
+						await this.connectServiceFromPicker(service, targets.get(service.serviceId), { knownIds });
 					})();
 				},
 				() => close(),
@@ -8954,21 +8965,34 @@ export class InteractiveMode {
 	private async showAccountPickerForService(
 		service: McpPluginView,
 		target: { url?: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean } | undefined,
+		options: { knownIds: Set<string> },
 	): Promise<void> {
 		const store = this.getMcpConnectionStore();
 		const catalogServiceId = service.serviceId;
 		const accountCards: McpPluginView[] = [];
 		for (const connectionId of service.connectionIds) {
 			const record = store.get(connectionId);
-			if (!record) continue;
+			// An account whose record vanished (error state before any record
+			// write) still gets a manageable card synthesized from the parent view.
+			const status = record?.status ?? service.connectionStatus;
 			accountCards.push({
 				...service,
-				serviceId: record.connectionId,
-				label: `${service.label} · ${record.connectionId}`,
-				connectionIds: [record.connectionId],
-				connectionStatus: record.status,
-				connectable: record.status === "error",
-				...(record.toolCount !== undefined ? { toolCount: record.toolCount } : {}),
+				serviceId: connectionId,
+				label: `${service.label} · ${connectionId}`,
+				connectionIds: [connectionId],
+				connectionStatus: status,
+				connectable: status === "error",
+				...(record?.toolCount !== undefined ? { toolCount: record.toolCount } : {}),
+			});
+			// Explicit per-account remove action, state-independent.
+			accountCards.push({
+				...service,
+				serviceId: connectionId,
+				label: `Remove ${connectionId}`,
+				connectionIds: [connectionId],
+				connectionStatus: status,
+				connectable: false,
+				removeAction: true,
 			});
 		}
 		accountCards.push({
@@ -8998,6 +9022,7 @@ export class InteractiveMode {
 							await this.connectServiceFromPicker(card, target, {
 								catalogServiceId,
 								addAccount: true,
+								knownIds: options.knownIds,
 							});
 							return;
 						}
@@ -9028,7 +9053,11 @@ export class InteractiveMode {
 					name?: string;
 			  }
 			| undefined,
-		options: { catalogServiceId?: string; addAccount?: boolean } = {},
+		options: {
+			catalogServiceId?: string;
+			addAccount?: boolean;
+			knownIds?: ReadonlySet<string>;
+		} = {},
 	): Promise<void> {
 		if (target?.transport === "stdio" && target.name) {
 			const serverName = target.name;
@@ -9051,6 +9080,13 @@ export class InteractiveMode {
 			);
 			return;
 		}
+		// Explicit per-account remove: logout + record removal, then reload.
+		if (service.removeAction === true) {
+			this.modelRegistry.authStorage.logout(`mcp:${service.serviceId}`);
+			await this.removeMcpConnectionRecord(service.serviceId);
+			await this.reloadAfterMcpChange(`Removed account ${service.serviceId}.`);
+			return;
+		}
 		if (service.connectionStatus === "connected") {
 			if (target?.managedBySettings && !service.usesOAuth) {
 				this.showStatus(
@@ -9063,6 +9099,35 @@ export class InteractiveMode {
 			await this.reloadAfterMcpChange(`Disconnected ${service.label}.`);
 			return;
 		}
+		// Pending accounts retry verification explicitly — no login needed, the
+		// grant already exists; "retry from /plugins" must actually work.
+		if (service.connectionStatus === "pending" && target?.url) {
+			let retried: McpConnectionRecord | undefined;
+			try {
+				retried = await verifyMcpConnection({
+					authStorage: this.modelRegistry.authStorage,
+					connectionStore: this.getMcpConnectionStore(),
+					connectionId: service.serviceId,
+					serviceId: options.catalogServiceId ?? service.serviceId,
+					label: service.label,
+					endpoint: target.url,
+					usesOAuth: target.usesOAuth,
+					...(target.bearerTokenEnvVar ? { bearerTokenEnvVar: target.bearerTokenEnvVar } : {}),
+				});
+			} catch {
+				retried = undefined;
+			}
+			const retriedMessage =
+				retried?.status === "connected"
+					? `Connected ${service.label}${
+							retried.toolCount !== undefined ? ` (${retried.toolCount} tools verified)` : ""
+						}.`
+					: retried
+						? `Verification did not complete: ${formatMcpVerificationIssue(retried.lastError)}. The connection is saved; retry from /plugins.`
+						: "The verification result could not be saved. The connection is saved; retry from /plugins.";
+			await this.reloadAfterMcpChange(retriedMessage);
+			return;
+		}
 		if (!service.connectable || !target) {
 			this.showStatus(service.setupHint ?? `${service.label} cannot be connected automatically in this build.`);
 			return;
@@ -9072,14 +9137,43 @@ export class InteractiveMode {
 			this.showStatus(`${service.label} cannot be connected automatically in this build.`);
 			return;
 		}
-		// Adding an account allocates a NEW connection id (its own credential key
-		// and record) and registers its provider before the login dialog.
+		// Adding an account allocates a NEW connection id: a durable pending
+		// reservation under the store's file lock (atomic across processes,
+		// visible to every other client's allocations), never a configured
+		// user/catalog id, and cleaned up with ownership validation on cancel.
 		let connectionId = service.serviceId;
+		let reservationCreatedAt: number | undefined;
 		if (options.addAccount === true) {
 			const store = this.getMcpConnectionStore();
-			const taken = (id: string) =>
-				store.get(id) !== undefined || this.modelRegistry.authStorage.get(mcpCredentialKey(id)) !== undefined;
-			connectionId = nextMcpConnectionId(service.serviceId, taken);
+			const taken = (id: string): boolean =>
+				store.get(id) !== undefined ||
+				this.modelRegistry.authStorage.get(mcpCredentialKey(id)) !== undefined ||
+				(options.knownIds?.has(id) ?? false) ||
+				this.settingsManager.getGlobalMcpServers()?.[id] !== undefined;
+			const usedIds = new Set<string>();
+			for (let attempt = 0; attempt < 20; attempt++) {
+				const candidate = nextMcpConnectionId(service.serviceId, (id) => taken(id) || usedIds.has(id));
+				const now = Date.now();
+				const won = await store.reserveConnectionId({
+					connectionId: candidate,
+					serviceId: options.catalogServiceId ?? service.serviceId,
+					endpoint: targetUrl,
+					label: `${service.label} (${candidate})`,
+					status: "pending",
+					createdAt: now,
+					updatedAt: now,
+				});
+				if (won) {
+					connectionId = candidate;
+					reservationCreatedAt = now;
+					break;
+				}
+				usedIds.add(candidate);
+			}
+			if (reservationCreatedAt === undefined) {
+				this.showStatus(`Could not allocate a free account id for ${service.label}.`);
+				return;
+			}
 			registerOAuthProvider(
 				createMcpOAuthProvider({
 					server: connectionId,
@@ -9091,6 +9185,13 @@ export class InteractiveMode {
 		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
 		const result = await this.createAuthFlows().runMcpLogin(connectionId, loginLabel);
 		if (result.status !== "success") {
+			// Cancelled or failed login: release OUR reservation only. The
+			// ownership check (id + pending + createdAt) means a late callback can
+			// never remove or resurrect another client's account.
+			if (options.addAccount === true && reservationCreatedAt !== undefined) {
+				await this.getMcpConnectionStore().removeReservation(connectionId, reservationCreatedAt);
+				unregisterOAuthProvider(`mcp:${connectionId}`);
+			}
 			return;
 		}
 		// A stored token is not "Connected": verify with a real MCP handshake. The
@@ -9120,7 +9221,7 @@ export class InteractiveMode {
 					? `${accountPrefix}Login succeeded for ${loginLabel}, but connection verification did not complete: ${formatMcpVerificationIssue(
 							verification.lastError,
 						)}. The connection is saved; retry from /plugins.`
-					: `${accountPrefix}Connected ${loginLabel}. (Verification result could not be saved.)`;
+					: `${accountPrefix}Login succeeded for ${loginLabel}, but the verification result could not be saved. The connection is saved; retry from /plugins.`;
 		await this.reloadAfterMcpChange(message);
 	}
 

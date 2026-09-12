@@ -302,3 +302,68 @@ describe("McpConnectionStore multi-process first create", () => {
 		}
 	}, 30_000);
 });
+
+describe("ENG-6108 durable account reservations", () => {
+	const record = (connectionId: string, createdAt: number) => ({
+		connectionId,
+		serviceId: "acme",
+		endpoint: "https://mcp.acme.test/mcp",
+		label: `Acme (${connectionId})`,
+		status: "pending" as const,
+		createdAt,
+		updatedAt: createdAt,
+	});
+
+	it("two clients reserving the same id concurrently: exactly one wins, the loser sees the durable marker", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "reserve-race-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const clientA = McpConnectionStore.open(path);
+		const clientB = McpConnectionStore.open(path);
+		const at = Date.now();
+		// Barrier: both clients enqueue the reservation before either flush lands.
+		const [a, b] = await Promise.all([
+			clientA.reserveConnectionId(record("acme-2", at)),
+			clientB.reserveConnectionId(record("acme-2", at)),
+		]);
+		// Exactly one winner; the durable pending marker blocks the loser.
+		expect(a || b).toBe(true);
+		expect(a && b).toBe(false);
+		// The reservation is durable: a fresh reader sees the pending marker.
+		const third = McpConnectionStore.open(path);
+		expect(third.get("acme-2")?.status).toBe("pending");
+		// The loser re-reads and allocates the NEXT id atomically.
+		const loser = a ? clientB : clientA;
+		loser.load();
+		const next = await loser.reserveConnectionId(record("acme-3", at + 1));
+		expect(next).toBe(true);
+		expect(loser.get("acme-3")?.status).toBe("pending");
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("removeReservation is ownership-validated: only OUR pending marker disappears", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "reserve-cancel-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		expect(await client.reserveConnectionId(record("acme-2", at))).toBe(true);
+
+		// A different owner (wrong createdAt) cannot remove it.
+		expect(await client.removeReservation("acme-2", at + 999)).toBe(false);
+		expect(client.get("acme-2")).toBeDefined();
+
+		// A completed account is not a reservation anymore.
+		client.upsert({
+			...record("acme-2", at),
+			status: "connected",
+		});
+		await client.flush();
+		expect(await client.removeReservation("acme-2", at)).toBe(false);
+		expect(client.get("acme-2")?.status).toBe("connected");
+
+		// The true owner cancels a still-pending reservation.
+		expect(await client.reserveConnectionId(record("acme-4", at))).toBe(true);
+		expect(await client.removeReservation("acme-4", at)).toBe(true);
+		expect(client.get("acme-4")).toBeUndefined();
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+});

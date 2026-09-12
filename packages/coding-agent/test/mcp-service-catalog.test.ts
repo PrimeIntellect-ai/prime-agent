@@ -179,7 +179,8 @@ describe("service catalog views", () => {
 			connectionStore: store,
 		});
 		expect(views[0]?.connectionStatus).toBe("error");
-		expect(views[0]?.connectionIds).toEqual([]);
+		// Error accounts stay listed so the account picker can manage them.
+		expect(views[0]?.connectionIds).toEqual(["acme"]);
 	});
 
 	it("surfaces requires-setup services honestly without a connect action", () => {
@@ -504,6 +505,185 @@ describe("nextMcpConnectionId", () => {
 		taken.add("acme");
 		taken.add("acme-3");
 		expect(nextMcpConnectionId("acme", (id) => taken.has(id))).toBe("acme-4");
+	});
+});
+
+describe("ENG-6108 wave-4 resolver and account aggregation", () => {
+	function accountRecord(connectionId: string, status: "connected" | "pending" | "error", at: number) {
+		return {
+			connectionId,
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status,
+			createdAt: at,
+			updatedAt: at,
+		};
+	}
+
+	it("a failing local source never blocks the rest: built-ins and other sources survive with a visible diagnostic", () => {
+		const resolution = resolveMcpServiceCatalog({
+			localSources: ["/bad.json", "/good.json"],
+			loadLocal: (filePath: string) => {
+				if (filePath === "/bad.json") {
+					throw new Error("Unexpected token in JSON");
+				}
+				return {
+					entries: [
+						{
+							server: "goodlocal",
+							service: "goodlocal",
+							label: "Good Local",
+							url: "https://good.test/mcp",
+							aliases: [],
+							transport: { type: "http", url: "https://good.test/mcp" },
+							auth: { strategy: "oauth", clientRegistration: "dynamic" },
+							setup: { status: "ready" },
+							verification: { status: "unverified" },
+							legacyBuiltin: false,
+							provenance: [],
+						} as McpServiceEntry,
+					],
+					path: filePath,
+				};
+			},
+		});
+		expect(resolution.descriptors.some((service) => service.serviceId === "linear")).toBe(true);
+		expect(resolution.descriptors.some((service) => service.serviceId === "goodlocal")).toBe(true);
+		expect(resolution.diagnostics.some((line) => line.includes("/bad.json") && line.includes("failed to load"))).toBe(
+			true,
+		);
+	});
+
+	it("an installed connection whose source vanished keeps a pinned descriptor at the record's endpoint", () => {
+		const at = Date.now();
+		const resolution = resolveMcpServiceCatalog({
+			localSources: [],
+			records: [
+				{
+					connectionId: "vanishsvc",
+					serviceId: "vanishsvc",
+					endpoint: "https://mcp.acme.test/mcp",
+					label: "Vanished",
+					status: "connected",
+					createdAt: at,
+					updatedAt: at,
+				},
+			],
+		});
+		const pinned = resolution.descriptors.find((service) => service.serviceId === "vanishsvc");
+		expect(pinned).toMatchObject({
+			pinnedFromRecord: true,
+			localSource: true,
+			transport: { type: "http", url: "https://mcp.acme.test/mcp" },
+		});
+		// The pinned endpoint keeps the credential usable (binding preserved).
+		const authStorage = AuthStorage.inMemory();
+		authStorage.set(mcpCredentialKey("vanishsvc"), {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const store = McpConnectionStore.open(join(tmpdir(), `svc-pin-${at}/mcp-connections.json`));
+		store.upsert({
+			connectionId: "vanishsvc",
+			serviceId: "vanishsvc",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Vanished",
+			status: "connected",
+			createdAt: at,
+			updatedAt: at,
+		});
+		const views = buildPluginViews({
+			services: [pinned ?? { ...serviceFixture(), serviceId: "vanishsvc" }],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("connected");
+		expect(views[0]?.connectionIds).toEqual(["vanishsvc"]);
+		expect(views[0]?.setupHint).toContain("catalog source is unavailable");
+	});
+
+	it("aggregates accounts: primary connected + alias pending stays connected and lists BOTH account ids", () => {
+		const authStorage = AuthStorage.inMemory();
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "primary",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		authStorage.set(mcpCredentialKey("acme-2"), {
+			type: "oauth",
+			access: "second",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const store = McpConnectionStore.open(join(tmpdir(), "svc-agg/mcp-connections.json"));
+		const at = Date.now();
+		store.upsert({ ...accountRecord("acme", "connected", at), verifiedAt: at, toolCount: 4 });
+		store.upsert(accountRecord("acme-2", "pending", at));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("connected");
+		expect(views[0]?.connectionIds).toEqual(["acme", "acme-2"]);
+	});
+
+	it("after the default account disconnects, the remaining alias stays visible and manageable", () => {
+		const authStorage = AuthStorage.inMemory();
+		authStorage.set(mcpCredentialKey("acme-2"), {
+			type: "oauth",
+			access: "second",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const store = McpConnectionStore.open(join(tmpdir(), "svc-alias-left/mcp-connections.json"));
+		const at = Date.now();
+		store.remove("acme");
+		store.upsert(accountRecord("acme-2", "pending", at));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		// The service card survives via the alias account, never vanishing.
+		expect(views).toHaveLength(1);
+		expect(views[0]?.connectionIds).toEqual(["acme-2"]);
+		// The alias is searchable by its account id.
+		expect(searchPluginViews(views, "acme-2", 10)).toHaveLength(1);
+		// The connection inventory lists the alias with its own status.
+		const connections = buildConnectionViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(connections.map((connection) => connection.connectionId)).toEqual(["acme-2"]);
+	});
+
+	it("an alias whose credential went missing is listed as reconnect-required, not silently dropped", () => {
+		const store = McpConnectionStore.open(join(tmpdir(), "svc-alias-stale/mcp-connections.json"));
+		const at = Date.now();
+		store.upsert(accountRecord("acme-2", "connected", at));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage: AuthStorage.inMemory(),
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionIds).toContain("acme-2");
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toBe("credential-unbound");
 	});
 });
 

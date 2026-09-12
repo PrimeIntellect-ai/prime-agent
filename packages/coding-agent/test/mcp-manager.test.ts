@@ -547,6 +547,71 @@ describe("McpManager service catalog handlers", () => {
 		expect(probeCalls).toEqual([{ url: "https://mcp.acme.test/mcp", token: "acct-2" }]);
 	});
 
+	it("full account lifecycle: second account listed and remains manageable after the default disconnects", async () => {
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "primary",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		authStorage.set("mcp:acme-2", {
+			type: "oauth",
+			access: "second",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: at,
+			toolCount: 2,
+			createdAt: at,
+			updatedAt: at,
+		});
+		store.upsert({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "pending",
+			createdAt: at,
+			updatedAt: at,
+		});
+		await store.flush();
+		const manager = createManager({ getServiceCatalog: () => [CATALOG_SERVICE] });
+		const handlers = manager.hostHandlers();
+
+		// Reload: both accounts are listed by the inventory.
+		manager.refresh();
+		const connections = (await handlers["mcp.list_connections"]({})) as {
+			connections: Array<{ connectionId: string; status: string }>;
+		};
+		const ids = connections.connections.map((connection) => connection.connectionId).sort();
+		expect(ids).toEqual(["acme", "acme-2"]);
+
+		// The default account disconnects: logout + record removal + reload.
+		authStorage.remove("mcp:acme");
+		store.remove("acme");
+		await store.flush();
+		manager.refresh();
+
+		// The second account is STILL listed, dispatchable, and verifiable.
+		const after = (await handlers["mcp.list_connections"]({})) as {
+			connections: Array<{ connectionId: string; status: string }>;
+		};
+		expect(after.connections.map((connection) => connection.connectionId)).toEqual(["acme-2"]);
+		expect(manager.getEnabledPersistentGenericServers()).toContain("acme-2");
+		const verified = await manager.verifyConnection("acme-2");
+		expect(verified.status).toBe("connected");
+		expect(verified.serviceId).toBe("acme");
+	});
+
 	it("drops an alias account's provider when its record is removed", async () => {
 		store.upsert({
 			connectionId: "acme-2",

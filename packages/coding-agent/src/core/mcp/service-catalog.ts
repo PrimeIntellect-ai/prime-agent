@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { McpServiceEntry } from "@earendil-works/pi-ai/mcp";
+import type { LocalCatalogLoadResult, McpServiceEntry } from "@earendil-works/pi-ai/mcp";
 import { loadLocalServiceCatalog, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
@@ -31,6 +31,8 @@ export interface McpPluginView {
 	source: "catalog" | "user";
 	/** Kernel dispatch ids (`mcp.list_tools("<id>")`); empty unless credentials make dispatch possible. */
 	connectionIds: string[];
+	/** View-only marker: this row removes the account instead of connecting. */
+	removeAction?: boolean;
 	description?: string;
 	category?: string;
 	publisher?: string;
@@ -77,6 +79,8 @@ export interface McpServiceDescriptor {
 	legacyBuiltin: boolean;
 	/** True when the entry came from a user-declared local catalog file (trusted by construction). */
 	localSource?: boolean;
+	/** True when the service's source vanished; the descriptor is pinned to the installed record's endpoint. */
+	pinnedFromRecord?: boolean;
 }
 
 export type McpServiceCatalogProvider = () => readonly McpServiceDescriptor[];
@@ -146,6 +150,13 @@ function expandSourcePath(rawPath: string): string {
 export function resolveMcpServiceCatalog(options: {
 	localSources?: readonly string[];
 	loadLocal?: typeof loadLocalServiceCatalog;
+	/**
+	 * Existing connection records. A record whose service came from an optional
+	 * local source that no longer loads keeps a durable PINNED descriptor built
+	 * from the record's endpoint, so installed credentials are never retargeted
+	 * and the connection stays manageable (verify/disconnect) by its own id.
+	 */
+	records?: readonly McpConnectionRecord[];
 }): McpCatalogResolution {
 	const loadLocal = options.loadLocal ?? loadLocalServiceCatalog;
 	const diagnostics: string[] = [];
@@ -162,7 +173,17 @@ export function resolveMcpServiceCatalog(options: {
 	}
 	for (const rawPath of options.localSources ?? []) {
 		const expanded = expandSourcePath(rawPath);
-		const loaded = loadLocal(expanded);
+		let loaded: LocalCatalogLoadResult;
+		try {
+			loaded = loadLocal(expanded);
+		} catch (error) {
+			// One unreadable/invalid source never blocks the rest: built-ins and
+			// every other source keep resolving; the problem is a visible,
+			// bounded diagnostic instead of a startup failure.
+			const reason = error instanceof Error ? error.message : "unknown error";
+			diagnostics.push(`MCP catalog source failed to load: ${rawPath}: ${reason.slice(0, 200)}`);
+			continue;
+		}
 		// The loader reports a missing file as path:""; a declared source that
 		// does not exist must be a visible diagnostic, never a silent skip.
 		if (!loaded.path) {
@@ -172,6 +193,23 @@ export function resolveMcpServiceCatalog(options: {
 		for (const entry of loaded.entries) {
 			addEntry(entry, true);
 		}
+	}
+	// Durable pins: records of services the catalog no longer defines.
+	for (const record of options.records ?? []) {
+		if (byId.has(record.serviceId)) continue;
+		byId.set(record.serviceId, {
+			serviceId: record.serviceId,
+			label: record.label,
+			aliases: [],
+			// Pinned to the endpoint the credential was verified against.
+			transport: { type: "http", url: record.endpoint },
+			authStrategy: "oauth",
+			setup: { status: "ready" },
+			metadataReviewed: false,
+			legacyBuiltin: false,
+			localSource: true,
+			pinnedFromRecord: true,
+		});
 	}
 	const descriptors = [...byId.values()];
 	if (descriptors.length > MAX_TOTAL_CATALOG_ENTRIES) {
@@ -189,17 +227,22 @@ export function resolveMcpServiceCatalog(options: {
  */
 export function defaultServiceCatalogProvider(
 	localSources?: readonly string[] | (() => readonly string[]),
+	records?: readonly McpConnectionRecord[] | (() => readonly McpConnectionRecord[]),
 ): McpServiceCatalogProvider {
 	const getSources = typeof localSources === "function" ? localSources : () => localSources ?? [];
-	return () => resolveMcpServiceCatalog({ localSources: getSources() }).descriptors;
+	const getRecords = typeof records === "function" ? records : () => records ?? [];
+	return () => resolveMcpServiceCatalog({ localSources: getSources(), records: getRecords() }).descriptors;
 }
 
 /**
  * Resolver result with diagnostics, for callers that surface wiring problems
  * (the /plugins UI banner and host logs).
  */
-export function resolveServiceCatalogWithDiagnostics(localSources?: readonly string[]): McpCatalogResolution {
-	return resolveMcpServiceCatalog({ localSources });
+export function resolveServiceCatalogWithDiagnostics(
+	localSources?: readonly string[],
+	records?: readonly McpConnectionRecord[],
+): McpCatalogResolution {
+	return resolveMcpServiceCatalog({ localSources, records });
 }
 
 export function mcpCredentialKey(connectionId: string): string {
@@ -379,43 +422,90 @@ function catalogServiceView(
 	if (service.transport.type !== "http" || !service.transport.url) {
 		return catalogServiceNotConnectedView(service);
 	}
-	const status = httpConnectionStatus({
+	const url = service.transport.url;
+	const usesOAuth = service.authStrategy === "oauth" || service.authStrategy === "unknown";
+	const primary = httpConnectionStatus({
 		connectionId: service.serviceId,
-		endpoint: service.transport.url,
+		endpoint: url,
 		authStorage,
 		connectionStore,
-		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+		usesOAuth,
 	});
-	if (status.status === "not_connected" && service.authStrategy === "none") {
+	if (primary.status === "not_connected" && service.authStrategy === "none") {
 		return catalogServiceNotConnectedView(service);
 	}
-	if (status.status === "not_connected" || status.status === "setup_required") {
+	// Per-account aggregation: every record of this service is one account, and
+	// the primary credential counts as the first account. Each account's status
+	// reflects its OWN bound credential; accounts without a usable bound grant
+	// are Reconnect-required, never silently dropped.
+	type AccountState = { connectionId: string; status: string; record?: McpConnectionRecord };
+	const accounts: AccountState[] = [];
+	if (primary.status !== "not_connected" && primary.status !== "setup_required") {
+		accounts.push({
+			connectionId: service.serviceId,
+			status: primary.status,
+			...(primary.record ? { record: primary.record } : {}),
+		});
+	}
+	for (const record of connectionStore.records()) {
+		if (record.serviceId !== service.serviceId || record.connectionId === service.serviceId) continue;
+		const credential = authStorage.get(mcpCredentialKey(record.connectionId));
+		const bound =
+			credential?.type === "oauth" && typeof credential.endpoint === "string" && credential.endpoint === url;
+		if (bound) {
+			accounts.push({ connectionId: record.connectionId, status: record.status, record });
+		} else {
+			accounts.push({
+				connectionId: record.connectionId,
+				status: "error",
+				record: { ...record, status: "error", lastError: MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL },
+			});
+		}
+	}
+	if (accounts.length === 0) {
 		const view = catalogServiceNotConnectedView(service);
 		// setup.required entries keep their reason; a status-computed hint (binding
 		// or expiry problems) wins; otherwise the candidate/transport hints stay.
-		if (status.status === "not_connected" && service.setup.status === "ready" && status.setupHint !== undefined) {
-			view.setupHint = status.setupHint;
+		if (primary.status === "not_connected" && service.setup.status === "ready" && primary.setupHint !== undefined) {
+			view.setupHint = primary.setupHint;
+		}
+		if (service.pinnedFromRecord) {
+			view.setupHint = "This service's catalog source is unavailable; its connection keeps the pinned definition.";
 		}
 		return view;
 	}
+	const anyConnected = accounts.some((account) => account.status === "connected");
+	const anyPending = accounts.some((account) => account.status === "pending");
+	const aggregate = anyConnected ? "connected" : anyPending ? "pending" : "error";
+	const newestConnected = accounts
+		.filter((account) => account.status === "connected" && account.record !== undefined)
+		.sort((left, right) => (right.record?.verifiedAt ?? 0) - (left.record?.verifiedAt ?? 0))[0];
+	const errorHint =
+		aggregate === "error"
+			? (accounts.find((account) => account.record?.lastError)?.record?.lastError ?? primary.setupHint)
+			: primary.setupHint;
+	const setupHint = service.pinnedFromRecord
+		? "This service's catalog source is unavailable; its connection keeps the pinned definition."
+		: errorHint;
 	return {
 		serviceId: service.serviceId,
 		label: service.label,
-		connectionStatus: status.status,
-		// Error (rejected credential, unbound grant) keeps the Reconnect action;
-		// connected/pending rows manage the connection instead of re-logging in.
-		connectable: status.status === "error",
-		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+		connectionStatus: aggregate,
+		// Error rows keep the Reconnect action; connected/pending rows manage
+		// their accounts through the picker instead of re-logging in.
+		connectable: aggregate === "error",
+		usesOAuth,
 		source: "catalog",
-		connectionIds: status.status === "error" ? [] : [service.serviceId],
+		// Every account id, so the account picker can manage each one.
+		connectionIds: accounts.map((account) => account.connectionId),
 		...(service.description ? { description: service.description } : {}),
 		...(service.category ? { category: service.category } : {}),
 		...(service.publisher ? { publisher: service.publisher } : {}),
 		...(service.docsUrl ? { docsUrl: service.docsUrl } : {}),
-		...(status.setupHint ? { setupHint: status.setupHint } : {}),
+		...(setupHint ? { setupHint } : {}),
 		...(service.metadataReviewed ? {} : { unverified: true }),
-		...(status.record?.verifiedAt ? { verifiedAt: status.record.verifiedAt } : {}),
-		...(status.record?.toolCount !== undefined ? { toolCount: status.record.toolCount } : {}),
+		...(newestConnected?.record?.verifiedAt ? { verifiedAt: newestConnected.record.verifiedAt } : {}),
+		...(newestConnected?.record?.toolCount !== undefined ? { toolCount: newestConnected.record.toolCount } : {}),
 	};
 }
 
@@ -452,7 +542,9 @@ function userServerView(
 		serviceId: name,
 		label,
 		connectionStatus: config.enabled === false ? "disabled" : status.status,
-		connectable: config.enabled !== false && usesOAuth && status.status === "not_connected",
+		// not_connected connects; error (rejected credential, unbound grant) reconnects.
+		connectable:
+			config.enabled !== false && usesOAuth && (status.status === "not_connected" || status.status === "error"),
 		usesOAuth,
 		source: "user",
 		connectionIds:
@@ -507,17 +599,44 @@ export function buildConnectionViews(
 		if (reservedIds.has(service.serviceId) && userServers?.[service.serviceId] !== undefined) continue;
 		const plugin = catalogServiceView(service, authStorage, connectionStore);
 		if (plugin.connectionIds.length === 0) continue;
-		connected.add(service.serviceId);
-		views.push({
-			connectionId: service.serviceId,
-			serviceId: service.serviceId,
-			label: service.label,
-			status: plugin.connectionStatus === "setup_required" ? "not_connected" : plugin.connectionStatus,
-			usesOAuth: plugin.usesOAuth,
-			transport: "http",
-			source: "catalog",
-			...(plugin.setupHint ? { setupHint: plugin.setupHint } : {}),
-		});
+		// The primary row exists only when the primary id is an account (its
+		// credential or record exists); a disconnected default never emits a
+		// phantom inventory entry.
+		if (plugin.connectionIds.includes(service.serviceId)) {
+			const primaryRecord = connectionStore.get(service.serviceId);
+			connected.add(service.serviceId);
+			views.push({
+				connectionId: service.serviceId,
+				serviceId: service.serviceId,
+				label: service.label,
+				status: primaryRecord?.status ?? "pending",
+				usesOAuth: plugin.usesOAuth,
+				transport: "http",
+				source: "catalog",
+				...(primaryRecord?.lastError ? { setupHint: primaryRecord.lastError } : {}),
+			});
+		}
+		// Every additional account of the service is its own connection entry,
+		// with its own status — the inventory never hides alias accounts.
+		for (const record of connectionStore.records()) {
+			if (record.serviceId !== service.serviceId || record.connectionId === service.serviceId) continue;
+			const credential = authStorage.get(mcpCredentialKey(record.connectionId));
+			const bound =
+				credential?.type === "oauth" &&
+				typeof credential.endpoint === "string" &&
+				credential.endpoint === (service.transport.type === "http" ? service.transport.url : "");
+			connected.add(record.connectionId);
+			views.push({
+				connectionId: record.connectionId,
+				serviceId: record.serviceId,
+				label: `${service.label} (${record.connectionId})`,
+				status: bound ? record.status : "error",
+				usesOAuth: true,
+				transport: "http",
+				source: "catalog",
+				...(bound ? {} : { setupHint: MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL }),
+			});
+		}
 	}
 	for (const [name, config] of Object.entries(userServers ?? {})) {
 		if (reservedIds.has(name)) continue;
@@ -560,6 +679,9 @@ export function searchPluginViews(views: readonly McpPluginView[], query: string
 			[
 				view.serviceId,
 				view.label,
+				// Account ids are searchable too — the kernel's search_plugins
+				// documents aliases as part of the match surface.
+				...view.connectionIds,
 				...(view.description ? [view.description] : []),
 				view.category,
 				view.publisher,

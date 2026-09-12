@@ -203,6 +203,170 @@ describe("ENG-6108 /plugins stdio server management", () => {
 	});
 });
 
+describe("ENG-6108 /plugins account state actions", () => {
+	function fakeFor(options: {
+		authStorage?: AuthStorage;
+		store?: McpConnectionStore;
+		runMcpLogin?: ReturnType<typeof vi.fn>;
+	}) {
+		const store =
+			options.store ?? McpConnectionStore.open(join(tmpdir(), `actions-${Date.now()}/mcp-connections.json`));
+		const authStorage = options.authStorage ?? AuthStorage.inMemory();
+		const runMcpLogin = options.runMcpLogin ?? vi.fn(async () => ({ status: "success" }) as const);
+		const showStatus = vi.fn();
+		const fake = {
+			mcpConnectionStore: store,
+			modelRegistry: { authStorage },
+			createAuthFlows: () => ({ runMcpLogin }),
+			ui: { requestRender: vi.fn() },
+			showStatus,
+			showWarning: vi.fn(),
+			handleReloadCommand: vi.fn(async () => true),
+			uiServices: { settingsManager: { getGlobalMcpServers: () => undefined } },
+		} as unknown as Record<string, unknown>;
+		Object.setPrototypeOf(fake, InteractiveMode.prototype);
+		return { fake, store, authStorage, showStatus, runMcpLogin };
+	}
+
+	const callConnect = (fake: Record<string, unknown>, service: unknown, target: unknown, options: unknown = {}) =>
+		(
+			fake as unknown as {
+				connectServiceFromPicker: (this: unknown, ...args: unknown[]) => Promise<void>;
+			}
+		).connectServiceFromPicker.call(fake, service, target, options);
+
+	test("pending account retries verification without a new login", async () => {
+		const { fake, store, authStorage, runMcpLogin } = fakeFor({});
+		authStorage.set("mcp:acme-2", {
+			type: "oauth",
+			access: "second",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "pending",
+			createdAt: at,
+			updatedAt: at,
+		});
+		const retryStatus = vi.fn();
+		(fake as unknown as Record<string, unknown>).showStatus = retryStatus;
+		await callConnect(
+			fake,
+			{ serviceId: "acme-2", label: "Acme · acme-2", connectionStatus: "pending", connectionIds: ["acme-2"] },
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{ catalogServiceId: "acme" },
+		);
+		expect(runMcpLogin).not.toHaveBeenCalled();
+		// The retry runs the verify path: offline the probe fails honestly and
+		// the record keeps its pending/category state — no login, no /reload ask.
+		expect(JSON.stringify(retryStatus.mock.calls)).not.toContain("/reload");
+	});
+
+	test("remove action logs out and removes that account's record only", async () => {
+		const { fake, store, authStorage, showStatus: removedStatus } = fakeFor({});
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "connected",
+			verifiedAt: at,
+			toolCount: 1,
+			createdAt: at,
+			updatedAt: at,
+		});
+		const logout = vi.fn();
+		authStorage.logout = logout;
+		await callConnect(
+			fake,
+			{
+				serviceId: "acme-2",
+				label: "Remove acme-2",
+				connectionStatus: "connected",
+				connectionIds: ["acme-2"],
+				removeAction: true,
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{ catalogServiceId: "acme" },
+		);
+		expect(logout).toHaveBeenCalledWith("mcp:acme-2");
+		expect(store.get("acme-2")).toBeUndefined();
+		expect(JSON.stringify(removedStatus.mock.calls)).toContain("Removed account acme-2");
+	});
+
+	test("a login whose verification result cannot be saved reports pending, never Connected", async () => {
+		const { fake, showStatus } = fakeFor({});
+		const brokenStore = {
+			get: vi.fn(() => undefined),
+			records: vi.fn(() => []),
+			flush: vi.fn(async () => undefined),
+			upsert: vi.fn(),
+			remove: vi.fn(),
+			queueVerifyResult: vi.fn(() => {
+				throw new Error("boom");
+			}),
+		};
+		(fake as unknown as Record<string, unknown>).mcpConnectionStore = brokenStore;
+		await callConnect(
+			fake,
+			{
+				serviceId: "acme",
+				label: "Acme",
+				connectionStatus: "not_connected",
+				connectionIds: [],
+				connectable: true,
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+		);
+		const calls = JSON.stringify(showStatus.mock.calls);
+		expect(calls).toContain("Login succeeded for Acme");
+		expect(calls).toContain("could not be saved");
+		expect(calls).not.toContain("Connected Acme");
+	});
+
+	test("add-account never allocates an id configured as a user server", async () => {
+		const { fake, store, showStatus } = fakeFor({});
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: at,
+			toolCount: 1,
+			createdAt: at,
+			updatedAt: at,
+		});
+		(fake as unknown as Record<string, unknown>).uiServices = {
+			settingsManager: { getGlobalMcpServers: () => ({ "acme-2": { type: "http", url: "https://x.test/mcp" } }) },
+		};
+		await callConnect(
+			fake,
+			{
+				serviceId: "acme",
+				label: "Add another account",
+				connectionStatus: "not_connected",
+				connectionIds: [],
+				connectable: true,
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{ catalogServiceId: "acme", addAccount: true, knownIds: new Set(["acme"]) },
+		);
+		// Skipped the configured acme-2; the allocation landed on acme-3.
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("acme-3");
+		expect(store.get("acme-2")).toBeUndefined();
+		expect(store.get("acme-3")).toBeDefined();
+	});
+});
+
 describe("ENG-6108 /plugins add-account flow", () => {
 	test("adding an account allocates a new connection id, registers its provider, and records the catalog service id", async () => {
 		resetOAuthProviders();
@@ -230,6 +394,7 @@ describe("ENG-6108 /plugins add-account flow", () => {
 			showStatus,
 			showWarning: vi.fn(),
 			handleReloadCommand: vi.fn(async () => true),
+			uiServices: { settingsManager: { getGlobalMcpServers: () => undefined } },
 		} as unknown as Record<string, unknown>;
 		Object.setPrototypeOf(fake, InteractiveMode.prototype);
 

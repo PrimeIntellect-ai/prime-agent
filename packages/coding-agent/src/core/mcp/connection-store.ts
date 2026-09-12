@@ -47,6 +47,19 @@ type PendingOp =
 			record: McpConnectionRecord;
 			/** Evaluated at flush time under the lock; a failed guard discards the result. */
 			isStillCurrent: () => boolean;
+	  }
+	| {
+			kind: "reserve";
+			record: McpConnectionRecord;
+			/** Cross-process atomic allocation: true when this store won the id. */
+			resolve: (won: boolean) => void;
+	  }
+	| {
+			kind: "removeReservation";
+			connectionId: string;
+			/** Ownership marker: only OUR pending reservation is removed. */
+			createdAt: number;
+			resolve: (removed: boolean) => void;
 	  };
 
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -153,6 +166,44 @@ export class McpConnectionStore {
 	}
 
 	/**
+	 * Atomically reserve a NEW connection id across processes, under the store's
+	 * file lock, as a durable pending record written before any login starts.
+	 * Resolves false when the id already exists on disk (or the write failed);
+	 * callers then try the next candidate id. The pending marker makes the id
+	 * visible to every other process's allocations and to reconnect flows.
+	 */
+	reserveConnectionId(record: McpConnectionRecord): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const settle = (won: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(won);
+			};
+			this.pendingOps.push({ kind: "reserve", record: { ...record }, resolve: settle });
+			void this.flush().catch(() => settle(false));
+		});
+	}
+
+	/**
+	 * Remove OUR pending reservation after a cancelled or failed login. Ownership
+	 * is validated under the lock (same id, still pending, same createdAt), so a
+	 * late callback can never remove — or resurrect — another account's record.
+	 */
+	removeReservation(connectionId: string, createdAt: number): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const settle = (removed: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(removed);
+			};
+			this.pendingOps.push({ kind: "removeReservation", connectionId, createdAt, resolve: settle });
+			void this.flush().catch(() => settle(false));
+		});
+	}
+
+	/**
 	 * Queue a verification result behind a guard. The guard is re-evaluated at flush
 	 * time under the file lock, so a result computed against an old grant (or a
 	 * connection that has since been disconnected) is discarded instead of
@@ -211,6 +262,25 @@ export class McpConnectionStore {
 							records.delete(operation.connectionId);
 						} else if (operation.kind === "upsert") {
 							this.applyUpsert(records, operation.record);
+						} else if (operation.kind === "reserve") {
+							// Atomic under the file lock: exactly one cross-process
+							// contender wins the id; the loser allocates another.
+							if (records.has(operation.record.connectionId)) {
+								operation.resolve(false);
+							} else {
+								this.applyUpsert(records, operation.record);
+								operation.resolve(true);
+							}
+						} else if (operation.kind === "removeReservation") {
+							const existing = records.get(operation.connectionId);
+							if (existing?.status === "pending" && existing.createdAt === operation.createdAt) {
+								records.delete(operation.connectionId);
+								operation.resolve(true);
+							} else {
+								// Not ours (completed, replaced, or gone): a late
+								// callback never removes another account's record.
+								operation.resolve(false);
+							}
 						} else if (operation.isStillCurrent()) {
 							this.applyUpsert(records, operation.record);
 						}

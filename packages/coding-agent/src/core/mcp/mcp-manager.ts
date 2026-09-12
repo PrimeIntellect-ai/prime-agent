@@ -101,7 +101,11 @@ export class McpManager {
 		this.beginConnect = options.beginConnect;
 		this.getCatalogSources = options.getCatalogSources;
 		this.getServiceCatalog =
-			options.getServiceCatalog ?? defaultServiceCatalogProvider(() => this.getCatalogSources?.() ?? []);
+			options.getServiceCatalog ??
+			defaultServiceCatalogProvider(
+				() => this.getCatalogSources?.() ?? [],
+				() => this.connectionStore.records(),
+			);
 		this.connectionStore =
 			options.connectionStore ?? McpConnectionStore.open(join(getAgentDir(), "mcp-connections.json"));
 		this.probeConnection = options.probeConnection;
