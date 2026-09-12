@@ -74,7 +74,25 @@ type PendingOp =
 			 * so they share the store's lock ordering with cancel/remove.
 			 */
 			commit: (record: McpConnectionRecord) => McpConnectionRecord;
+			/**
+			 * Runs under the SAME lock when the record write fails after commit
+			 * ran, restoring caller-side effects (credential moves) so a failed
+			 * finalize leaves the account exactly as before — all-or-nothing.
+			 * Closures capture whatever they need to restore.
+			 */
+			compensate?: () => void;
 			resolve: (committed: boolean) => void;
+	  }
+	| {
+			kind: "removeAccount";
+			connectionId: string;
+			/**
+			 * Credential cleanup under the SAME file lock as the record removal —
+			 * disconnects share the store->auth ordering with finalizeAttempt, so
+			 * a concurrent finalize can never leave an orphan credential behind.
+			 */
+			authCleanup: (connectionId: string) => void;
+			resolve: (removed: boolean) => void;
 	  };
 
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -223,6 +241,31 @@ export class McpConnectionStore {
 	}
 
 	/**
+	 * Remove an account ENTIRELY under the store's file lock: the record is
+	 * deleted and `authCleanup` (credential logout) runs inside the SAME locked
+	 * critical section, so disconnects share the store->auth lock ordering with
+	 * finalizeAttempt — a concurrent finalize can never re-add an orphan
+	 * credential after a disconnect removed the account.
+	 */
+	removeAccount(options: { connectionId: string; authCleanup: (connectionId: string) => void }): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const settle = (removed: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(removed);
+			};
+			this.pendingOps.push({
+				kind: "removeAccount",
+				connectionId: options.connectionId,
+				authCleanup: options.authCleanup,
+				resolve: settle,
+			});
+			void this.flush().catch(() => settle(false));
+		});
+	}
+
+	/**
 	 * Guarded credential commit for a successful login attempt. `commit` runs
 	 * under the store's file lock ONLY when the reservation is still ours
 	 * (same id, still pending, same attempt nonce) — the caller moves staged
@@ -235,6 +278,8 @@ export class McpConnectionStore {
 		connectionId: string;
 		attemptId: string;
 		commit: (record: McpConnectionRecord) => McpConnectionRecord;
+		/** Rolls caller-side effects back under the lock when the write fails. */
+		compensate?: () => void;
 	}): Promise<boolean> {
 		return new Promise<boolean>((resolve) => {
 			let settled = false;
@@ -248,6 +293,7 @@ export class McpConnectionStore {
 				connectionId: options.connectionId,
 				attemptId: options.attemptId,
 				commit: options.commit,
+				...(options.compensate ? { compensate: options.compensate } : {}),
 				resolve: settle,
 			});
 			void this.flush().catch(() => settle(false));
@@ -307,15 +353,16 @@ export class McpConnectionStore {
 				// Splice only after acquiring the lock: operations queued while we
 				// waited belong to this flush, not the previous one.
 				const operations = this.pendingOps.splice(0);
-				// One-shot attempt operations (reserve/remove/finalize) resolve
-				// only AFTER the atomic write commits: a failed write means no
-				// durable reservation/removal/finalize happened, so the caller
-				// must NOT start a login on a ghost. Losing branches (id taken,
-				// not our reservation) resolve false immediately — nothing of
-				// theirs was applied. One-shot ops never requeue: retrying an
-				// interactive intent after a failed write would be a surprise.
+				// One-shot attempt operations (reserve/remove/finalize/removeAccount)
+				// resolve only AFTER the atomic write commits: a failed write means
+				// no durable reservation/removal/finalize happened, so the caller
+				// must NOT act on a ghost. Losing branches resolve false
+				// immediately. Every one-shot op settles EXACTLY once — a throwing
+				// callback, a failed write, or trailing ops in a failed batch can
+				// never leave a promise hanging or a one-shot requeued.
 				const deferred: Array<(committed: boolean) => void> = [];
 				const oneShot = new Set<PendingOp>();
+				const compensations: Array<() => void> = [];
 				try {
 					for (const operation of operations) {
 						if (operation.kind === "remove") {
@@ -324,43 +371,68 @@ export class McpConnectionStore {
 							this.applyUpsert(records, operation.record);
 						} else if (operation.kind === "reserve") {
 							oneShot.add(operation);
-							// Atomic under the file lock: exactly one cross-process
-							// contender wins the id; the loser allocates another.
-							if (records.has(operation.record.connectionId)) {
+							try {
+								// Atomic under the file lock: exactly one cross-process
+								// contender wins the id; the loser allocates another.
+								if (records.has(operation.record.connectionId)) {
+									operation.resolve(false);
+								} else {
+									this.applyUpsert(records, operation.record);
+									deferred.push((didCommit) => operation.resolve(didCommit));
+								}
+							} catch {
 								operation.resolve(false);
-							} else {
-								this.applyUpsert(records, operation.record);
-								deferred.push((didCommit) => didCommit && operation.resolve(true));
 							}
 						} else if (operation.kind === "removeReservation") {
 							oneShot.add(operation);
-							const existing = records.get(operation.connectionId);
-							if (
-								existing?.status === "pending" &&
-								existing.attemptId !== undefined &&
-								existing.attemptId === operation.attemptId
-							) {
-								records.delete(operation.connectionId);
-								deferred.push((didCommit) => didCommit && operation.resolve(true));
-							} else {
-								// Not ours (completed, replaced, or gone): a late
-								// callback never removes another account's record.
+							try {
+								const existing = records.get(operation.connectionId);
+								if (
+									existing?.status === "pending" &&
+									existing.attemptId !== undefined &&
+									existing.attemptId === operation.attemptId
+								) {
+									records.delete(operation.connectionId);
+									deferred.push((didCommit) => operation.resolve(didCommit));
+								} else {
+									// Not ours (completed, replaced, or gone): a late
+									// callback never removes another account's record.
+									operation.resolve(false);
+								}
+							} catch {
+								operation.resolve(false);
+							}
+						} else if (operation.kind === "removeAccount") {
+							oneShot.add(operation);
+							try {
+								if (records.delete(operation.connectionId)) {
+									operation.authCleanup(operation.connectionId);
+									deferred.push((didCommit) => operation.resolve(didCommit));
+								} else {
+									operation.resolve(false);
+								}
+							} catch {
 								operation.resolve(false);
 							}
 						} else if (operation.kind === "finalizeAttempt") {
 							oneShot.add(operation);
-							const existing = records.get(operation.connectionId);
-							if (
-								existing?.status === "pending" &&
-								existing.attemptId !== undefined &&
-								existing.attemptId === operation.attemptId
-							) {
-								this.applyUpsert(records, operation.commit(existing));
-								deferred.push((didCommit) => didCommit && operation.resolve(true));
-							} else {
-								// Ownership lost (removed, replaced by another
-								// attempt, or completed elsewhere): the credential
-								// commit must NOT land on this account.
+							try {
+								const existing = records.get(operation.connectionId);
+								if (
+									existing?.status === "pending" &&
+									existing.attemptId !== undefined &&
+									existing.attemptId === operation.attemptId
+								) {
+									this.applyUpsert(records, operation.commit(existing));
+									if (operation.compensate && existing) compensations.push(operation.compensate);
+									deferred.push((didCommit) => operation.resolve(didCommit));
+								} else {
+									// Ownership lost (removed, replaced by another
+									// attempt, or completed elsewhere): the credential
+									// commit must NOT land on this account.
+									operation.resolve(false);
+								}
+							} catch {
 								operation.resolve(false);
 							}
 						} else if (operation.isStillCurrent()) {
@@ -382,6 +454,17 @@ export class McpConnectionStore {
 						// retry cleanly — but one-shot attempt ops resolve false and
 						// are dropped: no ghost reservation, no surprise finalize.
 						this.pendingOps.unshift(...operations.filter((operation) => !oneShot.has(operation)));
+						// Compensate finalize commits under the SAME lock: their
+						// credential moves are rolled back before release, so a
+						// failed finalize is all-or-nothing, not a partial commit.
+						for (const compensate of compensations) {
+							try {
+								compensate();
+							} catch {
+								// Compensation is best-effort; the op already
+								// resolves false and nothing durable changed.
+							}
+						}
 						for (const settle of deferred) settle(false);
 					}
 				}

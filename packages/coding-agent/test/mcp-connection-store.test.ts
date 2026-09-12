@@ -385,6 +385,128 @@ describe("ENG-6108 durable account reservations", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
+	it("TWO reserves batched into one failing write: BOTH resolve false (no hang), no ghost, retry works", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "reserve-batch-fail-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("simulated batched write failure");
+		});
+		// Both reserves queue into the SAME first flush (flushChain serializes
+		// runs, but both ops are already enqueued before the first run starts).
+		const [first, second] = await Promise.all([
+			client.reserveConnectionId(record("acme-2", at, nonce())),
+			client.reserveConnectionId(record("acme-3", at, nonce())),
+		]);
+		// Explicit settlement: every one-shot resolves exactly once — false here.
+		expect(first).toBe(false);
+		expect(second).toBe(false);
+		// No durable marker for either id (no ghost), and a retry succeeds.
+		const fresh = McpConnectionStore.open(path);
+		expect(fresh.get("acme-2")).toBeUndefined();
+		expect(fresh.get("acme-3")).toBeUndefined();
+		const retryNonce = nonce();
+		await expect(client.reserveConnectionId(record("acme-2", at, retryNonce))).resolves.toBe(true);
+		expect(McpConnectionStore.open(path).get("acme-2")?.attemptId).toBe(retryNonce);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a finalize whose RECORD write fails compensates: staged credential restored, real key untouched, no record", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "finalize-compensate-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		const mine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, mine));
+		const commitMoves: Array<string> = [];
+		const committed = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: (current) => {
+				commitMoves.push("moved");
+				return current;
+			},
+			compensate: () => {
+				commitMoves.push("compensated");
+			},
+		});
+		// The write is mocked to fail exactly once — inject it AFTER the
+		// reservation commit so the finalize's write is the failing one.
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("simulated finalize write failure");
+		});
+		const failed = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: (current) => {
+				commitMoves.push("moved-again");
+				return current;
+			},
+			compensate: () => {
+				commitMoves.push("compensated-again");
+			},
+		});
+		expect(committed).toBe(true);
+		expect(failed).toBe(false);
+		// All-or-nothing: compensation ran under the same lock.
+		expect(commitMoves).toContain("compensated-again");
+		// The record write failed: nothing durable for the second finalize, and
+		// the FIRST (successful) finalize's record is still on disk.
+		const fresh = McpConnectionStore.open(path);
+		expect(fresh.get("acme-2")?.attemptId).toBe(mine);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("removeAccount removes the credential AND the record under one lock: disconnect interleaving with finalize leaves no orphan", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "remove-account-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const clientA = McpConnectionStore.open(path);
+		const clientB = McpConnectionStore.open(path);
+		const at = Date.now();
+		const mine = nonce();
+		await clientA.reserveConnectionId(record("acme-2", at, mine));
+		const removed: string[] = [];
+		const authCleanup = (connectionId: string) => {
+			removed.push(connectionId);
+		};
+
+		// Order 1: another client disconnects (record+credential under one lock)
+		// BEFORE the login's finalize — the finalize must lose ownership and the
+		// account key must never receive the credential.
+		const removedFirst = await clientB.removeAccount({ connectionId: "acme-2", authCleanup });
+		expect(removedFirst).toBe(true);
+		expect(removed).toEqual(["acme-2"]);
+		const finalizeAfterRemove = await clientA.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: (current) => current,
+			compensate: () => {
+				throw new Error("should not run: commit never applied");
+			},
+		});
+		expect(finalizeAfterRemove).toBe(false);
+		expect(McpConnectionStore.open(path).get("acme-2")).toBeUndefined();
+
+		// Order 2: finalize commits first; a later disconnect removes BOTH the
+		// record AND the credential — no orphan survives.
+		const mine2 = nonce();
+		await clientA.reserveConnectionId(record("acme-4", at, mine2));
+		const finalized = await clientA.finalizeAttempt({
+			connectionId: "acme-4",
+			attemptId: mine2,
+			commit: (current) => current,
+		});
+		expect(finalized).toBe(true);
+		const removedAfter = await clientB.removeAccount({ connectionId: "acme-4", authCleanup });
+		expect(removedAfter).toBe(true);
+		expect(removed).toEqual(["acme-2", "acme-4"]);
+		expect(McpConnectionStore.open(path).get("acme-4")).toBeUndefined();
+		// Removing an absent account is an honest false, not a throw.
+		await expect(clientB.removeAccount({ connectionId: "acme-9", authCleanup })).resolves.toBe(false);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
 	it("removeReservation is ownership-validated by the attempt nonce: only OUR pending marker disappears", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "reserve-cancel-"));
 		const path = join(tempDir, "mcp-connections.json");

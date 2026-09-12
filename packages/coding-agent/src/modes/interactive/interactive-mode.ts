@@ -8796,8 +8796,17 @@ export class InteractiveMode {
 				this.showStatus(`${server} is not connected.`);
 				return;
 			}
-			authStorage.logout(`mcp:${server}`);
-			await this.removeMcpConnectionRecord(server);
+			// Credential AND record removal in one store-locked step (the same
+			// lock ordering finalize uses): no orphan credential can survive.
+			const loggedOut = await this.getMcpConnectionStore().removeAccount({
+				connectionId: server,
+				authCleanup: (connectionId) => {
+					authStorage.logout(mcpCredentialKey(connectionId));
+				},
+			});
+			if (!loggedOut) {
+				this.showStatus(`${server} is no longer connected.`);
+			}
 			await this.reloadAfterMcpChange(`Disconnected ${server}.`);
 			return;
 		}
@@ -9088,10 +9097,18 @@ export class InteractiveMode {
 			);
 			return;
 		}
-		// Explicit per-account remove: logout + record removal, then reload.
+		// Explicit per-account remove: credential AND record removal in ONE
+		// store-locked step (the same lock ordering finalize uses), then reload.
 		if (service.removeAction === true) {
-			this.modelRegistry.authStorage.logout(`mcp:${service.serviceId}`);
-			await this.removeMcpConnectionRecord(service.serviceId);
+			const removed = await this.getMcpConnectionStore().removeAccount({
+				connectionId: service.serviceId,
+				authCleanup: (connectionId) => {
+					this.modelRegistry.authStorage.logout(mcpCredentialKey(connectionId));
+				},
+			});
+			if (!removed) {
+				this.showStatus(`Account ${service.serviceId} is no longer present.`);
+			}
 			await this.reloadAfterMcpChange(`Removed account ${service.serviceId}.`);
 			return;
 		}
@@ -9102,8 +9119,15 @@ export class InteractiveMode {
 				);
 				return;
 			}
-			this.modelRegistry.authStorage.logout(`mcp:${service.serviceId}`);
-			await this.removeMcpConnectionRecord(service.serviceId);
+			const disconnected = await this.getMcpConnectionStore().removeAccount({
+				connectionId: service.serviceId,
+				authCleanup: (connectionId) => {
+					this.modelRegistry.authStorage.logout(mcpCredentialKey(connectionId));
+				},
+			});
+			if (!disconnected) {
+				this.showStatus(`${service.label} is no longer connected.`);
+			}
 			await this.reloadAfterMcpChange(`Disconnected ${service.label}.`);
 			return;
 		}
@@ -9215,29 +9239,46 @@ export class InteractiveMode {
 		}
 		if (options.addAccount === true && attemptId !== undefined && stagedServerId !== undefined) {
 			const stagedKey = mcpCredentialKey(stagedServerId);
+			const realKey = mcpCredentialKey(connectionId);
 			// Guarded commit: the staged credential moves to the REAL account key
 			// under the store's file lock, only while our reservation is still
 			// ours — cancel/remove share the same lock ordering, so a removed or
-			// replaced account can never receive a late login's credential.
+			// replaced account can never receive a late login's credential. If the
+			// RECORD write then fails, the compensate callback runs under the SAME
+			// lock and restores the staged credential, deleting the real key (it
+			// was empty before this attempt) — a failed finalize is all-or-nothing.
 			const committed = await this.getMcpConnectionStore().finalizeAttempt({
 				connectionId,
 				attemptId,
 				commit: (record) => {
 					const staged = this.modelRegistry.authStorage.get(stagedKey);
 					if (staged) {
-						this.modelRegistry.authStorage.set(mcpCredentialKey(connectionId), staged);
+						this.modelRegistry.authStorage.set(realKey, staged);
 						this.modelRegistry.authStorage.remove(stagedKey);
 					}
 					return record;
 				},
+				compensate: () => {
+					const moved = this.modelRegistry.authStorage.get(realKey);
+					if (moved) {
+						this.modelRegistry.authStorage.set(stagedKey, moved);
+						this.modelRegistry.authStorage.remove(realKey);
+					}
+				},
 			});
 			if (!committed) {
-				// Ownership lost or the write failed: discard the staged
-				// credential; the account keeps its own state untouched.
+				// Ownership lost, or the write failed and the compensation restored
+				// the staged credential: discard it either way — the account key was
+				// never ours to touch and stays exactly as before. When the failure
+				// was the write, OUR pending reservation may still be on disk; it is
+				// removable from the account picker, and we say so honestly.
 				this.modelRegistry.authStorage.remove(stagedKey);
 				unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
+				const reservationCleaned = await this.getMcpConnectionStore().removeReservation(connectionId, attemptId);
 				this.showStatus(
-					`The account ${connectionId} was removed or replaced during login; the login result was discarded.`,
+					`The account ${connectionId} was removed or replaced during login, or the change could not be saved; the login result was discarded and the account is unchanged.${
+						reservationCleaned ? "" : " A pending placeholder may remain; remove it from the account picker."
+					}`,
 				);
 				return;
 			}

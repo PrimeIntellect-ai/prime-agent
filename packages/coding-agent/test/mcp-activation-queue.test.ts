@@ -3,6 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
+
+// The atomic write is the seam for finalize write-failure regressions; every
+// other test keeps the real implementation.
+vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/utils/atomic-file.js")>();
+	return { ...actual, writeFileAtomicSync: vi.fn(actual.writeFileAtomicSync) };
+});
+
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
 
@@ -271,6 +280,41 @@ describe("ENG-6108 guarded credential commit", () => {
 		const stagedLeftovers = authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"));
 		expect(stagedLeftovers).toEqual([]);
 		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
+	});
+
+	test("a finalize whose record write fails: credentials restored to staged, account key untouched, reservation released, honest message", async () => {
+		const { fake, store, authStorage, showStatus } = fakeWithStore();
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: stagedLogin(authStorage),
+		});
+		// Fail exactly the SECOND atomic write: the reserve commit succeeds; the
+		// finalize's record write fails, so its compensation must run.
+		const actualModule =
+			await vi.importActual<typeof import("../src/utils/atomic-file.js")>("../src/utils/atomic-file.js");
+		const real = actualModule.writeFileAtomicSync;
+		let writeCount = 0;
+		vi.mocked(writeFileAtomicSync).mockImplementation((...args: Parameters<typeof real>) => {
+			writeCount += 1;
+			if (writeCount === 2) {
+				throw new Error("simulated finalize write failure");
+			}
+			return real(...args);
+		});
+		try {
+			await callAddAccount(fake);
+			// All-or-nothing: the REAL account key never received the credential...
+			expect(authStorage.get("mcp:acme-2")).toBeUndefined();
+			// ...the staged credential was compensated then discarded...
+			const stagedLeftovers = authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"));
+			expect(stagedLeftovers).toEqual([]);
+			// ...and the reservation was released (no ghost pending record).
+			expect(store.get("acme-2")).toBeUndefined();
+			const calls = JSON.stringify(showStatus.mock.calls);
+			expect(calls).toContain("could not be saved");
+			expect(calls).toContain("account is unchanged");
+		} finally {
+			vi.mocked(writeFileAtomicSync).mockImplementation(real);
+		}
 	});
 
 	test("same id, new owner: a replaced reservation is finalized by ITS attempt only; the stale attempt's credential is discarded", async () => {
