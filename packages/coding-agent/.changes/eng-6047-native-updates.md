@@ -8,3 +8,4 @@
 - Fixed damaged compiled installations blocking repair and rollback to a healthy retained release.
 - Fixed rollback planning after interrupted activation and provided repair guidance for older retained installers without recovery support.
 - Fixed stalled executable checks holding the installer lock indefinitely during installation, rollback, or activation recovery.
+- Fixed update guidance directing repairable compiled installations to a manual download instead of the update command.

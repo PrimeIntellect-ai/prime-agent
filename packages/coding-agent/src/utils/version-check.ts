@@ -12,7 +12,7 @@ export interface LatestPiRelease {
 	binaries?: NativeReleaseArtifact[];
 }
 
-export interface NativeReleaseArtifact {
+interface NativeReleaseArtifact {
 	platform: string;
 	file: string;
 	sha256: string;
