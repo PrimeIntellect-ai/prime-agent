@@ -1,0 +1,1 @@
+- Fixed invalid macOS signatures in standalone downloads and blocked releases whose final Mac archives fail signature or runtime checks.

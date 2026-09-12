@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { copyBinaryAssets, validateBinaryAssets } from "./copy-binary-assets.mjs";
+import { signMacosBinary } from "./macos-signature.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const packageDir = join(root, "packages/coding-agent");
@@ -55,6 +56,7 @@ for (const target of platform === "all" ? platforms : [platform]) {
 			],
 			{ cwd: packageDir, stdio: "inherit" },
 		);
+		signMacosBinary(join(staging, "prime-agent"), target);
 		copyBinaryAssets(staging);
 		validateBinaryAssets(staging);
 		const destination = join(outputRoot, target);
