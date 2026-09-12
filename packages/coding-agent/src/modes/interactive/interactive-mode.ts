@@ -5928,7 +5928,9 @@ export class InteractiveMode {
 	private async openScopedAgentsView(): Promise<void> {
 		if (!this.options.returnToAgentsView) {
 			this.focusEditor();
-			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
+			this.showStatus(
+				"The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+			);
 			return;
 		}
 		await this.returnToAgentsView("scoped_agents_view");
@@ -6764,7 +6766,9 @@ export class InteractiveMode {
 
 	private async requestAgentsView(): Promise<void> {
 		if (!this.options.returnToAgentsView) {
-			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
+			this.showStatus(
+				"The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+			);
 			return;
 		}
 		await this.returnToAgentsView();

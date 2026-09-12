@@ -1,0 +1,2 @@
+- Fixed an invalid `--thinking` level being only a warning while the launch continued with the default level; it is now a hard error listing the valid values, matching `--mode` strictness.
+- Fixed the agents-view hint telling users to start "without --no-daemon" - a flag the CLI does not recognize; the hint now names the real condition (a daemon-hosted session; start normally without `--no-session`).
