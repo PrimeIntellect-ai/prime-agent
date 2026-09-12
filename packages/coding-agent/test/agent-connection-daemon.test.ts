@@ -4133,6 +4133,184 @@ describe("DaemonAgentConnection deferred session events", () => {
 		}
 	});
 
+	it.each([0, 2, 3])(
+		"releases a superseded attach with %i snapshot frames received before its response",
+		async (frameCount) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+			let release!: () => void;
+			const responseGate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			try {
+				await connection.attach();
+				const result = createAttachResult("active-1", undefined, undefined, 100);
+				fakeClient.attachResultFactory = () => ({
+					...result,
+					snapshotStream: { id: "abandoned", messageCount: 1, targetChunkBytes: 512 * 1024 },
+				});
+				const request = fakeClient.request.bind(fakeClient);
+				vi.spyOn(fakeClient, "request").mockImplementation(async (...args) => {
+					const response = await request(...args);
+					if (args[0].type === "attach") await responseGate;
+					return response;
+				});
+				const frames: DaemonOutbound[] = [
+					{
+						type: "session_snapshot_begin",
+						activeSessionId: "active-1",
+						snapshotId: "abandoned",
+						snapshot: result.snapshot,
+						messageCount: 1,
+						targetChunkBytes: 512 * 1024,
+						purpose: "attach",
+					},
+					{
+						type: "session_snapshot_chunk",
+						activeSessionId: "active-1",
+						snapshotId: "abandoned",
+						index: 0,
+						messages: [{ role: "user", content: "old transcript", timestamp: 1 }],
+					},
+					{
+						type: "session_snapshot_end",
+						activeSessionId: "active-1",
+						snapshotId: "abandoned",
+						chunkCount: 1,
+						lastEventSequence: 100,
+					},
+				];
+				const pendingAttach = connection.attach();
+				for (const frame of frames.slice(0, frameCount)) fakeClient.emitMessage(frame);
+				fakeClient.emitMessage({
+					type: "session_replaced",
+					activeSessionId: "active-1",
+					state: createConnectionState("active-1", "replacement"),
+					messages: [],
+				});
+				release();
+				await pendingAttach;
+				expect(
+					(connection as unknown as { snapshotAssemblies: Map<string, unknown> }).snapshotAssemblies.size,
+				).toBe(0);
+				for (const frame of frames.slice(frameCount)) fakeClient.emitMessage(frame);
+				await nextMessageLoopTurn();
+				expect(
+					(connection as unknown as { snapshotAssemblies: Map<string, unknown> }).snapshotAssemblies.size,
+				).toBe(0);
+				expect((await connection.getInitialSnapshot()).state.sessionId).toBe("replacement");
+			} finally {
+				release();
+				await connection.dispose();
+			}
+		},
+	);
+
+	it.each(["before response", "during stream", "after end"] as const)(
+		"rejects a closed attach immediately %s",
+		async (timing) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+			const result = createAttachResult("active-1", undefined, undefined, 12);
+			fakeClient.attachResultFactory = () => ({
+				...result,
+				snapshotStream: { id: "closed", messageCount: 0, targetChunkBytes: 512 * 1024 },
+			});
+			const rejected = vi.fn();
+			const resolved = vi.fn();
+			const pendingAttach = connection.attach().then(resolved, rejected);
+			try {
+				if (timing !== "before response") await nextMessageLoopTurn();
+				fakeClient.emitMessage({
+					type: "session_snapshot_begin",
+					activeSessionId: "active-1",
+					snapshotId: "closed",
+					snapshot: result.snapshot,
+					messageCount: 0,
+					targetChunkBytes: 512 * 1024,
+					purpose: "attach",
+				});
+				if (timing === "after end") {
+					fakeClient.emitMessage({
+						type: "session_snapshot_end",
+						activeSessionId: "active-1",
+						snapshotId: "closed",
+						chunkCount: 0,
+						lastEventSequence: 12,
+					});
+				}
+				fakeClient.emitMessage({ type: "session_closed", activeSessionId: "active-1", reason: "killed" });
+				await nextMessageLoopTurn();
+				expect(rejected).toHaveBeenCalledExactlyOnceWith(expect.any(Error));
+				expect(resolved).not.toHaveBeenCalled();
+				expect(
+					(connection as unknown as { snapshotAssemblies: Map<string, unknown> }).snapshotAssemblies.size,
+				).toBe(0);
+				expect(fakeClient.closeCount).toBe(0);
+			} finally {
+				await connection.dispose();
+				await pendingAttach;
+			}
+		},
+	);
+
+	it.each(["session_replaced", "session_resynced"] as const)(
+		"drops a %s superseded during the initial render",
+		async (type) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+			let release!: () => void;
+			const initialRenderPromise = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const ui = {
+				agentConnection: connection,
+				sessionEventQueue: Promise.resolve(),
+				sessionEventGeneration: 0,
+				initialRenderPromise,
+				refreshCommandCatalogForCurrentSession: vi.fn(async () => {}),
+				renderResyncedSession: vi.fn(async () => {}),
+				resetSideQuestion: vi.fn(),
+				resetExtensionUI: vi.fn(),
+				applyConnectionStateSnapshot: vi.fn(),
+				resetCurrentSessionRenderState: vi.fn(),
+				rebindCurrentSession: vi.fn(async () => {}),
+				renderInitialMessages: vi.fn(async () => {}),
+				ui: { requestRender: vi.fn() },
+				showError: vi.fn(),
+			};
+			try {
+				await connection.attach();
+				(InteractiveMode.prototype as unknown as { subscribeToAgent(this: typeof ui): void }).subscribeToAgent.call(
+					ui,
+				);
+				const snapshot = createAttachResult("active-1", undefined, undefined, 12).snapshot;
+				fakeClient.emitMessage(
+					type === "session_replaced"
+						? { type, activeSessionId: "active-1", state: snapshot.state, messages: [] }
+						: { type, activeSessionId: "active-1", snapshot },
+				);
+				await nextMessageLoopTurn();
+				const state = createConnectionState("active-1", "latest");
+				fakeClient.emitMessage({ type: "session_replaced", activeSessionId: "active-1", state, messages: [] });
+				release();
+				await ui.sessionEventQueue;
+				expect(ui.renderResyncedSession).not.toHaveBeenCalled();
+				expect(ui.resetSideQuestion).toHaveBeenCalledOnce();
+				expect(ui.resetExtensionUI).toHaveBeenCalledOnce();
+				expect(ui.applyConnectionStateSnapshot).toHaveBeenCalledExactlyOnceWith(state);
+				expect(ui.resetCurrentSessionRenderState).toHaveBeenCalledOnce();
+				expect(ui.rebindCurrentSession).toHaveBeenCalledOnce();
+				expect(ui.renderInitialMessages).toHaveBeenCalledOnce();
+				expect(ui.ui.requestRender).toHaveBeenCalledOnce();
+				expect(ui.showError).not.toHaveBeenCalled();
+			} finally {
+				release();
+				await connection.dispose();
+			}
+		},
+	);
+
 	it("keeps live events behind the whole replay and shares concurrent flushes", async () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {

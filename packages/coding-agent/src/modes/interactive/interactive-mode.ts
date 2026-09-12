@@ -5038,6 +5038,7 @@ export class InteractiveMode {
 						// Let an in-flight initial render finish before clearing the
 						// chat for the new session.
 						await this.initialRenderPromise?.catch(() => undefined);
+						if (generation !== this.sessionEventGeneration) return;
 						this.resetSideQuestion();
 						this.resetExtensionUI();
 						this.applyConnectionStateSnapshot(event.state);
@@ -5057,6 +5058,7 @@ export class InteractiveMode {
 						// Never rebuild the transcript while an initial render is
 						// mid-flight; queue behind it instead.
 						await this.initialRenderPromise?.catch(() => undefined);
+						if (generation !== this.sessionEventGeneration) return false;
 						await this.renderResyncedSession(event.snapshot);
 						return true;
 					});

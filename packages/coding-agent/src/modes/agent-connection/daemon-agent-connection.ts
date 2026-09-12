@@ -429,7 +429,19 @@ export class DaemonAgentConnection implements AgentConnection {
 			undefined,
 			options,
 		);
-		if (sessionRevision !== this.sessionRevision) return;
+		if (this.terminalCloseEmitted) throw new Error("Daemon session closed during attach");
+		if (sessionRevision !== this.sessionRevision) {
+			if ("snapshot" in result && result.snapshotStream) {
+				const snapshotId = result.snapshotStream.id;
+				const assembly = this.snapshotAssemblies.get(snapshotId);
+				if (assembly) {
+					this.rejectSnapshotAssembly(snapshotId, assembly, new Error("Snapshot attach was superseded"));
+					this.snapshotAssemblies.delete(snapshotId);
+				}
+				this.ignoreSnapshotId(snapshotId);
+			}
+			return;
+		}
 		this.activeSessionId = getAttachActiveSessionId(result);
 		const snapshot =
 			"snapshot" in result
@@ -437,6 +449,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					? await this.waitForSnapshot(result.snapshotStream.id)
 					: result.snapshot
 				: undefined;
+		if (this.terminalCloseEmitted) throw new Error("Daemon session closed during attach");
 		if (sessionRevision !== this.sessionRevision) return;
 		const summary = "snapshot" in result ? result.snapshot.summary : result;
 		this.attachedSessionId = summary.sessionId;
@@ -1959,7 +1972,9 @@ export class DaemonAgentConnection implements AgentConnection {
 				return;
 			}
 			this.terminalCloseEmitted = true;
-			await this.emit({ type: "closed", error: this.formatDaemonSessionClosedError(message.reason) });
+			const error = this.formatDaemonSessionClosedError(message.reason);
+			this.rejectSnapshotAssemblies(new Error(error));
+			await this.emit({ type: "closed", error });
 		}
 	}
 
