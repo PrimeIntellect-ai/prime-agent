@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -7,12 +8,29 @@ const toolState = vi.hoisted(() => ({
 	platform: "linux",
 	architecture: "x64",
 	extractZip: async (_source: string, _options: { dir: string }): Promise<void> => {},
+	rgSha256: {} as Record<string, string>,
 }));
 
 vi.mock("../src/config.js", () => ({
 	APP_NAME: "prime-agent",
 	getBinDir: () => toolState.toolsDir,
 }));
+
+vi.mock("../src/utils/helper-tool-releases.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/utils/helper-tool-releases.js")>();
+	return {
+		...actual,
+		HELPER_TOOL_RELEASES: {
+			...actual.HELPER_TOOL_RELEASES,
+			rg: {
+				...actual.HELPER_TOOL_RELEASES.rg,
+				get sha256() {
+					return toolState.rgSha256;
+				},
+			},
+		},
+	};
+});
 
 vi.mock("os", () => ({
 	arch: () => toolState.architecture,
@@ -23,12 +41,20 @@ vi.mock("extract-zip", () => ({
 	default: (source: string, options: { dir: string }) => toolState.extractZip(source, options),
 }));
 
+import { HELPER_TOOL_RELEASES } from "../src/utils/helper-tool-releases.js";
 import {
 	ensureToolWithStatus,
 	formatMissingRipgrepMessage,
 	getToolPath,
 	type ToolUnavailableResult,
 } from "../src/utils/tools-manager.js";
+
+const RG_WINDOWS_ASSET = `ripgrep-${HELPER_TOOL_RELEASES.rg.version}-x86_64-pc-windows-msvc.zip`;
+const ASSET_BYTES = new Uint8Array([1]);
+
+function pinRgWindowsAsset(bytes: Uint8Array): void {
+	toolState.rgSha256 = { [RG_WINDOWS_ASSET]: createHash("sha256").update(bytes).digest("hex") };
+}
 
 const originalPath = process.env.PATH;
 const originalOffline = process.env.PI_OFFLINE;
@@ -55,6 +81,7 @@ describe("tools manager", () => {
 		toolState.platform = "linux";
 		toolState.architecture = "x64";
 		toolState.extractZip = async () => {};
+		toolState.rgSha256 = {};
 	});
 
 	afterEach(() => {
@@ -105,6 +132,7 @@ describe("tools manager", () => {
 		});
 
 		toolState.platform = "linux";
+		toolState.rgSha256 = { [HELPER_TOOL_RELEASES.rg.assetName("linux", "x64") ?? ""]: "0".repeat(64) };
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Promise.reject(new Error("network unavailable"))),
@@ -119,15 +147,8 @@ describe("tools manager", () => {
 	it("validates a downloaded binary before reporting it available", async () => {
 		toolState.platform = "win32";
 		writeExecutable(join(toolState.toolsDir, "rg.exe"), 1);
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValueOnce(
-				new Response(JSON.stringify({ tag_name: "15.1.0" }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				}),
-			)
-			.mockResolvedValueOnce(new Response(new Uint8Array([1]), { status: 200 }));
+		pinRgWindowsAsset(ASSET_BYTES);
+		const fetchMock = vi.fn().mockResolvedValueOnce(new Response(ASSET_BYTES, { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);
 		toolState.extractZip = async (_source, options) => {
 			writeExecutable(join(options.dir, "rg.exe"));
@@ -137,18 +158,17 @@ describe("tools manager", () => {
 			status: "available",
 			path: join(toolState.toolsDir, "rg.exe"),
 		});
-		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0][0]).toBe(
+			`https://github.com/BurntSushi/ripgrep/releases/download/${HELPER_TOOL_RELEASES.rg.tag}/${RG_WINDOWS_ASSET}`,
+		);
+		expect(readdirSync(toolState.toolsDir).sort()).toEqual(["path", "rg.exe"]);
 	});
 
 	it("removes a downloaded binary that fails its version check", async () => {
 		toolState.platform = "win32";
-		vi.stubGlobal(
-			"fetch",
-			vi
-				.fn()
-				.mockResolvedValueOnce(new Response(JSON.stringify({ tag_name: "15.1.0" }), { status: 200 }))
-				.mockResolvedValueOnce(new Response(new Uint8Array([1]), { status: 200 })),
-		);
+		pinRgWindowsAsset(ASSET_BYTES);
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(ASSET_BYTES, { status: 200 })));
 		toolState.extractZip = async (_source, options) => {
 			writeExecutable(join(options.dir, "rg.exe"), 1);
 		};
@@ -158,6 +178,23 @@ describe("tools manager", () => {
 			reason: "download_failed",
 		});
 		expect(existsSync(join(toolState.toolsDir, "rg.exe"))).toBe(false);
+		expect(readdirSync(toolState.toolsDir)).toEqual(["path"]);
+	});
+
+	it("rejects a downloaded asset whose digest differs from the pinned release", async () => {
+		toolState.platform = "win32";
+		pinRgWindowsAsset(new Uint8Array([2]));
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(ASSET_BYTES, { status: 200 })));
+		const extractZip = vi.fn(async () => {});
+		toolState.extractZip = extractZip;
+
+		await expect(ensureToolWithStatus("rg")).resolves.toMatchObject({
+			status: "unavailable",
+			reason: "download_failed",
+			detail: expect.stringContaining("SHA-256 mismatch"),
+		});
+		expect(extractZip).not.toHaveBeenCalled();
+		expect(readdirSync(toolState.toolsDir)).toEqual(["path"]);
 	});
 
 	it("formats actionable platform-specific ripgrep warnings", () => {
