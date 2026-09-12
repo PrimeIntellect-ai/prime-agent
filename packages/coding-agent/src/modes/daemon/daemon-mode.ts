@@ -372,6 +372,13 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 
 const DAEMON_CLIENT_CAPABILITY_SET: ReadonlySet<string> = new Set(DAEMON_SUPPORTED_CLIENT_CAPABILITIES);
 const CLIENT_CATCHUP_RETRY_MS = 250;
+/**
+ * Upper bound on frames deferred per client and session while a snapshot
+ * stream is active. Deferral spans one stream (seconds), so overflow means a
+ * pathologically slow client; the sender then falls back to a catch-up
+ * snapshot instead of buffering without limit.
+ */
+const MAX_DEFERRED_SESSION_FRAMES = 256;
 const UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS = 5000;
 const SUPERVISOR_FENCE_POLL_MS = 250;
 const UPDATE_RESTART_MARKER =
@@ -5566,6 +5573,17 @@ export class AgentDaemon {
 				purpose,
 				transferSignal,
 			);
+			// Frames withheld during the stream replay now that the snapshot is
+			// complete: every deferred frame is newer than the streamed
+			// snapshot, and the client applies them as ordinary live events. A
+			// replay failure must not turn the delivered snapshot into a failed
+			// one; queue a resync so the client recovers instead.
+			try {
+				this.flushDeferredSessionFrames(client, result.activeSessionId);
+			} catch (error) {
+				this.log(`could not replay deferred frames for ${result.activeSessionId}: ${String(error)}`);
+				this.queueClientCatchup(client, result.activeSessionId, "resync");
+			}
 		} catch (error) {
 			if (transferSignal.aborted) {
 				await deliverSnapshotFailure(new Error(`Snapshot ${stream.id} was aborted`));
@@ -6922,11 +6940,19 @@ export class AgentDaemon {
 				continue;
 			}
 			if (client.snapshotActiveSessionIds?.has(state.activeSessionId)) {
-				this.queueClientCatchup(
-					client,
-					state.activeSessionId,
-					sequencedMessage.type === "session_replaced" ? "replacement" : "resync",
-				);
+				// A replacement swaps the session wholesale; buffered frames from
+				// the old session must never replay, so fall back to a replacement
+				// catch-up snapshot.
+				if (sequencedMessage.type === "session_replaced") {
+					this.discardDeferredSessionFrames(client, state.activeSessionId);
+					this.queueClientCatchup(client, state.activeSessionId, "replacement");
+					continue;
+				}
+				if (this.deferSessionFrame(client, state.activeSessionId, sequencedMessage)) {
+					continue;
+				}
+				// The deferral buffer overflowed: fall back to a full resync.
+				this.queueClientCatchup(client, state.activeSessionId, "resync");
 				continue;
 			}
 			if (client.backpressured === true) {
@@ -7470,6 +7496,51 @@ export class AgentDaemon {
 		}
 	}
 
+	/**
+	 * Defer a session frame that arrived while a snapshot stream is active for
+	 * that session on this client. Deferred frames replay after the stream
+	 * completes instead of each one triggering a full snapshot re-transfer.
+	 * Returns false when the buffer overflows; the caller then queues a
+	 * catch-up snapshot.
+	 */
+	private deferSessionFrame(client: DaemonSocketClient, activeSessionId: string, message: DaemonOutbound): boolean {
+		if (client.deferredSessionFramesDropped?.has(activeSessionId)) {
+			return false;
+		}
+		const frames = client.deferredSessionOutbounds?.get(activeSessionId) ?? [];
+		if (frames.length >= MAX_DEFERRED_SESSION_FRAMES) {
+			// Stop deferring this session for the rest of the stream: a catch-up
+			// snapshot is already queued and supersedes anything buffered.
+			client.deferredSessionFramesDropped ??= new Set();
+			client.deferredSessionFramesDropped.add(activeSessionId);
+			this.discardDeferredSessionFrames(client, activeSessionId);
+			return false;
+		}
+		frames.push(message);
+		client.deferredSessionOutbounds ??= new Map();
+		client.deferredSessionOutbounds.set(activeSessionId, frames);
+		return true;
+	}
+
+	/** Replay frames deferred during a completed snapshot stream, in order. */
+	private flushDeferredSessionFrames(client: DaemonSocketClient, activeSessionId: string): void {
+		const frames = client.deferredSessionOutbounds?.get(activeSessionId);
+		if (!frames || frames.length === 0) {
+			return;
+		}
+		client.deferredSessionOutbounds?.delete(activeSessionId);
+		for (const frame of frames) {
+			if (client.socket.destroyed) {
+				return;
+			}
+			this.write(client, frame);
+		}
+	}
+
+	private discardDeferredSessionFrames(client: DaemonSocketClient, activeSessionId: string): void {
+		client.deferredSessionOutbounds?.delete(activeSessionId);
+	}
+
 	// The AgentSession doesn't know its own daemon active-session id, so fill it in here.
 	private stampRlmChildActiveSessionId(message: DaemonOutbound): void {
 		if (
@@ -7771,6 +7842,12 @@ export function finishClientSnapshotStreaming(client: DaemonSocketClient, active
 		client.snapshotActiveSessionCounts?.delete(activeSessionId);
 		client.snapshotActiveSessionIds?.delete(activeSessionId);
 		client.snapshotTransferAbortControllers?.delete(activeSessionId);
+		// A failed or aborted stream replays nothing; drop what it withheld so
+		// the next stream does not inherit stale frames.
+		client.deferredSessionOutbounds?.delete(activeSessionId);
+		client.deferredSessionPayloads?.delete(activeSessionId);
+		client.deferredSessionFramesDropped?.delete(activeSessionId);
+		client.deferredSessionPayloadsDropped?.delete(activeSessionId);
 	}
 	client.snapshotStreaming = (client.snapshotActiveSessionIds?.size ?? 0) > 0;
 	if (!client.snapshotStreaming) {

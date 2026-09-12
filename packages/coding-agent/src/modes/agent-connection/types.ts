@@ -645,6 +645,13 @@ export interface AgentConnection {
 
 	getState(): Promise<AgentConnectionState>;
 	getInitialSnapshot(): Promise<AgentConnectionSnapshot>;
+	/**
+	 * Replay session events the adapter deferred between attach and this call.
+	 * Only deferring adapters implement it; the interactive UI calls it once
+	 * its initial transcript render is complete, so deferred events apply on
+	 * top of a fully rendered chat instead of racing the initial build.
+	 */
+	flushBufferedSessionEvents?(): Promise<void>;
 	getRlmChildSnapshots(): Promise<AgentConnectionRlmChildAgentSnapshot[]>;
 	getMessages(): Promise<AgentMessage[]>;
 	getSessionHeader(): Promise<AgentConnectionSessionHeader | undefined>;

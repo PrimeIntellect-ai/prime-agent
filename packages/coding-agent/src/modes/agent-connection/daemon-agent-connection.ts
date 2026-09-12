@@ -115,6 +115,14 @@ const DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const DAEMON_RECONNECT_TIMEOUT_MS = 60_000;
 export const DAEMON_SNAPSHOT_TIMEOUT_MS = 30_000;
 const MAX_IGNORED_SNAPSHOT_IDS = 128;
+/**
+ * Upper bound on session events deferred between attach and the first
+ * flushBufferedSessionEvents() call. The deferral window is one initial
+ * render (sub-second), so overflow only happens on a pathologically busy
+ * session; the connection then falls back to the plain stale-snapshot
+ * re-fetch.
+ */
+const MAX_DEFERRED_SESSION_EVENTS = 1000;
 const UPDATE_RECONNECT_TIMEOUT_MS = 120000;
 const UPDATE_RECONNECT_RETRY_MS = 100;
 const MAX_COMPLETED_SNAPSHOTS = 128;
@@ -165,6 +173,14 @@ function reconnectDaemonTransportAfterUpdate(client: DaemonTransportClient): Pro
 
 export interface DaemonAgentConnectionOptions {
 	closeClientOnDispose?: boolean;
+	/**
+	 * Defer session events between attach and the first
+	 * flushBufferedSessionEvents() call. The interactive connection opts in so
+	 * its initial render can use the attach snapshot as-is (no full
+	 * get_messages re-fetch) and apply buffered events on top afterwards.
+	 * Watchers and one-shot clients leave this off and keep live delivery.
+	 */
+	deferSessionEvents?: boolean;
 	/** Secondary watchers pass false to stay on the shared control-plane socket. */
 	directTransport?: boolean;
 	/** Restart/probe the detached supervisor after a transient socket loss. */
@@ -235,6 +251,16 @@ export class DaemonAgentConnection implements AgentConnection {
 	private childRosterSequence: number | undefined;
 	private latestSnapshot: AgentConnectionSnapshot | undefined;
 	private latestSnapshotIsFresh = false;
+	/**
+	 * Session events observed between attach and the first
+	 * flushBufferedSessionEvents() call. Buffering them keeps the attach
+	 * snapshot usable for the initial render (no full get_messages re-fetch)
+	 * and stops event handlers from racing the initial transcript build; the
+	 * flush replays them on top of the finished render. Bounded: overflow
+	 * falls back to the stale-snapshot re-fetch of a non-deferring client.
+	 */
+	private readonly deferredSessionEvents: { event: AgentSessionEvent; sequence: number | undefined }[] = [];
+	private deferSessionEvents = false;
 	private attachedSessionId: string | undefined;
 	private attachedSessionFile: string | undefined;
 	private daemonLogPath: string | undefined;
@@ -264,6 +290,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (options.recoverDaemon) {
 			this.client.enableRequestRecovery();
 		}
+		this.deferSessionEvents = options.deferSessionEvents === true;
 		this.unsubscribeDaemonMessages = this.client.onMessage((message) => {
 			void this.handleDaemonMessage(message).catch((error: unknown) => {
 				try {
@@ -526,6 +553,50 @@ export class DaemonAgentConnection implements AgentConnection {
 			snapshotCursor?.generation === this.lastEventCursor?.generation &&
 			snapshotCursor?.sequence === this.lastEventCursor?.sequence;
 		return this.latestSnapshot;
+	}
+
+	/**
+	 * Stop deferring session events and replay everything buffered so far. The
+	 * interactive UI calls this once its initial transcript render is complete,
+	 * so deferred events apply on top of a fully rendered chat.
+	 */
+	async flushBufferedSessionEvents(): Promise<void> {
+		if (!this.deferSessionEvents) {
+			return;
+		}
+		this.deferSessionEvents = false;
+		const deferred = [...this.deferredSessionEvents];
+		this.deferredSessionEvents.length = 0;
+		for (const { event } of deferred) {
+			this.latestSnapshotIsFresh = false;
+			await this.emit({ type: "session_event", event });
+		}
+	}
+
+	private stopDeferringSessionEvents(): void {
+		this.deferSessionEvents = false;
+		this.deferredSessionEvents.length = 0;
+		this.latestSnapshotIsFresh = false;
+	}
+
+	/**
+	 * Drop deferred events that a newer snapshot already contains (sequence up
+	 * to and including snapshotSequence), so a flush cannot apply them twice.
+	 */
+	private dropDeferredSessionEventsThrough(snapshotSequence: number | undefined): void {
+		if (this.deferredSessionEvents.length === 0) {
+			return;
+		}
+		for (let index = this.deferredSessionEvents.length - 1; index >= 0; index--) {
+			const entry = this.deferredSessionEvents[index]!;
+			const keep =
+				entry.sequence !== undefined && snapshotSequence !== undefined
+					? entry.sequence > snapshotSequence
+					: entry.sequence === undefined && snapshotSequence === undefined;
+			if (!keep) {
+				this.deferredSessionEvents.splice(index, 1);
+			}
+		}
 	}
 
 	async getRlmChildSnapshots(): Promise<AgentConnectionRlmChildAgentSnapshot[]> {
@@ -1750,6 +1821,19 @@ export class DaemonAgentConnection implements AgentConnection {
 				this.childRosterSequence = maxEventSequence(this.childRosterSequence, getDaemonMessageSequence(message));
 				this.observeRlmChildUpdate(message.event.child);
 			}
+			if (this.deferSessionEvents) {
+				if (this.deferredSessionEvents.length >= MAX_DEFERRED_SESSION_EVENTS) {
+					// Too much happened before the first render: drop the buffer and
+					// fall back to the stale-snapshot re-fetch path.
+					this.stopDeferringSessionEvents();
+				} else {
+					this.deferredSessionEvents.push({
+						event: message.event,
+						sequence: getDaemonMessageSequence(message),
+					});
+					return;
+				}
+			}
 			this.latestSnapshotIsFresh = false;
 			await this.emit({ type: "session_event", event: message.event });
 			return;
@@ -1774,6 +1858,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.attachedSessionId = message.snapshot.state.sessionId;
 			this.attachedSessionFile = message.snapshot.state.sessionFile;
 			this.latestSnapshot = mapDaemonSessionSnapshot(message.snapshot);
+			this.dropDeferredSessionEventsThrough(message.snapshot.lastEventSequence);
 			if (Array.isArray(message.snapshot.children)) {
 				this.childRosterSequence = message.snapshot.lastEventSequence;
 			}
@@ -1790,6 +1875,9 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (message.type === "session_replaced") {
 			this.attachedSessionId = message.state.sessionId;
 			this.attachedSessionFile = message.state.sessionFile;
+			// Buffered events belong to the replaced session; they must never
+			// replay onto the new one. The replacement snapshot rebuilds state.
+			this.deferredSessionEvents.length = 0;
 			if (message.snapshotFollows) {
 				this.latestSnapshotIsFresh = false;
 				return;
@@ -2162,6 +2250,14 @@ export class DaemonAgentConnection implements AgentConnection {
 		assembly.resolve(snapshot);
 		const purpose = assembly.begin.purpose ?? "attach";
 		clearTimeout(assembly.timeout);
+		// A newer snapshot already contains every deferred event through its
+		// sequence; drop those so the post-render flush cannot double-apply
+		// them. A replacement snapshot swaps the session wholesale.
+		if (purpose === "replacement") {
+			this.deferredSessionEvents.length = 0;
+		} else {
+			this.dropDeferredSessionEventsThrough(message.lastEventSequence);
+		}
 		if (purpose !== "attach") {
 			this.snapshotAssemblies.delete(message.snapshotId);
 			if (this.pendingReattachActiveSessionIds.has(message.activeSessionId)) {

@@ -1067,6 +1067,7 @@ async function createDaemonClientConnection(options: {
 		const attach = async (summary: SessionSummary) => {
 			const connection = await DaemonAgentConnection.attach(client, getDaemonSummaryActiveSessionId(summary), {
 				closeClientOnDispose: true,
+				deferSessionEvents: true,
 				sendClientEnv: true,
 				ownedSession: options.clientOwned,
 				ownedSessionRecoveryConfig: options.clientOwned ? options.config : undefined,

@@ -3749,3 +3749,158 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.closeCount).toBe(1);
 	});
 });
+
+const DEFERRAL_EVENT_BASE_SEQUENCE = 13;
+
+function emitSequencedSessionEvent(client: FakeDaemonClient, activeSessionId: string, sequence: number): void {
+	client.emitMessage({
+		type: "session_event",
+		activeSessionId,
+		event: { type: "session_info_changed", name: undefined },
+		meta: {
+			id: `${activeSessionId}:${sequence}`,
+			protocol: DAEMON_PROTOCOL_INFO,
+			activeSessionId,
+			sequence,
+			cursor: { generation: `generation-${activeSessionId}`, sequence },
+			emittedAt: "2026-01-01T00:00:00.000Z",
+		},
+	} satisfies DaemonOutbound);
+}
+
+async function nextMessageLoopTurn(): Promise<void> {
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+describe("DaemonAgentConnection deferred session events", () => {
+	it("defers events between attach and flush so the attach snapshot stays usable", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			deferSessionEvents: true,
+		});
+		try {
+			await connection.attach();
+			const delivered: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				delivered.push(event);
+			});
+
+			emitSequencedSessionEvent(fakeClient, "active-1", DEFERRAL_EVENT_BASE_SEQUENCE);
+			await nextMessageLoopTurn();
+			expect(delivered).toEqual([]);
+
+			fakeClient.requests.length = 0;
+			const snapshot = await connection.getInitialSnapshot();
+			expect(fakeClient.requests.map((request) => request.type)).not.toContain("get_messages");
+			expect(snapshot.state.activeSessionId).toBe("active-1");
+
+			await connection.flushBufferedSessionEvents();
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toMatchObject({ type: "session_event" });
+
+			emitSequencedSessionEvent(fakeClient, "active-1", DEFERRAL_EVENT_BASE_SEQUENCE + 1);
+			await nextMessageLoopTurn();
+			expect(delivered).toHaveLength(2);
+		} finally {
+			await connection.dispose();
+		}
+	});
+
+	it("delivers events live and refetches when deferral is not opted in", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		try {
+			await connection.attach();
+			const delivered: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				delivered.push(event);
+			});
+
+			emitSequencedSessionEvent(fakeClient, "active-1", DEFERRAL_EVENT_BASE_SEQUENCE);
+			await nextMessageLoopTurn();
+			expect(delivered).toHaveLength(1);
+
+			fakeClient.requests.length = 0;
+			await connection.getInitialSnapshot();
+			expect(fakeClient.requests.map((request) => request.type)).toContain("get_messages");
+		} finally {
+			await connection.dispose();
+		}
+	});
+
+	it("drops deferred events a resync snapshot already contains", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			deferSessionEvents: true,
+		});
+		try {
+			await connection.attach();
+			const delivered: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				delivered.push(event);
+			});
+
+			const resyncSequence = DEFERRAL_EVENT_BASE_SEQUENCE + 2;
+			emitSequencedSessionEvent(fakeClient, "active-1", DEFERRAL_EVENT_BASE_SEQUENCE);
+			emitSequencedSessionEvent(fakeClient, "active-1", DEFERRAL_EVENT_BASE_SEQUENCE + 1);
+			fakeClient.emitMessage({
+				type: "session_resynced",
+				activeSessionId: "active-1",
+				snapshot: createAttachResult("active-1", undefined, undefined, resyncSequence).snapshot,
+				meta: {
+					id: `active-1:${resyncSequence}`,
+					protocol: DAEMON_PROTOCOL_INFO,
+					activeSessionId: "active-1",
+					sequence: resyncSequence,
+					cursor: { generation: "generation-active-1", sequence: resyncSequence },
+					emittedAt: "2026-01-01T00:00:00.000Z",
+				},
+			} satisfies DaemonOutbound);
+			await nextMessageLoopTurn();
+			expect(delivered.filter((event) => event.type === "session_resynced")).toHaveLength(1);
+			expect(delivered.filter((event) => event.type === "session_event")).toEqual([]);
+
+			await connection.flushBufferedSessionEvents();
+			expect(delivered.filter((event) => event.type === "session_event")).toEqual([]);
+
+			emitSequencedSessionEvent(fakeClient, "active-1", resyncSequence + 1);
+			await connection.flushBufferedSessionEvents();
+			expect(delivered.filter((event) => event.type === "session_event")).toHaveLength(1);
+		} finally {
+			await connection.dispose();
+		}
+	});
+
+	it("falls back to the re-fetch path when deferral overflows", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			deferSessionEvents: true,
+		});
+		try {
+			await connection.attach();
+			const delivered: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				delivered.push(event);
+			});
+
+			// MAX_DEFERRED_SESSION_EVENTS is 1000: the 1001st event overflows,
+			// drops the buffer, and resumes live delivery.
+			for (let index = 0; index <= 1000; index++) {
+				emitSequencedSessionEvent(fakeClient, "active-1", DEFERRAL_EVENT_BASE_SEQUENCE + index);
+			}
+			await nextMessageLoopTurn();
+			expect(delivered).toHaveLength(1);
+
+			fakeClient.requests.length = 0;
+			await connection.getInitialSnapshot();
+			expect(fakeClient.requests.map((request) => request.type)).toContain("get_messages");
+
+			emitSequencedSessionEvent(fakeClient, "active-1", DEFERRAL_EVENT_BASE_SEQUENCE + 1001);
+			await nextMessageLoopTurn();
+			expect(delivered).toHaveLength(2);
+		} finally {
+			await connection.dispose();
+		}
+	});
+});

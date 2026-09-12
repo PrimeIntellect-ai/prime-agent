@@ -1800,7 +1800,11 @@ describe("InteractiveMode connection events", () => {
 		expect((fakeThis as unknown as { activeBashComponent: unknown }).activeBashComponent).toBe(activeBashComponent);
 		expect(
 			(fakeThis as unknown as { renderSessionContext: ReturnType<typeof vi.fn> }).renderSessionContext,
-		).toHaveBeenCalledWith(expect.anything(), { clearChat: true, updateFooter: true });
+		).toHaveBeenCalledWith(expect.anything(), {
+			clearChat: true,
+			updateFooter: true,
+			limitTranscript: true,
+		});
 		expect(startAssistantStreamingMessage).toHaveBeenCalledWith(streamingMessage);
 		expect((fakeThis as unknown as { turnStartedAt: number | undefined }).turnStartedAt).toBe(100);
 		expect((fakeThis as unknown as { workingStartedAt: number | undefined }).workingStartedAt).toBe(100);
@@ -2163,7 +2167,7 @@ describe("InteractiveMode transcript rebuild", () => {
 
 		await fakeThis.rebuildChatFromMessages();
 
-		expect(fakeThis.renderSessionContext).toHaveBeenCalledWith(context, { clearChat: true });
+		expect(fakeThis.renderSessionContext).toHaveBeenCalledWith(context, { clearChat: true, limitTranscript: true });
 		expect(fakeThis.chatContainer.children).toEqual([rebuiltChild]);
 		expect(fakeThis.chatContainer.children).not.toContain(staleChild);
 	});
