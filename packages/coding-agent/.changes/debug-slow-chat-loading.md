@@ -1,0 +1,6 @@
+- Sped up opening long live sessions: events arriving during the snapshot load now replay incrementally instead of each one triggering a full transcript re-transfer.
+- Capped resync and settings-rebuild transcript renders to the recent tail, matching the initial open.
+- Stopped the chat from re-fetching the whole transcript when a live event lands between attach and the first render.
+- Fixed event ordering and snapshot recovery when opening busy sessions, switching sessions, or reconnecting, while preserving live updates in headless modes.
+- Fixed snapshot transfers continuing after a session closes.
+- Limited memory retained by live updates while a slow snapshot loads.

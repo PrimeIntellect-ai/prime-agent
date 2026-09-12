@@ -62,6 +62,20 @@ describe("truncateToWidth", () => {
 });
 
 describe("visibleWidth", () => {
+	it("keeps controls and non-ASCII characters out of the printable ASCII fast path", () => {
+		for (const [text, width] of [
+			["", 0],
+			[" ~", 2],
+			["abc\n", 3],
+			["a\x1fb", 2],
+			["a\x7fb", 2],
+			["abc\t", 6],
+			["a界b", 4],
+		] as const) {
+			assert.strictEqual(visibleWidth(text), width);
+		}
+	});
+
 	it("counts tabs inline and skips ANSI inline", () => {
 		assert.strictEqual(visibleWidth("\t\x1b[31m界\x1b[0m"), 5);
 	});

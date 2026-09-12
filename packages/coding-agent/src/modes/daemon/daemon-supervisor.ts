@@ -202,6 +202,14 @@ const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 // an abandoned prepare leaves the daemon permanently fenced with workers stopped.
 const UPDATE_RESTART_PREPARE_DEADLINE_MS = 100_000;
 const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
+/**
+ * Upper bound on relay payloads deferred per client and session while a
+ * snapshot stream is active. Deferral spans one stream (seconds), so overflow
+ * means a pathologically slow client; the supervisor then falls back to a
+ * catch-up snapshot instead of buffering without limit.
+ */
+const MAX_DEFERRED_SESSION_PAYLOADS = 256;
+const MAX_DEFERRED_SESSION_BYTES = 8 * 1024 * 1024;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
 // ~2.5 minutes of probing: each round is one 5s defer recheck plus a ~11s three-delay probe pass.
 const MAX_DEFERRED_RECOVERY_ROUNDS = 10;
@@ -2074,6 +2082,7 @@ export class DaemonSupervisor {
 					this.write(client, success(command.id, command.type, attached.result));
 					this.detachClient(client, command.activeSessionId);
 					releaseSnapshotReservation();
+					this.releaseDeferredSessionPayloads(client, targetActiveSessionId, true);
 					return undefined;
 				} catch (error) {
 					releaseTranscript?.();
@@ -2081,6 +2090,7 @@ export class DaemonSupervisor {
 						this.detachClient(client, targetActiveSessionId);
 					}
 					releaseSnapshotReservation();
+					this.releaseDeferredSessionPayloads(client, targetActiveSessionId, targetWasAttached);
 					throw error;
 				}
 			}
@@ -5358,24 +5368,31 @@ export class DaemonSupervisor {
 		releaseSnapshotReservation = this.reserveSnapshotStream(client, result.activeSessionId),
 	): Promise<void> {
 		const stream = result.snapshotStream;
-		const releaseTranscript = retainedTranscriptRelease ?? transcript.retain();
-		if (!stream || client.socket.destroyed) {
+		const signal = client.snapshotTransferAbortControllers?.get(result.activeSessionId)?.signal;
+		if (!stream || client.socket.destroyed || signal?.aborted) {
 			releaseSnapshotReservation();
-			releaseTranscript();
+			retainedTranscriptRelease?.();
+			this.releaseDeferredSessionPayloads(client, result.activeSessionId, false);
 			return;
 		}
+		const releaseTranscript = retainedTranscriptRelease ?? transcript.retain();
 		const { messages: _messages, ...snapshotHeader } = result.snapshot;
+		let snapshotDelivered = false;
 		try {
 			if (
-				!(await this.writeSnapshotRecord(client, {
-					type: "session_snapshot_begin",
-					activeSessionId: result.activeSessionId,
-					snapshotId: stream.id,
-					snapshot: snapshotHeader,
-					messageCount: stream.messageCount,
-					targetChunkBytes: stream.targetChunkBytes,
-					purpose,
-				}))
+				!(await this.writeSnapshotRecord(
+					client,
+					{
+						type: "session_snapshot_begin",
+						activeSessionId: result.activeSessionId,
+						snapshotId: stream.id,
+						snapshot: snapshotHeader,
+						messageCount: stream.messageCount,
+						targetChunkBytes: stream.targetChunkBytes,
+						purpose,
+					},
+					signal,
+				))
 			) {
 				return;
 			}
@@ -5383,8 +5400,9 @@ export class DaemonSupervisor {
 			while (true) {
 				let chunk: Buffer | undefined;
 				try {
-					chunk = await transcript.waitForChunk(chunkCount);
+					chunk = await transcript.waitForChunk(chunkCount, signal);
 				} catch (error) {
+					if (signal?.aborted) return;
 					const streamError = error instanceof Error ? error : new Error(String(error));
 					this.failWorkerSnapshotCache(worker, result.activeSessionId, streamError, false, stream.id);
 					throw streamError;
@@ -5392,29 +5410,39 @@ export class DaemonSupervisor {
 				if (!chunk) {
 					break;
 				}
-				if (!(await this.writeSnapshotBuffer(client, chunk))) {
+				if (!(await this.writeSnapshotBuffer(client, chunk, signal))) {
 					return;
 				}
 				chunkCount++;
 			}
-			await this.writeSnapshotRecord(client, {
-				type: "session_snapshot_end",
-				activeSessionId: result.activeSessionId,
-				snapshotId: stream.id,
-				chunkCount,
-				lastEventSequence: result.lastEventSequence,
-				lastEventCursor: result.lastEventCursor,
-			});
+			snapshotDelivered = await this.writeSnapshotRecord(
+				client,
+				{
+					type: "session_snapshot_end",
+					activeSessionId: result.activeSessionId,
+					snapshotId: stream.id,
+					chunkCount,
+					lastEventSequence: result.lastEventSequence,
+					lastEventCursor: result.lastEventCursor,
+				},
+				signal,
+			);
 		} catch (error) {
+			if (signal?.aborted) return;
 			const streamError = error instanceof Error ? error : new Error(String(error));
 			if (!client.socket.destroyed) {
 				try {
-					const delivered = await this.writeSnapshotRecord(client, {
-						type: "session_snapshot_failed",
-						activeSessionId: result.activeSessionId,
-						snapshotId: stream.id,
-						error: streamError.message,
-					});
+					const delivered = await this.writeSnapshotRecord(
+						client,
+						{
+							type: "session_snapshot_failed",
+							activeSessionId: result.activeSessionId,
+							snapshotId: stream.id,
+							error: streamError.message,
+						},
+						signal,
+					);
+					if (signal?.aborted) return;
 					if (!delivered && !client.socket.destroyed) {
 						client.socket.destroy(streamError);
 					}
@@ -5424,12 +5452,25 @@ export class DaemonSupervisor {
 			}
 			throw streamError;
 		} finally {
+			if (
+				!snapshotDelivered &&
+				client.attachedActiveSessionIds.has(result.activeSessionId) &&
+				client.deferredSessionPayloads?.get(result.activeSessionId)?.payloads.length
+			) {
+				this.queueCatchup(client, result.activeSessionId, "resync");
+			}
 			releaseSnapshotReservation();
 			releaseTranscript();
+			this.releaseDeferredSessionPayloads(client, result.activeSessionId, snapshotDelivered);
 		}
 	}
 
 	private reserveSnapshotStream(client: DaemonSocketClient, activeSessionId: string): () => void {
+		if (!client.snapshotActiveSessionIds?.has(activeSessionId)) {
+			client.deferredSessionPayloadsDropped?.delete(activeSessionId);
+			client.snapshotTransferAbortControllers ??= new Map();
+			client.snapshotTransferAbortControllers.set(activeSessionId, new AbortController());
+		}
 		client.snapshotStreaming = true;
 		client.snapshotActiveSessionIds ??= new Set();
 		client.snapshotActiveSessionIds.add(activeSessionId);
@@ -5450,11 +5491,9 @@ export class DaemonSupervisor {
 			} else {
 				client.snapshotActiveSessionCounts?.delete(activeSessionId);
 				client.snapshotActiveSessionIds?.delete(activeSessionId);
+				client.snapshotTransferAbortControllers?.delete(activeSessionId);
 			}
 			client.snapshotStreaming = (client.snapshotActiveSessionIds?.size ?? 0) > 0;
-			if (!client.snapshotStreaming) {
-				client.backpressured = false;
-			}
 			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
 				void this.catchUpClient(client).catch((error) =>
 					this.log(`Failed to catch up client ${client.id}: ${String(error)}`),
@@ -5463,17 +5502,26 @@ export class DaemonSupervisor {
 		};
 	}
 
-	private writeSnapshotRecord(client: DaemonSocketClient, message: DaemonOutbound): Promise<boolean> {
-		return this.writeSnapshotBuffer(client, Buffer.from(serializeJsonLine(message)));
+	private writeSnapshotRecord(
+		client: DaemonSocketClient,
+		message: DaemonOutbound,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		return this.writeSnapshotBuffer(client, Buffer.from(serializeJsonLine(message)), signal);
 	}
 
-	private async writeSnapshotBuffer(client: DaemonSocketClient, buffer: Uint8Array): Promise<boolean> {
-		if (client.socket.destroyed) {
+	private async writeSnapshotBuffer(
+		client: DaemonSocketClient,
+		buffer: Uint8Array,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		if (client.socket.destroyed || signal?.aborted) {
 			return false;
 		}
 		if (this.writeSerialized(client, buffer)) {
 			return true;
 		}
+		if (signal?.aborted) return false;
 		return new Promise<boolean>((resolveDrain) => {
 			let settled = false;
 			const finish = (value: boolean) => {
@@ -5484,6 +5532,7 @@ export class DaemonSupervisor {
 				client.socket.off("drain", onDrain);
 				client.socket.off("close", onClose);
 				client.socket.off("error", onClose);
+				signal?.removeEventListener("abort", onClose);
 				resolveDrain(value);
 			};
 			const onDrain = () => finish(true);
@@ -5491,6 +5540,7 @@ export class DaemonSupervisor {
 			client.socket.once("drain", onDrain);
 			client.socket.once("close", onClose);
 			client.socket.once("error", onClose);
+			signal?.addEventListener("abort", onClose, { once: true });
 		});
 	}
 
@@ -5504,6 +5554,7 @@ export class DaemonSupervisor {
 			}
 			client.catchupActiveSessionIds?.delete(resolvedId);
 			client.catchupPurposes?.delete(resolvedId);
+			client.deferredSessionPayloadsDropped?.delete(resolvedId);
 			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
 			void this.syncWorkerExtensionUi(resolvedId);
 			void this.evictEmptySessionOnLastDetach(resolvedId);
@@ -5912,10 +5963,33 @@ export class DaemonSupervisor {
 			if (outboundType === "extension_ui_request" && !client.supportsExtensionUi) {
 				continue;
 			}
-			if (client.snapshotActiveSessionIds?.has(activeSessionId)) {
-				this.queueCatchup(client, activeSessionId, outboundType === "session_replaced" ? "replacement" : "resync");
+			if (outboundType === "session_closed") {
+				client.snapshotTransferAbortControllers?.get(activeSessionId)?.abort();
+				this.discardDeferredSessionPayloads(client, activeSessionId);
+				client.catchupActiveSessionIds?.delete(activeSessionId);
+				client.catchupPurposes?.delete(activeSessionId);
+				this.writeSerialized(client, publicPayload);
 				continue;
 			}
+			if (client.snapshotActiveSessionIds?.has(activeSessionId)) {
+				// A replacement swaps the session wholesale; buffered payloads from
+				// the old session must never replay, so fall back to a replacement
+				// catch-up snapshot.
+				if (outboundType === "session_replaced") {
+					this.discardDeferredSessionPayloads(client, activeSessionId);
+					client.deferredSessionPayloadsDropped ??= new Set();
+					client.deferredSessionPayloadsDropped.add(activeSessionId);
+					this.queueCatchup(client, activeSessionId, "replacement");
+					continue;
+				}
+				if (this.deferSessionPayload(client, activeSessionId, publicPayload)) {
+					continue;
+				}
+				// The deferral buffer overflowed: fall back to a full resync.
+				this.queueCatchup(client, activeSessionId, "resync");
+				continue;
+			}
+			if (client.deferredSessionPayloadsDropped?.has(activeSessionId)) continue;
 			if (client.backpressured === true) {
 				this.queueCatchup(client, activeSessionId, outboundType === "session_replaced" ? "replacement" : "resync");
 				continue;
@@ -5983,6 +6057,72 @@ export class DaemonSupervisor {
 		client.catchupPurposes ??= new Map();
 		if (purpose === "replacement" || !client.catchupPurposes.has(activeSessionId)) {
 			client.catchupPurposes.set(activeSessionId, purpose);
+		}
+	}
+
+	/** Hold relayed payloads until the snapshot finishes; false requests a catch-up. */
+	private deferSessionPayload(client: DaemonSocketClient, activeSessionId: string, payload: Buffer): boolean {
+		if (client.deferredSessionPayloadsDropped?.has(activeSessionId)) {
+			return false;
+		}
+		const deferred = client.deferredSessionPayloads?.get(activeSessionId) ?? { payloads: [], bytes: 0 };
+		if (
+			deferred.payloads.length >= MAX_DEFERRED_SESSION_PAYLOADS ||
+			deferred.bytes + payload.byteLength > MAX_DEFERRED_SESSION_BYTES
+		) {
+			// A catch-up snapshot supersedes the buffered payloads.
+			client.deferredSessionPayloadsDropped ??= new Set();
+			client.deferredSessionPayloadsDropped.add(activeSessionId);
+			this.discardDeferredSessionPayloads(client, activeSessionId);
+			return false;
+		}
+		deferred.payloads.push(payload);
+		deferred.bytes += payload.byteLength;
+		client.deferredSessionPayloads ??= new Map();
+		client.deferredSessionPayloads.set(activeSessionId, deferred);
+		return true;
+	}
+
+	/** Replay payloads deferred during a completed snapshot stream, in order. */
+	private flushDeferredSessionPayloads(client: DaemonSocketClient, activeSessionId: string): void {
+		const payloads = client.deferredSessionPayloads?.get(activeSessionId)?.payloads;
+		if (!payloads || payloads.length === 0) {
+			return;
+		}
+		client.deferredSessionPayloads?.delete(activeSessionId);
+		if (!client.attachedActiveSessionIds.has(activeSessionId)) return;
+		for (const payload of payloads) {
+			if (client.socket.destroyed) {
+				return;
+			}
+			if (client.backpressured || !this.writeSerialized(client, payload)) {
+				this.queueCatchup(client, activeSessionId, "resync");
+				return;
+			}
+		}
+	}
+
+	private discardDeferredSessionPayloads(client: DaemonSocketClient, activeSessionId: string): void {
+		client.deferredSessionPayloads?.delete(activeSessionId);
+	}
+
+	/**
+	 * Flush or discard the payloads withheld during a snapshot stream. Only the
+	 * last active stream for the session owns them; an overlapping stream
+	 * replays them after it completes.
+	 */
+	private releaseDeferredSessionPayloads(
+		client: DaemonSocketClient,
+		activeSessionId: string,
+		delivered: boolean,
+	): void {
+		if (client.snapshotActiveSessionIds?.has(activeSessionId)) {
+			return;
+		}
+		if (delivered) {
+			this.flushDeferredSessionPayloads(client, activeSessionId);
+		} else {
+			this.discardDeferredSessionPayloads(client, activeSessionId);
 		}
 	}
 

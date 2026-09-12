@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentStatus } from "../../core/session-manager.js";
-import type { DaemonClientCapability, DaemonEventSequence, DaemonExtensionUIResponse } from "./daemon-protocol.js";
+import type {
+	DaemonClientCapability,
+	DaemonEventSequence,
+	DaemonExtensionUIResponse,
+	DaemonOutbound,
+} from "./daemon-protocol.js";
 import { formatSessionDisplayId, matchesSessionIdSuffix } from "./daemon-session-id.js";
 
 export interface DaemonSocketClient {
@@ -26,6 +31,21 @@ export interface DaemonSocketClient {
 	transport?: "jsonl" | "private-framed";
 	snapshotStreaming?: boolean;
 	snapshotActiveSessionIds?: Set<string>;
+	/**
+	 * Session frames withheld while a snapshot stream is active for that session
+	 * (worker side: DaemonOutbound). They replay when the stream completes
+	 * instead of each one triggering a full snapshot re-transfer.
+	 */
+	deferredSessionOutbounds?: Map<string, { frames: DaemonOutbound[]; bytes: number }>;
+	/** Worker-side sessions whose deferral buffer overflowed this stream. */
+	deferredSessionFramesDropped?: Set<string>;
+	/**
+	 * Relay payloads withheld while a snapshot stream is active for that session
+	 * (supervisor side: serialized buffers). Same replay-on-completion policy.
+	 */
+	deferredSessionPayloads?: Map<string, { payloads: Buffer[]; bytes: number }>;
+	/** Supervisor-side sessions whose deferral buffer overflowed this stream. */
+	deferredSessionPayloadsDropped?: Set<string>;
 	snapshotActiveSessionCounts?: Map<string, number>;
 	snapshotTransferAbortControllers?: Map<string, AbortController>;
 	snapshotTransferTails?: Map<string, Promise<void>>;
