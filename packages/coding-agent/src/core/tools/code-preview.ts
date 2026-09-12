@@ -458,7 +458,7 @@ function scanPythonStringLiteral(code: string, start: number, quote: string, raw
 	return { value, end: i, closed: false, unsupportedEscape };
 }
 
-/** Keep source-line positions while excluding lines that begin inside string literals. */
+/** Keep source-line positions while masking multiline-string continuations. */
 export function pythonStatementLines(code: string): string[] {
 	const lines = code.split("\n");
 	let line = 0;
@@ -474,8 +474,14 @@ export function pythonStatementLines(code: string): string[] {
 		if (char === '"' || char === "'") {
 			const quote = code.startsWith(char.repeat(3), i) ? char.repeat(3) : char;
 			const scan = scanPythonStringLiteral(code, i + quote.length, quote, true);
+			const startLine = line;
 			for (let end = i; end < scan.end; end++) {
 				if (code[end] === "\n") lines[++line] = "";
+			}
+			if (scan.closed && line > startLine) {
+				const column = scan.end - code.lastIndexOf("\n", scan.end - 1) - 1;
+				const newline = code.indexOf("\n", scan.end);
+				lines[line] = " ".repeat(column) + code.slice(scan.end, newline < 0 ? undefined : newline);
 			}
 			i = scan.end;
 			continue;
@@ -502,7 +508,7 @@ function extractBashSkillCommand(code: string): string | undefined {
 
 export function previewPythonCode(code: string): CodePreview {
 	const rawLines = code.split("\n");
-	const lines = pythonStatementLines(code);
+	const lines = pythonStatementLines(code).map((line) => line.replace(/^(\s*);\s*/, "$1"));
 	const paths = pythonPathVars(lines);
 	let bestIndex: number | undefined;
 	let bestScore = -1;
@@ -517,8 +523,10 @@ export function previewPythonCode(code: string): CodePreview {
 
 	if (bestIndex !== undefined && bestScore >= 0) {
 		const previewIndex = pythonPreviewIndex(lines, bestIndex);
-		// Extract from the original tail because a literal command may span lines.
-		const bashCommand = extractBashSkillCommand(rawLines.slice(previewIndex).join("\n"));
+		// Keep the original tail for multiline commands, excluding any preceding string continuation.
+		const bashCommand = extractBashSkillCommand(
+			[lines[previewIndex], ...rawLines.slice(previewIndex + 1)].join("\n"),
+		);
 		if (bashCommand) {
 			return previewBashCommand(bashCommand);
 		}

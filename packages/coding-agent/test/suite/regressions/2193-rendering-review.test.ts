@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import stripAnsi from "strip-ansi";
 import { afterEach, describe, expect, test } from "vitest";
+import { previewPythonCode, pythonStatementLines } from "../../../src/core/tools/code-preview.js";
 import { AssistantMessageComponent } from "../../../src/modes/interactive/components/assistant-message.js";
 import { IPythonCellComponent } from "../../../src/modes/interactive/components/ipython-cell.js";
 import {
@@ -12,6 +13,7 @@ import {
 import {
 	initTheme,
 	loadThemeFromPath,
+	preloadCodeHighlighter,
 	preloadThemeValidator,
 	setThemeInstance,
 	theme,
@@ -25,6 +27,38 @@ afterEach(() => {
 });
 
 describe("conversation rendering review regressions", () => {
+	test.each(['"""', "'''", 'r"""', 'f"""'])(
+		"preserves statements after a multiline string closes (%s)",
+		async (opener) => {
+			initTheme("dark");
+			await preloadCodeHighlighter();
+			const closer = opener.slice(-3);
+			const code = `body = ${opener}draft\n!not_a_command\n${closer}; publish(body)\n!echo done`;
+			const statements = pythonStatementLines(code);
+			expect(statements).toHaveLength(4);
+			expect(statements[1]).toBe("");
+			expect(statements[2]?.trim()).toBe("; publish(body)");
+			expect(statements[3]).toBe("!echo done");
+			expect(previewPythonCode(code)).toEqual({ language: "python", text: "publish(body)" });
+			expect(previewPythonCode(`body = ${opener}draft\n${closer}; bash('git status')`)).toEqual({
+				language: "bash",
+				text: "git status",
+			});
+			expect(pythonStatementLines(`body = ${opener}draft\nnot closed`)[1]).toBe("");
+			const rows = new IPythonCellComponent({
+				code,
+				expanded: true,
+				argsComplete: true,
+				details: { status: "ok" },
+			}).render(120);
+			const stringRow = rows.find((row) => stripAnsi(row).includes("!not_a_command"))!;
+			const commandRow = rows.find((row) => stripAnsi(row).trim() === "!echo done")!;
+			expect(stringRow).toContain(theme.getFgAnsi("syntaxString"));
+			expect(commandRow).toContain(theme.getFgAnsi("bashMode"));
+			expect(rows.some((row) => stripAnsi(row).includes(`${closer}; publish(body)`))).toBe(true);
+		},
+	);
+
 	test("loads custom themes without mdBody before and after validator initialization", async () => {
 		harness = await createHarness();
 		const custom = JSON.parse(
