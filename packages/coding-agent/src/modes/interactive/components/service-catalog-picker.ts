@@ -172,7 +172,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 					service.toolCount !== undefined ? `Connected · ${service.toolCount} tools` : "Connected",
 				);
 			case "pending":
-				return theme.fg("warning", "Verifying");
+				return theme.fg("warning", "Needs verification");
 			case "error":
 				return theme.fg("error", "Reconnect");
 			case "setup_required":

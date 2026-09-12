@@ -317,6 +317,13 @@ function httpConnectionStatus(options: {
 	if (usesOAuth) {
 		const credential = oauthSnapshot(authStorage, connectionId);
 		if (!credential.exists) {
+			if (record?.status === "pending" && record.attemptId === undefined) {
+				return {
+					status: "not_connected",
+					setupHint: "Account settings kept. Connect to finish setup, or remove the account.",
+					record,
+				};
+			}
 			// A record without credentials is a stale connection, not a fresh one.
 			if (record) {
 				return {
@@ -492,7 +499,10 @@ export function accountStatesFor(options: {
 			}),
 		);
 	}
-	return accounts.filter((account) => account.status !== "not_connected");
+	return accounts.filter(
+		(account) =>
+			account.status !== "not_connected" || options.connectionStore.get(account.connectionId) !== undefined,
+	);
 }
 
 function catalogServiceView(
@@ -528,11 +538,19 @@ function catalogServiceView(
 	}
 	const anyConnected = accounts.some((account) => account.status === "connected");
 	const anyPending = accounts.some((account) => account.status === "pending");
-	const aggregate = anyConnected ? "connected" : anyPending ? "pending" : "error";
+	const aggregate = anyConnected
+		? "connected"
+		: anyPending
+			? "pending"
+			: accounts.some((account) => account.status === "error")
+				? "error"
+				: "not_connected";
 	const newestConnected = accounts
 		.filter((account) => account.status === "connected")
 		.sort((left, right) => (right.verifiedAt ?? 0) - (left.verifiedAt ?? 0))[0];
-	const errorHint = accounts.find((account) => account.status === "error")?.setupHint;
+	const errorHint =
+		accounts.find((account) => account.status === "error")?.setupHint ??
+		accounts.find((account) => account.status === "not_connected")?.setupHint;
 	const setupHint = service.pinnedFromRecord
 		? "This service's catalog source is unavailable; its connection keeps the pinned definition."
 		: errorHint;
@@ -542,7 +560,7 @@ function catalogServiceView(
 		connectionStatus: aggregate,
 		// Error rows keep the Reconnect action; connected/pending rows manage
 		// their accounts through the picker instead of re-logging in.
-		connectable: aggregate === "error",
+		connectable: aggregate === "error" || aggregate === "not_connected",
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		// Every account id, so the account picker can manage each one.
@@ -598,7 +616,11 @@ function userServerView(
 		usesOAuth,
 		source: "user",
 		connectionIds:
-			config.enabled === false || status.status === "error" || status.status === "not_connected" ? [] : [name],
+			connectionStore.get(name) !== undefined
+				? [name]
+				: config.enabled === false || status.status === "error" || status.status === "not_connected"
+					? []
+					: [name],
 		...(status.setupHint ? { setupHint: status.setupHint } : {}),
 	};
 }

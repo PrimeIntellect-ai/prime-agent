@@ -312,10 +312,26 @@ describe("ProviderAuthFlows", () => {
 		expect(result.status).toBe("success");
 	});
 
-	it("an unresolvable MCP login falls back to the raw dialog (internal detail)", async () => {
+	it("an MCP login without a guarded host hook fails closed without opening a dialog", async () => {
+		const { host, overlays, errorMessages } = createHost(
+			AuthStorage.create(authJsonPath, { usePrimeCliConfig: false }),
+		);
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "mcp:my--service",
+			name: "My service",
+			authType: "oauth",
+			category: "service",
+		});
+		expect(result).toEqual({ status: "failed" });
+		expect(overlays).toEqual([]);
+		expect(errorMessages.join("\n")).toContain("guarded host");
+	});
+
+	it("an unresolvable MCP login reports an explicit failure — never a raw-dialog fallback", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
 		const { host } = createHost(authStorage);
-		(host as { onMcpAccountLogin?: unknown }).onMcpAccountLogin = vi.fn(async () => undefined);
+		const delegated = vi.fn(async () => ({ status: "failed" as const }));
+		(host as { onMcpAccountLogin?: unknown }).onMcpAccountLogin = delegated;
 
 		const result = await new ProviderAuthFlows(host).loginProvider({
 			id: "mcp:acme",
@@ -324,8 +340,10 @@ describe("ProviderAuthFlows", () => {
 			category: "service",
 		});
 
-		// The hook declined (unresolvable): the raw dialog path ran against the
-		// missing provider and failed honestly — never a crash.
+		// The hook OWNS every MCP login (including unresolvable names): its
+		// explicit failed outcome is the route's result — no raw dialog ever
+		// writes the final credential directly.
+		expect(delegated).toHaveBeenCalledWith("mcp:acme");
 		expect(result).toEqual({ status: "failed" });
 	});
 

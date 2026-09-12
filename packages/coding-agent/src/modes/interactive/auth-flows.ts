@@ -107,12 +107,12 @@ export interface ProviderAuthFlowsHost {
 	/**
 	 * OWNS the MCP account login for the generic /login service options and
 	 * the config menu: the host runs the ONE guarded connect operation
-	 * (claim under the store lock, staged OAuth, guarded finalize) instead
-	 * of the raw provider dialog writing the final credential directly.
-	 * Return undefined ONLY when the account cannot be resolved — the raw
-	 * dialog stays an internal detail for unresolvable providers.
+	 * (claim under the store lock, staged OAuth, guarded finalize). There
+	 * is NO raw-dialog fallback for MCP ids — an unresolvable provider
+	 * reports an explicit configuration-required outcome; only the guarded
+	 * operation's private staging dialog exists.
 	 */
-	onMcpAccountLogin?(providerId: string): Promise<AuthenticationResult | undefined>;
+	onMcpAccountLogin?(providerId: string): Promise<AuthenticationResult>;
 	/**
 	 * OWNS the entire MCP account logout for the generic /logout route: the
 	 * host must perform verified credential deletion AND pending-attempt
@@ -196,10 +196,10 @@ export class ProviderAuthFlows {
 			// operation BEFORE any dialog writes the final credential: a
 			// concurrent logout can cancel the attempt and a late callback
 			// can never reactivate or clobber the account.
-			if (providerOption.id.startsWith("mcp:") && this.host.onMcpAccountLogin) {
-				return this.host
-					.onMcpAccountLogin(providerOption.id)
-					.then((handled) => handled ?? this.showLoginDialog(providerOption.id, providerOption.name, kind));
+			if (providerOption.id.startsWith("mcp:")) {
+				if (this.host.onMcpAccountLogin) return this.host.onMcpAccountLogin(providerOption.id);
+				this.host.showError("MCP account login requires the guarded host connection flow.");
+				return Promise.resolve({ status: "failed" });
 			}
 			return this.showLoginDialog(providerOption.id, providerOption.name, kind);
 		}

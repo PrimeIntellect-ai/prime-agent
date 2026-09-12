@@ -83,6 +83,37 @@ describe("service catalog views", () => {
 		});
 	});
 
+	it("keeps a cancelled account shell visible and connectable without implying an active login", async () => {
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "cancelled",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		await store.releaseClaim({ connectionId: "acme", attemptId: "cancelled" });
+		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
+		const [view] = buildPluginViews(options);
+		expect(view).toMatchObject({ connectionStatus: "not_connected", connectable: true, connectionIds: ["acme"] });
+		expect(view.setupHint).toContain("settings kept");
+		expect(buildConnectionViews(options)[0]).toMatchObject({ connectionId: "acme", status: "not_connected" });
+		const userOptions = {
+			...options,
+			userServers: { acme: { type: "http" as const, url: "https://mcp.acme.test/mcp", oauth: true } },
+		};
+		expect(buildPluginViews(userOptions)[0]).toMatchObject({
+			connectionIds: ["acme"],
+			connectionStatus: "not_connected",
+			connectable: true,
+		});
+		expect(buildConnectionViews(userOptions)[0]).toMatchObject({ connectionId: "acme", status: "not_connected" });
+		expect(await store.claimConnectionId({ connectionId: "acme", attemptId: "retry" })).toBe(true);
+		expect(await store.removeAccount({ connectionId: "acme", authCleanup: () => false })).toBe("removed");
+	});
+
 	it("never reports connected from a stored token alone: bound grants without a verified record stay pending", () => {
 		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
 		const views = buildPluginViews({

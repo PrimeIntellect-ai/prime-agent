@@ -845,14 +845,14 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Atomic full-identity compare-and-swap move for guarded MCP logins that
-	 * REPLACE an existing grant (reconnect): move `stagedProvider`'s
-	 * credential to `provider` ONLY when the on-disk value at `provider` is
-	 * exactly `expectedOld` (or absent, for fresh accounts) — read and written
-	 * under the backend's own file lock. A credential written by anyone else is
-	 * never clobbered; the result reports "occupied" so callers can refuse and
-	 * preserve the newer account. Returns the exact credential that moved (for
-	 * full-identity rollback).
+	 * Atomic full-identity compare-and-swap move for guarded MCP logins:
+	 * move `stagedProvider`'s credential to `provider` ONLY when the on-disk
+	 * value at `provider` is exactly `expectedOld` — the comparison INCLUDES
+	 * absence (both present, or both absent) — read and written under the
+	 * backend's own file lock. A changed OR deleted grant refuses ("occupied"):
+	 * a logged-out account is never reactivated and a newer writer is never
+	 * clobbered. Returns the exact credential that moved (for full-identity
+	 * rollback).
 	 */
 	replaceStagedCredential(
 		stagedProvider: string,
@@ -866,7 +866,11 @@ export class AuthStorage {
 		const outcome = this.storage.withLock<ReplaceOutcome>((current) => {
 			const currentData = this.parseStorageData(current);
 			const existing = currentData[provider];
-			if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(expectedOld)) {
+			// FULL-IDENTITY comparison INCLUDING absence: the on-disk value must
+			// be exactly `expectedOld` (both present, or both absent). A
+			// changed OR deleted grant refuses — never reactivate a logged-out
+			// account, never clobber a newer writer.
+			if (JSON.stringify(existing) !== JSON.stringify(expectedOld)) {
 				return { result: { status: "occupied" as const } };
 			}
 			const staged = currentData[stagedProvider];

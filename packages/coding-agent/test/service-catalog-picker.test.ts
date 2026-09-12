@@ -58,6 +58,17 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(output).toContain("Reconnect");
 	});
 
+	it("labels stored unverified credentials as needing verification, not an active login", () => {
+		const picker = new ServiceCatalogPickerComponent(
+			[viewFixture({ connectionStatus: "pending" })],
+			() => {},
+			() => {},
+		);
+		const output = stripAnsi(picker.render(120).join("\n"));
+		expect(output).toContain("Needs verification");
+		expect(output).not.toContain("Verifying");
+	});
+
 	it("filters cards as the user types and restores the full list when cleared", () => {
 		const picker = new ServiceCatalogPickerComponent(
 			[

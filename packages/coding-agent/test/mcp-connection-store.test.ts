@@ -103,6 +103,27 @@ describe("McpConnectionStore concurrency", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
+	it("directory preparation failure settles reserve and claim without later ghost mutations", async () => {
+		const blockedDirectory = join(tempDir, "blocked");
+		const blockedPath = join(blockedDirectory, "connections.json");
+		writeFileSync(blockedDirectory, "not a directory");
+		const failed = McpConnectionStore.open(blockedPath);
+		const reserve = failed.reserveConnectionId(
+			recordFixture("fresh", { status: "pending", attemptId: "denied-reserve" }),
+		);
+		const claim = failed.claimConnectionId({ connectionId: "existing", attemptId: "denied-claim" });
+		expect(await reserve).toBe(false);
+		expect(await claim).toBe(false);
+		rmSync(blockedDirectory);
+		const writer = McpConnectionStore.open(blockedPath);
+		writer.upsert(recordFixture("existing"));
+		await writer.flush();
+		await failed.flush();
+		const fresh = McpConnectionStore.open(blockedPath);
+		expect(fresh.get("fresh")).toBeUndefined();
+		expect(fresh.get("existing")?.attemptId).toBeUndefined();
+	});
+
 	it("two instances never lose each other's records on interleaved flushes", async () => {
 		const client = McpConnectionStore.open(path);
 		const daemon = McpConnectionStore.open(path);

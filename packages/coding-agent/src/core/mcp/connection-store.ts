@@ -532,18 +532,6 @@ export class McpConnectionStore {
 	 */
 	flush(): Promise<void> {
 		const run = async (): Promise<void> => {
-			mkdirSync(dirname(this.path), { recursive: true });
-			// Exclusive, non-truncating create. The previous exists-then-write-empty
-			// could rename an empty file over records another process had just
-			// written; "wx" only ever creates a brand-new inode, so a first writer
-			// can never wipe anything. Content always comes from the locked
-			// read-modify-write below, so the winner writes nothing here.
-			try {
-				closeSync(openSync(this.path, "wx", 0o600));
-				chmodSync(this.path, 0o600);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			}
 			let lockCompromised = false;
 			let lockCompromisedError: Error | undefined;
 			// Splice THIS run's batch BEFORE acquiring the lock: a lock-acquisition
@@ -554,6 +542,18 @@ export class McpConnectionStore {
 			const operations = this.pendingOps.splice(0);
 			let release: Awaited<ReturnType<typeof lockfile.lock>>;
 			try {
+				mkdirSync(dirname(this.path), { recursive: true });
+				// Exclusive, non-truncating create. The previous exists-then-write-empty
+				// could rename an empty file over records another process had just
+				// written; "wx" only ever creates a brand-new inode, so a first writer
+				// can never wipe anything. Content always comes from the locked
+				// read-modify-write below, so the winner writes nothing here.
+				try {
+					closeSync(openSync(this.path, "wx", 0o600));
+					chmodSync(this.path, 0o600);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+				}
 				release = await lockfile.lock(realpathIfPresentSync(this.path), {
 					retries: {
 						retries: 10,

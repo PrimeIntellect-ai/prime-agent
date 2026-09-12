@@ -2871,6 +2871,47 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(fakeThis.editor.getValue()).toBe("draft [paste #1] [image #2]");
 	});
 
+	test.each(["cancelled", "failed", "success"] as const)(
+		"MCP config-menu login propagates guarded %s without a second activation",
+		async (status) => {
+			const provider: AuthSelectorProvider = {
+				id: "mcp:my--service",
+				name: "My service",
+				authType: "oauth",
+				category: "service",
+			};
+			const { fakeThis, getSelector } = createSelectorHarness({ connectionModels: [], providerOptions: [provider] });
+			const result: AuthenticationResult =
+				status === "success"
+					? { status, providerId: provider.id, providerName: provider.name, authType: "oauth", kind: "service" }
+					: { status };
+			const byName = vi.fn(async () => ({ resolved: true, result }));
+			const reload = vi.fn(async () => true);
+			const queue = vi.fn();
+			Object.assign(fakeThis, {
+				connectMcpAccountByName: byName,
+				handleReloadCommand: reload,
+				queueMcpActivationForNextBoundary: queue,
+				isAgentStreaming: () => true,
+				isAgentCompacting: () => false,
+			});
+			const flows = selectorPrototype.createAuthFlows.call(fakeThis);
+			flows.getLoginProviderOptions = () => [provider];
+			fakeThis.createAuthFlows = () => flows;
+			const pending = fakeThis.showConfigurationMenu("mcp-connections");
+			getSelector().handleInput("\r");
+			await flushAsyncWork();
+			expect(byName).toHaveBeenCalledWith("my--service");
+			expect(reload).not.toHaveBeenCalled();
+			expect(queue).not.toHaveBeenCalled();
+			if (status !== "success") {
+				expect(fakeThis.closeConfigurationMenu).toBeDefined();
+				getSelector().handleInput("\x1b");
+			}
+			await pending;
+		},
+	);
+
 	test("authenticates an unavailable model provider before applying the model", async () => {
 		const model = createModel("openai", "gpt-5.5");
 		const provider: AuthSelectorProvider = { id: "openai", name: "OpenAI", authType: "api_key" };
