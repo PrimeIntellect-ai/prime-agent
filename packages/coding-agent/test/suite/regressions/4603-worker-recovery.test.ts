@@ -1053,6 +1053,8 @@ describe("ENG-4603 worker recovery convergence", () => {
 		writeFileSync(lsofPath, '#!/bin/sh\nexec "$ENG_4603_SYSTEM_LSOF" -nP -F pn -U -a -p "$ENG_4603_LSOF_PIDS"\n', {
 			mode: 0o700,
 		});
+		// Keep discovery on the PID-scoped lsof wrapper even when the host has ss.
+		writeFileSync(join(paths.agentDir, "ss"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
 		const lsofEnvironment = {
 			ENG_4603_LSOF_PIDS: `${predecessor.child.pid},${successor.child.pid},${workerPid}`,
 			ENG_4603_SYSTEM_LSOF: systemLsofPath,

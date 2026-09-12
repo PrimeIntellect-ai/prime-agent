@@ -401,7 +401,7 @@ describe("ENG-4606 update restart coordinator", () => {
 				`Coordinator failed: ${status.message}\npredecessor stderr:\n${predecessor.stderr}\npredecessor stdout:\n${predecessor.stdout}`,
 			);
 		}
-		expect(status).toMatchObject({
+		expect(status, JSON.stringify(status, null, 2)).toMatchObject({
 			phase: "complete",
 			socketPath: paths.socketPath,
 			counts: { total: 1, restored: 1, resumed: 1, failed: 0 },
