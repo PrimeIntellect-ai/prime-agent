@@ -3,7 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildCatalog, type ClaudeFixture, type OpenAiFixture, type Overrides } from "../scripts/import-mcp-catalog.js";
+import {
+	type AuditFile,
+	buildCatalog,
+	type ClaudeFixture,
+	type OpenAiFixture,
+	type Overrides,
+} from "../scripts/import-mcp-catalog.js";
 import {
 	BUILTIN_MCP_CATALOG,
 	getCatalogEntry,
@@ -26,11 +32,17 @@ import { getOAuthProvider, resetOAuthProviders } from "../src/utils/oauth/index.
 const catalogDir = path.resolve(__dirname, "../mcp-catalog");
 const rawCatalogJson = fs.readFileSync(path.resolve(__dirname, "../src/mcp/catalog.json"), "utf8");
 
-function loadInputs(): { openAi: OpenAiFixture; claude: ClaudeFixture; overrides: Overrides } {
+function loadInputs(): {
+	openAi: OpenAiFixture;
+	claude: ClaudeFixture;
+	overrides: Overrides;
+	audit: AuditFile;
+} {
 	return {
 		openAi: JSON.parse(fs.readFileSync(path.join(catalogDir, "sources/openai-plugins.json"), "utf8")),
 		claude: JSON.parse(fs.readFileSync(path.join(catalogDir, "sources/claude-plugins-official.json"), "utf8")),
 		overrides: JSON.parse(fs.readFileSync(path.join(catalogDir, "overrides.json"), "utf8")),
+		audit: JSON.parse(fs.readFileSync(path.join(catalogDir, "audit/metadata-audit.json"), "utf8")),
 	};
 }
 
@@ -151,15 +163,26 @@ describe("MCP service catalog", () => {
 		walk(JSON.parse(rawCatalogJson));
 	});
 
-	it("marks known setup blockers honestly and imports no scope lists", () => {
+	it("marks known setup blockers honestly and imports no reviewed scope lists", () => {
 		const slack = getServiceCatalogEntry("slack");
 		expect(slack?.auth).toMatchObject({ strategy: "oauth", clientRegistration: "pre-registered" });
 		expect(slack?.setup.status).toBe("requires-setup");
 		expect(slack?.setup.reason).toMatch(/dynamic client registration/i);
-		for (const server of ["gmail", "google-calendar", "google-drive", "airtable", "shopify"]) {
+		// Placeholder-only upstream blocks were cleared with evidence: Airtable
+		// now Connects with OAuth DCR, Shopify stays attemptable with honest unknowns.
+		for (const server of ["airtable", "shopify"]) {
+			const entry = getServiceCatalogEntry(server);
+			expect(entry?.setup.status).toBe("ready");
+			expect(entry?.setup.reason).toBeUndefined();
+			expect(entry?.setup.reason ?? "").not.toMatch(/placeholder/i);
+		}
+		// Genuine docs-anchored restrictions are kept, with research-anchored reasons.
+		for (const server of ["gmail", "google-calendar", "google-drive"]) {
 			const entry = getServiceCatalogEntry(server);
 			expect(entry?.setup.status).toBe("requires-setup");
-			expect(entry?.setup.reason).toMatch(/placeholder/i);
+			expect(entry?.setup.requirement).toBe("registered-client");
+			expect(entry?.setup.reason).toMatch(/Developer Preview/i);
+			expect(entry?.setup.reason ?? "").not.toMatch(/placeholder/i);
 		}
 		for (const server of ["gmail", "google-calendar", "google-drive"]) {
 			const entry = getServiceCatalogEntry(server);
@@ -172,6 +195,92 @@ describe("MCP service catalog", () => {
 			"GITHUB_PAT_TOKEN",
 			"GITHUB_PERSONAL_ACCESS_TOKEN",
 		]);
+	});
+
+	it("classifies readiness from committed audit evidence without blanket bans", () => {
+		// Ready entries are never downgraded by missing evidence, and a metadata GET
+		// is never proof of live OAuth: oauth-ready requires audience-coherent
+		// DCR evidence; everything else stays honestly unknown.
+		const airtable = getServiceCatalogEntry("airtable");
+		expect(airtable?.setup.status).toBe("ready");
+		expect(airtable?.setup.readiness).toBe("unknown");
+		expect(airtable?.auth.metadata?.dynamicClientRegistration).toBe(true);
+		expect(airtable?.auth.metadata?.note).toMatch(/audience/);
+		expect(airtable?.auth.alternatives).toEqual([
+			expect.objectContaining({ kind: "api-key", readiness: "user-setup" }),
+		]);
+		const shopify = getServiceCatalogEntry("shopify");
+		expect(shopify?.setup.status).toBe("ready");
+		expect(shopify?.setup.readiness).toBe("unknown");
+		expect(shopify?.auth.metadata?.status).toBe("unavailable");
+		const linear = getServiceCatalogEntry("linear");
+		expect(linear?.setup.readiness).toBe("oauth-ready");
+		expect(linear?.auth.metadata?.dynamicClientRegistration).toBe(true);
+		expect(linear?.auth.metadata?.note).toBeUndefined();
+		// Notion: engine audience handling approved but not landed.
+		const notion = getServiceCatalogEntry("notion");
+		expect(notion?.setup.readiness).toBe("unknown");
+		expect(notion?.auth.metadata?.note).toMatch(/audience handling is approved but not yet landed/);
+		// CIMD alone is never oauth-ready (no Prime-controlled identity deployed).
+		const synthflow = getServiceCatalogEntry("synthflow");
+		expect(synthflow?.setup.readiness).toBe("unknown");
+		// Prime-restricted: registered-client requirements stay hard, research-anchored.
+		for (const server of ["gmail", "google-calendar", "google-drive", "slack", "mongodb-atlas"]) {
+			const entry = getServiceCatalogEntry(server);
+			expect(entry?.setup.status).toBe("requires-setup");
+			expect(entry?.setup.readiness).toBe("prime-restricted");
+			expect(entry?.setup.requirement).toBe("registered-client");
+		}
+		const mongo = getServiceCatalogEntry("mongodb-atlas");
+		expect(mongo?.auth.alternatives).toEqual([
+			expect.objectContaining({ kind: "service-account", readiness: "user-setup" }),
+		]);
+		// Documented user-supplied credentials stay primary; OAuth alternatives stay unknown.
+		const render = getServiceCatalogEntry("render");
+		expect(render?.setup.status).toBe("requires-setup");
+		expect(render?.setup.readiness).toBe("user-setup");
+		expect(render?.setup.requirement).toBe("api-key");
+		expect(render?.auth.alternatives).toEqual([expect.objectContaining({ kind: "oauth", readiness: "unknown" })]);
+		const github = getServiceCatalogEntry("github");
+		expect(github?.setup.readiness).toBe("user-setup");
+		expect(github?.setup.requirement).toBe("bearer-token");
+		expect(github?.auth.alternatives).toEqual([expect.objectContaining({ kind: "oauth", readiness: "unknown" })]);
+		for (const field of github?.setup.fields ?? []) {
+			expect(field.kind).toBe("bearer-token");
+		}
+		// Tenant, transport and local-runtime requirements are classified.
+		expect(getServiceCatalogEntry("cockroachdb")?.setup.requirement).toBe("tenant");
+		expect(getServiceCatalogEntry("jfrog")?.setup.requirement).toBe("tenant");
+		expect(getServiceCatalogEntry("paypal-sandbox")?.setup.requirement).toBe("unsupported-transport");
+		expect(getServiceCatalogEntry("aikido")?.setup.requirement).toBe("local-runtime");
+		expect(getServiceCatalogEntry("zoom")?.setup.requirement).toBe("bearer-token");
+		// Readiness is informational-only data; the raw counts are in the file.
+		const committed = JSON.parse(rawCatalogJson);
+		expect(
+			committed.counts.readinessOauthReady +
+				committed.counts.readinessUserSetup +
+				committed.counts.readinessPrimeRestricted +
+				committed.counts.readinessUnknown,
+		).toBe(committed.counts.total);
+		expect(committed.counts.metadataAvailable + committed.counts.metadataUnavailable).toBe(
+			committed.counts.http + committed.counts.sse,
+		);
+		// Metadata evidence blocks exist only on audited remote entries, all stamped
+		// with the same committed audit snapshot date.
+		const fetchedAt = loadInputs().audit.fetchedAt;
+		for (const entry of SERVICE_CATALOG) {
+			if (entry.transport.type === "http" || entry.transport.type === "sse") {
+				expect(entry.auth.metadata?.status).toBeDefined();
+				expect(entry.auth.metadata?.fetchedAt).toBe(fetchedAt);
+			} else {
+				expect(entry.auth.metadata).toBeUndefined();
+			}
+		}
+		// Observational AS scope universes are recorded but never imported as
+		// reviewed scopes, and no entry ever auto-requests them.
+		for (const entry of SERVICE_CATALOG) {
+			expect(entry.auth.reviewedScopes).toBeUndefined();
+		}
 	});
 
 	it("flags stdio, sse and tenant-URL adapters as not one-click", () => {
@@ -251,7 +360,7 @@ describe("MCP service catalog", () => {
 
 	it("rebuilds the committed catalog byte-for-byte from the pinned fixtures", async () => {
 		const inputs = loadInputs();
-		const { catalog } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides);
+		const { catalog } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
 		const rebuilt = JSON.parse(JSON.stringify(catalog));
 		const committed = JSON.parse(rawCatalogJson);
 		expect(rebuilt).toEqual(committed);
@@ -259,13 +368,13 @@ describe("MCP service catalog", () => {
 		const { CATALOG_DATA } = await import("../src/mcp/catalog.data.generated.js");
 		expect(JSON.parse(JSON.stringify(CATALOG_DATA))).toEqual(committed);
 		// Deterministic: a second run produces identical output.
-		const again = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides);
+		const again = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
 		expect(JSON.stringify(again.catalog)).toBe(JSON.stringify(catalog));
 	});
 
 	it("counts the sources before dedupe and records every exclusion", () => {
 		const inputs = loadInputs();
-		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides);
+		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
 		expect(inputs.openAi.plugins).toHaveLength(25);
 		expect(inputs.claude.plugins).toHaveLength(118);
 		expect(report.sources["openai-plugins"].remoteServers).toBe(25);
@@ -434,6 +543,40 @@ describe("Local MCP service sources", () => {
 			entries: [validLocalEntry({ verification: { status: "metadata-reviewed" } })],
 		});
 		expect(() => loadLocalServiceCatalog(reviewed)).toThrow(/local sources are always unverified/);
+		// Audit-derived readiness and evidence are Prime assessments; a local file
+		// cannot self-assert them. setup.requirement stays allowed as honest
+		// self-description of the user's own service.
+		const readiness = writeLocal(dir, "readiness.json", {
+			version: 1,
+			entries: [validLocalEntry({ setup: { status: "ready", readiness: "oauth-ready" } })],
+		});
+		expect(() => loadLocalServiceCatalog(readiness)).toThrow(/cannot claim setup.readiness/);
+		const withRequirement = writeLocal(dir, "requirement.json", {
+			version: 1,
+			entries: [
+				validLocalEntry({
+					setup: { status: "requires-setup", reason: "needs an api key", requirement: "api-key" },
+				}),
+			],
+		});
+		expect(loadLocalServiceCatalog(withRequirement).entries[0].setup.requirement).toBe("api-key");
+		const evidence = writeLocal(dir, "evidence.json", {
+			version: 1,
+			entries: [
+				validLocalEntry({
+					auth: {
+						strategy: "oauth",
+						clientRegistration: "dynamic",
+						metadata: {
+							status: "available",
+							sourceUrls: ["https://mcp.docs.acme.example.com/mcp"],
+							fetchedAt: "2026-09-12",
+						},
+					},
+				}),
+			],
+		});
+		expect(() => loadLocalServiceCatalog(evidence)).toThrow(/cannot carry auth.alternatives or auth.metadata/);
 	});
 
 	it("refuses special files instead of hanging on them", () => {

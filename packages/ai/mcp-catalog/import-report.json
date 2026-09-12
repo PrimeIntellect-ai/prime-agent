@@ -248,11 +248,17 @@
 		"httpTemplate": 5,
 		"sse": 1,
 		"stdio": 32,
-		"ready": 80,
-		"requiresSetup": 60,
+		"ready": 82,
+		"requiresSetup": 58,
 		"metadataReviewed": 2,
 		"oauthStrategy": 14,
 		"apiKeyStrategy": 32,
-		"mergedFromBothSources": 16
+		"mergedFromBothSources": 16,
+		"readinessOauthReady": 62,
+		"readinessUserSetup": 53,
+		"readinessPrimeRestricted": 5,
+		"readinessUnknown": 20,
+		"metadataAvailable": 94,
+		"metadataUnavailable": 9
 	}
 }
