@@ -81,7 +81,7 @@ The kernel is created lazily on first Python REPL use. Python resolution is:
 
 The managed environment includes Python 3.11, `prime-agent-runtime`, `dill`, and the default Python packages. A bootstrap marker detects stale environments.
 
-Startup spawns `python -m rlm.repl` and exchanges newline-delimited JSON over stdio: the runtime announces itself with a single `ready` event, then requests and events flow one JSON object per line (see `prime-agent-runtime/src/rlm/repl.md`).
+Startup spawns `python -P -m rlm.repl` in the session working directory and exchanges newline-delimited JSON over stdio. The `-P` (safe path) flag keeps that directory off `sys.path`, so a checkout cannot shadow `rlm`, `dill`, or stdlib modules; project code is not importable from the kernel and runs through the project's own environment instead. The same flag is passed to the bootstrap's `python -c "import ..."` probes. The runtime announces itself with a single `ready` event, then requests and events flow one JSON object per line (see `prime-agent-runtime/src/rlm/repl.md`).
 
 The manager owns the child process and a bounded stderr tail. Shutdown sends a `shutdown` request, waits for the process to exit, and terminates it as a fallback. Persistent sessions may snapshot the kernel namespace into their session artifact directory for revival.
 
