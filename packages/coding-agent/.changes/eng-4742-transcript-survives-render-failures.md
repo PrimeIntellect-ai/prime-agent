@@ -1,0 +1,2 @@
+- Fixed re-opened sessions rendering an empty transcript until the next message when a transient control-plane failure interrupted the initial render.
+- Fixed one unrenderable message aborting the whole transcript rebuild during a session resync.
