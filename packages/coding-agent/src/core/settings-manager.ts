@@ -741,16 +741,6 @@ export class SettingsManager {
 		return typeof value === "string" ? value : undefined;
 	}
 
-	setAuxiliaryModel(selector: string | undefined): void {
-		if (selector === undefined || selector.length === 0) {
-			delete this.globalSettings.auxiliaryModel;
-		} else {
-			this.globalSettings.auxiliaryModel = selector;
-		}
-		this.markModified("auxiliaryModel");
-		this.save();
-	}
-
 	getRecentModels(): string[] {
 		return this.settings.recentModels ?? [];
 	}
