@@ -743,6 +743,7 @@ export class DaemonSupervisor {
 	private scheduledWakeTimer?: ReturnType<typeof setTimeout>;
 	private scheduledWakeRecompute?: Promise<void>;
 	private scheduledWakeRecomputeQueued = false;
+	private heartbeatRefresh?: Promise<DaemonResponse>;
 	private readonly scheduledWakeFailures = new Map<string, number>();
 
 	constructor(
@@ -938,7 +939,7 @@ export class DaemonSupervisor {
 				pendingCancelRoots.add(canonicalSessionPath(context.sessionFile));
 			}
 		}
-		const infos = await this.rlmSpawnLedger().family();
+		const infos = await this.rlmSpawnLedger().family(SESSION_SCHEDULED_JOBS_FILENAME);
 		const infoByPath = new Map(infos.map((info) => [canonicalSessionPath(info.path), info] as const));
 		const storeBySessionId = new Map<string, AgentCronJobStore>();
 		const infoBySessionId = new Map<string, SessionInfo>();
@@ -2289,56 +2290,68 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter(
-					(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
-				);
-				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
-				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
-					await Promise.all(
-						workers.map(async (worker) => {
-							if (worker.client && worker.descriptor.lifecycle === "ready") {
-								const response = await this.forwardToWorker(worker, command, 5000).catch((error: unknown) =>
-									failure(command.id, command.type, error, serializeDaemonError(error)),
-								);
-								if (response.success) {
-									const snapshot = heartbeatsFromResponse(response);
-									worker.heartbeatSnapshot = snapshot;
-									worker.heartbeatSnapshotStale = false;
-									return { heartbeats: snapshot };
-								}
-								this.log(`Could not list heartbeats from a worker: ${response.error}`);
-								if (worker.heartbeatSnapshot === undefined || worker.heartbeatSnapshotStale === true) {
-									return { response };
-								}
+				// Clients share the in-flight refresh; settled results are never cached.
+				if (!this.heartbeatRefresh) {
+					const refresh = (async (): Promise<DaemonResponse> => {
+						const workers = [...this.workers.values()].filter(
+							(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
+						);
+						const heartbeats = new Map<string, AgentConnectionHeartbeat>();
+						const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
+							await Promise.all(
+								workers.map(async (worker) => {
+									if (worker.client && worker.descriptor.lifecycle === "ready") {
+										const response = await this.forwardToWorker(worker, command, 5000).catch(
+											(error: unknown) =>
+												failure(command.id, command.type, error, serializeDaemonError(error)),
+										);
+										if (response.success) {
+											const snapshot = heartbeatsFromResponse(response);
+											if (this.heartbeatRefresh === refresh) {
+												worker.heartbeatSnapshot = snapshot;
+												worker.heartbeatSnapshotStale = false;
+											}
+											return { heartbeats: snapshot };
+										}
+										this.log(`Could not list heartbeats from a worker: ${response.error}`);
+										if (worker.heartbeatSnapshot === undefined || worker.heartbeatSnapshotStale === true) {
+											return { response };
+										}
+									}
+									if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
+										return { heartbeats: worker.heartbeatSnapshot };
+									}
+									const state =
+										worker.descriptor.lifecycle === "ready" ? "disconnected" : worker.descriptor.lifecycle;
+									const error = new Error(`Cannot list heartbeats while session worker is ${state}`);
+									return { response: failure(command.id, command.type, error, serializeDaemonError(error)) };
+								}),
+							);
+						const failed = snapshots.find((snapshot) => snapshot.response)?.response;
+						if (failed) {
+							return failed;
+						}
+						for (const snapshot of snapshots) {
+							for (const heartbeat of snapshot.heartbeats ?? []) {
+								heartbeats.set(heartbeat.job.id, heartbeat);
 							}
-							if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
-								return { heartbeats: worker.heartbeatSnapshot };
-							}
-							const state =
-								worker.descriptor.lifecycle === "ready" ? "disconnected" : worker.descriptor.lifecycle;
-							const error = new Error(`Cannot list heartbeats while session worker is ${state}`);
-							return { response: failure(command.id, command.type, error, serializeDaemonError(error)) };
-						}),
-					);
-				const failed = snapshots.find((snapshot) => snapshot.response)?.response;
-				if (failed) {
-					return failed;
-				}
-				for (const snapshot of snapshots) {
-					for (const heartbeat of snapshot.heartbeats ?? []) {
-						heartbeats.set(heartbeat.job.id, heartbeat);
-					}
-				}
-				// Passivated sessions keep their armed heartbeats; no worker can list them.
-				for (const { job, info } of await this.collectPassiveScheduledJobs()) {
-					if (!isHeartbeatCronJob(job) || heartbeats.has(job.id)) continue;
-					heartbeats.set(job.id, {
-						job,
-						...(info.name !== undefined ? { sessionName: info.name } : {}),
-						...(info.firstMessage !== undefined ? { firstMessage: info.firstMessage } : {}),
+						}
+						// Passivated sessions keep their armed heartbeats; no worker can list them.
+						for (const { job, info } of await this.collectPassiveScheduledJobs()) {
+							if (!isHeartbeatCronJob(job) || heartbeats.has(job.id)) continue;
+							heartbeats.set(job.id, {
+								job,
+								...(info.name !== undefined ? { sessionName: info.name } : {}),
+								...(info.firstMessage !== undefined ? { firstMessage: info.firstMessage } : {}),
+							});
+						}
+						return success(command.id, "heartbeats_list", { heartbeats: [...heartbeats.values()] });
+					})().finally(() => {
+						if (this.heartbeatRefresh === refresh) this.heartbeatRefresh = undefined;
 					});
+					this.heartbeatRefresh = refresh;
 				}
-				return success(command.id, "heartbeats_list", { heartbeats: [...heartbeats.values()] });
+				return responseWithId(await this.heartbeatRefresh, command.id);
 			}
 			case "heartbeat_manage": {
 				const cachedWorker = [...this.workers.values()].find((worker) =>
@@ -6733,6 +6746,7 @@ export class DaemonSupervisor {
 	}
 
 	private broadcastHeartbeatsChanged(): void {
+		this.heartbeatRefresh = undefined;
 		this.scheduleScheduledSessionWakeRecompute();
 		for (const client of this.clients) {
 			this.write(client, { type: "heartbeats_changed" });
