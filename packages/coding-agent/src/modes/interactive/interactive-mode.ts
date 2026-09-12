@@ -13,7 +13,8 @@ import {
 	supportsFastMode,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
-import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
+import { BUILTIN_MCP_CATALOG, createMcpOAuthProvider } from "@earendil-works/pi-ai/mcp";
+import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -101,10 +102,14 @@ import { type McpConnectionRecord, McpConnectionStore } from "../../core/mcp/con
 import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
 	buildPluginViews,
-	defaultServiceCatalogProvider,
 	type McpPluginView,
+	type McpServiceDescriptor,
+	mcpCredentialKey,
+	nextMcpConnectionId,
+	resolveServiceCatalogWithDiagnostics,
 	verifyMcpConnection,
 } from "../../core/mcp/service-catalog.js";
+
 import {
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
 	bashOutputToText,
@@ -8838,14 +8843,26 @@ export class InteractiveMode {
 		await store.flush().catch(() => undefined);
 	}
 
-	/** External-service cards for the /plugins picker (client-side view of the shared files). */
-	private buildServiceCatalogViews(): McpPluginView[] {
-		return buildPluginViews({
-			services: defaultServiceCatalogProvider()(),
+	/**
+	 * External-service cards for the /plugins picker. Uses the SAME resolver the
+	 * host uses (built-in catalog + declared local sources from settings) and
+	 * re-reads the shared connection records from disk, so the UI never renders
+	 * a stale in-process cache.
+	 */
+	private buildServiceCatalogViews(): {
+		services: readonly McpServiceDescriptor[];
+		views: McpPluginView[];
+		diagnostics: string[];
+	} {
+		const resolution = resolveServiceCatalogWithDiagnostics(this.settingsManager.getMcpCatalogSources());
+		this.getMcpConnectionStore().load();
+		const views = buildPluginViews({
+			services: resolution.descriptors,
 			userServers: this.settingsManager.getGlobalMcpServers(),
 			authStorage: this.modelRegistry.authStorage,
 			connectionStore: this.getMcpConnectionStore(),
 		});
+		return { services: resolution.descriptors, views, diagnostics: resolution.diagnostics };
 	}
 
 	private async handlePluginsCommand(args: string | undefined): Promise<void> {
@@ -8853,8 +8870,12 @@ export class InteractiveMode {
 	}
 
 	private async showServiceCatalogPicker(initialSearch?: string): Promise<void> {
-		const services = defaultServiceCatalogProvider()();
-		const views = this.buildServiceCatalogViews();
+		const { services, views, diagnostics } = this.buildServiceCatalogViews();
+		// Wiring problems (a declared local source that vanished, duplicate ids,
+		// truncation) are visible, never silent.
+		if (diagnostics.length > 0) {
+			this.showWarning(`Service catalog notice: ${diagnostics[0]}`);
+		}
 		// Connect targets keyed by serviceId; user-declared servers resolve from settings.
 		const userServers = this.settingsManager.getGlobalMcpServers() ?? {};
 		const targets = new Map<
@@ -8910,6 +8931,10 @@ export class InteractiveMode {
 				(service) => {
 					void (async () => {
 						close();
+						if (service.connectionIds.length > 0) {
+							await this.showAccountPickerForService(service, targets.get(service.serviceId));
+							return;
+						}
 						await this.connectServiceFromPicker(service, targets.get(service.serviceId));
 					})();
 				},
@@ -8917,6 +8942,77 @@ export class InteractiveMode {
 				{ getRows: () => this.ui.terminal.rows, ...(initialSearch ? { initialSearch } : {}) },
 			);
 			handle = showFullPaneOverlay(this.ui, picker, 78);
+		});
+	}
+
+	/**
+	 * Account management for a service with at least one existing account: the
+	 * same picker lists the accounts (each row reconnects or disconnects THAT
+	 * connection id) plus an "Add another account" row that allocates a new id
+	 * and runs a fresh login — a second account never overwrites the first.
+	 */
+	private async showAccountPickerForService(
+		service: McpPluginView,
+		target: { url?: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean } | undefined,
+	): Promise<void> {
+		const store = this.getMcpConnectionStore();
+		const catalogServiceId = service.serviceId;
+		const accountCards: McpPluginView[] = [];
+		for (const connectionId of service.connectionIds) {
+			const record = store.get(connectionId);
+			if (!record) continue;
+			accountCards.push({
+				...service,
+				serviceId: record.connectionId,
+				label: `${service.label} · ${record.connectionId}`,
+				connectionIds: [record.connectionId],
+				connectionStatus: record.status,
+				connectable: record.status === "error",
+				...(record.toolCount !== undefined ? { toolCount: record.toolCount } : {}),
+			});
+		}
+		accountCards.push({
+			...service,
+			label: "Add another account",
+			connectionIds: [],
+			connectionStatus: "not_connected",
+			connectable: true,
+			setupHint: undefined,
+		});
+		await new Promise<void>((resolve) => {
+			let handle: OverlayHandle | undefined;
+			let settled = false;
+			const close = () => {
+				if (settled) return;
+				settled = true;
+				handle?.hide();
+				this.ui.requestRender();
+				resolve();
+			};
+			const picker = new ServiceCatalogPickerComponent(
+				accountCards,
+				(card) => {
+					void (async () => {
+						close();
+						if (card.connectionIds.length === 0) {
+							await this.connectServiceFromPicker(card, target, {
+								catalogServiceId,
+								addAccount: true,
+							});
+							return;
+						}
+						await this.connectServiceFromPicker(card, target, { catalogServiceId });
+					})();
+				},
+				() => close(),
+				{
+					getRows: () => this.ui.terminal.rows,
+					title: `Accounts — ${service.label}`,
+					subtitle: "Enter reconnects or disconnects that account; the last row adds another.",
+					hideSearch: true,
+				},
+			);
+			handle = showFullPaneOverlay(this.ui, picker, 60);
 		});
 	}
 
@@ -8932,6 +9028,7 @@ export class InteractiveMode {
 					name?: string;
 			  }
 			| undefined,
+		options: { catalogServiceId?: string; addAccount?: boolean } = {},
 	): Promise<void> {
 		if (target?.transport === "stdio" && target.name) {
 			const serverName = target.name;
@@ -8975,19 +9072,37 @@ export class InteractiveMode {
 			this.showStatus(`${service.label} cannot be connected automatically in this build.`);
 			return;
 		}
-		const result = await this.createAuthFlows().runMcpLogin(service.serviceId, service.label);
+		// Adding an account allocates a NEW connection id (its own credential key
+		// and record) and registers its provider before the login dialog.
+		let connectionId = service.serviceId;
+		if (options.addAccount === true) {
+			const store = this.getMcpConnectionStore();
+			const taken = (id: string) =>
+				store.get(id) !== undefined || this.modelRegistry.authStorage.get(mcpCredentialKey(id)) !== undefined;
+			connectionId = nextMcpConnectionId(service.serviceId, taken);
+			registerOAuthProvider(
+				createMcpOAuthProvider({
+					server: connectionId,
+					label: `${service.label} (${connectionId})`,
+					url: targetUrl,
+				}),
+			);
+		}
+		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
+		const result = await this.createAuthFlows().runMcpLogin(connectionId, loginLabel);
 		if (result.status !== "success") {
 			return;
 		}
-		// A stored token is not "Connected": verify with a real MCP handshake.
+		// A stored token is not "Connected": verify with a real MCP handshake. The
+		// record's serviceId stays the catalog id; the connectionId is the account.
 		let verification: McpConnectionRecord | undefined;
 		try {
 			verification = await verifyMcpConnection({
 				authStorage: this.modelRegistry.authStorage,
 				connectionStore: this.getMcpConnectionStore(),
-				connectionId: service.serviceId,
-				serviceId: service.serviceId,
-				label: service.label,
+				connectionId,
+				serviceId: options.catalogServiceId ?? service.serviceId,
+				label: loginLabel,
 				endpoint: targetUrl,
 				usesOAuth: target.usesOAuth,
 				...(target.bearerTokenEnvVar ? { bearerTokenEnvVar: target.bearerTokenEnvVar } : {}),
@@ -8995,16 +9110,17 @@ export class InteractiveMode {
 		} catch {
 			verification = undefined;
 		}
+		const accountPrefix = options.addAccount === true ? `Added account ${connectionId}. ` : "";
 		const message =
 			verification?.status === "connected"
-				? `Connected ${service.label}${
+				? `${accountPrefix}Connected ${loginLabel}${
 						verification.toolCount !== undefined ? ` (${verification.toolCount} tools verified)` : ""
 					}.`
 				: verification
-					? `Login succeeded for ${service.label}, but connection verification did not complete: ${formatMcpVerificationIssue(
+					? `${accountPrefix}Login succeeded for ${loginLabel}, but connection verification did not complete: ${formatMcpVerificationIssue(
 							verification.lastError,
 						)}. The connection is saved; retry from /plugins.`
-					: `Connected ${service.label}. (Verification result could not be saved.)`;
+					: `${accountPrefix}Connected ${loginLabel}. (Verification result could not be saved.)`;
 		await this.reloadAfterMcpChange(message);
 	}
 

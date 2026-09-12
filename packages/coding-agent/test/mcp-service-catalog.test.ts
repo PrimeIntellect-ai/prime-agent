@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { McpServiceEntry } from "@earendil-works/pi-ai/mcp";
 import { createMcpOAuthProvider } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -13,9 +14,12 @@ import {
 	decodePluginCursor,
 	defaultServiceCatalogProvider,
 	filterPluginViewsByStatus,
+	type McpPluginView,
 	type McpServiceDescriptor,
 	mcpCredentialKey,
+	nextMcpConnectionId,
 	pagePluginViews,
+	resolveMcpServiceCatalog,
 	searchPluginViews,
 	verifyMcpConnection,
 } from "../src/core/mcp/service-catalog.js";
@@ -211,7 +215,7 @@ describe("service catalog views", () => {
 		expect(views.every((view) => typeof view.setupHint === "string" && view.setupHint.length > 0)).toBe(true);
 	});
 
-	it("marks imported, metadata-unreviewed catalog entries as unverified while staying connectable", () => {
+	it("marks imported, metadata-unreviewed catalog entries as candidates: unverified, never one-click connectable", () => {
 		const views = buildPluginViews({
 			services: [serviceFixture({ metadataReviewed: false })],
 			userServers: undefined,
@@ -219,7 +223,8 @@ describe("service catalog views", () => {
 			connectionStore: store,
 		});
 		expect(views[0]?.unverified).toBe(true);
-		expect(views[0]?.connectable).toBe(true);
+		expect(views[0]?.connectable).toBe(false);
+		expect(views[0]?.setupHint).toContain("not been reviewed");
 	});
 
 	it("keeps user-declared servers working when the catalog adds the same id (user owns non-legacy ids)", () => {
@@ -471,13 +476,145 @@ describe("verifyMcpConnection", () => {
 });
 
 describe("defaultServiceCatalogProvider", () => {
-	it("derives descriptors from the built-in catalog with linear and notion", () => {
+	it("derives descriptors from the merged catalog: legacy built-ins plus the imported entries", () => {
 		const services = defaultServiceCatalogProvider()();
-		const ids = services.map((service) => service.serviceId).sort();
-		expect(ids).toEqual(["linear", "notion"]);
+		const ids = new Set(services.map((service) => service.serviceId));
+		// The merged catalog supersedes the legacy-only slice; the full entry set
+		// (140 today) still contains the reserved legacy built-ins.
+		expect(ids.has("linear")).toBe(true);
+		expect(ids.has("notion")).toBe(true);
+		expect(services.length).toBeGreaterThan(100);
+		const legacy = services.filter((service) => service.legacyBuiltin);
+		expect(legacy.map((service) => service.serviceId).sort()).toEqual(["linear", "notion"]);
+		// Imported entries are never reviewed by construction.
 		for (const service of services) {
-			expect(service.transport.type).toBe("http");
-			expect(service.legacyBuiltin).toBe(true);
+			if (!service.legacyBuiltin) {
+				expect(service.metadataReviewed).toBe(false);
+			}
 		}
+	});
+});
+
+describe("nextMcpConnectionId", () => {
+	it("keeps the service id for the first account and allocates -2, -3, ... after it", () => {
+		const taken = new Set<string>(["acme", "acme-2"]);
+		expect(nextMcpConnectionId("acme", (id) => taken.has(id))).toBe("acme-3");
+		taken.delete("acme");
+		expect(nextMcpConnectionId("acme", (id) => taken.has(id))).toBe("acme");
+		taken.add("acme");
+		taken.add("acme-3");
+		expect(nextMcpConnectionId("acme", (id) => taken.has(id))).toBe("acme-4");
+	});
+});
+
+describe("resolveMcpServiceCatalog", () => {
+	function bundledEntry(overrides: Record<string, unknown> = {}): McpServiceEntry {
+		return {
+			server: "brand",
+			service: "brand",
+			label: "Brand",
+			url: "https://brand.test/mcp",
+			aliases: ["brandapp"],
+			transport: { type: "http", url: "https://brand.test/mcp" },
+			auth: { strategy: "oauth", clientRegistration: "dynamic" },
+			setup: { status: "ready" },
+			verification: { status: "metadata-reviewed" },
+			legacyBuiltin: false,
+			...overrides,
+		} as McpServiceEntry;
+	}
+
+	function viewsFor(service: McpServiceDescriptor): McpPluginView[] {
+		return buildPluginViews({
+			services: [service],
+			userServers: undefined,
+			authStorage: AuthStorage.inMemory(),
+			connectionStore: McpConnectionStore.open(join(tmpdir(), `svc-resolver-${Date.now()}/mcp-connections.json`)),
+		});
+	}
+
+	it("maps the bundled catalog: metadata-reviewed OAuth entries stay one-click connectable", () => {
+		const resolution = resolveMcpServiceCatalog({ localSources: [] });
+		const linear = resolution.descriptors.find((service) => service.serviceId === "linear");
+		expect(linear).toMatchObject({
+			metadataReviewed: true,
+			legacyBuiltin: true,
+			authStrategy: "oauth",
+		});
+		if (linear) {
+			const views = viewsFor(linear);
+			expect(views[0]?.connectable).toBe(true);
+			expect(views[0]?.unverified ?? false).toBe(false);
+		}
+	});
+
+	it("keeps unreviewed imported OAuth entries as candidates — no one-click Connect", () => {
+		const resolution = resolveMcpServiceCatalog({ localSources: [] });
+		// A real bundled import: unverified by construction, OAuth, ready, http.
+		const imported = resolution.descriptors.find(
+			(service) =>
+				!service.legacyBuiltin &&
+				!service.metadataReviewed &&
+				service.authStrategy === "oauth" &&
+				service.setup.status === "ready" &&
+				service.transport.type === "http",
+		);
+		expect(imported).toBeDefined();
+		if (imported) {
+			const views = viewsFor(imported);
+			expect(views[0]?.connectable).toBe(false);
+			expect(views[0]?.setupHint).toContain("not been reviewed");
+		}
+	});
+
+	it("loads declared local sources after the built-ins with ~ expansion", () => {
+		const resolution = resolveMcpServiceCatalog({
+			localSources: ["~/local-services.json"],
+			loadLocal: (filePath: string) => {
+				expect(filePath).toBe(join(homedir(), "local-services.json"));
+				return {
+					entries: [
+						bundledEntry({
+							server: "mylocal",
+							verification: { status: "unverified" },
+						}),
+					],
+					path: filePath,
+				};
+			},
+		});
+		const local = resolution.descriptors.find((service) => service.serviceId === "mylocal");
+		expect(local?.localSource).toBe(true);
+		expect(local?.metadataReviewed).toBe(false);
+		// Trusted local entries connect through the login dialog's explicit approval.
+		if (local) {
+			const views = viewsFor(local);
+			expect(views[0]?.connectable).toBe(true);
+		}
+	});
+
+	it("surfaces declared-but-missing sources and duplicate ids as visible diagnostics", () => {
+		const resolution = resolveMcpServiceCatalog({
+			localSources: ["/missing/services.json", "/dup/a.json", "/dup/b.json"],
+			loadLocal: (filePath: string) => {
+				if (filePath === "/missing/services.json") return { entries: [], path: "" };
+				return { entries: [bundledEntry({ server: "dupe" })], path: filePath };
+			},
+		});
+		expect(resolution.diagnostics.some((line) => line.includes("not found: /missing/services.json"))).toBe(true);
+		expect(resolution.diagnostics.some((line) => line.includes('"dupe"'))).toBe(true);
+		expect(resolution.descriptors.filter((service) => service.serviceId === "dupe")).toHaveLength(1);
+	});
+
+	it("enforces a total cap with a visible diagnostic", () => {
+		const huge: McpServiceEntry[] = Array.from({ length: 600 }, (_, index) =>
+			bundledEntry({ server: `bulk-${index}` }),
+		);
+		const capped = resolveMcpServiceCatalog({
+			localSources: ["/huge.json"],
+			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
+		});
+		expect(capped.descriptors).toHaveLength(500);
+		expect(capped.diagnostics.some((line) => line.includes("capped at 500"))).toBe(true);
 	});
 });

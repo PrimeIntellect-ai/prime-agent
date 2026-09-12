@@ -13,6 +13,12 @@ import {
 export interface ServiceCatalogPickerOptions extends MenuViewportProvider {
 	/** Pre-filled search (e.g. from `/plugins notion`). */
 	initialSearch?: string;
+	/** Panel title override (e.g. the account picker reuses this component). */
+	title?: string;
+	/** Subtitle override; describes what Enter does in this listing. */
+	subtitle?: string;
+	/** Hide the search input (short account lists do not need it). */
+	hideSearch?: boolean;
 }
 
 const PREFERRED_VISIBLE_SERVICES = 9;
@@ -66,8 +72,8 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		this.onCancelCallback = onCancel;
 
 		const panel = new MenuPanel({
-			title: "External Services",
-			subtitle: "Search services; Enter connects, verifies, or disconnects.",
+			title: options.title ?? "External Services",
+			subtitle: options.subtitle ?? "Search services; Enter connects, verifies, or disconnects.",
 		});
 		this.addChild(panel);
 
@@ -76,8 +82,10 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			const service = this.filteredServices[this.selectedIndex];
 			if (service) this.onSelectCallback(service);
 		};
-		panel.addChild(this.searchInput);
-		panel.addChild(new Spacer(1));
+		if (!options.hideSearch) {
+			panel.addChild(this.searchInput);
+			panel.addChild(new Spacer(1));
+		}
 
 		this.listContainer = new MenuList({ compact: () => this.listLayout.compact });
 		panel.addChild(this.listContainer);

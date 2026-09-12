@@ -4,7 +4,10 @@
 // connection records; no secrets ever leave this module.
 
 import { createHash } from "node:crypto";
-import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { McpServiceEntry } from "@earendil-works/pi-ai/mcp";
+import { loadLocalServiceCatalog, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import { MCP_PROBE_ERRORS, probeMcpEndpoint } from "./connection-probe.js";
@@ -72,31 +75,150 @@ export interface McpServiceDescriptor {
 	metadataReviewed: boolean;
 	/** True for pre-catalog legacy built-ins; their ids stay reserved. */
 	legacyBuiltin: boolean;
+	/** True when the entry came from a user-declared local catalog file (trusted by construction). */
+	localSource?: boolean;
 }
 
 export type McpServiceCatalogProvider = () => readonly McpServiceDescriptor[];
 
+/** Result of merging the built-in catalog with declared local sources. */
+export interface McpCatalogResolution {
+	descriptors: readonly McpServiceDescriptor[];
+	/** Human-readable wiring diagnostics; visible, never silent. */
+	diagnostics: string[];
+}
+
 /**
- * Interim catalog source: the compiled-in built-in integrations. When the merged
- * JSON catalog resolver lands this swaps to it; the descriptor shape already
- * covers the merged entry contract.
+ * Map one merged-catalog entry onto the host descriptor shape. `localSource`
+ * marks entries from a user-declared file (trusted by construction: the user
+ * placed the file); the metadataReviewed flag mirrors the entry's own review
+ * state and is never inferred for local files.
  */
-export function defaultServiceCatalogProvider(): McpServiceCatalogProvider {
-	return () =>
-		BUILTIN_MCP_CATALOG.map((entry) => ({
-			serviceId: entry.server,
-			label: entry.label,
-			aliases: [],
-			transport: { type: "http" as const, url: entry.url },
-			authStrategy: entry.oauth?.kind === "oauth" ? ("oauth" as const) : ("none" as const),
-			setup: { status: "ready" as const },
-			metadataReviewed: true,
-			legacyBuiltin: true,
-		}));
+function mapCatalogEntry(entry: McpServiceEntry, localSource: boolean): McpServiceDescriptor {
+	const transport: McpServiceDescriptor["transport"] =
+		entry.transport.type === "http" && entry.url
+			? { type: "http", url: entry.url }
+			: entry.transport.type === "http-template"
+				? { type: "http-template" }
+				: entry.transport.type === "stdio"
+					? { type: "stdio" }
+					: { type: "other" };
+	return {
+		serviceId: entry.server,
+		label: entry.label,
+		aliases: entry.aliases ?? [],
+		...(entry.description ? { description: entry.description } : {}),
+		...(entry.category ? { category: entry.category } : {}),
+		...(entry.publisher ? { publisher: entry.publisher } : {}),
+		...(entry.service ? { brand: entry.service } : {}),
+		...(entry.docsUrl ? { docsUrl: entry.docsUrl } : {}),
+		...(entry.homepage ? { homepage: entry.homepage } : {}),
+		transport,
+		authStrategy: entry.auth.strategy,
+		setup: {
+			status: entry.setup.status,
+			...(entry.setup.reason ? { reason: entry.setup.reason } : {}),
+		},
+		metadataReviewed: entry.verification?.status === "metadata-reviewed",
+		legacyBuiltin: entry.legacyBuiltin === true,
+		...(localSource ? { localSource: true } : {}),
+	};
+}
+
+const MAX_TOTAL_CATALOG_ENTRIES = 500;
+
+/** Expand a leading ~ in a declared source path; other spellings pass through. */
+function expandSourcePath(rawPath: string): string {
+	if (rawPath === "~" || rawPath.startsWith("~/")) {
+		return join(homedir(), rawPath.slice(1));
+	}
+	return rawPath;
+}
+
+/**
+ * Resolve the merged service catalog: the built-in SERVICE_CATALOG plus every
+ * declared local source (settings mcpCatalogSources, ~-expanded here — the
+ * loader does no expansion by design). First source wins per id; declared-but-
+ * missing files and duplicate ids surface as visible diagnostics; a total cap
+ * keeps the merged catalog bounded. The SAME resolution feeds the host handlers
+ * and the /plugins UI, so both views agree.
+ */
+export function resolveMcpServiceCatalog(options: {
+	localSources?: readonly string[];
+	loadLocal?: typeof loadLocalServiceCatalog;
+}): McpCatalogResolution {
+	const loadLocal = options.loadLocal ?? loadLocalServiceCatalog;
+	const diagnostics: string[] = [];
+	const byId = new Map<string, McpServiceDescriptor>();
+	const addEntry = (entry: McpServiceEntry, localSource: boolean): void => {
+		if (byId.has(entry.server)) {
+			diagnostics.push(`Duplicate MCP service id "${entry.server}"; the first source wins.`);
+			return;
+		}
+		byId.set(entry.server, mapCatalogEntry(entry, localSource));
+	};
+	for (const entry of SERVICE_CATALOG) {
+		addEntry(entry, false);
+	}
+	for (const rawPath of options.localSources ?? []) {
+		const expanded = expandSourcePath(rawPath);
+		const loaded = loadLocal(expanded);
+		// The loader reports a missing file as path:""; a declared source that
+		// does not exist must be a visible diagnostic, never a silent skip.
+		if (!loaded.path) {
+			diagnostics.push(`Declared MCP catalog source not found: ${rawPath}`);
+			continue;
+		}
+		for (const entry of loaded.entries) {
+			addEntry(entry, true);
+		}
+	}
+	const descriptors = [...byId.values()];
+	if (descriptors.length > MAX_TOTAL_CATALOG_ENTRIES) {
+		diagnostics.push(
+			`MCP service catalog capped at ${MAX_TOTAL_CATALOG_ENTRIES} entries; ${descriptors.length - MAX_TOTAL_CATALOG_ENTRIES} entries were ignored.`,
+		);
+		return { descriptors: descriptors.slice(0, MAX_TOTAL_CATALOG_ENTRIES), diagnostics };
+	}
+	return { descriptors, diagnostics };
+}
+
+/**
+ * Default catalog source: the merged built-in SERVICE_CATALOG plus any declared
+ * local sources. Callers without settings wiring get the built-in catalog only.
+ */
+export function defaultServiceCatalogProvider(
+	localSources?: readonly string[] | (() => readonly string[]),
+): McpServiceCatalogProvider {
+	const getSources = typeof localSources === "function" ? localSources : () => localSources ?? [];
+	return () => resolveMcpServiceCatalog({ localSources: getSources() }).descriptors;
+}
+
+/**
+ * Resolver result with diagnostics, for callers that surface wiring problems
+ * (the /plugins UI banner and host logs).
+ */
+export function resolveServiceCatalogWithDiagnostics(localSources?: readonly string[]): McpCatalogResolution {
+	return resolveMcpServiceCatalog({ localSources });
 }
 
 export function mcpCredentialKey(connectionId: string): string {
 	return `mcp:${connectionId}`;
+}
+
+/**
+ * Next free per-account connection id for a service. The first account keeps
+ * the service id (compat with existing credentials); further accounts get
+ * "<serviceId>-2", "-3", ... — distinct ids with distinct credentials and
+ * records, so a second login never overwrites the first account.
+ */
+export function nextMcpConnectionId(serviceId: string, taken: (id: string) => boolean): string {
+	if (!taken(serviceId)) return serviceId;
+	for (let index = 2; index < 1000; index++) {
+		const candidate = `${serviceId}-${index}`;
+		if (!taken(candidate)) return candidate;
+	}
+	throw new Error(`No free connection id for service ${serviceId}`);
 }
 
 interface CredentialSnapshot {
@@ -218,7 +340,9 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 					? "This service requires an API key. Add it manually with /mcp add."
 					: service.authStrategy === "none"
 						? "No login required. Add it manually with /mcp add to use it."
-						: undefined;
+						: service.metadataReviewed || service.localSource === true
+							? undefined
+							: "Imported entry; its OAuth metadata has not been reviewed. Verify the provider, then add it manually with /mcp add.";
 	return {
 		serviceId: service.serviceId,
 		label: service.label,
@@ -226,7 +350,15 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 			service.setup.status === "requires-setup" || !http || service.authStrategy === "api_key"
 				? "setup_required"
 				: "not_connected",
-		connectable: Boolean(http) && service.setup.status === "ready" && usesOAuth,
+		// One-click Connect is an honest claim only for reviewed entries (or files
+		// the user placed themselves, which still go through the login dialog's
+		// explicit approval). Unreviewed imports stay candidates: verify the
+		// provider manually and add it with /mcp add.
+		connectable:
+			Boolean(http) &&
+			service.setup.status === "ready" &&
+			usesOAuth &&
+			(service.metadataReviewed || service.localSource === true),
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		connectionIds: [],
@@ -259,8 +391,11 @@ function catalogServiceView(
 	}
 	if (status.status === "not_connected" || status.status === "setup_required") {
 		const view = catalogServiceNotConnectedView(service);
-		// setup.required entries keep their reason; plain not_connected keeps the honest default.
-		if (status.status === "not_connected" && service.setup.status === "ready") view.setupHint = status.setupHint;
+		// setup.required entries keep their reason; a status-computed hint (binding
+		// or expiry problems) wins; otherwise the candidate/transport hints stay.
+		if (status.status === "not_connected" && service.setup.status === "ready" && status.setupHint !== undefined) {
+			view.setupHint = status.setupHint;
+		}
 		return view;
 	}
 	return {

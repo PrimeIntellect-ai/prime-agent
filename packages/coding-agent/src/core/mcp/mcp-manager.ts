@@ -39,6 +39,8 @@ export interface McpManagerOptions {
 	beginConnect?: (serviceId: string) => Promise<boolean>;
 	/** Service catalog source; defaults to the built-in adapter until the merged catalog lands. */
 	getServiceCatalog?: McpServiceCatalogProvider;
+	/** Declared local service-catalog sources (settings); re-read on every refresh. */
+	getCatalogSources?: () => string[];
 	/** Connection record store; defaults to <agentDir>/mcp-connections.json. */
 	connectionStore?: McpConnectionStore;
 	/** Injectable MCP verification probe (tests). */
@@ -57,6 +59,8 @@ interface ResolvedIntegration {
 	usesOAuth: boolean;
 	/** True when this came from Settings.mcpServers (may override a catalog name). */
 	userDeclared?: boolean;
+	/** Parent catalog service id for per-account connections (records keep it). */
+	catalogServiceId?: string;
 }
 
 const LIST_PLUGINS_DEFAULT_LIMIT = 50;
@@ -78,6 +82,7 @@ export class McpManager {
 	private readonly beginLogin?: (server: string) => Promise<void>;
 	private readonly beginConnect?: (serviceId: string) => Promise<boolean>;
 	private readonly getServiceCatalog: McpServiceCatalogProvider;
+	private readonly getCatalogSources: (() => string[]) | undefined;
 	private readonly connectionStore: McpConnectionStore;
 	private readonly probeConnection: typeof probeMcpEndpoint | undefined;
 	private readonly noBackgroundVerification: boolean;
@@ -94,7 +99,9 @@ export class McpManager {
 		this.getUserServers = options.getUserServers ?? (() => undefined);
 		this.beginLogin = options.beginLogin;
 		this.beginConnect = options.beginConnect;
-		this.getServiceCatalog = options.getServiceCatalog ?? defaultServiceCatalogProvider();
+		this.getCatalogSources = options.getCatalogSources;
+		this.getServiceCatalog =
+			options.getServiceCatalog ?? defaultServiceCatalogProvider(() => this.getCatalogSources?.() ?? []);
 		this.connectionStore =
 			options.connectionStore ?? McpConnectionStore.open(join(getAgentDir(), "mcp-connections.json"));
 		this.probeConnection = options.probeConnection;
@@ -171,6 +178,23 @@ export class McpManager {
 				usesOAuth,
 			});
 		}
+		// Per-account connections ("acme-2"): each record of a catalog service is
+		// its own dispatchable id with its own credentials, so every existing
+		// flow (verify, inventory, mcp.config, demand-driven verification) serves
+		// accounts through the same machinery.
+		for (const record of this.connectionStore.records()) {
+			if (record.connectionId === record.serviceId) continue;
+			const service = this.services.find((entry) => entry.serviceId === record.serviceId);
+			if (!service || service.transport.type !== "http" || !service.transport.url) continue;
+			if (integrations.has(record.connectionId)) continue;
+			integrations.set(record.connectionId, {
+				server: record.connectionId,
+				label: `${service.label} (${record.connectionId})`,
+				config: { type: "http", url: service.transport.url, oauth: true },
+				usesOAuth: true,
+				catalogServiceId: service.serviceId,
+			});
+		}
 		for (const [server, config] of Object.entries(this.getUserServers() ?? {})) {
 			integrations.set(server, {
 				server,
@@ -229,6 +253,22 @@ export class McpManager {
 		const legacyIds = new Set(
 			this.services.filter((service) => service.legacyBuiltin).map((service) => this.providerId(service.serviceId)),
 		);
+		// Alias connections register their own provider so an "Add account"
+		// login targets mcp:<connectionId> and its bound credential.
+		for (const record of this.connectionStore.records()) {
+			if (record.connectionId === record.serviceId) continue;
+			const service = this.services.find((entry) => entry.serviceId === record.serviceId);
+			if (!service || service.transport.type !== "http" || !service.transport.url) continue;
+			if (this.isUserOwnedName(record.connectionId)) continue;
+			desired.set(
+				this.providerId(record.connectionId),
+				createMcpOAuthProvider({
+					server: record.connectionId,
+					label: `${service.label} (${record.connectionId})`,
+					url: service.transport.url,
+				}),
+			);
+		}
 		for (const [id, provider] of desired) {
 			if (!legacyIds.has(id)) registerOAuthProvider(provider);
 		}
@@ -293,7 +333,8 @@ export class McpManager {
 			authStorage: this.authStorage,
 			connectionStore: this.connectionStore,
 			connectionId: server,
-			serviceId: server,
+			// Per-account records keep the parent catalog id as their serviceId.
+			serviceId: integration.catalogServiceId ?? server,
 			label: integration.label,
 			endpoint: integration.config.url,
 			usesOAuth: integration.usesOAuth,
@@ -366,6 +407,11 @@ export class McpManager {
 			authStorage: this.authStorage,
 			connectionStore: this.connectionStore,
 		});
+	}
+
+	/** Current resolved service descriptors (the same resolution the UI uses). */
+	getServices(): readonly McpServiceDescriptor[] {
+		return this.services;
 	}
 
 	/** Host-request handlers exposed to the kernel. */

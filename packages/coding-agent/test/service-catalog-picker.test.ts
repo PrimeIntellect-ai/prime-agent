@@ -4,7 +4,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { McpPluginView } from "../src/core/mcp/service-catalog.js";
 import { ServiceCatalogPickerComponent } from "../src/modes/interactive/components/service-catalog-picker.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, preloadCodeHighlighter } from "../src/modes/interactive/theme/theme.js";
 
 function viewFixture(overrides: Partial<McpPluginView> = {}): McpPluginView {
 	return {
@@ -20,8 +20,12 @@ function viewFixture(overrides: Partial<McpPluginView> = {}): McpPluginView {
 }
 
 describe("ServiceCatalogPickerComponent", () => {
-	beforeAll(() => {
+	beforeAll(async () => {
 		initTheme("dark");
+		// initTheme fire-and-forgets the cli-highlight preload; settle it before
+		// teardown or vitest records an EnvironmentTeardownError unhandled
+		// rejection (a pre-existing race, see ENG-6108 notes).
+		await preloadCodeHighlighter();
 	});
 
 	beforeEach(() => {

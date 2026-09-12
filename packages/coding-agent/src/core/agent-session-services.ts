@@ -158,6 +158,7 @@ export async function createAgentSessionServices(
 		new McpManager({
 			authStorage,
 			getUserServers: () => settingsManager.getGlobalMcpServers(),
+			getCatalogSources: () => settingsManager.getMcpCatalogSources(),
 		});
 	// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
 	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerAllProviders());

@@ -40,6 +40,30 @@ describe("ENG-6108 service catalog connect-then-activate", () => {
 		mcpManager = new McpManager({
 			authStorage,
 			connectionStore: store,
+			// Pin the legacy built-in slice: this regression exercises the
+			// connect-then-activate flow, not the merged catalog's breadth.
+			getServiceCatalog: () => [
+				{
+					serviceId: "linear",
+					label: "Linear",
+					aliases: [],
+					transport: { type: "http", url: "https://mcp.linear.app/mcp" },
+					authStrategy: "oauth",
+					setup: { status: "ready" },
+					metadataReviewed: true,
+					legacyBuiltin: true,
+				},
+				{
+					serviceId: "notion",
+					label: "Notion",
+					aliases: [],
+					transport: { type: "http", url: "https://mcp.notion.com/mcp" },
+					authStrategy: "oauth",
+					setup: { status: "ready" },
+					metadataReviewed: true,
+					legacyBuiltin: true,
+				},
+			],
 			noBackgroundVerification: true,
 			probeConnection: async () => ({ ok: true, toolCount: 3 }),
 		});

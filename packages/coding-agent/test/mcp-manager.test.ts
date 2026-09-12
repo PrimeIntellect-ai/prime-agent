@@ -172,6 +172,7 @@ describe("McpManager", () => {
 		} as never);
 		const manager = new McpManager({
 			authStorage,
+			getServiceCatalog: () => [],
 			getUserServers: () => ({
 				remote: { type: "http", url: "https://new.test/mcp", oauth: true },
 				unbound: { type: "http", url: "https://srv.test/mcp", oauth: true },
@@ -209,6 +210,7 @@ describe("McpManager", () => {
 		const manager = new McpManager({
 			authStorage,
 			noBackgroundVerification: true,
+			getServiceCatalog: () => LEGACY_CATALOG,
 			getUserServers: () => ({
 				zebra: { type: "stdio", command: "z" },
 				disabled: { type: "stdio", command: "off", enabled: false },
@@ -354,6 +356,28 @@ const CATALOG_SERVICE: McpServiceDescriptor = {
 	legacyBuiltin: false,
 };
 
+const LEGACY_CATALOG: McpServiceDescriptor[] = [
+	{
+		serviceId: "linear",
+		label: "Linear",
+		aliases: [],
+		transport: { type: "http", url: "https://mcp.linear.app/mcp" },
+		authStrategy: "oauth",
+		setup: { status: "ready" },
+		metadataReviewed: true,
+		legacyBuiltin: true,
+	},
+	{
+		serviceId: "notion",
+		label: "Notion",
+		aliases: [],
+		transport: { type: "http", url: "https://mcp.notion.com/mcp" },
+		authStrategy: "oauth",
+		setup: { status: "ready" },
+		metadataReviewed: true,
+		legacyBuiltin: true,
+	},
+];
 describe("McpManager service catalog handlers", () => {
 	let tempDir: string;
 	let authStorage: AuthStorage;
@@ -379,6 +403,9 @@ describe("McpManager service catalog handlers", () => {
 		return new McpManager({
 			authStorage,
 			connectionStore: store,
+			// Exact-list assertions pin the legacy built-in slice; individual
+			// tests override this with their own catalogs.
+			getServiceCatalog: () => LEGACY_CATALOG,
 			probeConnection: async (probeOptions) => {
 				probeCalls.push({ url: probeOptions.url, token: await probeOptions.getToken() });
 				return probeResult;
@@ -487,6 +514,56 @@ describe("McpManager service catalog handlers", () => {
 		await handlers["mcp.list_plugins"]({});
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(store.get("acme")?.updatedAt).toBe(record?.updatedAt);
+	});
+
+	it("serves per-account connection ids as their own dispatchable integrations", async () => {
+		// A second account "acme-2" with its own bound credential.
+		authStorage.set("mcp:acme-2", {
+			type: "oauth",
+			access: "acct-2",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		store.upsert({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "pending",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		await store.flush();
+		const manager = createManager({ getServiceCatalog: () => [CATALOG_SERVICE] });
+		// The alias gets its own provider (the add-account login targets it).
+		expect(getOAuthProvider("mcp:acme-2")).toBeDefined();
+		// Inventory includes the alias account once verified...
+		expect(manager.getEnabledPersistentGenericServers()).toContain("acme-2");
+		const record = await manager.verifyConnection("acme-2");
+		expect(record.status).toBe("connected");
+		expect(record.connectionId).toBe("acme-2");
+		expect(record.serviceId).toBe("acme");
+		expect(probeCalls).toEqual([{ url: "https://mcp.acme.test/mcp", token: "acct-2" }]);
+	});
+
+	it("drops an alias account's provider when its record is removed", async () => {
+		store.upsert({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "pending",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		await store.flush();
+		const manager = createManager({ getServiceCatalog: () => [CATALOG_SERVICE] });
+		expect(getOAuthProvider("mcp:acme-2")).toBeDefined();
+		store.remove("acme-2");
+		await store.flush();
+		manager.refresh();
+		expect(getOAuthProvider("mcp:acme-2")).toBeUndefined();
 	});
 
 	it("reconciles owned providers atomically: override removal restores the catalog provider in one refresh", () => {

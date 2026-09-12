@@ -1,4 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
+
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
@@ -193,5 +200,58 @@ describe("ENG-6108 /plugins stdio server management", () => {
 		);
 		expect(fake.settingsManager.setGlobalMcpServer).not.toHaveBeenCalled();
 		expect(JSON.stringify(fake.showStatus.mock.calls)).toContain("no longer present in settings");
+	});
+});
+
+describe("ENG-6108 /plugins add-account flow", () => {
+	test("adding an account allocates a new connection id, registers its provider, and records the catalog service id", async () => {
+		resetOAuthProviders();
+		const tempDir = mkdtempSync(join(tmpdir(), "addacct-"));
+		const authStorage = AuthStorage.inMemory();
+		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		// The first account exists: allocation must land on acme-2, not overwrite.
+		const now = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			createdAt: now,
+			updatedAt: now,
+		});
+		const runMcpLogin = vi.fn(async () => ({ status: "success" }) as const);
+		const showStatus = vi.fn();
+		const fake = {
+			mcpConnectionStore: store,
+			modelRegistry: { authStorage },
+			createAuthFlows: () => ({ runMcpLogin }),
+			ui: { requestRender: vi.fn() },
+			showStatus,
+			showWarning: vi.fn(),
+			handleReloadCommand: vi.fn(async () => true),
+		} as unknown as Record<string, unknown>;
+		Object.setPrototypeOf(fake, InteractiveMode.prototype);
+
+		const callAdd = (fake as unknown as { connectServiceFromPicker: (...args: unknown[]) => Promise<void> })
+			.connectServiceFromPicker;
+		await callAdd.call(
+			fake,
+			{ serviceId: "acme", label: "Acme", connectable: true, connectionIds: [], connectionStatus: "not_connected" },
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{ catalogServiceId: "acme", addAccount: true },
+		);
+
+		// The second account got its OWN id, provider, and login target.
+		expect(runMcpLogin).toHaveBeenCalledWith("acme-2", "Acme (acme-2)");
+		expect(getOAuthProvider("mcp:acme-2")).toBeDefined();
+		const record = store.get("acme-2");
+		expect(record?.connectionId).toBe("acme-2");
+		expect(record?.serviceId).toBe("acme");
+		// The first account is untouched.
+		expect(store.get("acme")?.status).toBe("connected");
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("acme-2");
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+		resetOAuthProviders();
 	});
 });
