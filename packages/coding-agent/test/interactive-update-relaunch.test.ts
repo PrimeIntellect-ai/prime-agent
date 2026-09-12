@@ -1,10 +1,23 @@
 import type * as ChildProcessModule from "child_process";
 import { describe, expect, it, vi } from "vitest";
 import type * as DaemonUpdateRestartModule from "../src/cli/daemon-update-restart.js";
+import type * as ConfigModule from "../src/config.js";
 
 const updateMocks = vi.hoisted(() => ({
 	spawnSync: vi.fn(),
 	launchCoordinator: vi.fn(),
+	binary: false,
+}));
+
+vi.mock("../src/config.js", async (importOriginal) => ({
+	...(await importOriginal<typeof ConfigModule>()),
+	get isBunBinary() {
+		return updateMocks.binary;
+	},
+}));
+
+vi.mock("../src/utils/native-installation.js", () => ({
+	getNativeInstallation: () => (updateMocks.binary ? { launcher: "/tmp/managed/bin/prime-agent" } : undefined),
 }));
 
 vi.mock("child_process", async (importOriginal) => ({
@@ -167,9 +180,10 @@ describe("tryExecUpdateRelaunch", () => {
 });
 
 describe("interactive self-update relaunch", () => {
-	it.skipIf(process.platform === "win32")(
-		"tears down and replaces the TUI process without waiting for a child TUI to quit",
-		async () => {
+	it.skipIf(process.platform === "win32").each([false, true])(
+		"tears down and relaunches the TUI with the activated application (compiled: %s)",
+		async (binary) => {
+			updateMocks.binary = binary;
 			const events: string[] = [];
 			updateMocks.spawnSync.mockReset();
 			updateMocks.spawnSync.mockImplementation(() => {
@@ -234,6 +248,7 @@ describe("interactive self-update relaunch", () => {
 			try {
 				await handleUpdateCommand.call(receiver, "");
 			} finally {
+				updateMocks.binary = false;
 				updateProcess.execve = originalExecve;
 				if (originalNodeVersion) {
 					Object.defineProperty(process.versions, "node", originalNodeVersion);
@@ -252,6 +267,13 @@ describe("interactive self-update relaunch", () => {
 				"execve",
 			]);
 			expect(updateMocks.spawnSync).toHaveBeenCalledTimes(1);
+			const updateArgs = updateMocks.spawnSync.mock.calls[0]?.[1];
+			expect(updateArgs).toEqual(
+				binary
+					? ["update", "--daemon-socket", "/tmp/update.sock"]
+					: [...process.execArgv, process.argv[1], "update", "--daemon-socket", "/tmp/update.sock"],
+			);
+			expect(execve.mock.calls[0]?.[0]).toBe(binary ? "/tmp/managed/bin/prime-agent" : process.execPath);
 			expect(execve.mock.calls[0]?.[1]).toEqual(expect.arrayContaining(["--resume", "/tmp/session.jsonl"]));
 		},
 	);

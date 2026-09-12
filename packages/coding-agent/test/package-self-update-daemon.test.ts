@@ -578,6 +578,66 @@ describe("self-update daemon restart", () => {
 		expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(false);
 	});
 
+	it.each(["bad checksum", "duplicate platform"])(
+		"keeps an up-to-date npm install and daemon untouched with %s metadata",
+		async (invalidKind) => {
+			process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
+			const artifact = {
+				platform: "linux-x64",
+				file: `prime-agent-${VERSION}-linux-x64.tar.gz`,
+				sha256: "a".repeat(64),
+			};
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () =>
+					Response.json({
+						version: VERSION,
+						package: PACKAGE_NAME,
+						tarball: `https://releases.example/releases/v${VERSION}/prime-agent-${VERSION}.tgz`,
+						binaries:
+							invalidKind === "bad checksum" ? [{ ...artifact, sha256: "invalid" }] : [artifact, artifact],
+					}),
+				),
+			);
+
+			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+
+			expect(process.exitCode).toBe(SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE);
+			expect(mockState.calls).toEqual([]);
+		},
+	);
+
+	it.each(["bad checksum", "duplicate platform"])(
+		"keeps the selected npm release URL when a newer release has %s metadata",
+		async (invalidKind) => {
+			mockState.daemonProbe = { reachable: false };
+			const tarball = "https://releases.example/releases/v999.0.0/prime-agent-999.0.0.tgz";
+			const artifact = {
+				platform: "linux-x64",
+				file: "prime-agent-999.0.0-linux-x64.tar.gz",
+				sha256: "a".repeat(64),
+			};
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () =>
+					Response.json({
+						version: "999.0.0",
+						package: PACKAGE_NAME,
+						tarball,
+						binaries:
+							invalidKind === "bad checksum" ? [{ ...artifact, sha256: "invalid" }] : [artifact, artifact],
+					}),
+				),
+			);
+
+			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+
+			expect(mockState.calls.filter((call) => call.startsWith("spawn:"))).toEqual([
+				`spawn:npm install -g ${tarball}`,
+			]);
+		},
+	);
+
 	it("does not use the no-change sentinel when interactive self-update is cancelled", async () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
 		mockState.daemonProbe = {

@@ -1,0 +1,11 @@
+- Added verified updates and offline rollback for compiled Prime Agent installations, preserving sessions and restarting with the activated release.
+- Fixed normal interruptions during rollback losing the release needed to undo that rollback.
+- Fixed malformed compiled-release metadata causing unnecessary npm reinstalls and daemon restarts.
+- Fixed interrupted compiled activation recovering the exact rollback target before another lifecycle change.
+- Added conservative cleanup for abandoned installer staging and inactive managed releases while retaining live or uncertain releases.
+- Fixed direct and planned rollback rejecting inconsistent release metadata, assets, paths, and executable versions before activation.
+- Fixed failed activation recovery discarding the state needed to retry restoring the previous release.
+- Fixed damaged compiled installations blocking repair and rollback to a healthy retained release.
+- Fixed rollback planning after interrupted activation and provided repair guidance for older retained installers without recovery support.
+- Fixed stalled executable checks holding the installer lock indefinitely during installation, rollback, or activation recovery.
+- Fixed update guidance directing repairable compiled installations to a manual download instead of the update command.

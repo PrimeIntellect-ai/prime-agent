@@ -48,7 +48,11 @@ import {
 	launchDaemonUpdateRestartCoordinator,
 	resolveDaemonUpdateRestartSocketPath,
 } from "../../cli/daemon-update-restart.js";
-import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
+import {
+	type CliSubprocessLaunchSpec,
+	createCliSubprocessLaunchSpec,
+	createUpdatedCliSubprocessLaunchSpec,
+} from "../../cli/subprocess-launch.js";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -8660,15 +8664,12 @@ export class InteractiveMode {
 		this.ui.stop();
 
 		const updateEnv = includesSelf ? { ...process.env, [SELF_UPDATE_INTERACTIVE_CHILD_ENV]: "1" } : process.env;
-		const updateResult = spawnSync(
-			process.execPath,
-			[...process.execArgv, entrypoint, "update", ...updateChildArgs],
-			{
-				stdio: "inherit",
-				cwd: updateCwd,
-				env: updateEnv,
-			},
-		);
+		const updateLaunch = createCliSubprocessLaunchSpec(["update", ...updateChildArgs]);
+		const updateResult = spawnSync(updateLaunch.command, updateLaunch.args, {
+			stdio: "inherit",
+			cwd: updateCwd,
+			env: updateEnv,
+		});
 		const updateExitCode = updateResult.status ?? (updateResult.signal ? 1 : 0);
 		const selfUpdateNotAttempted =
 			includesSelf && !updateResult.error && updateExitCode === SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE;
@@ -8714,7 +8715,7 @@ export class InteractiveMode {
 					);
 				}
 			}
-			const relaunch = createCliSubprocessLaunchSpec(relaunchArgs);
+			const relaunch = createUpdatedCliSubprocessLaunchSpec(relaunchArgs);
 			const updateProcess = process as NodeJS.Process & { execve?: UpdateRelaunchExecve };
 			try {
 				if (

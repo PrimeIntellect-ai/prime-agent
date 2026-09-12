@@ -71,7 +71,7 @@ jobs:
 
       - name: Test extracted application without JavaScript runtimes on PATH
         working-directory: ${{ runner.temp }}/standalone-source/packages/coding-agent
-        run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts
+        run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts test/native-probe-timeout.test.ts
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

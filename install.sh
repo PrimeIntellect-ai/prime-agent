@@ -1,4 +1,5 @@
 #!/bin/sh
+# prime-agent-native-recovery-v1
 
 set -eu
 
@@ -62,6 +63,10 @@ prime_agent_native_lock=
 prime_agent_allow_insecure_http=0
 
 main() {
+	if [ "${1:-}" = --rollback ]; then
+		prime_agent_native_rollback
+		return
+	fi
 	if [ "${1:-}" = --native-platform ]; then
 		prime_agent_native_platform
 		return
@@ -1729,6 +1734,14 @@ prime_agent_native_platform() {
 }
 
 prime_agent_native_cleanup() {
+	if [ -n "${prime_agent_native_lock:-}" ] && [ "$(cat "$prime_agent_native_lock/pid" 2>/dev/null || :)" = "$$" ] &&
+		[ -n "${native_root:-}" ] && { [ -e "$native_root/.activation-state" ] || [ -L "$native_root/.activation-state" ]; }; then
+		if prime_agent_native_recover_activation; then
+			prime_agent_native_prune_releases
+		else
+			printf 'Could not recover the interrupted activation; inspect %s/.activation-state before retrying.\n' "$native_root" >&2
+		fi
+	fi
 	if [ -n "${prime_agent_native_activation_target:-}" ] && [ -n "${prime_agent_native_activation_previous:-}" ] &&
 		[ "$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)" = "$prime_agent_native_activation_target" ] &&
 		[ "$(readlink "$native_root/bin/previous" 2>/dev/null || :)" != "$prime_agent_native_activation_previous" ]; then
@@ -1781,17 +1794,243 @@ prime_agent_native_prepare_root() {
 			}
 		fi
 	done
+	prime_agent_native_sweep_orphan_stages
 	prime_agent_native_stage=$(mktemp -d "$native_root/.install.XXXXXX")
+	prime_agent_native_recovered=0
+	prime_agent_native_recover_activation || exit 1
+	if [ "$prime_agent_native_recovered" = 1 ]; then
+		prime_agent_native_prune_releases
+	fi
 	if [ "${PRIME_AGENT_EXPECTED_CURRENT+x}" = x ] && [ "$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)" != "$PRIME_AGENT_EXPECTED_CURRENT" ]; then
 		printf 'error: the active release changed; retry the update.\n' >&2; exit 1
 	fi
 }
 
+prime_agent_native_rollback() {
+	prime_agent_install_traps
+	prime_agent_native_prepare_root
+	[ -L "$native_root/bin/previous" ] || { printf 'error: no previous compiled release is available.\n' >&2; exit 1; }
+	native_previous=$(readlink "$native_root/bin/previous")
+	native_current=$(readlink "$native_root/bin/prime-agent")
+	if [ -n "${PRIME_AGENT_EXPECTED_PREVIOUS:-}" ] && [ "$native_previous" != "$PRIME_AGENT_EXPECTED_PREVIOUS" ]; then
+		printf 'error: the previous release changed while planning rollback; retry.\n' >&2; exit 1
+	fi
+	[ "$native_previous" != "$native_current" ] || { printf 'error: no different previous release is available.\n' >&2; exit 1; }
+	prime_agent_native_verify_release_target "$native_previous" previous || exit 1
+	if prime_agent_native_verify_release_target "$native_current" current >/dev/null 2>&1; then
+		prime_agent_native_activate "$native_previous" "$native_current"
+	else
+		# Repair only the active link; keep the healthy rollback target instead of retaining damage.
+		prime_agent_native_atomic_link "$native_previous" "$native_root/bin/prime-agent" || exit 1
+	fi
+	prime_agent_native_prune_releases
+	printf 'Restored the previous compiled release.\n'
+	prime_agent_native_cleanup
+}
+
 prime_agent_native_valid_target() {
-	case "$1" in ../releases/*/prime-agent) ;; *) return 1 ;; esac
-	native_target_name=${1#../releases/}
-	native_target_name=${native_target_name%/prime-agent}
-	case "$native_target_name" in ''|.|..|*[!0-9A-Za-z.-]*) return 1 ;; esac
+	prime_agent_native_parse_target "$1"
+	return $?
+}
+
+prime_agent_native_parse_target() {
+	native_parsed_target="$1"
+	case "$native_parsed_target" in ../releases/*/prime-agent) ;; *) return 1 ;; esac
+	native_parsed_name=${native_parsed_target#../releases/}
+	native_parsed_name=${native_parsed_name%/prime-agent}
+	case "$native_parsed_name" in ''|.|..|*/*|*[!0-9A-Za-z.-]*) return 1 ;; esac
+	native_parsed_digest_suffix=${native_parsed_name##*-}
+	native_parsed_digest=${native_parsed_digest_suffix%%.*}
+	[ "${#native_parsed_digest}" -eq 64 ] || return 1
+	case "$native_parsed_digest" in *[!0-9a-f]*) return 1 ;; esac
+	if [ "$native_parsed_digest_suffix" != "$native_parsed_digest" ]; then
+		native_parsed_unique=${native_parsed_digest_suffix#"$native_parsed_digest".}
+		[ "${#native_parsed_unique}" -eq 6 ] || return 1
+		case "$native_parsed_unique" in *[!0-9A-Za-z]*) return 1 ;; esac
+	fi
+	native_parsed_prefix=${native_parsed_name%-"$native_parsed_digest_suffix"}
+	case "$native_parsed_prefix" in
+		*-darwin-arm64) native_parsed_version=${native_parsed_prefix%-darwin-arm64}; native_parsed_platform=darwin-arm64 ;;
+		*-darwin-x64) native_parsed_version=${native_parsed_prefix%-darwin-x64}; native_parsed_platform=darwin-x64 ;;
+		*-linux-arm64) native_parsed_version=${native_parsed_prefix%-linux-arm64}; native_parsed_platform=linux-arm64 ;;
+		*-linux-x64) native_parsed_version=${native_parsed_prefix%-linux-x64}; native_parsed_platform=linux-x64 ;;
+		*) return 1 ;;
+	esac
+	printf '%s\n' "$native_parsed_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || return 1
+	native_parsed_dir="$native_root/releases/$native_parsed_name"
+}
+
+prime_agent_native_validate_asset() {
+	native_asset_release_dir="$1"
+	native_asset_relative="$2"
+	native_asset_path="$native_asset_release_dir/$native_asset_relative"
+	[ -f "$native_asset_path" ] && [ ! -L "$native_asset_path" ] || return 1
+	case "$native_asset_relative" in
+		*/*) native_asset_parent_relative=${native_asset_relative%/*} ;;
+		*) native_asset_parent_relative= ;;
+	esac
+	if [ -n "$native_asset_parent_relative" ]; then
+		native_asset_expected_parent="$native_asset_release_dir/$native_asset_parent_relative"
+	else
+		native_asset_expected_parent="$native_asset_release_dir"
+	fi
+	native_asset_actual_parent=$(CDPATH= cd "$(dirname "$native_asset_path")" 2>/dev/null && pwd -P) || return 1
+	[ "$native_asset_actual_parent" = "$native_asset_expected_parent" ]
+}
+
+prime_agent_native_validate_release_metadata() {
+	native_metadata_target="$1"
+	prime_agent_native_parse_target "$native_metadata_target" || return 1
+	native_metadata_dir="$native_parsed_dir"
+	native_metadata_version="$native_parsed_version"
+	native_metadata_digest="$native_parsed_digest"
+	[ -d "$native_metadata_dir" ] && [ ! -L "$native_metadata_dir" ] || return 1
+	[ "$(CDPATH= cd "$native_metadata_dir" 2>/dev/null && pwd -P)" = "$native_metadata_dir" ] || return 1
+	for native_metadata_asset in prime-agent package.json install.sh prime-agent-runtime/pyproject.toml prime-agent-runtime/src/rlm/repl.py theme/prime.json export-html/template.html photon_rs_bg.wasm .archive-sha256 .install-source; do
+		prime_agent_native_validate_asset "$native_metadata_dir" "$native_metadata_asset" || return 1
+	done
+	[ "$(cat "$native_metadata_dir/.archive-sha256")" = "$native_metadata_digest" ] || return 1
+	native_metadata_package_version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$native_metadata_dir/package.json")
+	[ "$native_metadata_package_version" = "$native_metadata_version" ] || return 1
+	native_metadata_source=$(cat "$native_metadata_dir/.install-source")
+	case "$native_metadata_source" in http://*|https://*) ;; *) return 1 ;; esac
+}
+
+prime_agent_native_probe() (
+	# macOS does not ship timeout; keep the deadline independent of Node and Python.
+	native_probe_pid=
+	trap '
+		if [ -n "$native_probe_pid" ]; then
+			kill -KILL "$native_probe_pid" 2>/dev/null || :
+			wait "$native_probe_pid" 2>/dev/null || :
+		fi
+	' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+	"$@" &
+	native_probe_pid=$!
+	native_probe_deadline=$(($(date +%s) + 10))
+	while kill -0 "$native_probe_pid" 2>/dev/null; do
+		if [ "$(date +%s)" -ge "$native_probe_deadline" ]; then
+			printf 'error: executable probe timed out after 10 seconds.\n' >&2
+			kill -KILL "$native_probe_pid" 2>/dev/null || :
+			wait "$native_probe_pid" 2>/dev/null || :
+			native_probe_pid=
+			exit 124
+		fi
+		sleep 0.1
+	done
+	if wait "$native_probe_pid"; then native_probe_status=0; else native_probe_status=$?; fi
+	native_probe_pid=
+	exit "$native_probe_status"
+)
+
+prime_agent_native_verify_release_target() {
+	native_verify_target="$1"
+	native_verify_label="$2"
+	if ! prime_agent_native_validate_release_metadata "$native_verify_target"; then
+		printf 'error: invalid %s release metadata or assets. The active release was kept.\n' "$native_verify_label" >&2
+		return 1
+	fi
+	native_verify_dir="$native_metadata_dir"
+	native_verify_version="$native_metadata_version"
+	if ! prime_agent_native_probe "$native_verify_dir/prime-agent" --version >"$prime_agent_native_stage/$native_verify_label.version" 2>"$prime_agent_native_stage/$native_verify_label.probe.log"; then
+		cat "$prime_agent_native_stage/$native_verify_label.probe.log" >&2
+		printf 'error: the %s release executable could not be validated. The active release was kept.\n' "$native_verify_label" >&2
+		return 1
+	fi
+	if [ "$(cat "$prime_agent_native_stage/$native_verify_label.version")" != "$native_verify_version" ]; then
+		printf 'error: the %s release executable reports a different version. The active release was kept.\n' "$native_verify_label" >&2
+		return 1
+	fi
+	if ! prime_agent_native_probe "$native_verify_dir/prime-agent" --help >"$prime_agent_native_stage/$native_verify_label.help" 2>"$prime_agent_native_stage/$native_verify_label.help.log"; then
+		cat "$prime_agent_native_stage/$native_verify_label.help.log" >&2
+		printf 'error: the %s release executable failed its help probe. The active release was kept.\n' "$native_verify_label" >&2
+		return 1
+	fi
+}
+
+prime_agent_native_sweep_orphan_stages() {
+	for native_orphan_stage in "$native_root"/.install.*; do
+		[ -e "$native_orphan_stage" ] || [ -L "$native_orphan_stage" ] || continue
+		native_orphan_name=${native_orphan_stage##*/}
+		native_orphan_suffix=${native_orphan_name#.install.}
+		[ "${#native_orphan_suffix}" -eq 6 ] || continue
+		case "$native_orphan_suffix" in *[!0-9A-Za-z]*) continue ;; esac
+		[ -d "$native_orphan_stage" ] && [ ! -L "$native_orphan_stage" ] || continue
+		rm -rf "$native_orphan_stage"
+	done
+}
+
+prime_agent_native_release_in_use() {
+	native_usage_executable="$1"
+	if native_lsof=$(command -v lsof 2>/dev/null); then
+		:
+	elif [ -x /usr/sbin/lsof ]; then
+		native_lsof=/usr/sbin/lsof
+	elif [ -x /usr/bin/lsof ]; then
+		native_lsof=/usr/bin/lsof
+	else
+		return 2
+	fi
+	if "$native_lsof" -n -F p "$native_usage_executable" >"$prime_agent_native_stage/lsof.out" 2>"$prime_agent_native_stage/lsof.err"; then
+		return 0
+	else
+		native_lsof_status=$?
+	fi
+	[ "$native_lsof_status" -eq 1 ] && [ ! -s "$prime_agent_native_stage/lsof.err" ] && return 1
+	return 2
+}
+
+prime_agent_native_prune_releases() {
+	native_prune_current=$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)
+	native_prune_previous=$(readlink "$native_root/bin/previous" 2>/dev/null || :)
+	for native_prune_dir in "$native_root"/releases/*; do
+		[ -e "$native_prune_dir" ] || [ -L "$native_prune_dir" ] || continue
+		[ -d "$native_prune_dir" ] && [ ! -L "$native_prune_dir" ] || continue
+		native_prune_target="../releases/${native_prune_dir##*/}/prime-agent"
+		[ "$native_prune_target" != "$native_prune_current" ] || continue
+		[ "$native_prune_target" != "$native_prune_previous" ] || continue
+		prime_agent_native_validate_release_metadata "$native_prune_target" || continue
+		if prime_agent_native_release_in_use "$native_prune_dir/prime-agent"; then
+			continue
+		else
+			native_prune_usage_status=$?
+		fi
+		[ "$native_prune_usage_status" -eq 1 ] || continue
+		rm -rf "$native_prune_dir"
+	done
+}
+
+prime_agent_native_recover_activation() {
+	native_activation_state="$native_root/.activation-state"
+	if [ ! -e "$native_activation_state" ] && [ ! -L "$native_activation_state" ]; then
+		return 0
+	fi
+	if [ ! -f "$native_activation_state" ] || [ -L "$native_activation_state" ] ||
+		[ "$(wc -l <"$native_activation_state" | tr -d ' ')" != 2 ]; then
+		printf 'error: invalid activation recovery state at %s. Restore bin/prime-agent and bin/previous, then remove it.\n' "$native_activation_state" >&2
+		return 1
+	fi
+	native_recovery_target=$(sed -n '1p' "$native_activation_state")
+	native_recovery_previous=$(sed -n '2p' "$native_activation_state")
+	prime_agent_native_verify_release_target "$native_recovery_target" recovery-target || return 1
+	if [ -n "$native_recovery_previous" ]; then
+		prime_agent_native_verify_release_target "$native_recovery_previous" recovery-previous || return 1
+	fi
+	native_recovery_current=$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)
+	if [ "$native_recovery_current" = "$native_recovery_target" ]; then
+		if [ -n "$native_recovery_previous" ] && [ "$native_recovery_previous" != "$native_recovery_target" ] &&
+			[ "$(readlink "$native_root/bin/previous" 2>/dev/null || :)" != "$native_recovery_previous" ]; then
+			prime_agent_native_atomic_link "$native_recovery_previous" "$native_root/bin/previous" || return 1
+		fi
+	elif [ "$native_recovery_current" != "$native_recovery_previous" ]; then
+		printf 'error: activation recovery is ambiguous: bin/prime-agent matches neither recorded release. Restore the links using %s before retrying.\n' "$native_activation_state" >&2
+		return 1
+	fi
+	rm -f "$native_activation_state" || return 1
+	prime_agent_native_recovered=1
 }
 
 prime_agent_native_check_public_link() {
@@ -1823,20 +2062,26 @@ prime_agent_native_validate_archive() {
 }
 
 prime_agent_native_atomic_link() {
-	native_link_stage=$(mktemp -d "$prime_agent_native_stage/link.XXXXXX")
-	ln -s "$1" "$native_link_stage/link"
+	native_link_stage=$(mktemp -d "$prime_agent_native_stage/link.XXXXXX") || return 1
+	ln -s "$1" "$native_link_stage/link" || return 1
 	# The destination is an executable link, never a directory link.
-	mv -f "$native_link_stage/link" "$2"
-	rmdir "$native_link_stage"
+	mv -f "$native_link_stage/link" "$2" || return 1
+	rmdir "$native_link_stage" || return 1
 }
 
 prime_agent_native_activate() {
 	prime_agent_native_activation_target="$1"
 	prime_agent_native_activation_previous="$2"
+	{
+		printf '%s\n' "$1"
+		printf '%s\n' "$2"
+	} >"$prime_agent_native_stage/activation-state"
+	mv -f "$prime_agent_native_stage/activation-state" "$native_root/.activation-state"
 	prime_agent_native_atomic_link "$1" "$native_root/bin/prime-agent"
 	if [ -n "$2" ] && [ "$1" != "$2" ]; then
 		prime_agent_native_atomic_link "$2" "$native_root/bin/previous"
 	fi
+	rm -f "$native_root/.activation-state"
 	prime_agent_native_activation_target=
 	prime_agent_native_activation_previous=
 }
@@ -1893,6 +2138,9 @@ prime_agent_install_native() {
 	rm -rf "$prime_agent_download_dir"
 	prime_agent_download_dir=
 	native_archive="$prime_agent_native_stage/$native_file"
+	if [ -n "${PRIME_AGENT_EXPECTED_SHA256:-}" ] && [ "$(awk '{print $1}' "$prime_agent_native_stage/selected.sha256")" != "$PRIME_AGENT_EXPECTED_SHA256" ]; then
+		printf 'error: release manifest and checksum inventory disagree.\n' >&2; exit 1
+	fi
 	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading compiled Prime Agent" "$native_platform" \
 		prime_agent_curl_download -fsSL --connect-timeout 10 --max-time 300 "$prime_agent_base_url/releases/v$native_version/$native_file" -o "$native_archive"
 	if command -v sha256sum >/dev/null 2>&1; then native_checker=sha256sum; else native_checker=shasum; fi
@@ -1905,7 +2153,7 @@ prime_agent_install_native() {
 	for native_asset in prime-agent package.json install.sh prime-agent-runtime/pyproject.toml prime-agent-runtime/src/rlm/repl.py theme/prime.json export-html/template.html photon_rs_bg.wasm; do
 		[ -f "$native_extracted/$native_asset" ] || { printf 'error: missing archive asset: %s\n' "$native_asset" >&2; exit 1; }
 	done
-	if ! "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
+	if ! prime_agent_native_probe "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
 		cat "$prime_agent_native_stage/probe.log" >&2
 		prime_agent_native_cleanup
 		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then
@@ -1916,7 +2164,7 @@ prime_agent_install_native() {
 		printf 'error: the compiled executable cannot run on this machine.\n' >&2; exit 1
 	fi
 	[ "$(cat "$prime_agent_native_stage/version")" = "$native_version" ] || { printf 'error: archive version mismatch.\n' >&2; exit 1; }
-	"$native_extracted/prime-agent" --help >"$prime_agent_native_stage/help"
+	prime_agent_native_probe "$native_extracted/prime-agent" --help >"$prime_agent_native_stage/help"
 	prime_agent_native_check_public_link
 	native_digest=$(awk '{ print $1 }' "$prime_agent_native_stage/selected.sha256")
 	native_release_name="$native_version-$native_platform-$native_digest"
@@ -1954,8 +2202,13 @@ prime_agent_install_native() {
 	fi
 	# Keep an existing release active if creating the public command loses a race.
 	if [ -n "$native_previous" ]; then
-		prime_agent_native_activate "$native_target" "$native_previous"
+		if prime_agent_native_verify_release_target "$native_previous" current >/dev/null 2>&1; then
+			prime_agent_native_activate "$native_target" "$native_previous"
+		else
+			prime_agent_native_atomic_link "$native_target" "$native_root/bin/prime-agent" || exit 1
+		fi
 	fi
+	prime_agent_native_prune_releases
 	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" != 0 ]; then
 		prime_agent_native_configure_path || printf 'Add %s to PATH to run Prime Agent.\n' "$native_public_bin" >&2
 	fi
