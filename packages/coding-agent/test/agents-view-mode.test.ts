@@ -730,7 +730,7 @@ describe("AgentsViewMode", () => {
 	});
 
 	it("keeps a subagent summary selected across roster refreshes", () => {
-		const parent = summary({ sessionName: "parent" });
+		const parent = summary({ sessionName: "parent", sessionFile: undefined });
 		const child = summary({
 			id: "child",
 			activeSessionId: "child",
@@ -749,11 +749,13 @@ describe("AgentsViewMode", () => {
 				return rows[Reflect.get(view, "selectedIndex") as number];
 			};
 			expect(selectedRow()?.kind).toBe("subagent-summary");
+			const provisionalIdentity = selectedRow()?.identity;
 
-			Reflect.set(view, "lastListedSummaries", [{ ...parent, summary: "Updated status" }, child]);
+			Reflect.set(view, "lastListedSummaries", [{ ...parent, sessionFile: "/tmp/parent.jsonl" }, child]);
 			invoke("reconcileCatalogs", view);
 
 			expect(selectedRow()?.kind).toBe("subagent-summary");
+			expect(selectedRow()?.identity).not.toBe(provisionalIdentity);
 		} finally {
 			stopThemeWatcher();
 		}

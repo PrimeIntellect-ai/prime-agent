@@ -2313,15 +2313,6 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		const selectedIdentity = this.selectedRowIdentity ?? this.persistentState.selectedRowIdentity;
-		const exactIndex =
-			selectedIdentity === undefined
-				? -1
-				: this.rows.findIndex((row) => row.selectable && row.identity === selectedIdentity);
-		if (exactIndex >= 0) {
-			this.selectedIndex = exactIndex;
-			this.syncSelectedRowState();
-			return;
-		}
 		const resolution = resolveAgentsViewSelectionState(
 			this.rows,
 			this.selectedIndex,

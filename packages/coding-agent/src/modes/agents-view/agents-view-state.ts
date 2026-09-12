@@ -748,6 +748,9 @@ export function resolveAgentsViewSelectionIndex(
 ): number {
 	const findSelectable = (predicate: (row: AgentsViewRow) => boolean): number =>
 		rows.findIndex((row) => row.selectable && predicate(row));
+	const selectedSyntheticKind = identity?.startsWith("subagents:") ? "subagent-summary" : undefined;
+	const preservesSelectedKind = (row: AgentsViewRow): boolean =>
+		selectedSyntheticKind === undefined || row.kind === selectedSyntheticKind;
 
 	if (identity !== undefined) {
 		const index = findSelectable((row) => row.identity === identity);
@@ -759,7 +762,9 @@ export function resolveAgentsViewSelectionIndex(
 	}
 	if (key?.activeSessionId !== undefined) {
 		const activeSessionId = key.activeSessionId;
-		const index = findSelectable((row) => (row.summary.activeSessionId ?? row.summary.id) === activeSessionId);
+		const index = findSelectable(
+			(row) => preservesSelectedKind(row) && (row.summary.activeSessionId ?? row.summary.id) === activeSessionId,
+		);
 		if (index >= 0) {
 			return index;
 		}
@@ -772,7 +777,7 @@ export function resolveAgentsViewSelectionIndex(
 	}
 	if (key?.sessionId !== undefined) {
 		const sessionId = key.sessionId;
-		return findSelectable((row) => row.summary.sessionId === sessionId);
+		return findSelectable((row) => preservesSelectedKind(row) && row.summary.sessionId === sessionId);
 	}
 	return -1;
 }
