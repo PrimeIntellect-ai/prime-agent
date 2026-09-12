@@ -153,6 +153,7 @@ import {
 	GOAL_CONTEXT_PREVIEW_LABEL,
 	GOAL_SKILL_NAME,
 	GOAL_STATE_CUSTOM_TYPE,
+	type GoalContextDetails,
 	type GoalHostResponse,
 	type GoalState,
 	type GoalStatus,
@@ -2360,6 +2361,40 @@ export class AgentSession {
 			// Admission can race a new pause; roll back so the retry re-counts.
 			this._setGoalState(goalBeforeResume);
 		}
+	}
+
+	/**
+	 * Queued goal continuations snapshot goal accounting at queue time, but
+	 * delivery can lag arbitrarily (a threshold compaction, admission pauses,
+	 * other queued work) while usage keeps accruing. A continuation's whole
+	 * purpose is "here is the current goal state — keep working", so stale
+	 * numbers misreport the budget and can mislead the model into stopping
+	 * early or ignoring limits. Refresh the frozen content in place at
+	 * delivery, preserving the message identity every queue/dedup marker
+	 * (post-compaction continuation tracking, threshold dedup) matches on.
+	 * Budget-limit steers are excluded: they are created immediately after the
+	 * accounting event they report, and `objective_updated` carries the
+	 * objective snapshot that was the event.
+	 */
+	private _refreshGoalContextMessageAtDelivery(message: AgentMessage): void {
+		if (message.role !== "custom" || message.customType !== GOAL_CONTEXT_CUSTOM_TYPE) return;
+		const custom = message as CustomMessage<GoalContextDetails | undefined>;
+		const details = custom.details;
+		if (details?.kind !== "continuation" || details.goalId === undefined) return;
+		if (
+			this._goalState.status !== "active" ||
+			this._goalState.goalId !== details.goalId ||
+			!this._goalState.objective
+		) {
+			return;
+		}
+		const images = Array.isArray(custom.content)
+			? custom.content.filter((block): block is ImageContent => block.type === "image")
+			: undefined;
+		const fresh = createGoalContextMessage(this._goalState, "continuation", images);
+		custom.content = fresh.content;
+		custom.details = fresh.details;
+		custom.timestamp = fresh.timestamp;
 	}
 
 	private _runOrQueueGoalContext(kind: "continuation" | "objective_updated", images?: ImageContent[]): void {
@@ -6350,6 +6385,11 @@ export class AgentSession {
 					);
 					const firstPrimaryIndex = turns[0].payload.records.indexOf(primaryDeliveryRecord(turns[0]));
 					turns[0].payload.records.splice(firstPrimaryIndex, 0, ...contextRecords);
+					for (const action of turns) {
+						// Queued continuations must report goal accounting as of delivery,
+						// not as of queue time (see refresh rationale).
+						this._refreshGoalContextMessageAtDelivery(primaryDeliveryRecord(action).message);
+					}
 					const preparedMessages: AgentMessage[] = turns.flatMap((action) =>
 						action.payload.records.map((record) => record.message),
 					);
