@@ -172,7 +172,7 @@ export interface McpServiceEntry {
 	 * ids stay reserved. Not a claim about shipped skill packages.
 	 */
 	legacyBuiltin: boolean;
-	/** Present on OAuth-strategy entries; keeps `usesOAuth: entry.oauth?.kind === "oauth"` working. */
+	/** Present on OAuth-strategy entries; consumers key OAuth support off `auth.strategy` (the host uses authStrategy), not this marker. */
 	oauth?: Omit<McpOAuthConfig, "server" | "url"> & { kind: "oauth" };
 	provenance: McpServiceProvenance[];
 	homepage?: string;
