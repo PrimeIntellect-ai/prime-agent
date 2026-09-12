@@ -69,7 +69,14 @@ OAuth metadata for every remote endpoint (102 http + 1 sse), captured by
 - all RFC 9728 locations are probed per endpoint (WWW-Authenticate
   `resource_metadata` pointer, pathful and origin-level well-known), so
   providers that serve different bodies per location (Notion, Slack) keep raw
-  evidence of which document serves where.
+  evidence of which document serves where;
+- the engine selection is mirrored exactly: a `resource_metadata` pointer is
+  followed alone and any failure fails closed (no well-known fall-through);
+  absent a pointer the pathful well-known is tried, then the origin-level root
+  location (SDK parity — a 4xx at one location is not proof the other is
+  absent); a candidate is selectable only when its document matches the
+  endpoint audience under the engine's component comparison and carries
+  authorization servers, mirroring the engine's own validation.
 
 The importer merges this evidence into `catalog.json` offline and
 deterministically:
@@ -80,13 +87,15 @@ deterministically:
   Connect gate. Omitted fields mean "not advertised", never "unsupported".
 - `setup.readiness` (`oauth-ready` / `user-setup` / `prime-restricted` /
   `unknown`) is informational-only; `setup.status` stays the only hard lever.
-  `oauth-ready` requires audience-coherent dynamic-client-registration
-  evidence — a CIMD flag alone is never sufficient (no Prime-controlled
-  identity document is deployed), and a protected-resource document whose
-  resource does not match the endpoint audience under the engine's current
-  exact-match rule keeps the entry honestly `unknown` with a metadata note
-  (the approved engine audience policy is tracked separately and not yet
-  landed).
+  `oauth-ready` requires the engine's audience rule (component comparison:
+  exact canonical endpoint or exact origin, root-slash normalized) plus
+  dynamic-client-registration evidence — a CIMD flag alone is never sufficient
+  (no Prime-controlled identity document is deployed). A served document that
+  fails the engine's audience or structure validation fails closed (no
+  origin-AS fallback) and keeps the entry honestly `unknown` with the
+  fail-closed reason in the metadata note; an endpoint with no valid
+  protected-resource document anywhere follows the engine's origin-level
+  authorization-server fallback, so captured AS evidence still decides.
 - Placeholder/branded-client-only blockers were cleared with evidence
   (Airtable and Shopify stay Connect-attemptable); genuine documented
   requirements stay hard — API keys/bearer tokens (GitHub PAT, Zoom, Render,

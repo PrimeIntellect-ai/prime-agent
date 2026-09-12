@@ -212,7 +212,9 @@ describe("MCP service catalog", () => {
 		const shopify = getServiceCatalogEntry("shopify");
 		expect(shopify?.setup.status).toBe("ready");
 		expect(shopify?.setup.readiness).toBe("unknown");
-		expect(shopify?.auth.metadata?.status).toBe("unavailable");
+		expect(shopify?.auth.metadata?.status).toBe("available");
+		expect(shopify?.auth.metadata?.dynamicClientRegistration).toBeUndefined();
+		expect(shopify?.auth.metadata?.note).toMatch(/no dynamic client registration is advertised/);
 		const linear = getServiceCatalogEntry("linear");
 		expect(linear?.setup.readiness).toBe("oauth-ready");
 		expect(linear?.auth.metadata?.dynamicClientRegistration).toBe(true);
@@ -231,13 +233,25 @@ describe("MCP service catalog", () => {
 			expect(getServiceCatalogEntry(server)?.setup.readiness).toBe("oauth-ready");
 		}
 		// LogRocket fails closed even under the component rule: its resource keeps
-		// the path but drops the ?toolsets=all query, matching neither the exact
-		// endpoint nor the origin.
+		// the path but drops the ?toolsets=all query, so the header-pointed
+		// document fails the engine's validation with no well-known fall-through.
 		const logrocket = getServiceCatalogEntry("logrocket");
 		expect(logrocket?.setup.readiness).toBe("unknown");
-		expect(logrocket?.auth.metadata?.note).toMatch(/matches neither the exact endpoint nor the origin/);
+		expect(logrocket?.auth.metadata?.note).toMatch(
+			/header-pointed document fails the engine's protected-resource validation/,
+		);
 		// DCR-less mismatched providers never become oauth-ready.
 		expect(getServiceCatalogEntry("hubspot")?.setup.readiness).toBe("unknown");
+		// The SDK-parity origin-level fallback makes previously unreachable PRM
+		// documents engine-visible: valid documents with DCR flip (Codspeed,
+		// Resend), served-but-invalid ones fail closed (Confidence).
+		expect(getServiceCatalogEntry("codspeed")?.setup.readiness).toBe("oauth-ready");
+		expect(getServiceCatalogEntry("resend")?.setup.readiness).toBe("oauth-ready");
+		for (const server of ["confidence-docs", "confidence-flags"]) {
+			const entry = getServiceCatalogEntry(server);
+			expect(entry?.setup.readiness).toBe("unknown");
+			expect(entry?.auth.metadata?.note).toMatch(/fails the engine's audience\/structure validation/);
+		}
 		// Prime-restricted: registered-client requirements stay hard, research-anchored.
 		for (const server of ["gmail", "google-calendar", "google-drive", "slack", "mongodb-atlas"]) {
 			const entry = getServiceCatalogEntry(server);

@@ -254,11 +254,11 @@
 		"oauthStrategy": 14,
 		"apiKeyStrategy": 32,
 		"mergedFromBothSources": 16,
-		"readinessOauthReady": 62,
+		"readinessOauthReady": 72,
 		"readinessUserSetup": 53,
 		"readinessPrimeRestricted": 5,
-		"readinessUnknown": 20,
-		"metadataAvailable": 94,
-		"metadataUnavailable": 9
+		"readinessUnknown": 10,
+		"metadataAvailable": 97,
+		"metadataUnavailable": 6
 	}
 }

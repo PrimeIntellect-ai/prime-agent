@@ -13,13 +13,13 @@
 	"userAgent": "PrimeAgent-CatalogAudit/1.0 (ENG-6108 PR2256; read-only metadata audit)",
 	"counts": {
 		"audited": 103,
-		"asAvailable": 94,
-		"prmEngineVisible": 86,
-		"prmAudienceMismatch": 11,
-		"asUnavailable": 9,
-		"dcr": 76,
-		"cimd": 24,
-		"pkceS256": 94
+		"asAvailable": 97,
+		"prmEngineVisible": 93,
+		"prmAudienceMismatch": 15,
+		"asUnavailable": 6,
+		"dcr": 78,
+		"cimd": 25,
+		"pkceS256": 97
 	},
 	"results": [
 		{
@@ -46,7 +46,8 @@
 						"error": "http 403"
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -1032,7 +1033,8 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -1800,7 +1802,8 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -1987,18 +1990,25 @@
 						"audienceMatches": true
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://mcp.codspeed.io/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
-					"https://mcp.codspeed.io/.well-known/oauth-authorization-server",
-					"https://mcp.codspeed.io/.well-known/openid-configuration"
+					"https://api.codspeed.io/.well-known/oauth-authorization-server",
+					"https://api.codspeed.io/.well-known/openid-configuration"
 				],
-				"status": "unavailable",
+				"status": "available",
+				"issuer": "https://api.codspeed.io",
 				"evidence": {
-					"httpStatus": 404,
-					"contentType": "application/json",
-					"error": "http 404"
+					"issuer": "https://api.codspeed.io",
+					"authorizationEndpoint": "https://app.codspeed.io/auth/oauth",
+					"tokenEndpoint": "https://api.codspeed.io/oauth/token",
+					"registrationEndpoint": "https://api.codspeed.io/oauth/register",
+					"pkceS256": true,
+					"tokenAuthMethods": [
+						"none"
+					]
 				}
 			}
 		},
@@ -2037,7 +2047,8 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "the origin-level protected-resource document fails the engine's audience/structure validation; PRM discovery fails closed"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -2101,7 +2112,8 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "the origin-level protected-resource document fails the engine's audience/structure validation; PRM discovery fails closed"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -3466,26 +3478,29 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://mcp.hunter.io/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
-					"https://mcp.hunter.io/.well-known/oauth-authorization-server",
-					"https://mcp.hunter.io/.well-known/openid-configuration"
+					"https://hunter.io/.well-known/oauth-authorization-server",
+					"https://hunter.io/.well-known/openid-configuration"
 				],
 				"status": "available",
-				"issuer": "https://mcp.hunter.io",
+				"issuer": "https://hunter.io",
 				"evidence": {
 					"issuer": "https://hunter.io",
 					"authorizationEndpoint": "https://hunter.io/oauth/authorize",
 					"tokenEndpoint": "https://hunter.io/oauth/token",
-					"registrationEndpoint": "https://hunter.io/oauth/applications",
+					"registrationEndpoint": "https://hunter.io/oauth/register",
 					"pkceS256": true,
 					"authorizationServerScopes": [
 						"read",
 						"write"
 					],
 					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
 						"none"
 					]
 				}
@@ -3515,7 +3530,8 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -3872,8 +3888,8 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "available",
-				"engineSelectedSourceUrl": "https://mcp.logrocket.com/.well-known/oauth-protected-resource/mcp"
+				"engineVisible": "unavailable",
+				"selectionNote": "the header-pointed document fails the engine's protected-resource validation; PRM discovery fails closed with no well-known fall-through"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -3909,25 +3925,6 @@
 					{
 						"sourceUrl": "https://mcp.lovable.dev/.well-known/oauth-protected-resource?src=cc-plugin",
 						"kind": "pathful",
-						"status": "available",
-						"evidence": {
-							"resource": "https://mcp.lovable.dev",
-							"authorizationServers": [
-								"https://lovable.dev/oauth"
-							],
-							"protectedResourceScopes": [
-								"offline",
-								"projects:read",
-								"projects:write",
-								"workspaces:read",
-								"workspaces:write"
-							]
-						},
-						"audienceMatches": false
-					},
-					{
-						"sourceUrl": "https://mcp.lovable.dev/.well-known/oauth-protected-resource",
-						"kind": "origin",
 						"status": "available",
 						"evidence": {
 							"resource": "https://mcp.lovable.dev",
@@ -4244,7 +4241,8 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -5462,18 +5460,32 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://mcp.resend.com/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
-					"https://mcp.resend.com/.well-known/oauth-authorization-server",
-					"https://mcp.resend.com/.well-known/openid-configuration"
+					"https://api.resend.com/.well-known/oauth-authorization-server",
+					"https://api.resend.com/.well-known/openid-configuration"
 				],
-				"status": "unavailable",
+				"status": "available",
+				"issuer": "https://api.resend.com",
 				"evidence": {
-					"httpStatus": 404,
-					"contentType": "text/html",
-					"error": "http 404"
+					"issuer": "https://api.resend.com",
+					"authorizationEndpoint": "https://api.resend.com/oauth/authorize",
+					"tokenEndpoint": "https://api.resend.com/oauth/token",
+					"registrationEndpoint": "https://api.resend.com/oauth/register",
+					"pkceS256": true,
+					"clientIdMetadataDocument": true,
+					"authorizationServerScopes": [
+						"full_access",
+						"emails:send"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					]
 				}
 			}
 		},
@@ -5510,7 +5522,8 @@
 						"audienceMatches": true
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://mcp.revenuecat.ai/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -5870,18 +5883,56 @@
 						"audienceMatches": true
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://setup.shopify.com/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
-					"https://setup.shopify.com/.well-known/oauth-authorization-server",
-					"https://setup.shopify.com/.well-known/openid-configuration"
+					"https://setup.shopify.com/.well-known/oauth-authorization-server/auth",
+					"https://setup.shopify.com/auth/.well-known/openid-configuration"
 				],
-				"status": "unavailable",
+				"status": "available",
+				"issuer": "https://setup.shopify.com/auth",
 				"evidence": {
-					"httpStatus": 404,
-					"contentType": "application/json",
-					"error": "http 404"
+					"issuer": "https://setup.shopify.com/auth",
+					"authorizationEndpoint": "https://setup.shopify.com/oauth/authorize",
+					"tokenEndpoint": "https://setup.shopify.com/oauth/token",
+					"pkceS256": true,
+					"authorizationServerScopes": [
+						"read_all_orders",
+						"read_analytics",
+						"read_apps",
+						"read_companies",
+						"read_legal_policies",
+						"read_reports",
+						"write_checkout_branding_settings",
+						"write_checkouts",
+						"write_collective.access",
+						"write_content",
+						"write_customers",
+						"write_digital_products_product",
+						"write_discounts",
+						"write_draft_orders",
+						"write_files",
+						"write_fulfillments",
+						"write_inventory",
+						"write_locales",
+						"write_locations",
+						"write_marketing_events",
+						"write_markets",
+						"write_merchant_managed_fulfillment_orders",
+						"write_metaobject_definitions",
+						"write_metaobjects",
+						"write_online_store_navigation",
+						"write_order_edits",
+						"write_orders",
+						"write_price_rules",
+						"write_products",
+						"write_publications"
+					],
+					"tokenAuthMethods": [
+						"none"
+					]
 				}
 			}
 		},
@@ -6024,7 +6075,8 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -6356,7 +6408,8 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "unavailable",
+				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -6502,18 +6555,19 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://mcp.vanta.com/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
-					"https://mcp.vanta.com/.well-known/oauth-authorization-server",
-					"https://mcp.vanta.com/.well-known/openid-configuration"
+					"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+					"https://api.vanta.com/mcp/.well-known/openid-configuration"
 				],
 				"status": "available",
-				"issuer": "https://mcp.vanta.com",
+				"issuer": "https://api.vanta.com/mcp",
 				"evidence": {
-					"issuer": "https://mcp.vanta.com",
-					"authorizationEndpoint": "https://app.vanta.com/oauth/authorize",
+					"issuer": "https://api.vanta.com/mcp",
+					"authorizationEndpoint": "https://api.vanta.com/oauth/authorize",
 					"tokenEndpoint": "https://api.vanta.com/oauth/token",
 					"registrationEndpoint": "https://api.vanta.com/oauth/register",
 					"pkceS256": true,
@@ -6558,18 +6612,19 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://mcp.aus.vanta.com/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
-					"https://mcp.aus.vanta.com/.well-known/oauth-authorization-server",
-					"https://mcp.aus.vanta.com/.well-known/openid-configuration"
+					"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+					"https://api.vanta.com/mcp/.well-known/openid-configuration"
 				],
 				"status": "available",
-				"issuer": "https://mcp.aus.vanta.com",
+				"issuer": "https://api.vanta.com/mcp",
 				"evidence": {
-					"issuer": "https://mcp.aus.vanta.com",
-					"authorizationEndpoint": "https://app.aus.vanta.com/oauth/authorize",
+					"issuer": "https://api.vanta.com/mcp",
+					"authorizationEndpoint": "https://api.vanta.com/oauth/authorize",
 					"tokenEndpoint": "https://api.vanta.com/oauth/token",
 					"registrationEndpoint": "https://api.vanta.com/oauth/register",
 					"pkceS256": true,
@@ -6614,18 +6669,19 @@
 						"audienceMatches": false
 					}
 				],
-				"engineVisible": "unavailable"
+				"engineVisible": "available",
+				"engineSelectedSourceUrl": "https://mcp.eu.vanta.com/.well-known/oauth-protected-resource"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
-					"https://mcp.eu.vanta.com/.well-known/oauth-authorization-server",
-					"https://mcp.eu.vanta.com/.well-known/openid-configuration"
+					"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+					"https://api.vanta.com/mcp/.well-known/openid-configuration"
 				],
 				"status": "available",
-				"issuer": "https://mcp.eu.vanta.com",
+				"issuer": "https://api.vanta.com/mcp",
 				"evidence": {
-					"issuer": "https://mcp.eu.vanta.com",
-					"authorizationEndpoint": "https://app.eu.vanta.com/oauth/authorize",
+					"issuer": "https://api.vanta.com/mcp",
+					"authorizationEndpoint": "https://api.vanta.com/oauth/authorize",
 					"tokenEndpoint": "https://api.vanta.com/oauth/token",
 					"registrationEndpoint": "https://api.vanta.com/oauth/register",
 					"pkceS256": true,
