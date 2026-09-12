@@ -33,6 +33,7 @@ import {
 } from "../src/modes/daemon/daemon-protocol.js";
 import { DaemonRoutedClient } from "../src/modes/daemon/daemon-routed-client.js";
 import type { DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 class FakeDaemonClient {
 	readonly requests: DaemonCommand[] = [];
@@ -3920,6 +3921,62 @@ describe("DaemonAgentConnection deferred session events", () => {
 		}
 	});
 
+	it.each([true, false])(
+		"finishes overflow recovery under continuous traffic (snapshot covers overflow=%s)",
+		async (covered) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+				deferSessionEvents: true,
+			});
+			let release!: () => void;
+			const rendering = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			try {
+				await connection.attach();
+				let sequence = 12;
+				for (let index = 0; index <= 1000; index++) emitSequencedSessionEvent(fakeClient, "active-1", ++sequence);
+				let attaches = 0;
+				fakeClient.attachResultFactory = (command) => {
+					if (++attaches > 3) throw new Error("overflow recovery did not terminate");
+					const before = sequence;
+					if (covered || attaches === 1) {
+						for (let index = 0; index <= 1000; index++)
+							emitSequencedSessionEvent(fakeClient, "active-1", ++sequence);
+					}
+					return createAttachResult(
+						command.activeSessionId,
+						command.clientId,
+						command.capabilities,
+						!covered && attaches === 1 ? before : sequence,
+					);
+				};
+				const delivered: AgentConnectionEvent[] = [];
+				connection.subscribe((event) => {
+					delivered.push(event);
+					if (event.type === "session_resynced") return rendering;
+				});
+				const flush = connection.flushBufferedSessionEvents();
+				await nextMessageLoopTurn();
+				expect(attaches).toBe(covered ? 1 : 2);
+				expect(delivered.at(-1)).toMatchObject({
+					type: "session_resynced",
+					snapshot: { lastEventSequence: sequence },
+				});
+				const beforeLive = delivered.length;
+				for (let index = 0; index < 2000; index++) emitSequencedSessionEvent(fakeClient, "active-1", ++sequence);
+				expect(delivered.slice(beforeLive)).toHaveLength(2000);
+				release();
+				await flush;
+				expect(attaches).toBe(covered ? 1 : 2);
+				expect(delivered.some((event) => event.type === "closed")).toBe(false);
+			} finally {
+				release();
+				await connection.dispose();
+			}
+		},
+	);
+
 	it.each([
 		["replacement", false],
 		["replacement", true],
@@ -4025,6 +4082,57 @@ describe("DaemonAgentConnection deferred session events", () => {
 		}
 	});
 
+	it("does not advance event cursors for an attach superseded before its snapshot finishes", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			deferSessionEvents: true,
+		});
+		try {
+			await connection.attach();
+			fakeClient.attachResultFactory = (command) => ({
+				...createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 100),
+				snapshotStream: { id: "superseded", messageCount: 0, targetChunkBytes: 512 * 1024 },
+			});
+			const pendingAttach = connection.attach();
+			await nextMessageLoopTurn();
+			fakeClient.emitMessage({
+				type: "session_snapshot_begin",
+				activeSessionId: "active-1",
+				snapshotId: "superseded",
+				snapshot: createAttachResult("active-1", undefined, undefined, 100).snapshot,
+				messageCount: 0,
+				targetChunkBytes: 512 * 1024,
+				purpose: "attach",
+			});
+			fakeClient.emitMessage({
+				type: "session_replaced",
+				activeSessionId: "active-1",
+				state: createConnectionState("active-1", "replacement"),
+				messages: [],
+			});
+			fakeClient.emitMessage({
+				type: "session_snapshot_end",
+				activeSessionId: "active-1",
+				snapshotId: "superseded",
+				chunkCount: 0,
+				lastEventSequence: 100,
+				lastEventCursor: { generation: "generation-active-1", sequence: 100 },
+			});
+			await pendingAttach;
+			const delivered: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				delivered.push(event);
+			});
+			emitSequencedSessionEvent(fakeClient, "active-1", 13);
+			await connection.flushBufferedSessionEvents();
+			expect(delivered).toEqual([{ type: "session_event", event: { type: "session_info_changed", name: "13" } }]);
+			const snapshot = await connection.getInitialSnapshot();
+			expect(snapshot.lastEventCursor).toEqual({ generation: "generation-active-1", sequence: 13 });
+		} finally {
+			await connection.dispose();
+		}
+	});
+
 	it("keeps live events behind the whole replay and shares concurrent flushes", async () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
@@ -4037,11 +4145,19 @@ describe("DaemonAgentConnection deferred session events", () => {
 		try {
 			await connection.attach();
 			const delivered: string[] = [];
-			connection.subscribe(async (event) => {
-				if (event.type !== "session_event" || event.event.type !== "session_info_changed") return;
-				delivered.push(event.event.name!);
-				if (delivered.length === 1) await gate;
-			});
+			const ui = {
+				agentConnection: connection,
+				sessionEventQueue: Promise.resolve(),
+				sessionEventGeneration: 0,
+				handleEvent: async (event: { type: string; name?: string }) => {
+					delivered.push(event.name!);
+					if (delivered.length === 1) await gate;
+				},
+				showError: vi.fn(),
+			};
+			(InteractiveMode.prototype as unknown as { subscribeToAgent(this: typeof ui): void }).subscribeToAgent.call(
+				ui,
+			);
 			emitSequencedSessionEvent(fakeClient, "active-1", 13);
 			emitSequencedSessionEvent(fakeClient, "active-1", 14);
 			const flush = connection.flushBufferedSessionEvents();
@@ -4051,7 +4167,9 @@ describe("DaemonAgentConnection deferred session events", () => {
 			expect(delivered).toEqual(["13"]);
 			release();
 			await flush;
+			await ui.sessionEventQueue;
 			expect(delivered).toEqual(["13", "14", "15"]);
+			expect(ui.showError).not.toHaveBeenCalled();
 		} finally {
 			release();
 			await connection.dispose();

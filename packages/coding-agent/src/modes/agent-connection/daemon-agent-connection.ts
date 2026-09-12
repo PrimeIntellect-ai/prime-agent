@@ -431,6 +431,13 @@ export class DaemonAgentConnection implements AgentConnection {
 		);
 		if (sessionRevision !== this.sessionRevision) return;
 		this.activeSessionId = getAttachActiveSessionId(result);
+		const snapshot =
+			"snapshot" in result
+				? result.snapshotStream
+					? await this.waitForSnapshot(result.snapshotStream.id)
+					: result.snapshot
+				: undefined;
+		if (sessionRevision !== this.sessionRevision) return;
 		const summary = "snapshot" in result ? result.snapshot.summary : result;
 		this.attachedSessionId = summary.sessionId;
 		this.attachedSessionFile =
@@ -443,11 +450,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.observeEventCursor(attachCursor);
 		}
 		this.lastEventSequence = maxEventSequence(this.lastEventSequence, getAttachLastEventSequence(result));
-		if ("snapshot" in result) {
-			const snapshot = result.snapshotStream
-				? await this.waitForSnapshot(result.snapshotStream.id)
-				: result.snapshot;
-			if (sessionRevision !== this.sessionRevision) return;
+		if (snapshot && "snapshot" in result) {
 			this.applySessionSnapshot(snapshot, result.replay);
 		} else {
 			this.latestSnapshot = undefined;
@@ -555,6 +558,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 		this.deferredSessionEventFlush = Promise.resolve()
 			.then(async () => {
+				const deliveries: Promise<void>[] = [];
 				while (!this.disposed && !this.terminalCloseEmitted) {
 					if (this.deferredSessionEventsOverflowed) {
 						this.deferredSessionEventsOverflowed = false;
@@ -566,15 +570,16 @@ export class DaemonAgentConnection implements AgentConnection {
 							if (sessionRevision === this.sessionRevision) throw error;
 						}
 						if (this.disposed || this.terminalCloseEmitted) return;
-						if (sessionRevision !== this.sessionRevision) continue;
+						if (sessionRevision !== this.sessionRevision || this.deferredSessionEventsOverflowed) continue;
 						const snapshot = await this.getInitialSnapshot();
-						if (sessionRevision === this.sessionRevision) await this.emit({ type: "session_resynced", snapshot });
+						if (sessionRevision === this.sessionRevision)
+							deliveries.push(this.emit({ type: "session_resynced", snapshot }));
 						continue;
 					}
 					const deferred = this.deferredSessionEvents.shift();
 					if (!deferred) {
 						this.stopDeferringSessionEvents();
-						return;
+						break;
 					}
 					const { event, sequence } = deferred;
 					this.observeStreamingMessage(event);
@@ -583,8 +588,10 @@ export class DaemonAgentConnection implements AgentConnection {
 						this.observeRlmChildUpdate(event.child);
 					}
 					this.latestSnapshotIsFresh = false;
-					await this.emit({ type: "session_event", event });
+					// Enqueue the whole replay before yielding; the UI serializes its rendering.
+					deliveries.push(this.emit({ type: "session_event", event }));
 				}
+				await Promise.all(deliveries);
 			})
 			.catch(async (error: unknown) => {
 				if (this.disposed || this.terminalCloseEmitted) return;
@@ -611,6 +618,14 @@ export class DaemonAgentConnection implements AgentConnection {
 		snapshotSequence: number | undefined,
 		snapshotCursor: DaemonEventCursor | undefined,
 	): void {
+		if (
+			snapshotSequence !== undefined &&
+			this.lastEventSequence !== undefined &&
+			snapshotCursor?.generation === this.lastEventCursor?.generation &&
+			snapshotSequence >= this.lastEventSequence
+		) {
+			this.deferredSessionEventsOverflowed = false;
+		}
 		this.deferredSessionEvents = this.deferredSessionEvents.filter(
 			(entry) =>
 				entry.generation === snapshotCursor?.generation &&

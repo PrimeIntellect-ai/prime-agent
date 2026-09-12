@@ -209,6 +209,7 @@ const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
  * catch-up snapshot instead of buffering without limit.
  */
 const MAX_DEFERRED_SESSION_PAYLOADS = 256;
+const MAX_DEFERRED_SESSION_BYTES = 8 * 1024 * 1024;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
 // ~2.5 minutes of probing: each round is one 5s defer recheck plus a ~11s three-delay probe pass.
 const MAX_DEFERRED_RECOVERY_ROUNDS = 10;
@@ -5436,7 +5437,7 @@ export class DaemonSupervisor {
 			if (
 				!snapshotDelivered &&
 				client.attachedActiveSessionIds.has(result.activeSessionId) &&
-				client.deferredSessionPayloads?.get(result.activeSessionId)?.length
+				client.deferredSessionPayloads?.get(result.activeSessionId)?.payloads.length
 			) {
 				this.queueCatchup(client, result.activeSessionId, "resync");
 			}
@@ -5930,6 +5931,13 @@ export class DaemonSupervisor {
 			if (outboundType === "extension_ui_request" && !client.supportsExtensionUi) {
 				continue;
 			}
+			if (outboundType === "session_closed") {
+				this.discardDeferredSessionPayloads(client, activeSessionId);
+				client.catchupActiveSessionIds?.delete(activeSessionId);
+				client.catchupPurposes?.delete(activeSessionId);
+				this.writeSerialized(client, publicPayload);
+				continue;
+			}
 			if (client.snapshotActiveSessionIds?.has(activeSessionId)) {
 				// A replacement swaps the session wholesale; buffered payloads from
 				// the old session must never replay, so fall back to a replacement
@@ -6024,23 +6032,27 @@ export class DaemonSupervisor {
 		if (client.deferredSessionPayloadsDropped?.has(activeSessionId)) {
 			return false;
 		}
-		const payloads = client.deferredSessionPayloads?.get(activeSessionId) ?? [];
-		if (payloads.length >= MAX_DEFERRED_SESSION_PAYLOADS) {
+		const deferred = client.deferredSessionPayloads?.get(activeSessionId) ?? { payloads: [], bytes: 0 };
+		if (
+			deferred.payloads.length >= MAX_DEFERRED_SESSION_PAYLOADS ||
+			deferred.bytes + payload.byteLength > MAX_DEFERRED_SESSION_BYTES
+		) {
 			// A catch-up snapshot supersedes the buffered payloads.
 			client.deferredSessionPayloadsDropped ??= new Set();
 			client.deferredSessionPayloadsDropped.add(activeSessionId);
 			this.discardDeferredSessionPayloads(client, activeSessionId);
 			return false;
 		}
-		payloads.push(payload);
+		deferred.payloads.push(payload);
+		deferred.bytes += payload.byteLength;
 		client.deferredSessionPayloads ??= new Map();
-		client.deferredSessionPayloads.set(activeSessionId, payloads);
+		client.deferredSessionPayloads.set(activeSessionId, deferred);
 		return true;
 	}
 
 	/** Replay payloads deferred during a completed snapshot stream, in order. */
 	private flushDeferredSessionPayloads(client: DaemonSocketClient, activeSessionId: string): void {
-		const payloads = client.deferredSessionPayloads?.get(activeSessionId);
+		const payloads = client.deferredSessionPayloads?.get(activeSessionId)?.payloads;
 		if (!payloads || payloads.length === 0) {
 			return;
 		}

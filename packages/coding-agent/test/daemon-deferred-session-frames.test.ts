@@ -295,8 +295,22 @@ describe("deferred session frames during snapshot streams", () => {
 		socket.destroy();
 	});
 
-	const supervisorScenarios = ["attached", "detached", "replaced", "failed", "failed-detached"];
+	const supervisorScenarios = [
+		"attached",
+		"detached",
+		"replaced",
+		"failed",
+		"failed-detached",
+		"oversized",
+		"byte-limit",
+		"count-limit",
+		"closed",
+		"oversized-closed",
+		"replaced-closed",
+	];
 	it.each(supervisorScenarios)("supervisor: replay (%s)", async (scenario) => {
+		const overflow = scenario.startsWith("oversized") || scenario.endsWith("-limit");
+		const closed = scenario.endsWith("closed");
 		const supervisor = new DaemonSupervisor(join(tmpdir(), "deferred-frames-supervisor.sock"), {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			descriptorDir: join(tmpdir(), "deferred-frames-supervisor-state"),
@@ -358,7 +372,7 @@ describe("deferred session frames during snapshot streams", () => {
 		const completion = stream.catch((error: unknown) => error);
 		await nextMacroTaskTurn();
 		// The stream is parked before the end record; relayed frames are withheld.
-		if (scenario === "replaced") {
+		if (scenario.startsWith("replaced")) {
 			internals.handleWorkerFrame(worker, {
 				header: {
 					kind: "outbound",
@@ -371,7 +385,7 @@ describe("deferred session frames during snapshot streams", () => {
 				),
 			});
 		}
-		internals.handleWorkerFrame(worker, {
+		const eventFrame: PrivateFrame<DaemonWorkerFrameHeader> = {
 			header: {
 				kind: "outbound",
 				outboundType: "session_event",
@@ -379,8 +393,24 @@ describe("deferred session frames during snapshot streams", () => {
 				sessionEventType: "session_info_changed",
 				payloadEncoding: "jsonl",
 			},
-			payload: Buffer.from(`${JSON.stringify(sessionEventMessage(2))}\n`),
-		});
+			payload: Buffer.from(
+				`${JSON.stringify({
+					...sessionEventMessage(2),
+					padding: "x".repeat(
+						scenario.startsWith("oversized") ? 8 * 1024 * 1024 : scenario === "byte-limit" ? 4 * 1024 * 1024 : 0,
+					),
+				})}\n`,
+			),
+		};
+		internals.handleWorkerFrame(worker, eventFrame);
+		if (scenario === "byte-limit") internals.handleWorkerFrame(worker, eventFrame);
+		if (scenario === "count-limit") {
+			for (let index = 1; index < 257; index++) internals.handleWorkerFrame(worker, eventFrame);
+		}
+		if (overflow) {
+			expect(client.deferredSessionPayloads?.size ?? 0).toBe(0);
+			expect(client.catchupActiveSessionIds?.has(activeSessionId)).toBe(true);
+		}
 		internals.handleWorkerFrame(worker, {
 			header: {
 				kind: "outbound",
@@ -392,9 +422,15 @@ describe("deferred session frames during snapshot streams", () => {
 			payload: Buffer.from(`${JSON.stringify(sessionEventMessage(3))}\n`),
 		});
 
+		const closeFrame: PrivateFrame<DaemonWorkerFrameHeader> = {
+			header: { kind: "outbound", outboundType: "session_closed", activeSessionId, payloadEncoding: "jsonl" },
+			payload: Buffer.from(`${JSON.stringify({ type: "session_closed", activeSessionId, reason: "killed" })}\n`),
+		};
+		if (closed && !overflow) internals.handleWorkerFrame(worker, closeFrame);
 		if (scenario.endsWith("detached")) client.attachedActiveSessionIds.delete(activeSessionId);
 		releaseChunk();
 		const error = await completion;
+		if (closed && overflow) internals.handleWorkerFrame(worker, closeFrame);
 		if (scenario.startsWith("failed")) expect(error).toBeInstanceOf(Error);
 		else expect(error).toBeUndefined();
 
@@ -403,12 +439,16 @@ describe("deferred session frames during snapshot streams", () => {
 		expect(parsed.map((entry) => entry.type)).toEqual([
 			"session_snapshot_begin",
 			"session_snapshot_chunk",
+			...(closed && !overflow ? ["session_closed"] : []),
 			scenario.startsWith("failed") ? "session_snapshot_failed" : "session_snapshot_end",
+			...(closed && overflow ? ["session_closed"] : []),
 			...(scenario === "attached" ? ["session_event", "session_event"] : []),
 		]);
 		expect(client.deferredSessionPayloads?.size ?? 0).toBe(0);
-		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(scenario === "replaced" || scenario === "failed" ? 1 : 0);
-		if (scenario === "replaced") {
+		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(
+			!closed && (scenario === "replaced" || scenario === "failed" || overflow) ? 1 : 0,
+		);
+		if (!closed && (scenario === "replaced" || overflow)) {
 			const before = written.length;
 			const frame: PrivateFrame<DaemonWorkerFrameHeader> = {
 				header: { kind: "outbound", outboundType: "session_event", activeSessionId, payloadEncoding: "jsonl" },
@@ -550,7 +590,9 @@ describe("deferred session frames during snapshot streams", () => {
 		});
 		const socket = new PassThrough();
 		const client = socketClient(socket, {
-			deferredSessionPayloads: new Map([[activeSessionId, [Buffer.alloc(128 * 1024), Buffer.from("later")]]]),
+			deferredSessionPayloads: new Map([
+				[activeSessionId, { payloads: [Buffer.alloc(128 * 1024), Buffer.from("later")], bytes: 128 * 1024 + 5 }],
+			]),
 		});
 		const internals = supervisor as unknown as {
 			reserveSnapshotStream(client: DaemonSocketClient, activeSessionId: string): () => void;

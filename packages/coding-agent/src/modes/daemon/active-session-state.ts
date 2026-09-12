@@ -43,7 +43,7 @@ export interface DaemonSocketClient {
 	 * Relay payloads withheld while a snapshot stream is active for that session
 	 * (supervisor side: serialized buffers). Same replay-on-completion policy.
 	 */
-	deferredSessionPayloads?: Map<string, Buffer[]>;
+	deferredSessionPayloads?: Map<string, { payloads: Buffer[]; bytes: number }>;
 	/** Supervisor-side sessions whose deferral buffer overflowed this stream. */
 	deferredSessionPayloadsDropped?: Set<string>;
 	snapshotActiveSessionCounts?: Map<string, number>;
