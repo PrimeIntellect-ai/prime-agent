@@ -63,7 +63,7 @@ class TerminalTests(unittest.TestCase):
 import os, sys, time, tty
 tty.setraw(0)
 time.sleep(float(sys.argv[1]))
-os.write(1, b'agents/resume\\r\\n> ')
+os.write(1, sys.argv[2].encode())
 while True:
     byte = os.read(0, 1)
     if byte == b'\\x7f':
@@ -80,9 +80,9 @@ while True:
             root = Path(directory)
             path = root / "fixture.py"
             path.write_text(script)
-            for delay in (0.05, 0.6):
+            for delay, label in ((0.05, "agents/resume\r\n> "), (0.6, ">\r\n← manage")):
                 terminal = Terminal(
-                    [sys.executable, str(path), str(delay)],
+                    [sys.executable, str(path), str(delay), label],
                     root,
                     os.environ.copy(),
                     root / f"transcript-{delay}",
@@ -92,6 +92,16 @@ while True:
                 finally:
                     terminal.close()
         self.assertGreater(measurements[1] - measurements[0], 0.25)
+
+    def test_recognizes_current_and_legacy_prompt_bars(self):
+        for text in ("agents/resume\r\n> ", ">\r\n← manage        unknown  0"):
+            display = Display(lambda _reply: None)
+            display.feed(text)
+            self.assertTrue(display.prompt_ready())
+        for text in ("Loading...", ">", "← manage"):
+            display = Display(lambda _reply: None)
+            display.feed(text)
+            self.assertFalse(display.prompt_ready())
 
     def test_queries_split_at_every_boundary(self):
         for query, reply in QUERIES.items():
