@@ -2,8 +2,8 @@
  * RPC mode: headless operation with JSON commands on stdin and JSON responses/events on stdout.
  */
 
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import type { AgentSessionRuntime } from "../../session/runtime/runtime.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {

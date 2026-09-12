@@ -42,7 +42,6 @@ import {
 	type SelfUpdateCommand,
 	VERSION,
 } from "./config.js";
-import type { AgentSessionRuntimeMetadata } from "./core/agent-session-runtime.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { DaemonClient, type DaemonHello } from "./modes/daemon/daemon-client.js";
@@ -67,6 +66,7 @@ import {
 import type { SessionActionRecoverySnapshot } from "./session/agent-session.js";
 import { SESSION_ACTION_RECOVERY_FORMAT_VERSION } from "./session/agent-session.js";
 import { type CustomMessage, isSessionSlashCommand } from "./session/context/messages.js";
+import type { AgentSessionRuntimeMetadata } from "./session/runtime/runtime.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
 

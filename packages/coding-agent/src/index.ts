@@ -119,37 +119,9 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.js";
 export { DefaultPackageManager } from "./core/package-manager.js";
+export type { PromptTemplate } from "./core/prompt-templates.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
-// SDK for programmatic usage
-export {
-	type AgentSessionCreationOptions,
-	AgentSessionRuntime,
-	type AgentSessionRuntimeConfig,
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionRuntimeKind,
-	type AgentSessionRuntimeMetadata,
-	type AgentSessionServices,
-	type CreateAgentSessionFromServicesOptions,
-	type CreateAgentSessionOptions,
-	type CreateAgentSessionResult,
-	type CreateAgentSessionRuntimeFactory,
-	type CreateAgentSessionRuntimeResult,
-	type CreateAgentSessionServicesOptions,
-	type CreateRlmSubagentRuntimeOptions,
-	// Factory
-	createAgentSession,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	createBashTool,
-	// Tool factories (for custom cwd)
-	createEditTool,
-	createIpythonTool,
-	type PromptTemplate,
-	type RlmSubagentRuntime,
-	type SubagentRuntimeHost,
-} from "./core/sdk.js";
 export { SessionImportFileNotFoundError } from "./core/session-import-errors.js";
 export {
 	type BranchSummaryEntry,
@@ -210,8 +182,11 @@ export {
 	type BashToolDetails,
 	type BashToolInput,
 	type BashToolOptions,
+	createBashTool, // Tool factories (for custom cwd)
 	createBashToolDefinition,
+	createEditTool,
 	createEditToolDefinition,
+	createIpythonTool,
 	createIpythonToolDefinition,
 	createLocalBashOperations,
 	DEFAULT_MAX_BYTES,
@@ -360,6 +335,21 @@ export {
 	type ThemeColor,
 } from "./modes/interactive/theme/theme.js";
 export {
+	type CreateAgentSessionOptions,
+	type CreateAgentSessionResult, // Factory
+	createAgentSession,
+} from "./sdk/create-session.js";
+// SDK for programmatic usage
+export {
+	type AgentSessionCreationOptions,
+	type AgentSessionRuntimeDiagnostic,
+	type AgentSessionServices,
+	type CreateAgentSessionFromServicesOptions,
+	type CreateAgentSessionServicesOptions,
+	createAgentSessionFromServices,
+	createAgentSessionServices,
+} from "./sdk/services.js";
+export {
 	AgentSession,
 	type AgentSessionConfig,
 	type AgentSessionEvent,
@@ -367,6 +357,11 @@ export {
 	type ModelCycleResult,
 	type PromptOptions,
 } from "./session/agent-session.js";
+export type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "./session/children/runtime-contracts.js";
 export {
 	compact,
 	findCutPoint,
@@ -392,6 +387,15 @@ export type { SessionStats } from "./session/context/session-stats.js";
 export { calculateContextTokens, estimateTokens, getLastAssistantUsage } from "./session/context/token-estimate.js";
 export type { SessionActionSnapshot } from "./session/input/action-store.js";
 export type { HarnessState, RefinementEdit, RefinementProposal, RefinementResult } from "./session/refinement/types.js";
+export type { AgentSessionRuntimeConfig } from "./session/runtime/config.js";
+export {
+	AgentSessionRuntime,
+	type AgentSessionRuntimeKind,
+	type AgentSessionRuntimeMetadata,
+	type CreateAgentSessionRuntimeFactory,
+	type CreateAgentSessionRuntimeResult,
+	createAgentSessionRuntime,
+} from "./session/runtime/runtime.js";
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.js";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.js";

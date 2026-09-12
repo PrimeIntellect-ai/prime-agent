@@ -5,8 +5,6 @@ import type {
 	AgentSessionMessageReceipt,
 	AgentSessionMessageSafetyStatus,
 } from "../../core/agent-messages.js";
-import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
-import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type {
 	AgentCronJob,
@@ -23,6 +21,8 @@ import type { AgentAutonomousStatus } from "../../session/autonomy/autonomous.js
 import type { CustomMessage } from "../../session/context/messages.js";
 import type { SessionUsageSummary } from "../../session/context/usage.js";
 import type { QueuedMessageLane, QueuedMessageMutation } from "../../session/input/action-store.js";
+import type { AgentSessionRuntimeConfig } from "../../session/runtime/config.js";
+import type { AgentSessionRuntimeMetadata } from "../../session/runtime/runtime.js";
 import type {
 	AgentConnectionAgentStatus,
 	AgentConnectionHeartbeat,

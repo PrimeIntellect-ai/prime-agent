@@ -11,9 +11,17 @@ import type { ResourceLoader } from "../../core/resource-loader.js";
 import type { Skill } from "../../core/skills.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "../../core/source-info.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "../../core/tools/acp-mcp.js";
-import type { IpythonKernelProvisioner } from "../../core/tools/ipython.js";
+import { createAllToolDefinitions, type ToolsOptions } from "../../core/tools/index.js";
 import { createToolDefinitionFromAgentTool } from "../../core/tools/tool-definition-wrapper.js";
+import type { IpythonKernelProvisioner } from "../../kernel/provisioner.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "../context/system-prompt.js";
+
+export function createSessionBuiltinToolDefinitions(
+	cwd: string,
+	options: ToolsOptions,
+): Record<string, ToolDefinition> {
+	return createAllToolDefinitions(cwd, options);
+}
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
@@ -86,6 +94,9 @@ export class SessionTools {
 					]),
 				)
 			: undefined;
+	}
+	buildBuiltinDefinitions(options: ToolsOptions): Record<string, ToolDefinition> {
+		return createSessionBuiltinToolDefinitions(this.host.cwd, options);
 	}
 	setBaseDefinitions(definitions: Record<string, ToolDefinition>): void {
 		this._baseToolDefinitions = new Map(Object.entries(definitions));

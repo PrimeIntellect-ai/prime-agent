@@ -8,6 +8,9 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Model, ServiceTier } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, cleanupSessionResources, supportsFastMode } from "@earendil-works/pi-ai";
+import { handleAgentMessageHostRequest } from "../coordination/messaging/host-requests.js";
+import { handleAgentObserveHostRequest } from "../coordination/observation/host-requests.js";
+import { handleRlmHeartbeatHostRequest } from "../coordination/scheduling/host-requests.js";
 import {
 	AGENT_MESSAGE_SKILL_NAME,
 	type AgentSessionMessageController,
@@ -30,7 +33,6 @@ import type {
 	ToolDefinition,
 	ToolInfo,
 } from "../core/extensions/index.js";
-import type { HostRequestHandlers } from "../core/kernel/index.js";
 import type { AcpMcpServerConfig } from "../core/mcp/acp-mcp-types.js";
 import type { McpManager } from "../core/mcp/mcp-manager.js";
 import type { ModelRegistry } from "../core/model-registry.js";
@@ -41,7 +43,8 @@ import { SemanticEdgeRecorder, semanticEdgeLedgerPath, wrapStreamFnWithSemanticE
 import type { SessionManager } from "../core/session-manager.js";
 import type { SettingsManager } from "../core/settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "../core/skills.js";
-import type { IpythonKernelProvisioner } from "../core/tools/ipython.js";
+import type { HostRequestHandlers } from "../kernel/contracts.js";
+import type { IpythonKernelProvisioner } from "../kernel/provisioner.js";
 import type { AgentAutonomousConfig } from "./autonomy/autonomous.js";
 import { SessionAutonomousContinuation } from "./autonomy/continuation.js";
 import { createChildSessionDir, createInlineChildRuntime } from "./children/child-runtime.js";
@@ -100,15 +103,12 @@ import { SessionMessageDelivery } from "./input/message-delivery.js";
 import { type QueuedSessionAction, visibleSessionActionProjection } from "./input/prepared-actions.js";
 import { type PromptOptions, SessionPromptSubmission } from "./input/prompt-submission.js";
 import { SubmissionNormalizer } from "./input/submission-normalization.js";
-import { handleRlmHeartbeatHostRequest } from "./kernel/heartbeat-host-requests.js";
-import { SessionKernel } from "./kernel/kernel.js";
-import { KernelEnvironment } from "./kernel/kernel-environment.js";
-import { createSessionKernelHostHandlers } from "./kernel/kernel-host-handlers.js";
-import { handleAgentMessageHostRequest } from "./kernel/message-host-requests.js";
-import { handleAgentObserveHostRequest } from "./kernel/observe-host-requests.js";
 import { SessionModelSelection } from "./models/model-selection.js";
 import { type AutoRefineReviewer, SessionRefinement } from "./refinement/controller.js";
 import { REFINE_SKILL_NAME, type RefinementResult } from "./refinement/types.js";
+import { createSessionKernelHostHandlers } from "./runtime/host-bridge.js";
+import { KernelEnvironment } from "./runtime/kernel-environment.js";
+import { SessionKernel } from "./runtime/kernel-lifecycle.js";
 import { type ExecuteBashOptions, type RunUserBashOptions, SessionBash } from "./tools/bash.js";
 import { SessionTools } from "./tools/tools.js";
 import { SessionCommandExecution } from "./turns/command-execution.js";
@@ -866,7 +866,6 @@ export class AgentSession {
 				getShellCommandPrefix: () => this.settingsManager.getShellCommandPrefix(),
 				getShellPath: () => this.settingsManager.getShellPath(),
 				createHostHandlers: () => this._createKernelHostHandlers(),
-				recordLateSentAgentMessage: (id, message) => this._recordLateIpythonSentAgentMessage(id, message),
 				getMessages: () => this.agent.state.messages,
 				appendCustomMessageEntry: (...args) => this.sessionManager.appendCustomMessageEntry(...args),
 				emit: (event) => this._emit(event),
@@ -2440,7 +2439,18 @@ export class AgentSession {
 		includeAllExtensionTools?: boolean;
 	}): void {
 		const pythonSkills = getPythonSkillRuntimeInfo(this._modelVisibleSkills());
-		this._tools.setBaseDefinitions(this._tools.buildBaseOverrides() ?? this._kernel.build(pythonSkills));
+		this._tools.setBaseDefinitions(
+			this._tools.buildBaseOverrides() ??
+				this._tools.buildBuiltinDefinitions({
+					ipython: {
+						provisioner: this._kernel.prepare(pythonSkills),
+						commandPrefix: this.settingsManager.getShellCommandPrefix(),
+						shellPath: this.settingsManager.getShellPath(),
+						onLateSentAgentMessage: (toolCallId, message) =>
+							this._recordLateIpythonSentAgentMessage(toolCallId, message),
+					},
+				}),
+		);
 		this._extensions.build(options.flagValues);
 		this._tools.updateAcpDefinitions();
 		const baseActiveToolNames = [...(options.activeToolNames ?? this._tools.defaultActiveToolNames)];
