@@ -276,6 +276,22 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("auxiliaryModel", () => {
+		it("returns a valid persisted selector", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ auxiliaryModel: "faux/aux-model" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAuxiliaryModel()).toBe("faux/aux-model");
+		});
+
+		it("treats malformed persisted values as unset", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ auxiliaryModel: 42 }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAuxiliaryModel()).toBeUndefined();
+		});
+	});
+
 	describe("recentModels", () => {
 		it("records most-recently-used first, dedupes, and persists", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
