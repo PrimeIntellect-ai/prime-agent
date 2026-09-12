@@ -1773,10 +1773,15 @@ export class InteractiveMode {
 		const showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash();
 		let outcome: TelemetryOnboardingOutcome = "aborted";
 		try {
-			this.markOnboardingShown();
-			await this.settingsManager.flush();
 			await this.runOnboardingFlow(showPrimeCliSplash);
 			outcome = isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
+			if (outcome === "success") {
+				// Only a completed onboarding counts as seen: an escaped splash or a
+				// failed login leaves the flag unset so the next launch retries, and
+				// shouldRunOnboarding already skips users who configured a model.
+				this.markOnboardingShown();
+				await this.settingsManager.flush();
+			}
 			return true;
 		} catch (error) {
 			outcome = "error";
