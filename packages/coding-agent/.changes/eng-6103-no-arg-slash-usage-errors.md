@@ -1,0 +1,1 @@
+- No-argument slash commands now show a `Usage: /<command>` error when given arguments instead of silently sending the text to the model; the input is preserved for editing.
