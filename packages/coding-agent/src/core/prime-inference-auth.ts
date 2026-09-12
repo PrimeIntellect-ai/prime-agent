@@ -20,7 +20,7 @@ export const PRIME_INFERENCE_PROVIDER_NAME = "Prime Inference";
 export const PRIME_AGENT_TRACES_PROVIDER_ID = "prime-agent-traces";
 export const PRIME_AGENT_TRACES_PROVIDER_NAME = "Prime Agent Traces";
 
-const DEFAULT_PRIME_API_BASE_URL = "https://api.primeintellect.ai";
+export const DEFAULT_PRIME_API_BASE_URL = "https://api.primeintellect.ai";
 const DEFAULT_PRIME_FRONTEND_URL = "https://app.primeintellect.ai";
 const DEFAULT_PRIME_INFERENCE_URL = "https://api.pinference.ai/api/v1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -31,6 +31,7 @@ export type PrimeInferenceAuthSource = "prime-cli" | "browser";
 export type PrimeInferenceLoginResult = {
 	apiKey: string;
 	source: PrimeInferenceAuthSource;
+	primeTeam?: PrimeTeam | null;
 };
 
 export type PrimeCliConfig = {
@@ -53,6 +54,7 @@ export type PrimeInferenceLoginCallbacks = {
 
 export type PrimeInferenceLoginOptions = {
 	configPath?: string;
+	usePrimeCliConfig?: boolean;
 	fetchFn?: typeof fetch;
 	pollIntervalMs?: number;
 	requestTimeoutMs?: number;
@@ -201,6 +203,44 @@ export function loadPrimeCliConfig(configPath: string = defaultPrimeCliConfigPat
 	return config;
 }
 
+function loadProductionPrimeCliConfig(configPath?: string): PrimeCliConfig | undefined {
+	const path = getPrimeCliConfigPath(configPath);
+	const data = readPrimeCliConfigData(path);
+	const urls = [
+		["base_url", DEFAULT_PRIME_API_BASE_URL],
+		["frontend_url", DEFAULT_PRIME_FRONTEND_URL],
+		["inference_url", DEFAULT_PRIME_INFERENCE_URL],
+	] as const;
+	for (const [field, expected] of urls) {
+		if (data[field] === undefined) continue;
+		const value = stringField(data, field);
+		if (!value) return undefined;
+		const normalized = field === "base_url" ? normalizeBaseUrl(value) : normalizeUrl(value, expected);
+		if (normalized !== expected) return undefined;
+	}
+	return {
+		apiKey: stringField(data, "api_key"),
+		baseUrl: DEFAULT_PRIME_API_BASE_URL,
+		frontendUrl: DEFAULT_PRIME_FRONTEND_URL,
+		inferenceUrl: DEFAULT_PRIME_INFERENCE_URL,
+		path,
+		teamId: stringField(data, "team_id"),
+		teamName: stringField(data, "team_name"),
+		teamRole: stringField(data, "team_role"),
+		teamIdFromEnv: false,
+	};
+}
+
+function importedPrimeTeam(config: PrimeCliConfig): PrimeTeam | null {
+	return config.teamId
+		? {
+				teamId: config.teamId,
+				name: config.teamName ?? "Prime team",
+				...(config.teamRole ? { role: config.teamRole } : {}),
+			}
+		: null;
+}
+
 export function savePrimeCliApiKey(apiKey: string, configPath: string = defaultPrimeCliConfigPath()): PrimeCliConfig {
 	const data = readPrimeCliConfigData(configPath);
 	data.api_key = apiKey;
@@ -237,14 +277,21 @@ export function savePrimeCliTeamSelection(
 	return loadPrimeCliConfig(configPath);
 }
 
+export function resolvePrimeInferenceAuthConfig(): PrimeChallengeConfig {
+	return {
+		baseUrl: normalizeBaseUrl(stringEnv("PRIME_AGENT_INFERENCE_API_BASE_URL")),
+		frontendUrl: normalizeUrl(stringEnv("PRIME_AGENT_INFERENCE_FRONTEND_URL"), DEFAULT_PRIME_FRONTEND_URL),
+	};
+}
+
 export function resolvePrimeAgentTracesBaseUrl(baseUrl?: string): string {
 	return normalizeBaseUrl(baseUrl ?? stringEnv("PRIME_AGENT_TRACES_BASE_URL"));
 }
 
-function resolvePrimeAgentTracesChallengeConfig(config: PrimeCliConfig): PrimeChallengeConfig {
+function resolvePrimeAgentTracesChallengeConfig(): PrimeChallengeConfig {
 	return {
 		baseUrl: resolvePrimeAgentTracesBaseUrl(),
-		frontendUrl: stringEnv("PRIME_AGENT_TRACES_BASE_URL") ? config.frontendUrl : DEFAULT_PRIME_FRONTEND_URL,
+		frontendUrl: DEFAULT_PRIME_FRONTEND_URL,
 	};
 }
 
@@ -645,27 +692,33 @@ export async function loginPrimeInference(
 	callbacks: PrimeInferenceLoginCallbacks,
 	options: PrimeInferenceLoginOptions = {},
 ): Promise<PrimeInferenceLoginResult> {
-	const config = loadPrimeCliConfig(options.configPath);
+	const config = resolvePrimeInferenceAuthConfig();
+	const candidate =
+		options.usePrimeCliConfig !== false &&
+		config.baseUrl === DEFAULT_PRIME_API_BASE_URL &&
+		config.frontendUrl === DEFAULT_PRIME_FRONTEND_URL
+			? loadProductionPrimeCliConfig(options.configPath)
+			: undefined;
 	const fetchFn = options.fetchFn ?? fetch;
 	const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
-	if (config.apiKey) {
+	if (candidate?.apiKey) {
 		callbacks.onProgress?.("Checking existing Prime CLI credentials...");
-		const access = await checkPrimeInferenceAccess(config.apiKey, config.baseUrl, {
+		const access = await checkPrimeInferenceAccess(candidate.apiKey, config.baseUrl, {
 			fetchFn,
 			requestTimeoutMs,
 			signal: callbacks.signal,
 		});
 		if (access.ok) {
 			throwIfCancelled(callbacks.signal);
-			return { apiKey: config.apiKey, source: "prime-cli" };
+			return { apiKey: candidate.apiKey, source: "prime-cli", primeTeam: importedPrimeTeam(candidate) };
 		}
 		callbacks.onProgress?.(
 			`Existing Prime CLI key cannot access Prime Inference (${formatAccessFailure(access)}). Starting browser login...`,
 		);
 	} else {
-		callbacks.onProgress?.("No Prime CLI API key found. Starting browser login...");
+		callbacks.onProgress?.("No eligible production Prime CLI API key found. Starting browser login...");
 	}
 
 	const apiKey = await runPrimeBrowserLogin(config, callbacks, fetchFn, requestTimeoutMs, pollIntervalMs);
@@ -688,15 +741,18 @@ export async function loginPrimeAgentTraces(
 	callbacks: PrimeInferenceLoginCallbacks,
 	options: PrimeInferenceLoginOptions = {},
 ): Promise<PrimeInferenceLoginResult> {
-	const config = loadPrimeCliConfig(options.configPath);
-	const traceConfig = resolvePrimeAgentTracesChallengeConfig(config);
+	const traceConfig = resolvePrimeAgentTracesChallengeConfig();
+	const config =
+		options.usePrimeCliConfig !== false && traceConfig.baseUrl === DEFAULT_PRIME_API_BASE_URL
+			? loadProductionPrimeCliConfig(options.configPath)
+			: undefined;
 	const fetchFn = options.fetchFn ?? fetch;
 	const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
-	if (config.apiKey) {
+	if (config?.apiKey) {
 		callbacks.onProgress?.("Checking existing Prime CLI credentials...");
-		const access = await checkPrimeAgentTracesAccess(config.apiKey, traceConfig.baseUrl, {
+		const access = await checkPrimeAgentTracesAccess(config.apiKey, DEFAULT_PRIME_API_BASE_URL, {
 			fetchFn,
 			requestTimeoutMs,
 			signal: callbacks.signal,

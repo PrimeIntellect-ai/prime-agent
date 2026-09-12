@@ -1,0 +1,1 @@
+- Fixed Prime Agent production credentials and team selection to stay independent of Prime CLI configuration, with validated CLI credential reuse only during explicit login.

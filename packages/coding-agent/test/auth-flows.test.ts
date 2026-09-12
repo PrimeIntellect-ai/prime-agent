@@ -84,6 +84,8 @@ describe("ProviderAuthFlows", () => {
 	});
 
 	beforeEach(() => {
+		vi.stubEnv("PRIME_AGENT_INFERENCE_API_BASE_URL", "");
+		vi.stubEnv("PRIME_AGENT_INFERENCE_FRONTEND_URL", "");
 		tempDir = join(tmpdir(), `pi-auth-flows-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		authJsonPath = join(tempDir, "auth.json");
@@ -108,6 +110,7 @@ describe("ProviderAuthFlows", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 	});
 
 	it("preserves the Prime CLI team when login reuses the existing Prime CLI key", async () => {
@@ -153,59 +156,86 @@ describe("ProviderAuthFlows", () => {
 		expect(config.team_id).toBe("cli-team");
 		expect(config.team_name).toBe("CLI Research");
 		expect(config.team_role).toBe("admin");
-		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
+		expect(authStorage.get(PRIME_INFERENCE_PROVIDER_ID)).toEqual({
+			type: "api_key",
+			key: "prime-cli-key",
+			primeTeam: { teamId: "cli-team", name: "CLI Research", role: "admin" },
+		});
+		expect(statusMessages.join("\n")).not.toContain(primeConfigPath);
 	});
 
-	it("stores a reused Prime CLI key when Prime CLI config sync is disabled", async () => {
+	it("does not import default CLI credentials when CLI reuse is disabled", async () => {
 		process.env.HOME = tempDir;
-		process.env.PRIME_TEAM_ID = "env-team";
 		const defaultPrimeDir = join(tempDir, ".prime");
 		mkdirSync(defaultPrimeDir, { recursive: true });
 		writeFileSync(join(defaultPrimeDir, "config.json"), JSON.stringify({ api_key: "prime-cli-key" }));
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
-		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			jsonResponse({
-				data: { scope: { inference: { write: true } } },
-			}),
-		);
-		const { host, errorMessages } = createHost(authStorage);
-
-		const result = await new ProviderAuthFlows(host).runPrimeInferenceLogin();
-
-		expect(errorMessages).toEqual([]);
-		expect(result.status).toBe("success");
-		expect(fetchMock).toHaveBeenCalledOnce();
-		await expect(authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID)).resolves.toBe("prime-cli-key");
-		expect(authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID)).toEqual({
-			configured: true,
-			source: "stored",
-		});
-
-		const authData = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<
-			string,
-			{ type?: string; key?: string }
-		>;
-		expect(authData[PRIME_INFERENCE_PROVIDER_ID]).toEqual({
-			type: "api_key",
-			key: "prime-cli-key",
-		});
-	});
-
-	it("offers Prime Inference logout when auth comes from the Prime CLI config", async () => {
-		writeFileSync(primeConfigPath, JSON.stringify({ api_key: "prime-cli-key" }));
-		const authStorage = AuthStorage.create(authJsonPath, {
-			primeCliConfigPath: primeConfigPath,
-			usePrimeCliConfig: true,
-		});
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
 		const { host, overlays } = createHost(authStorage);
-
-		const logoutResult = new ProviderAuthFlows(host).runLogout();
-
-		expect(overlays).toHaveLength(1);
-		expect(stripAnsi(overlays[0]?.render(80).join("\n") ?? "")).toContain("Prime Inference");
+		const result = new ProviderAuthFlows(host).runPrimeInferenceLogin();
+		await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+		expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://api.primeintellect.ai/api/v1/auth_challenge/generate");
 		overlays[0]?.handleInput?.("\x1b");
-		await expect(logoutResult).resolves.toBeNull();
+		await expect(result).resolves.toEqual({ status: "cancelled" });
+		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
 	});
+
+	it("does not offer logout for credentials owned only by the Prime CLI", async () => {
+		writeFileSync(primeConfigPath, JSON.stringify({ api_key: "prime-cli-key" }));
+		const authStorage = AuthStorage.create(authJsonPath, { primeCliConfigPath: primeConfigPath });
+		const { host, overlays } = createHost(authStorage);
+		await expect(new ProviderAuthFlows(host).runLogout()).resolves.toBeNull();
+		expect(overlays).toHaveLength(0);
+		expect(JSON.parse(readFileSync(primeConfigPath, "utf-8"))).toEqual({ api_key: "prime-cli-key" });
+	});
+
+	it.each([undefined, "https://agent-api.example/api/v1/"])(
+		"uses the Agent auth target for manual validation and teams (%s)",
+		async (override) => {
+			delete process.env.PRIME_TEAM_ID;
+			if (override) vi.stubEnv("PRIME_AGENT_INFERENCE_API_BASE_URL", override);
+			const baseUrl = override ? "https://agent-api.example" : "https://api.primeintellect.ai";
+			const original = JSON.stringify({
+				api_key: "dev-secret",
+				base_url: "https://dev-api.example",
+				team_id: "dev-team",
+			});
+			writeFileSync(primeConfigPath, original);
+			const authStorage = AuthStorage.create(authJsonPath, { primeCliConfigPath: primeConfigPath });
+			const urls: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+				const url = String(input);
+				urls.push(url);
+				if (url === `${baseUrl}/api/v1/auth_challenge/generate`) throw new Error("browser unavailable");
+				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer manual-key");
+				if (url === `${baseUrl}/api/v1/user/whoami`)
+					return jsonResponse({ data: { scope: { inference: { write: true } } } });
+				if (url === `${baseUrl}/api/v1/user/teams?offset=0&limit=100`)
+					return jsonResponse({ data: [], total_count: 0 });
+				throw new Error(`Unexpected URL: ${url}`);
+			});
+			const { host, overlays, errorMessages } = createHost(authStorage);
+			const result = new ProviderAuthFlows(host).runPrimeInferenceLogin();
+			await vi.waitFor(() =>
+				expect(stripAnsi(overlays[0]?.render(80).join("\n") ?? "")).toContain("Paste a Prime API key below:"),
+			);
+			overlays[0]?.handleInput?.("manual-key");
+			overlays[0]?.handleInput?.("\r");
+			await expect(result).resolves.toMatchObject({ status: "success" });
+			expect(errorMessages).toEqual([]);
+			expect(urls).toEqual([
+				`${baseUrl}/api/v1/auth_challenge/generate`,
+				`${baseUrl}/api/v1/user/whoami`,
+				`${baseUrl}/api/v1/user/teams?offset=0&limit=100`,
+			]);
+			expect(authStorage.get(PRIME_INFERENCE_PROVIDER_ID)).toEqual({
+				type: "api_key",
+				key: "manual-key",
+				primeTeam: null,
+			});
+			expect(readFileSync(primeConfigPath, "utf8")).toBe(original);
+		},
+	);
 
 	it("opens login on the requested MCP Connections category", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });

@@ -62,6 +62,12 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/changelog` | Display version history |
 | `/quit` | Quit Prime Agent |
 
+### Prime credentials and trace sharing
+
+Prime Inference uses Agent-owned credentials in `~/.prime/agent/auth.json`, with `--api-key` and `PRIME_API_KEY` taking priority. Normal use ignores Prime CLI credentials, URLs, and teams in `~/.prime/config.json`. Run `/login` once if you previously relied on CLI credentials. Explicit login can import a production-compatible CLI key and its file team snapshot after production validation. Agent login, team changes, and logout never modify CLI config.
+
+Trace uploads also ignore live CLI credentials. Use `/traces login` to save a trace credential, or set `PRIME_AGENT_TRACES_API_KEY`. Explicit trace login can reuse a CLI key only after production URL and scope validation. Trace sharing is opt-in; `/traces off` disables automatic sharing. See [Providers](providers.md#prime-inference) for credential precedence, team overrides, and production endpoint details.
+
 ## Message Queue
 
 You can submit messages while the agent is still working:
@@ -362,6 +368,9 @@ prime-agent --tools ipython -p "Review the code"
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing when it has `agent_traces` scope |
+| `PRIME_TEAM_ID` | Override the Prime Inference team request header without changing the saved Agent team |
+| `PRIME_AGENT_INFERENCE_API_BASE_URL` | Override Agent authentication and team API URLs, not model inference URLs; defaults to production |
+| `PRIME_AGENT_INFERENCE_FRONTEND_URL` | Override the Agent login browser frontend; defaults to production |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of bootstrapping `~/.prime/agent/kernel-venv` |

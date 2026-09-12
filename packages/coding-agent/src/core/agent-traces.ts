@@ -7,7 +7,6 @@ import { appendRotatingLog, getAgentDir, getAgentTracesLogPath, getSessionsDir, 
 import { readFirstLineSync } from "../utils/file-lines.js";
 import type { AuthStorage } from "./auth-storage.js";
 import {
-	loadPrimeCliConfig,
 	PRIME_AGENT_TRACES_PROVIDER_ID,
 	PRIME_INFERENCE_PROVIDER_ID,
 	resolvePrimeAgentTracesBaseUrl,
@@ -865,11 +864,6 @@ export async function getPrimeAgentTraceCredential(
 		if (primeKey) {
 			return { apiKey: primeKey, source: "prime-inference", label: "Prime Inference credential" };
 		}
-	}
-
-	const primeCliKey = loadPrimeCliConfig(options.configPath).apiKey;
-	if (primeCliKey) {
-		return { apiKey: primeCliKey, source: "prime-cli", label: "Prime CLI credential" };
 	}
 
 	return undefined;

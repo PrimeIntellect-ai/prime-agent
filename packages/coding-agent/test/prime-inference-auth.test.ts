@@ -68,6 +68,8 @@ describe("Prime Inference auth", () => {
 	let originalTraceBaseUrl: string | undefined;
 
 	beforeEach(() => {
+		vi.stubEnv("PRIME_AGENT_INFERENCE_API_BASE_URL", "");
+		vi.stubEnv("PRIME_AGENT_INFERENCE_FRONTEND_URL", "");
 		tempDir = join(tmpdir(), `pi-prime-auth-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		configPath = join(tempDir, "config.json");
@@ -85,6 +87,7 @@ describe("Prime Inference auth", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 	});
 
 	it("loads Prime CLI config with defaults", () => {
@@ -216,7 +219,7 @@ describe("Prime Inference auth", () => {
 			configPath,
 			JSON.stringify({
 				api_key: "prime-cli-key",
-				base_url: "https://dev-api.example/api/v1",
+				base_url: "https://api.primeintellect.ai/api/v1",
 			}),
 		);
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -236,29 +239,17 @@ describe("Prime Inference auth", () => {
 		expect(fetchMock).toHaveBeenCalledOnce();
 	});
 
-	it("validates imported Prime CLI trace credentials against PRIME_AGENT_TRACES_BASE_URL", async () => {
+	it("does not import production CLI credentials into an explicit trace target", async () => {
 		process.env.PRIME_AGENT_TRACES_BASE_URL = "https://trace-api.example/api/v1";
-		writeFileSync(
-			configPath,
-			JSON.stringify({
-				api_key: "prime-cli-key",
-				base_url: "https://dev-api.example/api/v1",
-			}),
-		);
+		writeFileSync(configPath, JSON.stringify({ api_key: "prime-cli-key" }));
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			expect(getUrl(input)).toBe("https://trace-api.example/api/v1/user/whoami");
-			expect(getAuthorization(init)).toBe("Bearer prime-cli-key");
-			return jsonResponse({ data: { scope: { agent_traces: { write: true } } } });
+			expect(getUrl(input)).toBe("https://trace-api.example/api/v1/auth_challenge/generate");
+			expect(getAuthorization(init)).toBeUndefined();
+			throw new Error("stop before browser");
 		});
-		const onAuth = vi.fn();
-
-		const result = await loginPrimeAgentTraces(
-			{ onAuth },
-			{ configPath, fetchFn: fetchMock, requestTimeoutMs: 1000 },
+		await expect(loginPrimeAgentTraces({ onAuth: vi.fn() }, { configPath, fetchFn: fetchMock })).rejects.toThrow(
+			"stop before browser",
 		);
-
-		expect(result).toEqual({ apiKey: "prime-cli-key", source: "prime-cli" });
-		expect(onAuth).not.toHaveBeenCalled();
 		expect(fetchMock).toHaveBeenCalledOnce();
 	});
 
@@ -286,7 +277,7 @@ describe("Prime Inference auth", () => {
 
 		const result = await loginPrimeInference({ onAuth }, { configPath, fetchFn: fetchMock, requestTimeoutMs: 1000 });
 
-		expect(result).toEqual({ apiKey: "prime-cli-key", source: "prime-cli" });
+		expect(result).toEqual({ apiKey: "prime-cli-key", source: "prime-cli", primeTeam: null });
 		expect(onAuth).not.toHaveBeenCalled();
 		expect(fetchMock).toHaveBeenCalledOnce();
 	});
@@ -319,15 +310,15 @@ describe("Prime Inference auth", () => {
 			configPath,
 			JSON.stringify({
 				api_key: "old-key",
-				base_url: "https://prime-api.example",
-				frontend_url: "https://prime-app.example",
-				inference_url: "https://pinference.example/api/v1",
+				base_url: "https://api.primeintellect.ai",
+				frontend_url: "https://app.primeintellect.ai",
+				inference_url: "https://api.pinference.ai/api/v1",
 			}),
 		);
 		let challengePublicKey = "";
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			const url = getUrl(input);
-			if (url === "https://prime-api.example/api/v1/user/whoami") {
+			if (url === "https://api.primeintellect.ai/api/v1/user/whoami") {
 				const auth = getAuthorization(init);
 				if (auth === "Bearer old-key") {
 					return jsonResponse({ data: { scope: { inference: { read: true, write: false } } } });
@@ -336,11 +327,11 @@ describe("Prime Inference auth", () => {
 					return jsonResponse({ data: { scope: { inference: { read: true, write: true } } } });
 				}
 			}
-			if (url === "https://prime-api.example/api/v1/auth_challenge/generate") {
+			if (url === "https://api.primeintellect.ai/api/v1/auth_challenge/generate") {
 				challengePublicKey = String(getJsonBody(init).encryptionPublicKey);
 				return jsonResponse({ challenge: "challenge-code", status_auth_token: "status-token" });
 			}
-			if (url.startsWith("https://prime-api.example/api/v1/auth_challenge/status")) {
+			if (url.startsWith("https://api.primeintellect.ai/api/v1/auth_challenge/status")) {
 				expect(getAuthorization(init)).toBe("Bearer status-token");
 				return jsonResponse({ result: encryptChallengeResult(challengePublicKey, "browser-key") });
 			}
@@ -359,7 +350,7 @@ describe("Prime Inference auth", () => {
 
 		expect(result).toEqual({ apiKey: "browser-key", source: "browser" });
 		expect(onAuth).toHaveBeenCalledWith({
-			url: "https://prime-app.example/dashboard/tokens/challenge?code=challenge-code",
+			url: "https://app.primeintellect.ai/dashboard/tokens/challenge?code=challenge-code",
 			instructions: "Code: challenge-code",
 		});
 		expect(progress.join("\n")).toContain("Existing Prime CLI key cannot access Prime Inference");
@@ -402,19 +393,19 @@ describe("Prime Inference auth", () => {
 
 		expect(result).toEqual({ apiKey: "trace-key", source: "browser" });
 		expect(onAuth).toHaveBeenCalledWith({
-			url: "https://prime-app.example/dashboard/tokens/challenge?code=challenge-code&scope=agent_traces",
+			url: "https://app.primeintellect.ai/dashboard/tokens/challenge?code=challenge-code&scope=agent_traces",
 			instructions: "Code: challenge-code",
 		});
 	});
 
 	it("rejects an expired browser challenge", async () => {
-		writeFileSync(configPath, JSON.stringify({ base_url: "https://prime-api.example" }));
+		writeFileSync(configPath, JSON.stringify({ base_url: "https://api.primeintellect.ai" }));
 		const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
 			const url = getUrl(input);
-			if (url === "https://prime-api.example/api/v1/auth_challenge/generate") {
+			if (url === "https://api.primeintellect.ai/api/v1/auth_challenge/generate") {
 				return jsonResponse({ challenge: "challenge-code", status_auth_token: "status-token" });
 			}
-			if (url.startsWith("https://prime-api.example/api/v1/auth_challenge/status")) {
+			if (url.startsWith("https://api.primeintellect.ai/api/v1/auth_challenge/status")) {
 				return new Response("expired", { status: 404 });
 			}
 			throw new Error(`Unexpected fetch URL: ${url}`);
