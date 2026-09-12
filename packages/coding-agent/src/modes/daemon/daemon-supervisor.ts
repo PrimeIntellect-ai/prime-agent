@@ -2457,6 +2457,11 @@ export class DaemonSupervisor {
 				return await this.withSessionNameReservation(target, async () => {
 					await this.assertSupervisorSavedSessionNameAvailable(command.sessionPath, target.name);
 					if (!command.activeSessionId) {
+						const owner = this.findWorkerBySessionFile(command.sessionPath);
+						if (owner) {
+							this.assertWorkerAccessibleToClient(client, owner, command.sessionPath);
+							return await this.forwardToWorker(owner, command);
+						}
 						await this.catalog.rename(command.sessionPath, command.name);
 						// Third rename write point: an offline saved-session rename
 						// changes the name the ledger carries for that child.
@@ -5017,13 +5022,57 @@ export class DaemonSupervisor {
 			await worker.recovery;
 		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
-		const response = await client.request(withoutCommandId(command), timeoutMs);
+		const renameTarget =
+			command.type === "rename_saved_session"
+				? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
+				: command.type === "rename" || command.type === "set_session_name"
+					? this.roster().byActiveSessionId(command.activeSessionId)
+					: undefined;
+		const workerCommand: DaemonCommandBody =
+			command.type === "set_session_name"
+				? { type: "rename", activeSessionId: command.activeSessionId, name: command.name }
+				: withoutCommandId(command);
+		const response = await client.request(workerCommand, timeoutMs);
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
-		if (command.type === "rename" && response.success && isSessionSummary(response.data)) {
-			this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
-			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
+		if (
+			response.success &&
+			(command.type === "rename" || command.type === "set_session_name" || command.type === "rename_saved_session")
+		) {
+			// An acknowledged name survives disconnects. Drain earlier frames, then amend the
+			// same session's current row before releasing its name reservation.
+			await worker.rosterApplyChain;
+			const renamedSummary =
+				(command.type === "rename" || command.type === "set_session_name") && isSessionSummary(response.data)
+					? response.data
+					: renameTarget?.summary;
+			const entry =
+				command.type === "rename_saved_session"
+					? this.roster().bySessionFile(canonicalSessionPath(command.sessionPath))
+					: renamedSummary?.sessionFile
+						? this.roster().bySessionFile(canonicalSessionPath(renamedSummary.sessionFile))
+						: this.roster().byActiveSessionId(command.activeSessionId);
+			if (
+				entry?.workerId === worker.descriptor.workerId &&
+				(command.type === "rename_saved_session" ||
+					!renamedSummary ||
+					entry.summary.sessionId === renamedSummary.sessionId)
+			) {
+				const name =
+					(command.type === "rename" || command.type === "set_session_name") && isSessionSummary(response.data)
+						? (response.data.sessionName ?? command.name.trim())
+						: command.name.trim();
+				this.writeRosterEntry({ ...entry, summary: { ...entry.summary, sessionName: name } }, worker);
+			}
+			if (command.type === "rename" && isSessionSummary(response.data)) {
+				return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
+			}
+		}
+		if (command.type === "set_session_name") {
+			return response.success
+				? success(command.id, command.type)
+				: { ...response, id: command.id, command: command.type };
 		}
 		return responseWithId(response, command.id);
 	}

@@ -503,6 +503,12 @@ describe("agent trace upload", () => {
 		sessionManager.appendMessage(createAssistantMessage("hi"));
 		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(1_000);
 		await advanceTimersUntil(() => calls.length === 1);
+		// Fetch observation precedes the cursor write; finish it before teardown can remove the outbox.
+		await advanceTimersUntil(
+			() =>
+				readOutboxEntry(tempDir, sessionManager.getSessionFile() as string)?.size ===
+				Buffer.byteLength(String(calls[0].init.body)),
+		);
 
 		// The request starts before the upload cursor and completion log are written.
 		const sessionFile = sessionManager.getSessionFile() as string;
