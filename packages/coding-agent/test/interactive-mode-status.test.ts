@@ -1078,25 +1078,31 @@ describe("InteractiveMode MCP command", () => {
 		settingsManager: SettingsManager;
 		uiServices: { refreshMcpProviders?(): void };
 		showConfigurationMenu(tab: "mcp-connections"): Promise<void>;
+		showServiceCatalogPicker(): Promise<void>;
+		removeMcpConnectionRecord(name: string): Promise<void>;
 		showStatus(message: string): void;
 		showError(message: string): void;
 		showWarning(message: string): void;
 		handleReloadCommand(): Promise<boolean>;
 		reloadAfterMcpChange(message: string, successMessage?: string): Promise<void>;
+		queueMcpActivationForNextBoundary(message: string, successMessage?: string): void;
 		isAgentStreaming(): boolean;
 		isAgentCompacting(): boolean;
 		handleMcpCommand(args: string | undefined): Promise<void>;
 	};
 	const handleMcpCommand = (InteractiveMode.prototype as unknown as McpCommandHarness).handleMcpCommand;
 
-	test("opens bare /mcp on the MCP Connections tab", async () => {
+	test("opens bare /mcp on the service catalog picker", async () => {
 		const fakeThis = {
 			showConfigurationMenu: vi.fn(async () => {}),
+			showServiceCatalogPicker: vi.fn(async () => {}),
 		} as unknown as McpCommandHarness;
 
 		await handleMcpCommand.call(fakeThis, undefined);
 
-		expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("mcp-connections");
+		// Bare /mcp opens the searchable service catalog (ENG-6108): the legacy
+		// connections menu is no longer the default surface.
+		expect(fakeThis.showServiceCatalogPicker).toHaveBeenCalledOnce();
 	});
 
 	test("preserves the explicit /mcp list status output", async () => {
@@ -1134,6 +1140,8 @@ describe("InteractiveMode MCP command", () => {
 			).reloadAfterMcpChange,
 			isAgentStreaming: vi.fn(() => false),
 			isAgentCompacting: vi.fn(() => false),
+			// The remove path also clears the account's connection record.
+			removeMcpConnectionRecord: vi.fn(async () => {}),
 		} as unknown as McpCommandHarness & { chatContainer: Container };
 	}
 
@@ -1189,13 +1197,19 @@ describe("InteractiveMode MCP command", () => {
 		fakeThis.handleReloadCommand = vi.fn(async () => true);
 		fakeThis.isAgentStreaming = vi.fn(() => true);
 		fakeThis.showStatus = vi.fn((message: string) => events.push(message));
+		// The queued activation pushes the same wording the real method does.
+		fakeThis.queueMcpActivationForNextBoundary = vi.fn((message: string) => {
+			events.push(`${message} It will activate automatically when the current turn finishes.`);
+		});
 
 		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
 
 		expect(events[0]).toBe("refresh");
 		expect(fakeThis.handleReloadCommand).not.toHaveBeenCalled();
 		expect(events.join("\n")).toContain("Run /mcp login remote to connect.");
-		expect(events.join("\n")).toContain("Run /reload after the current turn to activate it.");
+		// Deferred activation now queues for the next safe boundary with its
+		// own wording (no manual /reload instruction).
+		expect(events.join("\n")).toContain("It will activate automatically when the current turn finishes.");
 	});
 
 	test("guides OAuth server additions to explicit login after refresh", async () => {

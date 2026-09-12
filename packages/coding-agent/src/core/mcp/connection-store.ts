@@ -45,6 +45,12 @@ type PendingOp =
 	| { kind: "upsert"; record: McpConnectionRecord }
 	| { kind: "remove"; connectionId: string }
 	| {
+			kind: "invalidateAttempts";
+			connectionId: string;
+			/** True when a pending reservation marker was removed (write commits it). */
+			resolve: (removed: boolean) => void;
+	  }
+	| {
 			kind: "verify";
 			record: McpConnectionRecord;
 			/** Evaluated at flush time under the lock; a failed guard discards the result. */
@@ -216,6 +222,27 @@ export class McpConnectionStore {
 	remove(connectionId: string): void {
 		this.recordsById.delete(connectionId);
 		this.pendingOps.push({ kind: "remove", connectionId });
+	}
+
+	/**
+	 * A real logout of an account wins over any in-flight login: remove the
+	 * PENDING reservation marker under the file lock so a later finalizeAttempt
+	 * by the old attempt loses ownership ("denied") and its staged credential is
+	 * discarded — the account cannot be re-activated by a stale login attempt.
+	 * Non-pending records are left alone (a logged-out account keeps its record
+	 * and shows the honest unbound/Reconnect state).
+	 */
+	invalidatePendingAttempts(connectionId: string): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const settle = (removed: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(removed);
+			};
+			this.pendingOps.push({ kind: "invalidateAttempts", connectionId, resolve: settle });
+			void this.flush().catch(() => settle(false));
+		});
 	}
 
 	/**
@@ -420,6 +447,13 @@ export class McpConnectionStore {
 					for (const operation of operations) {
 						if (operation.kind === "remove") {
 							records.delete(operation.connectionId);
+						} else if (operation.kind === "invalidateAttempts") {
+							const existing = records.get(operation.connectionId);
+							const wasPending = existing?.status === "pending";
+							if (wasPending) {
+								records.delete(operation.connectionId);
+							}
+							deferred.push((didCommit) => operation.resolve(didCommit && wasPending));
 						} else if (operation.kind === "upsert") {
 							this.applyUpsert(records, operation.record);
 						} else if (operation.kind === "reserve") {

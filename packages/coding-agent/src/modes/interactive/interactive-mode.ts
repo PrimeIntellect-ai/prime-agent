@@ -8726,6 +8726,17 @@ export class InteractiveMode {
 			onLoginCompleted: () => {
 				void this.maybeWarnAboutAnthropicSubscriptionAuth();
 			},
+			onMcpCredentialRemoved: async (providerId) => {
+				// A REAL logout of an MCP account cancels its in-flight login
+				// attempts: the pending reservation is invalidated under the
+				// store's lock, so the old attempt's finalize loses ownership
+				// and can never re-activate the account. A staged credential
+				// key (`mcp:<id>--<attempt>`) maps back to the base account.
+				const connectionId = providerId.slice("mcp:".length).split("--")[0];
+				if (connectionId) {
+					await this.getMcpConnectionStore().invalidatePendingAttempts(connectionId);
+				}
+			},
 		});
 	}
 
@@ -8802,8 +8813,12 @@ export class InteractiveMode {
 			const loggedOut = await this.getMcpConnectionStore().removeAccount({
 				connectionId: server,
 				authCleanup: (connectionId) => {
-					authStorage.logout(mcpCredentialKey(connectionId));
-					return authStorage.get(mcpCredentialKey(connectionId)) === undefined;
+					// Disk-authoritative logout: remove() swallows persistence
+					// errors, so a failed auth-file write could report the logout
+					// done while the credential survives. removeVerified throws
+					// instead (the honest "failed" path) and returns whether a
+					// credential was actually removed from disk.
+					return authStorage.removeVerified(mcpCredentialKey(connectionId));
 				},
 			});
 			// Honest outcomes: removed/credential-only changed durable state,
@@ -9120,8 +9135,12 @@ export class InteractiveMode {
 			const removed = await this.getMcpConnectionStore().removeAccount({
 				connectionId: service.serviceId,
 				authCleanup: (connectionId) => {
-					this.modelRegistry.authStorage.logout(mcpCredentialKey(connectionId));
-					return this.modelRegistry.authStorage.get(mcpCredentialKey(connectionId)) === undefined;
+					// Disk-authoritative logout: remove() swallows persistence
+					// errors, so a failed auth-file write could report the logout
+					// done while the credential survives. removeVerified throws
+					// instead (the honest "failed" path) and returns whether a
+					// credential was actually removed from disk.
+					return this.modelRegistry.authStorage.removeVerified(mcpCredentialKey(connectionId));
 				},
 			});
 			// Honest outcomes: removed/credential-only removed the account (the
@@ -9156,8 +9175,12 @@ export class InteractiveMode {
 			const disconnected = await this.getMcpConnectionStore().removeAccount({
 				connectionId: service.serviceId,
 				authCleanup: (connectionId) => {
-					this.modelRegistry.authStorage.logout(mcpCredentialKey(connectionId));
-					return this.modelRegistry.authStorage.get(mcpCredentialKey(connectionId)) === undefined;
+					// Disk-authoritative logout: remove() swallows persistence
+					// errors, so a failed auth-file write could report the logout
+					// done while the credential survives. removeVerified throws
+					// instead (the honest "failed" path) and returns whether a
+					// credential was actually removed from disk.
+					return this.modelRegistry.authStorage.removeVerified(mcpCredentialKey(connectionId));
 				},
 			});
 			// Honest outcomes: removed/credential-only disconnected the account,

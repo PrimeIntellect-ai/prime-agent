@@ -103,6 +103,13 @@ export interface ProviderAuthFlowsHost {
 	onAuthChanged?(): void | Promise<void>;
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
+	/**
+	 * Invoked after a REAL logout route removes an MCP credential: the host
+	 * invalidates the account's pending login attempts under the connection
+	 * store's lock, so a stale in-flight OAuth attempt cannot re-activate the
+	 * account. Non-MCP logouts are unaffected.
+	 */
+	onMcpCredentialRemoved?(providerId: string): void | Promise<void>;
 }
 
 export interface ProviderLoginOptions {
@@ -210,6 +217,12 @@ export class ProviderAuthFlows {
 						this.host.modelRegistry.authStorage.logout(providerOption.id);
 						this.host.modelRegistry.refresh();
 						await this.host.onAuthChanged?.();
+						// An MCP logout also cancels any in-flight login attempt
+						// for that account: the old OAuth attempt must not be able
+						// to re-activate the account after the logout.
+						if (providerOption.id.startsWith("mcp:")) {
+							await this.host.onMcpCredentialRemoved?.(providerOption.id);
+						}
 						const message =
 							providerOption.authType === "oauth"
 								? `Logged out of ${providerOption.name}`

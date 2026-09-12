@@ -576,6 +576,43 @@ describe("ENG-6108 durable account reservations", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
+	it("invalidatePendingAttempts removes ONLY the pending reservation: a real logout cancels in-flight logins without touching finished accounts", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "invalidate-attempts-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		// A pending attempt for acme-2: invalidation removes the marker.
+		const pendingMine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, pendingMine));
+		// A FINISHED account for acme-4: invalidation must leave it alone.
+		const finishedMine = nonce();
+		await client.reserveConnectionId(record("acme-4", at + 1, finishedMine));
+		const finished = await client.finalizeAttempt({
+			connectionId: "acme-4",
+			attemptId: finishedMine,
+			commit: (current) => ({ ...current, status: "connected" as const }),
+		});
+		expect(finished).toBe("committed");
+
+		const invalidatedPending = await client.invalidatePendingAttempts("acme-2");
+		const invalidatedFinished = await client.invalidatePendingAttempts("acme-4");
+
+		expect(invalidatedPending).toBe(true);
+		expect(invalidatedFinished).toBe(false);
+		// The stale attempt loses ownership and can NEVER re-activate.
+		const denied = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: pendingMine,
+			commit: (current) => current,
+		});
+		expect(denied).toBe("denied");
+		expect(McpConnectionStore.open(path).get("acme-2")).toBeUndefined();
+		// The finished account survives (its record shows the honest unbound
+		// state after a credential-only logout).
+		expect(McpConnectionStore.open(path).get("acme-4")?.status).toBe("connected");
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
 	it("removeAccount removes the credential AND the record under one lock: disconnect interleaving with finalize leaves no orphan", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "remove-account-"));
 		const path = join(tempDir, "mcp-connections.json");

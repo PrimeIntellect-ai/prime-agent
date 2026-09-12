@@ -343,6 +343,73 @@ describe("ENG-6108 guarded credential commit", () => {
 		expect(store.get("acme-2")).toBeDefined();
 	});
 
+	test("a removeAccount whose AUTH-file write fails never reports the logout done (fresh reader sees the credential survive)", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "mcp-auth-"));
+		const authPath = join(tempDir, "auth.json");
+		const authStorage = AuthStorage.create(authPath);
+		const { fake, store, showWarning, showStatus } = fakeWithStore(authStorage);
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "connected",
+			createdAt: at,
+			updatedAt: at,
+		});
+		authStorage.set("mcp:acme-2", {
+			type: "oauth",
+			access: "real-for-acme-2",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		// Fail ONLY the AUTH-file write (the durable logout): the account must
+		// NOT be reported removed/disconnected while the credential survives.
+		const actualModule =
+			await vi.importActual<typeof import("../src/utils/atomic-file.js")>("../src/utils/atomic-file.js");
+		const real = actualModule.writeFileAtomicSync;
+		vi.mocked(writeFileAtomicSync).mockImplementation((...args: Parameters<typeof real>) => {
+			if (String(args[0]).endsWith("auth.json")) {
+				throw new Error("simulated auth write failure");
+			}
+			return real(...args);
+		});
+		await (
+			fake as unknown as {
+				connectServiceFromPicker: (this: unknown, ...args: unknown[]) => Promise<void>;
+			}
+		).connectServiceFromPicker.call(
+			fake,
+			{
+				serviceId: "acme-2",
+				label: "Acme (acme-2)",
+				connectionStatus: "connected",
+				connectable: false,
+				removeAction: true,
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{},
+		);
+		vi.mocked(writeFileAtomicSync).mockImplementation(real);
+		// A FRESH reader of the auth file sees the credential SURVIVE on disk.
+		const freshReader = AuthStorage.create(authPath);
+		const survivor = freshReader.get("mcp:acme-2");
+		expect(survivor?.type).toBe("oauth");
+		if (survivor?.type === "oauth") {
+			expect(survivor.access).toBe("real-for-acme-2");
+		}
+		// The record also survives (nothing durable was committed).
+		expect(AuthStorage.create(authPath).list()).toContain("mcp:acme-2");
+		// The wording is state-neutral (never "Removed"/"Disconnected").
+		const calls = JSON.stringify([...showWarning.mock.calls, ...showStatus.mock.calls]);
+		expect(calls).toContain("could not be saved");
+		expect(calls).toContain("try removing account acme-2 again");
+		expect(calls).not.toContain("Removed account");
+		expect(calls).not.toContain("Disconnected");
+	});
+
 	test("a removeAccount whose record write fails after the logout reports the honest partial state", async () => {
 		const { fake, store, authStorage, showWarning, showStatus } = fakeWithStore();
 		// A real record AND a real credential for the account.
@@ -363,12 +430,16 @@ describe("ENG-6108 guarded credential commit", () => {
 			expires: at + 3600_000,
 			endpoint: "https://mcp.acme.test/mcp",
 		});
-		// Fail the FIRST store write: the removeAccount's record save.
+		// Fail ONLY the connection-RECORD write: the durable auth-file logout
+		// (removeVerified) must succeed first, then the record save fails.
 		const actualModule =
 			await vi.importActual<typeof import("../src/utils/atomic-file.js")>("../src/utils/atomic-file.js");
 		const real = actualModule.writeFileAtomicSync;
-		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
-			throw new Error("simulated remove write failure");
+		vi.mocked(writeFileAtomicSync).mockImplementation((...args: Parameters<typeof real>) => {
+			if (String(args[0]).includes("mcp-connections.json")) {
+				throw new Error("simulated remove write failure");
+			}
+			return real(...args);
 		});
 		// Drive the REAL removeAction branch.
 		await (
@@ -388,7 +459,8 @@ describe("ENG-6108 guarded credential commit", () => {
 			{},
 		);
 		vi.mocked(writeFileAtomicSync).mockImplementation(real);
-		// The logout is PRESERVED (credential gone); the record survives on disk.
+		// The logout is PRESERVED (credential gone from DISK, removeVerified);
+		// the record survives on disk.
 		expect(authStorage.get("mcp:acme-2")).toBeUndefined();
 		expect(store.get("acme-2")).toBeDefined();
 		// The wording reports the honest partial state and never claims the
@@ -557,8 +629,10 @@ describe("ENG-6108 /plugins account state actions", () => {
 			createdAt: at,
 			updatedAt: at,
 		});
-		const logout = vi.fn();
-		authStorage.logout = logout;
+		// The durable logout uses removeVerified (disk-authoritative); a plain
+		// logout() would swallow auth-file write failures.
+		const removeVerified = vi.fn(() => true);
+		authStorage.removeVerified = removeVerified;
 		await callConnect(
 			fake,
 			{
@@ -571,7 +645,7 @@ describe("ENG-6108 /plugins account state actions", () => {
 			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
 			{ catalogServiceId: "acme" },
 		);
-		expect(logout).toHaveBeenCalledWith("mcp:acme-2");
+		expect(removeVerified).toHaveBeenCalledWith("mcp:acme-2");
 		expect(store.get("acme-2")).toBeUndefined();
 		expect(JSON.stringify(removedStatus.mock.calls)).toContain("Removed account acme-2");
 	});
