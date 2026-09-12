@@ -3,10 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.js";
+import { createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { createAgentSession } from "../src/core/sdk.js";
+import { SessionManager } from "../src/core/session-manager.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -113,7 +117,13 @@ describe("ProviderAuthFlows", () => {
 		vi.unstubAllEnvs();
 	});
 
-	it("preserves the Prime CLI team when login reuses the existing Prime CLI key", async () => {
+	it.each(["services", "sdk"])("imports CLI credentials through default %s", async (factory) => {
+		process.env.HOME = tempDir;
+		vi.stubEnv(ENV_AGENT_DIR, "");
+		vi.stubEnv("PI_OFFLINE", "1");
+		authJsonPath = join(tempDir, ".prime", "agent", "auth.json");
+		primeConfigPath = join(tempDir, ".prime", "config.json");
+		mkdirSync(join(tempDir, ".prime", "agent"), { recursive: true });
 		process.env.PRIME_TEAM_ID = "env-team";
 		writeFileSync(
 			primeConfigPath,
@@ -133,10 +143,23 @@ describe("ProviderAuthFlows", () => {
 				},
 			}),
 		);
-		const authStorage = AuthStorage.create(authJsonPath, {
-			primeCliConfigPath: primeConfigPath,
-			usePrimeCliConfig: true,
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			resourceLoaderOptions: { noExtensions: true },
 		});
+		let modelRegistry = services.modelRegistry;
+		if (factory === "sdk") {
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				resourceLoader: services.resourceLoader,
+				sessionManager: SessionManager.inMemory(tempDir),
+				noTools: "all",
+			});
+			onTestFinished(() => session.dispose());
+			modelRegistry = session.modelRegistry;
+		}
+		const authStorage = modelRegistry.authStorage;
+		expect(authStorage.getPrimeCliConfigPath()).toBe(primeConfigPath);
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
 			jsonResponse({
 				data: { scope: { inference: { write: true } } },
@@ -144,7 +167,7 @@ describe("ProviderAuthFlows", () => {
 		);
 		const { host, statusMessages, errorMessages } = createHost(authStorage);
 
-		const result = await new ProviderAuthFlows(host).runPrimeInferenceLogin();
+		const result = await new ProviderAuthFlows({ ...host, modelRegistry }).runPrimeInferenceLogin();
 
 		expect(errorMessages).toEqual([]);
 		expect(result.status).toBe("success");
@@ -156,7 +179,7 @@ describe("ProviderAuthFlows", () => {
 		expect(config.team_id).toBe("cli-team");
 		expect(config.team_name).toBe("CLI Research");
 		expect(config.team_role).toBe("admin");
-		expect(authStorage.get(PRIME_INFERENCE_PROVIDER_ID)).toEqual({
+		expect(AuthStorage.create(authJsonPath).get(PRIME_INFERENCE_PROVIDER_ID)).toEqual({
 			type: "api_key",
 			key: "prime-cli-key",
 			primeTeam: { teamId: "cli-team", name: "CLI Research", role: "admin" },
