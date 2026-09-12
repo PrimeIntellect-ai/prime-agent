@@ -217,21 +217,25 @@ export function resolveMcpServiceCatalog(options: {
 	}
 	const descriptors = [...byId.values()];
 	if (descriptors.length > MAX_TOTAL_CATALOG_ENTRIES) {
-		// Installed connections are manageability anchors: EVERY serviceId with
-		// records survives the cap — whether its descriptor is pinned from the
-		// record or still present in a source — and only non-installed entries
-		// fill the remaining budget. When installed connections alone exceed
-		// the cap they still win and the diagnostic states it explicitly
-		// instead of silently dropping manageability.
+		// Installed connections and built-in services are never trimmed: every
+		// serviceId with records survives the cap (pinned from the record or
+		// still present in a source), and legacy builtins keep their reserved
+		// names — dropping one would resurrect shadow user entries and hide
+		// credential-only legacy accounts. Only uninstalled candidates fill
+		// the remaining budget. When the retained inventory alone exceeds the
+		// cap it still wins and the diagnostic states it explicitly instead of
+		// silently dropping manageability.
 		const installedIds = new Set((options.records ?? []).map((record) => record.serviceId));
-		const kept = descriptors.filter((descriptor) => installedIds.has(descriptor.serviceId));
+		const retained = (descriptor: McpServiceDescriptor): boolean =>
+			installedIds.has(descriptor.serviceId) || descriptor.legacyBuiltin;
+		const kept = descriptors.filter(retained);
 		const budget = Math.max(0, MAX_TOTAL_CATALOG_ENTRIES - kept.length);
-		const fill = descriptors.filter((descriptor) => !installedIds.has(descriptor.serviceId)).slice(0, budget);
+		const fill = descriptors.filter((descriptor) => !retained(descriptor)).slice(0, budget);
 		const ignored = descriptors.length - kept.length - fill.length;
 		diagnostics.push(
-			`MCP service catalog capped at ${MAX_TOTAL_CATALOG_ENTRIES} entries; ${ignored} entries were ignored. Installed connections are always kept${
+			`MCP service catalog discovery capped at ${MAX_TOTAL_CATALOG_ENTRIES} entries; ${ignored} entries were ignored. Installed connections and built-in services are always kept${
 				kept.length > MAX_TOTAL_CATALOG_ENTRIES
-					? ` (installed connections alone exceeded the cap: ${kept.length} kept)`
+					? ` (retained inventory alone exceeded the cap: ${kept.length} kept — ${installedIds.size} installed connections)`
 					: ""
 			}.`,
 		);
@@ -284,7 +288,7 @@ export function nextMcpConnectionId(serviceId: string, taken: (id: string) => bo
 }
 
 /** Why a stored OAuth grant is not usable at an endpoint. */
-export type OAuthGrantUsabilityReason =
+type OAuthGrantUsabilityReason =
 	| "missing"
 	| "wrong-type"
 	| "empty-access"
@@ -292,7 +296,7 @@ export type OAuthGrantUsabilityReason =
 	| "cross-endpoint"
 	| "expired-no-refresh";
 
-export interface OAuthGrantUsability {
+interface OAuthGrantUsability {
 	usable: boolean;
 	reason?: OAuthGrantUsabilityReason;
 }

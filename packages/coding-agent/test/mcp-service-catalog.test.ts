@@ -1008,14 +1008,21 @@ describe("resolveMcpServiceCatalog", () => {
 			records,
 		});
 		// The cap still binds (500), but BOTH installed serviceIds survive —
-		// the in-source one is retained instead of sliced away, and the
-		// vanished-source pin is never the first thing discarded.
+		// the in-source one is retained instead of sliced away, the vanished-
+		// source pin is never the first thing discarded, and legacy builtins
+		// keep their reserved names.
 		expect(capped.descriptors).toHaveLength(500);
 		const kept = new Set(capped.descriptors.map((descriptor) => descriptor.serviceId));
 		expect(kept.has("bulk-550")).toBe(true);
 		expect(kept.has("pinned-svc")).toBe(true);
-		expect(capped.diagnostics.some((line) => line.includes("capped at 500"))).toBe(true);
-		expect(capped.diagnostics.some((line) => line.includes("Installed connections are always kept"))).toBe(true);
+		expect(kept.has("linear")).toBe(true);
+		expect(kept.has("notion")).toBe(true);
+		expect(capped.diagnostics.some((line) => line.includes("discovery capped at 500"))).toBe(true);
+		expect(
+			capped.diagnostics.some((line) =>
+				line.includes("Installed connections and built-in services are always kept"),
+			),
+		).toBe(true);
 	});
 
 	it("keeps an installed inventory that ALONE exceeds the cap, with an explicit diagnostic", () => {
@@ -1037,14 +1044,15 @@ describe("resolveMcpServiceCatalog", () => {
 			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
 			records,
 		});
-		// Manageability never drops: all 510 installed serviceIds are kept even
-		// though they alone exceed the cap, the diagnostic says so explicitly,
-		// and non-installed candidates were the ones trimmed.
+		// Manageability never drops: all 510 installed serviceIds AND the
+		// legacy builtins are kept even though the retained inventory alone
+		// exceeds the cap, the diagnostic says so explicitly, and only
+		// uninstalled candidates were trimmed.
 		const kept = capped.descriptors.map((descriptor) => descriptor.serviceId);
-		expect(kept).toHaveLength(510);
-		expect(records.every((record) => kept.includes(record.serviceId))).toBe(true);
-		expect(capped.diagnostics.some((line) => line.includes("installed connections alone exceeded the cap"))).toBe(
-			true,
-		);
+		expect(kept.filter((id) => id.startsWith("installed-"))).toHaveLength(510);
+		expect(kept).toContain("linear");
+		expect(kept).toContain("notion");
+		expect(kept.filter((id) => id.startsWith("bulk-"))).toEqual([]);
+		expect(capped.diagnostics.some((line) => line.includes("retained inventory alone exceeded the cap"))).toBe(true);
 	});
 });

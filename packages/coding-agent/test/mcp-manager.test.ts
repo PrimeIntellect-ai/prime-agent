@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { type AuthCredential, AuthStorage } from "../src/core/auth-storage.js";
 import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import type { McpServiceDescriptor } from "../src/core/mcp/service-catalog.js";
@@ -335,7 +335,7 @@ describe("McpManager", () => {
 		expect(authStorage.get("mcp:task")).toMatchObject({ access: "stored-oauth-token" });
 	});
 
-	it("fails closed with empty auth on the REAL bundled catalog: zero none+ready rows are enabled, aws-devops-agent included", () => {
+	it("fails closed with empty auth on the REAL bundled catalog: zero none+ready rows are enabled, aws-devops-agent included", async () => {
 		const manager = new McpManager({ authStorage });
 		// No user servers, empty auth: the enabled generic set is exactly the
 		// bundled rows that are explicitly public no-auth AND setup-ready —
@@ -343,6 +343,8 @@ describe("McpManager", () => {
 		// (aws-devops-agent) must never appear.
 		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
 		expect(manager.listStatus().find((s) => s.server === "aws-devops-agent")?.enabled).toBe(false);
+		// The requires-setup api_key row is never served to the kernel either.
+		await expect(manager.hostHandlers()["mcp.config"]({ server: "aws-devops-agent" })).resolves.toEqual({});
 	});
 
 	it("never enables a catalog api_key row even when its token env var is set (no field-id inference)", () => {
@@ -467,8 +469,14 @@ describe("McpManager", () => {
 			expires: Date.now() - 1000,
 			endpoint: "https://svc-b.example/mcp",
 		});
-		// svc-c: wrong-type entry at the MCP key -> refused.
-		authStorage.set("mcp:svc-c", { type: "api_key", key: "not-an-oauth-grant" });
+		// svc-c: a wrong-type entry at the MCP key that STILL carries a
+		// matching endpoint — the exact shape the old endpoint-only check
+		// wrongly authenticated. The type gate must refuse it.
+		authStorage.set("mcp:svc-c", {
+			type: "api_key",
+			key: "not-an-oauth-grant",
+			endpoint: "https://svc-c.example/mcp",
+		} as unknown as AuthCredential);
 		const manager = new McpManager({ authStorage, getServiceCatalog: () => catalog });
 		expect(manager.listStatus().find((s) => s.server === "svc-a")?.enabled).toBe(false);
 		expect(manager.listStatus().find((s) => s.server === "svc-b")?.enabled).toBe(true);
@@ -488,7 +496,7 @@ describe("McpManager", () => {
 			refresh: "r",
 			expires: Date.now() + 3600_000,
 			endpoint: "https://svc-c.example/mcp",
-		} as never);
+		});
 		manager.refresh();
 		expect(manager.listStatus().find((s) => s.server === "svc-c")?.enabled).toBe(false);
 	});
