@@ -19,9 +19,14 @@ export function createFileOps(): FileOperations {
 }
 
 /**
- * Extract file operations from tool calls in an assistant message.
+ * Extract file operations from tool calls in an assistant message and from
+ * structured tool results.
  */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role === "toolResult") {
+		extractFileOpsFromToolResult(message, fileOps);
+		return;
+	}
 	if (message.role !== "assistant") return;
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
@@ -45,13 +50,47 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 }
 
 /**
+ * Extract file operations from a tool result message.
+ *
+ * The default toolset routes file edits through the ipython kernel: the
+ * kernel's edit skill reports structured diff displays (path, oldStr, newStr)
+ * that ride on the tool result's details, and no assistant-side tool call
+ * ever carries the path. Without this branch, compaction summaries never
+ * learn about kernel-performed edits and <modified-files> stays empty in the
+ * default configuration.
+ */
+function extractFileOpsFromToolResult(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role !== "toolResult" || message.toolName !== "ipython") return;
+	const details =
+		typeof message.details === "object" && message.details !== null && !Array.isArray(message.details)
+			? (message.details as Record<string, unknown>)
+			: {};
+	const diffs = Array.isArray(details.diffs) ? details.diffs : [];
+	for (const diff of diffs) {
+		if (typeof diff !== "object" || diff === null || Array.isArray(diff)) continue;
+		const path = (diff as Record<string, unknown>).path;
+		if (typeof path === "string" && path) fileOps.edited.add(path);
+	}
+}
+
+/**
+ * Maximum files kept per summary block, so a single oversized kernel
+ * result cannot produce a file list larger than the model context limit.
+ */
+const FILE_LIST_MAX_ENTRIES = 200;
+
+/**
  * Compute final file lists from file operations.
  * Returns readFiles (files only read, not modified) and modifiedFiles.
+ * Both lists are capped at FILE_LIST_MAX_ENTRIES (sorted, then truncated).
  */
 export function computeFileLists(fileOps: FileOperations): { readFiles: string[]; modifiedFiles: string[] } {
 	const modified = new Set([...fileOps.edited, ...fileOps.written]);
-	const readOnly = [...fileOps.read].filter((f) => !modified.has(f)).sort();
-	const modifiedFiles = [...modified].sort();
+	const readOnly = [...fileOps.read]
+		.filter((f) => !modified.has(f))
+		.sort()
+		.slice(0, FILE_LIST_MAX_ENTRIES);
+	const modifiedFiles = [...modified].sort().slice(0, FILE_LIST_MAX_ENTRIES);
 	return { readFiles: readOnly, modifiedFiles };
 }
 
