@@ -7973,7 +7973,7 @@ export class InteractiveMode {
 			.cycleModel(direction)
 			.then(async (result) => {
 				if (!result) {
-					this.showStatus("No scoped models available to cycle (see /scoped-models)");
+					this.showStatus("No other models available to cycle");
 					return;
 				}
 				const state = await connection.getState();
