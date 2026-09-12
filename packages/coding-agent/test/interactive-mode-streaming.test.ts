@@ -104,6 +104,7 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		refreshConnectionContextUsage: vi.fn(async () => {}),
 		clearShortcutGuide: vi.fn(),
 		addMessageToChat: vi.fn(),
+		updatePendingMessagesDisplay: vi.fn(),
 	};
 	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 	return fakeThis;

@@ -1,0 +1,1 @@
+- Fixed queued messages staying parked after Escape or Ctrl+C interrupted a turn: pressing Enter on an empty editor now sends the parked queue, and the queued-messages footer shows `enter to send` while the session is idle ([#1476](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1476)).

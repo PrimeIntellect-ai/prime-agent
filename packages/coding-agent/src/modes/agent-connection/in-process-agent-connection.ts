@@ -232,6 +232,10 @@ export class InProcessAgentConnection implements AgentConnection {
 		return queue;
 	}
 
+	async resumeQueuedWork(): Promise<boolean> {
+		return this.session.resumeQueuedWork();
+	}
+
 	async acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause> {
 		const existing = this.sessionInputPauses.get(leaseKey);
 		if (existing) return existing;
