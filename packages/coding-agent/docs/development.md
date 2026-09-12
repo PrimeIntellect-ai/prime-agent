@@ -81,3 +81,5 @@ npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
 ```
 
 If you create or modify a test file, run that file and iterate until it passes. Coding-agent suite regressions belong under `test/suite/regressions/` and use the suite harness and faux provider rather than live provider credentials.
+
+Live provider tests in `packages/ai` are opt-in: they skip unless `PI_LIVE_TESTS=1` is set and `PI_TEST_AUTH_FILE` names a dedicated credential file. No test reads or rewrites `~/.prime/agent/auth.json` or the legacy `~/.pi/agent/auth.json`. See "Running tests" in `packages/ai/README.md`.
