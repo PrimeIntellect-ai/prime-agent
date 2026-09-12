@@ -654,7 +654,7 @@ describe("ENG-6108 durable account reservations", () => {
 
 		await expect(finalization).resolves.toBe("committed");
 		const outcome = await routeLogout;
-		// Fail-closed refusal: never a success claim while the account lives.
+		// State-neutral refusal: never a success claim while the account lives.
 		expect(outcome).toBe("refused");
 		const fresh = AuthStorage.create(authPath);
 		// The moved credential SURVIVES on the real key...
@@ -663,10 +663,74 @@ describe("ENG-6108 durable account reservations", () => {
 		if (survivingCredential?.type === "oauth") {
 			expect(survivingCredential.access).toBe(`staged-for-acme-2--${mine}`);
 		}
-		// ...AND the record survives — no orphan either way.
+		// ...AND the account shell (the record) survives — no orphan either
+		// way — with the old attempt nonce INVALIDATED so the in-flight
+		// login's denied path cannot removeReservation-delete it.
 		const survivingRecord = McpConnectionStore.open(storePath).get("acme-2");
 		expect(survivingRecord).toBeDefined();
-		expect([survivingCredential === undefined, survivingRecord !== undefined]).toContain(true);
+		expect(survivingRecord?.attemptId).toBeUndefined();
+		// A later finalize with the OLD nonce is denied...
+		const denied = await finalizingStore.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: (current) => current,
+		});
+		expect(denied).toBe("denied");
+		// ...and the denied cleanup (removeReservation) preserves the record.
+		await expect(finalizingStore.removeReservation("acme-2", mine)).resolves.toBe(false);
+		expect(McpConnectionStore.open(storePath).get("acme-2")).toBeDefined();
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a staged-key logout with a bystander on the real key preserves the account shell and never orphans the credential", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "both-exist-"));
+		const storePath = join(tempDir, "mcp-connections.json");
+		const authPath = join(tempDir, "auth.json");
+		const loginClient = AuthStorage.create(authPath);
+		const bystander = {
+			type: "oauth" as const,
+			access: "ordinary-login-for-acme-2",
+			refresh: "r2",
+			expires: Date.now() + 7200_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		};
+		const otherClient = AuthStorage.create(authPath);
+		const store = McpConnectionStore.open(storePath);
+		const at = Date.now();
+		const mine = nonce();
+		await store.reserveConnectionId(record("acme-2", at, mine));
+		loginClient.set(`mcp:acme-2--${mine}`, {
+			type: "oauth",
+			access: `staged-for-acme-2--${mine}`,
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		// BOTH credentials exist: our staged attempt AND another client's
+		// ordinary login on the real account key.
+		otherClient.set("mcp:acme-2", bystander);
+
+		const outcome = await logoutMcpAccount(`mcp:acme-2--${mine}`, store, otherClient);
+
+		// 1. Our staged credential is removed (verified)...
+		expect(outcome).toBe("refused");
+		const fresh = AuthStorage.create(authPath);
+		expect(fresh.get(`mcp:acme-2--${mine}`)).toBeUndefined();
+		// 2. ...the bystander's credential survives BYTE-FOR-BYTE...
+		expect(fresh.get("mcp:acme-2")).toEqual(bystander);
+		// 3. ...and the ACCOUNT SHELL (the record) is PRESERVED — record
+		// deletion is the explicit Remove action's job — with the old nonce
+		// INVALIDATED so the in-flight login can neither finalize nor
+		// removeReservation-delete the preserved record.
+		const preserved = McpConnectionStore.open(storePath).get("acme-2");
+		expect(preserved).toBeDefined();
+		expect(preserved?.attemptId).toBeUndefined();
+		await expect(
+			store.finalizeAttempt({ connectionId: "acme-2", attemptId: mine, commit: (current) => current }),
+		).resolves.toBe("denied");
+		await expect(store.removeReservation("acme-2", mine)).resolves.toBe(false);
+		expect(McpConnectionStore.open(storePath).get("acme-2")).toBeDefined();
+		expect(AuthStorage.create(authPath).get("mcp:acme-2")).toEqual(bystander);
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 

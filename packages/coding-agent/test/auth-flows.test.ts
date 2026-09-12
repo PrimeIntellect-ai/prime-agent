@@ -287,7 +287,7 @@ describe("ProviderAuthFlows", () => {
 		expect(statusMessages.join("\n")).toContain("could not be saved");
 	});
 
-	it("a refused stale staged logout reports the completed login explicitly, never Logged out", async () => {
+	it("a refused stale staged logout reports state-neutrally, never Logged out or Connected", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
 		authStorage.set("mcp:acme-2--attempt-1", {
 			type: "oauth",
@@ -309,9 +309,11 @@ describe("ProviderAuthFlows", () => {
 		overlays[0]?.handleInput?.("\r");
 		await expect(logoutResult).resolves.toBe("mcp:acme-2--attempt-1");
 		const messages = statusMessages.join("\n");
-		expect(messages).toContain("already completed");
-		expect(messages).toContain("remains connected");
+		// State-neutral: no success claim, no Connected claim from token presence.
+		expect(messages).toContain("no longer current");
+		expect(messages).toContain("manage the account from /plugins");
 		expect(messages).not.toContain("Logged out of acme-2");
+		expect(messages).not.toContain("remains connected");
 	});
 
 	it("non-MCP logouts stay unchanged: the route removes them directly", async () => {

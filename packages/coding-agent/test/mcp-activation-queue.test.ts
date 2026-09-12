@@ -342,9 +342,14 @@ describe("ENG-6108 guarded credential commit", () => {
 			expires: at + 3600_000,
 			endpoint: "https://mcp.acme.test/mcp",
 		});
-		await expect(logoutAccount.call(fake, "mcp:acme-2--nonce-abc")).resolves.toBe("removed");
+		// A staged-key logout CANCELS the attempt but PRESERVES the account
+		// shell: the state-neutral "refused" outcome, the staged credential
+		// removed, the nonce invalidated, the record kept (removal is the
+		// explicit Remove action's job).
+		await expect(logoutAccount.call(fake, "mcp:acme-2--nonce-abc")).resolves.toBe("refused");
 		expect(authStorage.get("mcp:acme-2--nonce-abc")).toBeUndefined();
-		expect(store.get("acme-2")).toBeUndefined();
+		expect(store.get("acme-2")).toBeDefined();
+		expect(store.get("acme-2")?.attemptId).toBeUndefined();
 		// An unrelated id containing "--" with NO recorded attempt is its own
 		// credential-only account (removed, no record involved).
 		authStorage.set("mcp:odd--key", {

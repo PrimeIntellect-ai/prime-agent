@@ -87,11 +87,8 @@ type PendingOp =
 			kind: "removeAccountForProvider";
 			/** The raw MCP credential provider id the user selected. */
 			providerId: string;
-			/**
-			 * Disk-authoritative auth surface: `hasVerified` for current-state
-			 * refusal decisions, `removeVerified` for the durable cleanup.
-			 */
-			authStorage: { hasVerified: (provider: string) => boolean; removeVerified: (provider: string) => boolean };
+			/** Disk-authoritative credential removal (throws on write failure). */
+			authStorage: { removeVerified: (provider: string) => boolean };
 			resolve: (result: McpRemoveAccountResult) => void;
 	  }
 	| {
@@ -164,17 +161,20 @@ export function resolveMcpAccountLogoutTarget(
  * The shared one-op MCP account logout for the generic /logout route:
  * verified credential deletion AND pending-attempt cancellation in ONE
  * store-locked critical section (store->auth ordering), with the id resolved
- * from CURRENT state UNDER the lock — never a stale pre-lock snapshot. A
- * staged-key selection whose attempt already completed (or whose staged
- * credential already moved onto the account key) REFUSES fail-closed: the
- * newer credential and the record stay, and the honest outcome is "refused",
- * never a success claim. The route delegates BEFORE touching auth; a failed
- * verified removal fails the whole op and cancels nothing.
+ * from CURRENT state UNDER the lock — never a stale pre-lock snapshot. An
+ * account-key logout cancels pending attempts and preserves completed
+ * records; a staged-key logout cancels the attempt — INVALIDATING its nonce
+ * so the in-flight login's denied path cannot delete the record — while
+ * NEVER deleting the account record itself (another client's ordinary login
+ * may hold the real key at any moment; deleting could orphan it). The
+ * state-neutral outcome is "refused": no success claim, no Connected claim
+ * from token presence. The route delegates BEFORE touching auth; a failed
+ * verified removal fails the whole op and changes no record.
  */
 export function logoutMcpAccount(
 	providerId: string,
 	store: McpConnectionStore,
-	authStorage: { hasVerified: (provider: string) => boolean; removeVerified: (provider: string) => boolean },
+	authStorage: { removeVerified: (provider: string) => boolean },
 ): Promise<McpRemoveAccountResult> {
 	return store.removeAccountForProvider({ providerId, authStorage });
 }
@@ -359,14 +359,18 @@ export class McpConnectionStore {
 	 */
 	/**
 	 * The generic /logout route's MCP account logout: ONE store-locked op that
-	 * resolves the account id from CURRENT records, refuses stale staged-key
-	 * selections fail-closed, verifies the credential removal (throwing on
-	 * auth-file write failures), cancels PENDING attempts, and PRESERVES
-	 * completed records (honest unbound/Reconnect state).
+	 * resolves the account id from CURRENT records, verifies the credential
+	 * removal (throwing on auth-file write failures), and acts on the CURRENT
+	 * record state. An account-key logout cancels PENDING attempts (deleting
+	 * their record) and PRESERVES completed records (honest unbound/Reconnect).
+	 * A staged-key logout CANCELS the attempt — invalidating its nonce — but
+	 * NEVER deletes the account record (another client's ordinary login may
+	 * hold the real key; deleting could orphan it) and resolves the
+	 * state-neutral "refused" outcome.
 	 */
 	removeAccountForProvider(options: {
 		providerId: string;
-		authStorage: { hasVerified: (provider: string) => boolean; removeVerified: (provider: string) => boolean };
+		authStorage: { removeVerified: (provider: string) => boolean };
 	}): Promise<McpRemoveAccountResult> {
 		return new Promise<McpRemoveAccountResult>((resolve) => {
 			let settled = false;
@@ -591,27 +595,44 @@ export class McpConnectionStore {
 								} else {
 									const accountKey = `mcp:${target.connectionId}`;
 									const stagedSelection = target.credentialKey !== accountKey;
-									const stagedStillThere = stagedSelection
-										? operation.authStorage.hasVerified(target.credentialKey)
-										: true;
-									const realOccupied = stagedSelection ? operation.authStorage.hasVerified(accountKey) : false;
-									if (stagedSelection && !stagedStillThere && realOccupied) {
-										// A finalize already moved the staged
-										// credential onto the account key while
-										// this logout queued behind its lock:
-										// deleting the pending record would orphan
-										// the moved credential. Refuse.
-										operation.resolve("refused");
+									// Verified cleanup FIRST (store->auth): a
+									// throwing auth write fails the whole op
+									// and changes NO record.
+									const credentialRemoved = operation.authStorage.removeVerified(target.credentialKey);
+									if (stagedSelection) {
+										// A staged-key logout CANCELS the attempt but
+										// NEVER deletes the account record: another
+										// client's ordinary login may hold the real
+										// key at any moment, and a credential
+										// snapshot is not atomic with it — deleting
+										// the record could orphan that credential.
+										// The record stays visible (honest pending /
+										// unbound state); an explicit account Remove
+										// deletes it later.
+										const existing = records.get(target.connectionId);
+										if (existing?.status === "pending" && existing.attemptId !== undefined) {
+											// Invalidate the attempt nonce so the in-flight
+											// login's denied/occupied path can no longer
+											// removeReservation-delete this preserved record.
+											const { attemptId: _cancelled, ...withoutAttempt } = existing;
+											records.set(target.connectionId, withoutAttempt);
+										}
+										// State-neutral outcome: the attempt is no
+										// longer current; the account keeps whatever
+										// state another login gave it.
+										deferred.push((didCommit) =>
+											didCommit
+												? operation.resolve("refused")
+												: // The staged credential removal committed but the
+													// nonce invalidation failed to save: honest partial.
+													operation.resolve(credentialRemoved ? "logged-out" : "failed"),
+										);
 									} else {
-										// Verified cleanup FIRST (store->auth): a
-										// throwing auth write fails the whole op
-										// and cancels nothing.
-										const credentialRemoved = operation.authStorage.removeVerified(target.credentialKey);
+										// Account-key logout: cancel PENDING attempts
+										// (the record goes with the attempt), PRESERVE
+										// completed records (honest unbound/Reconnect).
 										const existing = records.get(target.connectionId);
 										const existed = existing !== undefined;
-										// Generic-logout semantics: cancel PENDING
-										// attempts, PRESERVE completed records
-										// (honest unbound/Reconnect state).
 										const removeRecord = existed && existing.status === "pending";
 										if (removeRecord) {
 											records.delete(target.connectionId);

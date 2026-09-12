@@ -223,11 +223,11 @@ export class ProviderAuthFlows {
 						if (providerOption.id.startsWith("mcp:") && this.host.onMcpAccountLogout) {
 							const outcome = await this.host.onMcpAccountLogout(providerOption.id);
 							if (outcome === "refused") {
-								// The staged login already completed while this
-								// logout raced it: the account stays connected —
-								// say so explicitly, never "Logged out".
+								// State-neutral: the attempt is no longer current
+								// — no "Logged out" claim, and no Connected
+								// claim from mere token presence.
 								this.host.showStatus(
-									`The login attempt for ${providerOption.name} already completed; the account remains connected. Manage it from /plugins.`,
+									`This login attempt is no longer current; manage the account from /plugins.`,
 								);
 								resolve(providerOption.id);
 								return;

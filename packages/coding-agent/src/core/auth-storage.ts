@@ -832,18 +832,6 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Disk-authoritative existence check: whether `provider` has a
-	 * credential ON DISK, read under the backend's own file lock — a
-	 * cross-instance writer is always visible, unlike the cached `has()`.
-	 */
-	hasVerified(provider: string): boolean {
-		return this.storage.withLock((current) => {
-			const currentData = this.parseStorageData(current);
-			return { result: provider in currentData };
-		});
-	}
-
-	/**
 	 * List all providers with credentials.
 	 */
 	list(): string[] {
