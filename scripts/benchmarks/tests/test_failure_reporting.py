@@ -192,6 +192,7 @@ class WorkerFailureTests(unittest.TestCase):
         self.assertIn("Editor input probe", side.metrics["cold"][0].error)
         self.assertNotIn("warm", side.metrics)
         self.assertNotIn("rss", side.metrics)
+        self.assertNotIn("disk", side.metrics)
 
     def test_failed_launch_is_recorded_and_owned_processes_are_stopped(self):
         side = Side(sha=SHA, metrics={"install": observations(1)})
@@ -206,40 +207,81 @@ class WorkerFailureTests(unittest.TestCase):
     def test_memory_failure_does_not_overwrite_successful_startup_timing(self):
         terminal = Mock()
         terminal.ready.return_value = 0.5
-        side = Side(sha=SHA, metrics={"install": observations(1)})
+        side = Side(
+            sha=SHA, metrics={"install": observations(1)}, runtime={"home_before_install_bytes": "100"}
+        )
         with (
             patch("worker.Terminal", return_value=terminal),
             patch("worker.stop_processes"),
+            patch("worker.disk_bytes", return_value=700),
             patch("worker.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=1)),
             patch("worker.memory", return_value=[]),
             patch("worker.stop_agents") as stop_agents,
         ):
-            worker.measure(request_for(fixture()), side, 1)
+            worker.measure(request_for(fixture()), side, 0)
         self.assertEqual(side.metrics["cold"][0].value, 0.5)
         self.assertEqual(side.metrics["warm"][0].value, 0.5)
         self.assertIn("No owned processes", side.metrics["rss"][0].error)
         self.assertEqual(terminal.close.call_count, 2)
         stop_agents.assert_called_once()
+        self.assertEqual(side.metrics["disk"][0].value, 600)
 
-    def test_warm_settle_failure_preserves_measured_startup_and_cleans_up(self):
-        terminal = Mock()
-        terminal.ready.return_value = 0.5
-        terminal.settle.side_effect = [None, RuntimeError("terminal exited")]
-        side = Side(sha=SHA, metrics={"install": observations(1)})
-        with (
-            patch("worker.Terminal", return_value=terminal),
-            patch("worker.stop_processes") as stop,
-            patch("worker.stop_agents"),
-            patch("worker.write_json"),
-            patch("worker.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=1)),
-            patch("worker.memory", return_value=[ProcessMemory(pid=1, name="agent", rss=100)]),
-        ):
-            worker.measure(request_for(fixture()), side, 0)
-        self.assertEqual(side.metrics["cold"][0].value, 0.5)
-        self.assertEqual(side.metrics["warm"][0].value, 0.5)
-        self.assertEqual(side.error, "warm settle: RuntimeError: terminal exited")
-        self.assertEqual(terminal.close.call_count, 2)
-        self.assertEqual(stop.call_count, 2)
+    def test_warm_failures_preserve_first_use_disk_and_measurement_diagnostics(self):
+        for stage in ("ready", "settle"):
+            for trial, disk_failure in ((0, False), (0, True), (1, False)):
+                with self.subTest(stage=stage, trial=trial, disk_failure=disk_failure):
+                    order = []
+                    terminal = Mock()
+                    terminal.close.side_effect = lambda order=order: order.append("closed")
+                    terminal.ready.return_value = 0.5
+                    if stage == "ready":
+                        terminal.ready.side_effect = [0.5, TimeoutError("warm not ready")]
+                    else:
+                        terminal.settle.side_effect = [None, RuntimeError("terminal exited")]
+                    side = Side(
+                        sha=SHA,
+                        metrics={"install": observations(1)},
+                        runtime={"home_before_install_bytes": "100"},
+                    )
+
+                    def disk(_home, order=order, disk_failure=disk_failure):
+                        self.assertEqual(order, ["stopped", "closed", "closed", "stopped"])
+                        if disk_failure:
+                            raise OSError("footprint unavailable")
+                        return 700
+
+                    with (
+                        patch("worker.Terminal", return_value=terminal),
+                        patch(
+                            "worker.stop_processes",
+                            side_effect=lambda _user, order=order: order.append("stopped"),
+                        ),
+                        patch("worker.stop_agents"),
+                        patch("worker.write_json"),
+                        patch("worker.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=1)),
+                        patch("worker.memory", return_value=[ProcessMemory(pid=1, name="agent", rss=100)]),
+                        patch("worker.disk_bytes", side_effect=disk) as footprint,
+                    ):
+                        worker.measure(request_for(fixture()), side, trial)
+                    self.assertEqual(side.metrics["cold"][0].value, 0.5)
+                    self.assertEqual(side.metrics["rss"][0].value, 100)
+                    if stage == "ready":
+                        self.assertEqual(side.metrics["warm"][0].error, "TimeoutError: warm not ready")
+                        self.assertIsNone(side.error)
+                    else:
+                        self.assertEqual(side.metrics["warm"][0].value, 0.5)
+                        self.assertEqual(side.error, "warm settle: RuntimeError: terminal exited")
+                    self.assertEqual(terminal.close.call_count, 2)
+                    self.assertEqual(order, ["stopped", "closed", "closed", "stopped"])
+                    if trial == 0:
+                        footprint.assert_called_once()
+                        if disk_failure:
+                            self.assertEqual(side.metrics["disk"][0].error, "OSError: footprint unavailable")
+                        else:
+                            self.assertEqual(side.metrics["disk"][0].value, 600)
+                    else:
+                        footprint.assert_not_called()
+                        self.assertNotIn("disk", side.metrics)
 
     def test_prior_phase_error_does_not_poison_later_independent_work(self):
         with tempfile.TemporaryDirectory() as directory:

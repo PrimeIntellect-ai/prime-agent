@@ -144,6 +144,7 @@ class Report(StrictModel):
     pr_head: Side
     sandboxes: list[SandboxUsage] = Field(default_factory=list, max_length=2)
     errors: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=30)
+    warnings: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=30)
 
     @model_validator(mode="after")
     def validate_revisions(self) -> Report:

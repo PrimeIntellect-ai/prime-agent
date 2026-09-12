@@ -158,6 +158,8 @@ probe skips warm startup because there is no verified cold session to retain; a 
 skips dependent interactive and runtime trials.
 Skipped trials are not measurements or successful samples. Failure causes and terminal transcripts
 remain in the result artifacts, which are uploaded even when the benchmark command fails.
+Log-collection and deferred sandbox-cleanup problems appear as operational warnings. They do not
+mark complete measurements as partial; missing or failed measurements still fail the command.
 
 At the configured list rates, two sandboxes cost about $0.01/minute together. A 10-minute run costs
 about $0.10 in sandbox compute. There are no inference charges. Full sandbox lifetimes are recorded,

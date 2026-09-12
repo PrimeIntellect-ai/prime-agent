@@ -392,6 +392,7 @@ def measure(request: Request, side: Side, trial: int) -> None:
         raise RuntimeError("The first installation must succeed before interactive measurements")
     home = HOMES / "benchmark1"
     stop_processes("benchmark1")
+    cold_ready = False
     try:
         for mode in ("cold", "warm"):
             terminal = None
@@ -408,6 +409,7 @@ def measure(request: Request, side: Side, trial: int) -> None:
                 record(side, mode, trial, terminal.ready())
                 startup_ready = True
                 if mode == "cold":
+                    cold_ready = True
                     metric = "rss"
                     terminal.settle(1)
                     settled = True
@@ -436,8 +438,11 @@ def measure(request: Request, side: Side, trial: int) -> None:
                 stop_agents(home)
     finally:
         stop_processes("benchmark1")
-    if trial == 0:
-        record(side, "disk", 0, disk_bytes(home) - int(side.runtime["home_before_install_bytes"]))
+        if trial == 0 and cold_ready:
+            try:
+                record(side, "disk", 0, disk_bytes(home) - int(side.runtime["home_before_install_bytes"]))
+            except Exception as error:
+                record(side, "disk", 0, error=clean_error(error))
 
 
 def runtime(side: Side, trial: int) -> None:

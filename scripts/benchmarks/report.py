@@ -247,6 +247,17 @@ def render(report: Report) -> str:
     if errors:
         lines.extend(["**Failure diagnostics:**", "", *[f"- {escape(error)}" for error in errors[:3]], ""])
         lines.extend(["See the saved per-trial logs and terminal transcripts for details.", ""])
+    if report.warnings:
+        lines.extend(
+            [
+                "**Operational warnings — log collection or sandbox cleanup needs attention:**",
+                "",
+                *[f"- {escape(warning)}" for warning in report.warnings],
+                "",
+                "These warnings do not change measurement completeness.",
+                "",
+            ]
+        )
     results = comparisons(report)
     counts = Counter(result.outcome for result in results.values())
     summary = [f"{counts[outcome]} {outcome}" for outcome in ("regressed", "improved", "no clear change")]

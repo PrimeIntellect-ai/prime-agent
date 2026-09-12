@@ -90,6 +90,7 @@ class Controller:
 
     def save(self) -> None:
         self.report.errors = self.report.errors[:30]
+        self.report.warnings = self.report.warnings[:30]
         if self.report.status == "completed" and not report_complete(self.report):
             self.report.status = "partial"
         self.report = Report.model_validate(self.report.model_dump())
@@ -320,8 +321,10 @@ class Controller:
                             if repeated >= self.report.config.failure_limit and trial + 1 < count:
                                 blocked.add(role)
                                 self.report.errors.append(
-                                    f"{role} {phase}: skipped {count - trial - 1} remaining trials after "
-                                    f"{repeated} identical consecutive failures; last cause: {failure}"[:500]
+                                    (
+                                        f"{role} {phase}: skipped {count - trial - 1} remaining trials after "
+                                        f"{repeated} identical consecutive failures; last cause: {failure}"
+                                    )[:500]
                                 )
                         else:
                             failures.pop(role, None)
@@ -347,14 +350,19 @@ class Controller:
                 deleted = False
                 try:
                     self.logs(role)
-                except Exception:
-                    self.report.errors.append(f"{role} logs could not be collected")
+                except Exception as error:
+                    self.report.warnings.append(
+                        f"{role} logs could not be collected: {error_message(error)}"[:500]
+                    )
                 try:
                     self.client.delete(sandbox.id)
                     deleted = True
-                except Exception:
-                    self.report.errors.append(
-                        f"{role} sandbox cleanup deferred to the cleanup workflow or TTL"
+                except Exception as error:
+                    self.report.warnings.append(
+                        (
+                            f"{role} sandbox cleanup deferred to the cleanup workflow or TTL: "
+                            f"{error_message(error)}"
+                        )[:500]
                     )
                 seconds = elapsed_seconds(sandbox.created_at)
                 if not deleted:
