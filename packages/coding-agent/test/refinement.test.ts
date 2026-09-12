@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -668,10 +677,11 @@ describe("harness refinement", () => {
 	});
 
 	it.each(["not json at all", "null", "[]", '"a string"', "123"])(
-		"loads empty harness state from a corrupt or non-object file (%s)",
+		"loads an empty view but refuses to overwrite a corrupt or non-object file (%s)",
 		(payload) => {
 			const dir = makeTempDir();
-			writeFileSync(getHarnessStatePath(dir), payload, "utf8");
+			const statePath = getHarnessStatePath(dir);
+			writeFileSync(statePath, payload, "utf8");
 
 			const state = loadHarnessState(dir);
 
@@ -684,8 +694,8 @@ describe("harness refinement", () => {
 				]),
 				{ id: "refine_recover" },
 			);
-			saveHarnessState(dir, state);
-			expect(loadHarnessState(dir).entries.memory.recovered.content).toBe("ok");
+			expect(() => saveHarnessState(dir, state)).toThrow("invalid or unreadable");
+			expect(readFileSync(statePath, "utf8")).toBe(payload);
 		},
 	);
 

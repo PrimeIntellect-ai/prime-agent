@@ -1,5 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
@@ -10,12 +10,14 @@ import { convertToLlm } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import type { CustomEntry } from "../session-manager.js";
 import { getAuxiliaryThinkingLevel } from "../thinking-levels.js";
+import { mergeHarnessStateChanges, withHarnessFileLock } from "./harness-persistence.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 
 export const REFINE_SKILL_NAME = "refine";
 const HARNESS_STATE_DIR_NAME = "harness";
 const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
+const HARNESS_SCHEMA_VERSION = 1;
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
@@ -54,6 +56,8 @@ export interface HarnessState {
 	entries: Record<RefinementKind, Record<string, HarnessEntry>>;
 	refinements: HarnessRefinementEvent[];
 }
+
+const harnessSnapshots = new WeakMap<HarnessState, { state: HarnessState; scope: HarnessScope; statePath: string }>();
 
 export interface RefinementEdit {
 	action: RefinementAction;
@@ -271,6 +275,134 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
+function containsUnsafeJsonNumber(value: unknown): boolean {
+	if (typeof value === "number") {
+		return (
+			Object.is(value, -0) || !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))
+		);
+	}
+	if (Array.isArray(value)) return value.some(containsUnsafeJsonNumber);
+	const record = objectRecord(value);
+	return record ? Object.values(record).some(containsUnsafeJsonNumber) : false;
+}
+
+const JSON_NUMBER_TOKEN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/;
+const JSON_NUMBER_PARTS = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
+
+function normalizeJsonNumberToken(token: string): string | undefined {
+	const match = JSON_NUMBER_PARTS.exec(token);
+	if (!match) return undefined;
+	const fraction = match[3] ?? "";
+	let digits = `${match[2]}${fraction}`.replace(/^0+/, "");
+	if (!digits) return `${match[1]}0e0`;
+	let exponent = BigInt(match[4] ?? "0") - BigInt(fraction.length);
+	while (digits.endsWith("0")) {
+		digits = digits.slice(0, -1);
+		exponent++;
+	}
+	return `${match[1]}${digits}e${exponent}`;
+}
+
+function hasLosslessJsonNumbers(source: string): boolean {
+	for (let index = 0; index < source.length; index++) {
+		if (source[index] === '"') {
+			index++;
+			while (index < source.length && source[index] !== '"') {
+				if (source[index] === "\\") index++;
+				index++;
+			}
+			continue;
+		}
+		if (source[index] !== "-" && (source[index] < "0" || source[index] > "9")) continue;
+		const token = JSON_NUMBER_TOKEN.exec(source.slice(index))?.[0];
+		if (!token) return false;
+		const number = Number(token);
+		if (!Number.isFinite(number)) return false;
+		if (normalizeJsonNumberToken(token) !== normalizeJsonNumberToken(String(number))) return false;
+		index += token.length - 1;
+	}
+	return true;
+}
+
+const HARNESS_STATE_FIELDS = new Set(["schema", "entries", "refinements"]);
+const HARNESS_ENTRY_FIELDS = new Set([
+	"id",
+	"kind",
+	"title",
+	"content",
+	"path",
+	"scope",
+	"reference",
+	"arguments",
+	"metadata",
+	"source",
+	"created_at",
+	"updated_at",
+	"version",
+]);
+const HARNESS_REFINEMENT_FIELDS = new Set(["id", "trigger", "changes", "evidence", "outcome", "created_at"]);
+
+function hasOnlyFields(record: Record<string, unknown>, fields: ReadonlySet<string>): boolean {
+	return Object.keys(record).every((key) => fields.has(key));
+}
+
+function isWritableHarnessEntry(value: unknown, id: string, kind: RefinementKind): boolean {
+	const entry = objectRecord(value);
+	if (!entry || !hasOnlyFields(entry, HARNESS_ENTRY_FIELDS)) return false;
+	if (entry.id !== id || entry.kind !== kind) return false;
+	if (typeof entry.title !== "string" || typeof entry.content !== "string") return false;
+	if (entry.path !== undefined && typeof entry.path !== "string") return false;
+	if (entry.scope !== undefined && entry.scope !== "local" && entry.scope !== "global") return false;
+	if (entry.source !== undefined && typeof entry.source !== "string") return false;
+	if (entry.created_at !== undefined && typeof entry.created_at !== "string") return false;
+	if (entry.updated_at !== undefined && typeof entry.updated_at !== "string") return false;
+	if (entry.version !== undefined && (typeof entry.version !== "number" || !Number.isInteger(entry.version))) {
+		return false;
+	}
+	for (const field of ["reference", "arguments", "metadata"] as const) {
+		if (entry[field] !== undefined && !objectRecord(entry[field])) return false;
+	}
+	return true;
+}
+
+function isWritableHarnessRefinement(value: unknown): boolean {
+	const event = objectRecord(value);
+	if (!event || !hasOnlyFields(event, HARNESS_REFINEMENT_FIELDS)) return false;
+	if (typeof event.id !== "string" || typeof event.trigger !== "string") return false;
+	if (!Array.isArray(event.changes) || event.changes.some((change) => typeof change !== "string")) return false;
+	for (const field of ["evidence", "outcome", "created_at"] as const) {
+		if (event[field] !== undefined && typeof event[field] !== "string") return false;
+	}
+	return true;
+}
+
+function isWritableHarnessState(value: unknown): boolean {
+	const state = objectRecord(value);
+	if (!state || !hasOnlyFields(state, HARNESS_STATE_FIELDS) || containsUnsafeJsonNumber(state)) return false;
+	const emptyEntries = emptyHarnessState().entries;
+	const entries = state.entries === undefined ? {} : objectRecord(state.entries);
+	if (!entries || Object.keys(entries).some((kind) => !Object.hasOwn(emptyEntries, kind))) return false;
+	for (const kind of Object.keys(emptyEntries) as RefinementKind[]) {
+		const records = entries[kind] === undefined ? {} : objectRecord(entries[kind]);
+		if (!records) return false;
+		if (Object.entries(records).some(([id, entry]) => !isWritableHarnessEntry(entry, id, kind))) return false;
+	}
+	if (state.refinements !== undefined) {
+		if (!Array.isArray(state.refinements) || state.refinements.some((event) => !isWritableHarnessRefinement(event))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function invalidHarnessStateError(): string {
+	return "Harness state is invalid or unreadable and was not overwritten. Repair or remove the file before saving.";
+}
+
+function unsupportedHarnessSchemaError(schema: unknown): string {
+	return `Unsupported harness schema ${String(schema)}; this version supports schema ${HARNESS_SCHEMA_VERSION}. The file was not overwritten.`;
+}
+
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
 	return value === "global" || value === "local" ? value : fallback;
 }
@@ -307,29 +439,71 @@ export function getHarnessStatePath(harnessStateDir: string = getGlobalHarnessSt
 	return join(harnessStateDir, "harness_state.json");
 }
 
+function resolveHarnessStateTarget(statePath: string): string {
+	const resolvedPath = realpathIfPresentSync(statePath);
+	let parent = dirname(resolvedPath);
+	try {
+		parent = realpathSync(parent);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		// The save path may not exist yet; saveHarnessState creates it before locking.
+	}
+	return join(parent, basename(resolvedPath));
+}
+
 export function loadHarnessState(
 	harnessStateDir: string = getGlobalHarnessStateDir(),
 	scope: HarnessScope = "global",
 ): HarnessState {
 	const statePath = getHarnessStatePath(harnessStateDir);
+	const state = readHarnessState(statePath, scope);
+	harnessSnapshots.set(state, {
+		state: structuredClone(state),
+		scope,
+		statePath: resolveHarnessStateTarget(statePath),
+	});
+	return state;
+}
+
+function readHarnessState(statePath: string, scope: HarnessScope): HarnessState {
+	return readHarnessStateResult(statePath, scope).state;
+}
+
+function readHarnessStateResult(statePath: string, scope: HarnessScope): { state: HarnessState; writeError?: string } {
 	if (!existsSync(statePath)) {
-		return emptyHarnessState();
+		return { state: emptyHarnessState() };
 	}
 	let parsed: Partial<HarnessState>;
+	let unsafeNumbers = false;
 	try {
-		const raw = JSON.parse(readFileSync(statePath, "utf8"));
+		const source = readFileSync(statePath, "utf8");
+		const raw = JSON.parse(source);
 		// loadHarnessState runs on every system-prompt build and before each /refine, so
 		// a corrupt or unreadable (or non-object) state file must degrade to empty rather
-		// than throw and break the session. The next saveHarnessState rewrites it cleanly.
+		// than throw and break the session. Saving stays blocked so unknown data survives.
 		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-			return emptyHarnessState();
+			return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 		}
+		unsafeNumbers = !hasLosslessJsonNumbers(source) || containsUnsafeJsonNumber(raw);
 		parsed = raw as Partial<HarnessState>;
 	} catch {
-		return emptyHarnessState();
+		return { state: emptyHarnessState(), writeError: invalidHarnessStateError() };
 	}
 	const state = emptyHarnessState();
-	state.schema = typeof parsed.schema === "number" ? parsed.schema : 1;
+	let writeError = unsafeNumbers ? invalidHarnessStateError() : undefined;
+	if (parsed.schema === undefined) {
+		state.schema = HARNESS_SCHEMA_VERSION;
+	} else if (typeof parsed.schema !== "number" || !Number.isFinite(parsed.schema)) {
+		return { state, writeError: invalidHarnessStateError() };
+	} else {
+		state.schema = parsed.schema;
+		if (!writeError && parsed.schema !== HARNESS_SCHEMA_VERSION) {
+			writeError = unsupportedHarnessSchemaError(parsed.schema);
+		}
+	}
+	if (!writeError && !isWritableHarnessState(parsed)) {
+		writeError = invalidHarnessStateError();
+	}
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const records = parsed.entries?.[kind];
 		if (records && typeof records === "object") {
@@ -349,7 +523,7 @@ export function loadHarnessState(
 	if (Array.isArray(parsed.refinements)) {
 		state.refinements = parsed.refinements;
 	}
-	return state;
+	return { state, writeError };
 }
 
 export function mergeHarnessStates(globalState: HarnessState, localState?: HarnessState): HarnessState {
@@ -374,9 +548,27 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
-	const targetPath = realpathIfPresentSync(statePath);
-	const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
-	writeFileAtomicSync(targetPath, `${JSON.stringify(state, null, 2)}\n`, { mode });
+	const targetPath = resolveHarnessStateTarget(statePath);
+	const snapshot = harnessSnapshots.get(state);
+	const scope = snapshot?.scope ?? "global";
+	withHarnessFileLock(targetPath, () => {
+		const latestRead = readHarnessStateResult(targetPath, scope);
+		if (latestRead.writeError) throw new Error(latestRead.writeError);
+		if (typeof state.schema !== "number" || !Number.isFinite(state.schema)) {
+			throw new Error(invalidHarnessStateError());
+		}
+		if (state.schema !== HARNESS_SCHEMA_VERSION) {
+			throw new Error(unsupportedHarnessSchemaError(state.schema));
+		}
+		if (!isWritableHarnessState(state)) throw new Error(invalidHarnessStateError());
+		const latest = latestRead.state;
+		const baseline = snapshot?.statePath === targetPath ? snapshot.state : emptyHarnessState();
+		const merged = mergeHarnessStateChanges(baseline, state, latest);
+		const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
+		writeFileAtomicSync(targetPath, `${JSON.stringify(merged, null, 2)}\n`, { mode });
+		Object.assign(state, merged);
+		harnessSnapshots.set(state, { state: structuredClone(merged), scope, statePath: targetPath });
+	});
 	return statePath;
 }
 
