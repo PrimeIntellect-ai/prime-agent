@@ -361,7 +361,7 @@ function firstPythonChildLine(lines: readonly string[], parentIndex: number): nu
 function pythonLineScore(lines: readonly string[], index: number, paths: ReadonlyMap<string, string>): number {
 	const line = lines[index] ?? "";
 	const trimmed = line.trim();
-	if (isSkippablePythonLine(line) || PYTHON_DECORATOR_PATTERN.test(trimmed)) {
+	if (isSkippablePythonLine(line) || PYTHON_DECORATOR_PATTERN.test(trimmed) || /^[)\]},;\s]+(?:#.*)?$/.test(trimmed)) {
 		return -1;
 	}
 	if (pythonFileOperation(line, paths)) {

@@ -27,6 +27,16 @@ afterEach(() => {
 });
 
 describe("conversation rendering review regressions", () => {
+	test.each([
+		['print("""text\n""")', 'print("""text'],
+		['print(["""text\n"""])', 'print(["""text'],
+		['print(("""text\n"""));', 'print(("""text'],
+		['print("""text\n""") # finished', 'print("""text'],
+	])("ignores punctuation-only string closer suffixes in previews (%s)", (code, expected) => {
+		expect(previewPythonCode(code)).toEqual({ language: "python", text: expected });
+		expect(previewPythonCode(`${code}\npublish()`)).toEqual({ language: "python", text: "publish()" });
+	});
+
 	test.each(['"""', "'''", 'r"""', 'f"""'])(
 		"preserves statements after a multiline string closes (%s)",
 		async (opener) => {
