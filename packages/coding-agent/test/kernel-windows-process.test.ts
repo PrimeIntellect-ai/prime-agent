@@ -39,7 +39,7 @@ describe("Windows kernel subprocesses", () => {
 		await expect(ensureKernelPython()).rejects.toThrow("PRIME_AGENT_KERNEL_PYTHON");
 		expect(spawn.mock.calls[0]?.[2]).toMatchObject({
 			windowsHide: true,
-			stdio: "ignore",
+			stdio: ["ignore", "ignore", "pipe"],
 			env: { PYTHONUTF8: "1" },
 		});
 		expect(process.env.PYTHONUTF8).toBe("0");
@@ -65,7 +65,11 @@ describe("Windows kernel subprocesses", () => {
 		await expect(ensureKernelPython({ onProgress: () => {} })).rejects.toThrow("spawn refused by test");
 		const call = spawn.mock.calls.at(-1);
 		expect(call?.[0]).toBe(process.env.ComSpec ?? "cmd.exe");
-		expect(call?.[2]).toMatchObject({ windowsHide: true, windowsVerbatimArguments: true, stdio: "ignore" });
+		expect(call?.[2]).toMatchObject({
+			windowsHide: true,
+			windowsVerbatimArguments: true,
+			stdio: ["ignore", "ignore", "pipe"],
+		});
 		expect(Object.values(call?.[2]?.env ?? {})).toContain(uv);
 	});
 
