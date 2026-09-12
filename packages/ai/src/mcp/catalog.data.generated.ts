@@ -29,10 +29,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 		"oauthStrategy": 14,
 		"apiKeyStrategy": 32,
 		"mergedFromBothSources": 16,
-		"readinessOauthReady": 62,
+		"readinessOauthReady": 72,
 		"readinessUserSetup": 53,
 		"readinessPrimeRestricted": 5,
-		"readinessUnknown": 20,
+		"readinessUnknown": 10,
 		"metadataAvailable": 94,
 		"metadataUnavailable": 9
 	},
@@ -237,13 +237,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://airtable.com/.well-known/oauth-authorization-server/oauth2/v1",
 						"https://airtable.com/oauth2/v1/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -799,13 +798,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.amplitude.com/.well-known/oauth-authorization-server",
 						"https://mcp.amplitude.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1035,13 +1033,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://fra.cloud.appwrite.io/.well-known/oauth-authorization-server/v1/oauth2/console",
 						"https://fra.cloud.appwrite.io/v1/oauth2/console/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5139,8 +5136,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.hubspot.com/.well-known/oauth-authorization-server",
 						"https://mcp.hubspot.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
@@ -5743,7 +5739,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.logrocket.com/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"note": "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry"
 				}
 			},
 			"setup": {
@@ -5947,13 +5943,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://lovable.dev/.well-known/oauth-authorization-server/oauth",
 						"https://lovable.dev/oauth/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6335,13 +6330,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.miro.com/.well-known/oauth-authorization-server",
 						"https://mcp.miro.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6733,13 +6727,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.notion.com/.well-known/oauth-authorization-server",
 						"https://mcp.notion.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the header path serves the pathful protected-resource document (resource matches the /mcp endpoint) while the origin-level document declares an origin resource; engine audience handling is approved but not yet landed, so readiness stays unknown until it lands"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "metadata-reviewed"
@@ -7708,13 +7701,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://rootly.com/.well-known/oauth-authorization-server",
 						"https://rootly.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -8166,7 +8158,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.slack.com/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12",
-					"note": "no dynamic client registration advertised; confidential-only client auth (client_secret_post) observed; the origin-level protected-resource document's resource does not exactly match the /mcp endpoint audience under the engine's exact-match rule"
+					"note": "no dynamic client registration advertised; confidential-only client auth (client_secret_post) observed"
 				}
 			},
 			"setup": {
@@ -9195,13 +9187,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://vercel.com/.well-known/oauth-authorization-server",
 						"https://vercel.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -9270,13 +9261,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.windsor.ai/.well-known/oauth-authorization-server",
 						"https://mcp.windsor.ai/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -10066,13 +10056,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.zoominfo.com/.well-known/oauth-authorization-server",
 						"https://mcp.zoominfo.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"

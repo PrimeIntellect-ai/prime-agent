@@ -494,6 +494,13 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 		if (clientId !== undefined) {
 			fail(entryId, "catalog entries must not carry OAuth client ids");
 		}
+		// Secrets fail loudly instead of silently dropping (symmetric with the client-id rejection).
+		const rawOauth = entry.oauth as Record<string, unknown>;
+		for (const secretKey of ["clientSecret", "client_secret"]) {
+			if (rawOauth[secretKey] !== undefined) {
+				fail(entryId, "catalog entries must not carry OAuth client secrets");
+			}
+		}
 		oauth = { kind: "oauth", ...(scopes !== undefined ? { scopes } : {}) };
 	}
 

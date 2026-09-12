@@ -203,9 +203,9 @@ describe("MCP service catalog", () => {
 		// DCR evidence; everything else stays honestly unknown.
 		const airtable = getServiceCatalogEntry("airtable");
 		expect(airtable?.setup.status).toBe("ready");
-		expect(airtable?.setup.readiness).toBe("unknown");
+		expect(airtable?.setup.readiness).toBe("oauth-ready");
 		expect(airtable?.auth.metadata?.dynamicClientRegistration).toBe(true);
-		expect(airtable?.auth.metadata?.note).toMatch(/audience/);
+		expect(airtable?.auth.metadata?.note).toBeUndefined();
 		expect(airtable?.auth.alternatives).toEqual([
 			expect.objectContaining({ kind: "api-key", readiness: "user-setup" }),
 		]);
@@ -217,13 +217,27 @@ describe("MCP service catalog", () => {
 		expect(linear?.setup.readiness).toBe("oauth-ready");
 		expect(linear?.auth.metadata?.dynamicClientRegistration).toBe(true);
 		expect(linear?.auth.metadata?.note).toBeUndefined();
-		// Notion: engine audience handling approved but not landed.
+		// Notion: the engine component comparison accepts the pathful document
+		// served via the header pointer (exact endpoint match).
 		const notion = getServiceCatalogEntry("notion");
-		expect(notion?.setup.readiness).toBe("unknown");
-		expect(notion?.auth.metadata?.note).toMatch(/audience handling is approved but not yet landed/);
+		expect(notion?.setup.readiness).toBe("oauth-ready");
+		expect(notion?.auth.metadata?.note).toBeUndefined();
 		// CIMD alone is never oauth-ready (no Prime-controlled identity deployed).
 		const synthflow = getServiceCatalogEntry("synthflow");
 		expect(synthflow?.setup.readiness).toBe("unknown");
+		// The component comparison accepts exact-origin resources (root-slash
+		// normalized): the 9 DCR-capable origin-mismatched entries flipped.
+		for (const server of ["amplitude", "appwrite", "lovable", "miro", "rootly", "vercel", "windsor-ai", "zoominfo"]) {
+			expect(getServiceCatalogEntry(server)?.setup.readiness).toBe("oauth-ready");
+		}
+		// LogRocket fails closed even under the component rule: its resource keeps
+		// the path but drops the ?toolsets=all query, matching neither the exact
+		// endpoint nor the origin.
+		const logrocket = getServiceCatalogEntry("logrocket");
+		expect(logrocket?.setup.readiness).toBe("unknown");
+		expect(logrocket?.auth.metadata?.note).toMatch(/matches neither the exact endpoint nor the origin/);
+		// DCR-less mismatched providers never become oauth-ready.
+		expect(getServiceCatalogEntry("hubspot")?.setup.readiness).toBe("unknown");
 		// Prime-restricted: registered-client requirements stay hard, research-anchored.
 		for (const server of ["gmail", "google-calendar", "google-drive", "slack", "mongodb-atlas"]) {
 			const entry = getServiceCatalogEntry(server);
@@ -326,6 +340,16 @@ describe("MCP service catalog", () => {
 		expect(() =>
 			validateMcpServiceEntry({ ...good, oauth: { kind: "oauth" }, auth: { ...good.auth, strategy: "api_key" } }),
 		).toThrow(/oauth is only allowed on oauth-strategy/);
+		// Client ids and secrets both fail loudly in catalog data — secrets are
+		// rejected explicitly, never silently dropped.
+		expect(() => validateMcpServiceEntry({ ...good, oauth: { kind: "oauth", clientId: "abc" } })).toThrow(
+			/client ids/,
+		);
+		for (const secretShape of [{ clientSecret: "shh" }, { client_secret: "shh" }]) {
+			expect(() => validateMcpServiceEntry({ ...good, oauth: { kind: "oauth", ...secretShape } })).toThrow(
+				/client secrets/,
+			);
+		}
 		expect(() => validateMcpServiceEntry({ ...good, aliases: ["linear", "Linear"] })).toThrow(/aliases/);
 		// Literal loopback/private/link-local/unspecified endpoints are rejected structurally.
 		for (const badUrl of [

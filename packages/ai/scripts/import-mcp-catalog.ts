@@ -637,11 +637,12 @@ function evidenceSupportsStandardOauth(result: AuditResult): boolean {
 	) {
 		return false;
 	}
-	// The engine's current PRM validation compares metadata.resource against
-	// canonicalResource(endpoint). A mismatched engine-visible document fails
-	// runtime discovery today, so oauth-ready never overclaims "usable now";
-	// the approved (not yet landed) engine audience policy is recorded in the
-	// metadata note instead.
+	// The engine's PRM validation uses the component comparison (root-approved
+	// audience policy): the document's resource must match the exact endpoint
+	// (canonical form) OR the exact origin, root-slash normalized. Anything
+	// else fails closed — e.g. a resource that keeps the path but drops the
+	// query string never matches (LogRocket), and DCR-less providers never
+	// become oauth-ready regardless (Slack, HubSpot).
 	return !audienceMismatched(result);
 }
 
@@ -652,18 +653,25 @@ function canonicalResource(url: string): string {
 	return `${parsed.origin}${parsed.pathname}${parsed.search}`;
 }
 
+/** The engine's component comparison: exact canonical endpoint OR exact origin (root-slash normalized). */
+function audienceMatches(resource: string, endpoint: string): boolean {
+	const parsed = new URL(endpoint);
+	const canonical = canonicalResource(endpoint);
+	return resource === canonical || resource === parsed.origin || resource === `${parsed.origin}/`;
+}
+
 function audienceMismatched(result: AuditResult): boolean {
 	const selected = result.protectedResource.attempts.find(
 		(attempt) => attempt.sourceUrl === result.protectedResource.engineSelectedSourceUrl,
 	);
 	if (!selected?.evidence?.resource) return result.protectedResource.engineVisible === "available";
-	return selected.evidence.resource !== canonicalResource(result.endpoint);
+	return !audienceMatches(selected.evidence.resource, result.endpoint);
 }
 
 function metadataNote(result: AuditResult, overrideNote?: string): string | undefined {
 	if (overrideNote) return overrideNote;
 	if (audienceMismatched(result)) {
-		return "the engine-visible protected-resource document's resource does not match the endpoint audience under the engine's current exact-match rule; the approved engine audience policy is not yet landed";
+		return "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry";
 	}
 	return undefined;
 }
