@@ -1100,7 +1100,7 @@ export class ModelRegistry {
 	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
 		if (this.isUsingXaiSubscription(model) && !getXaiSubscriptionModel(model)) {
 			throw new Error(
-				`Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login xai to configure an API key.`,
+				`Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login and select the xAI API-key entry.`,
 			);
 		}
 		if (options?.assumeAuthConfigured) {
@@ -1491,7 +1491,7 @@ export class ModelRegistry {
 				if (!apiKey) {
 					return {
 						ok: false,
-						error: "No usable xAI credential. Use /login xai to sign in again or configure an API key.",
+						error: "No usable xAI credential. Use /login and select an xAI entry to sign in again or configure an API key.",
 					};
 				}
 				const configuredModel = this.xaiModelSources.get(model) ?? model;
@@ -1500,7 +1500,7 @@ export class ModelRegistry {
 				if (!requestModel) {
 					return {
 						ok: false,
-						error: `Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login xai to configure an API key.`,
+						error: `Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login and select the xAI API-key entry.`,
 					};
 				}
 			}
@@ -1534,7 +1534,7 @@ export class ModelRegistry {
 					if (name.toLowerCase() === "authorization" && value !== `Bearer ${apiKey}`) {
 						return {
 							ok: false,
-							error: "Grok subscription cannot use a custom Authorization header. Remove the header or use /login xai to configure an API key.",
+							error: "Grok subscription cannot use a custom Authorization header. Remove the header or use /login and select the xAI API-key entry.",
 						};
 					}
 				}

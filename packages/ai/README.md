@@ -1107,7 +1107,7 @@ For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_
 
 ### xAI subscription
 
-In Prime Agent, run `/login`, select **xAI**, then choose the subscription method. Open the displayed HTTPS URL and enter the device code. `XAI_API_KEY` and API-key login remain supported. Stored subscription credentials take priority over `XAI_API_KEY`; an explicit `--api-key` override uses API-key routing.
+In Prime Agent, run `/login` and select the **xAI subscription** entry. Open the displayed HTTPS URL and enter the device code. `XAI_API_KEY` and API-key login remain supported. Stored subscription credentials take priority over `XAI_API_KEY`; an explicit `--api-key` override uses API-key routing.
 
 Initial subscription support is limited to `xai/grok-4.5` through the Responses API with low, medium, or high reasoning. Other xAI models still use the API-key catalog. Account eligibility, available models, and usage limits are controlled by xAI; signing in does not guarantee access or unlimited usage.
 

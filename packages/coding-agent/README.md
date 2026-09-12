@@ -82,7 +82,7 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 - GitHub Copilot
 - xAI Grok (eligible subscriptions)
 
-Use `/login xai` to choose **Use a subscription** or **Use an API key**. Model access depends on your xAI account entitlement. See [xAI setup](docs/providers.md#xai-grok).
+Select the xAI subscription entry in `/login` to sign in. Model access depends on your xAI account entitlement. See [xAI setup](docs/providers.md#xai-grok).
 
 **API keys:**
 - Anthropic
@@ -148,7 +148,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 
 | Command | Description |
 |---------|-------------|
-| `/login [provider]`, `/logout` | Configure or remove subscription/API key authentication |
+| `/login`, `/logout` | OAuth authentication |
 | `/model` | Switch models |
 | `/effort` | Set reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |

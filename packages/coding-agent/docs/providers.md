@@ -38,16 +38,13 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 ### xAI Grok
 
-Run `/login xai` and choose an authentication method:
+Use `/login` and select the xAI subscription entry to open browser sign-in. Complete the authorization flow for an eligible Grok subscription. The existing xAI API-key entry still accepts a key, and `XAI_API_KEY` remains supported.
 
-- **Use a subscription** opens xAI browser sign-in. Complete the authorization flow for an eligible Grok subscription.
-- **Use an API key** lets you enter a key. If `XAI_API_KEY` is set, you can explicitly choose **Use XAI_API_KEY** instead. This removes the saved xAI credential without copying the environment key to disk. The active backend must also have access to that variable. Runtime API-key overrides still take priority.
-
-Both methods use provider ID `xai` and `https://api.x.ai/v1`. Subscription requests use `/responses`; API-key requests keep the existing `/chat/completions` route and model defaults. Successful sign-in or key entry replaces the saved xAI credential. Cancelling before completion keeps the previous credential. Changing methods updates the current session without requiring model reselection.
+Both methods use provider ID `xai` and `https://api.x.ai/v1`. Subscription requests use `/responses`; API-key requests keep the existing `/chat/completions` route and model defaults. Changing authentication updates the current session without requiring model reselection.
 
 Choose a model with `/model` after initial setup. Grok 4.5 is already in the bundled catalog; subscription login does not guarantee access to every listed model. Access depends on your account entitlement. If a model is unavailable or authorization fails, check your plan or use an API key.
 
-Bare `/login` still opens the full configuration menu. `/logout` removes saved xAI authentication, but does not unset `XAI_API_KEY`; an environment key can remain active after logout.
+`/logout` removes saved xAI authentication, but does not unset `XAI_API_KEY`; an environment key can remain active after logout.
 
 ## API Keys
 

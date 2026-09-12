@@ -78,7 +78,7 @@ describe("xAI credential source and request model", () => {
 		).toEqual(["grok-4.5"]);
 		expect(await registry.getApiKeyAndHeaders(getModel("xai", "grok-4.6"))).toMatchObject({
 			ok: false,
-			error: expect.stringContaining("/login xai"),
+			error: expect.stringContaining("/login and select"),
 		});
 	});
 

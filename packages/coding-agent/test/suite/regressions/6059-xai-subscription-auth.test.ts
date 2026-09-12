@@ -150,6 +150,6 @@ describe("ENG-6059 xAI subscription dispatch", () => {
 		vi.spyOn(xaiOAuthProvider, "refreshToken").mockRejectedValue(new Error("revoked"));
 		await session.prompt("do not silently charge API key");
 		expect(requests).toHaveLength(0);
-		expect(session.state.errorMessage).toContain("/login xai");
+		expect(session.state.errorMessage).toContain("/login and select");
 	});
 });

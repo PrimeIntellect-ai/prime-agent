@@ -1357,12 +1357,6 @@ export class InteractiveMode {
 				getModelArgumentCompletions(prefix, this.getCachedModelCandidates());
 		}
 
-		const loginCommand = slashCommands.find((command) => command.name === "login");
-		if (loginCommand) {
-			loginCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
-				this.getLoginArgumentCompletions(prefix);
-		}
-
 		const effortCommand = slashCommands.find((command) => command.name === "effort");
 		if (effortCommand) {
 			effortCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
@@ -4889,9 +4883,9 @@ export class InteractiveMode {
 					await this.showTreeSelector();
 					return;
 				}
-				if (commandName === "login") {
+				if (commandName === "login" && !commandArgs) {
 					this.editor.setText("");
-					await this.handleLoginCommand(commandArgs);
+					await this.showConfigurationMenu("providers");
 					return;
 				}
 				if (commandName === "logout" && !commandArgs) {
@@ -8688,35 +8682,6 @@ export class InteractiveMode {
 				col: 0,
 			});
 		});
-	}
-
-	private getLoginArgumentCompletions(prefix: string): AutocompleteItem[] | null {
-		const providers = new Map(
-			this.createAuthFlows()
-				.getLoginProviderOptions()
-				.map((option) => [option.id, option]),
-		);
-		const items = [...providers.values()]
-			.filter((provider) => provider.id.startsWith(prefix.trim().toLowerCase()))
-			.map((provider) => ({ value: provider.id, label: provider.id, description: provider.name }));
-		return items.length > 0 ? items : null;
-	}
-
-	private async handleLoginCommand(args: string): Promise<void> {
-		const providerId = args.trim();
-		if (!providerId) {
-			await this.showConfigurationMenu("providers");
-			return;
-		}
-		if (/\s/.test(providerId)) {
-			this.showError("Usage: /login [provider]");
-			return;
-		}
-		const authResult = await this.createAuthFlows().runLogin({ providerId });
-		if (authResult.status !== "success") return;
-		if (await this.prepareForModelSelectionAfterLogin(authResult)) {
-			this.showModelSelector();
-		}
 	}
 
 	private createAuthFlows(): ProviderAuthFlows {
