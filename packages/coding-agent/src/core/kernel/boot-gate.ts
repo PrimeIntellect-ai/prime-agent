@@ -1,2 +1,5 @@
-// Compatibility export; implementation lives with its feature owner.
-export * from "../../kernel/boot-gate.js";
+// Compatibility exports; implementation lives with its feature owner.
+export {
+	resolveKernelBootConcurrency,
+	withKernelBootPermit,
+} from "../../kernel/boot-gate.js";

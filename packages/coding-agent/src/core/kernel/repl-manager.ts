@@ -1,2 +1,2 @@
-// Compatibility export; implementation lives with its feature owner.
-export * from "../../kernel/repl-manager.js";
+// Compatibility exports; implementation lives with its feature owner.
+export { ReplKernelManager } from "../../kernel/repl-manager.js";

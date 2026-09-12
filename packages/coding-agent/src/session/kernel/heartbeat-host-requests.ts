@@ -1,2 +1,2 @@
-// Compatibility export; implementation lives with its feature owner.
-export * from "../../coordination/scheduling/host-requests.js";
+// Compatibility exports; implementation lives with its feature owner.
+export { handleRlmHeartbeatHostRequest } from "../../coordination/scheduling/host-requests.js";

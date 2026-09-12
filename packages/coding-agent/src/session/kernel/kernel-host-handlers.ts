@@ -1,2 +1,5 @@
-// Compatibility export; implementation lives with its feature owner.
-export * from "../runtime/host-bridge.js";
+// Compatibility exports; implementation lives with its feature owner.
+export {
+	createSessionKernelHostHandlers,
+	type SessionKernelOperations,
+} from "../runtime/host-bridge.js";

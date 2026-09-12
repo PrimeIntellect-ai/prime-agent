@@ -1,2 +1,2 @@
-// Compatibility export; implementation lives with its feature owner.
-export * from "../../coordination/messaging/host-requests.js";
+// Compatibility exports; implementation lives with its feature owner.
+export { handleAgentMessageHostRequest } from "../../coordination/messaging/host-requests.js";

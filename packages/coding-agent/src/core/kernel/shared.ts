@@ -1,3 +1,45 @@
-export * from "../../kernel/contracts.js";
-export * from "../../kernel/process-registry.js";
-export * from "../../kernel/protocol.js";
+// Compatibility exports; implementation lives with its feature owner.
+export type {
+	ExecuteOptions,
+	ExecuteResult,
+	HostRequestHandler,
+	HostRequestHandlers,
+	KernelAttachment,
+	KernelClient,
+	KernelDiffDisplay,
+	KernelManagerOptions,
+	KernelSentAgentMessage,
+	KernelShutdownOptions,
+	KernelSnapshotConfig,
+	KernelStartOptions,
+} from "../../kernel/contracts.js";
+export {
+	installSignalHandlersOnce,
+	liveKernels,
+} from "../../kernel/process-registry.js";
+export {
+	AGENT_MESSAGE_DISPLAY_MIME,
+	ATTACHMENT_DISPLAY_MIME,
+	BASH_ACTIVITY_DISPLAY_MIME,
+	createDeferred,
+	createKernelStartupAbortError,
+	DEFAULT_MAX_OUTPUT_CHARS,
+	DEFAULT_SNAPSHOT_DEBOUNCE_MS,
+	type Deferred,
+	DIFF_DISPLAY_MIME,
+	errorMessage,
+	HOST_REQUEST_SHUTDOWN_TIMEOUT_MS,
+	isRecord,
+	KERNEL_ABORT_GRACE_MS,
+	KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+	KERNEL_BUSY_REUSE_WAIT_MS,
+	KERNEL_SHUTDOWN_TIMEOUT_MS,
+	KernelBusyAfterInterruptError,
+	MAX_ATTACHMENT_DATA_CHARS,
+	MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+	parseAttachmentDisplay,
+	parseDiffDisplay,
+	parseSentAgentMessage,
+	raceStartupWithAbort,
+	SNAPSHOT_EXECUTION_TIMEOUT_MS,
+} from "../../kernel/protocol.js";
