@@ -7967,15 +7967,15 @@ export class InteractiveMode {
 	}
 
 	private handleModelCycle(direction: "forward" | "backward"): void {
-		void this.agentConnection
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
+		void connection
 			.cycleModel(direction)
 			.then(async (result) => {
 				if (!result) {
 					this.showStatus("No scoped models available to cycle (see /scoped-models)");
 					return;
 				}
-				const connection = this.agentConnection;
-				const sessionId = this.connectionState?.sessionId;
 				const state = await connection.getState();
 				if (
 					this.agentConnection !== connection ||

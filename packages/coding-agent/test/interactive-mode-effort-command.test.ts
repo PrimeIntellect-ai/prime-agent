@@ -400,6 +400,84 @@ describe("InteractiveMode /effort", () => {
 			expect(context.subagentSummaryLine.invalidate).toHaveBeenCalled();
 			expect(context.updateEditorBorderColor).toHaveBeenCalled();
 		});
+
+		it("discards a cycle result when the session switches mid-cycle", async () => {
+			type ModelState = {
+				sessionId: string;
+				model: unknown;
+				serviceTier: ServiceTier;
+				availableThinkingLevels: ThinkingLevel[];
+			};
+			type CycleContext = {
+				connectionState: { sessionId: string };
+				agentConnection: {
+					cycleModel: (direction: "forward" | "backward") => Promise<unknown>;
+					getState: () => Promise<ModelState>;
+				};
+				applyModelSwitchUiState: (state: ModelState, model: unknown) => void;
+				patchConnectionState: (patch: Record<string, unknown>) => void;
+				footer: { invalidate: () => void };
+				subagentSummaryLine: { invalidate: () => void };
+				showStatus: (message: string) => void;
+				showError: (message: string) => void;
+				updateEditorBorderColor: () => void;
+				setupAutocompleteProvider: () => void;
+			};
+			const prototype = InteractiveMode.prototype as unknown as {
+				handleModelCycle(this: CycleContext, direction: "forward" | "backward"): void;
+				applyModelSwitchUiState(this: CycleContext, state: ModelState, model: unknown): void;
+			};
+			const handleModelCycle = prototype.handleModelCycle;
+			const cycledModel = { provider: "openai-codex", id: "gpt-5.5-mini", reasoning: true };
+			const nextConnection = {
+				cycleModel: vi.fn(),
+				getState: vi.fn(),
+			};
+			const showStatus = vi.fn();
+			const patchConnectionState = vi.fn();
+			const originalConnection = {
+				cycleModel: vi.fn(async () => {
+					// Simulate the user switching sessions while the cycle is in flight.
+					context.connectionState.sessionId = "session-2";
+					context.agentConnection = nextConnection;
+					return {
+						model: cycledModel,
+						thinkingLevel: "high",
+						serviceTier: "priority",
+						isScoped: true,
+					};
+				}),
+				getState: vi.fn(
+					async (): Promise<ModelState> => ({
+						sessionId: "session-2",
+						model: cycledModel,
+						serviceTier: "priority",
+						availableThinkingLevels: ["off", "low", "medium", "high"],
+					}),
+				),
+			};
+			const context: CycleContext = {
+				connectionState: { sessionId: "session-1" },
+				agentConnection: originalConnection,
+				applyModelSwitchUiState: (state, cycledModel) =>
+					prototype.applyModelSwitchUiState.call(context, state, cycledModel),
+				patchConnectionState,
+				footer: { invalidate: vi.fn() },
+				subagentSummaryLine: { invalidate: vi.fn() },
+				showStatus,
+				showError: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				setupAutocompleteProvider: vi.fn(),
+			};
+
+			handleModelCycle.call(context, "forward");
+
+			await vi.waitFor(() => expect(originalConnection.getState).toHaveBeenCalled());
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(patchConnectionState).not.toHaveBeenCalled();
+			expect(showStatus).not.toHaveBeenCalled();
+			expect(context.setupAutocompleteProvider).not.toHaveBeenCalled();
+		});
 	});
 
 	describe("Fast mode", () => {
