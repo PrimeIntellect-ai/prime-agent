@@ -432,6 +432,19 @@ export class ReplKernelManager {
 				this.appendKernelDiagnostic(`kernel stderr log close failed: ${errorMessage(error)}`);
 			}
 		});
+		// A pipe write into a dead kernel surfaces as an 'error' event on the
+		// stream (write EPIPE); without a listener Node rethrows it and takes
+		// down the whole worker. The pending writeLine rejection and the child
+		// 'exit' handler below own the fallout, so this only records the
+		// diagnosis.
+		child.stdin?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stdin error: ${errorMessage(error)}`);
+		});
+		child.stdout?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stdout error: ${errorMessage(error)}`);
+		});
 		child.once("exit", () => {
 			// One turn for the poll phase to deliver the bytes the kernel wrote
 			// before dying (the pipe buffer bounds them), then destroy: EOF may
