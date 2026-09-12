@@ -573,6 +573,193 @@ const LEGACY_CATALOG: McpServiceDescriptor[] = [
 		legacyBuiltin: true,
 	},
 ];
+
+describe("ENG-6108 reserved ownership and durable repair endpoints (manager)", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+	let probeCalls: Array<{ url: string; token: string }>;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "mcp-ownership-"));
+		authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		resetOAuthProviders();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		probeCalls = [];
+	});
+
+	afterEach(() => {
+		resetOAuthProviders();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function createManager(options: Partial<ConstructorParameters<typeof McpManager>[0]> = {}): McpManager {
+		return new McpManager({
+			authStorage,
+			connectionStore: store,
+			getServiceCatalog: () => LEGACY_CATALOG,
+			probeConnection: async (probeOptions) => {
+				probeCalls.push({ url: probeOptions.url, token: await probeOptions.getToken() });
+				return { ok: true, toolCount: 2 };
+			},
+			...options,
+		});
+	}
+
+	it("a conflicting reserved-name declaration is never dispatchable: config, probe, and login all refuse", async () => {
+		const manager = createManager({
+			noBackgroundVerification: true,
+			getUserServers: () => ({ linear: { type: "http", url: "https://shadow.example/mcp", oauth: true } }),
+		});
+		const handlers = manager.hostHandlers();
+		await expect(handlers["mcp.config"]({ server: "linear" })).resolves.toEqual({});
+		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow();
+		await expect(manager.verifyConnection("linear")).rejects.toThrow(
+			"Rename or remove the conflicting server settings",
+		);
+		expect(manager.getEnabledPersistentGenericServers()).not.toContain("linear");
+		// A shadow credential can never authorize dispatch either.
+		authStorage.set("mcp:linear", {
+			type: "oauth",
+			access: "shadow",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://shadow.example/mcp",
+		});
+		manager.refresh();
+		expect(manager.getEnabledPersistentGenericServers()).not.toContain("linear");
+		expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
+	});
+
+	it("a same-name enabled:false declaration disables the builtin slot without deleting it", () => {
+		const manager = createManager({
+			noBackgroundVerification: true,
+			getUserServers: () => ({ linear: { type: "http", url: "https://mcp.linear.app/mcp", enabled: false } }),
+		});
+		authStorage.set("mcp:linear", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
+		});
+		manager.refresh();
+		expect(manager.getEnabledPersistentGenericServers()).not.toContain("linear");
+		expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
+	});
+
+	it("a canonical-equivalent declaration keeps the builtin integration live", async () => {
+		const manager = createManager({
+			noBackgroundVerification: true,
+			getUserServers: () => ({
+				linear: { type: "http", url: "https://mcp.linear.app/mcp", oauth: true },
+			}),
+		});
+		authStorage.set("mcp:linear", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.linear.app/mcp",
+		});
+		manager.refresh();
+		expect(manager.getEnabledPersistentGenericServers()).toContain("linear");
+		await expect(manager.verifyConnection("linear")).resolves.toMatchObject({ status: "connected" });
+	});
+
+	it("an installed record pins its durable endpoint for verification and dispatch when the catalog URL changes", async () => {
+		const now = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://old.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: now,
+			toolCount: 2,
+			createdAt: now,
+			updatedAt: now,
+		});
+		await store.flush();
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://old.acme.test/mcp",
+		});
+		const manager = createManager({
+			noBackgroundVerification: true,
+			getServiceCatalog: () => [
+				{ ...CATALOG_SERVICE, transport: { type: "http", url: "https://new.acme.test/mcp" } },
+			],
+		});
+		// Verification probes the DURABLE saved endpoint, never the changed URL.
+		await expect(manager.verifyConnection("acme")).resolves.toMatchObject({
+			status: "connected",
+			endpoint: "https://old.acme.test/mcp",
+		});
+		expect(probeCalls).toEqual([{ url: "https://old.acme.test/mcp", token: "tok" }]);
+		// Dispatch config carries the same durable endpoint.
+		const config = (await manager.hostHandlers()["mcp.config"]({ server: "acme" })) as {
+			url?: string;
+		};
+		expect(config.url).toBe("https://old.acme.test/mcp");
+	});
+
+	it("a credential-only account never retargets automatic dispatch to a stored endpoint", async () => {
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://old.acme.test/mcp",
+		});
+		const manager = createManager({ noBackgroundVerification: true, getServiceCatalog: () => [CATALOG_SERVICE] });
+		const handlers = manager.hostHandlers();
+		// A cross-endpoint credential-only grant authorizes nothing at the
+		// current service URL — dispatch config stays absent.
+		await expect(handlers["mcp.config"]({ server: "acme" })).resolves.toEqual({});
+		// A bound grant authorizes dispatch at the CURRENT service URL only —
+		// never at a stored credential endpoint.
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		manager.refresh();
+		const bound = (await handlers["mcp.config"]({ server: "acme" })) as { url?: string };
+		expect(bound.url).toBe("https://mcp.acme.test/mcp");
+	});
+
+	it("background verification never probes an account claimed by a live attempt", async () => {
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "live-owner",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const manager = createManager({ getServiceCatalog: () => [CATALOG_SERVICE] });
+		const handlers = manager.hostHandlers();
+		await handlers["mcp.list_plugins"]({});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(probeCalls).toEqual([]);
+	});
+});
+
 describe("McpManager service catalog handlers", () => {
 	let tempDir: string;
 	let authStorage: AuthStorage;

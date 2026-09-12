@@ -207,6 +207,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 
 	private actionText(service: McpPluginView): string {
 		if (service.removeAction) return "remove account";
+		if (service.loginPending && this.mode === "accounts") return "login in progress";
 		if (this.mode === "catalog" && service.connectionIds.length > 0) return "manage accounts";
 		if (this.mode === "accounts" && service.connectionIds.length === 0)
 			return service.usesOAuth ? "add account" : "setup guidance";
@@ -219,6 +220,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 
 	private statusText(service: McpPluginView): string {
 		if (service.removeAction) return theme.fg("muted", "Remove account");
+		if (service.loginPending) return theme.fg("warning", "Login in progress");
 		if (this.mode === "accounts" && service.connectionIds.length === 0)
 			return service.usesOAuth ? theme.fg("accent", "Add account") : theme.fg("warning", "Requires setup");
 		switch (service.connectionStatus) {
@@ -230,7 +232,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			case "pending":
 				return theme.fg("warning", "Needs verification");
 			case "error":
-				return theme.fg("error", "Reconnect");
+				return theme.fg("error", service.connectable ? "Reconnect" : "Needs attention");
 			case "setup_required":
 				return theme.fg("warning", "Requires setup");
 			case "disabled":

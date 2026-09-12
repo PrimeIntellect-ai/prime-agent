@@ -49,12 +49,15 @@ type PendingOp =
 			record: McpConnectionRecord;
 			/** Evaluated at flush time under the lock; a failed guard discards the result. */
 			isStillCurrent: () => boolean;
+			expectedRecord: McpConnectionRecord | undefined;
+			resolve: (committed: boolean) => void;
 	  }
 	| {
 			kind: "claimConnectionId";
 			connectionId: string;
 			/** Opaque ownership nonce stamped onto the EXISTING record. */
 			attemptId: string;
+			isStillCurrent?: (record: McpConnectionRecord) => boolean;
 			resolve: (claimed: boolean) => void;
 	  }
 	| {
@@ -253,6 +256,7 @@ type OneShotOperation = Extract<
 	PendingOp,
 	{
 		kind:
+			| "verify"
 			| "reserve"
 			| "claimConnectionId"
 			| "releaseClaim"
@@ -265,6 +269,7 @@ type OneShotOperation = Extract<
 
 function isOneShotOperation(operation: PendingOp): operation is OneShotOperation {
 	return (
+		operation.kind === "verify" ||
 		operation.kind === "reserve" ||
 		operation.kind === "claimConnectionId" ||
 		operation.kind === "releaseClaim" ||
@@ -343,7 +348,12 @@ export class McpConnectionStore {
 	 * finalize owns it and cancel (releaseClaim) restores the record exactly.
 	 * One-shot: settles on I/O or lock failure, never requeues.
 	 */
-	claimConnectionId(options: { connectionId: string; attemptId: string }): Promise<boolean> {
+	claimConnectionId(options: {
+		connectionId: string;
+		attemptId: string;
+		/** Revalidate exact-account admission under the store lock, before claiming. */
+		isStillCurrent?: (record: McpConnectionRecord) => boolean;
+	}): Promise<boolean> {
 		return new Promise<boolean>((resolve) => {
 			let settled = false;
 			const settle = (claimed: boolean): void => {
@@ -355,6 +365,7 @@ export class McpConnectionStore {
 				kind: "claimConnectionId",
 				connectionId: options.connectionId,
 				attemptId: options.attemptId,
+				isStillCurrent: options.isStillCurrent,
 				resolve: settle,
 			});
 			void this.flush().catch(() => settle(false));
@@ -481,12 +492,15 @@ export class McpConnectionStore {
 
 	/**
 	 * Guarded credential commit for a successful login attempt. `commit` runs
-	 * under the store's file lock ONLY when the reservation is still ours
-	 * (same id, still pending, same attempt nonce) — the caller moves staged
+	 * under the store's file lock ONLY when the record still carries OUR
+	 * attempt nonce (any record status — a claimed connected/error account
+	 * finalizes like a pending reservation) — the caller moves staged
 	 * credentials there, sharing this lock's ordering with cancel/remove.
-	 * Resolves true only after the record write commits; false when ownership
-	 * was lost or the write failed, in which case the staged credential stays
-	 * under the attempt key for the caller to discard.
+	 * A successful finalize CONSUMES the nonce itself, so a late callback can
+	 * never replay ownership. Resolves "committed" only after the record write
+	 * commits; "denied" when ownership was lost; "compensated"/"recovery-
+	 * required" when the write failed (see McpFinalizeResult) — the staged
+	 * credential then stays under the attempt key for the caller to discard.
 	 */
 	finalizeAttempt(options: {
 		connectionId: string;
@@ -520,8 +534,27 @@ export class McpConnectionStore {
 	 * connection that has since been disconnected) is discarded instead of
 	 * resurrecting a stale record.
 	 */
-	queueVerifyResult(record: McpConnectionRecord, isStillCurrent: () => boolean): void {
-		this.pendingOps.push({ kind: "verify", record: { ...record }, isStillCurrent });
+	queueVerifyResult(
+		record: McpConnectionRecord,
+		isStillCurrent: () => boolean,
+		options?: { expectedRecord: McpConnectionRecord | undefined },
+	): Promise<boolean> {
+		const expected = options ? options.expectedRecord : this.get(record.connectionId);
+		return new Promise((resolve) => {
+			let settled = false;
+			const settle = (committed: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(committed);
+			};
+			this.pendingOps.push({
+				kind: "verify",
+				record: { ...record },
+				expectedRecord: expected ? { ...expected } : undefined,
+				isStillCurrent,
+				resolve: settle,
+			});
+		});
 	}
 
 	/**
@@ -610,7 +643,11 @@ export class McpConnectionStore {
 							oneShot.add(operation);
 							try {
 								const existing = records.get(operation.connectionId);
-								if (existing === undefined) {
+								if (
+									existing === undefined ||
+									existing.attemptId !== undefined ||
+									(operation.isStillCurrent !== undefined && !operation.isStillCurrent(existing))
+								) {
 									operation.resolve(false);
 								} else {
 									// Stamp OUR nonce on the existing record (any
@@ -814,7 +851,8 @@ export class McpConnectionStore {
 									try {
 										const committedRecord = operation.commit(existing);
 										appliedFinalizes.push({ operation, rollback });
-										this.applyUpsert(records, committedRecord);
+										const { attemptId: _consumed, ...completedRecord } = committedRecord;
+										this.applyUpsert(records, completedRecord);
 										committedFinalizes.add(operation);
 									} catch {
 										// Partial commit: roll back immediately.
@@ -834,8 +872,19 @@ export class McpConnectionStore {
 							} catch {
 								operation.resolve("recovery-required");
 							}
-						} else if (operation.isStillCurrent()) {
-							this.applyUpsert(records, operation.record);
+						} else {
+							oneShot.add(operation);
+							const current = records.get(operation.record.connectionId);
+							if (
+								current?.attemptId === undefined &&
+								sameConnectionRecord(current, operation.expectedRecord) &&
+								operation.isStillCurrent()
+							) {
+								this.applyUpsert(records, operation.record);
+								deferred.push((didCommit) => operation.resolve(didCommit));
+							} else {
+								operation.resolve(false);
+							}
 						}
 					}
 					writeFileAtomicSync(realpathIfPresentSync(this.path), serializeRecords(records), {
@@ -855,7 +904,9 @@ export class McpConnectionStore {
 						// records put the batch back at the FRONT — idempotent ops
 						// retry cleanly — but one-shot attempt ops resolve false and
 						// are dropped: no ghost reservation, no surprise finalize.
-						this.pendingOps.unshift(...operations.filter((operation) => !oneShot.has(operation)));
+						this.pendingOps.unshift(
+							...operations.filter((operation) => !oneShot.has(operation) && operation.kind !== "verify"),
+						);
 						// Finalizes whose commit callback ran get their rollback
 						// under the SAME lock before release. A successful rollback
 						// is honest all-or-nothing; a FAILING rollback surfaces
@@ -868,6 +919,9 @@ export class McpConnectionStore {
 							} catch {
 								applied.operation.resolve("recovery-required");
 							}
+						}
+						for (const operation of operations) {
+							if (operation.kind === "verify") operation.resolve(false);
 						}
 						for (const settle of deferred) settle(false);
 					}
@@ -896,6 +950,24 @@ export class McpConnectionStore {
 		}
 		records.set(record.connectionId, next);
 	}
+}
+
+function sameConnectionRecord(left: McpConnectionRecord | undefined, right: McpConnectionRecord | undefined): boolean {
+	if (left === undefined || right === undefined) return left === right;
+	const fields: readonly (keyof McpConnectionRecord)[] = [
+		"connectionId",
+		"serviceId",
+		"endpoint",
+		"label",
+		"status",
+		"createdAt",
+		"updatedAt",
+		"verifiedAt",
+		"toolCount",
+		"lastError",
+		"attemptId",
+	];
+	return fields.every((field) => left[field] === right[field]);
 }
 
 function safeReadFileSync(path: string): string | undefined {

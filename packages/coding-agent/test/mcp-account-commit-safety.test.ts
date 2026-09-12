@@ -1669,6 +1669,95 @@ describe("MCP account guarded OAuth commit (interactive add-account seam)", () =
 		expect((credential as { access: string }).access).toBe("guarded-login-credential");
 	});
 
+	it("a picker Connect on an account owned by a live attempt reports progress instead of starting a second login", async () => {
+		// The durable pending reservation carries ANOTHER client's attempt
+		// nonce: the picker's Connect action must refuse — visible progress
+		// guidance, never a second concurrent login or an overwrite.
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "live-owner",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		const fake = buildFake(async (serverId: string) => {
+			throw new Error(`a second login must never start, got ${serverId}`);
+		});
+		await callInitialConnect(fake);
+
+		const messages = JSON.stringify((fake.showStatus as ReturnType<typeof vi.fn>).mock.calls);
+		expect(messages).toContain("Login in progress");
+		expect(store.get("acme")?.attemptId).toBe("live-owner");
+		expect(authStorage.list().filter((id) => id.startsWith("mcp:acme--"))).toEqual([]);
+	});
+
+	it("an explicit /mcp login repairs a vanished-source account at its durable saved endpoint", async () => {
+		// The record is the only surviving definition (pinned from record):
+		// the saved endpoint plus its bound grant is the approved evidence.
+		const now = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://old.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: now,
+			toolCount: 2,
+			createdAt: now,
+			updatedAt: now,
+		});
+		await store.flush();
+		authStorage.set("mcp:acme", {
+			type: "oauth",
+			access: "existing-grant",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://old.acme.test/mcp",
+		});
+		let sawStagedId = false;
+		const fake = buildFake(async (serverId: string) => {
+			sawStagedId = serverId.startsWith("acme--");
+			authStorage.set(`mcp:${serverId}`, {
+				type: "oauth",
+				access: "repaired-credential",
+				refresh: "r",
+				expires: Date.now() + 3600_000,
+				endpoint: "https://old.acme.test/mcp",
+			});
+			return { status: "success" };
+		});
+		await callMcpLoginCommand(fake, "acme");
+
+		expect(sawStagedId).toBe(true);
+		expect((authStorage.get("mcp:acme") as { access: string }).access).toBe("repaired-credential");
+	});
+
+	it("a pending shell without evidence cannot log in to a vanished-source account", async () => {
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://old.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "shell",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		await store.releaseClaim({ connectionId: "acme", attemptId: "shell" });
+		const fake = buildFake(async (serverId: string) => {
+			throw new Error(`no login may start without evidence, got ${serverId}`);
+		});
+		await callMcpLoginCommand(fake, "acme");
+
+		const messages = JSON.stringify((fake.showStatus as ReturnType<typeof vi.fn>).mock.calls);
+		expect(messages).toContain("restore its source");
+		expect(authStorage.get("mcp:acme")).toBeUndefined();
+		expect(store.get("acme")).toBeDefined();
+	});
+
 	it("a refused finalize of a fresh reservation preserves the account shell and releases only the nonce", async () => {
 		// Our fresh add-account attempt reserved the id; a NEWER external
 		// credential appeared at the account key mid-login. The finalize

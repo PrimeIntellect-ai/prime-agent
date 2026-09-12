@@ -107,6 +107,18 @@ export type McpServerConfig =
 			bearerTokenEnvVar?: string;
 			/** Use the generic OAuth login flow for this server. */
 			oauth?: boolean;
+			/** Pre-registered OAuth client id for this server (optional). */
+			oauthClientId?: string;
+			/**
+			 * Env var holding the OAuth client secret. When set, a missing or
+			 * empty env value fails the login/refresh — never a stale stored
+			 * secret fallback.
+			 */
+			oauthClientSecretEnvVar?: string;
+			/** Client identity metadata document URL (CIMD) for this server. */
+			oauthClientMetadataUrl?: string;
+			/** Requested OAuth scopes for this server (config > PRM > omit). */
+			oauthScopes?: string[];
 			/** Force-disable even when credentials exist. */
 			enabled?: boolean;
 			enabledTools?: string[];

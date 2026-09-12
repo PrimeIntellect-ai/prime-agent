@@ -21,8 +21,10 @@ import {
 	type McpPluginView,
 	type McpServiceCatalogProvider,
 	type McpServiceDescriptor,
+	mcpLoginEligibility,
 	oauthGrantUsable,
 	pagePluginViews,
+	reservedMcpOwnership,
 	searchPluginViews,
 	verifyMcpConnection,
 } from "./service-catalog.js";
@@ -38,7 +40,7 @@ export interface McpManagerOptions {
 	 * Registered only when provided; never auto-opens a browser.
 	 */
 	beginConnect?: (serviceId: string) => Promise<boolean>;
-	/** Service catalog source; defaults to the built-in adapter until the merged catalog lands. */
+	/** Service catalog source; defaults to the merged catalog and declared local sources. */
 	getServiceCatalog?: McpServiceCatalogProvider;
 	/** Declared local service-catalog sources (settings); re-read on every refresh. */
 	getCatalogSources?: () => string[];
@@ -60,6 +62,7 @@ interface ResolvedIntegration {
 	usesOAuth: boolean;
 	/** True when this came from Settings.mcpServers (may override a catalog name). */
 	userDeclared?: boolean;
+	blockedReason?: string;
 	/**
 	 * Catalog entries only: the descriptor is explicitly public no-auth AND
 	 * setup-ready, so credential-free dispatch is honest. api_key and
@@ -179,12 +182,21 @@ export class McpManager {
 		for (const service of this.services) {
 			if (service.transport.type !== "http" || !service.transport.url) continue;
 			const usesOAuth = service.authStrategy === "oauth" || service.authStrategy === "unknown";
+			const eligibility = mcpLoginEligibility({
+				connectionId: service.serviceId,
+				service,
+				record: this.connectionStore.get(service.serviceId),
+				credential: this.authStorage.get(this.providerId(service.serviceId)),
+			});
 			integrations.set(service.serviceId, {
 				server: service.serviceId,
 				label: service.label,
 				config: {
 					type: "http",
-					url: service.transport.url,
+					url:
+						eligibility.repair && this.connectionStore.get(service.serviceId)
+							? eligibility.endpoint!
+							: service.transport.url,
 					...(usesOAuth ? { oauth: true } : {}),
 				},
 				usesOAuth,
@@ -200,15 +212,39 @@ export class McpManager {
 			const service = this.services.find((entry) => entry.serviceId === record.serviceId);
 			if (!service || service.transport.type !== "http" || !service.transport.url) continue;
 			if (integrations.has(record.connectionId)) continue;
+			const eligibility = mcpLoginEligibility({
+				connectionId: record.connectionId,
+				service,
+				record,
+				credential: this.authStorage.get(this.providerId(record.connectionId)),
+			});
 			integrations.set(record.connectionId, {
 				server: record.connectionId,
 				label: `${service.label} (${record.connectionId})`,
-				config: { type: "http", url: service.transport.url, oauth: true },
+				config: {
+					type: "http",
+					url: eligibility.repair ? eligibility.endpoint! : service.transport.url,
+					oauth: true,
+				},
 				usesOAuth: true,
 				catalogServiceId: service.serviceId,
 			});
 		}
 		for (const [server, config] of Object.entries(this.getUserServers() ?? {})) {
+			const service = this.services.find((entry) => entry.serviceId === server && entry.legacyBuiltin);
+			if (service) {
+				const ownership = reservedMcpOwnership(service, config);
+				for (const integration of integrations.values()) {
+					if (integration.server !== server && integration.catalogServiceId !== server) continue;
+					if (ownership.status !== "canonical") {
+						integration.config = { ...integration.config, enabled: false };
+						integration.blockedReason = ownership.setupHint;
+					} else if (config.type === "http") {
+						integration.config = { ...config, ...integration.config };
+					}
+				}
+				continue;
+			}
 			integrations.set(server, {
 				server,
 				label: server,
@@ -322,9 +358,8 @@ export class McpManager {
 	}
 
 	/**
-	 * `-<server>/SKILL.md` overrides for legacy built-ins the user isn't logged
-	 * into. Applies while the legacy skill packages still ship; once the authored
-	 * wrappers are removed these overrides become harmless no-ops.
+	 * Disable stale legacy skill packages from older installations when their
+	 * canonical integration is not enabled. Current installations use generic MCP.
 	 */
 	getDisabledBuiltinSkillOverrides(): string[] {
 		const overrides: string[] = [];
@@ -345,6 +380,9 @@ export class McpManager {
 	async verifyConnection(server: string): Promise<McpConnectionRecord> {
 		const integration = this.integrations.get(server);
 		if (!integration) throw new Error(`Unknown MCP connection: ${server}`);
+		if (integration.blockedReason || integration.config.enabled === false) {
+			throw new Error(integration.blockedReason ?? "Disabled in settings.");
+		}
 		if (integration.config.type !== "http") {
 			throw new Error(`MCP connection ${server} is not an HTTP endpoint`);
 		}
@@ -381,20 +419,31 @@ export class McpManager {
 			// demand-driven pass records the unusable state once so /plugins shows
 			// an honest Reconnect instead of a stale pending.
 			if (!this.isAuthed(integration)) {
-				if (integration.usesOAuth && !this.connectionStore.get(integration.server)) {
-					const credential = this.authStorage.get(this.providerId(integration.server));
+				if (
+					!integration.blockedReason &&
+					integration.config.enabled !== false &&
+					integration.usesOAuth &&
+					!this.connectionStore.get(integration.server)
+				) {
+					const credential = this.authStorage.getVerified(this.providerId(integration.server));
 					if (credential !== undefined) {
+						const snapshot = JSON.stringify(credential);
 						const now = Date.now();
-						this.connectionStore.upsert({
-							connectionId: integration.server,
-							serviceId: integration.server,
-							endpoint: integration.config.type === "http" ? integration.config.url : "",
-							label: integration.label,
-							status: "error",
-							createdAt: now,
-							updatedAt: now,
-							lastError: MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL,
-						});
+						void this.connectionStore.queueVerifyResult(
+							{
+								connectionId: integration.server,
+								serviceId: integration.catalogServiceId ?? integration.server,
+								endpoint: integration.config.url,
+								label: integration.label,
+								status: "error",
+								createdAt: now,
+								updatedAt: now,
+								lastError: MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL,
+							},
+							() =>
+								JSON.stringify(this.authStorage.getVerified(this.providerId(integration.server))) === snapshot,
+							{ expectedRecord: undefined },
+						);
 						void this.connectionStore.flush().catch(() => undefined);
 					}
 				}
@@ -403,7 +452,7 @@ export class McpManager {
 			if (!integration.usesOAuth && !integration.config.bearerTokenEnvVar) continue;
 			if (integration.config.enabled === false) continue;
 			const record = this.connectionStore.get(integration.server);
-			if (record?.status === "connected") continue;
+			if (record?.attemptId !== undefined || record?.status === "connected") continue;
 			if (this.verificationInFlight.has(integration.server)) continue;
 			candidates.push(integration.server);
 		}
@@ -533,7 +582,7 @@ export class McpManager {
 				if (!view) throw new Error(`Unknown MCP service: ${serviceId}`);
 				// The approver seam may run on pending rows (verify a stored grant) and
 				// error rows (re-login), matching the UI's Connect/Reconnect actions.
-				if (!view.connectable && view.connectionStatus !== "pending") {
+				if (view.loginPending || (!view.connectable && view.connectionStatus !== "pending")) {
 					throw new Error(
 						view.setupHint ??
 							`${view.label} cannot be connected automatically (status: ${view.connectionStatus}).`,

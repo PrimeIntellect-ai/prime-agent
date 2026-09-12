@@ -113,7 +113,9 @@ import {
 	type McpPluginView,
 	type McpServiceDescriptor,
 	mcpCredentialKey,
+	mcpLoginEligibility,
 	nextMcpConnectionId,
+	reservedMcpOwnership,
 	resolveServiceCatalogWithDiagnostics,
 	verifyMcpConnection,
 } from "../../core/mcp/service-catalog.js";
@@ -8771,6 +8773,29 @@ export class InteractiveMode {
 		return { services: resolution.descriptors, views, diagnostics: resolution.diagnostics };
 	}
 
+	private getMcpLoginEligibility(
+		connectionId: string,
+		catalogServiceId = connectionId,
+		addAccount = false,
+		locked?: { record: McpConnectionRecord },
+		explicitLogin = false,
+	): ReturnType<typeof mcpLoginEligibility> {
+		const { services } = this.buildServiceCatalogViews();
+		const record = locked ? locked.record : this.getMcpConnectionStore().get(connectionId);
+		const service = services.find((entry) => entry.serviceId === (record?.serviceId ?? catalogServiceId));
+		const userServers = this.settingsManager.getGlobalMcpServers() ?? {};
+		return mcpLoginEligibility({
+			connectionId,
+			service,
+			record,
+			addAccount,
+			explicitLogin,
+			userConfig: userServers[connectionId],
+			reservedConfig: service ? userServers[service.serviceId] : undefined,
+			credential: this.modelRegistry.authStorage.getVerified(mcpCredentialKey(connectionId)),
+		});
+	}
+
 	private async handlePluginsCommand(args: string | undefined): Promise<void> {
 		await this.showServiceCatalogPicker((args ?? "").trim() || undefined);
 	}
@@ -8827,7 +8852,11 @@ export class InteractiveMode {
 			}
 		>();
 		for (const service of services) {
-			if (service.transport.type === "http" && service.transport.url && !userServers[service.serviceId]) {
+			if (
+				service.transport.type === "http" &&
+				service.transport.url &&
+				(service.legacyBuiltin || !userServers[service.serviceId])
+			) {
 				targets.set(service.serviceId, {
 					url: service.transport.url,
 					usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
@@ -8836,6 +8865,7 @@ export class InteractiveMode {
 			}
 		}
 		for (const [name, config] of Object.entries(userServers)) {
+			if (services.some((entry) => entry.serviceId === name && entry.legacyBuiltin)) continue;
 			if (config.type === "http") {
 				targets.set(name, {
 					url: config.url,
@@ -8924,29 +8954,50 @@ export class InteractiveMode {
 	): Promise<void> {
 		const catalogServiceId = service.serviceId;
 		const settingsOnly = service.source === "user" && !service.usesOAuth;
+		const definition = this.buildServiceCatalogViews().services.find((entry) => entry.serviceId === catalogServiceId);
+		const ownership = reservedMcpOwnership(
+			definition,
+			this.settingsManager.getGlobalMcpServers()?.[catalogServiceId],
+		);
 		const accountCards: McpPluginView[] = [];
+		const accountTargets = new Map<string, typeof target>();
 		for (const connectionId of service.connectionIds) {
 			// Centralized per-account state: credential binding, expiry, and the
 			// record combine through the SAME computation as the plugin aggregate
 			// and the inventory — the picker never trusts a raw record.status.
+			const admission = this.getMcpLoginEligibility(connectionId, catalogServiceId);
+			const accountTarget = target && admission.endpoint ? { ...target, url: admission.endpoint } : target;
+			accountTargets.set(connectionId, accountTarget);
 			const state = settingsOnly
 				? { status: service.connectionStatus, setupHint: service.setupHint, toolCount: service.toolCount }
 				: accountStateFor({
 						connectionId,
-						endpoint: target?.url ?? "",
+						endpoint: accountTarget?.url ?? "",
 						authStorage: this.modelRegistry.authStorage,
 						connectionStore: this.getMcpConnectionStore(),
 						usesOAuth: service.usesOAuth,
 					});
-			const status = state.status;
+			const blocked = ownership.status !== "canonical" || service.connectionStatus === "disabled";
+			const status = blocked ? service.connectionStatus : state.status;
+			const loginPending = "loginPending" in state && state.loginPending === true;
+			const repairHint =
+				admission.repair && admission.endpoint
+					? `Saved endpoint: ${new URL(admission.endpoint).origin}${new URL(admission.endpoint).pathname}`
+					: undefined;
 			accountCards.push({
 				...service,
 				serviceId: connectionId,
 				label: `${service.label} · ${connectionId}`,
 				connectionIds: [connectionId],
 				connectionStatus: status,
-				connectable: service.usesOAuth && (status === "error" || status === "not_connected"),
-				...(state.setupHint ? { setupHint: state.setupHint } : {}),
+				connectable:
+					!blocked && !loginPending && admission.allowed && (status === "error" || status === "not_connected"),
+				loginPending,
+				setupHint: blocked
+					? service.setupHint
+					: !admission.allowed
+						? admission.setupHint
+						: [repairHint, state.setupHint].filter(Boolean).join(" · ") || undefined,
 				...(state.toolCount !== undefined ? { toolCount: state.toolCount } : {}),
 			});
 			// Explicit per-account remove action, state-independent.
@@ -8960,7 +9011,12 @@ export class InteractiveMode {
 				removeAction: true,
 			});
 		}
-		if (service.usesOAuth && target?.usesOAuth) {
+		if (
+			service.usesOAuth &&
+			target?.usesOAuth &&
+			!service.loginPending &&
+			this.getMcpLoginEligibility(catalogServiceId, catalogServiceId, true).allowed
+		) {
 			accountCards.push({
 				...service,
 				label: "Add another account",
@@ -9001,7 +9057,7 @@ export class InteractiveMode {
 				});
 				return;
 			}
-			await this.connectServiceFromPicker(card, target, { catalogServiceId });
+			await this.connectServiceFromPicker(card, accountTargets.get(card.serviceId), { catalogServiceId });
 		} catch {
 			this.showError("MCP connection action did not complete. Try again.");
 		}
@@ -9019,32 +9075,42 @@ export class InteractiveMode {
 	private async connectMcpAccountByName(name: string): Promise<{ resolved: boolean; result: AuthenticationResult }> {
 		const { services } = this.buildServiceCatalogViews();
 		const record = this.getMcpConnectionStore().get(name);
-		const userServer = this.settingsManager.getGlobalMcpServers()?.[name];
-		const settingsUrl = userServer?.type === "http" ? userServer.url : undefined;
-		const catalogService =
-			services.find((entry) => entry.serviceId === name) ?? services.find((entry) => entry.aliases.includes(name));
-		const catalogUrl = catalogService?.transport.type === "http" ? catalogService.transport.url : undefined;
-		const url = record?.endpoint ?? settingsUrl ?? catalogUrl;
-		if (!url) {
-			// Endpoint resolution is SEPARATE from login success: an unresolved
-			// name never reports a login outcome at all.
-			return { resolved: false, result: { status: "failed" } };
+		const service =
+			services.find((entry) => entry.serviceId === (record?.serviceId ?? name)) ??
+			services.find((entry) => entry.aliases.includes(name));
+		const connectionId = record ? name : (service?.serviceId ?? name);
+		const config = this.settingsManager.getGlobalMcpServers()?.[connectionId];
+		const credential = this.modelRegistry.authStorage.getVerified(mcpCredentialKey(connectionId));
+		if (!service && !record && !config && !credential) return { resolved: false, result: { status: "failed" } };
+		const admission =
+			service || config || record
+				? this.getMcpLoginEligibility(connectionId, service?.serviceId ?? connectionId, false, undefined, true)
+				: { allowed: true, endpoint: undefined as string | undefined };
+		const endpoint =
+			admission.endpoint ?? (config?.type === "http" ? config.url : undefined) ?? record?.endpoint ?? "";
+		if (!admission.allowed || !endpoint) {
+			this.showStatus(admission.setupHint ?? "This service cannot be connected automatically.");
+			return { resolved: true, result: { status: "failed" } };
 		}
-		// LOGIN intent goes DIRECTLY to the guarded OAuth operation — never the
-		// picker action dispatch (a connected record must reconnect, not
-		// disconnect; a pending record must re-login, not verify-only).
 		const result = await this.guardedMcpLogin(
 			{
-				serviceId: name,
-				label: record?.label ?? catalogService?.label ?? name,
-				connectionStatus: record ? record.status : "not_connected",
-				connectionIds: record ? [name] : [],
+				serviceId: connectionId,
+				label: record?.label ?? service?.label ?? connectionId,
+				connectionStatus: record?.status ?? "not_connected",
+				connectionIds: record ? [connectionId] : [],
 				connectable: true,
 				usesOAuth: true,
-				source: catalogService ? "catalog" : "user",
+				source: service ? "catalog" : "user",
 			},
-			{ url, usesOAuth: true, managedBySettings: userServer !== undefined },
-			{ catalogServiceId: record?.serviceId ?? catalogService?.serviceId ?? name },
+			{
+				url: endpoint,
+				usesOAuth: true,
+				managedBySettings: config !== undefined && !service?.legacyBuiltin,
+			},
+			{
+				catalogServiceId: record?.serviceId ?? service?.serviceId ?? connectionId,
+				explicitLogin: true,
+			},
 		);
 		return { resolved: true, result };
 	}
@@ -9122,6 +9188,23 @@ export class InteractiveMode {
 				return false;
 			}
 			await this.reloadAfterMcpChange(`Removed account ${service.serviceId}.`);
+			return false;
+		}
+		this.getMcpConnectionStore().load();
+		if (service.loginPending || this.getMcpConnectionStore().get(service.serviceId)?.attemptId !== undefined) {
+			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
+			return false;
+		}
+		const { services: currentServices } = this.buildServiceCatalogViews();
+		const catalog = currentServices.find(
+			(entry) => entry.serviceId === (options.catalogServiceId ?? service.serviceId),
+		);
+		const ownership = reservedMcpOwnership(
+			catalog,
+			this.settingsManager.getGlobalMcpServers()?.[catalog?.serviceId ?? service.serviceId],
+		);
+		if (ownership.status !== "canonical" || service.connectionStatus === "disabled") {
+			this.showStatus(ownership.setupHint ?? service.setupHint ?? "Disabled in settings.");
 			return false;
 		}
 		if (service.connectionStatus === "connected") {
@@ -9224,15 +9307,31 @@ export class InteractiveMode {
 			catalogServiceId?: string;
 			addAccount?: boolean;
 			knownIds?: ReadonlySet<string>;
+			explicitLogin?: boolean;
 		} = {},
 	): Promise<AuthenticationResult> {
 		if (!service.connectable || !target) {
 			this.showStatus(service.setupHint ?? `${service.label} cannot be connected automatically in this build.`);
 			return { status: "failed" };
 		}
-		const targetUrl = target.url;
-		if (!targetUrl) {
-			this.showStatus(`${service.label} cannot be connected automatically in this build.`);
+		const { services: currentServices } = this.buildServiceCatalogViews();
+		const definition = currentServices.find(
+			(entry) => entry.serviceId === (options.catalogServiceId ?? service.serviceId),
+		);
+		const userConfig = this.settingsManager.getGlobalMcpServers()?.[service.serviceId];
+		const admission =
+			definition || userConfig
+				? this.getMcpLoginEligibility(
+						service.serviceId,
+						options.catalogServiceId ?? service.serviceId,
+						options.addAccount === true,
+						undefined,
+						options.explicitLogin === true,
+					)
+				: { allowed: true, endpoint: target.url };
+		const targetUrl = admission.endpoint;
+		if (!admission.allowed || !targetUrl || target.url !== targetUrl || !target.usesOAuth) {
+			this.showStatus(admission.setupHint ?? "The connection target changed. Open the catalog again to review it.");
 			return { status: "failed" };
 		}
 		// EVERY user-facing MCP login is guarded (initial connect, reconnect,
@@ -9308,7 +9407,20 @@ export class InteractiveMode {
 					return { status: "failed" };
 				}
 			} else {
-				const claimed = await store.claimConnectionId({ connectionId, attemptId: nonce });
+				const claimed = await store.claimConnectionId({
+					connectionId,
+					attemptId: nonce,
+					isStillCurrent: (record) => {
+						const current = this.getMcpLoginEligibility(
+							connectionId,
+							options.catalogServiceId ?? service.serviceId,
+							false,
+							{ record },
+							options.explicitLogin === true,
+						);
+						return current.allowed && current.endpoint === targetUrl;
+					},
+				});
 				if (!claimed) {
 					this.showStatus(`${service.label} is already being connected from another client.`);
 					return { status: "failed" };

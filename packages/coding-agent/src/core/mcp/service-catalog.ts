@@ -27,6 +27,10 @@ export interface McpPluginView {
 	connectionStatus: McpConnectionStatus;
 	/** True when the service can be connected through the host OAuth flow right now. */
 	connectable: boolean;
+	/** A fresh additional account obeys current definition capabilities. */
+	addAccountAllowed?: boolean;
+	/** Active login ownership, distinct from pending endpoint verification. */
+	loginPending?: boolean;
 	usesOAuth: boolean;
 	source: "catalog" | "user";
 	/** Kernel dispatch ids (`mcp.list_tools("<id>")`); empty unless credentials make dispatch possible. */
@@ -56,6 +60,7 @@ export interface McpConnectionView {
 	status: Exclude<McpConnectionStatus, "setup_required" | "not_connected"> | "not_connected" | "disabled";
 	usesOAuth: boolean;
 	transport: "http" | "stdio";
+	loginPending?: boolean;
 	source: "catalog" | "user" | "acp";
 	setupHint?: string;
 }
@@ -268,6 +273,160 @@ export function resolveServiceCatalogWithDiagnostics(
 	return resolveMcpServiceCatalog({ localSources, records });
 }
 
+/** Reserved definitions keep one canonical owner across UI and dispatch. */
+export function reservedMcpOwnership(
+	service: McpServiceDescriptor | undefined,
+	config: McpServerConfig | undefined,
+): { status: "canonical" | "disabled" | "conflict"; setupHint?: string } {
+	if (!service?.legacyBuiltin || !config) return { status: "canonical" };
+	if (config.enabled === false) return { status: "disabled", setupHint: "Disabled in settings." };
+	if (
+		config.type === "http" &&
+		service.transport.type === "http" &&
+		config.url === service.transport.url &&
+		config.oauth === true &&
+		config.bearerTokenEnvVar === undefined &&
+		Object.keys(config.headers ?? {}).length === 0
+	) {
+		return { status: "canonical" };
+	}
+	return {
+		status: "conflict",
+		setupHint:
+			"This name belongs to a built-in service. Rename or remove the conflicting server settings; saved accounts remain available for removal.",
+	};
+}
+
+function concreteOAuthEndpoint(endpoint: string | undefined): endpoint is string {
+	if (!endpoint || /[{}]/.test(endpoint)) return false;
+	try {
+		const url = new URL(endpoint);
+		return (
+			!url.username &&
+			!url.password &&
+			!url.hash &&
+			(url.protocol === "https:" ||
+				(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** A discoverable OAuth candidate is not a certification or a successful connection. */
+export function freshMcpLoginAllowed(service: McpServiceDescriptor): boolean {
+	return (
+		service.transport.type === "http" &&
+		concreteOAuthEndpoint(service.transport.url) &&
+		(service.authStrategy === "oauth" || service.authStrategy === "unknown") &&
+		service.setup.status === "ready" &&
+		service.pinnedFromRecord !== true
+	);
+}
+
+/** Resolve one operation, never infer approval from an aggregate account status. */
+export function mcpLoginEligibility(options: {
+	connectionId: string;
+	service?: McpServiceDescriptor;
+	userConfig?: McpServerConfig;
+	reservedConfig?: McpServerConfig;
+	record: McpConnectionRecord | undefined;
+	credential: AuthCredential | undefined;
+	addAccount?: boolean;
+	/** Explicit login commands (/mcp login, /login, config menu) carry OAuth intent. */
+	explicitLogin?: boolean;
+}): { allowed: boolean; endpoint?: string; setupHint?: string; repair?: boolean } {
+	const { service, record, credential, connectionId } = options;
+	const deny = (setupHint: string) => ({ allowed: false, setupHint });
+	const ownership = reservedMcpOwnership(service, options.reservedConfig);
+	if (ownership.status !== "canonical") return deny(ownership.setupHint!);
+	if (record?.attemptId !== undefined) return deny("Login in progress. Finish it or remove the account to cancel.");
+	const config = service?.legacyBuiltin ? undefined : options.userConfig;
+	if (config?.enabled === false) return deny("Disabled in settings.");
+	// An explicit login command carries OAuth intent itself; a settings HTTP
+	// server without `oauth: true` still logs in through the guarded flow. The
+	// picker's fresh Connect keeps the stricter check instead.
+	if (
+		config &&
+		(config.type !== "http" ||
+			config.bearerTokenEnvVar !== undefined ||
+			(options.explicitLogin !== true && config.oauth !== true))
+	) {
+		return deny("This server uses settings-managed authentication. Manage it through /mcp or settings.");
+	}
+	if (!config && service && service.authStrategy !== "oauth" && service.authStrategy !== "unknown") {
+		return deny(service.setup.reason ?? "This service does not use automatic OAuth login.");
+	}
+	if (service?.setup.status === "requires-setup" && !config) {
+		return deny(service.setup.reason ?? "This service requires setup before OAuth login.");
+	}
+	const boundEndpoint =
+		credential?.type === "oauth" &&
+		typeof credential.access === "string" &&
+		credential.access.length > 0 &&
+		typeof credential.endpoint === "string" &&
+		concreteOAuthEndpoint(credential.endpoint)
+			? credential.endpoint
+			: undefined;
+	const exactRecord =
+		record?.connectionId === connectionId && (!service || record.serviceId === service.serviceId)
+			? record
+			: undefined;
+	const verifiedEndpoint =
+		exactRecord?.status === "connected" &&
+		Number.isFinite(exactRecord.verifiedAt) &&
+		(exactRecord.verifiedAt ?? 0) > 0
+			? exactRecord.endpoint
+			: undefined;
+	const repairEndpoint = exactRecord
+		? boundEndpoint === exactRecord.endpoint || verifiedEndpoint === exactRecord.endpoint
+			? exactRecord.endpoint
+			: undefined
+		: boundEndpoint;
+	if (!options.addAccount && !config && concreteOAuthEndpoint(repairEndpoint)) {
+		return { allowed: true, endpoint: repairEndpoint, repair: true };
+	}
+	if (config?.type === "http" && concreteOAuthEndpoint(config.url)) return { allowed: true, endpoint: config.url };
+	if (service && freshMcpLoginAllowed(service))
+		return { allowed: true, endpoint: service.transport.type === "http" ? service.transport.url : undefined };
+	return deny(
+		service?.pinnedFromRecord
+			? "The catalog source is unavailable. Only an approved saved account endpoint can be repaired; remove this account or restore its source."
+			: "This service requires a concrete OAuth endpoint and supported setup before it can be connected.",
+	);
+}
+
+/**
+ * Explicit OAuth client identity resolved from a settings HTTP server.
+ * `clientId` is omitted for DCR/public discovery. A CONFIGURED
+ * `oauthClientSecretEnvVar` resolves to the env value or the EXPLICIT empty
+ * string when it is missing/empty — the engine fails closed on "" before any
+ * network request and never falls back to a stale stored secret. Scopes are
+ * omitted when unset so the engine keeps its config > PRM > omit precedence.
+ */
+export interface McpOAuthIdentity {
+	clientId?: string;
+	clientSecret?: string;
+	clientMetadataUrl?: string;
+	scopes?: string[];
+}
+
+/** Resolve the configured OAuth client identity for a settings HTTP server. */
+export function resolveMcpOAuthIdentity(config: McpServerConfig | undefined): McpOAuthIdentity {
+	if (!config || config.type !== "http") return {};
+	const identity: McpOAuthIdentity = {};
+	const clientId = config.oauthClientId?.trim();
+	if (clientId) identity.clientId = clientId;
+	const secretEnvVar = config.oauthClientSecretEnvVar?.trim();
+	if (secretEnvVar) identity.clientSecret = process.env[secretEnvVar]?.trim() ?? "";
+	const metadataUrl = config.oauthClientMetadataUrl?.trim();
+	if (metadataUrl) identity.clientMetadataUrl = metadataUrl;
+	if (config.oauthScopes !== undefined && config.oauthScopes.length > 0) {
+		identity.scopes = [...config.oauthScopes];
+	}
+	return identity;
+}
+
 export function mcpCredentialKey(connectionId: string): string {
 	return `mcp:${connectionId}`;
 }
@@ -331,6 +490,7 @@ function bearerTokenPresent(bearerTokenEnvVar: string | undefined): boolean {
 
 interface HttpStatusResult {
 	status: McpConnectionStatus;
+	loginPending?: boolean;
 	setupHint?: string;
 	record?: McpConnectionRecord;
 }
@@ -352,7 +512,15 @@ function httpConnectionStatus(options: {
 }): HttpStatusResult {
 	const { connectionId, endpoint, authStorage, connectionStore, usesOAuth, bearerTokenEnvVar } = options;
 	const record = connectionStore.get(connectionId);
-	if (usesOAuth) {
+	if (record?.attemptId !== undefined) {
+		return {
+			status: "pending",
+			loginPending: true,
+			record,
+			setupHint: "Login in progress. Finish it or remove the account to cancel.",
+		};
+	}
+	if (usesOAuth && !bearerTokenEnvVar) {
 		// ONE shared grant-usability rule (with the manager's dispatch
 		// eligibility): wrong-type, empty-access, unbound, cross-endpoint, and
 		// expired-no-refresh grants are all unusable here too.
@@ -425,7 +593,6 @@ function httpConnectionStatus(options: {
 
 function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPluginView {
 	const http = service.transport.type === "http" && service.transport.url ? service.transport.url : undefined;
-	const usesOAuth = service.authStrategy === "oauth" || service.authStrategy === "unknown";
 	const setupHint =
 		service.setup.status === "requires-setup"
 			? (service.setup.reason ?? "This service requires manual setup before it can be connected.")
@@ -435,9 +602,9 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 					? "This service requires an API key. Add it manually with /mcp add."
 					: service.authStrategy === "none"
 						? "No login required. Add it manually with /mcp add to use it."
-						: service.metadataReviewed || service.localSource === true
+						: service.metadataReviewed
 							? undefined
-							: "Imported entry; its OAuth metadata has not been reviewed. Verify the provider, then add it manually with /mcp add.";
+							: "OAuth support has not been verified. Connect checks capabilities and asks for approval before login.";
 	return {
 		serviceId: service.serviceId,
 		label: service.label,
@@ -445,18 +612,9 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 			service.setup.status === "requires-setup" || !http || service.authStrategy === "api_key"
 				? "setup_required"
 				: "not_connected",
-		// One-click Connect is an honest claim only for reviewed entries (or files
-		// the user placed themselves, which still go through the login dialog's
-		// explicit approval). Unreviewed imports stay candidates: verify the
-		// provider manually and add it with /mcp add.
-		connectable:
-			Boolean(http) &&
-			service.setup.status === "ready" &&
-			usesOAuth &&
-			(service.metadataReviewed || service.localSource === true) &&
-			// A pinned (vanished-source) service has no reviewed OAuth metadata
-			// to connect through — its accounts manage in place, never re-login.
-			service.pinnedFromRecord !== true,
+		// Connect starts explicit capability discovery and consent, not a verified claim.
+		connectable: freshMcpLoginAllowed(service),
+		addAccountAllowed: freshMcpLoginAllowed(service),
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		connectionIds: [],
@@ -480,6 +638,7 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
  */
 export interface McpAccountState {
 	connectionId: string;
+	loginPending?: boolean;
 	status: "connected" | "pending" | "error" | "not_connected" | "disabled" | "setup_required";
 	setupHint?: string;
 	toolCount?: number;
@@ -504,6 +663,7 @@ export function accountStateFor(options: {
 	return {
 		connectionId: options.connectionId,
 		status: state.status,
+		...(state.loginPending ? { loginPending: true } : {}),
 		...(state.setupHint ? { setupHint: state.setupHint } : {}),
 		...(state.record?.toolCount !== undefined ? { toolCount: state.record.toolCount } : {}),
 		...(state.record?.verifiedAt ? { verifiedAt: state.record.verifiedAt } : {}),
@@ -513,40 +673,42 @@ export function accountStateFor(options: {
 
 /** Every account of a service (primary first), each with its computed state. */
 export function accountStatesFor(options: {
-	service: Pick<McpServiceDescriptor, "serviceId" | "transport">;
+	service: McpServiceDescriptor;
 	authStorage: AuthStorage;
 	connectionStore: McpConnectionStore;
 }): McpAccountState[] {
-	const url = options.service.transport.type === "http" ? options.service.transport.url : undefined;
+	const { service, authStorage, connectionStore } = options;
+	const url = service.transport.type === "http" ? service.transport.url : undefined;
 	if (!url) return [];
-	const accounts: McpAccountState[] = [
-		accountStateFor({
-			connectionId: options.service.serviceId,
-			endpoint: url,
-			authStorage: options.authStorage,
-			connectionStore: options.connectionStore,
-		}),
+	const ids = [
+		service.serviceId,
+		...connectionStore
+			.records()
+			.filter((record) => record.serviceId === service.serviceId && record.connectionId !== service.serviceId)
+			.map((record) => record.connectionId),
 	];
-	for (const record of options.connectionStore.records()) {
-		if (record.serviceId !== options.service.serviceId || record.connectionId === options.service.serviceId) {
-			continue;
-		}
-		accounts.push(
-			accountStateFor({
-				connectionId: record.connectionId,
-				endpoint: url,
-				authStorage: options.authStorage,
-				connectionStore: options.connectionStore,
-			}),
+	return ids
+		.map((connectionId) => {
+			const eligibility = mcpLoginEligibility({
+				connectionId,
+				service,
+				record: connectionStore.get(connectionId),
+				credential: authStorage.get(mcpCredentialKey(connectionId)),
+			});
+			return accountStateFor({
+				connectionId,
+				endpoint: eligibility.repair && connectionStore.get(connectionId) ? eligibility.endpoint! : url,
+				authStorage,
+				connectionStore,
+				usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+			});
+		})
+		.filter(
+			(account) => account.status !== "not_connected" || connectionStore.get(account.connectionId) !== undefined,
 		);
-	}
-	return accounts.filter(
-		(account) =>
-			account.status !== "not_connected" || options.connectionStore.get(account.connectionId) !== undefined,
-	);
 }
 
-function catalogServiceView(
+function baseCatalogServiceView(
 	service: McpServiceDescriptor,
 	authStorage: AuthStorage,
 	connectionStore: McpConnectionStore,
@@ -590,6 +752,7 @@ function catalogServiceView(
 		.filter((account) => account.status === "connected")
 		.sort((left, right) => (right.verifiedAt ?? 0) - (left.verifiedAt ?? 0))[0];
 	const errorHint =
+		accounts.find((account) => account.loginPending)?.setupHint ??
 		accounts.find((account) => account.status === "error")?.setupHint ??
 		accounts.find((account) => account.status === "not_connected")?.setupHint;
 	const setupHint = service.pinnedFromRecord
@@ -599,9 +762,17 @@ function catalogServiceView(
 		serviceId: service.serviceId,
 		label: service.label,
 		connectionStatus: aggregate,
-		// Error rows keep the Reconnect action; connected/pending rows manage
-		// their accounts through the picker instead of re-logging in.
-		connectable: aggregate === "error" || aggregate === "not_connected",
+		connectable:
+			!accounts.some((account) => account.loginPending) &&
+			(aggregate === "error" || aggregate === "not_connected") &&
+			mcpLoginEligibility({
+				connectionId: service.serviceId,
+				service,
+				record: connectionStore.get(service.serviceId),
+				credential: authStorage.get(mcpCredentialKey(service.serviceId)),
+			}).allowed,
+		addAccountAllowed: freshMcpLoginAllowed(service) && !accounts.some((account) => account.loginPending),
+		...(accounts.some((account) => account.loginPending) ? { loginPending: true } : {}),
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		// Every account id, so the account picker can manage each one.
@@ -615,6 +786,24 @@ function catalogServiceView(
 		...(newestConnected?.verifiedAt ? { verifiedAt: newestConnected.verifiedAt } : {}),
 		...(newestConnected?.toolCount !== undefined ? { toolCount: newestConnected.toolCount } : {}),
 		...(service.aliases.length > 0 ? { aliases: service.aliases } : {}),
+	};
+}
+
+function catalogServiceView(
+	service: McpServiceDescriptor,
+	authStorage: AuthStorage,
+	connectionStore: McpConnectionStore,
+	reservedConfig?: McpServerConfig,
+): McpPluginView {
+	const view = baseCatalogServiceView(service, authStorage, connectionStore);
+	const ownership = reservedMcpOwnership(service, reservedConfig);
+	if (ownership.status === "canonical") return view;
+	return {
+		...view,
+		connectionStatus: ownership.status === "disabled" ? "disabled" : "error",
+		connectable: false,
+		addAccountAllowed: false,
+		setupHint: ownership.setupHint,
 	};
 }
 
@@ -653,7 +842,21 @@ function userServerView(
 		connectionStatus: config.enabled === false ? "disabled" : status.status,
 		// not_connected connects; error (rejected credential, unbound grant) reconnects.
 		connectable:
-			config.enabled !== false && usesOAuth && (status.status === "not_connected" || status.status === "error"),
+			!status.loginPending &&
+			mcpLoginEligibility({
+				connectionId: name,
+				userConfig: config,
+				record: connectionStore.get(name),
+				credential: authStorage.get(mcpCredentialKey(name)),
+			}).allowed &&
+			(status.status === "not_connected" || status.status === "error"),
+		addAccountAllowed:
+			!status.loginPending &&
+			config.enabled !== false &&
+			usesOAuth &&
+			config.bearerTokenEnvVar === undefined &&
+			concreteOAuthEndpoint(config.url),
+		...(status.loginPending ? { loginPending: true } : {}),
 		usesOAuth,
 		source: "user",
 		connectionIds:
@@ -688,11 +891,24 @@ export function buildPluginViews(options: BuildViewsOptions): McpPluginView[] {
 	for (const service of services) {
 		// A user-declared server owns the id for non-bundled services; no duplicate card.
 		if (!service.legacyBuiltin && userViews.has(service.serviceId)) continue;
-		views.push(catalogServiceView(service, authStorage, connectionStore));
+		views.push(catalogServiceView(service, authStorage, connectionStore, userServers?.[service.serviceId]));
 	}
 	views.push(...userViews.values());
+	const rank = (view: McpPluginView): number =>
+		view.connectionStatus === "connected"
+			? 0
+			: view.loginPending
+				? 1
+				: view.connectionStatus === "pending"
+					? 2
+					: view.connectable
+						? 3
+						: view.connectionIds.length > 0
+							? 4
+							: 5;
 	return views.sort(
 		(left, right) =>
+			rank(left) - rank(right) ||
 			left.label.toLowerCase().localeCompare(right.label.toLowerCase()) ||
 			left.serviceId.localeCompare(right.serviceId),
 	);
@@ -709,9 +925,22 @@ export function buildConnectionViews(
 	const reservedIds = new Set(services.filter((service) => service.legacyBuiltin).map((service) => service.serviceId));
 	const connected = new Set<string>();
 	for (const service of services) {
-		if (reservedIds.has(service.serviceId) && userServers?.[service.serviceId] !== undefined) continue;
-		const plugin = catalogServiceView(service, authStorage, connectionStore);
-		if (plugin.connectionIds.length === 0) continue;
+		const ownership = reservedMcpOwnership(service, userServers?.[service.serviceId]);
+		const plugin = catalogServiceView(service, authStorage, connectionStore, userServers?.[service.serviceId]);
+		if (plugin.connectionIds.length === 0) {
+			if (ownership.status !== "canonical")
+				views.push({
+					connectionId: service.serviceId,
+					serviceId: service.serviceId,
+					label: service.label,
+					status: ownership.status === "disabled" ? "disabled" : "error",
+					usesOAuth: plugin.usesOAuth,
+					transport: "http",
+					source: "catalog",
+					setupHint: ownership.setupHint,
+				});
+			continue;
+		}
 		// One inventory row per account, each with the SAME centralized,
 		// honestly-computed status (credential binding + expiry + record) —
 		// never a raw record.status that could claim a stale Connected.
@@ -725,13 +954,20 @@ export function buildConnectionViews(
 						? service.label
 						: `${service.label} (${account.connectionId})`,
 				status:
-					account.status === "not_connected" || account.status === "setup_required"
-						? "not_connected"
-						: account.status,
+					ownership.status === "disabled"
+						? "disabled"
+						: ownership.status === "conflict"
+							? "error"
+							: account.status === "setup_required"
+								? "not_connected"
+								: account.status,
+				...(account.loginPending ? { loginPending: true } : {}),
 				usesOAuth: plugin.usesOAuth,
 				transport: "http",
 				source: "catalog",
-				...(account.setupHint ? { setupHint: account.setupHint } : {}),
+				...(ownership.setupHint || account.setupHint
+					? { setupHint: ownership.setupHint ?? account.setupHint }
+					: {}),
 			});
 		}
 	}
@@ -746,6 +982,7 @@ export function buildConnectionViews(
 			status: plugin.connectionStatus === "setup_required" ? "not_connected" : plugin.connectionStatus,
 			usesOAuth: plugin.usesOAuth,
 			transport: config.type,
+			...(plugin.loginPending ? { loginPending: true } : {}),
 			source: "user",
 			...(plugin.setupHint ? { setupHint: plugin.setupHint } : {}),
 		});
@@ -831,6 +1068,8 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 	const { authStorage, connectionStore, connectionId, serviceId, label, endpoint, usesOAuth, bearerTokenEnvVar } =
 		options;
 	const probe = options.probe ?? probeMcpEndpoint;
+	const previous = connectionStore.get(connectionId);
+	const expectedRecord = previous ? { ...previous } : undefined;
 	const now = Date.now();
 	const record: McpConnectionRecord = {
 		connectionId,
@@ -841,35 +1080,68 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 		createdAt: now,
 		updatedAt: now,
 	};
+	// Login owns this record until finalize/logout/release. Verification never
+	// refreshes credentials or probes on behalf of an active attempt.
+	if (expectedRecord?.attemptId !== undefined) return { ...expectedRecord, status: "pending" };
+	const oauthSource = usesOAuth && !bearerTokenEnvVar;
+	const currentSource = (): string => {
+		if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
+		if (oauthSource) return JSON.stringify(authStorage.getVerified(mcpCredentialKey(connectionId))) ?? "";
+		return "";
+	};
+	let sourceSnapshot: string;
 	try {
-		// Endpoint binding first: a stored token must prove where it belongs before
-		// any token fetch or probe. Unbound or cross-endpoint grants are ambiguous
-		// legacy state and demand an explicit reconnect — never auto-probe.
-		if (usesOAuth) {
-			const credential = authStorage.get(mcpCredentialKey(connectionId));
-			if (credential?.type === "oauth") {
-				const bound = typeof credential.endpoint === "string" ? credential.endpoint : undefined;
-				if (bound === undefined || bound !== endpoint) {
-					record.status = "error";
-					record.lastError = MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL;
-					connectionStore.queueVerifyResult(record, () => true);
-					await connectionStore.flush().catch(() => undefined);
-					return record;
-				}
+		sourceSnapshot = currentSource();
+	} catch {
+		return { ...record, lastError: MCP_PROBE_ERRORS.UNKNOWN };
+	}
+	const persist = async (): Promise<McpConnectionRecord> => {
+		const outcome = connectionStore.queueVerifyResult(record, () => sameGrantToken(sourceSnapshot, currentSource()), {
+			expectedRecord,
+		});
+		try {
+			await connectionStore.flush();
+			if (await outcome) return record;
+		} catch {
+			// A failed write is one-shot, not a weaker retry of this result.
+		}
+		return {
+			...record,
+			status: "pending",
+			verifiedAt: undefined,
+			toolCount: undefined,
+			lastError: MCP_PROBE_ERRORS.CREDENTIAL_CHANGED,
+		};
+	};
+	try {
+		if (oauthSource) {
+			const credential = authStorage.getVerified(mcpCredentialKey(connectionId));
+			if (credential?.type === "oauth" && credential.endpoint !== endpoint) {
+				record.status = "error";
+				record.lastError = MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL;
+				return await persist();
 			}
 		}
-		// Resolve the token once: the probe and the binding check below both refer to
-		// exactly this grant revision (getApiKey refreshes under its lock first).
-		const token = await resolveConnectionToken(authStorage, connectionId, usesOAuth, bearerTokenEnvVar);
-		// An OAuth connection verifies against its own grant: without a usable token
-		// there is nothing to verify, and an anonymous probe must not produce a
-		// "connected" record.
-		if (usesOAuth && !token) {
-			record.status = "pending";
+		const token = await resolveConnectionToken(authStorage, connectionId, oauthSource, bearerTokenEnvVar);
+		// getApiKey may refresh. Bind both the probe token and the complete fresh
+		// credential identity (including endpoint) before any network operation.
+		if (oauthSource) {
+			const credential = authStorage.getVerified(mcpCredentialKey(connectionId));
+			if (
+				token &&
+				(credential?.type !== "oauth" ||
+					credential.endpoint !== endpoint ||
+					!sameGrantToken(token, credential.access))
+			) {
+				return { ...record, lastError: MCP_PROBE_ERRORS.CREDENTIAL_CHANGED };
+			}
+			sourceSnapshot = JSON.stringify(credential) ?? "";
+		} else if (bearerTokenEnvVar) {
+			sourceSnapshot = token;
+		}
+		if ((oauthSource || bearerTokenEnvVar) && !token) {
 			record.lastError = MCP_PROBE_ERRORS.UNKNOWN;
-			connectionStore.queueVerifyResult(record, () => true);
-			await connectionStore.flush().catch(() => undefined);
-			return record;
+			return await persist();
 		}
 		const result = await probe({
 			url: endpoint,
@@ -881,34 +1153,16 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 			record.verifiedAt = Date.now();
 			record.toolCount = result.toolCount;
 		} else if (result.error === MCP_PROBE_ERRORS.UNAUTHORIZED) {
-			// The server rejected the credential: a real reconnection state.
 			record.status = "error";
 			record.lastError = result.error;
 		} else {
-			// Verification could not complete (network/timeout/protocol): the grant
-			// stays intact, so this is pending rather than a broken connection.
-			record.status = "pending";
 			record.lastError = result.error;
 		}
-		// Bind the result to the current grant revision: if the credential changed
-		// or disappeared while the probe ran (logout, rotation, reconnect), the
-		// result is stale and must not mark the connection verified. The same guard
-		// is re-evaluated under the store lock at flush time.
-		const isStillCurrent = () =>
-			sameGrantToken(token, currentCredentialBindingValue(authStorage, connectionId, usesOAuth, bearerTokenEnvVar));
-		if (!isStillCurrent()) {
-			return { ...record, status: "pending", lastError: MCP_PROBE_ERRORS.CREDENTIAL_CHANGED };
-		}
-		connectionStore.queueVerifyResult(record, isStillCurrent);
-		await connectionStore.flush();
-		return record;
 	} catch {
 		record.status = "pending";
 		record.lastError = MCP_PROBE_ERRORS.UNKNOWN;
-		connectionStore.queueVerifyResult(record, () => true);
-		await connectionStore.flush().catch(() => undefined);
-		return record;
 	}
+	return persist();
 }
 
 /** Resolve the usable token for a connection; empty string when unauthenticated. */
@@ -921,30 +1175,6 @@ async function resolveConnectionToken(
 	if (usesOAuth) {
 		const token = await authStorage.getApiKey(mcpCredentialKey(connectionId));
 		return token ?? "";
-	}
-	if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
-	return "";
-}
-
-/**
- * The current grant revision as a short stable hash. Reloads the credential
- * source first: the probe-to-flush guard must observe logins, logouts, and token
- * rotations — including ones performed by another process between probe start
- * and flush — so it never re-reads a cached AuthStorage snapshot. The reload is
- * one consistent read under the auth.json backend lock; a login racing the flush
- * itself is resolved by the next verification (documented best-effort, no
- * cross-process atomicity claim).
- */
-function currentCredentialBindingValue(
-	authStorage: AuthStorage,
-	connectionId: string,
-	usesOAuth: boolean,
-	bearerTokenEnvVar: string | undefined,
-): string {
-	authStorage.reload();
-	if (usesOAuth) {
-		const credential = authStorage.get(mcpCredentialKey(connectionId));
-		return credential?.type === "oauth" && typeof credential.access === "string" ? credential.access : "";
 	}
 	if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
 	return "";

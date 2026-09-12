@@ -469,6 +469,9 @@ describe("ENG-6108 durable account reservations", () => {
 				commitMoves.push("compensated");
 			},
 		});
+		// A committed finalize consumed its nonce. A new transaction must claim again.
+		const retryNonce = nonce();
+		expect(await client.claimConnectionId({ connectionId: "acme-2", attemptId: retryNonce })).toBe(true);
 		// The write is mocked to fail exactly once — inject it AFTER the
 		// reservation commit so the finalize's write is the failing one.
 		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
@@ -476,7 +479,7 @@ describe("ENG-6108 durable account reservations", () => {
 		});
 		const failed = await client.finalizeAttempt({
 			connectionId: "acme-2",
-			attemptId: mine,
+			attemptId: retryNonce,
 			commit: (current) => {
 				commitMoves.push("moved-again");
 				return current;
@@ -492,7 +495,7 @@ describe("ENG-6108 durable account reservations", () => {
 		// The record write failed: nothing durable for the second finalize, and
 		// the FIRST (successful) finalize's record is still on disk.
 		const fresh = McpConnectionStore.open(path);
-		expect(fresh.get("acme-2")?.attemptId).toBe(mine);
+		expect(fresh.get("acme-2")?.attemptId).toBe(retryNonce);
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
@@ -787,16 +790,17 @@ describe("ENG-6108 durable account reservations", () => {
 				routeLogout = logoutMcpAccount(`mcp:acme-2--${mine}`, warmedStore, routeClient);
 				const moved = loginClient.moveStagedCredential(`mcp:acme-2--${mine}`, "mcp:acme-2");
 				expect(moved.status).toBe("moved");
-				// The real flow's commit returns the pending record unchanged;
-				// verification updates it later.
+				// Finalize consumes ownership even when the callback returns the
+				// pending record unchanged; verification updates its status later.
 				return current;
 			},
 		});
 
 		await expect(finalization).resolves.toBe("committed");
 		const outcome = await routeLogout;
-		// State-neutral refusal: never a success claim while the account lives.
-		expect(outcome).toBe("refused");
+		// Finalize consumed the nonce and moved the staged key. A late staged
+		// logout finds no exact key; it never guesses or touches the live account.
+		expect(outcome).toBe("missing");
 		const fresh = AuthStorage.create(authPath);
 		// The moved credential SURVIVES on the real key...
 		const survivingCredential = fresh.get("mcp:acme-2");

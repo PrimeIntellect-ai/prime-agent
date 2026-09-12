@@ -1,0 +1,7 @@
+- Fixed MCP verification and background probes so they can no longer overwrite an in-flight login's account claim; every verification write is compared against the record and credential snapshot it was computed from.
+- Added an honest "Login in progress" state for accounts with an active login attempt, replacing the misleading missing-credential Reconnect across the service picker, connection inventory, and host actions; a second Connect or Verify waits while Remove stays available.
+- Made reserved built-in names conflict-aware: an equivalent user declaration keeps working, while a disabled or conflicting same-name entry now shows an explicit conflict or disabled state instead of a Connected card that cannot dispatch.
+- Restricted installed-account repair to its exact saved connection id at its durable approved endpoint, so changed catalog URLs are never silently followed and a pending placeholder alone is not treated as approval.
+- Changed unreviewed imported OAuth entries to offer an explicit Connect attempt (with an unverified notice) instead of a blanket metadata-review block, while keeping real API-key, setup-required, and registered-client restrictions.
+- Ordered the service catalog so connected accounts and ready-to-connect services appear first, with every service still searchable and visible.
+- Added optional per-server OAuth client identity settings (`oauthClientId`, `oauthClientSecretEnvVar`, `oauthClientMetadataUrl`, `oauthScopes`) with fail-closed secret resolution, ready for the OAuth engine's client negotiation.
