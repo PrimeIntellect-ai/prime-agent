@@ -2,7 +2,7 @@
 """Render the Prime butterfly SVG as terminal character art.
 
 Usage:
-  uv run scripts/render-logo.py [--width 60] [--threshold 96] [--svg path]
+  uv run scripts/render-logo.py [--width 60] [--threshold 96] [--style blocks] [--svg path]
 
 Outputs the rendered art to stdout.
 
