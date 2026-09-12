@@ -3,7 +3,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import {
 	type AnthropicMessagesCompat,
 	type Api,
@@ -430,7 +430,11 @@ interface PrivatePrimeAuthorizationCache {
 }
 
 function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): string {
-	return createHash("sha256").update(apiKey).update("\0").update(teamId).digest("hex");
+	// Use the bearer token as a MAC key, not a password to hash. Keep the scope stable for disk cache reuse.
+	return createHmac("sha256", apiKey)
+		.update("prime-agent:private-prime-authorization:v1\0")
+		.update(teamId)
+		.digest("hex");
 }
 
 function isOfflineModeEnabled(): boolean {
@@ -1135,7 +1139,9 @@ export class ModelRegistry {
 		if (!auth.ok || !auth.apiKey) {
 			return availableModels.filter((model) => model.provider !== "openai-codex");
 		}
-		const authFingerprint = createHash("sha256").update(auth.apiKey).digest("hex");
+		const authFingerprint = createHmac("sha256", auth.apiKey)
+			.update("prime-agent:openai-codex-models:v1")
+			.digest("hex");
 		const cached = this.openAICodexModelsCache;
 		if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
 			return availableModels.filter((model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id));

@@ -43,7 +43,8 @@ describe("issue #702 codex model discovery client version", () => {
 			}),
 		);
 
-		const registry = ModelRegistry.create(AuthStorage.create(authPath), join(tempDir, "models.json"));
+		const authStorage = AuthStorage.create(authPath);
+		const registry = ModelRegistry.create(authStorage, join(tempDir, "models.json"));
 		const codexModels = registry.getAvailable().filter((model) => model.provider === "openai-codex");
 		expect(codexModels.length).toBeGreaterThan(0);
 
@@ -70,5 +71,17 @@ describe("issue #702 codex model discovery client version", () => {
 		expect((major ?? 0) > 0 || (minor ?? 0) >= 153).toBe(true);
 
 		expect(executable.some((model) => model.provider === "openai-codex")).toBe(true);
+		await registry.getExecutableModels();
+		expect(requestedUrls.filter((url) => url.includes("/codex/models"))).toHaveLength(1);
+
+		authStorage.set("openai-codex", {
+			type: "oauth",
+			access: codexAccessToken("account-123") + "-rotated",
+			refresh: "rotated-refresh-token",
+			expires: Date.now() + 60 * 60 * 1000,
+			accountId: "account-123",
+		});
+		await registry.getExecutableModels();
+		expect(requestedUrls.filter((url) => url.includes("/codex/models"))).toHaveLength(2);
 	});
 });
