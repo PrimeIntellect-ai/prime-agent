@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -14,12 +23,14 @@ import {
 	getLocalHarnessStateDir,
 	getRefinementHistory,
 	getRefinementHistoryPath,
+	type HarnessEntry,
 	type HarnessState,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
 	loadHarnessState,
 	mergeHarnessStates,
 	mergeRefinementHistory,
+	normalizeRefinementProposal,
 	planRefinement,
 	type RefinementAction,
 	type RefinementKind,
@@ -129,7 +140,7 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 				id,
 				title: `${kind} title`,
 				content: `${kind} content`,
-				path: `${kind}/path`,
+				topic: `${kind}/topic`,
 				...skillArguments,
 				metadata: { seeded: true },
 			},
@@ -236,7 +247,7 @@ describe("harness refinement", () => {
 					id: `${kind}_entry`,
 					title: `${kind} title`,
 					content: `${kind} content`,
-					path: `${kind}/created`,
+					topic: `${kind}/created`,
 					...(kind === "skill"
 						? {
 								reference: skillReference,
@@ -260,7 +271,7 @@ describe("harness refinement", () => {
 				kind,
 				title: `${kind} title`,
 				content: `${kind} content`,
-				path: `${kind}/created`,
+				topic: `${kind}/created`,
 				metadata: { kind },
 				source: "refine",
 				version: 1,
@@ -278,7 +289,7 @@ describe("harness refinement", () => {
 					id: `${kind}_entry`,
 					title: `${kind} title updated`,
 					content: `${kind} content updated`,
-					path: `${kind}/updated`,
+					topic: `${kind}/updated`,
 					...(kind === "skill"
 						? {
 								reference: skillReference,
@@ -302,7 +313,7 @@ describe("harness refinement", () => {
 			expect(state.entries[kind][`${kind}_entry`]).toMatchObject({
 				title: `${kind} title updated`,
 				content: `${kind} content updated`,
-				path: `${kind}/updated`,
+				topic: `${kind}/updated`,
 				metadata: { updated: kind },
 				version: 2,
 			});
@@ -348,7 +359,7 @@ describe("harness refinement", () => {
 						id: "target_env_validation",
 						title: "Target environment validation",
 						content: "Run checks through the target repository environment.",
-						path: "validation",
+						topic: "validation",
 					},
 					{
 						action: "create",
@@ -411,7 +422,28 @@ describe("harness refinement", () => {
 		expect(state.refinements.map((event) => event.id)).toEqual(["refine_1", "refine_2"]);
 	});
 
-	it("creates ids from titles and uses default path and metadata when omitted", () => {
+	it("stores the grouping when a proposal spells it path", () => {
+		const state = loadHarnessState(makeTempDir());
+
+		const normalized = normalizeRefinementProposal({
+			summary: "Group a memory",
+			edits: [
+				{
+					action: "create",
+					kind: "memory",
+					id: "grouped",
+					title: "Grouped",
+					content: "content",
+					path: "repo/testing",
+				},
+			],
+		});
+		applyRefinementProposal(state, normalized, { id: "refine_path_edit" });
+
+		expect(state.entries.memory.grouped.topic).toBe("repo/testing");
+	});
+
+	it("creates ids from titles and uses default topic and metadata when omitted", () => {
 		const state = loadHarnessState(makeTempDir());
 
 		const result = applyRefinementProposal(
@@ -441,7 +473,7 @@ describe("harness refinement", () => {
 			id: "native_check",
 			after: {
 				id: "native_check",
-				path: "general",
+				topic: "general",
 				reference: {
 					type: "python",
 					import: "agent_skills.native_check",
@@ -665,6 +697,66 @@ describe("harness refinement", () => {
 			trigger: "Add prompt note",
 			changes: ["create prompt:focused_edits"],
 		});
+	});
+
+	it("keeps the grouping when a writer that only knows the path field rewrites the file", () => {
+		const dir = makeTempDir();
+		const state = loadHarnessState(dir, "local");
+		state.entries.memory.grouped = {
+			id: "grouped",
+			kind: "memory",
+			title: "Grouped",
+			content: "content",
+			topic: "repo/testing",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-01-01T00:00:00.000Z",
+			updated_at: "2026-01-01T00:00:00.000Z",
+			version: 1,
+		};
+		saveHarnessState(dir, state);
+
+		// A pre-topic build rewrites the file and drops fields it does not know.
+		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8"));
+		const { topic: _topic, ...withoutTopic } = saved.entries.memory.grouped;
+		saved.entries.memory.grouped = withoutTopic;
+		writeFileSync(getHarnessStatePath(dir), JSON.stringify(saved), "utf8");
+
+		expect(loadHarnessState(dir, "local").entries.memory.grouped.topic).toBe("repo/testing");
+	});
+
+	it("loads an entry that stores the grouping as path and resaves it as topic", () => {
+		const dir = makeTempDir();
+		writeFileSync(
+			getHarnessStatePath(dir),
+			JSON.stringify({
+				schema: 1,
+				entries: {
+					memory: {
+						legacy: {
+							id: "legacy",
+							kind: "memory",
+							title: "Legacy",
+							content: "Stored with the older field name.",
+							path: "repo/testing",
+						},
+					},
+				},
+			}),
+			"utf8",
+		);
+
+		const state = loadHarnessState(dir, "local");
+		expect(state.entries.memory.legacy.topic).toBe("repo/testing");
+
+		saveHarnessState(dir, state);
+		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8")).entries.memory.legacy;
+		expect(saved.topic).toBe("repo/testing");
+		// The mirror keeps a pre-topic writer from resaving the entry ungrouped.
+		expect(saved.path).toBe("repo/testing");
 	});
 
 	it.each(["not json at all", "null", "[]", '"a string"', "123"])(
@@ -1139,7 +1231,7 @@ describe("harness refinement", () => {
 					id: "kept_memory",
 					title: "Updated memory",
 					content: "Updated memory content",
-					path: "updated/path",
+					topic: "updated/topic",
 					metadata: { updated: true },
 				},
 				{
@@ -1170,20 +1262,51 @@ describe("harness refinement", () => {
 		expect(state.entries.memory.kept_memory).toMatchObject({
 			title: "memory title",
 			content: "memory content",
-			path: "memory/path",
+			topic: "memory/topic",
 			metadata: { seeded: true },
 			version: 3,
 		});
 		expect(state.entries.skill.deleted_skill).toMatchObject({
 			title: "skill title",
 			content: "skill content",
-			path: "skill/path",
+			topic: "skill/topic",
 			reference: skillReference,
 			arguments: { input: { type: "string", required: true, description: "Task input" } },
 			metadata: { seeded: true },
 			version: 1,
 		});
 		expect(state.refinements.at(-1)?.trigger).toBe("Rollback refinement refine_target");
+	});
+
+	it("rolls back a deletion recorded with the older path field into the same grouping", async () => {
+		const state = loadHarnessState(makeTempDir());
+		const deleted = {
+			id: "retired",
+			kind: "memory",
+			title: "Retired memory",
+			content: "Retired content",
+			path: "repo/testing",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-01-01T00:00:00.000Z",
+			updated_at: "2026-01-01T00:00:00.000Z",
+			version: 1,
+		} as unknown as HarnessEntry;
+		const target: RefinementResult = {
+			id: "refine_old",
+			summary: "Retire a memory",
+			rationale: "It was stale.",
+			expectedOutcome: "Less noise.",
+			appliedEdits: [{ action: "delete", kind: "memory", id: "retired", before: deleted, applied: true }],
+			harnessStatePath: "/tmp/harness_state.json",
+		};
+
+		await refineHarness([], state, [target], {} as never, "api-key", { rollbackId: "refine_old" });
+
+		expect(state.entries.memory.retired.topic).toBe("repo/testing");
 	});
 
 	it("throws when rollback target is missing", async () => {
@@ -1254,7 +1377,7 @@ describe("global refinement history", () => {
 						kind: "memory",
 						title: "Legacy global memory",
 						content: "created globally",
-						path: "general",
+						topic: "general",
 						scope: "global",
 						reference: {},
 						arguments: {},

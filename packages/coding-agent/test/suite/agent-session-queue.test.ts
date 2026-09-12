@@ -1325,7 +1325,7 @@ describe("AgentSession queue characterization", () => {
 				kind: "memory",
 				title: id,
 				content,
-				path: "general",
+				topic: "general",
 				reference: {},
 				arguments: {},
 				metadata: {},

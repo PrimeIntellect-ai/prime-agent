@@ -1,6 +1,6 @@
 import { type Component, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
-import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
+import { type AppliedRefinementEdit, type HarnessEntry, harnessTopic } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { theme } from "../theme/theme.js";
 import { renderDiff } from "./diff.js";
@@ -11,7 +11,7 @@ function editableEntry(entry: HarnessEntry): Record<string, unknown> {
 	return {
 		title: entry.title,
 		content: entry.content,
-		path: entry.path,
+		topic: harnessTopic(entry),
 		reference: entry.reference,
 		arguments: entry.arguments,
 		metadata: entry.metadata,
@@ -19,10 +19,11 @@ function editableEntry(entry: HarnessEntry): Record<string, unknown> {
 }
 
 function proposedEntry(edit: AppliedRefinementEdit): Record<string, unknown> {
+	const topic = harnessTopic(edit);
 	return {
 		...(edit.title === undefined ? {} : { title: edit.title }),
 		...(edit.content === undefined ? {} : { content: edit.content }),
-		...(edit.path === undefined ? {} : { path: edit.path }),
+		...(topic === undefined ? {} : { topic }),
 		...(edit.reference === undefined ? {} : { reference: edit.reference }),
 		...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
 		...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),

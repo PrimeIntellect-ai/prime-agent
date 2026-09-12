@@ -26,35 +26,38 @@ class HarnessStateTest(unittest.TestCase):
             state = HarnessState(Path(temp_dir) / "harness_state.json")
 
             created = {
-                "prompt": state.create_prompt_note(
+                "prompt": state.create_memory(
                     "Prompt note",
                     "Prompt content",
                     id="prompt_entry",
-                    path="prompt/path",
+                    topic="prompt/topic",
                     metadata={"kind": "prompt"},
+                    kind="prompt",
                 ),
                 "memory": state.create_memory(
                     "Memory",
                     "Memory content",
                     id="memory_entry",
-                    path="memory/path",
+                    topic="memory/topic",
                     metadata={"kind": "memory"},
                 ),
-                "skill": state.create_skill(
+                "skill": state.create_memory(
                     "Skill",
                     "Skill content",
                     id="skill_entry",
-                    path="skill/path",
+                    topic="skill/topic",
                     reference=PYTHON_REFERENCE,
                     arguments={"target": {"type": "string", "required": True}},
                     metadata={"kind": "skill"},
+                    kind="skill",
                 ),
-                "subagent": state.create_subagent(
+                "subagent": state.create_memory(
                     "Subagent",
                     "Subagent content",
                     id="subagent_entry",
-                    path="subagent/path",
+                    topic="subagent/topic",
                     metadata={"kind": "subagent"},
+                    kind="subagent",
                 ),
             }
 
@@ -63,27 +66,134 @@ class HarnessStateTest(unittest.TestCase):
                 self.assertIn("content", state.get(kind, entry.id).content.lower())
                 self.assertIn(entry, state.list(kind))
 
-            state.update_prompt_note("prompt_entry", "Prompt note", "Prompt content updated")
+            state.update_memory("prompt_entry", "Prompt note", "Prompt content updated", kind="prompt")
             state.update_memory("memory_entry", "Memory", "Memory content updated")
-            state.update_skill(
+            state.update_memory(
                 "skill_entry",
                 "Skill",
                 "Skill content updated",
                 reference=PYTHON_REFERENCE,
                 arguments={"target": {"type": "string", "required": True}, "mode": {"type": "string"}},
+                kind="skill",
             )
-            state.update_subagent("subagent_entry", "Subagent", "Subagent content updated")
+            state.update_memory("subagent_entry", "Subagent", "Subagent content updated", kind="subagent")
 
             for kind in ("prompt", "memory", "skill", "subagent"):
                 entry_id = f"{kind}_entry"
                 self.assertEqual(state.get(kind, entry_id).version, 2)
                 self.assertIn("updated", state.get(kind, entry_id).content)
-                delete_method = getattr(state, f"delete_{'prompt_note' if kind == 'prompt' else kind}")
-                self.assertTrue(delete_method(entry_id))
+                self.assertTrue(state.delete_memory(entry_id, kind=kind))
                 self.assertIsNone(state.get(kind, entry_id))
-                self.assertFalse(delete_method(entry_id))
+                self.assertFalse(state.delete_memory(entry_id, kind=kind))
 
             self.assertEqual(state.list(), [])
+
+    def test_create_defaults_and_skill_only_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            default_entry = state.create_memory("Default", "No kind given.")
+            self.assertEqual(default_entry.kind, "memory")
+            self.assertEqual(default_entry.topic, "general")
+            self.assertEqual(state.create_memory("Note", "Policy note.", kind="prompt").topic, "policy")
+
+            for kind in ("memory", "prompt", "subagent"):
+                with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
+                    state.create_memory("Bad", "content", id=f"bad_{kind}", kind=kind, reference=PYTHON_REFERENCE)
+                with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
+                    state.create_memory("Bad", "content", id=f"bad_{kind}", kind=kind, arguments={})
+                with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
+                    state.update_memory(default_entry.id, "Bad", "content", kind=kind, arguments={})
+
+            # An unknown kind is reported as such, not as a skill-only field error.
+            with self.assertRaisesRegex(ValueError, "unknown harness kind 'tool'"):
+                state.create_memory("Bad", "content", kind="tool", reference=PYTHON_REFERENCE)
+
+    def test_the_common_old_call_form_still_works_and_path_names_its_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            entry = state.create_memory("Durable fact", "Unchanged call form.")
+            self.assertEqual((entry.kind, entry.topic), ("memory", "general"))
+
+            with self.assertRaisesRegex(TypeError, "path was renamed to topic"):
+                state.create_memory("Grouped", "content", id="grouped", **{"path": "repo/testing"})
+
+    def test_removed_per_kind_wrappers_name_their_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            for name, replacement in (
+                ("update_skill", "update_memory(..., kind='skill')"),
+                ("delete_prompt_note", "delete_memory(..., kind='prompt')"),
+                ("create_subagent", "create_memory(..., kind='subagent')"),
+            ):
+                with self.assertRaises(AttributeError) as caught:
+                    getattr(state, name)
+                self.assertEqual(
+                    str(caught.exception), f"{name} was removed; use rlm.harness.{replacement}"
+                )
+
+    def test_entries_that_store_the_grouping_as_path_load_and_resave_as_topic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "entries": {
+                            "memory": {
+                                "legacy": {
+                                    "id": "legacy",
+                                    "kind": "memory",
+                                    "title": "Legacy",
+                                    "content": "Stored with the older field name.",
+                                    "path": "repo/testing",
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state = HarnessState(state_path)
+            self.assertEqual(state.get("memory", "legacy").topic, "repo/testing")
+
+            state.update_memory("legacy", "Legacy", "Resaved by the current writer.")
+            saved = json.loads(state_path.read_text(encoding="utf-8"))["entries"]["memory"]["legacy"]
+            self.assertEqual(saved["topic"], "repo/testing")
+            # The mirror keeps a pre-topic writer from resaving the entry ungrouped.
+            self.assertEqual(saved["path"], "repo/testing")
+
+    def test_grouping_survives_a_writer_that_only_knows_the_path_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            HarnessState(state_path).create_memory("Grouped", "content", id="grouped", topic="repo/testing")
+
+            # A pre-topic build rewrites the file and drops fields it does not know.
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            entry = saved["entries"]["memory"]["grouped"]
+            saved["entries"]["memory"]["grouped"] = {key: value for key, value in entry.items() if key != "topic"}
+            state_path.write_text(json.dumps(saved), encoding="utf-8")
+
+            self.assertEqual(HarnessState(state_path).get("memory", "grouped").topic, "repo/testing")
+
+    def test_delete_and_update_name_the_kind_an_id_actually_has(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Policy note", "content", id="cadence", kind="prompt")
+
+            for mutate in (
+                lambda: state.delete_memory("cadence"),
+                lambda: state.update_memory("cadence", "Policy note", "new content"),
+            ):
+                with self.assertRaisesRegex(ValueError, "entry 'cadence' is kind='prompt'; pass kind='prompt'"):
+                    mutate()
+
+            self.assertIsNotNone(state.get("prompt", "cadence"))
+            # A plain miss still reports absence rather than a mismatch.
+            self.assertFalse(state.delete_memory("absent"))
 
     def test_persists_entries_and_refinements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -92,21 +202,23 @@ class HarnessStateTest(unittest.TestCase):
             memory = state.create_memory(
                 "Prefer focused patches",
                 "Small harness updates are easier to validate than broad rewrites.",
-                path="engineering",
+                topic="engineering",
             )
-            skill = state.create_skill(
+            skill = state.create_memory(
                 "Check failures first",
                 "Inspect current failure evidence before editing code.",
                 id="failure_first",
                 reference=PYTHON_REFERENCE,
                 arguments={"failure_log": {"type": "string", "description": "Current failure evidence."}},
+                kind="skill",
             )
-            subagent = state.create_subagent(
+            subagent = state.create_memory(
                 "Reviewer",
                 "Review the proposed patch for regressions and missing tests.",
                 metadata={"max_turns": 3},
+                kind="subagent",
             )
-            state.create_prompt_note("Refinement cadence", "Refine only after repeated evidence.")
+            state.create_memory("Refinement cadence", "Refine only after repeated evidence.", kind="prompt")
             event = state.record_refinement(
                 "skill failed twice",
                 ["updated failure_first skill", "added reviewer subagent"],
@@ -132,6 +244,7 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("receiver_role='parent'", overview)
             self.assertIn("await rlm.list_subagents()", overview)
             self.assertIn("receiver_role='child'", overview)
+            self.assertIn("(engineering, v1)", overview)
             self.assertIn("refinements: 1", reloaded.overview())
 
     def test_save_failure_preserves_previous_state_on_disk(self) -> None:
@@ -278,7 +391,7 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(state.get("memory", "known").content, "Loaded despite extra keys.")
             self.assertEqual(state.get("memory", "known").id, "known")
             self.assertEqual(state.get("memory", "known").kind, "memory")
-            self.assertEqual(state.get("memory", "known").path, "general")
+            self.assertEqual(state.get("memory", "known").topic, "general")
             self.assertEqual(state.get("memory", "known").source, "agent")
             self.assertIsNone(state.get("memory", "mismatched"))
             self.assertEqual(state.get("memory", "known").version, 2)
@@ -296,7 +409,7 @@ class HarnessStateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
 
-            created = state.create_skill(
+            created = state.create_memory(
                 "Edit file",
                 "Apply a targeted edit.",
                 id="edit_file",
@@ -311,8 +424,9 @@ class HarnessStateTest(unittest.TestCase):
                     "find": {"type": "string", "required": True},
                     "replace": {"type": "string", "required": True},
                 },
+                kind="skill",
             )
-            updated = state.update_skill(
+            updated = state.update_memory(
                 "edit_file",
                 "Edit file",
                 "Apply a targeted edit after reading context.",
@@ -328,6 +442,7 @@ class HarnessStateTest(unittest.TestCase):
                     "replace": {"type": "string", "required": True},
                     "validate": {"type": "boolean", "default": True},
                 },
+                kind="skill",
             )
             reloaded = HarnessState(state.file_path)
 
@@ -344,22 +459,24 @@ class HarnessStateTest(unittest.TestCase):
             state = HarnessState(Path(temp_dir) / "harness_state.json")
 
             with self.assertRaisesRegex(ValueError, "Python reference"):
-                state.create_skill("No reference", "missing", arguments={})
+                state.create_memory("No reference", "missing", arguments={}, kind="skill")
             with self.assertRaisesRegex(ValueError, "reference.type must be 'python'"):
-                state.create_skill(
+                state.create_memory(
                     "Shell reference",
                     "bad",
                     reference={"type": "shell", "command": "edit"},
                     arguments={},
+                    kind="skill",
                 )
             with self.assertRaisesRegex(ValueError, "Python import"):
-                state.create_skill("No import", "bad", reference={"type": "python", "callable": "run"}, arguments={})
+                state.create_memory("No import", "bad", reference={"type": "python", "callable": "run"}, arguments={}, kind="skill")
             with self.assertRaisesRegex(ValueError, "callable or call_pattern"):
-                state.create_skill(
+                state.create_memory(
                     "No callable",
                     "bad",
                     reference={"type": "python", "import": "agent_skills.bad"},
                     arguments={},
+                    kind="skill",
                 )
 
     def test_load_tolerates_corrupt_or_non_object_state(self) -> None:
@@ -379,54 +496,58 @@ class HarnessStateTest(unittest.TestCase):
     def test_update_skill_preserves_omitted_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
-            state.create_skill(
+            state.create_memory(
                 "Edit file",
                 "Apply an edit.",
                 id="edit_file",
                 reference=PYTHON_REFERENCE,
                 arguments={"path": {"type": "string", "required": True}},
+                kind="skill",
             )
 
             # Updating only title/content (arguments omitted) must keep the contract.
-            state.update_skill("edit_file", "Edit file", "Apply an edit carefully.", reference=PYTHON_REFERENCE)
+            state.update_memory("edit_file", "Edit file", "Apply an edit carefully.", reference=PYTHON_REFERENCE, kind="skill")
             self.assertEqual(state.get("skill", "edit_file").arguments, {"path": {"type": "string", "required": True}})
 
             # An explicit empty dict still clears it.
-            state.update_skill("edit_file", "Edit file", "Now argument-free.", reference=PYTHON_REFERENCE, arguments={})
+            state.update_memory(
+                "edit_file", "Edit file", "Now argument-free.", reference=PYTHON_REFERENCE, arguments={}, kind="skill"
+            )
             self.assertEqual(state.get("skill", "edit_file").arguments, {})
 
     def test_update_skill_without_reference_preserves_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
-            state.create_skill(
+            state.create_memory(
                 "Edit file",
                 "Apply an edit.",
                 id="edit_file",
                 reference=PYTHON_REFERENCE,
                 arguments={"path": {"type": "string", "required": True}},
+                kind="skill",
             )
 
             # A title/content-only update must not require re-sending the reference,
             # and must preserve the existing reference and arguments.
-            updated = state.update_skill("edit_file", "Edit file", "Apply an edit carefully.")
+            updated = state.update_memory("edit_file", "Edit file", "Apply an edit carefully.", kind="skill")
 
             self.assertEqual(updated.version, 2)
             self.assertEqual(updated.reference, PYTHON_REFERENCE)
             self.assertEqual(updated.arguments, {"path": {"type": "string", "required": True}})
             self.assertEqual(updated.content, "Apply an edit carefully.")
 
-    def test_update_preserves_omitted_path(self) -> None:
+    def test_update_preserves_omitted_topic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
-            state.create_memory("Grouped", "content", id="grouped", path="repo/testing")
+            state.create_memory("Grouped", "content", id="grouped", topic="repo/testing")
 
-            # Updating without a path keeps the custom grouping path.
+            # Updating without a topic keeps the custom grouping topic.
             state.update_memory("grouped", "Grouped", "new content")
-            self.assertEqual(state.get("memory", "grouped").path, "repo/testing")
+            self.assertEqual(state.get("memory", "grouped").topic, "repo/testing")
 
-            # An explicit path still moves it.
-            state.update_memory("grouped", "Grouped", "newer", path="repo/other")
-            self.assertEqual(state.get("memory", "grouped").path, "repo/other")
+            # An explicit topic still moves it.
+            state.update_memory("grouped", "Grouped", "newer", topic="repo/other")
+            self.assertEqual(state.get("memory", "grouped").topic, "repo/other")
 
     def test_in_memory_state_never_touches_disk(self) -> None:
         previous = os.environ.get("RLM_HARNESS_STATE_DIR")
@@ -552,13 +673,13 @@ class HarnessStateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
 
-            first = state.create_skill("Triage", "old", id="triage", reference=PYTHON_REFERENCE, arguments={})
+            first = state.create_memory("Triage", "old", id="triage", reference=PYTHON_REFERENCE, arguments={}, kind="skill")
             with self.assertRaisesRegex(ValueError, "already exists"):
-                state.create_skill("Triage", "duplicate", id="triage", reference=PYTHON_REFERENCE, arguments={})
+                state.create_memory("Triage", "duplicate", id="triage", reference=PYTHON_REFERENCE, arguments={}, kind="skill")
             with self.assertRaisesRegex(ValueError, "does not exist"):
-                state.update_skill("missing", "Missing", "missing", reference=PYTHON_REFERENCE, arguments={})
+                state.update_memory("missing", "Missing", "missing", reference=PYTHON_REFERENCE, arguments={}, kind="skill")
 
-            second = state.update_skill("triage", "Triage", "new", reference=PYTHON_REFERENCE, arguments={})
+            second = state.update_memory("triage", "Triage", "new", reference=PYTHON_REFERENCE, arguments={}, kind="skill")
 
             self.assertEqual(first.id, second.id)
             self.assertEqual(second.content, "new")
@@ -1023,7 +1144,7 @@ class HarnessStateTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown harness kind"):
                 state.get("tool", "tool")
             with self.assertRaisesRegex(ValueError, "unknown harness kind"):
-                state.delete("tool", "tool")
+                state.delete_memory("tool", kind="tool")
             with self.assertRaisesRegex(ValueError, "unknown harness kind"):
                 state.list("tool")
 

@@ -3404,9 +3404,7 @@ export class AgentDaemon {
 			...(entry.repliedSinceTask !== undefined ? { repliedSinceTask: entry.repliedSinceTask } : {}),
 			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
 			...(entry.rlmChildId ? { rlmChildId: entry.rlmChildId } : {}),
-			...(entry.firstMessage
-				? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) }
-				: {}),
+			...(entry.firstMessage ? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) } : {}),
 		};
 	}
 
@@ -3482,7 +3480,11 @@ export class AgentDaemon {
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 			...(latest
 				? {
-						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, AGENT_OBSERVE_PREVIEW_MAX_CHARS),
+						latestMessage: createAgentObserveMessagePreview(
+							latest,
+							messages.length - 1,
+							AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+						),
 					}
 				: {}),
 		};

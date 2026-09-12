@@ -19,7 +19,7 @@ function entry(overrides: Partial<HarnessEntry> = {}): HarnessEntry {
 		kind: "prompt",
 		title: "Rhyme response guidance",
 		content: "Make conversational responses rhyme.",
-		path: "prompts/rhyme-response-guidance.md",
+		topic: "prompts/rhyme-response-guidance.md",
 		scope: "local",
 		reference: {},
 		arguments: {},
@@ -46,7 +46,7 @@ function result(): RefinementResult {
 				id: after.id,
 				title: after.title,
 				content: after.content,
-				path: after.path,
+				topic: after.topic,
 				after,
 				applied: true,
 			},
@@ -90,7 +90,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 		const expanded = rendered(component);
 		expect(expanded).toContain("Created local prompt `rhyme-response-guidance`");
 		expect(expanded).toContain('"content": "Make conversational responses rhyme."');
-		expect(expanded).toContain('"path": "prompts/rhyme-response-guidance.md"');
+		expect(expanded).toContain('"topic": "prompts/rhyme-response-guidance.md"');
 	});
 
 	test("truncates the collapsed summary so the line never wraps", () => {
