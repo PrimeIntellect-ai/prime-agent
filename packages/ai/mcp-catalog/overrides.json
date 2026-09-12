@@ -258,7 +258,7 @@
 		"openai-plugins/shopify/shopify": {
 			"setup": "ready",
 			"note": "placeholder-only upstream OAuth blocks cleared: unknown is not proof of a restriction; connect attempts surface real errors honestly",
-			"metadataNote": "no public OAuth metadata was served for this endpoint during the audit window"
+			"metadataNote": "the origin-level protected-resource document and authorization-server metadata are served; no dynamic client registration is advertised, so readiness stays unknown and connect attempts surface real errors"
 		},
 		"openai-plugins/gmail/gmail": {
 			"requirement": "registered-client",

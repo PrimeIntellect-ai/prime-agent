@@ -110,8 +110,10 @@ export interface AuditResult {
 	protectedResource: {
 		attempts: PrmAttempt[];
 		engineVisible: "available" | "unavailable";
-		/** The attempt the current engine runtime follows (header pointer > pathful well-known). */
+		/** The attempt the current engine runtime follows (header pointer, else pathful well-known, else the origin-level root well-known). */
 		engineSelectedSourceUrl?: string;
+		/** Why the engine's PRM discovery fails closed, when it does (mirrors oauth.ts semantics). */
+		selectionNote?: string;
 	};
 	authorizationServer: {
 		issuer?: string;
@@ -127,6 +129,28 @@ export function protectedResourceUrl(endpoint: string): string {
 	const url = new URL(endpoint);
 	const resourcePath = url.pathname === "/" ? "" : url.pathname;
 	return `${url.origin}/.well-known/oauth-protected-resource${resourcePath}${url.search}`;
+}
+
+/** The engine's canonicalResource rule: bare origins collapse, paths and searches stay. */
+export function canonicalResource(url: string): string {
+	const parsed = new URL(url);
+	if (parsed.pathname === "/" && !parsed.search) return parsed.origin;
+	return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+}
+
+/**
+ * The engine's audience rule (component comparison): a protected-resource
+ * document's resource must match the exact canonical endpoint, or be the
+ * endpoint origin itself (root path, no search, same origin).
+ */
+export function audienceMatchesEngineRule(resource: string | undefined, endpoint: string): boolean {
+	if (!resource) return false;
+	const parsedResource = new URL(resource);
+	const parsedEndpoint = new URL(endpoint);
+	const sameOrigin = parsedResource.origin === parsedEndpoint.origin;
+	const originLevel =
+		sameOrigin && (parsedResource.pathname === "/" || parsedResource.pathname === "") && !parsedResource.search;
+	return originLevel || resource === canonicalResource(endpoint);
 }
 
 /** Authorization-server metadata candidates (mirrors oauth.ts authorizationServerMetadataUrls). */
@@ -372,25 +396,95 @@ async function probeEndpoint(endpoint: string): Promise<AuditResult["probe"]> {
 	return result;
 }
 
+/**
+ * Mirrors the engine's tryProtectedResourceMetadata selection exactly:
+ * - a WWW-Authenticate resource_metadata pointer is followed alone — any
+ *   failure (fetch, 4xx/5xx, non-JSON, missing resource, audience mismatch,
+ *   missing authorization_servers) FAILS CLOSED, no well-known fall-through;
+ * - absent a pointer, the pathful well-known is tried first, then the
+ *   origin-level root well-known (SDK parity: a 4xx at one location is not
+ *   proof the other is absent); non-4xx failures and invalid documents fail
+ *   closed instead of falling through.
+ * A candidate is selectable only when it serves a valid document whose
+ * resource matches the endpoint audience (component comparison) and whose
+ * authorization_servers is non-empty — exactly the engine's resourceMetadata
+ * validation.
+ */
+function engineSelectProtectedResource(
+	attempts: PrmAttempt[],
+	endpoint: string,
+	hasPath: boolean,
+	hasHeader: boolean,
+): PrmAttempt | undefined {
+	const attemptByKind = (kind: PrmAttempt["kind"]) => attempts.find((attempt) => attempt.kind === kind);
+	const valid = (attempt: PrmAttempt): boolean =>
+		attempt.status === "available" &&
+		audienceMatchesEngineRule(attempt.evidence?.resource, endpoint) &&
+		(attempt.evidence?.authorizationServers?.length ?? 0) > 0;
+	if (hasHeader) {
+		const header = attemptByKind("header");
+		return header && valid(header) ? header : undefined;
+	}
+	const enginePath: PrmAttempt["kind"][] = hasPath ? ["pathful", "origin"] : ["pathful"];
+	for (const kind of enginePath) {
+		const attempt = attemptByKind(kind);
+		if (!attempt) continue;
+		if (valid(attempt)) return attempt;
+		const is4xx = attempt.httpStatus !== undefined && attempt.httpStatus >= 400 && attempt.httpStatus < 500;
+		if (!is4xx) return undefined;
+	}
+	return undefined;
+}
+
+/** Honest, bounded reason for a fail-closed PRM discovery (mirrors oauth.ts). */
+function engineSelectionNote(
+	attempts: PrmAttempt[],
+	endpoint: string,
+	hasPath: boolean,
+	hasHeader: boolean,
+): string {
+	const attemptByKind = (kind: PrmAttempt["kind"]) => attempts.find((attempt) => attempt.kind === kind);
+	const served = (attempt: PrmAttempt | undefined): boolean => !!attempt && attempt.status === "available";
+	if (hasHeader) {
+		const header = attemptByKind("header");
+		return served(header)
+			? "the header-pointed document fails the engine's protected-resource validation; PRM discovery fails closed with no well-known fall-through"
+			: "the WWW-Authenticate resource_metadata pointer could not be fetched; PRM discovery fails closed with no well-known fall-through";
+	}
+	const pathful = attemptByKind("pathful");
+	const origin = attemptByKind("origin");
+	if (served(pathful)) {
+		return "the pathful protected-resource document fails the engine's audience/structure validation; PRM discovery fails closed before the origin-level location";
+	}
+	if (served(origin)) {
+		return "the origin-level protected-resource document fails the engine's audience/structure validation; PRM discovery fails closed";
+	}
+	return hasPath
+		? "no valid protected-resource document at the pathful or origin-level well-known locations"
+		: "no valid protected-resource document at the well-known location";
+}
+
 async function auditEndpoint(server: string, endpoint: string): Promise<AuditResult> {
 	const probe = await probeEndpoint(endpoint);
 	// Metadata-supplied destinations (header hint, PRM authorization_servers) are
 	// only followed when they pass the same https + literal-public + DNS checks.
 	const endpointUrl = new URL(endpoint);
 	const origin = endpointUrl.origin;
-	const pathSuffix = endpointUrl.pathname === "/" ? "" : endpointUrl.pathname;
+	const hasPath = endpointUrl.pathname !== "/" && endpointUrl.pathname !== "";
+	const headerUrl =
+		probe.resourceMetadataHeader && isFetchableUrl(probe.resourceMetadataHeader)
+			? probe.resourceMetadataHeader
+			: undefined;
+	const pathfulUrl = protectedResourceUrl(endpoint);
+	const originUrl = `${origin}/.well-known/oauth-protected-resource`;
+	// Evidence locations are all recorded (which body serves where), while the
+	// selection mirrors the engine runtime exactly (fail-closed rules above).
 	const candidates: Array<{ url: string; kind: "header" | "pathful" | "origin" }> = [];
-	if (probe.resourceMetadataHeader && isFetchableUrl(probe.resourceMetadataHeader)) {
-		candidates.push({ url: probe.resourceMetadataHeader, kind: "header" });
-	}
-	candidates.push({
-		url: `${origin}/.well-known/oauth-protected-resource${pathSuffix}${endpointUrl.search}`,
-		kind: "pathful",
-	});
-	candidates.push({ url: `${origin}/.well-known/oauth-protected-resource`, kind: "origin" });
+	if (headerUrl) candidates.push({ url: headerUrl, kind: "header" });
+	candidates.push({ url: pathfulUrl, kind: "pathful" });
+	if (hasPath) candidates.push({ url: originUrl, kind: "origin" });
 	const attempts: PrmAttempt[] = [];
 	const seen = new Set<string>();
-	let selected: PrmAttempt | undefined;
 	for (const candidate of candidates) {
 		if (seen.has(candidate.url)) continue;
 		seen.add(candidate.url);
@@ -406,18 +500,12 @@ async function auditEndpoint(server: string, endpoint: string): Promise<AuditRes
 		};
 		if (evidence?.resource !== undefined) attempt.audienceMatches = evidence.resource === endpoint;
 		attempts.push(attempt);
-		// Engine-mirror selection: the runtime follows the header pointer, else the
-		// pathful well-known. Origin-level bodies are evidence only — but when the
-		// header pointer TARGETS the origin-level location, that attempt is still
-		// the engine path (Slack); the exact-match rule then decides coherence.
-		if (!selected && attempt.status === "available" && attempt.kind !== "origin") {
-			selected = attempt;
-		}
 	}
+	const selected = engineSelectProtectedResource(attempts, endpoint, hasPath, headerUrl !== undefined);
 	const protectedResource: AuditResult["protectedResource"] = {
 		attempts,
 		engineVisible: selected ? "available" : "unavailable",
-		...(selected ? { engineSelectedSourceUrl: selected.sourceUrl } : {}),
+		...(selected ? { engineSelectedSourceUrl: selected.sourceUrl } : { selectionNote: engineSelectionNote(attempts, endpoint, hasPath, headerUrl !== undefined) }),
 	};
 
 	const issuer =

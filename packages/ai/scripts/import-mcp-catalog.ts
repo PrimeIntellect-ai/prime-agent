@@ -240,6 +240,7 @@ export interface AuditResult {
 		attempts: Array<{ sourceUrl: string; kind: string; status: string; audienceMatches?: boolean; evidence?: AuditPrmEvidence }>;
 		engineVisible: "available" | "unavailable";
 		engineSelectedSourceUrl?: string;
+		selectionNote?: string;
 	};
 	authorizationServer: { issuer?: string; sourceUrls: string[]; status: "available" | "unavailable"; evidence?: AuditAsEvidence };
 }
@@ -643,7 +644,14 @@ function evidenceSupportsStandardOauth(result: AuditResult): boolean {
 	// else fails closed — e.g. a resource that keeps the path but drops the
 	// query string never matches (LogRocket), and DCR-less providers never
 	// become oauth-ready regardless (Slack, HubSpot).
-	return !audienceMismatched(result);
+	if (result.protectedResource.engineVisible === "available") return !audienceMismatched(result);
+	// A served-but-invalid document makes the engine throw with NO origin-AS
+	// fallback (fail closed) — never oauth-ready.
+	if (servedButFailClosed(result)) return false;
+	// No valid PRM document anywhere: the engine falls back to origin-level
+	// authorization-server discovery, so the captured AS evidence (issuer =
+	// endpoint origin, mirroring the same fallback) decides.
+	return true;
 }
 
 /** The engine's canonicalResource rule: bare origins collapse, paths and searches stay. */
@@ -668,8 +676,20 @@ function audienceMismatched(result: AuditResult): boolean {
 	return !audienceMatches(selected.evidence.resource, result.endpoint);
 }
 
+/**
+ * The script's engine-mirror selection fail-closes when a served document
+ * misses the audience or structure validation; surface that reason honestly.
+ */
+function servedButFailClosed(result: AuditResult): boolean {
+	return (
+		result.protectedResource.engineVisible === "unavailable" &&
+		result.protectedResource.attempts.some((attempt) => attempt.status === "available")
+	);
+}
+
 function metadataNote(result: AuditResult, overrideNote?: string): string | undefined {
 	if (overrideNote) return overrideNote;
+	if (result.protectedResource.selectionNote) return result.protectedResource.selectionNote;
 	if (audienceMismatched(result)) {
 		return "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry";
 	}

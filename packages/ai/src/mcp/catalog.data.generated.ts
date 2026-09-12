@@ -33,8 +33,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 		"readinessUserSetup": 53,
 		"readinessPrimeRestricted": 5,
 		"readinessUnknown": 10,
-		"metadataAvailable": 94,
-		"metadataUnavailable": 9
+		"metadataAvailable": 97,
+		"metadataUnavailable": 6
 	},
 	"entries": [
 		{
@@ -110,7 +110,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://adobe-creativity.adobe.io/.well-known/oauth-authorization-server",
 						"https://adobe-creativity.adobe.io/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
 				}
 			},
 			"setup": {
@@ -1461,7 +1462,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-authorization-server",
 						"https://connect.aidevops.us-east-1.api.aws/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
 				}
 			},
 			"setup": {
@@ -2761,7 +2763,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-authorization-server",
 						"https://mediaflows.mcp.cloudinary.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
 				}
 			},
 			"setup": {
@@ -2969,20 +2972,27 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"strategy": "unknown",
 				"clientRegistration": "unknown",
 				"metadata": {
-					"status": "unavailable",
+					"status": "available",
+					"authorizationServer": "https://api.codspeed.io",
+					"resource": "https://mcp.codspeed.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"none"
+					],
 					"sourceUrls": [
 						"https://mcp.codspeed.io/mcp",
 						"https://mcp.codspeed.io/.well-known/oauth-protected-resource/mcp",
 						"https://mcp.codspeed.io/.well-known/oauth-protected-resource",
-						"https://mcp.codspeed.io/.well-known/oauth-authorization-server",
-						"https://mcp.codspeed.io/.well-known/openid-configuration"
+						"https://api.codspeed.io/.well-known/oauth-authorization-server",
+						"https://api.codspeed.io/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3037,12 +3047,13 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.confidence.dev/.well-known/oauth-authorization-server",
 						"https://mcp.confidence.dev/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the origin-level protected-resource document fails the engine's audience/structure validation; PRM discovery fails closed"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "oauth-ready"
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3101,12 +3112,13 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.confidence.dev/.well-known/oauth-authorization-server",
 						"https://mcp.confidence.dev/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the origin-level protected-resource document fails the engine's audience/structure validation; PRM discovery fails closed"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "oauth-ready"
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5242,22 +5254,29 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"clientRegistration": "unknown",
 				"metadata": {
 					"status": "available",
-					"authorizationServer": "https://mcp.hunter.io",
+					"authorizationServer": "https://hunter.io",
+					"resource": "https://mcp.hunter.io",
 					"pkceS256": true,
 					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
 					"authorizationServerScopes": [
 						"read",
 						"write"
 					],
 					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
 						"none"
 					],
 					"sourceUrls": [
 						"https://mcp.hunter.io/mcp",
 						"https://mcp.hunter.io/.well-known/oauth-protected-resource/mcp",
 						"https://mcp.hunter.io/.well-known/oauth-protected-resource",
-						"https://mcp.hunter.io/.well-known/oauth-authorization-server",
-						"https://mcp.hunter.io/.well-known/openid-configuration"
+						"https://hunter.io/.well-known/oauth-authorization-server",
+						"https://hunter.io/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12"
 				}
@@ -5310,7 +5329,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.intercom.com/.well-known/oauth-authorization-server",
 						"https://mcp.intercom.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
 				}
 			},
 			"setup": {
@@ -5721,7 +5741,6 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"metadata": {
 					"status": "available",
 					"authorizationServer": "https://mcp.logrocket.com",
-					"resource": "https://mcp.logrocket.com/mcp",
 					"pkceS256": true,
 					"dynamicClientRegistration": true,
 					"clientIdMetadataDocument": true,
@@ -5739,7 +5758,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.logrocket.com/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12",
-					"note": "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry"
+					"note": "the header-pointed document fails the engine's protected-resource validation; PRM discovery fails closed with no well-known fall-through"
 				}
 			},
 			"setup": {
@@ -5939,7 +5958,6 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"sourceUrls": [
 						"https://mcp.lovable.dev/?src=cc-plugin",
 						"https://mcp.lovable.dev/.well-known/oauth-protected-resource?src=cc-plugin",
-						"https://mcp.lovable.dev/.well-known/oauth-protected-resource",
 						"https://lovable.dev/.well-known/oauth-authorization-server/oauth",
 						"https://lovable.dev/oauth/.well-known/openid-configuration"
 					],
@@ -6200,7 +6218,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp-docs.mapbox.com/.well-known/oauth-authorization-server",
 						"https://mcp-docs.mapbox.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
 				}
 			},
 			"setup": {
@@ -7540,20 +7559,34 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"strategy": "unknown",
 				"clientRegistration": "unknown",
 				"metadata": {
-					"status": "unavailable",
+					"status": "available",
+					"authorizationServer": "https://api.resend.com",
+					"resource": "https://mcp.resend.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"authorizationServerScopes": [
+						"full_access",
+						"emails:send"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
 					"sourceUrls": [
 						"https://mcp.resend.com/mcp",
 						"https://mcp.resend.com/.well-known/oauth-protected-resource/mcp",
 						"https://mcp.resend.com/.well-known/oauth-protected-resource",
-						"https://mcp.resend.com/.well-known/oauth-authorization-server",
-						"https://mcp.resend.com/.well-known/openid-configuration"
+						"https://api.resend.com/.well-known/oauth-authorization-server",
+						"https://api.resend.com/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
 				"status": "ready",
-				"readiness": "unknown"
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -7587,8 +7620,13 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"metadata": {
 					"status": "available",
 					"authorizationServer": "https://mcp.revenuecat.ai",
+					"resource": "https://mcp.revenuecat.ai/mcp",
 					"pkceS256": true,
 					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"*:*:read",
+						"*:*:read_write"
+					],
 					"authorizationServerScopes": [
 						"*:*:read",
 						"*:*:read_write"
@@ -8022,16 +8060,86 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"strategy": "oauth",
 				"clientRegistration": "unknown",
 				"metadata": {
-					"status": "unavailable",
+					"status": "available",
+					"authorizationServer": "https://setup.shopify.com/auth",
+					"resource": "https://setup.shopify.com/mcp",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"read_all_orders",
+						"read_analytics",
+						"read_apps",
+						"read_companies",
+						"read_legal_policies",
+						"read_reports",
+						"write_checkout_branding_settings",
+						"write_checkouts",
+						"write_collective.access",
+						"write_content",
+						"write_customers",
+						"write_digital_products_product",
+						"write_discounts",
+						"write_draft_orders",
+						"write_files",
+						"write_fulfillments",
+						"write_inventory",
+						"write_locales",
+						"write_locations",
+						"write_marketing_events",
+						"write_markets",
+						"write_merchant_managed_fulfillment_orders",
+						"write_metaobject_definitions",
+						"write_metaobjects",
+						"write_online_store_navigation",
+						"write_order_edits",
+						"write_orders",
+						"write_price_rules",
+						"write_products",
+						"write_publications"
+					],
+					"authorizationServerScopes": [
+						"read_all_orders",
+						"read_analytics",
+						"read_apps",
+						"read_companies",
+						"read_legal_policies",
+						"read_reports",
+						"write_checkout_branding_settings",
+						"write_checkouts",
+						"write_collective.access",
+						"write_content",
+						"write_customers",
+						"write_digital_products_product",
+						"write_discounts",
+						"write_draft_orders",
+						"write_files",
+						"write_fulfillments",
+						"write_inventory",
+						"write_locales",
+						"write_locations",
+						"write_marketing_events",
+						"write_markets",
+						"write_merchant_managed_fulfillment_orders",
+						"write_metaobject_definitions",
+						"write_metaobjects",
+						"write_online_store_navigation",
+						"write_order_edits",
+						"write_orders",
+						"write_price_rules",
+						"write_products",
+						"write_publications"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
 					"sourceUrls": [
 						"https://setup.shopify.com/mcp",
 						"https://setup.shopify.com/.well-known/oauth-protected-resource/mcp",
 						"https://setup.shopify.com/.well-known/oauth-protected-resource",
-						"https://setup.shopify.com/.well-known/oauth-authorization-server",
-						"https://setup.shopify.com/.well-known/openid-configuration"
+						"https://setup.shopify.com/.well-known/oauth-authorization-server/auth",
+						"https://setup.shopify.com/auth/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12",
-					"note": "no public OAuth metadata was served for this endpoint during the audit window"
+					"note": "the origin-level protected-resource document and authorization-server metadata are served; no dynamic client registration is advertised, so readiness stays unknown and connect attempts surface real errors"
 				}
 			},
 			"setup": {
@@ -8236,7 +8344,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.guide.sonatype.com/.well-known/oauth-authorization-server",
 						"https://mcp.guide.sonatype.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
 				}
 			},
 			"setup": {
@@ -8744,7 +8853,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://docs.synthflow.ai/.well-known/oauth-authorization-server",
 						"https://docs.synthflow.ai/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
 				}
 			},
 			"setup": {
@@ -8967,9 +9077,13 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"clientRegistration": "unknown",
 				"metadata": {
 					"status": "available",
-					"authorizationServer": "https://mcp.vanta.com",
+					"authorizationServer": "https://api.vanta.com/mcp",
+					"resource": "https://mcp.vanta.com",
 					"pkceS256": true,
 					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp-api.all:write"
+					],
 					"authorizationServerScopes": [
 						"mcp-api.all:write"
 					],
@@ -8980,8 +9094,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.vanta.com/mcp",
 						"https://mcp.vanta.com/.well-known/oauth-protected-resource/mcp",
 						"https://mcp.vanta.com/.well-known/oauth-protected-resource",
-						"https://mcp.vanta.com/.well-known/oauth-authorization-server",
-						"https://mcp.vanta.com/.well-known/openid-configuration"
+						"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+						"https://api.vanta.com/mcp/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12"
 				}
@@ -9033,9 +9147,13 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"clientRegistration": "unknown",
 				"metadata": {
 					"status": "available",
-					"authorizationServer": "https://mcp.aus.vanta.com",
+					"authorizationServer": "https://api.vanta.com/mcp",
+					"resource": "https://mcp.aus.vanta.com",
 					"pkceS256": true,
 					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp-api.all:write"
+					],
 					"authorizationServerScopes": [
 						"mcp-api.all:write"
 					],
@@ -9046,8 +9164,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.aus.vanta.com/mcp",
 						"https://mcp.aus.vanta.com/.well-known/oauth-protected-resource/mcp",
 						"https://mcp.aus.vanta.com/.well-known/oauth-protected-resource",
-						"https://mcp.aus.vanta.com/.well-known/oauth-authorization-server",
-						"https://mcp.aus.vanta.com/.well-known/openid-configuration"
+						"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+						"https://api.vanta.com/mcp/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12"
 				}
@@ -9098,9 +9216,13 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"clientRegistration": "unknown",
 				"metadata": {
 					"status": "available",
-					"authorizationServer": "https://mcp.eu.vanta.com",
+					"authorizationServer": "https://api.vanta.com/mcp",
+					"resource": "https://mcp.eu.vanta.com",
 					"pkceS256": true,
 					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp-api.all:write"
+					],
 					"authorizationServerScopes": [
 						"mcp-api.all:write"
 					],
@@ -9111,8 +9233,8 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.eu.vanta.com/mcp",
 						"https://mcp.eu.vanta.com/.well-known/oauth-protected-resource/mcp",
 						"https://mcp.eu.vanta.com/.well-known/oauth-protected-resource",
-						"https://mcp.eu.vanta.com/.well-known/oauth-authorization-server",
-						"https://mcp.eu.vanta.com/.well-known/openid-configuration"
+						"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+						"https://api.vanta.com/mcp/.well-known/openid-configuration"
 					],
 					"fetchedAt": "2026-09-12"
 				}
