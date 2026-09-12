@@ -3300,6 +3300,44 @@ describe("DaemonAgentConnection", () => {
 		await connection.dispose();
 	});
 
+	it.each(["catalog", "legacyCatalog", "available"] as const)(
+		"fetches fresh model state after a %s refresh invalidates the attach snapshot",
+		async (refresh) => {
+			const fakeClient = new FakeDaemonClient();
+			if (refresh === "catalog") fakeClient.serverCapabilities.add("model_catalog");
+			const model = getModel("xai", "grok-4.5");
+			const initialState = { ...createConnectionState("active-1", "session-current"), model };
+			fakeClient.attachResultFactory = (command) =>
+				createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, {
+					state: initialState,
+				});
+			const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+			try {
+				const subscriptionModel = { ...model, api: "openai-responses" as const };
+				const freshState = {
+					...initialState,
+					model: subscriptionModel,
+					scopedModels: [{ model: subscriptionModel }],
+					availableThinkingLevels: ["low", "medium", "high"] as AgentConnectionState["availableThinkingLevels"],
+				};
+				fakeClient.connectionStateFactory = () => freshState;
+				expect(await connection.getState()).toBe(initialState);
+				expect(fakeClient.requests.filter((request) => request.type === "get_connection_state")).toHaveLength(0);
+
+				if (refresh === "available") await connection.getAvailableModels();
+				else await connection.getModelCatalog();
+
+				expect(await connection.getState()).toBe(freshState);
+				expect(fakeClient.requests.slice(-2).map((request) => request.type)).toEqual([
+					refresh === "catalog" ? "get_model_catalog" : "get_available_models",
+					"get_connection_state",
+				]);
+			} finally {
+				await connection.dispose();
+			}
+		},
+	);
+
 	it("loads the full model catalog through the daemon protocol", async () => {
 		const fakeClient = new FakeDaemonClient();
 		fakeClient.serverCapabilities.add("model_catalog");

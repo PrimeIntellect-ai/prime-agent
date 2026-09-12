@@ -264,6 +264,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
 			};
 		}
+		if (model.provider === "xai") params.include = ["reasoning.encrypted_content"];
 	}
 
 	return params;

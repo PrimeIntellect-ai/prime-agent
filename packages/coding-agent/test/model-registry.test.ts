@@ -22,6 +22,7 @@ describe("ModelRegistry", () => {
 
 	afterEach(() => {
 		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
@@ -650,7 +651,8 @@ describe("ModelRegistry", () => {
 			expect(getModelsForProvider(registry, "openrouter")).toHaveLength(getModels("openrouter").length);
 		});
 
-		test("restores cached authorized deployment metadata without waiting for the network", async () => {
+		test("restores cached private metadata only for matching credentials and team", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
 			const privateRoute = {
 				id: "vendor/model:deployment",
 				display_name: "Private Deployment",
@@ -662,11 +664,12 @@ describe("ModelRegistry", () => {
 					supports_reasoning: false,
 				},
 			};
-			authStorage.set("prime-inference", {
-				type: "api_key",
+			const credential = {
+				type: "api_key" as const,
 				key: "prime-key",
 				primeTeam: { teamId: "research-team", name: "Research" },
-			});
+			};
+			authStorage.set("prime-inference", credential);
 			vi.stubGlobal(
 				"fetch",
 				vi.fn(
@@ -687,10 +690,33 @@ describe("ModelRegistry", () => {
 					throw new Error("offline");
 				}),
 			);
-			const restoredRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			vi.stubEnv("PI_OFFLINE", "1");
+			const restoredRegistry = ModelRegistry.create(AuthStorage.create(join(tempDir, "auth.json")), modelsJsonPath);
 			expect(
 				(await restoredRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
 			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
+
+			for (const changed of [
+				{ ...credential, key: "different-prime-key" },
+				{ ...credential, primeTeam: { teamId: "other-team", name: "Other" } },
+			]) {
+				authStorage.set("prime-inference", changed);
+				const changedRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+				expect((await changedRegistry.refreshAvailableModels()).some((model) => model.id === privateRoute.id)).toBe(
+					false,
+				);
+			}
+
+			authStorage.set("prime-inference", credential);
+			const cachePath = join(tempDir, "prime-inference-private-models.json");
+			const cache = JSON.parse(readFileSync(cachePath, "utf8"));
+			// Pre-HMAC SHA256("prime-key\0research-team") cache entries must miss safely on upgrade.
+			cache.fingerprint = "9ffd3740e055c8cc8923a1d2653c6d02a4a9c95e6ab151bc179aeaa94dd046b4";
+			writeFileSync(cachePath, JSON.stringify(cache));
+			const legacyRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect((await legacyRegistry.refreshAvailableModels()).some((model) => model.id === privateRoute.id)).toBe(
+				false,
+			);
 		});
 	});
 

@@ -1,9 +1,12 @@
+import { xaiOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../src/core/provider-display-names.js";
 import {
 	ConfigurationMenuComponent,
+	type ConfigurationMenuOptions,
 	type ConfigurationMenuTab,
 } from "../src/modes/interactive/components/configuration-menu.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -21,6 +24,7 @@ describe("ConfigurationMenuComponent", () => {
 	async function createMenu(
 		options: {
 			initialTab?: ConfigurationMenuTab;
+			providerOptions?: ConfigurationMenuOptions["providerOptions"];
 			getRows?: () => number;
 			requestRender?: () => void;
 			onSelectProvider?: () => void;
@@ -46,7 +50,7 @@ describe("ConfigurationMenuComponent", () => {
 			initialTab: options.initialTab ?? "providers",
 			tui: createFakeTui(),
 			authStorage: harness.session.modelRegistry.authStorage,
-			providerOptions: [
+			providerOptions: options.providerOptions ?? [
 				{ id: "anthropic", name: "Anthropic", authType: "oauth" },
 				{
 					id: "serper",
@@ -82,6 +86,26 @@ describe("ConfigurationMenuComponent", () => {
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
+	});
+
+	it.each(["grok", "xai"])("finds both xAI auth entries when searching %s", async (query) => {
+		const selectProvider = vi.fn();
+		const menu = await createMenu({
+			providerOptions: [
+				{ id: xaiOAuthProvider.id, name: xaiOAuthProvider.name, authType: "oauth" },
+				{ id: "xai", name: BUILT_IN_PROVIDER_DISPLAY_NAMES.xai, authType: "api_key" },
+			],
+			onSelectProvider: selectProvider,
+		});
+		menu.handleInput(query);
+		expect(stripAnsi(menu.render(120).join("\n")).match(/xAI \(Grok\)/g)).toHaveLength(2);
+		menu.handleInput("\r");
+		menu.handleInput("\x1b[B");
+		menu.handleInput("\r");
+		expect(selectProvider.mock.calls.map(([provider]) => [provider.id, provider.authType])).toEqual([
+			["xai", "oauth"],
+			["xai", "api_key"],
+		]);
 	});
 
 	it("renders one single-purpose picker per command without tab chrome", async () => {

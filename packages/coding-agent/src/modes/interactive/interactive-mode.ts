@@ -7726,8 +7726,26 @@ export class InteractiveMode {
 	}
 
 	private async refreshConnectionModelsAfterAuthChange(): Promise<void> {
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
 		this.invalidateConnectionModels();
 		await this.getConnectionAvailableModels();
+		const state = await connection.getState();
+		if (
+			this.agentConnection !== connection ||
+			this.connectionState?.sessionId !== sessionId ||
+			(sessionId !== undefined && state.sessionId !== sessionId)
+		) {
+			return;
+		}
+		this.patchConnectionState({
+			model: state.model,
+			scopedModels: state.scopedModels,
+			serviceTier: state.serviceTier,
+			availableThinkingLevels: state.availableThinkingLevels,
+		});
+		this.subagentSummaryLine.invalidate();
+		this.setupAutocompleteProvider();
 	}
 
 	private async getModelCandidates(): Promise<AgentConnectionModel[]> {

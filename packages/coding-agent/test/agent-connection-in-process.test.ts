@@ -103,7 +103,9 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 		goalState: emptyGoalState(),
 		modelRegistry: {
 			refreshModelCatalog: async () => ({ models: model ? [model] : [], configuredProviders: ["openai"] }),
+			refreshAvailableModels: async () => (model ? [model] : []),
 		},
+		refreshModelMetadata: vi.fn(),
 		scopedModels: [],
 		getActiveToolNames: () => ["ipython"],
 		getContextUsage: () => undefined,
@@ -208,6 +210,9 @@ describe("InProcessAgentConnection", () => {
 		expect(catalog.configuredProviders).toEqual(["openai"]);
 		expect(catalog.models).toHaveLength(1);
 		expect(catalog.models[0]).toMatchObject({ provider: "openai", id: "gpt-5.1" });
+		expect(session.session.refreshModelMetadata).toHaveBeenCalledOnce();
+		await connection.getAvailableModels();
+		expect(session.session.refreshModelMetadata).toHaveBeenCalledTimes(2);
 	});
 
 	it("exposes serializable tool metadata without local execution or renderer callbacks", async () => {
