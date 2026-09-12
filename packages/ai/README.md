@@ -1096,7 +1096,7 @@ const key = getEnvApiKey('openai');  // checks OPENAI_API_KEY
 
 ## OAuth Providers
 
-Several providers require OAuth authentication instead of static API keys:
+OAuth authentication is available for these providers and subscriptions:
 
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)

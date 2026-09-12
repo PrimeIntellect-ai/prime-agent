@@ -3104,6 +3104,7 @@ function createFakeConnectionSession(commandName: string): AgentSessionRuntime["
 			getAgentsFiles: () => ({ agentsFiles: [] }),
 		},
 		modelRegistry: { refreshModelCatalog: async () => ({ models: [], configuredProviders: [] }) },
+		refreshModelMetadata: vi.fn(),
 		sessionManager: {
 			getCwd: () => "/tmp/project",
 			getSessionDir: () => "/tmp/sessions",
@@ -3221,10 +3222,12 @@ describe("InteractiveMode session switch command catalog", () => {
 			if (operation === "switchSession") await connection.switchSession("/target/session.jsonl");
 			else if (operation === "newSession") await connection.newSession();
 			else await connection.fork("entry-1");
+			expect(fakeThis.showError).not.toHaveBeenCalled();
 			await interactiveHarness.renderCurrentSessionState();
 
 			expect(calls).toEqual(["reset", "catalog", "render", "reset", "render"]);
 			expect(getCommands).toHaveBeenCalledTimes(2); // initial catalog + one replacement refresh
+			expect(targetSession.refreshModelMetadata).toHaveBeenCalledOnce();
 		},
 	);
 

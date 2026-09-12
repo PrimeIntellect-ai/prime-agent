@@ -2,7 +2,11 @@ import { type AutocompleteProvider, setKeybindings, type TUI } from "@earendil-w
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
-import type { AgentConnectionModel, AgentConnectionModelCatalog } from "../../../src/modes/agent-connection/types.js";
+import type {
+	AgentConnectionModel,
+	AgentConnectionModelCatalog,
+	AgentConnectionState,
+} from "../../../src/modes/agent-connection/types.js";
 import { ModelSelectorComponent } from "../../../src/modes/interactive/components/model-selector.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
@@ -10,7 +14,14 @@ import { getModelArgumentCompletions } from "../../../src/modes/model-autocomple
 import { createHarness, type Harness } from "../harness.js";
 
 interface ConnectionAuthRefreshHarness {
-	agentConnection: { getModelCatalog(): Promise<AgentConnectionModelCatalog> };
+	agentConnection: {
+		getModelCatalog(): Promise<AgentConnectionModelCatalog>;
+		getState?(): Promise<Partial<AgentConnectionState>>;
+	};
+	connectionState?: Partial<AgentConnectionState>;
+	patchConnectionState?: (patch: Partial<AgentConnectionState>) => void;
+	subagentSummaryLine?: { invalidate(): void };
+	setupAutocompleteProvider?: () => void;
 	connectionModelCatalog: AgentConnectionModel[];
 	connectionConfiguredProviders: Set<string>;
 	connectionModelsFetchedAt: number;
@@ -123,7 +134,19 @@ describe("ENG-4575 model authentication", () => {
 		const model = { ...harness.getModel("base")!, provider: "openai" } as AgentConnectionModel;
 		const getModelCatalog = vi.fn(async () => ({ models: [model], configuredProviders: [] }));
 		const fakeThis = Object.create(InteractiveMode.prototype) as ConnectionAuthRefreshHarness;
-		fakeThis.agentConnection = { getModelCatalog };
+		const state: Partial<AgentConnectionState> = {
+			sessionId: harness.session.sessionId,
+			model,
+			scopedModels: [{ model }],
+			serviceTier: "default",
+			availableThinkingLevels: ["low", "medium", "high"],
+		};
+		const getState = vi.fn(async () => state);
+		fakeThis.agentConnection = { getModelCatalog, getState };
+		fakeThis.connectionState = { sessionId: state.sessionId };
+		fakeThis.patchConnectionState = vi.fn();
+		fakeThis.subagentSummaryLine = { invalidate: vi.fn() };
+		fakeThis.setupAutocompleteProvider = vi.fn();
 		fakeThis.connectionModelCatalog = [model];
 		fakeThis.connectionConfiguredProviders = new Set([model.provider]);
 		fakeThis.connectionModelsFetchedAt = Date.now();
@@ -133,6 +156,14 @@ describe("ENG-4575 model authentication", () => {
 		await fakeThis.refreshConnectionModelsAfterAuthChange();
 
 		expect(getModelCatalog).toHaveBeenCalledOnce();
+		expect(getState).toHaveBeenCalledOnce();
+		expect(getModelCatalog.mock.invocationCallOrder[0]).toBeLessThan(getState.mock.invocationCallOrder[0]);
+		expect(fakeThis.patchConnectionState).toHaveBeenCalledWith({
+			model,
+			scopedModels: state.scopedModels,
+			serviceTier: state.serviceTier,
+			availableThinkingLevels: state.availableThinkingLevels,
+		});
 		expect(fakeThis.connectionConfiguredProviders).toEqual(new Set());
 		expect(fakeThis.getAvailableConnectionModels()).toEqual([]);
 		expect(fakeThis.connectionModelCatalog).toEqual([model]);
