@@ -1,0 +1,1 @@
+- Added xAI subscription device-code authentication and Grok 4.5 Responses support while preserving API-key access.

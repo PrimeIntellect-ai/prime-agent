@@ -36,6 +36,7 @@ export interface OAuthSelectorOptions extends MenuViewportProvider {
 	title?: string;
 	subtitle?: string;
 	searchPlaceholder?: string;
+	showAuthMethods?: boolean;
 }
 
 export function compareAuthSelectorProviders(a: AuthSelectorProvider, b: AuthSelectorProvider): number {
@@ -85,6 +86,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		compactItemRows: 2,
 	});
 	private readonly viewport: MenuViewportProvider;
+	private readonly showAuthMethods: boolean;
 	private readonly getHeaderRows: () => number;
 
 	constructor(
@@ -102,6 +104,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.authStorage = authStorage;
 		this.getAuthStatus = getAuthStatus ?? ((providerId) => this.authStorage.getAuthStatus(providerId));
 		this.viewport = options;
+		this.showAuthMethods = options.showAuthMethods ?? false;
 		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => TAB_BAR_RESERVED_ROWS)) : () => 0;
 		this.allProviders = this.sortProviders(providers);
 		this.filteredProviders = this.allProviders;
@@ -294,8 +297,12 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 
 			this.listContainer.addChild(
 				new MenuRow({
-					primary: provider.name,
-					secondary: provider.authType === "oauth" ? "subscription" : "api key",
+					primary: this.showAuthMethods
+						? provider.authType === "oauth"
+							? "Use a subscription"
+							: "Use an API key"
+						: provider.name,
+					secondary: this.showAuthMethods ? undefined : provider.authType === "oauth" ? "subscription" : "api key",
 					meta: this.formatStatusIndicator(provider),
 					selected: isSelected,
 				}),

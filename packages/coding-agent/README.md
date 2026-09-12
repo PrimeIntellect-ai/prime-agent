@@ -80,6 +80,9 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
+- xAI Grok (eligible subscriptions)
+
+Use `/login xai` to choose **Use a subscription** or **Use an API key**. Model access depends on your xAI account entitlement. See [xAI setup](docs/providers.md#xai-grok).
 
 **API keys:**
 - Anthropic
@@ -145,7 +148,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 
 | Command | Description |
 |---------|-------------|
-| `/login`, `/logout` | OAuth authentication |
+| `/login [provider]`, `/logout` | Configure or remove subscription/API key authentication |
 | `/model` | Switch models |
 | `/effort` | Set reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |

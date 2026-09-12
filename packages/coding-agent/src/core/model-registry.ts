@@ -22,7 +22,7 @@ import {
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
-import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
+import { getXaiSubscriptionModel, registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { existsSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
@@ -270,6 +270,7 @@ export type ResolvedRequestAuth =
 			ok: true;
 			apiKey?: string;
 			headers?: Record<string, string>;
+			requestModel?: Model<Api>;
 	  }
 	| {
 			ok: false;
@@ -443,6 +444,7 @@ function isOfflineModeEnabled(): boolean {
  */
 export class ModelRegistry {
 	private models: Model<Api>[] = [];
+	private xaiModelSources = new WeakMap<Model<Api>, Model<Api>>();
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private staleProviderRequestAuthSources: Map<string, AuthSourceToken[]> = new Map();
 	private lastProviderAuthSourceTokens: Map<string, AuthSourceToken> = new Map();
@@ -794,7 +796,28 @@ export class ModelRegistry {
 	 * If models.json had errors, returns only built-in models.
 	 */
 	getAll(): Model<Api>[] {
-		return this.models;
+		return this.models.map((model) => this.getModelForCurrentAuth(model));
+	}
+
+	getModelForCurrentAuth(model: Model<Api>): Model<Api> {
+		if (model.provider !== "xai") return model;
+		const source = this.xaiModelSources.get(model) ?? model;
+		return this.isUsingXaiSubscription(source) ? (this.getXaiSubscriptionModel(source) ?? source) : source;
+	}
+
+	private getXaiSubscriptionModel(model: Model<Api>): Model<Api> | undefined {
+		const source = this.xaiModelSources.get(model) ?? model;
+		const subscription = getXaiSubscriptionModel(source);
+		if (subscription) this.xaiModelSources.set(subscription, source);
+		return subscription;
+	}
+
+	private isUsingXaiSubscription(model: Model<Api>): boolean {
+		return (
+			model.provider === "xai" &&
+			this.authStorage.get("xai")?.type === "oauth" &&
+			this.getProviderAuthStatus("xai").source === "stored"
+		);
 	}
 
 	/**
@@ -802,7 +825,8 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.models.filter((model) => {
+		return this.getAll().filter((model) => {
+			if (this.isUsingXaiSubscription(model) && !getXaiSubscriptionModel(model)) return false;
 			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
 				return false;
 			}
@@ -1063,9 +1087,10 @@ export class ModelRegistry {
 			availableModels.filter(isPrivatePrimeInferenceModel).map((model) => `${model.provider}/${model.id}`),
 		);
 		return {
-			models: this.models.filter(
+			models: this.getAll().filter(
 				(model) =>
-					!isPrivatePrimeInferenceModel(model) || availablePrivateModels.has(`${model.provider}/${model.id}`),
+					(!this.isUsingXaiSubscription(model) || getXaiSubscriptionModel(model) !== undefined) &&
+					(!isPrivatePrimeInferenceModel(model) || availablePrivateModels.has(`${model.provider}/${model.id}`)),
 			),
 			configuredProviders: [...new Set(availableModels.map((model) => model.provider))],
 		};
@@ -1073,6 +1098,11 @@ export class ModelRegistry {
 
 	/** `assumeAuthConfigured` validates an explicit stale-provider selection BEFORE the clear commits. */
 	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
+		if (this.isUsingXaiSubscription(model) && !getXaiSubscriptionModel(model)) {
+			throw new Error(
+				`Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login xai to configure an API key.`,
+			);
+		}
 		if (options?.assumeAuthConfigured) {
 			// Must be side-effect-free: a keyless refresh would drop the cached entitlements it needs.
 			return !isPrivatePrimeInferenceModel(model) || this.isAuthorizedPrivatePrimeInferenceModel(model);
@@ -1147,7 +1177,8 @@ export class ModelRegistry {
 	 * Find a model by provider and ID.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
-		return this.models.find((m) => m.provider === provider && m.id === modelId);
+		const model = this.models.find((m) => m.provider === provider && m.id === modelId);
+		return model ? this.getModelForCurrentAuth(model) : undefined;
 	}
 
 	/**
@@ -1430,7 +1461,7 @@ export class ModelRegistry {
 	/**
 	 * Get API key and request headers for a model.
 	 */
-	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
+	async getApiKeyAndHeaders(model: Model<Api>, requestHeaders?: Record<string, string>): Promise<ResolvedRequestAuth> {
 		try {
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const authStorageAuth = await this.authStorage.getApiKeyWithSourceToken(model.provider, {
@@ -1455,6 +1486,25 @@ export class ModelRegistry {
 			}
 			this.setLastProviderAuthSourceToken(model.provider, apiKey === undefined ? undefined : authSourceToken);
 
+			let requestModel: Model<Api> | undefined;
+			if (model.provider === "xai") {
+				if (!apiKey) {
+					return {
+						ok: false,
+						error: "No usable xAI credential. Use /login xai to sign in again or configure an API key.",
+					};
+				}
+				const configuredModel = this.xaiModelSources.get(model) ?? model;
+				const subscription = authStorageAuth.credentialType === "oauth" && authSourceToken?.source === "stored";
+				requestModel = subscription ? this.getXaiSubscriptionModel(configuredModel) : configuredModel;
+				if (!requestModel) {
+					return {
+						ok: false,
+						error: `Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login xai to configure an API key.`,
+					};
+				}
+			}
+
 			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
 			const authStorageHeaders = this.authStorage.getProviderHeaders(model.provider);
 			const modelHeaders = resolveHeadersOrThrow(
@@ -1474,10 +1524,26 @@ export class ModelRegistry {
 				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
 			}
 
+			if (requestHeaders) headers = { ...headers, ...requestHeaders };
+			if (
+				model.provider === "xai" &&
+				authStorageAuth.credentialType === "oauth" &&
+				authSourceToken?.source === "stored"
+			) {
+				for (const [name, value] of Object.entries(headers ?? {})) {
+					if (name.toLowerCase() === "authorization" && value !== `Bearer ${apiKey}`) {
+						return {
+							ok: false,
+							error: "Grok subscription cannot use a custom Authorization header. Remove the header or use /login xai to configure an API key.",
+						};
+					}
+				}
+			}
 			return {
 				ok: true,
 				apiKey,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
+				...(requestModel ? { requestModel } : {}),
 			};
 		} catch (error) {
 			return {
@@ -1565,6 +1631,7 @@ export class ModelRegistry {
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
 	isUsingOAuth(model: Model<Api>): boolean {
+		if (model.provider === "xai") return this.isUsingXaiSubscription(model);
 		const cred = this.authStorage.get(model.provider);
 		return cred?.type === "oauth";
 	}

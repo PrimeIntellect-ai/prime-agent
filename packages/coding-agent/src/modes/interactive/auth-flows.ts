@@ -106,6 +106,7 @@ export interface ProviderAuthFlowsHost {
 }
 
 export interface ProviderLoginOptions {
+	providerId?: string;
 	authType?: "oauth" | "api_key";
 	initialCategory?: AuthSelectorCategory;
 }
@@ -132,8 +133,14 @@ export class ProviderAuthFlows {
 	}
 
 	runLogin(options: ProviderLoginOptions = {}): Promise<AuthenticationResult> {
-		const { authType, initialCategory } = options;
-		const providerOptions = this.getLoginProviderOptions(authType);
+		const { authType, initialCategory, providerId } = options;
+		const providerOptions = this.getLoginProviderOptions(authType).filter(
+			(provider) => !providerId || provider.id === providerId,
+		);
+		if (providerId && providerOptions.length === 0) {
+			this.host.showError(`Unknown login provider: ${providerId}. Use /login to choose a provider.`);
+			return Promise.resolve({ status: "failed" });
+		}
 		if (providerOptions.length === 0) {
 			this.host.showStatus(
 				authType === "oauth"
@@ -164,7 +171,18 @@ export class ProviderAuthFlows {
 					resolve({ status: "cancelled" });
 				},
 				(providerId) => this.host.modelRegistry.getProviderAuthStatus(providerId),
-				{ getRows: () => this.host.ui.terminal.rows, initialCategory },
+				{
+					getRows: () => this.host.ui.terminal.rows,
+					initialCategory,
+					...(providerId
+						? {
+								title: `Login to ${providerOptions[0].name}`,
+								subtitle: "Choose an authentication method. Completing login replaces the saved credential.",
+								searchPlaceholder: "Search authentication methods",
+								showAuthMethods: true,
+							}
+						: {}),
+				},
 			);
 			handle = showFullPaneOverlay(this.host.ui, selector, 78);
 		});
@@ -744,7 +762,46 @@ export class ProviderAuthFlows {
 		};
 
 		try {
-			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
+			let useEnvironmentKey = false;
+			if (providerId === "xai" && process.env.XAI_API_KEY?.trim()) {
+				const source = await this.showOAuthLoginSelect(handle, {
+					message: `API key for ${providerName}\nConfirm a source to replace the saved credential.`,
+					options: [
+						{ id: "environment", label: "Use XAI_API_KEY" },
+						{ id: "new", label: "Enter a new API key" },
+					],
+				});
+				if (!source) {
+					closeDialog();
+					return { status: "cancelled" };
+				}
+				useEnvironmentKey = source === "environment";
+				if (useEnvironmentKey && !process.env.XAI_API_KEY?.trim()) {
+					throw new Error("XAI_API_KEY is no longer set.");
+				}
+			}
+			const prompt = this.host.modelRegistry.authStorage.has(providerId)
+				? "Enter API key (replaces the saved credential):"
+				: "Enter API key:";
+			if (useEnvironmentKey) {
+				this.host.modelRegistry.authStorage.removeVerified(providerId);
+				this.host.modelRegistry.refresh();
+				await this.host.onAuthChanged?.();
+				if (!(await this.hasAvailableProviderModels(providerId))) {
+					closeDialog();
+					this.host.showError(
+						"Saved xAI credential removed, but xAI is unavailable to the active session. Run /login xai and enter an API key, or set XAI_API_KEY in the backend environment.",
+					);
+					return { status: "failed" };
+				}
+				closeDialog();
+				this.host.showStatus(
+					`Saved credential removed for ${providerName}. The active session uses external authentication; no key copied. Runtime overrides still take priority over XAI_API_KEY.`,
+				);
+				this.host.onLoginCompleted?.();
+				return { status: "success", providerId, providerName, authType: "api_key", kind };
+			}
+			const apiKey = (await dialog.showPrompt(prompt)).trim();
 			if (!apiKey) {
 				throw new Error("API key cannot be empty.");
 			}

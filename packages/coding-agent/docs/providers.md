@@ -18,6 +18,7 @@ Use `/login` in interactive mode, then select a provider:
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
+- xAI Grok (eligible subscriptions)
 
 Use `/logout` to clear credentials. Tokens are stored in `~/.prime/agent/auth.json` and auto-refresh when expired.
 
@@ -34,6 +35,19 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
 - If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
+
+### xAI Grok
+
+Run `/login xai` and choose an authentication method:
+
+- **Use a subscription** opens xAI browser sign-in. Complete the authorization flow for an eligible Grok subscription.
+- **Use an API key** lets you enter a key. If `XAI_API_KEY` is set, you can explicitly choose **Use XAI_API_KEY** instead. This removes the saved xAI credential without copying the environment key to disk. The active backend must also have access to that variable. Runtime API-key overrides still take priority.
+
+Both methods use provider ID `xai` and `https://api.x.ai/v1`. Subscription requests use `/responses`; API-key requests keep the existing `/chat/completions` route and model defaults. Successful sign-in or key entry replaces the saved xAI credential. Cancelling before completion keeps the previous credential. Changing methods updates the current session without requiring model reselection.
+
+Choose a model with `/model` after initial setup. Grok 4.5 is already in the bundled catalog; subscription login does not guarantee access to every listed model. Access depends on your account entitlement. If a model is unavailable or authorization fails, check your plan or use an API key.
+
+Bare `/login` still opens the full configuration menu. `/logout` removes saved xAI authentication, but does not unset `XAI_API_KEY`; an environment key can remain active after logout.
 
 ## API Keys
 

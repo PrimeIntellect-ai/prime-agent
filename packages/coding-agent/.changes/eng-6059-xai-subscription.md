@@ -1,0 +1,1 @@
+- Added xAI Grok subscription authentication and `/login xai` to choose subscription or API-key access, with auth changes applied to the current session.
