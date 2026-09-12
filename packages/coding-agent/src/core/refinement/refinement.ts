@@ -926,6 +926,7 @@ export async function planRefinement(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	sessionId?: string,
 ): Promise<RefinementPlan> {
 	const id = generateRefinementId();
 	if (options.rollbackId) {
@@ -982,6 +983,7 @@ export async function planRefinement(
 					signal,
 					apiKey,
 					headers,
+					sessionId,
 				},
 			),
 		{ policy: options.retry, signal },
@@ -1025,6 +1027,7 @@ export async function reviewAutoRefine(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	retry?: ProviderRetryPolicy,
+	sessionId?: string,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const buildPrompt = (conversation: string): string =>
@@ -1069,6 +1072,7 @@ ${conversation}
 					signal,
 					apiKey,
 					headers,
+					sessionId,
 				},
 			),
 		{ policy: retry, signal },
@@ -1096,8 +1100,20 @@ export async function refineHarness(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	sessionId?: string,
 ): Promise<RefinementResult> {
-	const plan = await planRefinement(messages, state, history, model, apiKey, options, headers, signal, thinkingLevel);
+	const plan = await planRefinement(
+		messages,
+		state,
+		history,
+		model,
+		apiKey,
+		options,
+		headers,
+		signal,
+		thinkingLevel,
+		sessionId,
+	);
 	return applyRefinementProposal(state, plan.proposal, {
 		id: plan.id,
 		rollbackOf: plan.rollbackOf,

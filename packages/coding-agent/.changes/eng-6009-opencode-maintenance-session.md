@@ -1,0 +1,1 @@
+- Fixed OpenCode compaction, refinement, and branch summaries failing because requests omitted the conversation identity.

@@ -7916,6 +7916,7 @@ export class AgentSession {
 					this.thinkingLevel,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
+					this.sessionId,
 				));
 			}
 
@@ -8438,6 +8439,7 @@ export class AgentSession {
 			signal,
 			this.thinkingLevel,
 			providerRetryPolicy(this.settingsManager),
+			this.sessionId,
 		);
 	}
 
@@ -8740,6 +8742,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
+			this.sessionId,
 		);
 		if (this._disposed || signal.aborted) {
 			throw new Error("Refinement cancelled because the session was disposed.");
@@ -12262,6 +12265,7 @@ export class AgentSession {
 					apiKey,
 					headers,
 					signal: this._branchSummaryAbortController.signal,
+					sessionId: this.sessionId,
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
