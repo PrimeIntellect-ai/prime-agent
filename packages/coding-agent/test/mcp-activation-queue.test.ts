@@ -2,7 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import type { McpRemoveAccountResult } from "../src/core/mcp/connection-store.js";
+import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
 import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
 
 // The atomic write is the seam for finalize write-failure regressions; every
@@ -17,6 +20,7 @@ import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
 
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 type ActivationQueueThis = {
 	connectionState: { isStreaming: boolean; isCompacting: boolean; messageCount: number };
@@ -53,6 +57,11 @@ async function flushAsync(): Promise<void> {
 
 describe("ENG-6108 MCP activation queue at safe boundaries", () => {
 	let mode: ActivationQueueThis;
+
+	beforeAll(() => {
+		// Overlay components (the generic /logout selector) need the theme.
+		initTheme("dark");
+	});
 
 	beforeEach(() => {
 		mode = createFakeMode();
@@ -283,6 +292,156 @@ describe("ENG-6108 guarded credential commit", () => {
 		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
 	});
 
+	test("logoutMcpAccount resolves exact ids first, cancels pending attempts, and preserves completed records", async () => {
+		const { fake, store, authStorage } = fakeWithStore();
+		const at = Date.now();
+		const logoutAccount = (
+			InteractiveMode.prototype as unknown as {
+				logoutMcpAccount: (this: unknown, providerId: string) => Promise<McpRemoveAccountResult>;
+			}
+		).logoutMcpAccount;
+		// A completed account whose id itself contains "--": EXACT resolution
+		// wins (never an unconditional nonce split); the completed record is
+		// PRESERVED and its credential removed.
+		store.upsert({
+			connectionId: "my--service-1",
+			serviceId: "my--service",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (my--service-1)",
+			status: "connected",
+			createdAt: at,
+			updatedAt: at,
+		});
+		authStorage.set("mcp:my--service-1", {
+			type: "oauth",
+			access: "real-for-my--service-1",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		await expect(logoutAccount.call(fake, "mcp:my--service-1")).resolves.toBe("preserved");
+		expect(authStorage.get("mcp:my--service-1")).toBeUndefined();
+		expect(store.get("my--service-1")?.status).toBe("connected");
+		// A staged key maps back ONLY through its recorded attempt nonce: the
+		// pending attempt is cancelled AND the staged credential is removed.
+		const mine = "nonce-abc";
+		await store.reserveConnectionId({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "pending",
+			createdAt: at,
+			updatedAt: at,
+			attemptId: mine,
+		});
+		authStorage.set("mcp:acme-2--nonce-abc", {
+			type: "oauth",
+			access: "staged-for-attempt",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		await expect(logoutAccount.call(fake, "mcp:acme-2--nonce-abc")).resolves.toBe("removed");
+		expect(authStorage.get("mcp:acme-2--nonce-abc")).toBeUndefined();
+		expect(store.get("acme-2")).toBeUndefined();
+		// An unrelated id containing "--" with NO recorded attempt is its own
+		// credential-only account (removed, no record involved).
+		authStorage.set("mcp:odd--key", {
+			type: "oauth",
+			access: "real-for-odd--key",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		await expect(logoutAccount.call(fake, "mcp:odd--key")).resolves.toBe("credential-only");
+		expect(authStorage.get("mcp:odd--key")).toBeUndefined();
+	});
+
+	test("the REAL generic /logout fired inside the finalize commit is never defeated by the race", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "mcp-auth-"));
+		const authPath = join(tempDir, "auth.json");
+		const clientA = AuthStorage.create(authPath);
+		const clientB = AuthStorage.create(authPath);
+		const { fake, store, showStatus } = fakeWithStore(clientA);
+		const at = Date.now();
+		// The account key holds a REAL credential from client B's ordinary login.
+		clientB.set("mcp:acme-2", {
+			type: "oauth",
+			access: "ordinary-login-for-acme-2",
+			refresh: "r2",
+			expires: at + 7200_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		// The REAL generic /logout route, driven on client B (which sees the
+		// account credential) with the REAL prototype handler wired.
+		const routeOverlays: Component[] = [];
+		const overlayHandle = (): OverlayHandle => ({
+			hide: vi.fn(),
+			setHidden: vi.fn(),
+			isHidden: () => false,
+			focus: vi.fn(),
+			unfocus: vi.fn(),
+			isFocused: () => true,
+		});
+		const routeHost: ProviderAuthFlowsHost = {
+			ui: {
+				terminal: { columns: 80, rows: 24 },
+				requestRender: vi.fn(),
+				showOverlay: vi.fn((component: Component) => {
+					routeOverlays.push(component);
+					return overlayHandle();
+				}),
+			} as unknown as TUI,
+			modelRegistry: {
+				authStorage: clientB,
+				refresh: vi.fn(),
+				getAll: () => [],
+				getProviderDisplayName: (providerId: string) => providerId,
+				getProviderAuthStatus: () => clientB.getAuthStatus("mcp:acme-2"),
+			} as unknown as ProviderAuthFlowsHost["modelRegistry"],
+			showStatus: (message: string) => showStatus(message),
+			showError: vi.fn(),
+			getAvailableModels: async () => [],
+			onMcpAccountLogout: (providerId) =>
+				(
+					InteractiveMode.prototype as unknown as {
+						logoutMcpAccount: (this: unknown, providerId: string) => Promise<McpRemoveAccountResult>;
+					}
+				).logoutMcpAccount.call(fake, providerId),
+		};
+		let routePromise: Promise<string | null> | undefined;
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: stagedLogin(clientA, () => {
+				// Mid-login (staged written, reservation held): open the REAL
+				// route and filter to the account, leaving the confirm pending.
+				routePromise = new ProviderAuthFlows(routeHost).runLogout();
+				for (const char of "acme-2") {
+					routeOverlays[0]?.handleInput?.(char);
+				}
+			}),
+		});
+		// The barrier: the route's selection confirms INSIDE the finalize's
+		// locked commit. The OLD code (logout before the store critical
+		// section) deleted the credential right here, and the commit then
+		// moved our staged credential in — the logout was defeated.
+		const originalMove = clientA.moveStagedCredential.bind(clientA);
+		clientA.moveStagedCredential = (stagedProvider: string, provider: string) => {
+			routeOverlays[0]?.handleInput?.("\r");
+			return originalMove(stagedProvider, provider);
+		};
+		await callAddAccount(fake);
+		await routePromise;
+		// The route's logout is NEVER defeated: no credential at the account key.
+		const fresh = AuthStorage.create(authPath);
+		expect(fresh.get("mcp:acme-2")).toBeUndefined();
+		// No staged leftovers and no surviving record.
+		expect(fresh.list().filter((id) => id.startsWith("mcp:acme-2--"))).toEqual([]);
+		expect(store.get("acme-2")).toBeUndefined();
+		// The route reported an honest logout.
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("Logged out of acme-2");
+	});
+
 	test("a bystander written by ANOTHER client's ordinary login survives finalization (two real storage instances)", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "mcp-auth-"));
 		const authPath = join(tempDir, "auth.json");
@@ -393,13 +552,16 @@ describe("ENG-6108 guarded credential commit", () => {
 			{},
 		);
 		vi.mocked(writeFileAtomicSync).mockImplementation(real);
-		// A FRESH reader of the auth file sees the credential SURVIVE on disk.
+		// A FRESH reader of the auth file sees the credential SURVIVE on disk...
 		const freshReader = AuthStorage.create(authPath);
 		const survivor = freshReader.get("mcp:acme-2");
 		expect(survivor?.type).toBe("oauth");
 		if (survivor?.type === "oauth") {
 			expect(survivor.access).toBe("real-for-acme-2");
 		}
+		// ...and the connection RECORD survives too: a failed verified logout
+		// never persists its record deletion (nothing was cancelled).
+		expect(store.get("acme-2")?.status).toBe("connected");
 		// The record also survives (nothing durable was committed).
 		expect(AuthStorage.create(authPath).list()).toContain("mcp:acme-2");
 		// The wording is state-neutral (never "Removed"/"Disconnected").

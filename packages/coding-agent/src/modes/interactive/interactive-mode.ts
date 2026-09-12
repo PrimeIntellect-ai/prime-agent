@@ -99,7 +99,12 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
-import { type McpConnectionRecord, McpConnectionStore } from "../../core/mcp/connection-store.js";
+import {
+	logoutMcpAccount,
+	type McpConnectionRecord,
+	McpConnectionStore,
+	type McpRemoveAccountResult,
+} from "../../core/mcp/connection-store.js";
 import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
 	accountStateFor,
@@ -8726,18 +8731,26 @@ export class InteractiveMode {
 			onLoginCompleted: () => {
 				void this.maybeWarnAboutAnthropicSubscriptionAuth();
 			},
-			onMcpCredentialRemoved: async (providerId) => {
-				// A REAL logout of an MCP account cancels its in-flight login
-				// attempts: the pending reservation is invalidated under the
-				// store's lock, so the old attempt's finalize loses ownership
-				// and can never re-activate the account. A staged credential
-				// key (`mcp:<id>--<attempt>`) maps back to the base account.
-				const connectionId = providerId.slice("mcp:".length).split("--")[0];
-				if (connectionId) {
-					await this.getMcpConnectionStore().invalidatePendingAttempts(connectionId);
-				}
-			},
+			onMcpAccountLogout: (providerId) => this.logoutMcpAccount(providerId),
 		});
+	}
+
+	/**
+	 * The ENTIRE MCP account logout, owned by ONE connection-store critical
+	 * section (store->auth ordering): verified credential deletion AND
+	 * pending-attempt cancellation happen under the store's file lock BEFORE
+	 * the generic /logout route reports anything. The route delegates here
+	 * instead of calling authStorage.logout first — a plain logout could be
+	 * defeated by a concurrent finalize re-creating the credential after it.
+	 *
+	 * Id resolution is exact-first: a local service id may itself contain
+	 * "--", so a staged key maps back ONLY through its actually recorded
+	 * attempt nonce.
+	 */
+	private async logoutMcpAccount(providerId: string): Promise<McpRemoveAccountResult> {
+		// The shared exported one-op handler: same code the reviewer's route
+		// tests drive, no copied literals.
+		return logoutMcpAccount(providerId, this.getMcpConnectionStore(), this.modelRegistry.authStorage);
 	}
 
 	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {

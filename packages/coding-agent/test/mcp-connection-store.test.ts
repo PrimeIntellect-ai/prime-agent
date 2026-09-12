@@ -576,15 +576,48 @@ describe("ENG-6108 durable account reservations", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
-	it("invalidatePendingAttempts removes ONLY the pending reservation: a real logout cancels in-flight logins without touching finished accounts", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "invalidate-attempts-"));
+	it("a removeAccount whose verified auth cleanup FAILS preserves the record on disk", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "auth-fail-logout-"));
 		const path = join(tempDir, "mcp-connections.json");
 		const client = McpConnectionStore.open(path);
 		const at = Date.now();
-		// A pending attempt for acme-2: invalidation removes the marker.
+		const mine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, mine));
+
+		const outcome = await client.removeAccount({
+			connectionId: "acme-2",
+			preserveCompletedRecord: true,
+			authCleanup: () => {
+				// removeVerified throws on an auth-file write failure.
+				throw new Error("simulated auth write failure");
+			},
+		});
+
+		// Nothing claimed, nothing cancelled: the PENDING record survives on
+		// disk (the batch write must not persist a deletion that a failed
+		// logout never earned) and the attempt stays recoverable.
+		expect(outcome).toBe("failed");
+		// The record remains in MEMORY (this client's view is unchanged)...
+		expect(client.get("acme-2")?.status).toBe("pending");
+		expect(client.get("acme-2")?.attemptId).toBe(mine);
+		// ...AND on disk (the batch write persisted no deletion).
+		const reopened = McpConnectionStore.open(path);
+		expect(reopened.get("acme-2")?.status).toBe("pending");
+		expect(reopened.get("acme-2")?.attemptId).toBe(mine);
+		// A failed logout never poisons later operations.
+		await expect(client.removeAccount({ connectionId: "acme-9", authCleanup: () => false })).resolves.toBe("missing");
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("removeAccount with preserveCompletedRecord cancels PENDING attempts but PRESERVES finished accounts", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "preserve-logout-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		// A pending attempt: cancelled by the credential-only logout.
 		const pendingMine = nonce();
 		await client.reserveConnectionId(record("acme-2", at, pendingMine));
-		// A FINISHED account for acme-4: invalidation must leave it alone.
+		// A FINISHED account: preserved (honest unbound state after logout).
 		const finishedMine = nonce();
 		await client.reserveConnectionId(record("acme-4", at + 1, finishedMine));
 		const finished = await client.finalizeAttempt({
@@ -594,11 +627,19 @@ describe("ENG-6108 durable account reservations", () => {
 		});
 		expect(finished).toBe("committed");
 
-		const invalidatedPending = await client.invalidatePendingAttempts("acme-2");
-		const invalidatedFinished = await client.invalidatePendingAttempts("acme-4");
+		const removedCredentialOnly = await client.removeAccount({
+			connectionId: "acme-2",
+			preserveCompletedRecord: true,
+			authCleanup: () => true,
+		});
+		const preservedFinished = await client.removeAccount({
+			connectionId: "acme-4",
+			preserveCompletedRecord: true,
+			authCleanup: () => true,
+		});
 
-		expect(invalidatedPending).toBe(true);
-		expect(invalidatedFinished).toBe(false);
+		expect(removedCredentialOnly).toBe("removed");
+		expect(preservedFinished).toBe("preserved");
 		// The stale attempt loses ownership and can NEVER re-activate.
 		const denied = await client.finalizeAttempt({
 			connectionId: "acme-2",
@@ -607,9 +648,15 @@ describe("ENG-6108 durable account reservations", () => {
 		});
 		expect(denied).toBe("denied");
 		expect(McpConnectionStore.open(path).get("acme-2")).toBeUndefined();
-		// The finished account survives (its record shows the honest unbound
-		// state after a credential-only logout).
+		// The finished account survives with its record (unbound display).
 		expect(McpConnectionStore.open(path).get("acme-4")?.status).toBe("connected");
+		// Without the flag, the same call removes the record entirely.
+		const removed = await client.removeAccount({
+			connectionId: "acme-4",
+			authCleanup: () => false,
+		});
+		expect(removed).toBe("removed");
+		expect(McpConnectionStore.open(path).get("acme-4")).toBeUndefined();
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 

@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
+import type { McpRemoveAccountResult } from "../../core/mcp/connection-store.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import {
 	checkPrimeAgentTracesAccess,
@@ -104,12 +105,14 @@ export interface ProviderAuthFlowsHost {
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
 	/**
-	 * Invoked after a REAL logout route removes an MCP credential: the host
-	 * invalidates the account's pending login attempts under the connection
-	 * store's lock, so a stale in-flight OAuth attempt cannot re-activate the
-	 * account. Non-MCP logouts are unaffected.
+	 * OWNS the entire MCP account logout for the generic /logout route: the
+	 * host must perform verified credential deletion AND pending-attempt
+	 * cancellation under ONE connection-store critical section (store->auth)
+	 * BEFORE the route reports anything. Called INSTEAD of
+	 * authStorage.logout for MCP credential ids; non-MCP logouts are
+	 * unaffected.
 	 */
-	onMcpCredentialRemoved?(providerId: string): void | Promise<void>;
+	onMcpAccountLogout?(providerId: string): Promise<McpRemoveAccountResult> | McpRemoveAccountResult;
 }
 
 export interface ProviderLoginOptions {
@@ -214,15 +217,28 @@ export class ProviderAuthFlows {
 					close();
 
 					try {
-						this.host.modelRegistry.authStorage.logout(providerOption.id);
+						// MCP logouts are DELEGATED whole before this route touches
+						// auth: a plain authStorage.logout would race a concurrent
+						// finalize that could re-create the credential after it.
+						if (providerOption.id.startsWith("mcp:") && this.host.onMcpAccountLogout) {
+							const outcome = await this.host.onMcpAccountLogout(providerOption.id);
+							if (outcome === "failed") {
+								throw new Error(
+									`Logout failed: the change could not be saved; try logging out ${providerOption.name} again.`,
+								);
+							}
+							if (outcome === "logged-out") {
+								this.host.showStatus(
+									`Logged out of ${providerOption.name}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
+								);
+								resolve(providerOption.id);
+								return;
+							}
+						} else {
+							this.host.modelRegistry.authStorage.logout(providerOption.id);
+						}
 						this.host.modelRegistry.refresh();
 						await this.host.onAuthChanged?.();
-						// An MCP logout also cancels any in-flight login attempt
-						// for that account: the old OAuth attempt must not be able
-						// to re-activate the account after the logout.
-						if (providerOption.id.startsWith("mcp:")) {
-							await this.host.onMcpCredentialRemoved?.(providerOption.id);
-						}
 						const message =
 							providerOption.authType === "oauth"
 								? `Logged out of ${providerOption.name}`
