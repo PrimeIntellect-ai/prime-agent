@@ -1,15 +1,16 @@
 import type { Agent } from "@earendil-works/pi-agent-core";
-import type { ActionStore } from "../../core/session-action-store.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { waitForPromiseOrAbort } from "../../utils/wait-for-abort.js";
-import { primaryDeliveryRecord, type QueuedSessionAction } from "../prepared-actions.js";
 import type { ContinuationToken, SessionContinuation } from "../turns/continuation.js";
+import type { ActionStore } from "./action-store.js";
 import type { SessionCommitFence, SessionCommitLease } from "./commit-fence.js";
 import type { SessionInputScheduler } from "./input-scheduler.js";
+import { primaryDeliveryRecord, type QueuedSessionAction } from "./prepared-actions.js";
 
 export interface SessionInputCheckpointsHost {
 	getFence(): Pick<SessionCommitFence, "isHeldByCurrentContext" | "disposeSignal">;
-	getScheduler(): Pick<SessionInputScheduler, "queuedWorkPauseCount" | "suspended" | "pendingPump" | "requested">;
+	getScheduler(): Pick<SessionInputScheduler, "queuedWorkPauseCount" | "pendingPump" | "requested">;
+	isBusyForInputPump(): boolean;
 	getEventQueue(): Promise<void>;
 	acquireFence(signal?: AbortSignal): Promise<SessionCommitLease>;
 	getStore(): Pick<SessionManager, "flushNow">;
@@ -174,7 +175,8 @@ export class SessionInputCheckpoints {
 	async waitForIdleOrSettlement(settlement?: ContinuationToken): Promise<void> {
 		while (settlement === undefined || this.host.getContinuation().current === settlement) {
 			if (this.actions.queuedActions().length > 0) {
-				if (this.host.getScheduler().suspended || this.host.getScheduler().queuedWorkPauseCount > 0) {
+				// A blocked pump must yield to the work that clears its busy state.
+				if (this.host.isBusyForInputPump()) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;

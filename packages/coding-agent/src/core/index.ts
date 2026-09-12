@@ -9,7 +9,15 @@ export {
 	type AgentSessionEventListener,
 	type ModelCycleResult,
 	type PromptOptions,
-} from "./agent-session.js";
+} from "../session/agent-session.js";
+export type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "../session/children/runtime-contracts.js";
+export type { CompactionResult } from "../session/compaction/types.js";
+export type { SessionStats } from "../session/context/session-stats.js";
+export type { RefinementResult } from "../session/refinement/types.js";
 export type { AgentSessionRuntimeConfig } from "./agent-session-config.js";
 export {
 	AgentSessionRuntime,
@@ -29,7 +37,6 @@ export {
 	createAgentSessionServices,
 } from "./agent-session-services.js";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.js";
-export type { CompactionResult } from "./compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.js";
 // Extensions system
 export {
@@ -77,8 +84,5 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.js";
-export type { RefinementResult } from "./refinement/index.js";
-export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";
-export type { SessionStats } from "./session-stats.js";
 export { createSyntheticSourceInfo } from "./source-info.js";

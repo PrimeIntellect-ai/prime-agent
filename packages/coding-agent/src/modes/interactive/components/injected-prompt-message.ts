@@ -21,7 +21,7 @@ import {
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 	type RlmChildFailureDetails,
 	type RlmChildTerminalNoticeDetails,
-} from "../../../core/messages.js";
+} from "../../../session/context/messages.js";
 import { GOAL_CONTEXT_CUSTOM_TYPE, type GoalContextDetails } from "../../../session/goals/contracts.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { agentMessageSummaryLine } from "./agent-message.js";

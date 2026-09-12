@@ -42,16 +42,11 @@ import {
 	readActiveOrphanProcesses,
 	shouldReapOrphanProcess,
 } from "../../core/orphan-process-journal.js";
-import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
-import {
-	canEvictWorker,
-	type IdleEvictionMinutes,
-	type WorkerEvictionSnapshot,
-} from "../../core/session-action-store.js";
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
+import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../session/input/prompt-admission.js";
 import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import {
 	isProcessAlive,
@@ -168,6 +163,7 @@ import {
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
+import { canEvictWorker, type IdleEvictionMinutes, type WorkerEvictionSnapshot } from "./workers/residency-policy.js";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;

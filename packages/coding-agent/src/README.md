@@ -2,7 +2,9 @@
 
 `src/` contains application source; tests, scripts, docs, examples, and build output stay at the package root. Follow the [source ownership rules](../docs/architecture.md#source-ownership-and-module-boundaries) when choosing module boundaries. Session features, including goals, live below `session/`; each feature groups its state, dependencies, and lifecycle.
 
-`core/` currently contains most execution logic. Migrate responsibilities into their owning feature folders as their boundaries are established. `AgentSession` remains the public entry point and coordinates work across features. Each feature owner keeps its state and transitions together and receives only the dependencies it uses.
+`session/agent-session.ts` is the public session composition point. Each feature owner keeps its state and transitions together and receives only the dependencies it uses. `core/` still contains unmigrated capabilities and compatibility exports; it is not a destination for new implementation.
+
+The session ownership follow-up consolidates context algorithms, input actions, autonomy and child request contracts with their owners. The [completion plan](../docs/source-organization-plan.md) distinguishes implemented boundaries from remaining package work. Historical module paths forward explicit exports to canonical modules; application imports use the canonical paths. These compatibility files do not own duplicate state or behavior.
 
 ## Goals
 
@@ -36,23 +38,24 @@ Apply the architecture guide's placement and dependency rules to each extraction
 | --- | --- |
 | `session/input/` | Submission normalization, admission, scheduling, commit fencing, action queues, delivery, and recovery. |
 | `session/goals/` | Goal state and contracts, accounting, persistence, command parsing, and goal-specific continuation. |
-| `session/turns/` | Turn preparation and execution, session commands, ordered events, retry, and autonomous/shared continuation. |
-| `session/compaction/` | Session compaction lifecycle and execution. |
+| `session/turns/` | Turn preparation and execution, session commands, ordered events, retry, and shared continuation. |
+| `session/autonomy/` | Autonomous budgets, gates, continuation messages and rollback. |
+| `session/compaction/` | Session compaction lifecycle, execution and summary generation. |
 | `session/refinement/` | Refinement planning/application lifecycle, automatic review, and execution. |
-| `session/context/` | Pending context, harness context, transcript views, branch navigation, and export. |
+| `session/context/` | Model-facing messages, usage, token estimates, prompts, pending context, transcript views, branch navigation, and export. |
 | `session/children/` | Child records, runtime creation, execution, projections, and usage accounting. |
 | `session/kernel/` | Kernel lifecycle, environment, host-handler composition, and stateless host-request adapters. |
 | `session/models/` | Model selection, thinking preferences, and authenticated availability. |
 | `session/tools/` | Tool selection and shell-command execution. |
 | `session/extensions/` | Extension bindings, resource reload, and tool hooks. |
 
-`session/prepared-actions.ts` remains the shared action and recovery contract used across input, turns, and context. Shared continuation belongs to `session/turns/`, including continuation after compaction. Child usage belongs to `session/children/` because its accounting and cleanup follow child records. Core compaction/refinement algorithms and their public exports remain in `core/` for their broader callers.
+`session/input/prepared-actions.ts` contains action and recovery contracts used across input, turns, and context. Shared continuation belongs to `session/turns/`, including continuation after compaction. Child usage belongs to `session/children/` because its accounting and cleanup follow child records. Compaction/refinement implementations live with their session features; their historical `core/` paths contain only explicit compatibility exports.
 
 ## Session input scheduling
 
 `session/input/input-scheduler.ts` owns the serialized pump, its preparation epoch, pause leases, and abort/restart suspension. It receives two callbacks: whether the session has work eligible for scheduling, and the operation that runs that work. The scheduler exposes read-only state and named operations; callers cannot change its pause sets or scheduling flags.
 
-The existing `ActionStore` in `core/session-action-store.ts` owns queued actions, their transitions, and delivery/completion tickets. `session/input/input-dispatcher.ts` selects and batches those actions, reconciles durable delivery after dispatch, rolls undelivered work back, and settles completion or failure. `AgentSession` supplies turn execution and session-command operations and coordinates goals, child agents, and compaction. The dispatcher shares the existing `ActionStore`; it does not create a second queue or copy the transcript.
+`ActionStore` in `session/input/action-store.ts` owns queued actions, their transitions, and delivery/completion tickets. `session/input/input-dispatcher.ts` selects and batches those actions, reconciles durable delivery after dispatch, rolls undelivered work back, and settles completion or failure. `AgentSession` supplies turn execution and session-command operations and coordinates goals, child agents, and compaction. The dispatcher shares the existing `ActionStore`; it does not create a second queue or copy the transcript. Worker eviction and passivation predicates belong to `modes/daemon/workers/residency-policy.ts` and consume action-state views without owning the queue.
 
 Preserve these distinctions when extending the scheduler:
 
@@ -105,7 +108,7 @@ Execution and recording callbacks preserve dispatch through the public session m
 
 Preserve the policy differences: direct prompts flush shell output before validation and compact after model selection; queued turns validate before flushing and compact before model selection. Conditional refinement barriers are checked when reached, so a refinement started during preparation is still awaited. Withdrawing prepared work skips the final barrier and commit. The exported `TurnExecutionPolicy` shape remains available from the session facade.
 
-`session/prepared-actions.ts` contains prepared action types, delivery records, recovery contracts, input copying, action factories, and queue projections. It has no session dependency. Primary messages retain their identity for durable-delivery checks; separately stored input blocks and prefix messages retain their existing copy behavior. Recovery format version 1 and the public exports from `AgentSession` stay unchanged.
+`session/input/prepared-actions.ts` contains prepared action types, delivery records, recovery contracts, input copying, action factories, and queue projections. It has no session implementation dependency. Primary messages retain their identity for durable-delivery checks; separately stored input blocks and prefix messages retain their existing copy behavior. Recovery format version 1 and the public exports from `AgentSession` stay unchanged.
 
 ## Session input and turns
 
@@ -123,7 +126,7 @@ Preserve the policy differences: direct prompts flush shell output before valida
 | `session/turns/events.ts` | Ordered agent-event processing, listener delivery, and transcript/accounting coordination. |
 | `session/context/pending-context.ts` | Pending messages, notices, and retention for the next turn. |
 | `session/goals/continuation.ts` | Goal continuation admission, budget notices, child-wait coordination, and rollback. |
-| `session/turns/autonomous-continuation.ts` | Autonomous continuation messages, snapshots, and rollback. |
+| `session/autonomy/continuation.ts` | Autonomous continuation messages, snapshots, and rollback. |
 | `session/turns/turn-policy.ts` | Turn stopping, threshold compaction, and continuation decisions from current session state. |
 
 Input has one durable ActionStore, one scheduling pump, one commit fence, and one ordered event queue. Queue operations, admission, preparation, execution, and recovery use these same owners; they do not maintain parallel queues or transcripts. Dependencies are named operations and small state views. Callbacks read the current model, controllers, and runtime where the original operation did.
@@ -137,14 +140,19 @@ Input has one durable ActionStore, one scheduling pump, one commit fence, and on
 
 | File | Responsibility |
 | --- | --- |
-| `session/compaction/compaction.ts` | Manual and automatic compaction lifecycle, pending requests, cancellation, thresholds, and overflow recovery. |
-| `session/compaction/compaction-execution.ts` | Summary generation, extension interception, request accounting, persistence, and context rebuild ordering. |
-| `session/refinement/refinement.ts` | Refinement admission, planning and application barriers, serialized plan ownership, and disposal drains. |
-| `session/refinement/auto-refinement.ts` | Review triggers, cooldowns, pending reviews, timers, and automatic operation cleanup. |
-| `session/refinement/refinement-execution.ts` | Planning against current dependencies, applying harness edits, and persisting outcomes and notices. |
+| `session/compaction/controller.ts` | Manual and automatic compaction lifecycle, pending requests, cancellation, thresholds, and overflow recovery. |
+| `session/compaction/execution.ts` | Summary generation, extension interception, request accounting, persistence, and context rebuild ordering. |
+| `session/compaction/summary.ts`, `types.ts` | Summary preparation/generation and compaction contracts. |
+| `session/context/token-estimate.ts`, `conversation-text.ts`, `file-tracking.ts` | Shared context estimation, serialization and file tracking. |
+| `session/context/branch-summary.ts` | Branch summary preparation and generation for history navigation. |
+| `session/refinement/controller.ts` | Refinement admission, planning and application barriers, serialized plan ownership, and disposal drains. |
+| `session/refinement/automatic.ts` | Review triggers, cooldowns, pending reviews, timers, and automatic operation cleanup. |
+| `session/refinement/execution.ts` | Planning against current dependencies, applying harness edits, and persisting outcomes and notices. |
+| `session/refinement/planning.ts`, `harness-state.ts` | Review/planning and persisted harness application/history. |
+| `session/refinement/types.ts`, `format.ts` | Lightweight contracts and outcome formatting, usable without loading planning. |
 | `session/turns/continuation.ts` | Resuming work after compaction, settlement, cancellation, and ownership of continuation messages. |
 
-Each owner keeps its mutable state and cleanup together. Typed host operations connect the owners to current model, authentication, extensions, storage, and scheduling. `AgentSession` composes them and retains public methods, events, and decisions that cross features, including goal and autonomous continuation admission. The summary algorithms and harness storage remain in their existing `core/` feature modules.
+Each owner keeps its mutable state and cleanup together. Typed host operations connect the owners to current model, authentication, extensions, storage, and scheduling. `AgentSession` composes them and retains public methods, events, and decisions that cross features, including goal and autonomous continuation admission. Message conversion imports only refinement formatting/contracts, avoiding the former message-conversion/planning import cycle. Harness persistence retains Python's on-disk contract, atomic writes and reread-before-apply behavior.
 
 Preserve these boundaries when changing context behavior:
 
@@ -164,8 +172,11 @@ Preserve these boundaries when changing context behavior:
 | `session/children/child-usage.ts` | Child usage attribution, origin batches, flush timers, and retry bookkeeping. |
 | `session/children/child-projection.ts` | Read-only child list and snapshot projections. |
 | `session/children/child-types.ts` | Child contracts and shared child data helpers. |
+| `session/children/runtime-contracts.ts`, `spawn-options.ts`, `host-requests.ts` | Child host contracts, spawn option validation and child request adapters. |
 
 The registry owns child identity and lifecycle transitions. Execution and usage components operate on the same child records; they do not create competing copies of run state. Child state exposes read-only properties and named mutations. Runtime hosts, inherited depth, model selection, and event queues are read through live operations supplied by the session.
+
+The former RLM runtime module's model search belongs to `session/models/model-search.ts`; background shell completion request handling belongs to `session/input/bash-host-requests.ts`. Their legacy combined module forwards exports but has no implementation. Child maximum-depth policy stays with children.
 
 - Reserve and publish children in the original order. A late completion cannot replace a newer run or clear another run's cancellation state.
 - Retain deletion reservations, retryable cleanup state, and descendant quiescence until their existing completion conditions hold. Parent continuation still waits for the appropriate child work.

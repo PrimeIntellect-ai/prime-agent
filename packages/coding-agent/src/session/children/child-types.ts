@@ -1,6 +1,6 @@
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import type { AgentSession } from "../../core/agent-session.js";
-import type { RlmSubagentRegistryEntry } from "../../core/rlm-runtime.js";
+import type { AgentSession } from "../agent-session.js";
+import type { RlmSubagentRegistryEntry } from "./runtime-contracts.js";
 
 export type RlmChildAgentStatus = "queued" | "running" | "done" | "error" | "cancelled";
 

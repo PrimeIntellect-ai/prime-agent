@@ -1,8 +1,8 @@
 import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionRunner } from "../../core/extensions/index.js";
-import { type CustomMessage, createHarnessDigestMessage, HARNESS_DIGEST_CUSTOM_TYPE } from "../../core/messages.js";
-import { type SessionAction, transitionSessionAction } from "../../core/session-action-store.js";
-import type { BuildSystemPromptOptions } from "../../core/system-prompt.js";
+import { type CustomMessage, createHarnessDigestMessage, HARNESS_DIGEST_CUSTOM_TYPE } from "../context/messages.js";
+import type { BuildSystemPromptOptions } from "../context/system-prompt.js";
+import { type SessionAction, transitionSessionAction } from "../input/action-store.js";
 import type { SessionCommitFence, SessionCommitLease } from "../input/commit-fence.js";
 import {
 	createDeliveryRecord,
@@ -11,7 +11,7 @@ import {
 	type PreparedTurnPayload,
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
-} from "../prepared-actions.js";
+} from "../input/prepared-actions.js";
 import type { TurnPreparer } from "./turn-preparation.js";
 
 export interface SessionTurnExecutionHost {

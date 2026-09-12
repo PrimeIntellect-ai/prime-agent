@@ -1,5 +1,5 @@
 import { Box, Container, Text } from "@earendil-works/pi-tui";
-import type { CompactionOutcomeMessage } from "../../../core/messages.js";
+import type { CompactionOutcomeMessage } from "../../../session/context/messages.js";
 import { theme } from "../theme/theme.js";
 
 /** Renders a durable unsuccessful automatic-compaction outcome. */

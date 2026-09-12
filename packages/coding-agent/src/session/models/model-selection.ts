@@ -17,10 +17,10 @@ import {
 import { DEFAULT_THINKING_LEVEL } from "../../core/defaults.js";
 import type { ExtensionRunner } from "../../core/extensions/index.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
-import { findRlmModelMatches, type RlmFindModelsResult } from "../../core/rlm-runtime.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
 import { THINKING_LEVELS } from "../../core/thinking-levels.js";
+import { findRlmModelMatches, type RlmFindModelsResult } from "./model-search.js";
 
 export interface ModelCycleResult {
 	model: Model<Api>;

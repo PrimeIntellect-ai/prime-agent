@@ -41,15 +41,16 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
+import type { CompactionPreparation, CompactionResult } from "../../session/compaction/types.js";
+import type { CustomMessage } from "../../session/context/messages.js";
+import type { BuildSystemPromptOptions } from "../../session/context/system-prompt.js";
+import type { HarnessState, RefinementProposal, RefinementResult } from "../../session/refinement/types.js";
 import type { BashResult } from "../bash-executor.js";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.js";
 import type { EventBus } from "../event-bus.js";
 import type { ExecOptions, ExecResult } from "../exec.js";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.js";
 import type { KeybindingsManager } from "../keybindings.js";
-import type { CustomMessage } from "../messages.js";
 import type { ModelRegistry } from "../model-registry.js";
-import type { HarnessState, RefinementProposal, RefinementResult } from "../refinement/index.js";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -59,7 +60,6 @@ import type {
 } from "../session-manager.js";
 import type { SlashCommandInfo } from "../slash-commands.js";
 import type { SourceInfo } from "../source-info.js";
-import type { BuildSystemPromptOptions } from "../system-prompt.js";
 import type { BashOperations } from "../tools/bash.js";
 import type { EditToolDetails } from "../tools/edit.js";
 import type {
@@ -70,9 +70,9 @@ import type {
 	IpythonToolInput,
 } from "../tools/index.js";
 
+export type { BuildSystemPromptOptions } from "../../session/context/system-prompt.js";
 export type { ExecOptions, ExecResult } from "../exec.js";
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.js";
-export type { BuildSystemPromptOptions } from "../system-prompt.js";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
 /** Options for extension UI dialogs. */
 export interface ExtensionUIDialogOptions {

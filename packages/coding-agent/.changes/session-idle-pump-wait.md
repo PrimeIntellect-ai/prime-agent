@@ -1,0 +1,1 @@
+- Fixed session idle waits consuming CPU while queued input is blocked by bash, compaction, or retry work.

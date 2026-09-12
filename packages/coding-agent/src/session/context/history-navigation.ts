@@ -1,10 +1,10 @@
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
-import { collectEntriesForBranchSummary, generateBranchSummary } from "../../core/compaction/index.js";
 import type { ExtensionRunner, SessionBeforeTreeResult, TreePreparation } from "../../core/extensions/index.js";
 import type { ProviderRetryPolicy } from "../../core/provider-retry.js";
 import type { BranchSummaryEntry, SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
 import type { SessionCommitLease } from "../input/commit-fence.js";
+import { collectEntriesForBranchSummary, generateBranchSummary } from "./branch-summary.js";
 
 export interface HistoryNavigationHost {
 	sessionManager: SessionManager;
