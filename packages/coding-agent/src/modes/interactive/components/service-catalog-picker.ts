@@ -25,6 +25,8 @@ export interface ServiceCatalogPickerOptions extends MenuViewportProvider {
 	title?: string;
 	/** Account rows preserve their account/remove grouping and expose explicit actions. */
 	mode?: "catalog" | "accounts";
+	/** Host-resolved intent and copy for settings-managed transports. */
+	getRowPresentation?: (service: McpPluginView) => { action?: string; status?: string; detail?: string } | undefined;
 }
 
 const PREFERRED_VISIBLE_SERVICES = 8;
@@ -56,6 +58,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	private readonly viewport: MenuViewportProvider;
 	private readonly mode: "catalog" | "accounts";
 	private readonly contextRows: number;
+	private readonly getRowPresentation: ServiceCatalogPickerOptions["getRowPresentation"];
 	private detailRows = 0;
 	private readonly onSelectCallback: (service: McpPluginView) => void;
 	private readonly onCancelCallback: () => void;
@@ -77,6 +80,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		this.filteredServices = this.allServices;
 		this.viewport = options;
 		this.mode = options.mode ?? "catalog";
+		this.getRowPresentation = options.getRowPresentation;
 		this.contextRows = options.title ? 1 : 0;
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
@@ -141,7 +145,9 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		const selected = this.filteredServices[this.selectedIndex];
 		const confirm = keyText("tui.select.confirm", { primaryOnly: true });
 		const cancel = keyText("tui.select.cancel", { primaryOnly: true });
-		const action = selected ? `${confirm} ${this.actionText(selected)} · ` : "";
+		const action = selected
+			? `${confirm} ${this.getRowPresentation?.(selected)?.action ?? this.actionText(selected)} · `
+			: "";
 		const navigation = `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })} navigate · `;
 		const hint = `${width >= 70 ? navigation : ""}${action}${cancel} close`;
 		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${hint}`), width, "", true)];
@@ -164,7 +170,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			this.listContainer.addChild(
 				new MenuRow({
 					primary: service.label,
-					trailing: [this.statusText(service)],
+					trailing: [this.getRowPresentation?.(service)?.status ?? this.statusText(service)],
 					selected: index === this.selectedIndex,
 					inline: true,
 				}),
@@ -185,7 +191,10 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 				render: (width) => [
 					"",
 					truncateToWidth(
-						theme.fg("muted", ` ${this.secondaryText(selected) ?? this.statusText(selected)}`),
+						theme.fg(
+							"muted",
+							` ${this.getRowPresentation?.(selected)?.detail ?? this.secondaryText(selected) ?? this.statusText(selected)}`,
+						),
 						width,
 						"…",
 						true,

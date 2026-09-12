@@ -27,6 +27,7 @@ beforeEach(() => {
 afterEach(() => {
 	while (harnesses.length) harnesses.pop()?.cleanup();
 	vi.unstubAllGlobals();
+	vi.unstubAllEnvs();
 });
 
 const ENDPOINT = "https://acme.example.test/mcp";
@@ -278,4 +279,241 @@ it.each(["remove", "add"] as const)("keeps the %s action and identifiers unchang
 			knownIds: new Set(["acme"]),
 		});
 	}
+});
+
+async function settingsFixture() {
+	const f = await fixture();
+	// Restore the real view builder and mutation callback on the production prototype.
+	Reflect.deleteProperty(f.mode, "buildServiceCatalogViews");
+	Reflect.deleteProperty(f.mode, "connectServiceFromPicker");
+	const showStatus = vi.fn();
+	const reload = vi.fn(async () => {});
+	const authFlow = vi.fn(() => {
+		throw new Error("OAuth must not run for settings-only actions");
+	});
+	Object.assign(f.mode, { showStatus, reloadAfterMcpChange: reload, createAuthFlows: authFlow });
+	const reserve = vi.spyOn(f.store, "reserveConnectionId");
+	const claim = vi.spyOn(f.store, "claimConnectionId");
+	return { ...f, showStatus, reload, authFlow, reserve, claim };
+}
+
+it("real stdio view routes explicit Disable directly to the existing settings mutator, not account cards", async () => {
+	const f = await settingsFixture();
+	f.harness.settingsManager.setGlobalMcpServer(
+		"stdio-proof",
+		{ type: "stdio", command: "synthetic-not-executed", enabled: true },
+		true,
+	);
+	const writeSettings = vi.spyOn(f.harness.settingsManager, "setGlobalMcpServer");
+	const done = f.mode.showServiceCatalogPicker("stdio-proof");
+	const picker = f.picker();
+	const output = stripAnsi(picker.render(100).join("\n"));
+	expect(output).toContain("Enter disable local server");
+	expect(output).not.toContain("Add another account");
+	expect(output).not.toContain("Remove stdio-proof");
+	picker.handleInput("\r");
+	picker.handleInput("\r");
+	await done;
+	expect(f.harness.settingsManager.getGlobalMcpServers()?.["stdio-proof"]?.enabled).toBe(false);
+	expect(writeSettings).toHaveBeenCalledOnce();
+	expect(f.reload).toHaveBeenCalledOnce();
+	expect(f.editorContainer.children).toEqual([f.editor]);
+	expect(f.authFlow).not.toHaveBeenCalled();
+	expect(f.reserve).not.toHaveBeenCalled();
+	expect(f.claim).not.toHaveBeenCalled();
+	expect(fetch).not.toHaveBeenCalled();
+});
+
+it("captured disabled stdio guidance cannot disable a server re-enabled while the picker is open", async () => {
+	const f = await settingsFixture();
+	const config = { type: "stdio" as const, command: "synthetic-not-executed", enabled: false };
+	f.harness.settingsManager.setGlobalMcpServer("stdio-proof", config, true);
+	const done = f.mode.showServiceCatalogPicker("stdio-proof");
+	const picker = f.picker();
+	expect(stripAnsi(picker.render(100).join("\n"))).toContain("Enter settings guidance");
+	f.harness.settingsManager.setGlobalMcpServer("stdio-proof", { ...config, enabled: true }, true);
+	const writeSettings = vi.spyOn(f.harness.settingsManager, "setGlobalMcpServer");
+	picker.handleInput("\r");
+	await done;
+	expect(f.harness.settingsManager.getGlobalMcpServers()?.["stdio-proof"]?.enabled).toBe(true);
+	expect(writeSettings).not.toHaveBeenCalled();
+	expect(f.reload).not.toHaveBeenCalled();
+	expect(f.showStatus).toHaveBeenCalled();
+	expect(f.authFlow).not.toHaveBeenCalled();
+	expect(f.reserve).not.toHaveBeenCalled();
+	expect(f.claim).not.toHaveBeenCalled();
+	expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(["anonymous", "missing-bearer"] as const)(
+	"real %s HTTP without a saved account exposes only non-mutating settings guidance",
+	async (kind) => {
+		const f = await settingsFixture();
+		vi.stubEnv("ENG_6108_MISSING_BEARER", "");
+		f.harness.settingsManager.setGlobalMcpServer(
+			"http-proof",
+			{
+				type: "http",
+				url: ENDPOINT,
+				...(kind === "missing-bearer" ? { bearerTokenEnvVar: "ENG_6108_MISSING_BEARER" } : {}),
+			},
+			true,
+		);
+		const writeSettings = vi.spyOn(f.harness.settingsManager, "setGlobalMcpServer");
+		const done = f.mode.showServiceCatalogPicker("http-proof");
+		const picker = f.picker();
+		const output = stripAnsi(picker.render(100).join("\n"));
+		expect(output).toContain("Enter settings guidance");
+		expect(output).not.toContain("Add another account");
+		expect(output).not.toContain("Remove http-proof");
+		picker.handleInput("\r");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+		expect(writeSettings).not.toHaveBeenCalled();
+		expect(f.authFlow).not.toHaveBeenCalled();
+		expect(f.reserve).not.toHaveBeenCalled();
+		expect(f.claim).not.toHaveBeenCalled();
+		expect(f.store.records()).toEqual([]);
+		expect(f.showStatus).toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+	},
+);
+
+it.each([false, true])("nonOAuth pending HTTP follows real Verify without OAuth (saved=%s)", async (saved) => {
+	const f = await settingsFixture();
+	vi.stubEnv("ENG_6108_PRESENT_BEARER", "synthetic-env-token");
+	f.harness.settingsManager.setGlobalMcpServer(
+		"http-proof",
+		{ type: "http", url: ENDPOINT, bearerTokenEnvVar: "ENG_6108_PRESENT_BEARER" },
+		true,
+	);
+	if (saved) {
+		f.store.upsert({
+			connectionId: "http-proof",
+			serviceId: "http-proof",
+			endpoint: ENDPOINT,
+			label: "HTTP",
+			status: "pending",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		await f.store.flush();
+	}
+	const done = f.mode.showServiceCatalogPicker("http-proof");
+	const catalog = f.picker();
+	if (saved) {
+		expect(stripAnsi(catalog.render(100).join("\n"))).toContain("Enter manage saved account");
+		catalog.handleInput("\r");
+		await vi.waitFor(() => expect(f.picker()).not.toBe(catalog));
+	}
+	const picker = f.picker();
+	const output = stripAnsi(picker.render(100).join("\n"));
+	expect(output).toContain("Enter verify");
+	expect(output).toContain("Needs verification");
+	expect(output).not.toContain("Add another account");
+	if (!saved) expect(output).not.toContain("Remove saved data");
+	picker.handleInput("\r");
+	await done;
+	// Global fetch is denied: this proves the existing verifier ran, not a login,
+	// while keeping all tests offline and the failed verification honest.
+	expect(fetch).toHaveBeenCalled();
+	expect(f.store.get("http-proof")?.status).toBe("pending");
+	expect(f.store.get("http-proof")?.lastError).toBeDefined();
+	expect(f.store.get("http-proof")?.verifiedAt).toBeUndefined();
+	expect(f.reload).toHaveBeenCalledOnce();
+	expect(f.authFlow).not.toHaveBeenCalled();
+	expect(f.reserve).not.toHaveBeenCalled();
+	expect(f.claim).not.toHaveBeenCalled();
+	expect(process.env.ENG_6108_PRESENT_BEARER).toBe("synthetic-env-token");
+});
+
+it.each(["record", "credential-only"] as const)(
+	"real nonOAuth HTTP %s cleanup removes saved data but keeps server settings and environment token",
+	async (saved) => {
+		const f = await settingsFixture();
+		vi.stubEnv("ENG_6108_SAVED_BEARER", "");
+		const config = { type: "http" as const, url: ENDPOINT, bearerTokenEnvVar: "ENG_6108_SAVED_BEARER" };
+		f.harness.settingsManager.setGlobalMcpServer("http-proof", config, true);
+		f.harness.authStorage.set("mcp:http-proof", {
+			type: "oauth",
+			access: "synthetic-saved-token",
+			refresh: "r",
+			endpoint: ENDPOINT,
+			expires: Date.now() + 3600_000,
+		});
+		if (saved === "record") {
+			f.store.upsert({
+				connectionId: "http-proof",
+				serviceId: "http-proof",
+				endpoint: ENDPOINT,
+				label: "HTTP",
+				status: "error",
+				createdAt: 1,
+				updatedAt: 1,
+			});
+			await f.store.flush();
+		}
+		const done = f.mode.showServiceCatalogPicker("http-proof");
+		const catalog = f.picker();
+		// Credential-only + absent bearer has connectionIds=[] in the core view.
+		// The UI still discovers real saved data without changing the core inventory.
+		expect(stripAnsi(catalog.render(100).join("\n"))).toContain("Enter manage saved account");
+		catalog.handleInput("\r");
+		await vi.waitFor(() => expect(f.picker()).not.toBe(catalog));
+		const accounts = f.picker();
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter settings guidance");
+		expect(stripAnsi(accounts.render(100).join("\n"))).not.toContain("Add another account");
+		accounts.handleInput("\x1b[B");
+		const output = stripAnsi(accounts.render(100).join("\n"));
+		expect(output).toContain("Enter remove saved data");
+		expect(output).toContain("Keeps server settings and environment token.");
+		// Changing the environment does not change the meaning of saved-data cleanup.
+		vi.stubEnv("ENG_6108_SAVED_BEARER", "synthetic-current-token");
+		accounts.handleInput("\r");
+		await done;
+		expect(f.harness.authStorage.getVerified("mcp:http-proof")).toBeUndefined();
+		expect(f.store.get("http-proof")).toBeUndefined();
+		expect(f.harness.settingsManager.getGlobalMcpServers()?.["http-proof"]).toEqual(config);
+		expect(process.env.ENG_6108_SAVED_BEARER).toBe("synthetic-current-token");
+		expect(f.reload).toHaveBeenCalledOnce();
+		expect(f.authFlow).not.toHaveBeenCalled();
+		expect(f.reserve).not.toHaveBeenCalled();
+		expect(f.claim).not.toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+	},
+);
+
+it("saved HTTP guidance stays inert if the bearer environment changes after rendering", async () => {
+	const f = await settingsFixture();
+	vi.stubEnv("ENG_6108_GUIDANCE_BEARER", "");
+	f.harness.settingsManager.setGlobalMcpServer(
+		"http-proof",
+		{ type: "http", url: ENDPOINT, bearerTokenEnvVar: "ENG_6108_GUIDANCE_BEARER" },
+		true,
+	);
+	f.store.upsert({
+		connectionId: "http-proof",
+		serviceId: "http-proof",
+		endpoint: ENDPOINT,
+		label: "HTTP",
+		status: "pending",
+		createdAt: 1,
+		updatedAt: 1,
+	});
+	await f.store.flush();
+	const done = f.mode.showServiceCatalogPicker("http-proof");
+	const catalog = f.picker();
+	catalog.handleInput("\r");
+	await vi.waitFor(() => expect(f.picker()).not.toBe(catalog));
+	const accounts = f.picker();
+	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter settings guidance");
+	vi.stubEnv("ENG_6108_GUIDANCE_BEARER", "synthetic-new-token");
+	accounts.handleInput("\r");
+	await done;
+	expect(f.authFlow).not.toHaveBeenCalled();
+	expect(f.reload).not.toHaveBeenCalled();
+	expect(f.reserve).not.toHaveBeenCalled();
+	expect(f.claim).not.toHaveBeenCalled();
+	expect(fetch).not.toHaveBeenCalled();
+	expect(f.store.get("http-proof")?.status).toBe("pending");
 });

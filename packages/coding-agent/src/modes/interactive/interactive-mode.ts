@@ -8853,13 +8853,56 @@ export class InteractiveMode {
 			}
 		}
 
-		const service = await this.selectServiceCatalogRow(views, { initialSearch });
+		// Freeze the displayed intent: guidance must never become a mutation
+		// when settings change while the picker is open.
+		const settingsActions = new Map<
+			string,
+			"disable local server" | "settings guidance" | "verify" | "manage saved account"
+		>();
+		for (const [name, config] of Object.entries(userServers)) {
+			if (views.find((view) => view.serviceId === name)?.source !== "user") continue;
+			if (config.type === "stdio") {
+				settingsActions.set(name, config.enabled === false ? "settings guidance" : "disable local server");
+			} else if (!config.oauth) {
+				const hasSavedAccount =
+					this.getMcpConnectionStore().get(name) !== undefined ||
+					this.modelRegistry.authStorage.getVerified(mcpCredentialKey(name)) !== undefined;
+				const pending =
+					config.enabled !== false &&
+					views.find((view) => view.serviceId === name)?.connectionStatus === "pending";
+				settingsActions.set(
+					name,
+					hasSavedAccount ? "manage saved account" : pending ? "verify" : "settings guidance",
+				);
+			}
+		}
+		const service = await this.selectServiceCatalogRow(views, {
+			initialSearch,
+			getRowPresentation: (view) => {
+				const action = settingsActions.get(view.serviceId);
+				return action ? { action } : undefined;
+			},
+		});
 		if (!service) return;
 		try {
+			const settingsAction = settingsActions.get(service.serviceId);
+			if (settingsAction === "settings guidance") {
+				this.showStatus(
+					service.setupHint ??
+						`${service.label} is configured through settings; manage it with /mcp or your settings file.`,
+				);
+				return;
+			}
+			if (settingsAction === "disable local server" || settingsAction === "verify") {
+				await this.connectServiceFromPicker(service, targets.get(service.serviceId));
+				return;
+			}
 			// Every configured id is off-limits for new account ids.
 			const knownIds = new Set<string>([...services.map((entry) => entry.serviceId), ...Object.keys(userServers)]);
-			if (service.connectionIds.length > 0) {
-				await this.showAccountPickerForService(service, targets.get(service.serviceId), { knownIds });
+			if (settingsAction === "manage saved account" || service.connectionIds.length > 0) {
+				const accountService =
+					settingsAction === "manage saved account" ? { ...service, connectionIds: [service.serviceId] } : service;
+				await this.showAccountPickerForService(accountService, targets.get(service.serviceId), { knownIds });
 				return;
 			}
 			await this.connectServiceFromPicker(service, targets.get(service.serviceId), { knownIds });
@@ -8880,18 +8923,21 @@ export class InteractiveMode {
 		options: { knownIds: Set<string> },
 	): Promise<void> {
 		const catalogServiceId = service.serviceId;
+		const settingsOnly = service.source === "user" && !service.usesOAuth;
 		const accountCards: McpPluginView[] = [];
 		for (const connectionId of service.connectionIds) {
 			// Centralized per-account state: credential binding, expiry, and the
 			// record combine through the SAME computation as the plugin aggregate
 			// and the inventory — the picker never trusts a raw record.status.
-			const state = accountStateFor({
-				connectionId,
-				endpoint: target?.url ?? "",
-				authStorage: this.modelRegistry.authStorage,
-				connectionStore: this.getMcpConnectionStore(),
-				usesOAuth: service.usesOAuth,
-			});
+			const state = settingsOnly
+				? { status: service.connectionStatus, setupHint: service.setupHint, toolCount: service.toolCount }
+				: accountStateFor({
+						connectionId,
+						endpoint: target?.url ?? "",
+						authStorage: this.modelRegistry.authStorage,
+						connectionStore: this.getMcpConnectionStore(),
+						usesOAuth: service.usesOAuth,
+					});
 			const status = state.status;
 			accountCards.push({
 				...service,
@@ -8907,27 +8953,46 @@ export class InteractiveMode {
 			accountCards.push({
 				...service,
 				serviceId: connectionId,
-				label: `Remove ${connectionId}`,
+				label: settingsOnly ? `Remove saved data for ${connectionId}` : `Remove ${connectionId}`,
 				connectionIds: [connectionId],
 				connectionStatus: status,
 				connectable: false,
 				removeAction: true,
 			});
 		}
-		accountCards.push({
-			...service,
-			label: "Add another account",
-			connectionIds: [],
-			connectionStatus: "not_connected",
-			connectable: true,
-			setupHint: undefined,
-		});
+		if (service.usesOAuth && target?.usesOAuth) {
+			accountCards.push({
+				...service,
+				label: "Add another account",
+				connectionIds: [],
+				connectionStatus: "not_connected",
+				connectable: true,
+				setupHint: undefined,
+			});
+		}
 		const card = await this.selectServiceCatalogRow(accountCards, {
 			title: `Accounts — ${service.label}`,
 			mode: "accounts",
+			getRowPresentation: (row) =>
+				settingsOnly
+					? row.removeAction
+						? {
+								action: "remove saved data",
+								status: "Remove saved data",
+								detail: "Remove saved account data. Keeps server settings and environment token.",
+							}
+						: { action: row.connectionStatus === "pending" ? "verify" : "settings guidance" }
+					: undefined,
 		});
 		if (!card) return;
 		try {
+			if (settingsOnly && !card.removeAction && card.connectionStatus !== "pending") {
+				this.showStatus(
+					card.setupHint ??
+						`${service.label} is configured through settings; manage it with /mcp or your settings file.`,
+				);
+				return;
+			}
 			if (card.connectionIds.length === 0) {
 				await this.connectServiceFromPicker(card, target, {
 					catalogServiceId,
