@@ -12,6 +12,7 @@ import asyncio
 import codecs
 import contextvars
 import ctypes
+import hashlib
 import inspect
 import io
 import json
@@ -40,6 +41,7 @@ DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
 _ALWAYS_SKIP = {"rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
 # IPython-injected names that may appear in a snapshot payload; never restored.
 _RESTORE_SKIP = {"In", "Out", "get_ipython"}
+_CREDENTIAL_SKIP_REASON = "matches a credential from the host environment"
 
 _protocol_fd: int = -1
 _write_lock = threading.Lock()
@@ -619,6 +621,19 @@ class _SnapshotSizeLimitExceeded(Exception):
     pass
 
 
+def _credential_digests(value: Any) -> tuple[str, ...]:
+    """SHA-256 hex digests of a str/bytes value (and its stripped form) for redaction matching."""
+    if isinstance(value, str):
+        candidates = [value]
+        stripped = value.strip()
+        if stripped != value:
+            candidates.append(stripped)
+        return tuple(hashlib.sha256(c.encode("utf-8", "surrogatepass")).hexdigest() for c in candidates)
+    if isinstance(value, (bytes, bytearray)):
+        return (hashlib.sha256(bytes(value)).hexdigest(),)
+    return ()
+
+
 class _CappedWriter:
     def __init__(self, sink: Any, limit: int) -> None:
         self._sink = sink
@@ -642,6 +657,7 @@ def _snapshot_state(
     max_variable_bytes: int,
     prune_oversized: bool,
     committed: list[dict[str, Any]] | None = None,
+    redact_sha256: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     import datetime
 
@@ -663,6 +679,11 @@ def _snapshot_state(
         if value is missing:
             # A background thread deleted the name after the key listing.
             skipped.append({"name": name, "reason": "deleted during snapshot"})
+            continue
+        if redact_sha256 and any(d in redact_sha256 for d in _credential_digests(value)):
+            # The host only shares digests of the credentials it saw at spawn; a
+            # name holding one of those values must never be persisted to disk.
+            skipped.append({"name": name, "reason": _CREDENTIAL_SKIP_REASON})
             continue
         remaining = max_bytes - total
         limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)
@@ -869,6 +890,11 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
             # realpath resolves symlinks, so aliased paths cannot silently clobber the payload.
             if os.path.realpath(req["path"]) == os.path.realpath(req["manifest_path"]):
                 return {"error": "path and manifest_path must differ"}
+            redact = req.get("redact_sha256", [])
+            if not isinstance(redact, list) or not all(
+                isinstance(d, str) and len(d) == 64 and all(c in "0123456789abcdef" for c in d) for d in redact
+            ):
+                return {"error": "redact_sha256 must be a list of lowercase sha256 hex digests"}
             return _snapshot_state(
                 ns,
                 req["path"],
@@ -877,6 +903,7 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
                 req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
                 prune,
                 committed,
+                frozenset(redact),
             )
         return _restore_state(ns, req["path"], committed)
 

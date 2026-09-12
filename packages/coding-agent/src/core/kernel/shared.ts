@@ -48,7 +48,10 @@ export interface KernelManagerOptions {
 	/** Python interpreter with the kernel runtime available. Defaults to the auto-bootstrapped kernel. */
 	python?: string;
 	cwd?: string;
+	/** Variables handed to the kernel verbatim, on top of the allowlisted host environment. */
 	env?: Record<string, string>;
+	/** Extra host variable names (exact or `PREFIX*`) the kernel may inherit beyond the built-in allowlist. */
+	hostEnvPassthrough?: readonly string[];
 	sessionId?: string;
 	hostHandlers?: HostRequestHandlers;
 	pythonSkills?: readonly KernelPythonSkill[];

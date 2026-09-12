@@ -275,6 +275,8 @@ export interface IpythonToolOptions {
 	/** Python override. Must have prime-agent-runtime installed. */
 	python?: string;
 	env?: Record<string, string>;
+	/** Extra host variable names (exact or `PREFIX*`) the kernel may inherit beyond the built-in allowlist. */
+	hostEnvPassthrough?: readonly string[];
 	/** Command prefix prepended to every bash() command. */
 	commandPrefix?: string;
 	/** Shell used by bash(). */
@@ -283,8 +285,10 @@ export interface IpythonToolOptions {
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
 	pythonSkills?: readonly PythonSkillRuntimeInfo[];
-	/** Per-session artifact dir where the kernel namespace snapshot is stored. Omit to disable snapshots. */
+	/** Per-session artifact dir where the kernel namespace snapshot and stderr log are stored. Omit to disable both. */
 	snapshotDir?: string;
+	/** Persist and revive the kernel namespace in `snapshotDir`. Default: true. False keeps only the stderr log. */
+	stateSnapshots?: boolean;
 	/** Resolves before this kernel starts — e.g. the previous provisioner's dispose, so a
 	 * /reload's old-kernel snapshot flush can't race the new kernel's restore. */
 	readyGate?: Promise<unknown>;
@@ -459,6 +463,7 @@ export class IpythonKernelProvisioner {
 				);
 			}
 			const snapshotDir = this.options?.snapshotDir;
+			const stateSnapshotDir = this.options?.stateSnapshots === false ? undefined : snapshotDir;
 			// Always inject an absolute trusted shell (undefined only on win32
 			// without bash, where the runtime's teaching error fires instead).
 			const shellPath = resolveKernelBashShell(this.options?.shellPath);
@@ -473,12 +478,13 @@ export class IpythonKernelProvisioner {
 					...(shellPath ? { PRIME_AGENT_BASH_SHELL: shellPath } : {}),
 					...(commandPrefix ? { PRIME_AGENT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
 				},
+				hostEnvPassthrough: this.options?.hostEnvPassthrough,
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
 				pythonSkills: this.options?.pythonSkills,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
-				snapshot: snapshotDir
-					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
+				snapshot: stateSnapshotDir
+					? { path: snapshotPathIn(stateSnapshotDir), manifestPath: manifestPathIn(stateSnapshotDir) }
 					: undefined,
 				stderrLogPath: snapshotDir ? join(snapshotDir, "kernel-stderr.log") : undefined,
 				bootstrapCode,
@@ -503,12 +509,12 @@ export class IpythonKernelProvisioner {
 				}, startupSignal);
 				// Revive a prior session's namespace before the bootstrap, so the bootstrap
 				// then overwrites live handles (rlm, skills) on top of anything restored.
-				if (snapshotDir) {
-					const snapshotExisted = existsSync(snapshotPathIn(snapshotDir));
+				if (stateSnapshotDir) {
+					const snapshotExisted = existsSync(snapshotPathIn(stateSnapshotDir));
 					this.emitStartupProgress("Restoring Python state...");
 					const restore = await raceWithAbort(m.restoreState(), startupSignal);
 					if (snapshotExisted) {
-						pendingRestore = restore ?? { restored: [], failed: [], path: snapshotPathIn(snapshotDir) };
+						pendingRestore = restore ?? { restored: [], failed: [], path: snapshotPathIn(stateSnapshotDir) };
 					}
 				}
 				this.emitStartupProgress("Preparing Python runtime...");

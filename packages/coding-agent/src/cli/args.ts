@@ -23,6 +23,7 @@ export interface Args {
 	mode?: Mode;
 	daemonSocket?: string;
 	noSession?: boolean;
+	noKernelSnapshots?: boolean;
 	fork?: string;
 	sessionDir?: string;
 	models?: string[];
@@ -143,6 +144,8 @@ export function parseArgs(args: string[]): Args {
 			result.appendSystemPrompt.push(args[++i]);
 		} else if (arg === "--no-session") {
 			result.noSession = true;
+		} else if (arg === "--no-kernel-snapshots") {
+			result.noKernelSnapshots = true;
 		} else if (arg === "--fork" && i + 1 < args.length) {
 			result.fork = args[++i];
 		} else if (arg === "--session-dir" && i + 1 < args.length) {

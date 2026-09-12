@@ -195,6 +195,24 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 
 Normally the package manager's global modules location is queried using `root -g`. As a special case, if the first element of `npmCommand` is `"bun"`, the modules location will instead be queried with `pm bin -g`.
 
+### Kernel
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `kernel.stateSnapshots` | boolean | `true` | Persist the Python kernel namespace to `session-artifacts/<id>/kernel-state.dill` and revive it on resume. `false` disables writing and restoring the snapshot for the session (same as `--no-kernel-snapshots`). |
+| `kernel.envPassthrough` | string[] | `[]` | Extra host environment variable names the kernel (and its `bash()` commands) may inherit, as exact names or `PREFIX*` globs. |
+
+```json
+{
+  "kernel": {
+    "stateSnapshots": false,
+    "envPassthrough": ["DATABASE_URL", "MYAPP_*"]
+  }
+}
+```
+
+The kernel does not inherit the host environment wholesale. It receives an allowlist (`PATH`, `HOME`, locale and terminal variables, temp dirs, proxy and TLS settings, common toolchain homes, `RLM_*`, `PRIME_AGENT_*`, `PYTHON*`, `UV_*`, `PIP_*`, `LC_*`, `XDG_*`, `GIT_*`, and the Windows system set) plus what the session injects. Provider credentials such as `PRIME_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `*_TOKEN`, and AWS/GCP credential variables are never inherited; list a name in `kernel.envPassthrough` only when model-run code genuinely needs it. Values of credentials present in the host environment are also never written to the kernel snapshot: a top-level variable equal to one of them is reported as skipped in `kernel-state.json`.
+
 ### Daemon
 
 | Setting | Type | Default | Description |

@@ -13,6 +13,8 @@ Live docs: `inference/overview.md`, `inference/usage.md`, `inference/adapter-dep
 export PRIME_API_KEY="your-api-key-here"
 ```
 
+Note: the Python kernel does not inherit `PRIME_API_KEY` (or other provider keys) from the host environment. The `prime` CLI still authenticates from `~/.prime/config.json`; for direct API calls from kernel code, read the key from `~/.prime/config.json` (`api_key`) or ask the user to add `PRIME_API_KEY` to `kernel.envPassthrough` in settings.
+
 ## Via the CLI (recommended for evaluations)
 
 ```bash

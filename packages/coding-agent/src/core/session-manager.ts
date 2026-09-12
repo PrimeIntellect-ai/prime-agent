@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent,
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
+	chmodSync,
 	chownSync,
 	closeSync,
 	existsSync,
@@ -59,6 +60,9 @@ const CONTENT_ENTRY_TYPES = new Set([
 	"compaction",
 	"branch_summary",
 ]);
+
+/** Owner-only mode for newly created session transcripts (matches the kernel snapshot files). */
+export const SESSION_FILE_MODE = 0o600;
 
 function statMetadataIfPresent(path: string): { mode: number; uid: number; gid: number } | undefined {
 	try {
@@ -1592,8 +1596,10 @@ export class SessionManager {
 		const directory = dirname(targetPath);
 		mkdirSync(directory, { recursive: true });
 		const metadata = statMetadataIfPresent(targetPath);
+		// Transcripts carry tool output and anything the model echoed; a new file is
+		// owner-only like the kernel snapshot, while an existing file keeps its mode.
 		writeFileAtomicSync(targetPath, content, {
-			...(metadata === undefined ? {} : { mode: metadata.mode }),
+			mode: metadata === undefined ? SESSION_FILE_MODE : metadata.mode,
 			beforeRename: (tempPath) => {
 				if (metadata !== undefined) chownSync(tempPath, metadata.uid, metadata.gid);
 			},
@@ -2378,7 +2384,8 @@ export class SessionManager {
 			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
 			git: captureGitContext(targetCwd) ?? undefined,
 		};
-		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`);
+		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { mode: SESSION_FILE_MODE });
+		chmodSync(newSessionFile, SESSION_FILE_MODE); // exact bits despite the umask
 
 		// Drop the source's git_state entries (re-linking children): they describe the source repo,
 		// so the fork would otherwise report the source's git instead of its own target context.
