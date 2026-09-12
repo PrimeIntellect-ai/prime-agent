@@ -10,7 +10,7 @@ export const PRIME_INFERENCE_PROVIDER_NAME = "Prime Inference";
 export const PRIME_AGENT_TRACES_PROVIDER_ID = "prime-agent-traces";
 export const PRIME_AGENT_TRACES_PROVIDER_NAME = "Prime Agent Traces";
 
-export const DEFAULT_PRIME_API_BASE_URL = "https://api.primeintellect.ai";
+const DEFAULT_PRIME_API_BASE_URL = "https://api.primeintellect.ai";
 const DEFAULT_PRIME_FRONTEND_URL = "https://app.primeintellect.ai";
 const DEFAULT_PRIME_INFERENCE_URL = "https://api.pinference.ai/api/v1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
