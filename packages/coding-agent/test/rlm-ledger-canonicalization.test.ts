@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -67,7 +76,7 @@ function lastRecord(ledger: RlmSpawnLedger): RlmLedgerRecord {
 
 describe("RLM ledger read-side canonicalization", () => {
 	it.each(["existing", "missing file", "missing directory", "file symlink", "directory symlink"])(
-		"preserves replay identities and caches %s outcomes",
+		"preserves fresh replay identities and caches %s reads",
 		async (kind) => {
 			const { root, sessionsDir, ledger } = fixture();
 			const parent = join(sessionsDir, "parent.jsonl");
@@ -103,7 +112,7 @@ describe("RLM ledger read-side canonicalization", () => {
 			const canonicalize = vi.spyOn(sessionLease, "canonicalSessionPath");
 			const expected = [{ childId: "sub-worker", parent, child, depth: 1, name: "renamed" }];
 			expect(await ledger.edges()).toEqual(expected);
-			expect(canonicalize).toHaveBeenCalledTimes(new Set([resolve(child), canonical]).size);
+			expect(canonicalize.mock.calls).toEqual([[child], [canonical]]);
 			const live = kind.startsWith("missing") ? [] : expected;
 			expect(await ledger.liveEdges()).toEqual(live);
 			canonicalize.mockClear();
@@ -240,13 +249,13 @@ describe("RLM ledger read-side canonicalization", () => {
 		const result = await tombstoneSavedSessionDelete(ledger, alias, { runtimeKind: "subagent" });
 		expect(result.deletedInfo?.path).toBe(alias);
 		expect(result.ledgerEdge).toMatchObject({ childId: "sub-first", child: alias });
+		// Destructive matching and both appendDelete writes bypass the warm read cache.
+		expect(canonicalize.mock.calls).toEqual([[alias], [alias], [child], [alias], [child]]);
 		expect(await ledger.edges()).toEqual([]);
 		expect(await ledger.edges(true)).toEqual([
 			expect.objectContaining({ childId: "sub-first", deleted: "user" }),
 			expect.objectContaining({ childId: "sub-duplicate", deleted: "user" }),
 		]);
-		// Destructive matching and both appendDelete writes bypass the warm read cache.
-		expect(canonicalize.mock.calls).toEqual([[alias], [alias], [child], [alias], [child]]);
 	});
 
 	it("matches the current symlink target for deletion despite a warm read identity", async () => {
@@ -364,6 +373,58 @@ describe("RLM ledger read-side canonicalization", () => {
 			});
 		},
 	);
+
+	it.each(
+		["missing", "retargeted"].flatMap((aliasState) =>
+			["rename", "rename by path", "delete", "external rename", "external delete"].map((operation) => ({
+				aliasState,
+				operation,
+			})),
+		),
+	)("replays $operation immediately after a cached $aliasState alias changes", async ({ aliasState, operation }) => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const { root, sessionsDir, ledger } = fixture();
+		const parent = makeSession(root, sessionsDir, "parent");
+		const child = makeSession(root, join(root, "child"), "child", parent);
+		const alias = join(root, "child-alias.jsonl");
+		if (aliasState === "retargeted") {
+			const original = makeSession(root, join(root, "original"), "original", parent);
+			symlinkSync(original, alias, "file");
+		}
+		writeRecords(ledger, [spawn(parent, alias)]);
+		await ledger.liveEdges();
+		if (aliasState === "retargeted") rmSync(alias);
+		symlinkSync(child, alias, "file");
+		const deleted = operation.endsWith("delete");
+		if (operation.startsWith("external")) {
+			// Simulate another process appending without touching this reader's caches.
+			const record: RlmLedgerRecord = deleted
+				? { v: 1, op: "delete", at: "deleted", childId: "sub-worker", child, reason: "user" }
+				: { v: 1, op: "rename", at: "renamed", childId: "sub-worker", child, name: "fresh" };
+			appendFileSync(ledger.ledgerPath, `${JSON.stringify(record)}\n`);
+		} else if (deleted) {
+			await ledger.appendDelete({ childId: "sub-worker", child: alias, reason: "user" });
+		} else if (operation === "rename by path") {
+			await ledger.appendRenameByChildPath(child, "fresh");
+		} else {
+			await ledger.appendRename({ childId: "sub-worker", child: alias, name: "fresh" });
+		}
+		const expected = [
+			{
+				childId: "sub-worker",
+				child: alias,
+				name: deleted ? "sub-worker" : "fresh",
+				...(deleted ? { deleted: "user" } : {}),
+			},
+		];
+		expect(await ledger.edges(true)).toMatchObject(expected);
+		vi.advanceTimersByTime(60_001);
+		expect(await ledger.edges(true)).toMatchObject(expected);
+		expect(await ledger.liveEdges()).toHaveLength(deleted ? 0 : 1);
+		const family = await ledger.family();
+		expect(family.map((row) => row.path)).toEqual(deleted ? [parent] : [parent, child]);
+		if (!deleted) expect(family[1].name).toBe("fresh");
+	});
 
 	it("checks duplicate spawn paths freshly even when the existing edge has a cached missing alias", async () => {
 		const { root, sessionsDir, ledger } = fixture();

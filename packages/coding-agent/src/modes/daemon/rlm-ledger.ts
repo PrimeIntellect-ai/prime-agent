@@ -314,7 +314,8 @@ function cachedCanonicalSessionPath(sessionPath: string): string {
 }
 
 function edgeKey(childId: string, child: string): string {
-	return `${childId}\u0000${cachedCanonicalSessionPath(child)}`;
+	// Replay is already stat-cached; rebuild keys freshly so aliases match later canonical writes.
+	return `${childId}\u0000${canonicalSessionPath(child)}`;
 }
 
 /**
