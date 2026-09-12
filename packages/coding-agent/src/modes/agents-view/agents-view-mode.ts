@@ -664,7 +664,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private deleteConfirmTimer: ReturnType<typeof setTimeout> | undefined;
 	private workingIconFrame = 0;
 	private rows: AgentsViewRow[] = [];
-	private allRows: AgentsViewRow[] = [];
 	private lastListedSummaries: SessionSummary[] = [];
 	private lastVisibleSummaries: SessionSummary[] = [];
 	private savedSessions: AgentConnectionSavedSessionInfo[] = [];
@@ -960,7 +959,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!this.replyTarget && this.editor.getText().length === 0) {
 			if (this.keybindings.matches(data, "app.agents.expand")) {
 				const row = this.rows[this.selectedIndex];
-				if (row && row.descendantCount > 0) this.toggleSubagentList(row);
+				if (row && (row.kind === "subagent-summary" || row.descendantCount > 0)) this.toggleSubagentList(row);
 				return;
 			}
 		}
@@ -1254,6 +1253,8 @@ export class AgentsViewMode implements Component, Focusable {
 		while (added) {
 			added = false;
 			for (const row of this.rows) {
+				// Summary/code rows reuse their parent's summary; only session rows own expansion keys.
+				if (row.kind !== "agent" && row.kind !== "subagent") continue;
 				if (wanted.has(row.summary.sessionId) && !this.expandedSubagentParents.has(row.identity)) {
 					this.expandedSubagentParents.add(row.identity);
 					added = true;
@@ -1303,7 +1304,7 @@ export class AgentsViewMode implements Component, Focusable {
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
 	private rebuildRows(): void {
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
-		this.allRows = buildAgentsViewRows(
+		this.rows = buildAgentsViewRows(
 			this.getFilteredRecords(),
 			this.expandedSubagentParents,
 			this.programShownParents,
@@ -1311,7 +1312,6 @@ export class AgentsViewMode implements Component, Focusable {
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
 		);
-		this.rows = compactSessionRows(this.allRows);
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
 		if (index >= 0) {
@@ -1391,6 +1391,10 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!row?.selectable || this.isPendingDeleteRow(row)) {
 			return;
 		}
+		if (row.kind === "subagent-summary") {
+			this.toggleSubagentList(row);
+			return;
+		}
 		if (row.kind === "subagent") {
 			this.openSelectedSubagent(row);
 			return;
@@ -1411,7 +1415,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private toggleSubagentList(row: AgentsViewRow): void {
-		const target = row.identity;
+		const target = row.kind === "subagent-summary" ? (row.parentIdentity ?? row.identity) : row.identity;
 		if (this.expandedSubagentParents.has(target)) {
 			this.expandedSubagentParents.delete(target);
 			this.programShownParents.delete(target);
@@ -1455,7 +1459,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 	/** Whether any subagent under the given agent identity carries spawn code. */
 	private targetHasSpawnCode(target: string): boolean {
-		for (const row of this.allRows) {
+		for (const row of this.rows) {
 			if (row.parentIdentity !== target) {
 				continue;
 			}
@@ -2170,7 +2174,7 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		this.scopedRecords = scopeToSessionSubtree(this.unifiedRecords, this.scopeKey, this.unifiedIndex);
-		this.allRows = buildAgentsViewRows(
+		this.rows = buildAgentsViewRows(
 			this.getFilteredRecords(),
 			this.expandedSubagentParents,
 			this.programShownParents,
@@ -2178,7 +2182,6 @@ export class AgentsViewMode implements Component, Focusable {
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
 		);
-		this.rows = compactSessionRows(this.allRows);
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
 		this.ui.requestRender();
@@ -2309,10 +2312,11 @@ export class AgentsViewMode implements Component, Focusable {
 			this.selectedActiveSessionId = undefined;
 			return;
 		}
+		const selectedIdentity = this.selectedRowIdentity ?? this.persistentState.selectedRowIdentity;
 		const resolution = resolveAgentsViewSelectionState(
 			this.rows,
 			this.selectedIndex,
-			this.selectedRowIdentity ?? this.persistentState.selectedRowIdentity,
+			selectedIdentity,
 			this.selectedSessionKey ?? this.persistentState.selectedSessionKey,
 		);
 		this.selectedIndex = resolution.index;
@@ -2471,7 +2475,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private getAgentCountsText(): string {
-		const counts = countRowsBySection(this.allRows);
+		const counts = countRowsBySection(this.rows);
 		return `${counts.running} running, ${counts.idle} idle, ${counts.inactive} inactive`;
 	}
 
@@ -2479,20 +2483,13 @@ export class AgentsViewMode implements Component, Focusable {
 		if (maxRows <= 0) return [];
 		const layout = buildCompactAgentsViewLayout(this.rows, width);
 		const displayItems: DisplayItem[] = [];
-		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
+		const counts = countRowsBySection(this.rows);
 		for (const section of ["running", "idle", "inactive"] as const) {
 			if (counts[section] === 0) continue;
 			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {
 				displayItems.push({ type: "row", row });
-				if (
-					(row.kind === "agent" || row.kind === "subagent") &&
-					row.runningSubagentCount > 0 &&
-					!this.expandedSubagentParents.has(row.identity)
-				) {
-					displayItems.push({ type: "running-subagents", row });
-				}
 			}
 		}
 		if (displayItems.length === 0) {
@@ -2517,14 +2514,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
 		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
 			if (item.type === "spacer") return "";
-			if (item.type === "running-subagents") {
-				const count = item.row.runningSubagentCount;
-				const indent = "  ".repeat(item.row.depth + 1);
-				return theme.fg(
-					"success",
-					truncateToWidth(`${indent}${count} subagent${count === 1 ? "" : "s"} running`, width),
-				);
-			}
 			if (item.type === "heading") {
 				return theme.fg("muted", truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
 			}
@@ -2545,6 +2534,10 @@ export class AgentsViewMode implements Component, Focusable {
 		const selected = row.selectable && row.identity === this.rows[this.selectedIndex]?.identity;
 		const markRow = (line: string): string => (selected ? `${SELECTED_ROW_MARKER}${line}` : line);
 		if (row.kind === "subagent-code") return this.renderCodeRow(row);
+		if (row.kind === "subagent-summary") {
+			const indent = "  ".repeat(row.depth);
+			return markRow(formatTableCell(`${indent}${row.expanded ? "▾" : "▸"} ${row.title}`, width));
+		}
 		const pendingDelete = row.kind === "agent" && this.isPendingDeleteRow(row);
 		const pendingKill = row.kind === "subagent" && this.isPendingKillSubagentRow(row);
 		const details = layout.details.get(row.identity) ?? "";
@@ -2574,7 +2567,6 @@ export class AgentsViewMode implements Component, Focusable {
 		cells.push(theme.fg("dim", details));
 		return markRow(formatTableCell(cells.join("  "), width));
 	}
-
 	// Spawn-code rows are read-only context. They render deemphasized — muted
 	// text on a panel background (applied in finalizeRenderedLine) so the program
 	// reads as one quiet segmented block rather than competing with agent rows.
@@ -2661,7 +2653,18 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.replyTarget) {
 			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
 		}
-		const hints = `${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate   ${keyText("tui.select.confirm")} open   ${keyText("app.agents.new")} new`;
+		const selected = this.rows[this.selectedIndex];
+		// Enter and Right both toggle the list on a summary row and open everywhere
+		// else; Left only has a parent scope to return to below the root view.
+		const rightAction = selected?.kind === "subagent-summary" ? (selected.expanded ? "collapse" : "expand") : "open";
+		const hints = [
+			`${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate`,
+			`${keyText("tui.select.confirm")}/${keyText("app.agents.open")} ${rightAction}`,
+			this.scopeRootSummary ? `${keyText("app.agents.back")} parent` : undefined,
+			`${keyText("app.agents.new")} new`,
+		]
+			.filter((hint): hint is string => hint !== undefined)
+			.join("   ");
 		return truncateToWidth(theme.fg("muted", hints), width);
 	}
 
@@ -2729,13 +2732,7 @@ export class AgentsViewMode implements Component, Focusable {
 type DisplayItem =
 	| { type: "spacer" }
 	| { type: "heading"; section: AgentsViewSection }
-	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };
-
-// Summary rows fold into the running-subagents display items.
-function compactSessionRows(rows: readonly AgentsViewRow[]): AgentsViewRow[] {
-	return rows.filter((row) => row.kind !== "subagent-summary");
-}
 
 // Nested rows (subagent summaries and expanded subagents) always render in
 // their top-level agent's section block, regardless of their own section.

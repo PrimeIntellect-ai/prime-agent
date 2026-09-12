@@ -1,0 +1,82 @@
+name: Standalone binaries
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Standalone (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: darwin-x64
+            runner: macos-15-intel
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: linux-x64
+            runner: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          path: source
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+          no-cache: true
+
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.11.7'
+          enable-cache: false
+
+      - name: Install native development dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: Install locked npm dependencies
+        working-directory: source
+        run: npm ci
+
+      - name: Compile standalone application
+        working-directory: source/packages/coding-agent
+        run: npm run build:binary
+
+      - name: Assemble native archive
+        working-directory: source
+        run: |
+          version=$(node -p "require('./package.json').version")
+          node scripts/assemble-release-archives.mjs packages/coding-agent/binaries "$RUNNER_TEMP/standalone" "$version"
+          echo "PRIME_AGENT_TEST_ARCHIVE=$RUNNER_TEMP/standalone/prime-agent-$version-${{ matrix.platform }}.tar.gz" >> "$GITHUB_ENV"
+          echo "PRIME_AGENT_TEST_UV=$(command -v uv)" >> "$GITHUB_ENV"
+
+      - name: Remove the build paths from the test machine
+        run: mv "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/standalone-source"
+
+      - name: Test extracted application without JavaScript runtimes on PATH
+        working-directory: ${{ runner.temp }}/standalone-source/packages/coding-agent
+        run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: standalone-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/standalone/*.tar.gz
+            ${{ runner.temp }}/standalone/SHA256SUMS
+          if-no-files-found: error

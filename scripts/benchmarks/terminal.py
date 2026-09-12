@@ -58,6 +58,13 @@ class Display:
             self.stream.feed(self.pending)
             self.pending = ""
 
+    def prompt_ready(self) -> bool:
+        text = self.text()
+        return "agents/resume" in text or (
+            any(line.strip() == ">" for line in text.splitlines())
+            and any(line.lstrip().startswith("← manage") for line in text.splitlines())
+        )
+
     def text(self) -> str:
         return "\n".join(row.rstrip() for row in self.screen.display)
 
@@ -108,7 +115,7 @@ class Terminal:
             self.pump()
 
     def ready(self) -> float:
-        self.until(lambda display: "agents/resume" in display.text(), 30)
+        self.until(lambda display: display.prompt_ready(), 30)
         self.child.send("benchready")
         echoed = self.until(lambda display: "benchready" in display.text(), 5)
         self.child.send("\x7f" * len("benchready"))

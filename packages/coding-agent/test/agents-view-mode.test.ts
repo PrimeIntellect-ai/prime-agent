@@ -691,7 +691,7 @@ describe("AgentsViewMode", () => {
 		expect(
 			expandedRows.find((row) => row.kind === "agent" && row.summary.sessionId === "root-session")?.identity,
 		).toBe("file:/tmp/root.jsonl");
-		expect(expandedRows.some((row) => row.kind === "subagent-summary")).toBe(false);
+		expect(expandedRows.some((row) => row.kind === "subagent-summary")).toBe(true);
 		expect(expandedRows.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(
 			true,
 		);
@@ -702,6 +702,63 @@ describe("AgentsViewMode", () => {
 		expect(collapsedRows.some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(false);
 		expect(collapsedRows.some((row) => row.kind === "subagent")).toBe(false);
 		expect(collapsedView.expandedSubagentParents.size).toBe(0);
+	});
+
+	it("records only session-row identities when re-expanding pending ancestors", () => {
+		const parent = summary({ sessionName: "parent" });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		try {
+			Reflect.set(view, "lastListedSummaries", [parent, child]);
+			invoke("reconcileCatalogs", view);
+			const persistentState = Reflect.get(view, "persistentState") as AgentsViewPersistentState;
+			persistentState.pendingExpandedAncestorSessionIds = [parent.sessionId];
+			invoke("applyPendingAncestorExpansion", view);
+			const expanded = Reflect.get(view, "expandedSubagentParents") as Set<string>;
+			expect(expanded).toEqual(new Set(["file:/tmp/scope.jsonl"]));
+			expect((Reflect.get(view, "rows") as AgentsViewRow[]).some((row) => row.kind === "subagent")).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps a subagent summary selected across roster refreshes", () => {
+		const parent = summary({ sessionName: "parent", sessionFile: undefined });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		try {
+			Reflect.set(view, "lastListedSummaries", [parent, child]);
+			invoke("reconcileCatalogs", view);
+			invoke("moveSelection", view, 1);
+			const selectedRow = () => {
+				const rows = Reflect.get(view, "rows") as AgentsViewRow[];
+				return rows[Reflect.get(view, "selectedIndex") as number];
+			};
+			expect(selectedRow()?.kind).toBe("subagent-summary");
+			const provisionalIdentity = selectedRow()?.identity;
+
+			Reflect.set(view, "lastListedSummaries", [{ ...parent, sessionFile: "/tmp/parent.jsonl" }, child]);
+			invoke("reconcileCatalogs", view);
+
+			expect(selectedRow()?.kind).toBe("subagent-summary");
+			expect(selectedRow()?.identity).not.toBe(provisionalIdentity);
+		} finally {
+			stopThemeWatcher();
+		}
 	});
 
 	it("toggles subagent list expansion from the parent row", () => {
@@ -903,7 +960,7 @@ describe("AgentsViewMode", () => {
 			expect(lines).not.toContain("Inactive (0)");
 			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
 			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
-			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
+			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(1);
 			for (const line of rendered) {
 				expect(invoke("finalizeRenderedLine", view, line, 120)).not.toContain("\x1b[48");
 			}
@@ -1078,7 +1135,7 @@ describe("AgentsViewMode", () => {
 		try {
 			Reflect.set(view, "lastListedSummaries", [parent, child]);
 			invoke("reconcileCatalogs", view);
-			expect(rows().map((row) => row.kind)).toEqual(["agent"]);
+			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent-summary"]);
 			const finish = vi.fn();
 			Reflect.set(view, "finish", finish);
 			invoke("openSelected", view);
@@ -1091,7 +1148,6 @@ describe("AgentsViewMode", () => {
 			invoke("cycleProgramForSelected", view);
 			expect(rows().some((row) => row.kind === "subagent-code" && row.code === child.spawnCode)).toBe(true);
 			expect(rows().some((row) => row.kind === "subagent" && row.summary.sessionId === child.sessionId)).toBe(true);
-			expect(rows().some((row) => row.kind === "subagent-summary")).toBe(false);
 			invoke("cycleProgramForSelected", view);
 			expect(rows().some((row) => row.kind === "subagent-code")).toBe(false);
 		} finally {
@@ -1241,7 +1297,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("shows running-subagent counts only while collapsed and work remains", () => {
+	it("puts the expand affordance on the subagent summary line instead of the session row", () => {
 		const parent = summary({ sessionName: "parent" });
 		const child = summary({
 			id: "child",
@@ -1260,41 +1316,82 @@ describe("AgentsViewMode", () => {
 			sessionId: "child-session-2",
 			sessionFile: "/tmp/child-2.jsonl",
 		};
+		const childless = summary({
+			id: "solo",
+			activeSessionId: "solo",
+			sessionId: "solo-session",
+			sessionName: "solo",
+		});
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
-		const lines = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
+		const renderRow = (row: AgentsViewRow) =>
+			(invoke("renderRow", view, row, 120) as string).replace("\0agents-view-selected-row\0", "");
+		const summaryRow = () => rows().find((row) => row.kind === "subagent-summary")!;
 		try {
-			Reflect.set(view, "lastListedSummaries", [parent, child, secondChild]);
+			Reflect.set(view, "lastListedSummaries", [parent, child, secondChild, childless]);
 			invoke("reconcileCatalogs", view);
-			expect(rows()).toHaveLength(1);
-			const collapsedRow = invoke("renderRow", view, rows()[0], 120) as string;
-			expect(collapsedRow).not.toContain("▸");
-			expect(collapsedRow).not.toContain("▾");
-			const collapsed = lines();
-			const parentIndex = collapsed.findIndex((line) => line.includes("parent"));
-			expect(collapsed[parentIndex + 1]).toBe("  2 subagents running");
-			invoke("moveSelection", view, 1);
-			expect(Reflect.get(view, "selectedIndex")).toBe(0);
+			Reflect.set(view, "selectedIndex", -1);
+			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent-summary", "agent"]);
+			// Session rows carry no arrow; the summary line is the visible control.
+			for (const row of rows().filter((r) => r.kind === "agent")) {
+				expect(stripAnsi(renderRow(row))).not.toMatch(/[▸▾]/);
+			}
+			const collapsedLine = renderRow(summaryRow());
+			expect(stripAnsi(collapsedLine).trimEnd()).toBe("  ▸ 2 subagents running");
+			// Normal foreground: no dim/success styling on the summary line.
+			expect(collapsedLine).toBe(stripAnsi(collapsedLine));
+			// Expand from the summary row itself (keybinding unchanged).
+			Reflect.set(view, "selectedIndex", 1);
 			view.handleInput("\x1b[1;3C");
-			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent", "subagent"]);
-			expect(lines().join("\n")).not.toContain("subagents running");
-			const expandedRow = invoke("renderRow", view, rows()[0], 120) as string;
-			expect(expandedRow).not.toContain("▸");
-			expect(expandedRow).not.toContain("▾");
-			view.handleInput("\x1b[1;3C");
-			expect(rows()).toHaveLength(1);
-			expect(lines()).toContain("  2 subagents running");
+			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent-summary", "subagent", "subagent", "agent"]);
+			expect(stripAnsi(renderRow(summaryRow())).trimEnd()).toBe("  ▾ 2 subagents running");
+			// Enter on the summary row collapses it again.
+			invoke("openSelected", view);
+			expect(rows().some((row) => row.kind === "subagent")).toBe(false);
+			expect(stripAnsi(renderRow(summaryRow()))).toContain("▸ 2 subagents running");
 			const idleChild = { ...child, activity: "idle", isStreaming: false };
-			Reflect.set(view, "lastListedSummaries", [parent, idleChild, secondChild]);
+			Reflect.set(view, "lastListedSummaries", [parent, idleChild, secondChild, childless]);
 			invoke("reconcileCatalogs", view);
-			expect(lines()).toContain("  1 subagent running");
+			expect(stripAnsi(renderRow(summaryRow()))).toContain("▸ 1 subagent running");
 			Reflect.set(view, "lastListedSummaries", [
 				parent,
 				idleChild,
 				{ ...secondChild, activity: "idle", isStreaming: false },
+				childless,
 			]);
 			invoke("reconcileCatalogs", view);
-			expect(lines().join("\n")).not.toMatch(/subagents? running/);
+			// Finished subagents keep a visible, expandable summary line.
+			expect(stripAnsi(renderRow(summaryRow()))).toContain("▸ 2 subagents");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("adapts the tray hints to the selected row and the scope", () => {
+		const parent = summary({ sessionName: "parent" });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child-session",
+			sessionFile: "/tmp/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const hints = () => stripAnsi(invoke("renderHints", view, 200) as string);
+		try {
+			Reflect.set(view, "lastListedSummaries", [parent, child]);
+			invoke("reconcileCatalogs", view);
+			Reflect.set(view, "selectedIndex", 0);
+			expect(hints()).toBe("↑/↓ navigate   Enter/→ open   Ctrl+N new");
+			// Right toggles the summary row, so its hint follows the expansion state.
+			Reflect.set(view, "selectedIndex", 1);
+			expect(hints()).toBe("↑/↓ navigate   Enter/→ expand   Ctrl+N new");
+			view.handleInput("\x1b[C");
+			expect(hints()).toBe("↑/↓ navigate   Enter/→ collapse   Ctrl+N new");
+			// Only a scoped view has a parent to return to.
+			Reflect.set(view, "scopeRootSummary", parent);
+			expect(hints()).toBe("↑/↓ navigate   Enter/→ collapse   ← parent   Ctrl+N new");
 		} finally {
 			stopThemeWatcher();
 		}

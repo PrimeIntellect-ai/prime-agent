@@ -30,7 +30,7 @@ from schema import (
     write_json,
 )
 from terminal import QUERIES, Display, Terminal
-from worker import environment, install, measure
+from worker import environment, install, measure, stop_agents
 
 SHA = "a" * 40
 HEAD = "b" * 40
@@ -63,7 +63,7 @@ class TerminalTests(unittest.TestCase):
 import os, sys, time, tty
 tty.setraw(0)
 time.sleep(float(sys.argv[1]))
-os.write(1, b'agents/resume\\r\\n> ')
+os.write(1, sys.argv[2].encode())
 while True:
     byte = os.read(0, 1)
     if byte == b'\\x7f':
@@ -80,9 +80,9 @@ while True:
             root = Path(directory)
             path = root / "fixture.py"
             path.write_text(script)
-            for delay in (0.05, 0.6):
+            for delay, label in ((0.05, "agents/resume\r\n> "), (0.6, ">\r\n← manage")):
                 terminal = Terminal(
-                    [sys.executable, str(path), str(delay)],
+                    [sys.executable, str(path), str(delay), label],
                     root,
                     os.environ.copy(),
                     root / f"transcript-{delay}",
@@ -92,6 +92,16 @@ while True:
                 finally:
                     terminal.close()
         self.assertGreater(measurements[1] - measurements[0], 0.25)
+
+    def test_recognizes_current_and_legacy_prompt_bars(self):
+        for text in ("agents/resume\r\n> ", ">\r\n← manage        unknown  0"):
+            display = Display(lambda _reply: None)
+            display.feed(text)
+            self.assertTrue(display.prompt_ready())
+        for text in ("Loading...", ">", "← manage"):
+            display = Display(lambda _reply: None)
+            display.feed(text)
+            self.assertFalse(display.prompt_ready())
 
     def test_queries_split_at_every_boundary(self):
         for query, reply in QUERIES.items():
@@ -590,6 +600,33 @@ class LifecycleTests(unittest.TestCase):
 
 
 class MeasurementTests(unittest.TestCase):
+    def test_cleanup_accepts_a_session_that_exits_between_list_and_stop(self):
+        stale = subprocess.CalledProcessError(
+            1, ["prime-agent", "stop", "session", "--json"], stderr="Error: Unknown active session: session\n"
+        )
+        with patch(
+            "worker.run_as",
+            side_effect=['{"sessions": [{"activeSessionId": "session"}]}', stale, '{"sessions": []}'],
+        ) as run:
+            stop_agents(Path("/fixture"))
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args.args[1], ["prime-agent", "list", "--json"])
+
+    def test_cleanup_preserves_real_stop_failures(self):
+        for error, remaining in (
+            ("Error: Unknown active session: session\n", '{"sessions": [{"activeSessionId": "session"}]}'),
+            ("Error: connection closed\n", '{"sessions": []}'),
+            ("Error: Unknown active session: another\n", '{"sessions": []}'),
+        ):
+            with self.subTest(error=error, remaining=remaining):
+                failure = subprocess.CalledProcessError(1, ["prime-agent", "stop"], stderr=error)
+                with patch(
+                    "worker.run_as",
+                    side_effect=['{"sessions": [{"activeSessionId": "session"}]}', failure, remaining],
+                ):
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        stop_agents(Path("/fixture"))
+
     def test_disk_footprint_is_measured_after_interactive_first_use(self):
         order = []
         terminal = Mock()

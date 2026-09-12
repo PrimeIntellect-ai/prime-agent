@@ -116,7 +116,7 @@ function writeLedgerOutboxEntry(agentDir: string, ledgerFile: string, uploadedBy
 }
 
 async function advanceTimersUntil(condition: () => boolean): Promise<void> {
-	for (let step = 0; step < 200 && !condition(); step += 1) {
+	for (let step = 0; step < 1_000 && !condition(); step += 1) {
 		await stat(new URL(import.meta.url));
 		if (!condition() && vi.getTimerCount() > 0) {
 			await vi.advanceTimersToNextTimerAsync();
@@ -410,6 +410,9 @@ describe("agent trace upload", () => {
 		sessionManager.appendMessage(createAssistantMessage("hi"));
 		await advanceTimersUntil(() => calls.length === 1);
 		expect(calls[0].url).toBe("https://api.example.test/api/v1/agent-traces/sessions/listener-session");
+		const sessionFile = sessionManager.getSessionFile()!;
+		const signature = await stat(sessionFile);
+		await advanceTimersUntil(() => readOutboxEntry(tempDir, sessionFile)?.size === signature.size);
 	});
 
 	it("coalesces new content that persists during an in-flight upload into one follow-up upload", async () => {

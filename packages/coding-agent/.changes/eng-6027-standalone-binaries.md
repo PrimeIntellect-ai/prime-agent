@@ -1,0 +1,11 @@
+- Added standalone macOS and Linux release archives that run without Node, npm, or Bun, including the Python runtime sources and application assets.
+- Changed new installations to prefer verified compiled releases on supported machines, with Node installation available for other systems.
+- Fixed reinstalling the same compiled release to restore its assets without modifying files used by existing processes.
+- Fixed installation to preserve a public command replaced by another installer during download.
+- Fixed terminal hangups leaving an installation lock behind.
+- Fixed installing older releases that only provide npm packages through the default installer, including when an npm command already exists.
+- Fixed interrupted compiled updates discarding the existing rollback target.
+- Fixed reinstalling or upgrading through the installer after an incompatible compiled executable falls back to Node.
+- Fixed interrupted fresh installations leaving a broken command.
+- Fixed installer downloads to require HTTPS and reject redirects to insecure protocols.
+- Changed macOS installation guidance to use the published installer until browser downloads are signed and notarized.

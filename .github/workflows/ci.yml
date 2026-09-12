@@ -157,16 +157,23 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked python -m unittest discover -s tests -v
 
+  standalone:
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    uses: ./.github/workflows/standalone-binaries.yml
+
   build-check-test:
     name: build-check-test
     if: always() && needs.trust.outputs.allowed == 'true'
-    needs: [trust, build-check, test]
+    needs: [trust, build-check, test, standalone]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          STANDALONE_RESULT: ${{ needs.standalone.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success
+          test "$STANDALONE_RESULT" = success

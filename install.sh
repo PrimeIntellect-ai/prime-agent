@@ -57,13 +57,40 @@ prime_agent_screen_status=
 prime_agent_screen_detail=
 prime_agent_screen_question=
 prime_agent_animation_frame=0
+prime_agent_native_stage=
+prime_agent_native_lock=
+prime_agent_allow_insecure_http=0
 
 main() {
+	if [ "${1:-}" = --native-platform ]; then
+		prime_agent_native_platform
+		return
+	fi
+	case "${PRIME_AGENT_INSTALL_METHOD:-auto}" in
+		auto|binary|node) ;;
+		*) printf 'error: PRIME_AGENT_INSTALL_METHOD must be auto, binary or node.\n' >&2; exit 1 ;;
+	esac
+	if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" != node ]; then
+		if native_platform=$(prime_agent_native_platform); then
+			prime_agent_install_native "$native_platform" "$@"
+			return
+		fi
+		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = binary ]; then
+			printf 'error: no compatible compiled archive is available for this platform.\n' >&2
+			exit 1
+		fi
+		printf 'Using the Node installation for this platform.\n' >&2
+	fi
+	prime_agent_install_node "$@"
+}
+
+prime_agent_install_node() {
 	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
 		printf 'error: installer download URL is not configured.\n' >&2
 		printf 'Set PRIME_AGENT_DOWNLOAD_BASE_URL or use the installer published by the release workflow.\n' >&2
 		exit 1
 	fi
+	prime_agent_validate_download_base_url
 
 	prime_agent_install_traps
 	prime_agent_init_screen
@@ -154,10 +181,50 @@ create_temp_dir() {
 	exit 1
 }
 
+prime_agent_is_loopback_test_base_url() {
+	case "$1" in
+		http://127.0.0.1:*) ;;
+		*) return 1 ;;
+	esac
+	test_port=${1##*:}
+	case "$test_port" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+prime_agent_validate_download_base_url() {
+	case "$prime_agent_base_url" in
+		https://*)
+			prime_agent_allow_insecure_http=0
+			;;
+		http://*)
+			if [ "${PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS:-0}" = 1 ] &&
+				prime_agent_is_loopback_test_base_url "$prime_agent_base_url"; then
+				prime_agent_allow_insecure_http=1
+				return
+			fi
+			printf 'error: Prime Agent downloads require an HTTPS base URL.\n' >&2
+			printf 'Local loopback test feeds require PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS=1.\n' >&2
+			exit 1
+			;;
+		*)
+			printf 'error: Prime Agent download base URL must use HTTPS.\n' >&2
+			exit 1
+			;;
+	esac
+}
+
+prime_agent_curl_download() {
+	if [ "$prime_agent_allow_insecure_http" = 1 ]; then
+		curl --proto '=http,https' --proto-redir '=https' "$@"
+	else
+		curl --proto '=https' --proto-redir '=https' "$@"
+	fi
+}
+
 prime_agent_install_traps() {
 	trap 'prime_agent_cleanup' EXIT
 	trap 'prime_agent_signal_cleanup 130' INT
 	trap 'prime_agent_signal_cleanup 143' TERM
+	trap 'prime_agent_signal_cleanup 129' HUP
 }
 
 prime_agent_cleanup() {
@@ -165,6 +232,7 @@ prime_agent_cleanup() {
 	if [ -n "${prime_agent_download_dir:-}" ] && [ -d "$prime_agent_download_dir" ]; then
 		rm -rf "$prime_agent_download_dir"
 	fi
+	prime_agent_native_cleanup
 	prime_agent_restore_terminal
 	return "$status"
 }
@@ -958,7 +1026,7 @@ resolve_prime_agent_version() {
 		"Resolving latest release" \
 		"Resolving latest release" \
 		"Checking the $release_channel release channel." \
-		curl -fsSL "$prime_agent_base_url/$release_channel" -o "$channel_path"; then
+		prime_agent_curl_download -fsSL "$prime_agent_base_url/$release_channel" -o "$channel_path"; then
 		rm -rf "$channel_dir"
 		printf 'error: could not resolve latest Prime Agent version from %s/%s\n' "$prime_agent_base_url" "$release_channel" >&2
 		exit 1
@@ -1188,7 +1256,7 @@ install_node_standalone() {
 	mkdir -p "$node_tmp_dir" "$node_base_dir"
 
 	printf 'Resolving Node.js binary for %s-%s\n' "$node_platform" "$node_arch"
-	curl -fsSL "$node_dist_base/SHASUMS256.txt" -o "$node_tmp_dir/SHASUMS256.txt"
+	prime_agent_curl_download -fsSL "$node_dist_base/SHASUMS256.txt" -o "$node_tmp_dir/SHASUMS256.txt"
 	node_file=$(awk -v suffix="-$node_platform-$node_arch.tar.xz" '
 		index($2, "node-v") == 1 && length($2) >= length(suffix) && substr($2, length($2) - length(suffix) + 1) == suffix { print $2; exit }
 	' "$node_tmp_dir/SHASUMS256.txt")
@@ -1212,7 +1280,7 @@ install_node_standalone() {
 	esac
 
 	printf 'Downloading Node.js %s\n' "${node_file%.tar.xz}"
-	curl -fsSL "$node_dist_base/$node_file" -o "$node_tmp_dir/$node_file"
+	prime_agent_curl_download -fsSL "$node_dist_base/$node_file" -o "$node_tmp_dir/$node_file"
 	verify_node_standalone_download "$node_tmp_dir" "$node_file"
 	ensure_node_standalone_extract_tools "$node_platform"
 
@@ -1469,13 +1537,13 @@ download_prime_agent_package() {
 		"Downloading checksums" \
 		"Downloading release checksums" \
 		"Prime Agent v$version" \
-		curl -fsSL "$checksums_url" -o "$checksums_path"
+		prime_agent_curl_download -fsSL "$checksums_url" -o "$checksums_path"
 
 	prime_agent_run_quiet_with_animation \
 		"Downloading Prime Agent" \
 		"Downloading Prime Agent v$version" \
-		"Fetching the verified package." \
-		curl -fsSL "$tarball_url" -o "$tarball_path"
+		"Fetching the checksummed package." \
+		prime_agent_curl_download -fsSL "$tarball_url" -o "$tarball_path"
 
 	verify_prime_agent_package_checksum "$checksums_path" "$tarball_path"
 }
@@ -1531,7 +1599,7 @@ confirm_install() {
 
 	if prime_agent_prompt_yes_no \
 		"Install Prime Agent v$version globally with npm?" \
-		"Downloads the verified release and runs npm install -g." \
+		"Downloads the checksummed release and runs npm install -g." \
 		"Install? [Y/n]"; then
 		return 0
 	else
@@ -1636,6 +1704,276 @@ Finalizing npm install."
 			"$npm_install_details" \
 			prime_agent_npm_install "$tarball_path" PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1
 	fi
+}
+
+prime_agent_native_platform() {
+	case "$(uname -s)" in
+		Darwin)
+			native_os_version=$(sw_vers -productVersion) || return 1
+			case "${native_os_version%%.*}" in ''|*[!0-9]*) return 1 ;; esac
+			[ "${native_os_version%%.*}" -ge 13 ] || return 1
+			native_os=darwin
+			;;
+		Linux)
+			native_libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || return 1
+			printf '%s\n' "$native_libc" | awk '$1 == "glibc" { split($2, v, "."); if (v[1] > 2 || (v[1] == 2 && v[2] >= 17)) ok=1 } END { exit !ok }' || return 1
+			native_os=linux
+			;;
+		*) return 1 ;;
+	esac
+	case "$(uname -m)" in
+		arm64|aarch64) printf '%s-arm64' "$native_os" ;;
+		x86_64|amd64) printf '%s-x64' "$native_os" ;;
+		*) return 1 ;;
+	esac
+}
+
+prime_agent_native_cleanup() {
+	if [ -n "${prime_agent_native_activation_target:-}" ] && [ -n "${prime_agent_native_activation_previous:-}" ] &&
+		[ "$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)" = "$prime_agent_native_activation_target" ] &&
+		[ "$(readlink "$native_root/bin/previous" 2>/dev/null || :)" != "$prime_agent_native_activation_previous" ]; then
+		prime_agent_native_atomic_link "$prime_agent_native_activation_previous" "$native_root/bin/previous" ||
+			printf 'Could not finish retaining the previous release; recover it from %s/releases.\n' "$native_root" >&2
+	fi
+	prime_agent_native_activation_target=
+	prime_agent_native_activation_previous=
+	if [ -n "${prime_agent_native_stage:-}" ]; then
+		rm -rf "$prime_agent_native_stage"
+		prime_agent_native_stage=
+	fi
+	if [ -n "${prime_agent_native_lock:-}" ] && [ "$(cat "$prime_agent_native_lock/pid" 2>/dev/null || :)" = "$$" ]; then
+		rm -f "$prime_agent_native_lock/pid"
+		rmdir "$prime_agent_native_lock"
+	fi
+	prime_agent_native_lock=
+}
+
+prime_agent_native_prepare_root() {
+	native_root="${PRIME_AGENT_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent}"
+	case "$native_root" in /*) ;; *) printf 'error: install directory must be absolute.\n' >&2; exit 1 ;; esac
+	mkdir -p "$native_root"
+	native_root=$(CDPATH= cd "$native_root" && pwd -P)
+	if [ -L "$native_root/.managed" ] || [ -L "$native_root/releases" ] || [ -L "$native_root/bin" ]; then
+		printf 'error: managed installation directories must not be symlinks.\n' >&2; exit 1
+	fi
+	if [ -e "$native_root/.managed" ]; then
+		[ "$(cat "$native_root/.managed")" = prime-agent-native-v1 ] || {
+			printf 'error: unrecognized installation owner in %s.\n' "$native_root" >&2; exit 1;
+		}
+	elif [ -n "$(ls -A "$native_root")" ]; then
+		printf 'error: refusing to take ownership of nonempty directory %s.\n' "$native_root" >&2
+		exit 1
+	fi
+	# Never steal a lock: even stale-lock recovery can race with another installer.
+	if ! mkdir "$native_root/.install-lock" 2>/dev/null; then
+		native_lock_pid=$(cat "$native_root/.install-lock/pid" 2>/dev/null || :)
+		printf 'error: installation is locked (pid %s). After confirming no installer is running, remove %s/.install-lock.\n' "$native_lock_pid" "$native_root" >&2
+		exit 1
+	fi
+	prime_agent_native_lock="$native_root/.install-lock"
+	printf '%s\n' "$$" >"$prime_agent_native_lock/pid"
+	printf 'prime-agent-native-v1\n' >"$native_root/.managed"
+	mkdir -p "$native_root/releases" "$native_root/bin"
+	for native_link in prime-agent previous; do
+		if [ -e "$native_root/bin/$native_link" ] || [ -L "$native_root/bin/$native_link" ]; then
+			[ -L "$native_root/bin/$native_link" ] && prime_agent_native_valid_target "$(readlink "$native_root/bin/$native_link")" || {
+				printf 'error: unrecognized managed command target.\n' >&2; exit 1;
+			}
+		fi
+	done
+	prime_agent_native_stage=$(mktemp -d "$native_root/.install.XXXXXX")
+	if [ "${PRIME_AGENT_EXPECTED_CURRENT+x}" = x ] && [ "$(readlink "$native_root/bin/prime-agent" 2>/dev/null || :)" != "$PRIME_AGENT_EXPECTED_CURRENT" ]; then
+		printf 'error: the active release changed; retry the update.\n' >&2; exit 1
+	fi
+}
+
+prime_agent_native_valid_target() {
+	case "$1" in ../releases/*/prime-agent) ;; *) return 1 ;; esac
+	native_target_name=${1#../releases/}
+	native_target_name=${native_target_name%/prime-agent}
+	case "$native_target_name" in ''|.|..|*[!0-9A-Za-z.-]*) return 1 ;; esac
+}
+
+prime_agent_native_check_public_link() {
+	native_public_bin="${PRIME_AGENT_BIN_DIR:-$HOME/.local/bin}"
+	case "$native_public_bin" in /*) ;; *) printf 'error: bin directory must be absolute.\n' >&2; exit 1 ;; esac
+	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" = 0 ]; then return; fi
+	case "$prime_agent_cmd" in
+		''|.|..|*/*) printf 'error: command name must be a basename.\n' >&2; exit 1 ;;
+	esac
+	if [ -e "$native_public_bin/$prime_agent_cmd" ] || [ -L "$native_public_bin/$prime_agent_cmd" ]; then
+		if [ ! -L "$native_public_bin/$prime_agent_cmd" ] || [ "$(readlink "$native_public_bin/$prime_agent_cmd")" != "$native_root/bin/prime-agent" ]; then
+			printf 'error: refusing to replace existing command %s/%s.\n' "$native_public_bin" "$prime_agent_cmd" >&2
+			printf 'Choose PRIME_AGENT_BIN_DIR or set PRIME_AGENT_INSTALL_LINK=0.\n' >&2
+			exit 1
+		fi
+	fi
+	mkdir -p "$native_public_bin"
+}
+
+prime_agent_native_validate_archive() {
+	LC_ALL=C tar -tzf "$native_archive" >"$prime_agent_native_stage/entries"
+	awk '
+		/^\// || /(^|\/)\.\.(\/|$)/ || /\\/ { bad=1 }
+		END { exit bad }
+	' "$prime_agent_native_stage/entries" || { printf 'error: unsafe archive path.\n' >&2; exit 1; }
+	LC_ALL=C tar -tvzf "$native_archive" >"$prime_agent_native_stage/types"
+	awk 'substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { bad=1 } END { exit bad }' \
+		"$prime_agent_native_stage/types" || { printf 'error: archive contains links or special files.\n' >&2; exit 1; }
+}
+
+prime_agent_native_atomic_link() {
+	native_link_stage=$(mktemp -d "$prime_agent_native_stage/link.XXXXXX")
+	ln -s "$1" "$native_link_stage/link"
+	# The destination is an executable link, never a directory link.
+	mv -f "$native_link_stage/link" "$2"
+	rmdir "$native_link_stage"
+}
+
+prime_agent_native_activate() {
+	prime_agent_native_activation_target="$1"
+	prime_agent_native_activation_previous="$2"
+	prime_agent_native_atomic_link "$1" "$native_root/bin/prime-agent"
+	if [ -n "$2" ] && [ "$1" != "$2" ]; then
+		prime_agent_native_atomic_link "$2" "$native_root/bin/previous"
+	fi
+	prime_agent_native_activation_target=
+	prime_agent_native_activation_previous=
+}
+
+prime_agent_release_is_node_only() {
+	awk -v file="$2" '
+		$2 ~ /\.tar\.gz$/ { compiled=1 }
+		$2 == file { count++; if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-fA-F]/) invalid=1 }
+		END { exit compiled || invalid || count != 1 }
+	' "$1"
+}
+
+prime_agent_install_native() {
+	native_platform="$1"
+	shift
+	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
+		printf 'error: set PRIME_AGENT_DOWNLOAD_BASE_URL or use the published installer.\n' >&2; exit 1
+	fi
+	prime_agent_validate_download_base_url
+	prime_agent_install_traps
+	prime_agent_init_screen
+	native_version=$(resolve_prime_agent_version "$@")
+	printf '%s\n' "$native_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || {
+		printf 'error: invalid native release version.\n' >&2; exit 1;
+	}
+	# Select the release format before touching native-owned installation paths.
+	prime_agent_download_dir=$(create_temp_dir)
+	native_file="prime-agent-$native_version-$native_platform.tar.gz"
+	native_checksums="$prime_agent_download_dir/SHA256SUMS"
+	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading release checksums" "Prime Agent v$native_version" \
+		prime_agent_curl_download -fsSL --connect-timeout 10 --max-time 120 "$prime_agent_base_url/releases/v$native_version/SHA256SUMS" -o "$native_checksums"
+	awk -v file="$native_file" '$2 == file { count++; hash=$1; fields=NF } END { if (count != 1 || fields != 2 || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1; print tolower(hash) "  " file }' \
+		"$native_checksums" >"$prime_agent_download_dir/selected.sha256" || {
+		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ] &&
+			prime_agent_release_is_node_only "$native_checksums" "$prime_agent_package-$native_version.tgz"; then
+			rm -rf "$prime_agent_download_dir"
+			prime_agent_download_dir=
+			printf 'This release only provides npm packages; using the Node installation.\n' >&2
+			prime_agent_install_node "$native_version"
+			return
+		fi
+		printf 'error: expected one valid checksum for %s.\n' "$native_file" >&2; exit 1;
+	}
+	if [ "${PRIME_AGENT_INSTALLER_NONINTERACTIVE:-0}" != 1 ]; then
+		if prime_agent_prompt_yes_no "Install Prime Agent v$native_version?" "Downloads and verifies the compiled application." "Install? [Y/n]"; then
+			:
+		else
+			native_prompt_status=$?
+			[ "$native_prompt_status" = 2 ] || return 0
+		fi
+	fi
+	prime_agent_native_prepare_root
+	mv "$prime_agent_download_dir/selected.sha256" "$prime_agent_native_stage/selected.sha256"
+	rm -rf "$prime_agent_download_dir"
+	prime_agent_download_dir=
+	native_archive="$prime_agent_native_stage/$native_file"
+	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading compiled Prime Agent" "$native_platform" \
+		prime_agent_curl_download -fsSL --connect-timeout 10 --max-time 300 "$prime_agent_base_url/releases/v$native_version/$native_file" -o "$native_archive"
+	if command -v sha256sum >/dev/null 2>&1; then native_checker=sha256sum; else native_checker=shasum; fi
+	prime_agent_run_quiet_with_animation "Verifying Prime Agent" "Verifying SHA-256" "Checking the downloaded archive." \
+		prime_agent_run_checksum_check "$prime_agent_native_stage" selected.sha256 "$native_checker"
+	prime_agent_native_validate_archive
+	mkdir "$prime_agent_native_stage/application"
+	tar -xzf "$native_archive" -C "$prime_agent_native_stage/application"
+	native_extracted="$prime_agent_native_stage/application"
+	for native_asset in prime-agent package.json install.sh prime-agent-runtime/pyproject.toml prime-agent-runtime/src/rlm/repl.py theme/prime.json export-html/template.html photon_rs_bg.wasm; do
+		[ -f "$native_extracted/$native_asset" ] || { printf 'error: missing archive asset: %s\n' "$native_asset" >&2; exit 1; }
+	done
+	if ! "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
+		cat "$prime_agent_native_stage/probe.log" >&2
+		prime_agent_native_cleanup
+		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then
+			printf 'The compiled executable cannot run here; using the Node installation.\n' >&2
+			prime_agent_install_node "$native_version"
+			return
+		fi
+		printf 'error: the compiled executable cannot run on this machine.\n' >&2; exit 1
+	fi
+	[ "$(cat "$prime_agent_native_stage/version")" = "$native_version" ] || { printf 'error: archive version mismatch.\n' >&2; exit 1; }
+	"$native_extracted/prime-agent" --help >"$prime_agent_native_stage/help"
+	prime_agent_native_check_public_link
+	native_digest=$(awk '{ print $1 }' "$prime_agent_native_stage/selected.sha256")
+	native_release_name="$native_version-$native_platform-$native_digest"
+	native_destination="$native_root/releases/$native_release_name"
+	if [ -e "$native_destination" ] || [ -L "$native_destination" ]; then
+		# Reinstalls activate fresh assets without modifying a running release.
+		native_destination=$(mktemp -d "$native_destination.XXXXXX")
+		rmdir "$native_destination"
+		native_release_name=${native_destination##*/}
+	fi
+	printf '%s\n' "$native_digest" >"$native_extracted/.archive-sha256"
+	printf '%s\n' "$prime_agent_base_url" >"$native_extracted/.install-source"
+	mv "$native_extracted" "$native_destination"
+	if [ "${PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL:-}" != 0 ]; then
+		confirm_kernel_runtime_setup
+		if [ "$prime_agent_bootstrap_kernel_on_install" = 1 ]; then
+			if ! prime_agent_run_quiet_with_animation "Preparing Python" "Preparing Python runtime" "Installing uv and Python dependencies." \
+				env PRIME_AGENT_INSTALL_UV=1 "$native_destination/prime-agent" --prime-agent-bootstrap; then
+				printf 'Python preparation failed; retry on first Python use.\n' >&2
+			fi
+		fi
+	fi
+	prime_agent_native_check_public_link
+	native_target="../releases/$native_release_name/prime-agent"
+	native_previous=
+	if [ -L "$native_root/bin/prime-agent" ]; then
+		native_previous=$(readlink "$native_root/bin/prime-agent")
+	fi
+	# A fresh public command must point to an already activated executable.
+	if [ -z "$native_previous" ]; then
+		prime_agent_native_activate "$native_target" ""
+	fi
+	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" != 0 ] && [ ! -L "$native_public_bin/$prime_agent_cmd" ]; then
+		ln -sn "$native_root/bin/prime-agent" "$native_public_bin/$prime_agent_cmd"
+	fi
+	# Keep an existing release active if creating the public command loses a race.
+	if [ -n "$native_previous" ]; then
+		prime_agent_native_activate "$native_target" "$native_previous"
+	fi
+	if [ "${PRIME_AGENT_INSTALL_LINK:-1}" != 0 ]; then
+		prime_agent_native_configure_path || printf 'Add %s to PATH to run Prime Agent.\n' "$native_public_bin" >&2
+	fi
+	prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
+	printf 'Installed Prime Agent %s at %s\n' "$native_version" "$native_root/bin/prime-agent"
+	prime_agent_native_cleanup
+}
+
+prime_agent_native_configure_path() {
+	case ":$prime_agent_original_path:" in *":$native_public_bin:"*) return ;; esac
+	native_path_line="export PATH=$(prime_agent_shell_quote "$native_public_bin"):\$PATH"
+	if native_profile=$(detect_shell_profile); then
+		if ! grep -Fx "$native_path_line" "$native_profile" >/dev/null 2>&1; then
+			mkdir -p "$(dirname "$native_profile")"
+			printf '\n# Prime Agent\n%s\n' "$native_path_line" >>"$native_profile"
+		fi
+	fi
+	printf 'For this shell, run: %s\n' "$native_path_line"
 }
 
 main "$@"

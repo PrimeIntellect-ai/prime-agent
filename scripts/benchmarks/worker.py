@@ -378,12 +378,20 @@ def record(
 def stop_agents(home: Path) -> None:
     listing = json.loads(run_as("benchmark1", ["prime-agent", "list", "--json"], home))
     for session in listing["sessions"]:
-        if session.get("activeSessionId"):
-            run_as(
-                "benchmark1",
-                ["prime-agent", "stop", session["activeSessionId"], "--json"],
-                home,
-            )
+        active_id = session.get("activeSessionId")
+        if not active_id:
+            continue
+        try:
+            run_as("benchmark1", ["prime-agent", "stop", active_id, "--json"], home)
+        except subprocess.CalledProcessError as error:
+            if (
+                error.returncode != 1
+                or (error.stderr or "").strip() != f"Error: Unknown active session: {active_id}"
+            ):
+                raise
+            current = json.loads(run_as("benchmark1", ["prime-agent", "list", "--json"], home))
+            if any(item.get("activeSessionId") == active_id for item in current["sessions"]):
+                raise
 
 
 def measure(request: Request, side: Side, trial: int) -> None:
