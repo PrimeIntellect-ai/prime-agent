@@ -1,6 +1,8 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
@@ -11,6 +13,48 @@ vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/utils/atomic-file.js")>();
 	return { ...actual, writeFileAtomicSync: vi.fn(actual.writeFileAtomicSync) };
 });
+
+const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
+const STORE_MODULE = resolve(TEST_DIR, "../src/core/mcp/connection-store.js");
+
+/**
+ * Real-process first-writer worker. Loaded through the project tsx loader so it
+ * imports the TS store module directly: each child opens the shared store, posts
+ * a ready marker, waits at the file barrier so every process starts its flush
+ * at once, then upserts its own record and flushes. Exit codes: 3 barrier
+ * timeout, 4 lost own record.
+ */
+const FIRST_CREATE_WORKER_SOURCE = `
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { McpConnectionStore } from ${JSON.stringify(STORE_MODULE)};
+const [storePath, barrierPath, readyDir, connectionId] = process.argv.slice(2);
+const store = McpConnectionStore.open(storePath);
+writeFileSync(join(readyDir, "ready-" + connectionId), connectionId);
+const deadline = Date.now() + 10_000;
+while (!existsSync(barrierPath)) {
+	if (Date.now() > deadline) {
+		console.error("barrier timeout");
+		process.exit(3);
+	}
+	await new Promise((resolve) => setTimeout(resolve, 5));
+}
+const now = Date.now();
+store.upsert({
+	connectionId: connectionId,
+	serviceId: connectionId,
+	endpoint: "https://mcp.example.test/mcp",
+	label: connectionId,
+	status: "connected",
+	createdAt: now,
+	updatedAt: now,
+});
+await store.flush();
+if (store.get(connectionId) === undefined) {
+	console.error("worker lost its own record");
+	process.exit(4);
+}
+`;
 
 function recordFixture(connectionId: string, overrides: Partial<McpConnectionRecord> = {}): McpConnectionRecord {
 	const now = Date.now();
@@ -182,4 +226,71 @@ describe("McpConnectionStore concurrency", () => {
 		const reopened = McpConnectionStore.open(path);
 		expect(reopened.get("queued-mid-flight")).toBeDefined();
 	});
+});
+
+describe("McpConnectionStore multi-process first create", () => {
+	let tempDir: string;
+	let path: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "mcp-store-mp-"));
+		path = join(tempDir, "mcp-connections.json");
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("independent first-time processes never wipe each other's records", async () => {
+		const workerPath = join(tempDir, "first-create-worker.mts");
+		const barrierPath = join(tempDir, "GO");
+		writeFileSync(workerPath, FIRST_CREATE_WORKER_SOURCE);
+
+		const ids = ["mp-alpha", "mp-beta", "mp-gamma", "mp-delta"];
+		const children = ids.map((id) =>
+			spawn(process.execPath, ["--import", "tsx", workerPath, path, barrierPath, tempDir, id], {
+				cwd: TEST_DIR,
+				stdio: ["ignore", "pipe", "pipe"],
+			}),
+		);
+		// Real, distinct OS processes — this is not the in-process instance race.
+		expect(new Set(children.map((child) => child.pid)).size).toBe(ids.length);
+		const failures: string[] = [];
+		for (const child of children) {
+			child.stderr?.on("data", (chunk: Buffer) => failures.push(String(chunk)));
+		}
+
+		try {
+			// Align every first-writer before any of them flushes.
+			let waited = 0;
+			while (!ids.every((id) => existsSync(join(tempDir, `ready-${id}`)))) {
+				if (waited++ > 1500) throw new Error(`workers never became ready: ${failures.join("")}`);
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			writeFileSync(barrierPath, "");
+			const exits = await Promise.all(
+				children.map(
+					(child) =>
+						new Promise<number | null>((resolve) => {
+							child.on("close", (code) => resolve(code));
+						}),
+				),
+			);
+			expect(exits).toEqual([0, 0, 0, 0]);
+			expect(failures.join("")).toBe("");
+		} finally {
+			for (const child of children) {
+				if (child.exitCode === null && !child.killed) child.kill();
+			}
+		}
+
+		const reopened = McpConnectionStore.open(path);
+		expect(
+			reopened
+				.records()
+				.map((record) => record.connectionId)
+				.sort(),
+		).toEqual([...ids].sort());
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+	}, 30_000);
 });
