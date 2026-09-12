@@ -6,16 +6,16 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { formatAgentMessageParticipant } from "../../../core/agent-messages.js";
-import { previewIpythonCode } from "../../../core/tools/code-preview.js";
+import { previewIpythonCode, pythonStatementLines } from "../../../core/tools/code-preview.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { parseIpythonBashCell } from "../../../core/tools/ipython-cell-code.js";
 import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../theme/working-icon.js";
-import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } from "./agent-message.js";
+import { agentMessageBodyLines, agentMessageSummaryLine } from "./agent-message.js";
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
 import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
+import type { BackgroundShellHandle, ShellCompletion } from "./shell-completion.js";
 
 export interface IPythonCellContentBlock {
 	type: string;
@@ -26,12 +26,14 @@ export interface IPythonCellContentBlock {
 
 export interface IPythonCellState {
 	code: string;
+	backgroundShell?: BackgroundShellHandle;
+	shellCompletion?: ShellCompletion;
+	shellCompletionAmbiguous?: boolean;
 	content?: readonly IPythonCellContentBlock[];
 	details?: unknown;
 	isPartial?: boolean;
 	isError?: boolean;
 	expanded?: boolean;
-	agentMessagesExpanded?: boolean;
 	editDiffsExpanded?: boolean;
 	showExpandHint?: boolean;
 	executionStarted?: boolean;
@@ -87,8 +89,8 @@ interface TracebackParts {
 
 const MAGIC_LINE_PATTERN = /^\s*!/;
 
-// Two columns, matching the code body's "› "/"  " gutter so output aligns under it.
-const OUTPUT_INDENT = "  ";
+// Match the agent-message tree gutter; input and output text share the same column.
+const OUTPUT_INDENT = "   ";
 
 const SGR_PATTERN = /\x1b\[([0-9;]*)m/g;
 
@@ -396,19 +398,23 @@ export class IPythonCellComponent implements Component {
 		const parts = [`${this.marker(details)} ${theme.fg("muted", languageLabel)}`];
 
 		if (preview.text) {
-			parts.push(this.highlightInputLine(preview.text, preview.language === "bash"));
+			// Collapsed preview stays plain and dim so the one-line summary reads as
+			// quiet metadata; the expanded block below keeps full highlighting.
+			parts.push(theme.fg("dim", preview.text));
 		} else if (!this.state.executionStarted) {
-			parts.push(theme.fg("muted", "waiting for code"));
+			parts.push(theme.fg("dim", "waiting for code"));
 		}
 
 		const counts = this.lineCounts(details);
 		if (counts) {
-			parts.push(theme.fg("muted", counts));
+			parts.push(theme.fg("dim", counts));
 		}
 
 		const duration = formatDuration(details.durationMs);
 		if (duration) {
-			parts.push(theme.fg("muted", duration));
+			parts.push(
+				theme.fg("dim", this.state.backgroundShell || this.state.shellCompletion ? `cell ${duration}` : duration),
+			);
 		}
 
 		const errorName = !this.state.isPartial ? (details.error?.ename ?? details.errorEname) : undefined;
@@ -416,9 +422,10 @@ export class IPythonCellComponent implements Component {
 			parts.push(theme.fg("error", errorName));
 		}
 
-		if (this.state.showExpandHint !== false) {
-			parts.push(expandCollapseHint("app.tools.expand", this.state.expanded === true));
-		}
+		if (this.state.shellCompletionAmbiguous) parts.push(theme.fg("dim", "completion unmatched"));
+
+		const shellExit = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell?.exitCode;
+		if (shellExit !== undefined && shellExit !== 0) parts.push(theme.fg("error", `exit ${shellExit}`));
 		return parts.join(theme.fg("dim", " · "));
 	}
 
@@ -468,6 +475,11 @@ export class IPythonCellComponent implements Component {
 
 	private statusKind(details: IpythonDetails): "error" | "aborted" | "running" | "queued" | "done" {
 		const status = details.status;
+		if (this.state.shellCompletionAmbiguous) return "queued";
+		if ((this.state.backgroundShell || this.state.shellCompletion) && !this.state.isPartial) {
+			const exitCode = this.state.shellCompletion?.details.exitCode ?? this.state.backgroundShell?.exitCode;
+			return exitCode === undefined ? "running" : exitCode === 0 ? "done" : "error";
+		}
 		if (this.state.isError || status === "error") {
 			return "error";
 		}
@@ -501,34 +513,30 @@ export class IPythonCellComponent implements Component {
 	private renderCode(lines: string[], width: number): boolean {
 		const code = this.state.code.trimEnd();
 		if (!code) {
-			this.addBlank(lines, width);
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for code"), width);
+			this.addWrapped(lines, theme.fg("dim", "╰─ "), theme.fg("muted", "waiting for code"), width);
 			return false;
 		}
 
-		this.addBlank(lines, width);
 		const isBashCell = parseIpythonBashCell(code) !== undefined;
 		const rawLines = code.split("\n");
-		// Highlight the whole cell at once so multi-line strings keep their color.
-		const highlightedLines = isBashCell ? [] : highlightCode(code, "python");
+		// Reopen inherited ANSI styles on each source line before gutters reset them.
+		const sourceWidth = rawLines.reduce((max, line) => Math.max(max, visibleWidth(line)), 1);
+		const highlightedLines = isBashCell
+			? []
+			: wrapTextWithAnsi(highlightCode(code, "python").join("\n"), sourceWidth);
+		const statementLines = isBashCell ? rawLines : pythonStatementLines(code);
 		for (const [index, rawLine] of rawLines.entries()) {
-			const prefix = index === 0 ? theme.fg("dim", "› ") : theme.fg("dim", "  ");
+			const prefix = index === 0 ? theme.fg("dim", "╰─ ") : OUTPUT_INDENT;
 			const highlighted =
-				isBashCell || MAGIC_LINE_PATTERN.test(rawLine) || parseIpythonBashCell(rawLine) !== undefined
+				isBashCell ||
+				MAGIC_LINE_PATTERN.test(statementLines[index] ?? "") ||
+				parseIpythonBashCell(statementLines[index] ?? "") !== undefined
 					? theme.fg("bashMode", rawLine)
 					: (highlightedLines[index] ?? theme.fg("mdCodeBlock", rawLine));
 			this.addWrapped(lines, prefix, highlighted || " ", width);
 		}
 
 		return true;
-	}
-
-	private highlightInputLine(line: string, isBashCell: boolean): string {
-		if (isBashCell || MAGIC_LINE_PATTERN.test(line) || parseIpythonBashCell(line) !== undefined) {
-			return theme.fg("bashMode", line);
-		}
-		const highlighted = highlightCode(line, "python");
-		return highlighted[0] ?? theme.fg("mdCodeBlock", line);
 	}
 
 	// Only runs when expanded — shows full output below the code, no previews.
@@ -547,6 +555,12 @@ export class IPythonCellComponent implements Component {
 				: undefined;
 		let outputStarted = false;
 		let renderedTextOutput = false;
+		let outputMarkerPending = true;
+		const outputPrefix = (): string => {
+			if (!outputMarkerPending) return OUTPUT_INDENT;
+			outputMarkerPending = false;
+			return theme.fg("dim", " › ");
+		};
 
 		const diffs = details.diffs ?? [];
 		const sentMessages = details.sentAgentMessages ?? [];
@@ -565,12 +579,12 @@ export class IPythonCellComponent implements Component {
 			if (details.stdout?.trim() && !isEditConfirmation(details.stdout, diffs)) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, normalizeErrorDetails(details.stdout), "out");
+				this.renderOutputText(lines, width, normalizeErrorDetails(details.stdout), "out", outputPrefix);
 			}
 			if (details.stderr?.trim()) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, normalizeErrorDetails(details.stderr), "err");
+				this.renderOutputText(lines, width, normalizeErrorDetails(details.stderr), "err", outputPrefix);
 			}
 			if (
 				details.result?.trim() &&
@@ -579,18 +593,24 @@ export class IPythonCellComponent implements Component {
 			) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, normalizeErrorDetails(details.result), "out");
+				this.renderOutputText(lines, width, normalizeErrorDetails(details.result), "out", outputPrefix);
 			}
 		} else if (traceback) {
 			if (traceback.output) {
 				startOutput();
 				renderedTextOutput = true;
-				this.renderOutputText(lines, width, traceback.output, "out");
+				this.renderOutputText(lines, width, traceback.output, "out", outputPrefix);
 			}
 		} else if (text.trim() && !isAgentMessageReceipt(text, sentMessages)) {
 			startOutput();
 			renderedTextOutput = true;
-			this.renderOutputText(lines, width, normalizeErrorDetails(text), this.state.isError ? "err" : "out");
+			this.renderOutputText(
+				lines,
+				width,
+				normalizeErrorDetails(text),
+				this.state.isError ? "err" : "out",
+				outputPrefix,
+			);
 		}
 
 		// Without structured fields the fallback content text above already contains the appended background block.
@@ -603,10 +623,10 @@ export class IPythonCellComponent implements Component {
 
 		if (!renderedTextOutput && this.state.isPartial) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for output..."), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "waiting for output..."), width);
 		} else if (!renderedTextOutput && this.state.executionStarted && !this.state.argsComplete) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for output..."), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "waiting for output..."), width);
 		} else if (
 			!renderedTextOutput &&
 			!traceback &&
@@ -617,7 +637,7 @@ export class IPythonCellComponent implements Component {
 			imageCount === 0
 		) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "no output"), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "no output"), width);
 		}
 
 		if (details.error) {
@@ -626,16 +646,17 @@ export class IPythonCellComponent implements Component {
 				lines,
 				width,
 				details.error.traceback.join("\n") || formatIpythonErrorSummary(details.error),
+				outputPrefix,
 			);
 		} else if (traceback) {
 			startOutput();
-			this.renderTraceback(lines, width, traceback.traceback);
+			this.renderTraceback(lines, width, traceback.traceback, outputPrefix);
 		}
 
 		if (backgroundOutput) {
 			startOutput();
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "background output (unattributed)"), width);
-			this.renderOutputText(lines, width, normalizeErrorDetails(backgroundOutput), "err");
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", "background output (unattributed)"), width);
+			this.renderOutputText(lines, width, normalizeErrorDetails(backgroundOutput), "err", outputPrefix);
 		}
 
 		if (imageCount > 0) {
@@ -643,43 +664,23 @@ export class IPythonCellComponent implements Component {
 			const text = this.state.showImages
 				? `${imageCount} image${imageCount === 1 ? "" : "s"} rendered below`
 				: `${imageCount} image${imageCount === 1 ? "" : "s"} hidden`;
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", text), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", text), width);
 		}
 	}
 
-	// Summary line per message; expanding shows the message text in a `╰─` gutter
-	// instead of the collapsed preview, matching received agent-message UI.
 	private renderSentAgentMessages(lines: string[], width: number, messages: readonly SentAgentMessageDisplay[]): void {
 		for (const message of messages) {
 			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
-			const hint = expandCollapseHint("app.messages.expand", this.state.agentMessagesExpanded === true);
-			if (this.state.agentMessagesExpanded) {
-				this.addBlank(lines, width);
-				this.addPlain(
-					lines,
-					truncateToWidth(`${agentMessageSummaryLine(label, recipient)} ${hint}`, Math.max(1, width - 1), "…"),
-				);
-				for (const bodyLine of agentMessageBodyLines(message.message, width)) {
-					lines.push(bodyLine);
-				}
-				continue;
+			if (this.state.expanded) this.addBlank(lines, width);
+			this.addPlain(lines, truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"));
+			if (this.state.expanded) {
+				for (const line of agentMessageBodyLines(message.message, width)) lines.push(line);
 			}
-			const prefixWidth = visibleWidth(`◆ ${label} · ${recipient} · `);
-			const preview = agentMessagePreview(prefixWidth, message.message);
-			this.addPlain(
-				lines,
-				truncateToWidth(
-					`${agentMessageSummaryLine(label, recipient, preview)} ${hint}`,
-					Math.max(1, width - 1),
-					"…",
-				),
-			);
 		}
 	}
 
-	// The `╰─ <path> +N -M` summary line renders in both states; ctrl+j only
-	// attaches or removes the indented diff rows underneath it.
+	// The path summary stays visible while conversation detail toggles the diff rows.
 	private renderDiffs(lines: string[], width: number, diffs: readonly DiffDisplay[], hasCode: boolean): void {
 		const diffsByPath = new Map<string, DiffDisplay[]>();
 		for (const diff of diffs) {
@@ -690,22 +691,14 @@ export class IPythonCellComponent implements Component {
 		if (hasCode) {
 			this.addPlain(lines, "");
 		}
-		let index = 0;
 		for (const [path, edits] of diffsByPath) {
-			index += 1;
-			this.renderFileDiff(lines, width, path, edits, index === diffsByPath.size);
+			this.renderFileDiff(lines, width, path, edits);
 		}
 	}
 
-	private renderFileDiff(
-		lines: string[],
-		width: number,
-		path: string,
-		edits: readonly DiffDisplay[],
-		showHint: boolean,
-	): void {
+	private renderFileDiff(lines: string[], width: number, path: string, edits: readonly DiffDisplay[]): void {
 		const language = getLanguageFromPath(path);
-		// Diff rows align with the summary line's text column (after the `╰─ ` gutter).
+		// The outer inset matches ordinary chat text; renderer gutters stay intact.
 		const indent = FILE_CHANGE_DIFF_INDENT.slice(0, Math.max(0, width - 1));
 		const contentWidth = Math.max(1, width - indent.length);
 		let added = 0;
@@ -728,27 +721,29 @@ export class IPythonCellComponent implements Component {
 			}
 		});
 
-		// Unlike the ctrl+o hint (latest tool row only), the ctrl+j hint renders on
-		// every tool row, matching the thinking and agent-message hints. Within a
-		// row it renders once, on the last file's summary line (showHint).
-		const hint = showHint ? this.state.editDiffsExpanded === true : undefined;
-		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, hint, width));
+		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, width));
 
 		for (const row of rows) {
 			lines.push(row);
 		}
 	}
 
-	private renderOutputText(lines: string[], width: number, text: string, label: "out" | "err"): void {
+	private renderOutputText(
+		lines: string[],
+		width: number,
+		text: string,
+		label: "out" | "err",
+		outputPrefix: () => string,
+	): void {
 		const color = label === "err" ? "muted" : "toolOutput";
 		for (const line of text.split("\n")) {
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg(color, line || " "), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg(color, line || " "), width);
 		}
 	}
 
-	private renderTraceback(lines: string[], width: number, traceback: string): void {
+	private renderTraceback(lines: string[], width: number, traceback: string, outputPrefix: () => string): void {
 		for (const line of traceback.split("\n")) {
-			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", line || " "), width);
+			this.addWrapped(lines, outputPrefix(), theme.fg("muted", line || " "), width);
 		}
 	}
 

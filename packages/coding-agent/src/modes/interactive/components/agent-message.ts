@@ -2,32 +2,20 @@ import {
 	type Component,
 	Container,
 	type MarkdownTheme,
-	Spacer,
 	Text,
 	truncateToWidth,
-	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { type AgentSessionMessage, formatAgentMessageParticipant } from "../../../core/agent-messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
-
-function collapseText(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
 
 /** `◆ <label> · <participant>[ · <preview>]` summary line shared by received and sent agent-message UI. */
 export function agentMessageSummaryLine(label: string, participant: string, preview?: string): string {
-	const parts = [`${theme.fg("accent", "◆")} ${theme.fg("muted", label)}`, theme.fg("muted", participant)];
+	const parts = [`${theme.fg("accent", "◆")} ${theme.fg("muted", label)}`, theme.fg("dim", participant)];
 	if (preview) {
-		parts.push(theme.fg("muted", preview));
+		parts.push(theme.fg("dim", preview));
 	}
 	return parts.join(theme.fg("dim", " · "));
-}
-
-/** Single-line message preview sized to fit after the summary-line prefix. */
-export function agentMessagePreview(prefixWidth: number, message: string): string {
-	return truncateToWidth(collapseText(message), Math.max(20, 100 - prefixWidth));
 }
 
 /** `╰─`-guttered message body lines shared by received and sent agent-message UI. */
@@ -57,17 +45,24 @@ class AgentMessageBodyComponent implements Component {
 export class AgentMessageComponent extends Container {
 	private readonly content = new Container();
 	private readonly header = new Text("", 1, 0);
+	private readonly shouldAddLeadingSpace?: (expanded: boolean) => boolean;
 	private expanded = false;
 
 	constructor(
 		private readonly message: AgentSessionMessage,
 		_markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		options: { suppressLeadingSpace?: boolean } = {},
+		options: { shouldAddLeadingSpace?: (expanded: boolean) => boolean } = {},
 	) {
 		super();
-		if (!options.suppressLeadingSpace) this.addChild(new Spacer(1));
+		this.shouldAddLeadingSpace = options.shouldAddLeadingSpace;
 		this.addChild(this.content);
 		this.updateDisplay();
+	}
+
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		const leadingSpace = this.shouldAddLeadingSpace?.(this.expanded) ?? true;
+		return leadingSpace ? ["", ...lines] : lines;
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -99,13 +94,6 @@ export class AgentMessageComponent extends Container {
 			this.message.details.fromRelationship,
 			this.message.details.from,
 		);
-		const hint = expandCollapseHint("app.messages.expand", this.expanded);
-		if (this.expanded) {
-			return `${agentMessageSummaryLine(label, participant)} ${hint}`;
-		}
-
-		const prefixWidth = visibleWidth(`◆ ${label} · ${participant} · `);
-		const preview = agentMessagePreview(prefixWidth, this.message.details.message);
-		return `${agentMessageSummaryLine(label, participant, preview)} ${hint}`;
+		return agentMessageSummaryLine(label, participant);
 	}
 }

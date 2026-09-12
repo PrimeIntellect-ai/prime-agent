@@ -8,7 +8,7 @@ import {
 } from "../../../core/tools/truncate.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
-import { expandCollapseHint, keyText } from "./keybinding-hints.js";
+import { keyText } from "./keybinding-hints.js";
 import { truncateToVisualLines } from "./visual-truncate.js";
 
 const PREVIEW_LINES = 20;
@@ -41,7 +41,7 @@ export class BashExecutionComponent extends Container {
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
 
-		const header = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
+		const header = new Text(theme.fg(colorKey, `$ ${command}`), 1, 0);
 		this.contentContainer.addChild(header);
 
 		this.loader = new Loader(
@@ -127,7 +127,7 @@ export class BashExecutionComponent extends Container {
 
 		this.contentContainer.clear();
 
-		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 1, 0);
+		const header = new Text(theme.fg("bashMode", `$ ${this.command}`), 1, 0);
 		this.contentContainer.addChild(header);
 
 		if (availableLines.length > 0) {
@@ -162,14 +162,8 @@ export class BashExecutionComponent extends Container {
 		} else {
 			const statusParts: string[] = [];
 
-			if (hiddenLineCount > 0) {
-				if (this.expanded) {
-					statusParts.push(expandCollapseHint("app.tools.expand", true));
-				} else {
-					statusParts.push(
-						`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} ${expandCollapseHint("app.tools.expand", false)}`,
-					);
-				}
+			if (hiddenLineCount > 0 && !this.expanded) {
+				statusParts.push(theme.fg("muted", `... ${hiddenLineCount} more lines`));
 			}
 
 			if (this.status === "cancelled") {

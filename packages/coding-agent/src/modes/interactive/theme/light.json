@@ -49,6 +49,7 @@
 		"toolTitle": "",
 		"toolOutput": "mediumGray",
 
+		"mdBody": "#454545",
 		"mdHeading": "#7e57c2",
 		"mdLink": "blue",
 		"mdLinkUrl": "dimGray",

@@ -1,7 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
 import { IPythonCellComponent } from "../src/modes/interactive/components/ipython-cell.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, preloadCodeHighlighter, theme } from "../src/modes/interactive/theme/theme.js";
 
 type CellState = ConstructorParameters<typeof IPythonCellComponent>[0];
 
@@ -48,8 +49,92 @@ const WRAPPING_STATE: CellState = {
 };
 
 describe("IPythonCellComponent wrapping", () => {
-	beforeAll(() => {
+	beforeAll(async () => {
 		initTheme("dark");
+		await preloadCodeHighlighter();
+	});
+
+	it.each(['"""', "'''", 'r"""'])(
+		"preserves multiline string colors across physical and wrapped lines (%s)",
+		(opening) => {
+			const code = [
+				`body = ${opening}stringtoken`,
+				"stringtoken stringtoken stringtoken stringtoken",
+				"",
+				"```ts",
+				"if (!env || state.clientEnv) return; // stringtoken",
+				"!not_a_shell stringtoken",
+				"```",
+				opening.slice(-3),
+				"after_value = 7",
+			].join("\n");
+			for (const width of [20, 34, 120]) {
+				const lines = new IPythonCellComponent({
+					...WRAPPING_STATE,
+					code,
+					content: [],
+					details: { status: "ok" },
+				}).render(width);
+				const codeLines = lines.slice(1);
+				const tokenLines = codeLines.filter((line) => line.includes("stringtoken"));
+				expect(tokenLines.length).toBeGreaterThanOrEqual(4);
+				for (const line of tokenLines) {
+					const escapes = [...line.slice(0, line.indexOf("stringtoken")).matchAll(/\x1b\[[0-9;]*m/g)];
+					expect(escapes.at(-1)?.[0]).toBe(theme.getFgAnsi("syntaxString"));
+				}
+				const afterLine = codeLines.find((line) => line.includes("after_value"));
+				expect(afterLine).toBeDefined();
+				expect(foregroundLeftOpen(afterLine!.slice(0, afterLine!.indexOf("after_value")))).toBe(false);
+				expect(afterLine).toContain(`${theme.getFgAnsi("syntaxNumber")}7`);
+				expect(lines.some(foregroundLeftOpen)).toBe(false);
+				expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+			}
+		},
+	);
+
+	it("nests source directly beneath the summary and marks only the output", () => {
+		const state: CellState = {
+			...WRAPPING_STATE,
+			code: "if True:\n    print('hello')",
+			details: { status: "ok", stdout: "hello\nworld", result: "42" },
+		};
+		const lines = new IPythonCellComponent(state).render(80).map(stripAnsi);
+		expect(lines[1]).toBe(" ╰─ if True:");
+		expect(lines[2]).toBe("        print('hello')");
+		expect(lines[3]).toBe("");
+		expect(lines[4]).toBe("  › hello");
+		expect(lines[5]).toBe("    world");
+		expect(lines[6]).toBe("    42");
+		expect(lines.filter((line) => line.includes("›"))).toHaveLength(1);
+	});
+
+	it.each([
+		{ details: { status: "ok" }, expected: "no output" },
+		{ details: { status: "ok" }, isPartial: true, expected: "waiting for output..." },
+		{
+			details: {
+				status: "error",
+				error: { ename: "NameError", evalue: "broken", traceback: ["Traceback:", "NameError: broken"] },
+			},
+			expected: "Traceback:",
+		},
+		{
+			details: { status: "ok" },
+			content: [{ type: "image", data: "", mimeType: "image/png" }],
+			showImages: true,
+			expected: "1 image rendered below",
+		},
+	])("marks empty, pending, error, and image output: $expected", ({ expected, ...outputState }) => {
+		const lines = new IPythonCellComponent({
+			...WRAPPING_STATE,
+			code: "work()",
+			content: [],
+			...outputState,
+		})
+			.render(100)
+			.map(stripAnsi);
+		expect(lines[1]).toBe(" ╰─ work()");
+		expect(lines).toContain(`  › ${expected}`);
 	});
 
 	it("never leaves a foreground color open at a wrapped line end", () => {

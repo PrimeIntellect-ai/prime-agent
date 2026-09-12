@@ -32,7 +32,7 @@ describe("ENG-4583 latest tool expand hint", () => {
 		harness = undefined;
 	});
 
-	it("shows the expand or collapse hint only on the latest tool row", async () => {
+	it("keeps repeated detail hints out of all tool rows during replay and expansion", async () => {
 		harness = await createHarness({ tools: [ipythonTool] });
 		harness.setResponses([
 			fauxAssistantMessage(
@@ -66,15 +66,16 @@ describe("ENG-4583 latest tool expand hint", () => {
 		if (!latest) {
 			throw new Error("Expected a latest tool component");
 		}
-		expect(render(tools.slice(0, -1))).not.toContain("to expand");
-		expect(render([latest])).toContain("to expand");
-		expect(render(tools).match(/to expand/g)).toHaveLength(1);
+		expect(render(tools.slice(0, -1))).not.toContain("cycle detail");
+		expect(render([latest])).toContain("3 + 3");
+		expect(render([latest])).not.toContain("Ctrl+O");
+		expect(render(tools)).not.toContain("Ctrl+O");
 
 		for (const tool of tools) {
 			tool.setExpanded(true);
 		}
-		expect(render(tools.slice(0, -1))).not.toContain("to collapse");
-		expect(render(tools).match(/to collapse/g)).toHaveLength(1);
+		expect(render(tools.slice(0, -1))).not.toContain("cycle detail");
+		expect(render(tools)).not.toContain("Ctrl+O");
 	});
 });
 

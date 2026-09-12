@@ -65,7 +65,8 @@ const ThemeJsonSchema = Type.Object({
 		toolPanelBg: ColorValueSchema,
 		toolTitle: ColorValueSchema,
 		toolOutput: ColorValueSchema,
-		// Markdown (10 colors)
+		// Markdown (11 colors)
+		mdBody: Type.Optional(ColorValueSchema),
 		mdHeading: ColorValueSchema,
 		mdLink: ColorValueSchema,
 		mdLinkUrl: ColorValueSchema,
@@ -145,6 +146,7 @@ export type ThemeColor =
 	| "refinementSummary"
 	| "toolTitle"
 	| "toolOutput"
+	| "mdBody"
 	| "mdHeading"
 	| "mdLink"
 	| "mdLinkUrl"
@@ -817,7 +819,11 @@ function loadThemeJson(name: string): ThemeJson {
 function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string): Theme {
 	const colorMode = mode ?? detectColorMode();
 	const resolvedColors = resolveThemeColors(
-		{ ...refinementColors(themeJson.name === "light"), ...themeJson.colors },
+		{
+			...refinementColors(themeJson.name === "light"),
+			...themeJson.colors,
+			mdBody: themeJson.colors.mdBody ?? themeJson.colors.text,
+		},
 		themeJson.vars,
 	);
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
