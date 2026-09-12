@@ -1099,9 +1099,7 @@ export class ModelRegistry {
 	/** `assumeAuthConfigured` validates an explicit stale-provider selection BEFORE the clear commits. */
 	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
 		if (this.isUsingXaiSubscription(model) && !getXaiSubscriptionModel(model)) {
-			throw new Error(
-				`Grok subscription does not support "${model.id}". Select xai/grok-4.5 or use /login and select the xAI API-key entry.`,
-			);
+			return false;
 		}
 		if (options?.assumeAuthConfigured) {
 			// Must be side-effect-free: a keyless refresh would drop the cached entitlements it needs.

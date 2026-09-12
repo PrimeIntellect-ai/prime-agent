@@ -76,6 +76,7 @@ describe("xAI credential source and request model", () => {
 				.filter((model) => model.provider === "xai")
 				.map((model) => model.id),
 		).toEqual(["grok-4.5"]);
+		await expect(registry.canUseModel(getModel("xai", "grok-4.6"))).resolves.toBe(false);
 		expect(await registry.getApiKeyAndHeaders(getModel("xai", "grok-4.6"))).toMatchObject({
 			ok: false,
 			error: expect.stringContaining("/login and select"),
