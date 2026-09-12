@@ -771,10 +771,13 @@ export class AgentDaemon {
 		this.supervisorAbsentSince ??= Date.now();
 		await this.launchReplacementSupervisor(supervisorSocketPath);
 		if (await this.canConnectToSupervisor(supervisorSocketPath)) {
-			// A replacement came up during the launch: recovery succeeded, so
-			// the orphan window must restart instead of exiting the worker.
+			// A replacement came up during the launch: the orphan window must
+			// restart instead of exiting the worker. The monitor must stay
+			// armed, though — a replacement can bind and then exit before it
+			// ever claims the worker, and only an authenticated claim (or its
+			// later close) re-arms the monitor. Falling through reschedules
+			// the next availability check below.
 			this.supervisorAbsentSince = undefined;
-			return;
 		}
 		await this.exitIfSupervisorOrphanedForTooLong(supervisorSocketPath);
 		if (!this.shuttingDown && !this.hasAuthenticatedSupervisorConnection()) {
