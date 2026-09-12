@@ -214,7 +214,7 @@ describe("ENG-6108 /plugins stdio server management", () => {
 
 describe("ENG-6108 guarded credential commit", () => {
 	function fakeWithStore() {
-		const store = McpConnectionStore.open(join(tmpdir(), `guarded-${Date.now()}/mcp-connections.json`));
+		const store = McpConnectionStore.open(join(mkdtempSync(join(tmpdir(), "guarded-")), "mcp-connections.json"));
 		const authStorage = AuthStorage.inMemory();
 		const showStatus = vi.fn();
 		const fake = {
@@ -280,6 +280,38 @@ describe("ENG-6108 guarded credential commit", () => {
 		const stagedLeftovers = authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"));
 		expect(stagedLeftovers).toEqual([]);
 		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
+	});
+
+	test("an ordinary login that wrote the real key mid-flight is never clobbered or deleted", async () => {
+		const { fake, store, authStorage, showStatus } = fakeWithStore();
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: stagedLogin(authStorage, (stagedServerId) => {
+				// Another client's ORDINARY login writes the real account key
+				// while OUR reservation holds: the guarded commit must refuse
+				// the move and the rollback must never delete the bystander.
+				void stagedServerId;
+				authStorage.set("mcp:acme-2", {
+					type: "oauth",
+					access: "ordinary-login-for-acme-2",
+					refresh: "r2",
+					expires: Date.now() + 7200_000,
+					endpoint: "https://mcp.acme.test/mcp",
+				});
+			}),
+		});
+		await callAddAccount(fake);
+		// The bystander credential survives byte-for-byte.
+		expect(authStorage.get("mcp:acme-2")).toEqual({
+			type: "oauth",
+			access: "ordinary-login-for-acme-2",
+			refresh: "r2",
+			expires: expect.any(Number),
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		// Our staged credential was discarded, and no record resurrected.
+		expect(authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"))).toEqual([]);
+		expect(store.get("acme-2")).toBeUndefined();
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("discarded");
 	});
 
 	test("a finalize whose record write fails: credentials restored to staged, account key untouched, reservation released, honest message", async () => {
@@ -366,7 +398,8 @@ describe("ENG-6108 /plugins account state actions", () => {
 		runMcpLogin?: ReturnType<typeof vi.fn>;
 	}) {
 		const store =
-			options.store ?? McpConnectionStore.open(join(tmpdir(), `actions-${Date.now()}/mcp-connections.json`));
+			options.store ??
+			McpConnectionStore.open(join(mkdtempSync(join(tmpdir(), "actions-")), "mcp-connections.json"));
 		const authStorage = options.authStorage ?? AuthStorage.inMemory();
 		const runMcpLogin = options.runMcpLogin ?? vi.fn(async () => ({ status: "success" }) as const);
 		const showStatus = vi.fn();

@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
@@ -13,6 +14,16 @@ import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
 vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/utils/atomic-file.js")>();
 	return { ...actual, writeFileAtomicSync: vi.fn(actual.writeFileAtomicSync) };
+});
+
+// The file lock is the seam for lock-ACQUISITION failure regressions; the real
+// implementation stays the default so every other test takes the real lock.
+vi.mock("proper-lockfile", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("proper-lockfile")>();
+	// CJS interop: default imports resolve through `default`, so expose the
+	// wrapped namespace there too (the store imports lockfile as a default).
+	const wrapped = { ...actual, lock: vi.fn(actual.lock) };
+	return { ...wrapped, default: wrapped };
 });
 
 const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -349,7 +360,7 @@ describe("ENG-6108 durable account reservations", () => {
 				attemptId: nextAttempt,
 				commit: (current) => current,
 			}),
-		).toBe(true);
+		).toBe("committed");
 		// A different attempt id cannot finalize someone else's reservation.
 		const otherAttempt = nonce();
 		expect(await loser.reserveConnectionId(record("acme-5", at + 2, otherAttempt))).toBe(true);
@@ -359,7 +370,7 @@ describe("ENG-6108 durable account reservations", () => {
 				attemptId: "not-the-owner",
 				commit: (current) => current,
 			}),
-		).toBe(false);
+		).toBe("denied");
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
@@ -447,14 +458,121 @@ describe("ENG-6108 durable account reservations", () => {
 				commitMoves.push("compensated-again");
 			},
 		});
-		expect(committed).toBe(true);
-		expect(failed).toBe(false);
+		expect(committed).toBe("committed");
+		expect(failed).toBe("compensated");
 		// All-or-nothing: compensation ran under the same lock.
 		expect(commitMoves).toContain("compensated-again");
 		// The record write failed: nothing durable for the second finalize, and
 		// the FIRST (successful) finalize's record is still on disk.
 		const fresh = McpConnectionStore.open(path);
 		expect(fresh.get("acme-2")?.attemptId).toBe(mine);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a failed lock ACQUISITION settles one-shot ops and requeues durable ops (pre-splice)", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "lock-fail-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		// One durable upsert queued BEFORE the failing flush: it must requeue and
+		// land on the next flush.
+		client.upsert(recordFixture("acme", { label: "durable", status: "pending" }));
+		vi.mocked(lockfile.lock).mockImplementationOnce(async () => {
+			throw new Error("lock contention");
+		});
+		const at = Date.now();
+		const mine = nonce();
+		const reserveOutcome = client.reserveConnectionId(record("acme-2", at, mine));
+		// The lock never acquired: the one-shot reserve settles false (no ghost
+		// marker), while the durable upsert survives for the next flush.
+		await expect(reserveOutcome).resolves.toBe(false);
+		await client.flush();
+		expect(client.get("acme")?.label).toBe("durable");
+		// No ghost reservation: the same id is free again.
+		const retryMine = nonce();
+		await expect(client.reserveConnectionId(record("acme-2", at, retryMine))).resolves.toBe(true);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a commit callback that throws mid-move is compensated under the same lock", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "finalize-partial-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		const mine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, mine));
+		const moves: string[] = [];
+		// The commit does the side effect (moves the credential) and then throws
+		// BEFORE returning the record: the registration must already cover it.
+		const outcome = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: () => {
+				moves.push("moved");
+				throw new Error("commit threw mid-move");
+			},
+			compensate: () => {
+				moves.push("compensated");
+			},
+		});
+		expect(outcome).toBe("compensated");
+		expect(moves).toEqual(["moved", "compensated"]);
+		// No record change landed for a commit that never returned one; the
+		// durable PENDING reservation marker itself stays (removable via
+		// removeReservation), which is the honest pre-login state.
+		expect(McpConnectionStore.open(path).get("acme-2")?.status).toBe("pending");
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a FAILED compensation surfaces recovery-required instead of a plain no-op", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "finalize-recovery-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		const mine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, mine));
+		const outcome = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: () => {
+				throw new Error("commit threw mid-move");
+			},
+			compensate: () => {
+				// The rollback itself fails: partial state may remain, so the
+				// result must say recovery, not claim a clean rollback.
+				throw new Error("compensation failed");
+			},
+		});
+		expect(outcome).toBe("recovery-required");
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a write-failed finalize whose compensation ALSO fails resolves recovery-required", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "finalize-recovery-2-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		const mine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, mine));
+		const mine2 = nonce();
+		await client.reserveConnectionId(record("acme-4", at + 1, mine2));
+		// The record write fails AFTER the commit callback ran; the rollback then
+		// fails too, so the outcome must surface recovery instead of claiming a
+		// clean rollback.
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("disk full");
+		});
+		const outcome = await client.finalizeAttempt({
+			connectionId: "acme-4",
+			attemptId: mine2,
+			commit: (current) => current,
+			compensate: () => {
+				throw new Error("rollback failed");
+			},
+		});
+		expect(outcome).toBe("recovery-required");
+		// Nothing committed; the durable PENDING reservation marker stays for
+		// manual recovery or removeReservation — never a silent ghost.
+		expect(McpConnectionStore.open(path).get("acme-4")?.status).toBe("pending");
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
@@ -469,13 +587,14 @@ describe("ENG-6108 durable account reservations", () => {
 		const removed: string[] = [];
 		const authCleanup = (connectionId: string) => {
 			removed.push(connectionId);
+			return true;
 		};
 
 		// Order 1: another client disconnects (record+credential under one lock)
 		// BEFORE the login's finalize — the finalize must lose ownership and the
 		// account key must never receive the credential.
 		const removedFirst = await clientB.removeAccount({ connectionId: "acme-2", authCleanup });
-		expect(removedFirst).toBe(true);
+		expect(removedFirst).toBe("removed");
 		expect(removed).toEqual(["acme-2"]);
 		const finalizeAfterRemove = await clientA.finalizeAttempt({
 			connectionId: "acme-2",
@@ -485,7 +604,7 @@ describe("ENG-6108 durable account reservations", () => {
 				throw new Error("should not run: commit never applied");
 			},
 		});
-		expect(finalizeAfterRemove).toBe(false);
+		expect(finalizeAfterRemove).toBe("denied");
 		expect(McpConnectionStore.open(path).get("acme-2")).toBeUndefined();
 
 		// Order 2: finalize commits first; a later disconnect removes BOTH the
@@ -497,13 +616,30 @@ describe("ENG-6108 durable account reservations", () => {
 			attemptId: mine2,
 			commit: (current) => current,
 		});
-		expect(finalized).toBe(true);
+		expect(finalized).toBe("committed");
 		const removedAfter = await clientB.removeAccount({ connectionId: "acme-4", authCleanup });
-		expect(removedAfter).toBe(true);
+		expect(removedAfter).toBe("removed");
 		expect(removed).toEqual(["acme-2", "acme-4"]);
 		expect(McpConnectionStore.open(path).get("acme-4")).toBeUndefined();
-		// Removing an absent account is an honest false, not a throw.
-		await expect(clientB.removeAccount({ connectionId: "acme-9", authCleanup })).resolves.toBe(false);
+		// Removing an absent account is an honest missing, not a throw — and the
+		// cleanup still runs under the lock (credential-only logouts work).
+		const credentialOnly: string[] = [];
+		await expect(
+			clientB.removeAccount({
+				connectionId: "acme-9",
+				authCleanup: (connectionId) => {
+					credentialOnly.push(connectionId);
+					return true;
+				},
+			}),
+		).resolves.toBe("credential-only");
+		expect(credentialOnly).toEqual(["acme-9"]);
+		await expect(
+			clientB.removeAccount({
+				connectionId: "acme-10",
+				authCleanup: () => false,
+			}),
+		).resolves.toBe("missing");
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
@@ -526,7 +662,7 @@ describe("ENG-6108 durable account reservations", () => {
 				attemptId: mine,
 				commit: (current) => ({ ...current, status: "connected" as const }),
 			}),
-		).toBe(true);
+		).toBe("committed");
 		expect(await client.removeReservation("acme-2", mine)).toBe(false);
 		expect(client.get("acme-2")?.status).toBe("connected");
 

@@ -81,7 +81,7 @@ type PendingOp =
 			 * Closures capture whatever they need to restore.
 			 */
 			compensate?: () => void;
-			resolve: (committed: boolean) => void;
+			resolve: (result: McpFinalizeResult) => void;
 	  }
 	| {
 			kind: "removeAccount";
@@ -90,9 +90,11 @@ type PendingOp =
 			 * Credential cleanup under the SAME file lock as the record removal —
 			 * disconnects share the store->auth ordering with finalizeAttempt, so
 			 * a concurrent finalize can never leave an orphan credential behind.
+			 * Runs even when no record exists (credential-only logouts); returns
+			 * whether a credential was actually removed.
 			 */
-			authCleanup: (connectionId: string) => void;
-			resolve: (removed: boolean) => void;
+			authCleanup: (connectionId: string) => boolean;
+			resolve: (result: McpRemoveAccountResult) => void;
 	  };
 
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -160,6 +162,22 @@ function serializeRecords(records: ReadonlyMap<string, McpConnectionRecord>): st
 }
 
 /** File-backed store of MCP connection records; corrupt or missing files reset to empty. */
+
+/** One-shot attempt operations: they carry a resolver and never requeue. */
+type OneShotOperation = Extract<
+	PendingOp,
+	{ kind: "reserve" | "removeReservation" | "finalizeAttempt" | "removeAccount" }
+>;
+
+function isOneShotOperation(operation: PendingOp): operation is OneShotOperation {
+	return (
+		operation.kind === "reserve" ||
+		operation.kind === "removeReservation" ||
+		operation.kind === "finalizeAttempt" ||
+		operation.kind === "removeAccount"
+	);
+}
+
 export class McpConnectionStore {
 	private recordsById = new Map<string, McpConnectionRecord>();
 	private pendingOps: PendingOp[] = [];
@@ -247,13 +265,17 @@ export class McpConnectionStore {
 	 * finalizeAttempt — a concurrent finalize can never re-add an orphan
 	 * credential after a disconnect removed the account.
 	 */
-	removeAccount(options: { connectionId: string; authCleanup: (connectionId: string) => void }): Promise<boolean> {
-		return new Promise<boolean>((resolve) => {
+	removeAccount(options: {
+		connectionId: string;
+		/** Returns whether a credential was actually removed. */
+		authCleanup: (connectionId: string) => boolean;
+	}): Promise<McpRemoveAccountResult> {
+		return new Promise<McpRemoveAccountResult>((resolve) => {
 			let settled = false;
-			const settle = (removed: boolean): void => {
+			const settle = (result: McpRemoveAccountResult): void => {
 				if (settled) return;
 				settled = true;
-				resolve(removed);
+				resolve(result);
 			};
 			this.pendingOps.push({
 				kind: "removeAccount",
@@ -261,7 +283,7 @@ export class McpConnectionStore {
 				authCleanup: options.authCleanup,
 				resolve: settle,
 			});
-			void this.flush().catch(() => settle(false));
+			void this.flush().catch(() => settle("failed"));
 		});
 	}
 
@@ -280,13 +302,13 @@ export class McpConnectionStore {
 		commit: (record: McpConnectionRecord) => McpConnectionRecord;
 		/** Rolls caller-side effects back under the lock when the write fails. */
 		compensate?: () => void;
-	}): Promise<boolean> {
-		return new Promise<boolean>((resolve) => {
+	}): Promise<McpFinalizeResult> {
+		return new Promise<McpFinalizeResult>((resolve) => {
 			let settled = false;
-			const settle = (committed: boolean): void => {
+			const settle = (result: McpFinalizeResult): void => {
 				if (settled) return;
 				settled = true;
-				resolve(committed);
+				resolve(result);
 			};
 			this.pendingOps.push({
 				kind: "finalizeAttempt",
@@ -296,7 +318,7 @@ export class McpConnectionStore {
 				...(options.compensate ? { compensate: options.compensate } : {}),
 				resolve: settle,
 			});
-			void this.flush().catch(() => settle(false));
+			void this.flush().catch(() => settle("denied"));
 		});
 	}
 
@@ -332,27 +354,47 @@ export class McpConnectionStore {
 			}
 			let lockCompromised = false;
 			let lockCompromisedError: Error | undefined;
-			const release = await lockfile.lock(realpathIfPresentSync(this.path), {
-				retries: {
-					retries: 10,
-					factor: 2,
-					minTimeout: 100,
-					maxTimeout: 10000,
-					randomize: true,
-				},
-				stale: 30000,
-				onCompromised: (error) => {
-					lockCompromised = true;
-					lockCompromisedError = error as Error;
-				},
-			});
+			// Splice THIS run's batch BEFORE acquiring the lock: a lock-acquisition
+			// failure can then resolve one-shot attempt ops false and drop them —
+			// no denied reservation or finalize can materialize on a later flush.
+			// Ops queued while we wait for the lock stay in pendingOps and belong
+			// to the NEXT flush; the requeue below keeps this batch ahead of them.
+			const operations = this.pendingOps.splice(0);
+			let release: Awaited<ReturnType<typeof lockfile.lock>>;
+			try {
+				release = await lockfile.lock(realpathIfPresentSync(this.path), {
+					retries: {
+						retries: 10,
+						factor: 2,
+						minTimeout: 100,
+						maxTimeout: 10000,
+						randomize: true,
+					},
+					stale: 30000,
+					onCompromised: (error) => {
+						lockCompromised = true;
+						lockCompromisedError = error as Error;
+					},
+				});
+			} catch (lockError) {
+				// The lock never acquired: durable (idempotent) ops retry on the
+				// next flush; one-shot attempt ops settle false and are dropped —
+				// the caller already learned "no", so a later materialization
+				// would be a ghost.
+				this.pendingOps.unshift(...operations.filter((operation) => !isOneShotOperation(operation)));
+				for (const operation of operations) {
+					if (isOneShotOperation(operation)) {
+						if (operation.kind === "finalizeAttempt") operation.resolve("denied");
+						else if (operation.kind === "removeAccount") operation.resolve("failed");
+						else operation.resolve(false);
+					}
+				}
+				throw lockError;
+			}
 			let committed = false;
 			try {
 				if (lockCompromised) throw lockCompromisedError ?? new Error("MCP connection store lock was compromised");
 				const records = parseRecords(safeReadFileSync(realpathIfPresentSync(this.path)));
-				// Splice only after acquiring the lock: operations queued while we
-				// waited belong to this flush, not the previous one.
-				const operations = this.pendingOps.splice(0);
 				// One-shot attempt operations (reserve/remove/finalize/removeAccount)
 				// resolve only AFTER the atomic write commits: a failed write means
 				// no durable reservation/removal/finalize happened, so the caller
@@ -362,7 +404,11 @@ export class McpConnectionStore {
 				// never leave a promise hanging or a one-shot requeued.
 				const deferred: Array<(committed: boolean) => void> = [];
 				const oneShot = new Set<PendingOp>();
-				const compensations: Array<() => void> = [];
+				const appliedFinalizes: Array<{
+					operation: Extract<PendingOp, { kind: "finalizeAttempt" }>;
+					rollback: () => void;
+				}> = [];
+				const committedFinalizes = new Set<PendingOp>();
 				try {
 					for (const operation of operations) {
 						if (operation.kind === "remove") {
@@ -405,14 +451,21 @@ export class McpConnectionStore {
 						} else if (operation.kind === "removeAccount") {
 							oneShot.add(operation);
 							try {
-								if (records.delete(operation.connectionId)) {
-									operation.authCleanup(operation.connectionId);
-									deferred.push((didCommit) => operation.resolve(didCommit));
-								} else {
-									operation.resolve(false);
-								}
+								// Cleanup runs under the lock even when no record
+								// exists: credential-only integrations (legacy
+								// grants, failed record saves) must still log out.
+								const existed = records.delete(operation.connectionId);
+								const credentialRemoved = operation.authCleanup(operation.connectionId);
+								const outcome: McpRemoveAccountResult = existed
+									? "removed"
+									: credentialRemoved
+										? "credential-only"
+										: "missing";
+								deferred.push((didCommit) =>
+									didCommit ? operation.resolve(outcome) : operation.resolve("failed"),
+								);
 							} catch {
-								operation.resolve(false);
+								operation.resolve("failed");
 							}
 						} else if (operation.kind === "finalizeAttempt") {
 							oneShot.add(operation);
@@ -423,17 +476,32 @@ export class McpConnectionStore {
 									existing.attemptId !== undefined &&
 									existing.attemptId === operation.attemptId
 								) {
-									this.applyUpsert(records, operation.commit(existing));
-									if (operation.compensate && existing) compensations.push(operation.compensate);
-									deferred.push((didCommit) => operation.resolve(didCommit));
+									// Recovery is registered BEFORE any side effect:
+									// a throwing or partial commit callback still
+									// gets its rollback attempt under this lock.
+									const rollback = operation.compensate ?? (() => {});
+									try {
+										const committedRecord = operation.commit(existing);
+										appliedFinalizes.push({ operation, rollback });
+										this.applyUpsert(records, committedRecord);
+										committedFinalizes.add(operation);
+									} catch {
+										// Partial commit: roll back immediately.
+										try {
+											rollback();
+											operation.resolve("compensated");
+										} catch {
+											operation.resolve("recovery-required");
+										}
+									}
 								} else {
 									// Ownership lost (removed, replaced by another
 									// attempt, or completed elsewhere): the credential
 									// commit must NOT land on this account.
-									operation.resolve(false);
+									operation.resolve("denied");
 								}
 							} catch {
-								operation.resolve(false);
+								operation.resolve("recovery-required");
 							}
 						} else if (operation.isStillCurrent()) {
 							this.applyUpsert(records, operation.record);
@@ -446,6 +514,9 @@ export class McpConnectionStore {
 						throw lockCompromisedError ?? new Error("MCP connection store lock was compromised");
 					this.recordsById = records;
 					committed = true;
+					for (const operation of committedFinalizes) {
+						(operation as unknown as { resolve: (result: McpFinalizeResult) => void }).resolve("committed");
+					}
 					for (const settle of deferred) settle(true);
 				} finally {
 					if (!committed) {
@@ -454,15 +525,17 @@ export class McpConnectionStore {
 						// retry cleanly — but one-shot attempt ops resolve false and
 						// are dropped: no ghost reservation, no surprise finalize.
 						this.pendingOps.unshift(...operations.filter((operation) => !oneShot.has(operation)));
-						// Compensate finalize commits under the SAME lock: their
-						// credential moves are rolled back before release, so a
-						// failed finalize is all-or-nothing, not a partial commit.
-						for (const compensate of compensations) {
+						// Finalizes whose commit callback ran get their rollback
+						// under the SAME lock before release. A successful rollback
+						// is honest all-or-nothing; a FAILING rollback surfaces
+						// recovery-required instead of claiming the account is
+						// unchanged.
+						for (const applied of appliedFinalizes) {
 							try {
-								compensate();
+								applied.rollback();
+								applied.operation.resolve("compensated");
 							} catch {
-								// Compensation is best-effort; the op already
-								// resolves false and nothing durable changed.
+								applied.operation.resolve("recovery-required");
 							}
 						}
 						for (const settle of deferred) settle(false);
@@ -503,3 +576,20 @@ function safeReadFileSync(path: string): string | undefined {
 }
 
 export type { McpConnectionsFile, PendingOp };
+
+/**
+ * Outcome of an account-removal transaction. "removed": record + credential
+ * both cleared under the lock. "credential-only": no record existed (legacy
+ * grants, failed record saves) but the credential logout ran. "missing":
+ * nothing to remove. "failed": the durable write failed — nothing committed.
+ */
+export type McpRemoveAccountResult = "removed" | "credential-only" | "missing" | "failed";
+
+/**
+ * Outcome of a guarded finalize. "committed": record write landed. "denied":
+ * ownership lost, no side effects. "compensated": the write failed and the
+ * rollback restored every side effect — honest all-or-nothing. "recovery-
+ * required": the commit callback or the rollback itself threw; partial state
+ * may remain and the caller must surface recovery, not claim success.
+ */
+export type McpFinalizeResult = "committed" | "denied" | "compensated" | "recovery-required";
