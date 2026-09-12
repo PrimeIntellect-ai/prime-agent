@@ -1910,9 +1910,9 @@ prime_agent_native_probe() (
 	trap 'exit 129' HUP
 	"$@" &
 	native_probe_pid=$!
-	native_probe_ticks=0
+	native_probe_deadline=$(($(date +%s) + 10))
 	while kill -0 "$native_probe_pid" 2>/dev/null; do
-		if [ "$native_probe_ticks" -ge 100 ]; then
+		if [ "$(date +%s)" -ge "$native_probe_deadline" ]; then
 			printf 'error: executable probe timed out after 10 seconds.\n' >&2
 			kill -KILL "$native_probe_pid" 2>/dev/null || :
 			wait "$native_probe_pid" 2>/dev/null || :
@@ -1920,7 +1920,6 @@ prime_agent_native_probe() (
 			exit 124
 		fi
 		sleep 0.1
-		native_probe_ticks=$((native_probe_ticks + 1))
 	done
 	if wait "$native_probe_pid"; then native_probe_status=0; else native_probe_status=$?; fi
 	native_probe_pid=
