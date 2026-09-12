@@ -107,6 +107,14 @@ export interface OverrideEntry {
 	setup?: "ready" | "requires-setup";
 	setupReason?: string;
 	setupFields?: CatalogSetupField[];
+	/** Research-anchored readiness of the default path; overrides derivation. */
+	readiness?: CatalogReadiness;
+	/** Research-anchored genuine requirement; overrides derivation. */
+	requirement?: CatalogSetupRequirement;
+	/** Documented alternative auth paths, each with per-path readiness. */
+	alternatives?: CatalogAuthAlternative[];
+	/** Honest note attached to the observational metadata block. */
+	metadataNote?: string;
 	/** Curated note recorded as a `prime` provenance entry. */
 	note?: string;
 	homepage?: string;
@@ -134,22 +142,114 @@ export interface CatalogProvenance {
 	note?: string;
 }
 
+export type CatalogSetupFieldKind =
+	| "env-var"
+	| "url"
+	| "client-id"
+	| "client-secret"
+	| "bearer-token"
+	| "api-key";
+
 export interface CatalogSetupField {
 	id: string;
 	label: string;
 	description?: string;
 	required: boolean;
+	kind?: CatalogSetupFieldKind;
 }
+
+export type CatalogReadiness = "oauth-ready" | "user-setup" | "prime-restricted" | "unknown";
+
+export type CatalogSetupRequirement =
+	| "api-key"
+	| "bearer-token"
+	| "registered-client"
+	| "tenant"
+	| "unsupported-transport"
+	| "local-runtime";
 
 export interface CatalogSetup {
 	status: "ready" | "requires-setup";
 	reason?: string;
 	fields?: CatalogSetupField[];
+	readiness?: CatalogReadiness;
+	requirement?: CatalogSetupRequirement;
+}
+
+export interface CatalogAuthAlternative {
+	kind: "oauth" | "api-key" | "bearer-token" | "service-account";
+	readiness: CatalogReadiness;
+	note?: string;
+	sourceUrl?: string;
+}
+
+/**
+ * Observational public-metadata evidence from the read-only audit
+ * (packages/ai/mcp-catalog/audit/metadata-audit.json). Never a live credential
+ * authority and never a Connect gate; omitted fields mean "not advertised",
+ * never "unsupported".
+ */
+export interface CatalogAuthMetadata {
+	status: "available" | "unavailable" | "not-audited";
+	authorizationServer?: string;
+	resource?: string;
+	pkceS256?: boolean;
+	dynamicClientRegistration?: boolean;
+	clientIdMetadataDocument?: boolean;
+	protectedResourceScopes?: string[];
+	authorizationServerScopes?: string[];
+	tokenAuthMethods?: string[];
+	sourceUrls: string[];
+	fetchedAt: string;
+	note?: string;
 }
 
 export interface CatalogAuth {
 	strategy: "oauth" | "api_key" | "none" | "unknown";
 	clientRegistration: "dynamic" | "pre-registered" | "unknown";
+	alternatives?: CatalogAuthAlternative[];
+	metadata?: CatalogAuthMetadata;
+}
+
+// ---------------------------------------------------------------------------
+// Read-only audit evidence input (committed snapshot; the importer is offline)
+// ---------------------------------------------------------------------------
+
+export interface AuditPrmEvidence {
+	resource?: string;
+	authorizationServers?: string[];
+	protectedResourceScopes?: string[];
+}
+
+export interface AuditAsEvidence {
+	issuer?: string;
+	authorizationEndpoint?: string;
+	tokenEndpoint?: string;
+	registrationEndpoint?: string;
+	pkceS256?: boolean;
+	clientIdMetadataDocument?: boolean;
+	authorizationServerScopes?: string[];
+	tokenAuthMethods?: string[];
+}
+
+export interface AuditResult {
+	server: string;
+	endpoint: string;
+	probe: { url: string; httpStatus?: number; resourceMetadataHeader?: string; error?: string };
+	protectedResource: {
+		attempts: Array<{ sourceUrl: string; kind: string; status: string; audienceMatches?: boolean; evidence?: AuditPrmEvidence }>;
+		engineVisible: "available" | "unavailable";
+		engineSelectedSourceUrl?: string;
+	};
+	authorizationServer: { issuer?: string; sourceUrls: string[]; status: "available" | "unavailable"; evidence?: AuditAsEvidence };
+}
+
+export interface AuditFile {
+	fetchedAt: string;
+	targets: { server: string; endpoint: string }[];
+	results: AuditResult[];
+	counts: Record<string, number>;
+	bounds: Record<string, string>;
 }
 
 export type CatalogTransport =
@@ -308,8 +408,8 @@ function optionalString(value: unknown): string | undefined {
 	return typeof value === "string" && value !== "" ? value : undefined;
 }
 
-function envField(name: string): CatalogSetupField {
-	return { id: name, label: name, description: `Environment variable ${name}`, required: true };
+function envField(name: string, kind: CatalogSetupFieldKind = "env-var"): CatalogSetupField {
+	return { id: name, label: name, description: `Environment variable ${name}`, required: true, kind };
 }
 
 function dedupeFields(fields: CatalogSetupField[]): CatalogSetupField[] {
@@ -405,7 +505,7 @@ function recordAuth(server: SourceServerDef, pluginPlaceholders: boolean): AuthE
 	if (server.bearer_token_env_var) {
 		evidence.apiKey = true;
 		evidence.blocks.push("requires a bearer token supplied via environment variable");
-		evidence.fields.push(envField(server.bearer_token_env_var));
+		evidence.fields.push(envField(server.bearer_token_env_var, "bearer-token"));
 	}
 	for (const [header, value] of Object.entries(server.headers ?? {})) {
 		if (typeof value !== "string") continue;
@@ -413,11 +513,13 @@ function recordAuth(server: SourceServerDef, pluginPlaceholders: boolean): AuthE
 		if (/^authorization$/i.test(header)) {
 			evidence.apiKey = true;
 			evidence.blocks.push("requires an auth token supplied via environment variable");
-			for (const ref of refs) evidence.fields.push(envField(ref));
+			for (const ref of refs) evidence.fields.push(envField(ref, "bearer-token"));
 		} else if (refs.length > 0 || /key|secret|token|authorization/i.test(header)) {
 			evidence.apiKey = true;
 			evidence.blocks.push("requires provider credentials supplied as headers");
-			evidence.fields.push(envField(refs[0] ?? header));
+			// Credential-named headers collect an api-key; other header bindings stay generic env vars.
+			const credentialHeader = /key|secret|token|authorization/i.test(header);
+			evidence.fields.push(envField(refs[0] ?? header, credentialHeader ? "api-key" : "env-var"));
 		}
 	}
 	evidence.fields = dedupeFields(evidence.fields);
@@ -495,10 +597,165 @@ function finalizeAliases(entry: CatalogEntry): string[] {
 	return [...aliasSet].sort();
 }
 
+// ---------------------------------------------------------------------------
+// Audit evidence merge + readiness derivation
+// ---------------------------------------------------------------------------
+
+function deriveRequirement(entry: CatalogEntry): CatalogSetupRequirement | undefined {
+	if (entry.setup.status === "ready") return undefined;
+	switch (entry.transport.type) {
+		case "stdio":
+			return "local-runtime";
+		case "sse":
+			return "unsupported-transport";
+		case "http-template":
+			return "tenant";
+		case "http":
+			// Field kinds classify the genuine requirement: bearer tokens, api keys,
+			// or a non-credential per-instance config value (cluster id).
+			if (entry.setup.fields?.some((field) => field.kind === "bearer-token")) return "bearer-token";
+			if (entry.setup.fields?.some((field) => field.kind === "api-key")) return "api-key";
+			if (entry.setup.fields?.some((field) => field.kind === "env-var")) return "tenant";
+			return undefined;
+	}
+	return undefined;
+}
+
+function evidenceSupportsStandardOauth(result: AuditResult): boolean {
+	// oauth-ready needs a coherent authorization server AND dynamic client
+	// registration. CIMD alone is NOT sufficient: no Prime-controlled identity
+	// document is deployed or authorized today (root decision), and foreign
+	// client ids must never be copied. Omitted PKCE/auth-method lists are
+	// omitted evidence, never unsupported — they do not block oauth-ready.
+	const as = result.authorizationServer;
+	if (as.status !== "available" || !as.evidence) return false;
+	if (
+		!as.evidence.issuer ||
+		!as.evidence.authorizationEndpoint ||
+		!as.evidence.tokenEndpoint ||
+		!as.evidence.registrationEndpoint
+	) {
+		return false;
+	}
+	// The engine's PRM validation uses the component comparison (root-approved
+	// audience policy): the document's resource must match the exact endpoint
+	// (canonical form) OR the exact origin, root-slash normalized. Anything
+	// else fails closed — e.g. a resource that keeps the path but drops the
+	// query string never matches (LogRocket), and DCR-less providers never
+	// become oauth-ready regardless (Slack, HubSpot).
+	return !audienceMismatched(result);
+}
+
+/** The engine's canonicalResource rule: bare origins collapse, paths and searches stay. */
+function canonicalResource(url: string): string {
+	const parsed = new URL(url);
+	if (parsed.pathname === "/" && !parsed.search) return parsed.origin;
+	return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+}
+
+/** The engine's component comparison: exact canonical endpoint OR exact origin (root-slash normalized). */
+function audienceMatches(resource: string, endpoint: string): boolean {
+	const parsed = new URL(endpoint);
+	const canonical = canonicalResource(endpoint);
+	return resource === canonical || resource === parsed.origin || resource === `${parsed.origin}/`;
+}
+
+function audienceMismatched(result: AuditResult): boolean {
+	const selected = result.protectedResource.attempts.find(
+		(attempt) => attempt.sourceUrl === result.protectedResource.engineSelectedSourceUrl,
+	);
+	if (!selected?.evidence?.resource) return result.protectedResource.engineVisible === "available";
+	return !audienceMatches(selected.evidence.resource, result.endpoint);
+}
+
+function metadataNote(result: AuditResult, overrideNote?: string): string | undefined {
+	if (overrideNote) return overrideNote;
+	if (audienceMismatched(result)) {
+		return "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry";
+	}
+	return undefined;
+}
+
+function applyAuditEvidence(built: BuiltEntry[], audit: AuditFile | undefined, overrides?: Overrides): void {
+	if (!audit) return;
+	const byServer = new Map(audit.results.map((result) => [result.server, result]));
+	for (const { entry, identityKey } of built) {
+		if (entry.transport.type !== "http" && entry.transport.type !== "sse") continue;
+		const endpointUrl = entry.transport.url;
+		const result = byServer.get(entry.server);
+		const overrideNote = overrides?.servers[identityKey]?.metadataNote;
+		if (!result) {
+			// Catalog drift: an endpoint without a committed audit snapshot.
+			// "not-audited" is honest; never a gate, never a downgrade.
+			entry.auth.metadata = {
+				status: "not-audited",
+				sourceUrls: [endpointUrl],
+				fetchedAt: audit.fetchedAt,
+			};
+			if (entry.setup.status === "ready" && !entry.setup.readiness) entry.setup.readiness = "unknown";
+			continue;
+		}
+		const as = result.authorizationServer;
+		const selected = result.protectedResource.attempts.find(
+			(attempt) => attempt.sourceUrl === result.protectedResource.engineSelectedSourceUrl,
+		);
+		const selectedPrm = selected?.evidence;
+		entry.auth.metadata = {
+			status: as.status === "available" ? "available" : "unavailable",
+			...(as.issuer ? { authorizationServer: as.issuer } : {}),
+			...(selectedPrm?.resource ? { resource: selectedPrm.resource } : {}),
+			...(as.evidence?.pkceS256 !== undefined ? { pkceS256: as.evidence.pkceS256 } : {}),
+			...(as.evidence?.registrationEndpoint !== undefined ? { dynamicClientRegistration: true } : {}),
+			...(as.evidence?.clientIdMetadataDocument ? { clientIdMetadataDocument: true } : {}),
+			...(selectedPrm?.protectedResourceScopes?.length ? { protectedResourceScopes: selectedPrm.protectedResourceScopes } : {}),
+			...(as.evidence?.authorizationServerScopes?.length
+				? { authorizationServerScopes: as.evidence.authorizationServerScopes }
+				: {}),
+			...(as.evidence?.tokenAuthMethods?.length ? { tokenAuthMethods: as.evidence.tokenAuthMethods } : {}),
+			sourceUrls: [
+				...new Set([
+					result.probe.url,
+					...result.protectedResource.attempts.map((attempt) => attempt.sourceUrl),
+					...as.sourceUrls,
+				]),
+			],
+			fetchedAt: audit.fetchedAt,
+			...(metadataNote(result, overrideNote) ? { note: metadataNote(result, overrideNote) } : {}),
+		};
+		if (entry.setup.readiness) continue; // curated override wins
+		if (entry.setup.status === "ready") {
+			// Metadata availability never downgrades a ready entry; oauth-ready
+			// requires positive evidence, everything else stays unknown.
+			entry.setup.readiness = evidenceSupportsStandardOauth(result) ? "oauth-ready" : "unknown";
+			continue;
+		}
+		const requirement = entry.setup.requirement ?? deriveRequirement(entry);
+		if (!requirement) {
+			throw new Error(
+				`requires-setup entry ${entry.server} has no genuine requirement signal; curate overrides.json (requirement) or flip the status with evidence`,
+			);
+		}
+		entry.setup.requirement = requirement;
+		entry.setup.readiness = requirement === "registered-client" ? "prime-restricted" : "user-setup";
+	}
+	// Non-remote adapters: local runtime / tenant URL / unsupported transport.
+	for (const { entry } of built) {
+		if (entry.transport.type === "http" || entry.transport.type === "sse") continue;
+		if (entry.setup.readiness) continue;
+		if (entry.setup.status === "ready") {
+			entry.setup.readiness = "unknown";
+			continue;
+		}
+		entry.setup.requirement ??= deriveRequirement(entry);
+		entry.setup.readiness = "user-setup";
+	}
+}
+
 export function buildCatalog(
 	openAi: OpenAiFixture,
 	claude: ClaudeFixture,
 	overrides: Overrides,
+	audit?: AuditFile,
 ): { catalog: CatalogFile; report: ImportReport } {
 	const excluded: { key: string; reason: string }[] = [];
 	const excludedKeys = new Set(overrides.excludedServers.map((entry) => entry.key));
@@ -697,6 +954,7 @@ export function buildCatalog(
 		const identityKey = `${template.source}/${template.plugin}/${template.serverName}`;
 		const override = overrides.servers[identityKey];
 		const strategy = authStrategy(template.auth);
+		// Template variables are per-instance endpoint URL bindings.
 		const fields = dedupeFields([
 			...template.auth.fields,
 			...template.resolved.variables.map((variable) => ({
@@ -704,6 +962,7 @@ export function buildCatalog(
 				label: variable.name,
 				description: variable.description,
 				required: true,
+				kind: "url" as const,
 			})),
 		]);
 		built.push({
@@ -801,7 +1060,11 @@ export function buildCatalog(
 			if (override.legacyBuiltin !== undefined) entry.legacyBuiltin = override.legacyBuiltin;
 			if (override.setup) entry.setup.status = override.setup;
 			if (override.setupReason) entry.setup.reason = override.setupReason;
+			if (override.setup === "ready") entry.setup.reason = undefined;
 			if (override.setupFields) entry.setup.fields = override.setupFields;
+			if (override.readiness) entry.setup.readiness = override.readiness;
+			if (override.requirement) entry.setup.requirement = override.requirement;
+			if (override.alternatives) entry.auth.alternatives = override.alternatives;
 			if (override.description) entry.description = override.description;
 			if (override.homepage) entry.homepage = override.homepage;
 			if (override.docsUrl) entry.docsUrl = override.docsUrl;
@@ -810,6 +1073,8 @@ export function buildCatalog(
 		}
 		entry.aliases = finalizeAliases(entry);
 	}
+
+	applyAuditEvidence(built, audit, overrides);
 
 	const entries = built.map((item) => item.entry).sort((a, b) => a.server.localeCompare(b.server));
 
@@ -851,10 +1116,16 @@ export function buildCatalog(
 						.filter((source) => source !== "prime"),
 				).size >= 2,
 		).length,
+		readinessOauthReady: entries.filter((entry) => entry.setup.readiness === "oauth-ready").length,
+		readinessUserSetup: entries.filter((entry) => entry.setup.readiness === "user-setup").length,
+		readinessPrimeRestricted: entries.filter((entry) => entry.setup.readiness === "prime-restricted").length,
+		readinessUnknown: entries.filter((entry) => entry.setup.readiness === "unknown").length,
+		metadataAvailable: entries.filter((entry) => entry.auth.metadata?.status === "available").length,
+		metadataUnavailable: entries.filter((entry) => entry.auth.metadata?.status === "unavailable").length,
 	};
 
 	const catalog: CatalogFile = {
-		version: 1,
+		version: 2,
 		sources: [
 			{ source: OPENAI, repository: "openai/plugins", commit: openAi.commit },
 			{ source: CLAUDE, repository: "anthropics/claude-plugins-official", commit: claude.catalogCommit },
@@ -984,8 +1255,11 @@ function main(): void {
 		fs.readFileSync(path.join(catalogDir, "sources/claude-plugins-official.json"), "utf8"),
 	) as ClaudeFixture;
 	const overrides = JSON.parse(fs.readFileSync(path.join(catalogDir, "overrides.json"), "utf8")) as Overrides;
+	const audit = JSON.parse(
+		fs.readFileSync(path.join(catalogDir, "audit/metadata-audit.json"), "utf8"),
+	) as AuditFile;
 
-	const { catalog, report } = buildCatalog(openAi, claude, overrides);
+	const { catalog, report } = buildCatalog(openAi, claude, overrides, audit);
 
 	const outPath = path.resolve(scriptDir, "../src/mcp/catalog.json");
 	fs.writeFileSync(outPath, `${JSON.stringify(catalog, null, "\t")}\n`);

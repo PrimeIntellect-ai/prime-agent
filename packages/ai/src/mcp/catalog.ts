@@ -23,21 +23,100 @@ export interface McpServiceProvenance {
 	note?: string;
 }
 
+export type McpServiceSetupFieldKind = "env-var" | "url" | "client-id" | "client-secret" | "bearer-token" | "api-key";
+
 export interface McpServiceSetupField {
 	id: string;
 	label: string;
 	description?: string;
 	required: boolean;
+	/** What the field collects. Absent means the importer had no signal (legacy generic env-var). */
+	kind?: McpServiceSetupFieldKind;
 }
 
 /**
  * Honest setup state. `ready` means upstream configs declare no blocker — it is
- * never a claim of tested connectivity (see `verification`).
+ * never a claim of tested connectivity (see `verification`). `status` is the
+ * only lever that gates Connect; readiness is informational and NEVER a gate.
  */
 export interface McpServiceSetup {
 	status: "ready" | "requires-setup";
 	reason?: string;
 	fields?: McpServiceSetupField[];
+	/**
+	 * INFORMATIONAL readiness of the default auth path (never consulted by
+	 * Connect gating; `status` is the only hard lever):
+	 * - `oauth-ready`: public metadata evidence shows a coherent standard-OAuth
+	 *   path usable today (dynamic client registration; a successful metadata
+	 *   GET is never proof live OAuth works).
+	 * - `user-setup`: the provider's documented default path needs user-supplied
+	 *   credentials (API key, token) before connecting.
+	 * - `prime-restricted`: the provider requires a pre-registered client or
+	 *   gated program (documented, research-anchored).
+	 * - `unknown`: no conclusive public evidence — connect attempts surface
+	 *   real errors honestly; never treated as proof of a restriction.
+	 */
+	readiness?: McpReadiness;
+	/** The genuine hard requirement behind a `requires-setup` status, when known. */
+	requirement?: McpSetupRequirement;
+}
+
+export type McpReadiness = "oauth-ready" | "user-setup" | "prime-restricted" | "unknown";
+
+export type McpSetupRequirement =
+	| "api-key"
+	| "bearer-token"
+	| "registered-client"
+	| "tenant"
+	| "unsupported-transport"
+	| "local-runtime";
+
+/**
+ * A documented alternative auth path with its own per-path readiness. Never
+ * replaces the primary path — recorded so consumers can show honest options
+ * (e.g. MongoDB interactive is prime-restricted, but a dedicated service
+ * account is a user-setup alternative; Airtable OAuth via DCR, PAT bearer as
+ * an api-key alternative).
+ */
+export interface McpServiceAuthAlternative {
+	kind: "oauth" | "api-key" | "bearer-token" | "service-account";
+	readiness: McpReadiness;
+	/** Human-readable basis for this path (provider docs / evidence), not a gate. */
+	note?: string;
+	/** Research or provider-doc anchor backing this path. */
+	sourceUrl?: string;
+}
+
+/**
+ * OBSERVATIONAL metadata evidence captured by the read-only public audit
+ * (public unauthenticated GETs only). Never a live credential authority and
+ * never a Connect gate: a successful metadata GET is never proof live OAuth
+ * works. Omitted fields mean "not advertised" or "not captured" — never
+ * "unsupported" (the engine applies protocol defaults for omitted lists).
+ */
+export interface McpServiceAuthMetadata {
+	/** Whether a public authorization-server metadata document was captured for the endpoint. */
+	status: "available" | "unavailable" | "not-audited";
+	authorizationServer?: string;
+	resource?: string;
+	/** code_challenge_methods_supported advertises S256; absent = list omitted (engine still sends S256). */
+	pkceS256?: boolean;
+	/** registration_endpoint advertised (RFC 7591 dynamic client registration). */
+	dynamicClientRegistration?: boolean;
+	/** client_id_metadata_document_supported advertised (CIMD; alone it is NOT oauth-readiness). */
+	clientIdMetadataDocument?: boolean;
+	/** scopes_supported from the protected-resource document — login-relevant list (reviewed/config > PRM > omit). */
+	protectedResourceScopes?: string[];
+	/** scopes_supported from the authorization-server document — observational only; NEVER fed to the requested scopes. */
+	authorizationServerScopes?: string[];
+	/** token_endpoint_auth_methods_supported; absent = omitted (engine applies spec defaults). */
+	tokenAuthMethods?: string[];
+	/** Evidence capture locations (probe + well-known documents). */
+	sourceUrls: string[];
+	/** ISO timestamp of the read-only public metadata capture. */
+	fetchedAt: string;
+	/** Free-form honesty note (e.g. audience mismatch, provider-side block). */
+	note?: string;
 }
 
 export interface McpServiceAuth {
@@ -46,6 +125,10 @@ export interface McpServiceAuth {
 	clientRegistration: "dynamic" | "pre-registered" | "unknown";
 	/** Reviewed upstream scope hints only; never auto-requested, and empty in the first snapshot. */
 	reviewedScopes?: string[];
+	/** Documented alternative auth paths, each with per-path readiness. */
+	alternatives?: McpServiceAuthAlternative[];
+	/** Observational public-metadata evidence from the read-only audit (never a gate). */
+	metadata?: McpServiceAuthMetadata;
 }
 
 export type McpServiceTransport =
@@ -89,7 +172,7 @@ export interface McpServiceEntry {
 	 * ids stay reserved. Not a claim about shipped skill packages.
 	 */
 	legacyBuiltin: boolean;
-	/** Present on OAuth-strategy entries; keeps `usesOAuth: entry.oauth?.kind === "oauth"` working. */
+	/** Present on OAuth-strategy entries; consumers key OAuth support off `auth.strategy` (the host uses authStrategy), not this marker. */
 	oauth?: Omit<McpOAuthConfig, "server" | "url"> & { kind: "oauth" };
 	provenance: McpServiceProvenance[];
 	homepage?: string;
@@ -113,6 +196,18 @@ const TRANSPORT_TYPES = new Set(["http", "http-template", "sse", "stdio"]);
 const AUTH_STRATEGIES = new Set(["oauth", "api_key", "none", "unknown"]);
 const CLIENT_REGISTRATIONS = new Set(["dynamic", "pre-registered", "unknown"]);
 const SETUP_STATUSES = new Set(["ready", "requires-setup"]);
+const READINESS_STATES = new Set(["oauth-ready", "user-setup", "prime-restricted", "unknown"]);
+const SETUP_REQUIREMENTS = new Set([
+	"api-key",
+	"bearer-token",
+	"registered-client",
+	"tenant",
+	"unsupported-transport",
+	"local-runtime",
+]);
+const SETUP_FIELD_KINDS = new Set(["env-var", "url", "client-id", "client-secret", "bearer-token", "api-key"]);
+const AUTH_ALTERNATIVE_KINDS = new Set(["oauth", "api-key", "bearer-token", "service-account"]);
+const AUTH_METADATA_STATUSES = new Set(["available", "unavailable", "not-audited"]);
 const PROVENANCE_SOURCES = new Set(["openai-plugins", "claude-plugins-official", "prime", "user"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -157,13 +252,88 @@ function requireSetupFields(entryId: string, value: unknown): McpServiceSetupFie
 	if (!Array.isArray(value)) return fail(entryId, "setup.fields must be an array");
 	return value.map((field) => {
 		if (!isRecord(field)) return fail(entryId, "setup.fields entries must be objects");
+		if (field.kind !== undefined && (typeof field.kind !== "string" || !SETUP_FIELD_KINDS.has(field.kind))) {
+			return fail(entryId, `setup.fields[].kind must be one of ${[...SETUP_FIELD_KINDS].join(", ")}`);
+		}
 		return {
 			id: requireString(entryId, "setup.fields[].id", field.id),
 			label: requireString(entryId, "setup.fields[].label", field.label),
 			description: typeof field.description === "string" ? field.description : undefined,
 			required: field.required === true,
+			...(typeof field.kind === "string" ? { kind: field.kind as McpServiceSetupFieldKind } : {}),
 		};
 	});
+}
+
+function requireAuthAlternatives(entryId: string, value: unknown): McpServiceAuthAlternative[] {
+	if (!Array.isArray(value)) return fail(entryId, "auth.alternatives must be an array");
+	return value.map((alternative) => {
+		if (!isRecord(alternative)) return fail(entryId, "auth.alternatives entries must be objects");
+		if (typeof alternative.kind !== "string" || !AUTH_ALTERNATIVE_KINDS.has(alternative.kind)) {
+			return fail(entryId, `auth.alternatives[].kind must be one of ${[...AUTH_ALTERNATIVE_KINDS].join(", ")}`);
+		}
+		if (typeof alternative.readiness !== "string" || !READINESS_STATES.has(alternative.readiness)) {
+			return fail(entryId, `auth.alternatives[].readiness must be one of ${[...READINESS_STATES].join(", ")}`);
+		}
+		return {
+			kind: alternative.kind as McpServiceAuthAlternative["kind"],
+			readiness: alternative.readiness as McpReadiness,
+			...(typeof alternative.note === "string" ? { note: alternative.note } : {}),
+			...(typeof alternative.sourceUrl === "string" ? { sourceUrl: alternative.sourceUrl } : {}),
+		};
+	});
+}
+
+function requireAuthMetadata(entryId: string, value: unknown): McpServiceAuthMetadata {
+	if (!isRecord(value)) return fail(entryId, "auth.metadata must be an object");
+	if (typeof value.status !== "string" || !AUTH_METADATA_STATUSES.has(value.status)) {
+		fail(entryId, `auth.metadata.status must be one of ${[...AUTH_METADATA_STATUSES].join(", ")}`);
+	}
+	const stringArray = (path: string, input: unknown): string[] | undefined =>
+		Array.isArray(input) ? input.map((item) => requireString(entryId, path, item)) : undefined;
+	if (value.sourceUrls !== undefined && !Array.isArray(value.sourceUrls)) {
+		fail(entryId, "auth.metadata.sourceUrls must be an array");
+	}
+	const booleanOrUndefined = (path: string, input: unknown): boolean | undefined => {
+		if (input === undefined) return undefined;
+		if (typeof input !== "boolean") fail(entryId, `auth.metadata.${path} must be a boolean`);
+		return input;
+	};
+	const protectedResourceScopes = stringArray(
+		"auth.metadata.protectedResourceScopes[]",
+		value.protectedResourceScopes,
+	);
+	const authorizationServerScopes = stringArray(
+		"auth.metadata.authorizationServerScopes[]",
+		value.authorizationServerScopes,
+	);
+	const tokenAuthMethods = stringArray("auth.metadata.tokenAuthMethods[]", value.tokenAuthMethods);
+	if (value.sourceUrls === undefined || !Array.isArray(value.sourceUrls) || value.sourceUrls.length === 0) {
+		fail(entryId, "auth.metadata.sourceUrls must be a non-empty array");
+	}
+	if (typeof value.fetchedAt !== "string" || value.fetchedAt.length === 0) {
+		fail(entryId, "auth.metadata.fetchedAt must be a non-empty string");
+	}
+	const pkceS256 = booleanOrUndefined("pkceS256", value.pkceS256);
+	const dynamicClientRegistration = booleanOrUndefined("dynamicClientRegistration", value.dynamicClientRegistration);
+	const clientIdMetadataDocument = booleanOrUndefined("clientIdMetadataDocument", value.clientIdMetadataDocument);
+	return {
+		status: value.status as McpServiceAuthMetadata["status"],
+		...(typeof value.authorizationServer === "string" ? { authorizationServer: value.authorizationServer } : {}),
+		...(typeof value.resource === "string" ? { resource: value.resource } : {}),
+		...(pkceS256 !== undefined ? { pkceS256 } : {}),
+		...(dynamicClientRegistration !== undefined ? { dynamicClientRegistration } : {}),
+		...(clientIdMetadataDocument !== undefined ? { clientIdMetadataDocument } : {}),
+		// Absent lists stay undefined — "not advertised / not captured", never "empty".
+		...(protectedResourceScopes ? { protectedResourceScopes } : {}),
+		...(authorizationServerScopes ? { authorizationServerScopes } : {}),
+		...(tokenAuthMethods ? { tokenAuthMethods } : {}),
+		sourceUrls: (value.sourceUrls as unknown[]).map((url) =>
+			requireString(entryId, "auth.metadata.sourceUrls[]", url),
+		),
+		fetchedAt: value.fetchedAt,
+		...(typeof value.note === "string" ? { note: value.note } : {}),
+	};
 }
 
 /**
@@ -261,10 +431,15 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 	const reviewedScopes = Array.isArray(entry.auth.reviewedScopes)
 		? entry.auth.reviewedScopes.map((scope) => requireString(entryId, "auth.reviewedScopes[]", scope))
 		: undefined;
+	const alternatives =
+		entry.auth.alternatives === undefined ? undefined : requireAuthAlternatives(entryId, entry.auth.alternatives);
+	const metadata = entry.auth.metadata === undefined ? undefined : requireAuthMetadata(entryId, entry.auth.metadata);
 	const auth: McpServiceAuth = {
 		strategy: strategyTyped,
 		clientRegistration: clientRegistrationTyped,
 		...(reviewedScopes ? { reviewedScopes } : {}),
+		...(alternatives ? { alternatives } : {}),
+		...(metadata ? { metadata } : {}),
 	};
 
 	if (!isRecord(entry.setup)) fail(entryId, "setup must be an object");
@@ -276,10 +451,26 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 		fail(entryId, "requires-setup entries need a reason");
 	}
 	const fields = entry.setup.fields === undefined ? undefined : requireSetupFields(entryId, entry.setup.fields);
+	if (
+		entry.setup.readiness !== undefined &&
+		(typeof entry.setup.readiness !== "string" || !READINESS_STATES.has(entry.setup.readiness))
+	) {
+		fail(entryId, `setup.readiness must be one of ${[...READINESS_STATES].join(", ")}`);
+	}
+	if (
+		entry.setup.requirement !== undefined &&
+		(typeof entry.setup.requirement !== "string" || !SETUP_REQUIREMENTS.has(entry.setup.requirement))
+	) {
+		fail(entryId, `setup.requirement must be one of ${[...SETUP_REQUIREMENTS].join(", ")}`);
+	}
 	const setup: McpServiceSetup = {
 		status: setupStatus as McpServiceSetup["status"],
 		...(typeof entry.setup.reason === "string" ? { reason: entry.setup.reason } : {}),
 		...(fields ? { fields } : {}),
+		...(typeof entry.setup.readiness === "string" ? { readiness: entry.setup.readiness as McpReadiness } : {}),
+		...(typeof entry.setup.requirement === "string"
+			? { requirement: entry.setup.requirement as McpSetupRequirement }
+			: {}),
 	};
 
 	if (!isRecord(entry.verification) || typeof entry.verification.status !== "string") {
@@ -302,6 +493,13 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 		const clientId = typeof entry.oauth.clientId === "string" ? entry.oauth.clientId : undefined;
 		if (clientId !== undefined) {
 			fail(entryId, "catalog entries must not carry OAuth client ids");
+		}
+		// Secrets fail loudly instead of silently dropping (symmetric with the client-id rejection).
+		const rawOauth = entry.oauth as Record<string, unknown>;
+		for (const secretKey of ["clientSecret", "client_secret"]) {
+			if (rawOauth[secretKey] !== undefined) {
+				fail(entryId, "catalog entries must not carry OAuth client secrets");
+			}
 		}
 		oauth = { kind: "oauth", ...(scopes !== undefined ? { scopes } : {}) };
 	}
@@ -352,8 +550,12 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 	};
 }
 
+const SUPPORTED_CATALOG_VERSIONS = new Set([1, 2]);
+
 function parseCatalog(data: CatalogFileShape): CatalogFileShape {
-	if (data.version !== 1) {
+	// Version 2 adds optional readiness/requirement/field-kind/alternatives/
+	// metadata-evidence fields (additive: every new field is optional).
+	if (!SUPPORTED_CATALOG_VERSIONS.has(data.version)) {
 		throw new Error(`catalog has unsupported version ${String(data.version)}`);
 	}
 	if (!Array.isArray(data.entries)) {

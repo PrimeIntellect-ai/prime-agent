@@ -4,7 +4,7 @@
 import type { CatalogFileShape } from "./catalog.js";
 
 export const CATALOG_DATA: CatalogFileShape = {
-	"version": 1,
+	"version": 2,
 	"sources": [
 		{
 			"source": "openai-plugins",
@@ -23,12 +23,18 @@ export const CATALOG_DATA: CatalogFileShape = {
 		"httpTemplate": 5,
 		"sse": 1,
 		"stdio": 32,
-		"ready": 80,
-		"requiresSetup": 60,
+		"ready": 82,
+		"requiresSetup": 58,
 		"metadataReviewed": 2,
 		"oauthStrategy": 14,
 		"apiKeyStrategy": 32,
-		"mergedFromBothSources": 16
+		"mergedFromBothSources": 16,
+		"readinessOauthReady": 72,
+		"readinessUserSetup": 53,
+		"readinessPrimeRestricted": 5,
+		"readinessUnknown": 10,
+		"metadataAvailable": 94,
+		"metadataUnavailable": 9
 	},
 	"entries": [
 		{
@@ -58,9 +64,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "user_config.server_url",
 						"label": "user_config.server_url",
 						"description": "Upstream template variable user_config.server_url",
-						"required": true
+						"required": true,
+						"kind": "url"
 					}
-				]
+				],
+				"requirement": "tenant",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -91,10 +100,22 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://adobe-creativity.adobe.io/mcp",
+						"https://adobe-creativity.adobe.io/.well-known/oauth-protected-resource/mcp",
+						"https://adobe-creativity.adobe.io/.well-known/oauth-protected-resource",
+						"https://adobe-creativity.adobe.io/.well-known/oauth-authorization-server",
+						"https://adobe-creativity.adobe.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -138,7 +159,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -169,11 +192,57 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"alternatives": [
+					{
+						"kind": "api-key",
+						"readiness": "user-setup",
+						"note": "Airtable also documents personal access tokens as a distinct API access path; OAuth dynamic client registration is the default route for the MCP server",
+						"sourceUrl": "https://airtable.com/developers/agents/mcp/getting-started"
+					}
+				],
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://airtable.com/oauth2/v1",
+					"resource": "https://mcp.airtable.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"data.records:read",
+						"data.records:write",
+						"schema.bases:read",
+						"schema.bases:write",
+						"data.recordComments:read",
+						"data.recordComments:write",
+						"workspacesAndBases:read"
+					],
+					"authorizationServerScopes": [
+						"data.records:read",
+						"data.records:write",
+						"schema.bases:read",
+						"schema.bases:write",
+						"data.recordComments:read",
+						"data.recordComments:write",
+						"workspacesAndBases:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.airtable.com/mcp",
+						"https://mcp.airtable.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.airtable.com/.well-known/oauth-protected-resource",
+						"https://airtable.com/.well-known/oauth-authorization-server/oauth2/v1",
+						"https://airtable.com/oauth2/v1/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "requires-setup",
-				"reason": "upstream OAuth client values are placeholders; upstream OAuth config contains client-id placeholders"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -193,6 +262,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"commit": "812ee67f1fd3d76fb45ff8df40afaa0448602ba8",
 					"path": "plugins/airtable",
 					"url": "https://raw.githubusercontent.com/Airtable/skills/812ee67f1fd3d76fb45ff8df40afaa0448602ba8/plugins/airtable/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "placeholder-only upstream OAuth blocks cleared: provider docs confirm OAuth for the Airtable MCP server and the committed audit evidence confirms a live registration endpoint"
 				}
 			],
 			"homepage": "https://airtable.com",
@@ -217,10 +290,95 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.airwallex.com/mcp",
+					"resource": "https://mcp.airwallex.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"r:awx_action:balances_view",
+						"r:awx_action:contact_management_view",
+						"r:awx_action:conversions_view",
+						"r:awx_action:global_accounts_view",
+						"r:awx_action:issuing_cardholders_view",
+						"r:awx_action:issuing_cards_view",
+						"r:awx_action:issuing_transactions_view",
+						"r:awx_action:pa_view",
+						"r:awx_action:payment_links_view",
+						"r:awx_action:settings.account_details_view",
+						"r:awx_action:transfers_view",
+						"r:org_action:billing.customer_view",
+						"r:org_action:billing.discount_view",
+						"r:org_action:billing.invoice_view",
+						"r:org_action:billing.payment_source_view",
+						"r:org_action:billing.price_view",
+						"r:org_action:billing.product_view",
+						"r:org_action:billing.subscription_view",
+						"r:org_action:billing.transaction_view",
+						"r:org_action:billing.usage_metering_view",
+						"r:org_action:expense_management.expense:api_view",
+						"r:org_action:spend.bills:api_view",
+						"r:org_action:spend.vendors:api_view",
+						"w:awx_action:contact_management_edit",
+						"w:awx_action:devx.feedback_write",
+						"w:awx_action:issuing_cardholders_edit",
+						"w:awx_action:issuing_cards_edit",
+						"w:awx_action:payment_links_edit",
+						"w:org_action:billing.customer_edit",
+						"w:org_action:billing.discount_edit"
+					],
+					"authorizationServerScopes": [
+						"r:awx_action:balances_view",
+						"r:awx_action:contact_management_view",
+						"r:awx_action:conversions_view",
+						"r:awx_action:global_accounts_view",
+						"r:awx_action:issuing_cardholders_view",
+						"r:awx_action:issuing_cards_view",
+						"r:awx_action:issuing_transactions_view",
+						"r:awx_action:pa_view",
+						"r:awx_action:payment_links_view",
+						"r:awx_action:settings.account_details_view",
+						"r:awx_action:transfers_view",
+						"r:org_action:billing.customer_view",
+						"r:org_action:billing.discount_view",
+						"r:org_action:billing.invoice_view",
+						"r:org_action:billing.payment_source_view",
+						"r:org_action:billing.price_view",
+						"r:org_action:billing.product_view",
+						"r:org_action:billing.subscription_view",
+						"r:org_action:billing.transaction_view",
+						"r:org_action:billing.usage_metering_view",
+						"r:org_action:expense_management.expense:api_view",
+						"r:org_action:spend.bills:api_view",
+						"r:org_action:spend.vendors:api_view",
+						"w:awx_action:contact_management_edit",
+						"w:awx_action:devx.feedback_write",
+						"w:awx_action:issuing_cardholders_edit",
+						"w:awx_action:issuing_cards_edit",
+						"w:awx_action:payment_links_edit",
+						"w:org_action:billing.customer_edit",
+						"w:org_action:billing.discount_edit"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.airwallex.com/mcp",
+						"https://mcp.airwallex.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.airwallex.com/.well-known/oauth-protected-resource",
+						"https://mcp.airwallex.com/.well-known/oauth-authorization-server/mcp",
+						"https://mcp.airwallex.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -257,10 +415,95 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.sandbox.airwallex.com/developer",
+					"resource": "https://mcp.sandbox.airwallex.com/developer",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"r:awx_action:balances_view",
+						"r:awx_action:contact_management_view",
+						"r:awx_action:conversions_view",
+						"r:awx_action:deposits_view",
+						"r:awx_action:direct_debits_view",
+						"r:awx_action:global_accounts_view",
+						"r:awx_action:issuing_cardholders_view",
+						"r:awx_action:issuing_cards_view",
+						"r:awx_action:issuing_transactions_view",
+						"r:awx_action:linked_accounts_view",
+						"r:awx_action:pa_view",
+						"r:awx_action:payment_dispute_view",
+						"r:awx_action:payment_links_view",
+						"r:awx_action:settings.account_details_view",
+						"r:awx_action:transfers_view",
+						"r:org_action:billing.customer_view",
+						"r:org_action:billing.discount_view",
+						"r:org_action:billing.invoice_view",
+						"r:org_action:billing.payment_source_view",
+						"r:org_action:billing.price_view",
+						"r:org_action:billing.product_view",
+						"r:org_action:billing.subscription_view",
+						"r:org_action:billing.transaction_view",
+						"r:org_action:billing.usage_metering_view",
+						"r:org_action:expense_management.expense:api_view",
+						"r:org_action:spend.bills:api_view",
+						"r:org_action:spend.vendors:api_view",
+						"w:awx_action:contact_management_edit",
+						"w:awx_action:conversions_edit",
+						"w:awx_action:deposits_create"
+					],
+					"authorizationServerScopes": [
+						"r:awx_action:balances_view",
+						"r:awx_action:contact_management_view",
+						"r:awx_action:conversions_view",
+						"r:awx_action:deposits_view",
+						"r:awx_action:direct_debits_view",
+						"r:awx_action:global_accounts_view",
+						"r:awx_action:issuing_cardholders_view",
+						"r:awx_action:issuing_cards_view",
+						"r:awx_action:issuing_transactions_view",
+						"r:awx_action:linked_accounts_view",
+						"r:awx_action:pa_view",
+						"r:awx_action:payment_dispute_view",
+						"r:awx_action:payment_links_view",
+						"r:awx_action:settings.account_details_view",
+						"r:awx_action:transfers_view",
+						"r:org_action:billing.customer_view",
+						"r:org_action:billing.discount_view",
+						"r:org_action:billing.invoice_view",
+						"r:org_action:billing.payment_source_view",
+						"r:org_action:billing.price_view",
+						"r:org_action:billing.product_view",
+						"r:org_action:billing.subscription_view",
+						"r:org_action:billing.transaction_view",
+						"r:org_action:billing.usage_metering_view",
+						"r:org_action:expense_management.expense:api_view",
+						"r:org_action:spend.bills:api_view",
+						"r:org_action:spend.vendors:api_view",
+						"w:awx_action:contact_management_edit",
+						"w:awx_action:conversions_edit",
+						"w:awx_action:deposits_create"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.sandbox.airwallex.com/developer",
+						"https://mcp.sandbox.airwallex.com/.well-known/oauth-protected-resource/developer",
+						"https://mcp.sandbox.airwallex.com/.well-known/oauth-protected-resource",
+						"https://mcp.sandbox.airwallex.com/.well-known/oauth-authorization-server/developer",
+						"https://mcp.sandbox.airwallex.com/developer/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -300,10 +543,39 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.aiven.io",
+					"resource": "https://mcp.aiven.live/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"projects",
+						"services",
+						"accounts:read"
+					],
+					"authorizationServerScopes": [
+						"projects",
+						"services",
+						"accounts:read"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.aiven.live/mcp",
+						"https://mcp.aiven.live/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.aiven.live/.well-known/oauth-protected-resource",
+						"https://api.aiven.io/.well-known/oauth-authorization-server",
+						"https://api.aiven.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -361,51 +633,61 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ALLOYDB_POSTGRES_CLUSTER",
 						"label": "ALLOYDB_POSTGRES_CLUSTER",
 						"description": "Environment variable ALLOYDB_POSTGRES_CLUSTER",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "ALLOYDB_POSTGRES_DATABASE",
 						"label": "ALLOYDB_POSTGRES_DATABASE",
 						"description": "Environment variable ALLOYDB_POSTGRES_DATABASE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "ALLOYDB_POSTGRES_INSTANCE",
 						"label": "ALLOYDB_POSTGRES_INSTANCE",
 						"description": "Environment variable ALLOYDB_POSTGRES_INSTANCE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "ALLOYDB_POSTGRES_IP_TYPE",
 						"label": "ALLOYDB_POSTGRES_IP_TYPE",
 						"description": "Environment variable ALLOYDB_POSTGRES_IP_TYPE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "ALLOYDB_POSTGRES_PASSWORD",
 						"label": "ALLOYDB_POSTGRES_PASSWORD",
 						"description": "Environment variable ALLOYDB_POSTGRES_PASSWORD",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "ALLOYDB_POSTGRES_PROJECT",
 						"label": "ALLOYDB_POSTGRES_PROJECT",
 						"description": "Environment variable ALLOYDB_POSTGRES_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "ALLOYDB_POSTGRES_REGION",
 						"label": "ALLOYDB_POSTGRES_REGION",
 						"description": "Environment variable ALLOYDB_POSTGRES_REGION",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "ALLOYDB_POSTGRES_USER",
 						"label": "ALLOYDB_POSTGRES_USER",
 						"description": "Environment variable ALLOYDB_POSTGRES_USER",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -451,7 +733,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -487,10 +771,39 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.amplitude.com",
+					"resource": "https://mcp.amplitude.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"authorizationServerScopes": [
+						"mcp:read",
+						"mcp:write",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.amplitude.com/mcp",
+						"https://mcp.amplitude.com/.well-known/oauth-protected-resource",
+						"https://mcp.amplitude.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.amplitude.com/.well-known/oauth-authorization-server",
+						"https://mcp.amplitude.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -521,10 +834,95 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.apollo.io",
+					"resource": "https://mcp.apollo.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read_user_profile",
+						"app_scopes",
+						"people_bulk_match",
+						"organizations_bulk_enrich",
+						"organizations_enrich",
+						"people_match",
+						"webhook_result_read",
+						"mixed_people_api_search",
+						"organizations_job_posting",
+						"mixed_companies_search",
+						"organizations_search",
+						"contact_write",
+						"contact_update",
+						"contacts_search",
+						"contact_read",
+						"account_write",
+						"account_update",
+						"context_center_read",
+						"context_center_write",
+						"emailer_campaigns_search",
+						"emailer_campaigns_create",
+						"emailer_campaigns_update",
+						"emailer_campaigns_approve",
+						"emailer_campaigns_add_contact_ids",
+						"emailer_campaigns_remove_or_stop_contact_ids",
+						"emailer_schedules_list",
+						"emailer_messages_search",
+						"emailer_messages_create",
+						"emailer_messages_send_now",
+						"emailer_messages_email_send_status"
+					],
+					"authorizationServerScopes": [
+						"read_user_profile",
+						"app_scopes",
+						"people_bulk_match",
+						"organizations_bulk_enrich",
+						"organizations_enrich",
+						"people_match",
+						"webhook_result_read",
+						"mixed_people_api_search",
+						"organizations_job_posting",
+						"mixed_companies_search",
+						"organizations_search",
+						"contact_write",
+						"contact_update",
+						"contacts_search",
+						"contact_read",
+						"account_write",
+						"account_update",
+						"context_center_read",
+						"context_center_write",
+						"emailer_campaigns_search",
+						"emailer_campaigns_create",
+						"emailer_campaigns_update",
+						"emailer_campaigns_approve",
+						"emailer_campaigns_add_contact_ids",
+						"emailer_campaigns_remove_or_stop_contact_ids",
+						"emailer_schedules_list",
+						"emailer_messages_search",
+						"emailer_messages_create",
+						"emailer_messages_send_now",
+						"emailer_messages_email_send_status"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.apollo.io/mcp",
+						"https://mcp.apollo.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.apollo.io/.well-known/oauth-protected-resource",
+						"https://mcp.apollo.io/.well-known/oauth-authorization-server",
+						"https://mcp.apollo.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -552,10 +950,95 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://fra.cloud.appwrite.io/v1/oauth2/console",
+					"resource": "https://mcp.appwrite.io/",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"phone",
+						"all",
+						"project:all",
+						"organization:all",
+						"project:project.read",
+						"project:project.write",
+						"project:keys.read",
+						"project:keys.write",
+						"project:platforms.read",
+						"project:platforms.write",
+						"project:mocks.read",
+						"project:mocks.write",
+						"project:project.policies.read",
+						"project:project.policies.write",
+						"project:project.oauth2.read",
+						"project:project.oauth2.write",
+						"project:templates.read",
+						"project:templates.write",
+						"project:stages.read",
+						"project:stages.write",
+						"project:users.read",
+						"project:users.write",
+						"project:sessions.read",
+						"project:sessions.write",
+						"project:teams.read",
+						"project:teams.write",
+						"project:databases.read"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"phone",
+						"all",
+						"project:all",
+						"organization:all",
+						"project:project.read",
+						"project:project.write",
+						"project:keys.read",
+						"project:keys.write",
+						"project:platforms.read",
+						"project:platforms.write",
+						"project:mocks.read",
+						"project:mocks.write",
+						"project:policies.read",
+						"project:policies.write",
+						"project:project.policies.read",
+						"project:project.policies.write",
+						"project:project.oauth2.read",
+						"project:project.oauth2.write",
+						"project:templates.read",
+						"project:templates.write",
+						"project:stages.read",
+						"project:stages.write",
+						"project:users.read",
+						"project:users.write",
+						"project:sessions.read",
+						"project:sessions.write",
+						"project:teams.read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.appwrite.io/",
+						"https://mcp.appwrite.io/.well-known/oauth-protected-resource",
+						"https://fra.cloud.appwrite.io/.well-known/oauth-authorization-server/v1/oauth2/console",
+						"https://fra.cloud.appwrite.io/v1/oauth2/console/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -583,10 +1066,35 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.atlan.com",
+					"resource": "https://mcp.atlan.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.atlan.com/mcp",
+						"https://mcp.atlan.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.atlan.com/.well-known/oauth-protected-resource",
+						"https://mcp.atlan.com/.well-known/oauth-authorization-server",
+						"https://mcp.atlan.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -614,10 +1122,65 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+					"resource": "https://mcp.atlassian.com/v2/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"read:me",
+						"read:account",
+						"offline_access",
+						"email",
+						"read:jira:agent-interface",
+						"write:jira:agent-interface",
+						"search:jira:agent-interface",
+						"delete:jira:agent-interface",
+						"manage:jira:agent-interface",
+						"read:confluence:agent-interface",
+						"write:confluence:agent-interface",
+						"search:confluence:agent-interface",
+						"search:rovo:agent-interface",
+						"search:code:agent-interface",
+						"read:all:twg",
+						"write:all:twg",
+						"read:goals:agent-interface",
+						"write:goals:agent-interface",
+						"read:projects:agent-interface",
+						"write:projects:agent-interface",
+						"read:bitbucket:agent-interface",
+						"write:bitbucket:agent-interface",
+						"read:loom:agent-interface",
+						"write:loom:agent-interface",
+						"read:talent:agent-interface",
+						"write:talent:agent-interface",
+						"read:teams:agent-interface",
+						"write:teams:agent-interface",
+						"read:artifacts:agent-interface",
+						"write:artifacts:agent-interface"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.atlassian.com/v2/mcp",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource/v2/mcp",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource",
+						"https://auth.atlassian.com/.well-known/oauth-authorization-server/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+						"https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -650,10 +1213,57 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+					"resource": "https://mcp.atlassian.com/v1/mcp/authv2",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"read:me",
+						"read:account",
+						"offline_access",
+						"email",
+						"read:jira-work",
+						"write:jira-work",
+						"search:confluence",
+						"read:confluence-user",
+						"read:page:confluence",
+						"write:page:confluence",
+						"read:comment:confluence",
+						"write:comment:confluence",
+						"read:space:confluence",
+						"read:hierarchical-content:confluence",
+						"write:component:compass",
+						"read:component:compass",
+						"read:scorecard:compass",
+						"write:scorecard:compass",
+						"read:event:compass",
+						"read:metric:compass",
+						"read:all:twg",
+						"write:all:twg"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.atlassian.com/v1/mcp/authv2",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource/v1/mcp/authv2",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource",
+						"https://auth.atlassian.com/.well-known/oauth-authorization-server/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+						"https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -696,7 +1306,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -746,7 +1358,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -796,7 +1410,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -835,7 +1451,18 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://connect.aidevops.us-east-1.api.aws/mcp",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-protected-resource/mcp",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-protected-resource",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-authorization-server",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -845,9 +1472,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "DEVOPS_AGENT_TOKEN",
 						"label": "DEVOPS_AGENT_TOKEN",
 						"description": "Environment variable DEVOPS_AGENT_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -900,9 +1530,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "FASTMCP_LOG_LEVEL",
 						"label": "FASTMCP_LOG_LEVEL",
 						"description": "Environment variable FASTMCP_LOG_LEVEL",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -948,7 +1581,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -997,7 +1632,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1052,15 +1689,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "BIGQUERY_LOCATION",
 						"label": "BIGQUERY_LOCATION",
 						"description": "Environment variable BIGQUERY_LOCATION",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "BIGQUERY_PROJECT",
 						"label": "BIGQUERY_PROJECT",
 						"description": "Environment variable BIGQUERY_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1098,10 +1739,50 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.canva.com",
+					"resource": "https://mcp.canva.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"profile:read",
+						"design:meta:read",
+						"design:content:write",
+						"design:content:read",
+						"folder:read",
+						"folder:write",
+						"brandtemplate:content:read",
+						"brandtemplate:meta:read",
+						"brandtemplate:content:write",
+						"comment:write",
+						"comment:read",
+						"asset:read",
+						"asset:write",
+						"brandkit:read",
+						"help:answers:read",
+						"help:answers:write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.canva.com/mcp",
+						"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.canva.com/.well-known/oauth-protected-resource",
+						"https://mcp.canva.com/.well-known/oauth-authorization-server",
+						"https://mcp.canva.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1142,10 +1823,88 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://catalyst.zohomcp.com",
+					"resource": "https://catalyst.zohomcp.com/mcp/message",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"ZohoCatalyst.fullaccess.ALL",
+						"ZohoCatalyst.functions.execute.CUSTOM",
+						"QuickML.projects.READ",
+						"QuickML.pipelines.READ",
+						"QuickML.pipelines.CREATE",
+						"QuickML.pipelines.UPDATE",
+						"QuickML.pipelines.DELETE",
+						"QuickML.datasets.READ",
+						"QuickML.datasets.UPDATE",
+						"QuickML.datasets.DELETE",
+						"QuickML.datasets.CREATE",
+						"QuickML.models.READ",
+						"QuickML.models.UPDATE",
+						"QuickML.models.DELETE",
+						"QuickML.endpoints.CREATE",
+						"QuickML.endpoints.READ",
+						"QuickML.endpoints.UPDATE",
+						"QuickML.endpoints.DELETE",
+						"QuickML.deployment.READ",
+						"QuickML.rag.READ",
+						"QuickML.rag.CREATE",
+						"QuickML.rag.DELETE",
+						"ZohoCatalyst.Slate.app.READ",
+						"ZohoCatalyst.Slate.app.CREATE",
+						"ZohoCatalyst.automationtesting.execute",
+						"ZohoCatalyst.circuits.execute",
+						"ZohoMCP.tool.execute"
+					],
+					"authorizationServerScopes": [
+						"ZohoCatalyst.fullaccess.ALL",
+						"ZohoCatalyst.functions.execute.CUSTOM",
+						"QuickML.projects.READ",
+						"QuickML.pipelines.READ",
+						"QuickML.pipelines.CREATE",
+						"QuickML.pipelines.UPDATE",
+						"QuickML.pipelines.DELETE",
+						"QuickML.datasets.READ",
+						"QuickML.datasets.UPDATE",
+						"QuickML.datasets.DELETE",
+						"QuickML.datasets.CREATE",
+						"QuickML.models.READ",
+						"QuickML.models.UPDATE",
+						"QuickML.models.DELETE",
+						"QuickML.endpoints.CREATE",
+						"QuickML.endpoints.READ",
+						"QuickML.endpoints.UPDATE",
+						"QuickML.endpoints.DELETE",
+						"QuickML.deployment.READ",
+						"QuickML.rag.READ",
+						"QuickML.rag.CREATE",
+						"QuickML.rag.DELETE",
+						"ZohoCatalyst.Slate.app.READ",
+						"ZohoCatalyst.Slate.app.CREATE",
+						"ZohoCatalyst.automationtesting.execute",
+						"ZohoCatalyst.circuits.execute",
+						"ZohoMCP.tool.execute"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://catalyst.zohomcp.com/mcp/message",
+						"https://catalyst.zohomcp.com/.well-known/oauth-protected-resource",
+						"https://catalyst.zohomcp.com/.well-known/oauth-protected-resource/mcp/message",
+						"https://catalyst.zohomcp.com/.well-known/oauth-authorization-server",
+						"https://catalyst.zohomcp.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1173,10 +1932,36 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://circleback.ai",
+					"resource": "https://circleback.ai/api/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"user"
+					],
+					"authorizationServerScopes": [
+						"user"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://circleback.ai/api/mcp",
+						"https://circleback.ai/.well-known/oauth-protected-resource/api/mcp",
+						"https://circleback.ai/.well-known/oauth-protected-resource",
+						"https://circleback.ai/.well-known/oauth-authorization-server",
+						"https://circleback.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1204,10 +1989,42 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.clickhouse.cloud",
+					"resource": "https://mcp.clickhouse.cloud/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:access",
+						"openid",
+						"profile",
+						"email"
+					],
+					"authorizationServerScopes": [
+						"mcp:access",
+						"clickstack:access",
+						"openid",
+						"profile",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.clickhouse.cloud/mcp",
+						"https://mcp.clickhouse.cloud/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.clickhouse.cloud/.well-known/oauth-protected-resource",
+						"https://mcp.clickhouse.cloud/.well-known/oauth-authorization-server",
+						"https://mcp.clickhouse.cloud/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1236,10 +2053,37 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.clickup.com",
+					"resource": "https://mcp.clickup.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
+					"authorizationServerScopes": [
+						"read",
+						"write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.clickup.com/mcp",
+						"https://mcp.clickup.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.clickup.com/.well-known/oauth-protected-resource",
+						"https://mcp.clickup.com/.well-known/oauth-authorization-server",
+						"https://mcp.clickup.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1299,45 +2143,54 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "CLOUD_SQL_MYSQL_DATABASE",
 						"label": "CLOUD_SQL_MYSQL_DATABASE",
 						"description": "Environment variable CLOUD_SQL_MYSQL_DATABASE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MYSQL_INSTANCE",
 						"label": "CLOUD_SQL_MYSQL_INSTANCE",
 						"description": "Environment variable CLOUD_SQL_MYSQL_INSTANCE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MYSQL_IP_TYPE",
 						"label": "CLOUD_SQL_MYSQL_IP_TYPE",
 						"description": "Environment variable CLOUD_SQL_MYSQL_IP_TYPE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MYSQL_PASSWORD",
 						"label": "CLOUD_SQL_MYSQL_PASSWORD",
 						"description": "Environment variable CLOUD_SQL_MYSQL_PASSWORD",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MYSQL_PROJECT",
 						"label": "CLOUD_SQL_MYSQL_PROJECT",
 						"description": "Environment variable CLOUD_SQL_MYSQL_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MYSQL_REGION",
 						"label": "CLOUD_SQL_MYSQL_REGION",
 						"description": "Environment variable CLOUD_SQL_MYSQL_REGION",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MYSQL_USER",
 						"label": "CLOUD_SQL_MYSQL_USER",
 						"description": "Environment variable CLOUD_SQL_MYSQL_USER",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1403,45 +2256,54 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "CLOUD_SQL_POSTGRES_DATABASE",
 						"label": "CLOUD_SQL_POSTGRES_DATABASE",
 						"description": "Environment variable CLOUD_SQL_POSTGRES_DATABASE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_POSTGRES_INSTANCE",
 						"label": "CLOUD_SQL_POSTGRES_INSTANCE",
 						"description": "Environment variable CLOUD_SQL_POSTGRES_INSTANCE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_POSTGRES_IP_TYPE",
 						"label": "CLOUD_SQL_POSTGRES_IP_TYPE",
 						"description": "Environment variable CLOUD_SQL_POSTGRES_IP_TYPE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_POSTGRES_PASSWORD",
 						"label": "CLOUD_SQL_POSTGRES_PASSWORD",
 						"description": "Environment variable CLOUD_SQL_POSTGRES_PASSWORD",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_POSTGRES_PROJECT",
 						"label": "CLOUD_SQL_POSTGRES_PROJECT",
 						"description": "Environment variable CLOUD_SQL_POSTGRES_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_POSTGRES_REGION",
 						"label": "CLOUD_SQL_POSTGRES_REGION",
 						"description": "Environment variable CLOUD_SQL_POSTGRES_REGION",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_POSTGRES_USER",
 						"label": "CLOUD_SQL_POSTGRES_USER",
 						"description": "Environment variable CLOUD_SQL_POSTGRES_USER",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1507,45 +2369,54 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "CLOUD_SQL_MSSQL_DATABASE",
 						"label": "CLOUD_SQL_MSSQL_DATABASE",
 						"description": "Environment variable CLOUD_SQL_MSSQL_DATABASE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MSSQL_INSTANCE",
 						"label": "CLOUD_SQL_MSSQL_INSTANCE",
 						"description": "Environment variable CLOUD_SQL_MSSQL_INSTANCE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MSSQL_IP_TYPE",
 						"label": "CLOUD_SQL_MSSQL_IP_TYPE",
 						"description": "Environment variable CLOUD_SQL_MSSQL_IP_TYPE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MSSQL_PASSWORD",
 						"label": "CLOUD_SQL_MSSQL_PASSWORD",
 						"description": "Environment variable CLOUD_SQL_MSSQL_PASSWORD",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MSSQL_PROJECT",
 						"label": "CLOUD_SQL_MSSQL_PROJECT",
 						"description": "Environment variable CLOUD_SQL_MSSQL_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MSSQL_REGION",
 						"label": "CLOUD_SQL_MSSQL_REGION",
 						"description": "Environment variable CLOUD_SQL_MSSQL_REGION",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "CLOUD_SQL_MSSQL_USER",
 						"label": "CLOUD_SQL_MSSQL_USER",
 						"description": "Environment variable CLOUD_SQL_MSSQL_USER",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1586,10 +2457,32 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.cloudflare.com",
+					"resource": "https://mcp.cloudflare.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.cloudflare.com/mcp",
+						"https://mcp.cloudflare.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.cloudflare.com/.well-known/oauth-protected-resource",
+						"https://mcp.cloudflare.com/.well-known/oauth-authorization-server",
+						"https://mcp.cloudflare.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1632,10 +2525,47 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://analysis.mcp.cloudinary.com",
+					"resource": "https://analysis.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"media_analysis",
+						"query_analysis_tasks"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"media_analysis",
+						"query_analysis_tasks"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://analysis.mcp.cloudinary.com/mcp",
+						"https://analysis.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://analysis.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://analysis.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://analysis.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1670,10 +2600,49 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://asset-management.mcp.cloudinary.com",
+					"resource": "https://asset-management.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload",
+						"media_generation"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload",
+						"media_generation"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://asset-management.mcp.cloudinary.com/mcp",
+						"https://asset-management.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://asset-management.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://asset-management.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://asset-management.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1708,10 +2677,47 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://environment-config.mcp.cloudinary.com",
+					"resource": "https://environment-config.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://environment-config.mcp.cloudinary.com/mcp",
+						"https://environment-config.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://environment-config.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://environment-config.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://environment-config.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1745,7 +2751,18 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://mediaflows.mcp.cloudinary.com/v2/mcp",
+						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-protected-resource/v2/mcp",
+						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://mediaflows.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -1755,15 +2772,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "cld-api-key",
 						"label": "cld-api-key",
 						"description": "Environment variable cld-api-key",
-						"required": true
+						"required": true,
+						"kind": "api-key"
 					},
 					{
 						"id": "cld-secret",
 						"label": "cld-secret",
 						"description": "Environment variable cld-secret",
-						"required": true
+						"required": true,
+						"kind": "api-key"
 					}
-				]
+				],
+				"requirement": "api-key",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1798,10 +2819,47 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://structured-metadata.mcp.cloudinary.com",
+					"resource": "https://structured-metadata.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://structured-metadata.mcp.cloudinary.com/mcp",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1836,7 +2894,33 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://cockroachlabs.cloud/mcp",
+					"resource": "https://cockroachlabs.cloud/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"authorizationServerScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://cockroachlabs.cloud/mcp",
+						"https://cockroachlabs.cloud/.well-known/oauth-protected-resource/mcp",
+						"https://cockroachlabs.cloud/.well-known/oauth-protected-resource",
+						"https://cockroachlabs.cloud/.well-known/oauth-authorization-server/mcp",
+						"https://cockroachlabs.cloud/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -1846,9 +2930,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "COCKROACHDB_CLUSTER_ID",
 						"label": "COCKROACHDB_CLUSTER_ID",
 						"description": "Environment variable COCKROACHDB_CLUSTER_ID",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "tenant",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1880,10 +2967,22 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://mcp.codspeed.io/mcp",
+						"https://mcp.codspeed.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.codspeed.io/.well-known/oauth-protected-resource",
+						"https://mcp.codspeed.io/.well-known/oauth-authorization-server",
+						"https://mcp.codspeed.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1915,10 +3014,35 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.confidence.dev",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.confidence.dev/mcp/docs",
+						"https://mcp.confidence.dev/.well-known/oauth-protected-resource/mcp/docs",
+						"https://mcp.confidence.dev/.well-known/oauth-protected-resource",
+						"https://mcp.confidence.dev/.well-known/oauth-authorization-server",
+						"https://mcp.confidence.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1954,10 +3078,35 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.confidence.dev",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.confidence.dev/mcp/flags",
+						"https://mcp.confidence.dev/.well-known/oauth-protected-resource/mcp/flags",
+						"https://mcp.confidence.dev/.well-known/oauth-protected-resource",
+						"https://mcp.confidence.dev/.well-known/oauth-authorization-server",
+						"https://mcp.confidence.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2002,7 +3151,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2150,9 +3301,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "X_GOOG_PROXY_HEADERS",
 						"label": "X_GOOG_PROXY_HEADERS",
 						"description": "Environment variable X_GOOG_PROXY_HEADERS",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2190,7 +3344,28 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.datadoghq.com/v1/mcp",
+					"resource": "https://mcp.datadoghq.com/v1/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"mcp_all"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.datadoghq.com/v1/mcp",
+						"https://mcp.datadoghq.com/.well-known/oauth-protected-resource/v1/mcp",
+						"https://mcp.datadoghq.com/.well-known/oauth-protected-resource",
+						"https://mcp.datadoghq.com/.well-known/oauth-authorization-server/v1/mcp",
+						"https://mcp.datadoghq.com/v1/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -2200,21 +3375,26 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "DD_API_KEY",
 						"label": "DD_API_KEY",
 						"description": "Environment variable DD_API_KEY",
-						"required": true
+						"required": true,
+						"kind": "api-key"
 					},
 					{
 						"id": "DD_APPLICATION_KEY",
 						"label": "DD_APPLICATION_KEY",
 						"description": "Environment variable DD_APPLICATION_KEY",
-						"required": true
+						"required": true,
+						"kind": "api-key"
 					},
 					{
 						"id": "DD_MCP_TOOLSETS",
 						"label": "DD_MCP_TOOLSETS",
 						"description": "Environment variable DD_MCP_TOOLSETS",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "api-key",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2281,15 +3461,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "DATAPROC_PROJECT",
 						"label": "DATAPROC_PROJECT",
 						"description": "Environment variable DATAPROC_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "DATAPROC_REGION",
 						"label": "DATAPROC_REGION",
 						"description": "Environment variable DATAPROC_REGION",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2350,9 +3534,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "FASTMCP_LOG_LEVEL",
 						"label": "FASTMCP_LOG_LEVEL",
 						"description": "Environment variable FASTMCP_LOG_LEVEL",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2403,7 +3590,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2456,15 +3645,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "DOMINO_API_KEY",
 						"label": "DOMINO_API_KEY",
 						"description": "Environment variable DOMINO_API_KEY",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "DOMINO_HOST",
 						"label": "DOMINO_HOST",
 						"description": "Environment variable DOMINO_HOST",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2496,10 +3689,73 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://www.dropbox.com",
+					"resource": "https://mcp.dropbox.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"account_info.read",
+						"file_requests.read",
+						"file_requests.write",
+						"files.content.read",
+						"files.content.write",
+						"files.metadata.read",
+						"sharing.read",
+						"sharing.write"
+					],
+					"authorizationServerScopes": [
+						"account_info.read",
+						"contacts.read",
+						"contacts.write",
+						"files.metadata.read",
+						"files.content.read",
+						"files.content.write",
+						"files.permanent_delete",
+						"files.metadata.write",
+						"sharing.read",
+						"sharing.write",
+						"file_requests.read",
+						"file_requests.write",
+						"openid",
+						"profile",
+						"email",
+						"account_info.write",
+						"backup.read",
+						"backup.write",
+						"dash/content.read",
+						"dash/content.write",
+						"team_info.read",
+						"team_info.write",
+						"sessions.list",
+						"sessions.modify",
+						"members.read",
+						"members.write",
+						"members.delete",
+						"groups.read",
+						"groups.write",
+						"events.read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.dropbox.com/mcp",
+						"https://mcp.dropbox.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.dropbox.com/.well-known/oauth-protected-resource",
+						"https://www.dropbox.com/.well-known/oauth-authorization-server",
+						"https://www.dropbox.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2545,15 +3801,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "DT_ENVIRONMENT",
 						"label": "DT_ENVIRONMENT",
 						"description": "Upstream template variable DT_ENVIRONMENT",
-						"required": true
+						"required": true,
+						"kind": "url"
 					},
 					{
 						"id": "DT_PLATFORM_TOKEN",
 						"label": "DT_PLATFORM_TOKEN",
 						"description": "Environment variable DT_PLATFORM_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "tenant",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2582,10 +3842,39 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.expo.dev",
+					"resource": "https://mcp.expo.dev/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"mcp:access"
+					],
+					"authorizationServerScopes": [
+						"mcp:access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"private_key_jwt",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.expo.dev/mcp",
+						"https://mcp.expo.dev/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.expo.dev/.well-known/oauth-protected-resource",
+						"https://mcp.expo.dev/.well-known/oauth-authorization-server",
+						"https://mcp.expo.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2616,10 +3905,36 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.figma.com",
+					"resource": "https://mcp.figma.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:connect"
+					],
+					"authorizationServerScopes": [
+						"mcp:connect"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.figma.com/mcp",
+						"https://mcp.figma.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.figma.com/.well-known/oauth-protected-resource",
+						"https://api.figma.com/.well-known/oauth-authorization-server",
+						"https://api.figma.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2672,7 +3987,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2732,15 +4049,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "FIRESTORE_DATABASE",
 						"label": "FIRESTORE_DATABASE",
 						"description": "Environment variable FIRESTORE_DATABASE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "FIRESTORE_PROJECT",
 						"label": "FIRESTORE_PROJECT",
 						"description": "Environment variable FIRESTORE_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2777,10 +4098,44 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.fullstory.com",
+					"resource": "https://api.fullstory.com/mcp/fullstory",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"playback:read",
+						"search:read",
+						"search.metadata:read",
+						"sessions:read",
+						"metrics:read",
+						"metrics.funnel:read",
+						"metrics.page:read",
+						"library.objects:read",
+						"playback.spec:read",
+						"playback.page.definitions:read",
+						"specs.mappings:read",
+						"settings.own:read",
+						"settings.own:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://api.fullstory.com/mcp/fullstory",
+						"https://api.fullstory.com/.well-known/oauth-protected-resource/mcp/fullstory",
+						"https://api.fullstory.com/.well-known/oauth-protected-resource",
+						"https://auth.fullstory.com/.well-known/oauth-authorization-server",
+						"https://auth.fullstory.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2808,10 +4163,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://app.gc.ai/",
+					"resource": "https://app.gc.ai/api/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://app.gc.ai/api/mcp",
+						"https://app.gc.ai/.well-known/oauth-protected-resource/api/mcp",
+						"https://app.gc.ai/.well-known/oauth-protected-resource",
+						"https://app.gc.ai/.well-known/oauth-authorization-server",
+						"https://app.gc.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2841,7 +4217,44 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"alternatives": [
+					{
+						"kind": "oauth",
+						"readiness": "unknown",
+						"note": "GitHub's MCP endpoint advertises standard OAuth (PKCE S256 observed) but no dynamic client registration; a Prime-controlled registered client is not established",
+						"sourceUrl": "https://github.com/login/oauth/.well-known/oauth-authorization-server"
+					}
+				],
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://github.com/login/oauth",
+					"resource": "https://api.githubcopilot.com/mcp/",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"repo",
+						"read:org",
+						"read:user",
+						"user:email",
+						"read:packages",
+						"write:packages",
+						"read:project",
+						"project",
+						"gist",
+						"notifications"
+					],
+					"authorizationServerScopes": [
+						"offline_access"
+					],
+					"sourceUrls": [
+						"https://api.githubcopilot.com/mcp/",
+						"https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/",
+						"https://api.githubcopilot.com/.well-known/oauth-protected-resource",
+						"https://github.com/.well-known/oauth-authorization-server/login/oauth",
+						"https://github.com/login/oauth/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -2851,15 +4264,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "GITHUB_PAT_TOKEN",
 						"label": "GITHUB_PAT_TOKEN",
 						"description": "Environment variable GITHUB_PAT_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					},
 					{
 						"id": "GITHUB_PERSONAL_ACCESS_TOKEN",
 						"label": "GITHUB_PERSONAL_ACCESS_TOKEN",
 						"description": "Environment variable GITHUB_PERSONAL_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2880,6 +4297,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"commit": "3deb821cb71ccfaaf2ffa9935e977df314ce5cd5",
 					"path": "./external_plugins/github",
 					"url": "https://raw.githubusercontent.com/anthropics/claude-plugins-official/3deb821cb71ccfaaf2ffa9935e977df314ce5cd5/external_plugins/github/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
 				}
 			],
 			"homepage": "https://github.com/",
@@ -2912,7 +4333,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2941,10 +4364,61 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://gitlab.com",
+					"resource": "https://gitlab.com/api/v4/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp"
+					],
+					"authorizationServerScopes": [
+						"api",
+						"read_api",
+						"read_user",
+						"create_runner",
+						"manage_runner",
+						"k8s_proxy",
+						"self_rotate",
+						"mcp",
+						"mcp_orbit",
+						"read_repository",
+						"write_repository",
+						"read_registry",
+						"write_registry",
+						"read_virtual_registry",
+						"write_virtual_registry",
+						"read_observability",
+						"write_observability",
+						"ai_features",
+						"sudo",
+						"admin_mode",
+						"read_service_ping",
+						"openid",
+						"profile",
+						"email",
+						"ai_workflows",
+						"user:*"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://gitlab.com/api/v4/mcp",
+						"https://gitlab.com/.well-known/oauth-protected-resource/api/v4/mcp",
+						"https://gitlab.com/.well-known/oauth-protected-resource",
+						"https://gitlab.com/.well-known/oauth-authorization-server",
+						"https://gitlab.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2974,11 +4448,39 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://accounts.google.com/",
+					"resource": "https://gmailmcp.googleapis.com/mcp/v1",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"https://mail.google.com/",
+						"https://www.googleapis.com/auth/gmail.modify",
+						"https://www.googleapis.com/auth/gmail.compose",
+						"https://www.googleapis.com/auth/gmail.readonly",
+						"https://www.googleapis.com/auth/gmail.metadata"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://gmailmcp.googleapis.com/mcp/v1",
+						"https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1",
+						"https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource",
+						"https://accounts.google.com/.well-known/oauth-authorization-server",
+						"https://accounts.google.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "upstream OAuth client values are placeholders; upstream OAuth config contains client-id placeholders; upstream OAuth config contains client-secret placeholders"
+				"reason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+				"readiness": "prime-restricted",
+				"requirement": "registered-client"
 			},
 			"verification": {
 				"status": "unverified"
@@ -2992,6 +4494,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"path": "plugins/gmail/.mcp.json",
 					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/gmail/.mcp.json",
 					"license": "MIT"
+				},
+				{
+					"source": "prime",
+					"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients — see https://developers.google.com/workspace/preview"
 				}
 			],
 			"homepage": "https://workspace.google.com/products/gmail/",
@@ -3014,11 +4520,46 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://accounts.google.com/",
+					"resource": "https://calendarmcp.googleapis.com/mcp/v1",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"https://www.googleapis.com/auth/calendar",
+						"https://www.googleapis.com/auth/calendar.acls",
+						"https://www.googleapis.com/auth/calendar.calendarlist",
+						"https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+						"https://www.googleapis.com/auth/calendar.calendars",
+						"https://www.googleapis.com/auth/calendar.calendars.readonly",
+						"https://www.googleapis.com/auth/calendar.events",
+						"https://www.googleapis.com/auth/calendar.events.freebusy",
+						"https://www.googleapis.com/auth/calendar.events.readonly",
+						"https://www.googleapis.com/auth/calendar.freebusy",
+						"https://www.googleapis.com/auth/calendar.readonly",
+						"https://www.googleapis.com/auth/calendar.settings.readonly"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://calendarmcp.googleapis.com/mcp/v1",
+						"https://calendarmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1",
+						"https://calendarmcp.googleapis.com/.well-known/oauth-protected-resource",
+						"https://accounts.google.com/.well-known/oauth-authorization-server",
+						"https://accounts.google.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "upstream OAuth client values are placeholders; upstream OAuth config contains client-id placeholders; upstream OAuth config contains client-secret placeholders"
+				"reason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+				"readiness": "prime-restricted",
+				"requirement": "registered-client"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3032,6 +4573,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"path": "plugins/google-calendar/.mcp.json",
 					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/google-calendar/.mcp.json",
 					"license": "MIT"
+				},
+				{
+					"source": "prime",
+					"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients — see https://developers.google.com/workspace/preview"
 				}
 			],
 			"homepage": "https://workspace.google.com/products/calendar/",
@@ -3076,9 +4621,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "CLOUD_STORAGE_PROJECT",
 						"label": "CLOUD_STORAGE_PROJECT",
 						"description": "Environment variable CLOUD_STORAGE_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3115,11 +4663,37 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://accounts.google.com/",
+					"resource": "https://drivemcp.googleapis.com/mcp/v1",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"https://www.googleapis.com/auth/drive",
+						"https://www.googleapis.com/auth/drive.readonly",
+						"https://www.googleapis.com/auth/drive.file"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://drivemcp.googleapis.com/mcp/v1",
+						"https://drivemcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1",
+						"https://drivemcp.googleapis.com/.well-known/oauth-protected-resource",
+						"https://accounts.google.com/.well-known/oauth-authorization-server",
+						"https://accounts.google.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "upstream OAuth client values are placeholders; upstream OAuth config contains client-id placeholders; upstream OAuth config contains client-secret placeholders"
+				"reason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+				"readiness": "prime-restricted",
+				"requirement": "registered-client"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3133,6 +4707,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"path": "plugins/google-drive/.mcp.json",
 					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/google-drive/.mcp.json",
 					"license": "MIT"
+				},
+				{
+					"source": "prime",
+					"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients — see https://developers.google.com/workspace/preview"
 				}
 			],
 			"homepage": "https://workspace.google.com/products/drive/",
@@ -3157,10 +4735,42 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.grafana.com/mcp",
+					"resource": "https://mcp.grafana.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"grafana:read",
+						"grafana:query",
+						"grafana:write"
+					],
+					"authorizationServerScopes": [
+						"grafana:read",
+						"grafana:query",
+						"grafana:write"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.grafana.com/mcp",
+						"https://mcp.grafana.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.grafana.com/.well-known/oauth-protected-resource",
+						"https://mcp.grafana.com/.well-known/oauth-authorization-server/mcp",
+						"https://mcp.grafana.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3190,10 +4800,42 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp-auth.granola.ai",
+					"resource": "https://mcp.granola.ai/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"mcp"
+					],
+					"authorizationServerScopes": [
+						"email",
+						"offline_access",
+						"openid",
+						"profile"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.granola.ai/mcp",
+						"https://mcp.granola.ai/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.granola.ai/.well-known/oauth-protected-resource",
+						"https://mcp-auth.granola.ai/.well-known/oauth-authorization-server",
+						"https://mcp-auth.granola.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3226,10 +4868,42 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.greptile.com",
+					"resource": "https://api.greptile.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"offline",
+						"openid",
+						"read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt",
+						"none"
+					],
+					"sourceUrls": [
+						"https://api.greptile.com/mcp",
+						"https://api.greptile.com/.well-known/oauth-protected-resource/mcp",
+						"https://api.greptile.com/.well-known/oauth-protected-resource",
+						"https://auth.greptile.com/.well-known/oauth-authorization-server",
+						"https://auth.greptile.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3259,10 +4933,46 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://clerk.higgsfield.ai",
+					"resource": "https://mcp.higgsfield.ai/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"openid",
+						"email",
+						"offline_access"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"public_metadata",
+						"private_metadata",
+						"offline_access",
+						"user:org:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.higgsfield.ai/mcp",
+						"https://mcp.higgsfield.ai/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.higgsfield.ai/.well-known/oauth-protected-resource",
+						"https://clerk.higgsfield.ai/.well-known/oauth-authorization-server",
+						"https://clerk.higgsfield.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3294,10 +5004,40 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://ui.honeycomb.io",
+					"resource": "https://mcp.honeycomb.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"authorizationServerScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.honeycomb.io/mcp",
+						"https://mcp.honeycomb.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.honeycomb.io/.well-known/oauth-protected-resource",
+						"https://ui.honeycomb.io/.well-known/oauth-authorization-server",
+						"https://ui.honeycomb.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3326,10 +5066,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.hostinger.com",
+					"resource": "https://mcp.hostinger.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:use"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.hostinger.com",
+						"https://mcp.hostinger.com/.well-known/oauth-protected-resource",
+						"https://auth.hostinger.com/.well-known/oauth-authorization-server",
+						"https://auth.hostinger.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3359,10 +5120,28 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.hubspot.com",
+					"resource": "https://mcp.hubspot.com",
+					"pkceS256": true,
+					"tokenAuthMethods": [
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.hubspot.com/anthropic",
+						"https://mcp.hubspot.com/.well-known/oauth-protected-resource/anthropic",
+						"https://mcp.hubspot.com/.well-known/oauth-protected-resource",
+						"https://mcp.hubspot.com/.well-known/oauth-authorization-server",
+						"https://mcp.hubspot.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3397,10 +5176,40 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://huggingface.co",
+					"resource": "https://huggingface.co/mcp?login",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"read-mcp",
+						"read-repos",
+						"jobs",
+						"contribute-repos",
+						"inference-api"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://huggingface.co/mcp?login",
+						"https://huggingface.co/.well-known/oauth-protected-resource/mcp?login",
+						"https://huggingface.co/.well-known/oauth-protected-resource",
+						"https://huggingface.co/.well-known/oauth-authorization-server",
+						"https://huggingface.co/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3430,10 +5239,32 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.hunter.io",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"read",
+						"write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.hunter.io/mcp",
+						"https://mcp.hunter.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.hunter.io/.well-known/oauth-protected-resource",
+						"https://mcp.hunter.io/.well-known/oauth-authorization-server",
+						"https://mcp.hunter.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3461,10 +5292,30 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.intercom.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.intercom.com/mcp",
+						"https://mcp.intercom.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.intercom.com/.well-known/oauth-protected-resource",
+						"https://mcp.intercom.com/.well-known/oauth-authorization-server",
+						"https://mcp.intercom.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3506,9 +5357,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "JFROG_URL",
 						"label": "JFROG_URL",
 						"description": "Upstream template variable JFROG_URL",
-						"required": true
+						"required": true,
+						"kind": "url"
 					}
-				]
+				],
+				"requirement": "tenant",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3560,9 +5414,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "DATAPLEX_PROJECT",
 						"label": "DATAPLEX_PROJECT",
 						"description": "Environment variable DATAPLEX_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3598,10 +5455,47 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.apigw.legalzoom.com",
+					"resource": "https://www.legalzoom.com/mcp/claude/v1",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"legalzoom_mcp"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"client_secret_jwt",
+						"private_key_jwt",
+						"tls_client_auth",
+						"self_signed_tls_client_auth"
+					],
+					"sourceUrls": [
+						"https://www.legalzoom.com/mcp/claude/v1",
+						"https://www.legalzoom.com/.well-known/oauth-protected-resource/mcp/claude/v1",
+						"https://www.legalzoom.com/.well-known/oauth-protected-resource",
+						"https://auth.apigw.legalzoom.com/.well-known/oauth-authorization-server",
+						"https://auth.apigw.legalzoom.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3638,10 +5532,42 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "dynamic"
+				"clientRegistration": "dynamic",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.linear.app",
+					"resource": "https://mcp.linear.app/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
+					"authorizationServerScopes": [
+						"read",
+						"write",
+						"openid",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.linear.app/mcp",
+						"https://mcp.linear.app/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.linear.app/.well-known/oauth-protected-resource",
+						"https://mcp.linear.app/.well-known/oauth-authorization-server",
+						"https://mcp.linear.app/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "metadata-reviewed"
@@ -3690,10 +5616,79 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://logfire-us.pydantic.dev",
+					"resource": "https://logfire-us.pydantic.dev/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"organization:create_project",
+						"organization:read_channel",
+						"organization:write_channel",
+						"project:read",
+						"project:read_alert",
+						"project:read_dashboard",
+						"project:read_variables",
+						"project:trigger_workflow",
+						"project:write",
+						"project:write_alert",
+						"project:write_dashboard",
+						"project:write_token",
+						"project:write_variables"
+					],
+					"authorizationServerScopes": [
+						"instance:admin",
+						"instance:billing",
+						"organization:admin",
+						"organization:read",
+						"organization:write",
+						"organization:create_project",
+						"organization:read_member",
+						"organization:write_member",
+						"organization:read_channel",
+						"organization:write_channel",
+						"organization:create_api_key",
+						"organization:read_api_key",
+						"organization:write_api_key",
+						"organization:read_invitation",
+						"organization:write_invitation",
+						"project:read",
+						"project:write",
+						"project:write_token",
+						"project:read_token",
+						"project:read_dashboard",
+						"project:write_dashboard",
+						"project:trigger_workflow",
+						"project:read_alert",
+						"project:write_alert",
+						"project:read_datasets",
+						"project:write_datasets",
+						"project:read_variables",
+						"project:write_variables",
+						"project:read_external_variables",
+						"project:gateway_proxy"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://logfire-us.pydantic.dev/mcp",
+						"https://logfire-us.pydantic.dev/.well-known/oauth-protected-resource/mcp",
+						"https://logfire-us.pydantic.dev/.well-known/oauth-protected-resource",
+						"https://logfire-us.pydantic.dev/.well-known/oauth-authorization-server",
+						"https://logfire-us.pydantic.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3722,10 +5717,34 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.logrocket.com",
+					"resource": "https://mcp.logrocket.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.logrocket.com/mcp?toolsets=all",
+						"https://mcp.logrocket.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.logrocket.com/.well-known/oauth-protected-resource/mcp?toolsets=all",
+						"https://mcp.logrocket.com/.well-known/oauth-protected-resource",
+						"https://mcp.logrocket.com/.well-known/oauth-authorization-server",
+						"https://mcp.logrocket.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3803,45 +5822,54 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "LOOKER_BASE_URL",
 						"label": "LOOKER_BASE_URL",
 						"description": "Environment variable LOOKER_BASE_URL",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "LOOKER_CLIENT_ID",
 						"label": "LOOKER_CLIENT_ID",
 						"description": "Environment variable LOOKER_CLIENT_ID",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "LOOKER_CLIENT_SECRET",
 						"label": "LOOKER_CLIENT_SECRET",
 						"description": "Environment variable LOOKER_CLIENT_SECRET",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "LOOKER_SHOW_HIDDEN_EXPLORES",
 						"label": "LOOKER_SHOW_HIDDEN_EXPLORES",
 						"description": "Environment variable LOOKER_SHOW_HIDDEN_EXPLORES",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "LOOKER_SHOW_HIDDEN_FIELDS",
 						"label": "LOOKER_SHOW_HIDDEN_FIELDS",
 						"description": "Environment variable LOOKER_SHOW_HIDDEN_FIELDS",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "LOOKER_SHOW_HIDDEN_MODELS",
 						"label": "LOOKER_SHOW_HIDDEN_MODELS",
 						"description": "Environment variable LOOKER_SHOW_HIDDEN_MODELS",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "LOOKER_VERIFY_SSL",
 						"label": "LOOKER_VERIFY_SSL",
 						"description": "Environment variable LOOKER_VERIFY_SSL",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3876,10 +5904,51 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://lovable.dev/oauth",
+					"resource": "https://mcp.lovable.dev",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"offline",
+						"projects:read",
+						"projects:write",
+						"workspaces:read",
+						"workspaces:write"
+					],
+					"authorizationServerScopes": [
+						"offline",
+						"openid",
+						"email",
+						"profile",
+						"projects:create",
+						"projects:read",
+						"projects:write",
+						"workspaces:create",
+						"workspaces:read",
+						"workspaces:write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.lovable.dev/?src=cc-plugin",
+						"https://mcp.lovable.dev/.well-known/oauth-protected-resource?src=cc-plugin",
+						"https://mcp.lovable.dev/.well-known/oauth-protected-resource",
+						"https://lovable.dev/.well-known/oauth-authorization-server/oauth",
+						"https://lovable.dev/oauth/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3907,10 +5976,37 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.lusha.com",
+					"resource": "https://mcp.lusha.com/mcp/claude",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp"
+					],
+					"authorizationServerScopes": [
+						"mcp",
+						"api_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.lusha.com/mcp/claude",
+						"https://mcp.lusha.com/.well-known/oauth-protected-resource/mcp/claude",
+						"https://mcp.lusha.com/.well-known/oauth-protected-resource",
+						"https://auth.lusha.com/.well-known/oauth-authorization-server",
+						"https://auth.lusha.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3942,10 +6038,45 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.mapbox.com",
+					"resource": "https://mcp.mapbox.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"styles:tiles",
+						"styles:read",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read"
+					],
+					"authorizationServerScopes": [
+						"styles:tiles",
+						"styles:read",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.mapbox.com/mcp",
+						"https://mcp.mapbox.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.mapbox.com/.well-known/oauth-protected-resource",
+						"https://mcp.mapbox.com/.well-known/oauth-authorization-server",
+						"https://mcp.mapbox.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3979,10 +6110,53 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp-devkit.mapbox.com",
+					"resource": "https://mcp-devkit.mapbox.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"styles:tiles",
+						"styles:read",
+						"styles:write",
+						"styles:list",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read",
+						"tilesets:read",
+						"user-feedback:read"
+					],
+					"authorizationServerScopes": [
+						"styles:tiles",
+						"styles:read",
+						"styles:write",
+						"styles:list",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read",
+						"tilesets:read",
+						"user-feedback:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp-devkit.mapbox.com/mcp",
+						"https://mcp-devkit.mapbox.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp-devkit.mapbox.com/.well-known/oauth-protected-resource",
+						"https://mcp-devkit.mapbox.com/.well-known/oauth-authorization-server",
+						"https://mcp-devkit.mapbox.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4016,10 +6190,22 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://mcp-docs.mapbox.com/mcp",
+						"https://mcp-docs.mapbox.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp-docs.mapbox.com/.well-known/oauth-protected-resource",
+						"https://mcp-docs.mapbox.com/.well-known/oauth-authorization-server",
+						"https://mcp-docs.mapbox.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4054,10 +6240,39 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.mercadopago.com/mcp",
+					"resource": "https://mcp.mercadopago.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"offline_access",
+						"write",
+						"read"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"write",
+						"read"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.mercadopago.com/mcp",
+						"https://mcp.mercadopago.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.mercadopago.com/.well-known/oauth-protected-resource",
+						"https://mcp.mercadopago.com/.well-known/oauth-authorization-server/mcp",
+						"https://mcp.mercadopago.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4086,10 +6301,41 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.miro.com/",
+					"resource": "https://mcp.miro.com/",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"boards:read",
+						"boards:write",
+						"openid",
+						"email"
+					],
+					"authorizationServerScopes": [
+						"boards:read",
+						"boards:write",
+						"openid",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.miro.com/",
+						"https://mcp.miro.com/.well-known/oauth-protected-resource",
+						"https://mcp.miro.com/.well-known/oauth-authorization-server",
+						"https://mcp.miro.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4123,10 +6369,30 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.monday.com/mcp",
+					"resource": "https://mcp.monday.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.monday.com/mcp",
+						"https://mcp.monday.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.monday.com/.well-known/oauth-protected-resource",
+						"https://auth.monday.com/.well-known/oauth-authorization-server/mcp",
+						"https://auth.monday.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4155,7 +6421,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 		{
 			"server": "mongodb-atlas",
 			"service": "mongodb",
-			"label": "MongoDB Atlas",
+			"label": "MongoDB",
 			"url": "https://mcp.mongodb.com/",
 			"aliases": [
 				"mongodb"
@@ -4167,11 +6433,42 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"alternatives": [
+					{
+						"kind": "service-account",
+						"readiness": "user-setup",
+						"note": "MongoDB documents a dedicated service-account (machine-to-machine) access model for its hosted MCP as a distinct path from the interactive OAuth flow",
+						"sourceUrl": "https://www.mongodb.com/docs/mcp-server/remote-mcp/access-models/"
+					}
+				],
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://authorize.mongodb.com",
+					"resource": "https://mcp.mongodb.com",
+					"pkceS256": true,
+					"clientIdMetadataDocument": true,
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.mongodb.com/",
+						"https://mcp.mongodb.com/.well-known/oauth-protected-resource",
+						"https://authorize.mongodb.com/.well-known/oauth-authorization-server",
+						"https://authorize.mongodb.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "no dynamic client registration advertised; a client-id metadata document is advertised but no Prime-controlled identity document is deployed or authorized, so CIMD alone is not oauth-readiness"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "upstream config relies on a Claude-specific OAuth client identity"
+				"reason": "MongoDB's hosted MCP requires a pre-registered OAuth client for the default interactive path (provider access-model docs); the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
+				"readiness": "prime-restricted",
+				"requirement": "registered-client"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4207,10 +6504,35 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.neon.tech",
+					"resource": "https://mcp.neon.tech/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"read",
+						"write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.neon.tech/mcp",
+						"https://mcp.neon.tech/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.neon.tech/.well-known/oauth-protected-resource",
+						"https://mcp.neon.tech/.well-known/oauth-authorization-server",
+						"https://mcp.neon.tech/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4242,10 +6564,43 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://netlify-mcp.netlify.app/",
+					"resource": "https://netlify-mcp.netlify.app/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"offline_access",
+						"read",
+						"write",
+						"claudeai"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"read",
+						"write",
+						"claudeai"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://netlify-mcp.netlify.app/mcp",
+						"https://netlify-mcp.netlify.app/.well-known/oauth-protected-resource/mcp",
+						"https://netlify-mcp.netlify.app/.well-known/oauth-protected-resource",
+						"https://netlify-mcp.netlify.app/.well-known/oauth-authorization-server",
+						"https://netlify-mcp.netlify.app/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4278,10 +6633,43 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://oauth2.service.newrelic.com",
+					"resource": "https://mcp.newrelic.com/mcp/",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"observability:read",
+						"offline",
+						"offline_access"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"offline",
+						"openid",
+						"observability:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.newrelic.com/mcp/",
+						"https://mcp.newrelic.com/.well-known/oauth-protected-resource",
+						"https://mcp.newrelic.com/.well-known/oauth-protected-resource/mcp/",
+						"https://oauth2.service.newrelic.com/.well-known/oauth-authorization-server",
+						"https://oauth2.service.newrelic.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4313,10 +6701,38 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "dynamic"
+				"clientRegistration": "dynamic",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.notion.com",
+					"resource": "https://mcp.notion.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"default"
+					],
+					"authorizationServerScopes": [
+						"default"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.notion.com/mcp",
+						"https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.notion.com/.well-known/oauth-protected-resource",
+						"https://mcp.notion.com/.well-known/oauth-authorization-server",
+						"https://mcp.notion.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "metadata-reviewed"
@@ -4361,7 +6777,89 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.pagerduty.com/",
+					"resource": "https://mcp.pagerduty.com/mcp",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"incidents.read",
+						"extension_schemas.read",
+						"subscribers.write",
+						"users:sessions.write",
+						"recommendations.write",
+						"recommendations.read",
+						"none",
+						"users:contact_methods.read",
+						"users.write",
+						"templates.read",
+						"incident_types.read",
+						"jira_cloud_rules.read",
+						"workflow_integrations:connections.write",
+						"session_configurations.write",
+						"addons.write",
+						"oncalls.read",
+						"standards.write",
+						"users:contact_methods.write",
+						"users.read",
+						"incident_workflows.write",
+						"notifications.read",
+						"workflow_integrations:connections.read",
+						"copilot:chat.write",
+						"write",
+						"incident_types.write",
+						"contextual_data.write",
+						"event_orchestrations.read",
+						"read",
+						"webhook_subscriptions.write",
+						"openid"
+					],
+					"authorizationServerScopes": [
+						"incidents.read",
+						"extension_schemas.read",
+						"subscribers.write",
+						"users:sessions.write",
+						"recommendations.write",
+						"recommendations.read",
+						"none",
+						"users:contact_methods.read",
+						"users.write",
+						"templates.read",
+						"incident_types.read",
+						"jira_cloud_rules.read",
+						"workflow_integrations:connections.write",
+						"session_configurations.write",
+						"addons.write",
+						"oncalls.read",
+						"standards.write",
+						"users:contact_methods.write",
+						"users.read",
+						"incident_workflows.write",
+						"notifications.read",
+						"workflow_integrations:connections.read",
+						"copilot:chat.write",
+						"write",
+						"incident_types.write",
+						"contextual_data.write",
+						"event_orchestrations.read",
+						"read",
+						"webhook_subscriptions.write",
+						"openid"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.pagerduty.com/mcp",
+						"https://mcp.pagerduty.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.pagerduty.com/.well-known/oauth-protected-resource",
+						"https://mcp.pagerduty.com/.well-known/oauth-authorization-server",
+						"https://mcp.pagerduty.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -4371,9 +6869,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "PAGERDUTY_API_KEY",
 						"label": "PAGERDUTY_API_KEY",
 						"description": "Environment variable PAGERDUTY_API_KEY",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4399,7 +6900,32 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.sandbox.paypal.com",
+					"resource": "https://mcp.sandbox.paypal.com/sse",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"email",
+						"profile"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.sandbox.paypal.com/sse",
+						"https://mcp.sandbox.paypal.com/.well-known/oauth-protected-resource/sse",
+						"https://mcp.sandbox.paypal.com/.well-known/oauth-protected-resource",
+						"https://mcp.sandbox.paypal.com/.well-known/oauth-authorization-server",
+						"https://mcp.sandbox.paypal.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -4409,9 +6935,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "PAYPAL_SANDBOX_ACCESS_TOKEN",
 						"label": "PAYPAL_SANDBOX_ACCESS_TOKEN",
 						"description": "Environment variable PAYPAL_SANDBOX_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "unsupported-transport",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4460,9 +6989,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "your-mcp-id",
 						"label": "your-mcp-id",
 						"description": "Upstream template variable your-mcp-id",
-						"required": true
+						"required": true,
+						"kind": "url"
 					}
-				]
+				],
+				"requirement": "tenant",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4511,9 +7043,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "PINECONE_API_KEY",
 						"label": "PINECONE_API_KEY",
 						"description": "Environment variable PINECONE_API_KEY",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4542,10 +7077,62 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.planetscale.com",
+					"resource": "https://mcp.pscale.dev/mcp/planetscale",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"read_databases",
+						"read_user",
+						"read_organization",
+						"read_organizations",
+						"email",
+						"openid",
+						"profile",
+						"write_databases",
+						"write_user",
+						"write_organization",
+						"branch:delete_backups",
+						"branch:delete_branch",
+						"branch:manage_passwords",
+						"branch:manage_read_only_passwords",
+						"branch:read_backups",
+						"branch:read_branch",
+						"branch:restore_backups",
+						"branch:write_backups",
+						"branch:write_branch",
+						"database:approve_deploy_requests",
+						"database:delete_backups",
+						"database:delete_branches",
+						"database:delete_database",
+						"database:delete_members",
+						"database:delete_production_branch_backups",
+						"database:delete_production_branches",
+						"database:demote_branches",
+						"database:deploy_deploy_requests",
+						"database:manage_passwords",
+						"database:manage_production_branch_passwords"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.pscale.dev/mcp/planetscale",
+						"https://mcp.pscale.dev/.well-known/oauth-protected-resource/mcp/planetscale",
+						"https://mcp.pscale.dev/.well-known/oauth-protected-resource",
+						"https://api.planetscale.com/.well-known/oauth-authorization-server",
+						"https://api.planetscale.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4575,10 +7162,96 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://oauth.posthog.com",
+					"resource": "https://mcp.posthog.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"introspection",
+						"action:read",
+						"action:write",
+						"access_control:read",
+						"account:read",
+						"account:write",
+						"activity_log:read",
+						"alert:read",
+						"alert:write",
+						"annotation:read",
+						"annotation:write",
+						"approvals:read",
+						"approvals:write",
+						"batch_export:read",
+						"batch_export:write",
+						"billing:read",
+						"business_knowledge:read",
+						"business_knowledge:write",
+						"canvas:read",
+						"canvas:write",
+						"cohort:read",
+						"cohort:write",
+						"comment:read",
+						"comment:write",
+						"conversation:read",
+						"customer_analytics:read",
+						"customer_analytics:write"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"introspection",
+						"action:read",
+						"action:write",
+						"access_control:read",
+						"access_control:write",
+						"account:read",
+						"account:write",
+						"activity_log:read",
+						"activity_log:write",
+						"alert:read",
+						"alert:write",
+						"annotation:read",
+						"annotation:write",
+						"approvals:read",
+						"approvals:write",
+						"autoresearch:read",
+						"autoresearch:write",
+						"batch_export:read",
+						"batch_export:write",
+						"batch_import:read",
+						"batch_import:write",
+						"billing:read",
+						"billing:write",
+						"business_knowledge:read",
+						"business_knowledge:write",
+						"canvas:read",
+						"canvas:write"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.posthog.com/mcp",
+						"https://mcp.posthog.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.posthog.com/.well-known/oauth-protected-resource",
+						"https://oauth.posthog.com/.well-known/oauth-authorization-server",
+						"https://oauth.posthog.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4617,10 +7290,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.postman.com",
+					"resource": "https://mcp.postman.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.postman.com/mcp",
+						"https://mcp.postman.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.postman.com/.well-known/oauth-protected-resource",
+						"https://mcp.postman.com/.well-known/oauth-authorization-server",
+						"https://mcp.postman.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4650,10 +7344,35 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.prisma.io",
+					"resource": "https://mcp.prisma.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"workspace:admin",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.prisma.io/mcp",
+						"https://mcp.prisma.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.prisma.io/.well-known/oauth-protected-resource",
+						"https://auth.prisma.io/.well-known/oauth-authorization-server",
+						"https://auth.prisma.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4685,10 +7404,45 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://backboard.railway.com",
+					"resource": "https://mcp.railway.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"workspace:member"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"workspace:member"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.railway.com",
+						"https://mcp.railway.com/.well-known/oauth-protected-resource",
+						"https://backboard.railway.com/.well-known/oauth-authorization-server",
+						"https://backboard.railway.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4717,11 +7471,39 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"alternatives": [
+					{
+						"kind": "oauth",
+						"readiness": "unknown",
+						"note": "Render also announced OAuth onboarding for specific partner clients (Claude Code, Codex, Cursor); Prime's client registration path is unknown",
+						"sourceUrl": "https://render.com/changelog/render-mcp-now-supports-oauth-for-claude-code-codex-and-cursor"
+					}
+				],
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.render.com",
+					"resource": "https://mcp.render.com/mcp",
+					"pkceS256": true,
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.render.com/mcp",
+						"https://mcp.render.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.render.com/.well-known/oauth-protected-resource",
+						"https://api.render.com/.well-known/oauth-authorization-server",
+						"https://api.render.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "no dynamic client registration advertised; only public-client token auth ('none') is advertised"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "upstream config relies on a Claude-specific OAuth client identity"
+				"reason": "Render's documented MCP authentication route is a user-supplied API key; the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
+				"readiness": "user-setup",
+				"requirement": "api-key"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4733,6 +7515,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"repository": "https://github.com/render-oss/render-plugin-claude-code.git",
 					"commit": "e8f889396634dbc8c368448a7f3de993ed4a5ac1",
 					"url": "https://raw.githubusercontent.com/render-oss/render-plugin-claude-code/e8f889396634dbc8c368448a7f3de993ed4a5ac1/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
 				}
 			],
 			"oauth": {
@@ -4752,10 +7538,22 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://mcp.resend.com/mcp",
+						"https://mcp.resend.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.resend.com/.well-known/oauth-protected-resource",
+						"https://mcp.resend.com/.well-known/oauth-authorization-server",
+						"https://mcp.resend.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4785,10 +7583,34 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.revenuecat.ai",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"*:*:read",
+						"*:*:read_write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.revenuecat.ai/mcp",
+						"https://mcp.revenuecat.ai/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.revenuecat.ai/.well-known/oauth-protected-resource",
+						"https://mcp.revenuecat.ai/.well-known/oauth-authorization-server",
+						"https://mcp.revenuecat.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4822,10 +7644,69 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://rootly.com",
+					"resource": "https://mcp.rootly.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"all"
+					],
+					"authorizationServerScopes": [
+						"profile",
+						"email",
+						"all",
+						"ir.all",
+						"oc.all",
+						"ir.incidents:read",
+						"ir.incidents:write",
+						"ir.services:read",
+						"ir.services:write",
+						"ir.environments:read",
+						"ir.environments:write",
+						"ir.functionalities:read",
+						"ir.functionalities:write",
+						"ir.severities:read",
+						"ir.severities:write",
+						"ir.incident_types:read",
+						"ir.incident_types:write",
+						"ir.incident_roles:read",
+						"ir.incident_roles:write",
+						"ir.workflows:read",
+						"ir.workflows:write",
+						"ir.catalogs:read",
+						"ir.catalogs:write",
+						"ir.groups:read",
+						"ir.groups:write",
+						"ir.playbooks:read",
+						"ir.playbooks:write",
+						"ir.retrospectives:read",
+						"ir.retrospectives:write",
+						"ir.status_pages:read"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.rootly.com/mcp",
+						"https://mcp.rootly.com/.well-known/oauth-protected-resource",
+						"https://mcp.rootly.com/.well-known/oauth-protected-resource/mcp",
+						"https://rootly.com/.well-known/oauth-authorization-server",
+						"https://rootly.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4864,7 +7745,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4901,10 +7784,36 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.sanity.io",
+					"resource": "https://mcp.sanity.io",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"global"
+					],
+					"authorizationServerScopes": [
+						"global"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.sanity.io",
+						"https://mcp.sanity.io/.well-known/oauth-protected-resource",
+						"https://mcp.sanity.io/.well-known/oauth-authorization-server",
+						"https://mcp.sanity.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4943,7 +7852,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4975,10 +7886,44 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.sentry.dev",
+					"resource": "https://mcp.sentry.dev/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"org:read",
+						"project:write",
+						"team:write",
+						"event:write"
+					],
+					"authorizationServerScopes": [
+						"org:read",
+						"project:write",
+						"team:write",
+						"event:write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.sentry.dev/mcp",
+						"https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.sentry.dev/.well-known/oauth-protected-resource",
+						"https://mcp.sentry.dev/.well-known/oauth-authorization-server",
+						"https://mcp.sentry.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5018,10 +7963,34 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://goshippo.com",
+					"resource": "https://mcp.shippo.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"*"
+					],
+					"authorizationServerScopes": [
+						"*"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.shippo.com",
+						"https://mcp.shippo.com/.well-known/oauth-protected-resource",
+						"https://goshippo.com/.well-known/oauth-authorization-server",
+						"https://goshippo.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5051,11 +8020,23 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://setup.shopify.com/mcp",
+						"https://setup.shopify.com/.well-known/oauth-protected-resource/mcp",
+						"https://setup.shopify.com/.well-known/oauth-protected-resource",
+						"https://setup.shopify.com/.well-known/oauth-authorization-server",
+						"https://setup.shopify.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "no public OAuth metadata was served for this endpoint during the audit window"
+				}
 			},
 			"setup": {
-				"status": "requires-setup",
-				"reason": "upstream OAuth client values are placeholders; upstream OAuth config contains client-id placeholders"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5068,6 +8049,10 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
 					"path": "plugins/shopify/.mcp.json",
 					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/shopify/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "placeholder-only upstream OAuth blocks cleared: unknown is not proof of a restriction; connect attempts surface real errors honestly"
 				}
 			],
 			"homepage": "https://shopify.com",
@@ -5092,11 +8077,111 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "pre-registered"
+				"clientRegistration": "pre-registered",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.slack.com",
+					"resource": "https://mcp.slack.com",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"canvases:read",
+						"canvases:write",
+						"channels:history",
+						"channels:read",
+						"channels:write",
+						"chat:write",
+						"emoji:read",
+						"files:read",
+						"files:write",
+						"groups:history",
+						"groups:read",
+						"groups:write",
+						"im:history",
+						"im:read",
+						"im:write",
+						"lists:read",
+						"lists:write",
+						"mpim:history",
+						"mpim:read",
+						"mpim:write",
+						"reactions:read",
+						"reactions:write",
+						"search:read.files",
+						"search:read.im",
+						"search:read.mpim",
+						"search:read.private",
+						"search:read.public",
+						"search:read.users",
+						"users:read",
+						"users:read.email"
+					],
+					"authorizationServerScopes": [
+						"canvases:read",
+						"canvases:write",
+						"channels:history",
+						"channels:read",
+						"channels:write",
+						"chat:write",
+						"emoji:read",
+						"files:read",
+						"files:write",
+						"groups:history",
+						"groups:read",
+						"groups:write",
+						"im:history",
+						"im:read",
+						"im:write",
+						"lists:read",
+						"lists:write",
+						"mpim:history",
+						"mpim:read",
+						"mpim:write",
+						"reactions:read",
+						"reactions:write",
+						"search:read.files",
+						"search:read.im",
+						"search:read.mpim",
+						"search:read.private",
+						"search:read.public",
+						"search:read.users",
+						"users:read",
+						"users:read.email"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.slack.com/mcp",
+						"https://mcp.slack.com/.well-known/oauth-protected-resource",
+						"https://mcp.slack.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.slack.com/.well-known/oauth-authorization-server",
+						"https://mcp.slack.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "no dynamic client registration advertised; confidential-only client auth (client_secret_post) observed"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "Slack MCP has no dynamic client registration; a Slack-registered app client id is required. Upstream configs carry OpenAI/Claude-branded client ids that Prime must not reuse."
+				"reason": "Slack MCP requires a Slack-registered app client (Marketplace or internal; unlisted distribution prohibited); it has no dynamic client registration, and upstream configs carry OpenAI/Claude-branded client ids that Prime must not reuse",
+				"fields": [
+					{
+						"id": "SLACK_MCP_CLIENT_ID",
+						"label": "Slack app client ID",
+						"description": "Client ID of your own registered Slack app (required because Slack has no dynamic client registration)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "SLACK_MCP_CLIENT_SECRET",
+						"label": "Slack app client secret",
+						"description": "Client secret of your own registered Slack app (Slack's authorization server accepts confidential client auth only)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"readiness": "prime-restricted",
+				"requirement": "registered-client"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5119,7 +8204,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 				},
 				{
 					"source": "prime",
-					"note": "branded OAuth client ids stripped from both upstream configs"
+					"note": "branded OAuth client ids stripped from both upstream configs; see https://docs.slack.dev/ai/slack-mcp-server"
 				}
 			],
 			"homepage": "https://slack.com/",
@@ -5141,7 +8226,18 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://mcp.guide.sonatype.com/mcp",
+						"https://mcp.guide.sonatype.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.guide.sonatype.com/.well-known/oauth-protected-resource",
+						"https://mcp.guide.sonatype.com/.well-known/oauth-authorization-server",
+						"https://mcp.guide.sonatype.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -5151,9 +8247,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "SONATYPE_GUIDE_TOKEN",
 						"label": "SONATYPE_GUIDE_TOKEN",
 						"description": "Environment variable SONATYPE_GUIDE_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5195,15 +8294,19 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "SOURCEGRAPH_ACCESS_TOKEN",
 						"label": "SOURCEGRAPH_ACCESS_TOKEN",
 						"description": "Environment variable SOURCEGRAPH_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					},
 					{
 						"id": "SOURCEGRAPH_ENDPOINT",
 						"label": "SOURCEGRAPH_ENDPOINT",
 						"description": "Upstream template variable SOURCEGRAPH_ENDPOINT",
-						"required": true
+						"required": true,
+						"kind": "url"
 					}
-				]
+				],
+				"requirement": "tenant",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5258,27 +8361,33 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "SPANNER_DATABASE",
 						"label": "SPANNER_DATABASE",
 						"description": "Environment variable SPANNER_DATABASE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "SPANNER_DIALECT",
 						"label": "SPANNER_DIALECT",
 						"description": "Environment variable SPANNER_DIALECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "SPANNER_INSTANCE",
 						"label": "SPANNER_INSTANCE",
 						"description": "Environment variable SPANNER_INSTANCE",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					},
 					{
 						"id": "SPANNER_PROJECT",
 						"label": "SPANNER_PROJECT",
 						"description": "Environment variable SPANNER_PROJECT",
-						"required": true
+						"required": true,
+						"kind": "env-var"
 					}
-				]
+				],
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5315,10 +8424,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://access.stripe.com/mcp",
+					"resource": "https://mcp.stripe.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"mcp"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.stripe.com",
+						"https://mcp.stripe.com/.well-known/oauth-protected-resource",
+						"https://access.stripe.com/.well-known/oauth-authorization-server/mcp",
+						"https://access.stripe.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5357,10 +8487,56 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.sumup.com",
+					"resource": "https://mcp.sumup.com/mcp",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"offline_access",
+						"email"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"members.read",
+						"members.write",
+						"merchants.read",
+						"merchants.write",
+						"roles.read",
+						"roles.write",
+						"checkouts.read",
+						"checkouts.write",
+						"customers.read",
+						"customers.write",
+						"api_keys.read",
+						"api_keys.write",
+						"receipts.read",
+						"refunds.write",
+						"transactions.read",
+						"payouts.read",
+						"readers.read",
+						"readers.write",
+						"sales.read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"private_key_jwt",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.sumup.com/mcp",
+						"https://mcp.sumup.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.sumup.com/.well-known/oauth-protected-resource",
+						"https://auth.sumup.com/.well-known/oauth-authorization-server",
+						"https://auth.sumup.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5390,10 +8566,71 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.supabase.com",
+					"resource": "https://mcp.supabase.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"organizations:read",
+						"projects:read",
+						"projects:write",
+						"database:write",
+						"database:read",
+						"analytics:read",
+						"secrets:read",
+						"edge_functions:read",
+						"edge_functions:write",
+						"environment:read",
+						"environment:write",
+						"storage:read",
+						"storage:write"
+					],
+					"authorizationServerScopes": [
+						"analytics:read",
+						"analytics:write",
+						"analytics_config:read",
+						"analytics_config:write",
+						"auth:read",
+						"auth:write",
+						"database:read",
+						"database:write",
+						"domains:read",
+						"domains:write",
+						"edge_functions:read",
+						"edge_functions:write",
+						"environment:read",
+						"environment:write",
+						"organizations:read",
+						"organizations:write",
+						"projects:read",
+						"projects:write",
+						"rest:read",
+						"rest:write",
+						"secrets:read",
+						"secrets:write",
+						"storage:read",
+						"storage:write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.supabase.com/mcp",
+						"https://mcp.supabase.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.supabase.com/.well-known/oauth-protected-resource",
+						"https://api.supabase.com/.well-known/oauth-authorization-server",
+						"https://api.supabase.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5432,10 +8669,37 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://kind-prelude-27.authkit.app",
+					"resource": "https://mcp.synthflow.ai/mcp",
+					"pkceS256": true,
+					"clientIdMetadataDocument": true,
+					"authorizationServerScopes": [
+						"email",
+						"offline_access",
+						"openid",
+						"profile"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.synthflow.ai/mcp",
+						"https://mcp.synthflow.ai/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.synthflow.ai/.well-known/oauth-protected-resource",
+						"https://kind-prelude-27.authkit.app/.well-known/oauth-authorization-server",
+						"https://kind-prelude-27.authkit.app/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5470,10 +8734,22 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://docs.synthflow.ai/_mcp/server",
+						"https://docs.synthflow.ai/.well-known/oauth-protected-resource/_mcp/server",
+						"https://docs.synthflow.ai/.well-known/oauth-protected-resource",
+						"https://docs.synthflow.ai/.well-known/oauth-authorization-server",
+						"https://docs.synthflow.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "unknown"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5521,7 +8797,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5566,7 +8844,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5600,10 +8880,59 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://www.val.town/oauth",
+					"resource": "https://api.val.town/v3/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"project_rw",
+						"user_r",
+						"blob_rw",
+						"email_rw",
+						"sqlite_rw",
+						"telemetry_r"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"offline_access",
+						"project_rw",
+						"user_r",
+						"user_rw",
+						"blob_rw",
+						"email_rw",
+						"sqlite_rw",
+						"telemetry_r",
+						"telemetry_rw",
+						"val_r",
+						"val_rw",
+						"profile",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://api.val.town/v3/mcp",
+						"https://api.val.town/.well-known/oauth-protected-resource",
+						"https://api.val.town/.well-known/oauth-protected-resource/v3/mcp",
+						"https://www.val.town/.well-known/oauth-authorization-server/oauth",
+						"https://www.val.town/oauth/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5635,10 +8964,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.vanta.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"mcp-api.all:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.vanta.com/mcp",
+						"https://mcp.vanta.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.vanta.com/.well-known/oauth-protected-resource",
+						"https://mcp.vanta.com/.well-known/oauth-authorization-server",
+						"https://mcp.vanta.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5680,10 +9030,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.aus.vanta.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"mcp-api.all:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.aus.vanta.com/mcp",
+						"https://mcp.aus.vanta.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.aus.vanta.com/.well-known/oauth-protected-resource",
+						"https://mcp.aus.vanta.com/.well-known/oauth-authorization-server",
+						"https://mcp.aus.vanta.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5724,10 +9095,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.eu.vanta.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"mcp-api.all:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.eu.vanta.com/mcp",
+						"https://mcp.eu.vanta.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.eu.vanta.com/.well-known/oauth-protected-resource",
+						"https://mcp.eu.vanta.com/.well-known/oauth-authorization-server",
+						"https://mcp.eu.vanta.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5767,10 +9159,40 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://vercel.com",
+					"resource": "https://mcp.vercel.com/",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"email",
+						"profile",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"client_secret_jwt",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.vercel.com",
+						"https://mcp.vercel.com/.well-known/oauth-protected-resource",
+						"https://vercel.com/.well-known/oauth-authorization-server",
+						"https://vercel.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5811,10 +9233,40 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.windsor.ai/",
+					"resource": "https://mcp.windsor.ai/",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"create",
+						"delete",
+						"offline_access"
+					],
+					"authorizationServerScopes": [
+						"create",
+						"delete",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.windsor.ai",
+						"https://mcp.windsor.ai/.well-known/oauth-protected-resource",
+						"https://mcp.windsor.ai/.well-known/oauth-authorization-server",
+						"https://mcp.windsor.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5844,10 +9296,34 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.wix.com",
+					"resource": "https://mcp.wix.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.wix.com/mcp",
+						"https://mcp.wix.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.wix.com/.well-known/oauth-protected-resource",
+						"https://mcp.wix.com/.well-known/oauth-authorization-server",
+						"https://mcp.wix.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5875,10 +9351,41 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.zapier.com",
+					"resource": "https://mcp.zapier.com/api/v1/connect",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zapier.com/api/v1/connect",
+						"https://mcp.zapier.com/.well-known/oauth-protected-resource/api/v1/connect",
+						"https://mcp.zapier.com/.well-known/oauth-protected-resource",
+						"https://mcp.zapier.com/.well-known/oauth-authorization-server",
+						"https://mcp.zapier.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5910,7 +9417,45 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/zoom/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"docs:update:collaborator",
+						"docs:write:collaborator",
+						"docs:read:list_file_collaborators",
+						"docs:delete:collaborator",
+						"my_notes:read:content",
+						"meeting:write:meeting",
+						"meeting:read:search",
+						"meeting:update:meeting",
+						"cloud_recording:read:list_user_recordings",
+						"docs:write:import",
+						"cloud_recording:read:content",
+						"docs:read:export",
+						"hub:write:content",
+						"meeting:update:in_meeting_controls",
+						"agentic_search:read:search",
+						"hub:read:content",
+						"meeting:delete:meeting",
+						"meeting:read:assets",
+						"agentic_search:read:ask"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/zoom/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/zoom/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -5920,9 +9465,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ZOOM_MCP_ACCESS_TOKEN",
 						"label": "ZOOM_MCP_ACCESS_TOKEN",
 						"description": "Environment variable ZOOM_MCP_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5958,7 +9506,49 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/canvas/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"docs:update:file",
+						"docs:read:export",
+						"docs:update:content",
+						"canvas:read:data_table",
+						"docs:delete:file",
+						"docs:write:file",
+						"docs:update:collaborator",
+						"canvas:write:data_table",
+						"docs:delete:collaborator",
+						"docs:read:general_access",
+						"canvas:delete:data_table",
+						"docs:write:collaborator",
+						"docs:write:content",
+						"canvas:update:data_table",
+						"canvas:write:file_search",
+						"hub:write:move",
+						"docs:delete:content",
+						"docs:write:import",
+						"docs:read:file",
+						"docs:read:list_children",
+						"docs:read:list_file_collaborators",
+						"docs:update:file_owner",
+						"docs:update:general_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/canvas/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/canvas/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -5968,9 +9558,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ZOOM_CANVAS_MCP_ACCESS_TOKEN",
 						"label": "ZOOM_CANVAS_MCP_ACCESS_TOKEN",
 						"description": "Environment variable ZOOM_CANVAS_MCP_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6006,7 +9599,42 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/chat/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"team_chat:read:list_user_messages",
+						"team_chat:update:user_message",
+						"team_chat:read:list_user_sessions",
+						"team_chat:write:contact_information",
+						"team_chat:update:user_channel",
+						"chat_channel:read",
+						"chat_channel:write",
+						"team_chat:read:channel",
+						"team_chat:read:list_contacts",
+						"team_chat:write:members",
+						"team_chat:write:user_message",
+						"team_chat:read:list_user_channels",
+						"team_chat:read:list_members",
+						"team_chat:write:user_channel",
+						"team_chat:update:channel_member_role",
+						"team_chat:read:list_user_files"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/chat/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/chat/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -6016,9 +9644,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ZOOM_CHAT_MCP_ACCESS_TOKEN",
 						"label": "ZOOM_CHAT_MCP_ACCESS_TOKEN",
 						"description": "Environment variable ZOOM_CHAT_MCP_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6056,7 +9687,35 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/meeting/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"meeting:write:meeting",
+						"meeting:read:search",
+						"meeting:delete:meeting",
+						"meeting:update:in_meeting_controls",
+						"meeting:update:meeting",
+						"meeting:read:assets",
+						"cloud_recording:read:list_user_recordings",
+						"cloud_recording:read:content"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/meeting/streamable",
+						"https://zoom.us/.well-known/oauth-protected-resource/mcp/meeting/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/meeting/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -6066,9 +9725,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
 						"label": "ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
 						"description": "Environment variable ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6114,7 +9776,38 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/revenue_accelerator/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"zra:read:conversation_analysis",
+						"zra:read:list_conversations",
+						"zra:read:list_deal_activities",
+						"zra:read:deal",
+						"zra:read:list_conversation_comments",
+						"zra:read:crm_customer_contact",
+						"zra:read:indicator",
+						"zra:read:conversations",
+						"zra:read:team",
+						"zra:read:conversation_scorecards",
+						"zra:read:user",
+						"zra:read:list_deals"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/revenue_accelerator/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/revenue_accelerator/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -6124,9 +9817,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
 						"label": "ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
 						"description": "Environment variable ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6162,7 +9858,40 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/tasks/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"tasks:read:list_tasks",
+						"tasks:update:task",
+						"tasks:delete:comment",
+						"tasks:write:task",
+						"tasks:write:assignees",
+						"tasks:write:collaborators",
+						"tasks:write:comment",
+						"tasks:read:comments",
+						"tasks:read:task",
+						"tasks:delete:assignees",
+						"tasks:delete:trash_task",
+						"tasks:delete:collaborator",
+						"tasks:read:list_collaborators",
+						"tasks:read:assignees"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/tasks/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/tasks/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -6172,9 +9901,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ZOOM_TASKS_MCP_ACCESS_TOKEN",
 						"label": "ZOOM_TASKS_MCP_ACCESS_TOKEN",
 						"description": "Environment variable ZOOM_TASKS_MCP_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6210,7 +9942,38 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "api_key",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/whiteboard/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"whiteboard:delete:whiteboard",
+						"whiteboard:write:collaborator",
+						"whiteboard:update:collaborator",
+						"whiteboard:read:list_collaborators",
+						"whiteboard:update:whiteboard",
+						"whiteboard:write:content",
+						"whiteboard:read:list_whiteboards",
+						"whiteboard:read:whiteboard",
+						"whiteboard:write:whiteboard",
+						"whiteboard:read:content",
+						"whiteboard:delete:content",
+						"whiteboard:delete:collaborator"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/whiteboard/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/whiteboard/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
 				"status": "requires-setup",
@@ -6220,9 +9983,12 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"id": "ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
 						"label": "ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
 						"description": "Environment variable ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
-						"required": true
+						"required": true,
+						"kind": "bearer-token"
 					}
-				]
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6254,10 +10020,48 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"auth": {
 				"strategy": "unknown",
-				"clientRegistration": "unknown"
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.zoominfo.com",
+					"resource": "https://mcp.zoominfo.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"zi_api",
+						"email",
+						"offline_access",
+						"zi_mcp",
+						"api:data:mcp"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"zi_api",
+						"email",
+						"offline_access",
+						"zi_mcp",
+						"api:data:mcp"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.zoominfo.com/mcp",
+						"https://mcp.zoominfo.com/.well-known/oauth-protected-resource",
+						"https://mcp.zoominfo.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.zoominfo.com/.well-known/oauth-authorization-server",
+						"https://mcp.zoominfo.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
 			},
 			"setup": {
-				"status": "ready"
+				"status": "ready",
+				"readiness": "oauth-ready"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6297,7 +10101,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane"
+				"reason": "local stdio adapter: requires the listed command and its credentials locally; not part of the remote one-click lane",
+				"requirement": "local-runtime",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"

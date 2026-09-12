@@ -21,8 +21,27 @@
 		},
 		"openai-plugins/slack/slack": {
 			"clientRegistration": "pre-registered",
-			"setupReason": "Slack MCP has no dynamic client registration; a Slack-registered app client id is required. Upstream configs carry OpenAI/Claude-branded client ids that Prime must not reuse.",
-			"note": "branded OAuth client ids stripped from both upstream configs"
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Slack MCP requires a Slack-registered app client (Marketplace or internal; unlisted distribution prohibited); it has no dynamic client registration, and upstream configs carry OpenAI/Claude-branded client ids that Prime must not reuse",
+			"setupFields": [
+				{
+					"id": "SLACK_MCP_CLIENT_ID",
+					"label": "Slack app client ID",
+					"description": "Client ID of your own registered Slack app (required because Slack has no dynamic client registration)",
+					"required": true,
+					"kind": "client-id"
+				},
+				{
+					"id": "SLACK_MCP_CLIENT_SECRET",
+					"label": "Slack app client secret",
+					"description": "Client secret of your own registered Slack app (Slack's authorization server accepts confidential client auth only)",
+					"required": true,
+					"kind": "client-secret"
+				}
+			],
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_post) observed",
+			"note": "branded OAuth client ids stripped from both upstream configs; see https://docs.slack.dev/ai/slack-mcp-server"
 		},
 		"openai-plugins/zoom/zoom": {
 			"id": "zoom-meetings",
@@ -141,7 +160,18 @@
 			"label": "Google Data Agent Kit"
 		},
 		"claude-plugins-official/mongodb-atlas/mongodb-atlas": {
-			"label": "MongoDB Atlas"
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "MongoDB's hosted MCP requires a pre-registered OAuth client for the default interactive path (provider access-model docs); the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
+			"alternatives": [
+				{
+					"kind": "service-account",
+					"readiness": "user-setup",
+					"note": "MongoDB documents a dedicated service-account (machine-to-machine) access model for its hosted MCP as a distinct path from the interactive OAuth flow",
+					"sourceUrl": "https://www.mongodb.com/docs/mcp-server/remote-mcp/access-models/"
+				}
+			],
+			"metadataNote": "no dynamic client registration advertised; a client-id metadata document is advertised but no Prime-controlled identity document is deployed or authorized, so CIMD alone is not oauth-readiness"
 		},
 		"openai-plugins/datadog/datadog": {
 			"label": "Datadog"
@@ -212,6 +242,68 @@
 		},
 		"claude-plugins-official/deploy-on-aws": {
 			"label": "Deploy on AWS"
+		},
+		"openai-plugins/airtable/airtable": {
+			"setup": "ready",
+			"note": "placeholder-only upstream OAuth blocks cleared: provider docs confirm OAuth for the Airtable MCP server and the committed audit evidence confirms a live registration endpoint",
+			"alternatives": [
+				{
+					"kind": "api-key",
+					"readiness": "user-setup",
+					"note": "Airtable also documents personal access tokens as a distinct API access path; OAuth dynamic client registration is the default route for the MCP server",
+					"sourceUrl": "https://airtable.com/developers/agents/mcp/getting-started"
+				}
+			]
+		},
+		"openai-plugins/shopify/shopify": {
+			"setup": "ready",
+			"note": "placeholder-only upstream OAuth blocks cleared: unknown is not proof of a restriction; connect attempts surface real errors honestly",
+			"metadataNote": "no public OAuth metadata was served for this endpoint during the audit window"
+		},
+		"openai-plugins/gmail/gmail": {
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+		},
+		"openai-plugins/google-calendar/google-calendar": {
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+		},
+		"openai-plugins/google-drive/google-drive": {
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+		},
+		"claude-plugins-official/render/render": {
+			"requirement": "api-key",
+			"readiness": "user-setup",
+			"setupReason": "Render's documented MCP authentication route is a user-supplied API key; the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
+			"alternatives": [
+				{
+					"kind": "oauth",
+					"readiness": "unknown",
+					"note": "Render also announced OAuth onboarding for specific partner clients (Claude Code, Codex, Cursor); Prime's client registration path is unknown",
+					"sourceUrl": "https://render.com/changelog/render-mcp-now-supports-oauth-for-claude-code-codex-and-cursor"
+				}
+			],
+			"metadataNote": "no dynamic client registration advertised; only public-client token auth ('none') is advertised"
+		},
+		"openai-plugins/github/github": {
+			"alternatives": [
+				{
+					"kind": "oauth",
+					"readiness": "unknown",
+					"note": "GitHub's MCP endpoint advertises standard OAuth (PKCE S256 observed) but no dynamic client registration; a Prime-controlled registered client is not established",
+					"sourceUrl": "https://github.com/login/oauth/.well-known/oauth-authorization-server"
+				}
+			]
 		}
 	},
 	"excludedServers": [

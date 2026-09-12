@@ -51,6 +51,58 @@ The committed `catalog.json` must always equal the importer output; the
 regression test in `packages/ai/test/mcp-catalog.test.ts` rebuilds it from
 these fixtures and fails on drift.
 
+## Read-only public metadata audit
+
+`audit/metadata-audit.json` is a committed, reproducible snapshot of public
+OAuth metadata for every remote endpoint (102 http + 1 sse), captured by
+`audit/audit-provider-metadata.ts`:
+
+- public unauthenticated GETs only — no Authorization headers, no cookies, no
+  registration POSTs, no OAuth or browser flows, no MCP tool calls, no stored
+  credentials, no writes; redirects are recorded, never followed;
+- bounded per request (10s timeout, 256 KiB body, global concurrency 6) and
+  issued through an undici dispatcher whose DNS lookup validates that every
+  resolved address is public and returns only those validated addresses for the
+  connection (no re-resolution race; TLS hostname validation retained);
+- every fetched URL — including metadata-supplied destinations — must be https
+  with a literal public address;
+- all RFC 9728 locations are probed per endpoint (WWW-Authenticate
+  `resource_metadata` pointer, pathful and origin-level well-known), so
+  providers that serve different bodies per location (Notion, Slack) keep raw
+  evidence of which document serves where.
+
+The importer merges this evidence into `catalog.json` offline and
+deterministically:
+
+- `auth.metadata` is observational evidence only (status, issuer/resource,
+  PKCE, DCR/CIMD flags, PRM and AS scope lists, token auth methods, source
+  URLs, capture date). It is never a live credential authority and never a
+  Connect gate. Omitted fields mean "not advertised", never "unsupported".
+- `setup.readiness` (`oauth-ready` / `user-setup` / `prime-restricted` /
+  `unknown`) is informational-only; `setup.status` stays the only hard lever.
+  `oauth-ready` requires audience-coherent dynamic-client-registration
+  evidence — a CIMD flag alone is never sufficient (no Prime-controlled
+  identity document is deployed), and a protected-resource document whose
+  resource does not match the endpoint audience under the engine's current
+  exact-match rule keeps the entry honestly `unknown` with a metadata note
+  (the approved engine audience policy is tracked separately and not yet
+  landed).
+- Placeholder/branded-client-only blockers were cleared with evidence
+  (Airtable and Shopify stay Connect-attemptable); genuine documented
+  requirements stay hard — API keys/bearer tokens (GitHub PAT, Zoom, Render,
+  datadog…), tenant config (tenant URLs, cluster ids), registered-client and
+  preview gates (Google, Slack, MongoDB), transport and local-runtime limits.
+- `auth.alternatives` records documented per-path alternatives with their own
+  readiness (Airtable PAT, MongoDB service-account, GitHub standard OAuth,
+  Render partner OAuth).
+- Ready entries are never downgraded by unavailable audit evidence, and
+  unknown is never treated as proof of a restriction.
+
+Local user sources cannot self-assert any of this: `setup.readiness`,
+`auth.alternatives` and `auth.metadata` are Prime audit assessments and are
+rejected from local files with visible errors (`setup.requirement` stays
+allowed as honest self-description of the user's own service).
+
 ## Local user sources
 
 Users can author their own services without a Prime release or a public PR.
