@@ -87,7 +87,7 @@ async function install(
 
 describe.skipIf(process.platform === "win32")("installer release format selection", () => {
 	beforeAll(async () => {
-		root = mkdtempSync(join(tmpdir(), "legacy-installer-"));
+		root = mkdtempSync(join(tmpdir(), "installer-release-format-"));
 		harness = join(root, "install.sh");
 		const installer = readFileSync(resolve(__dirname, "../../../install.sh"), "utf8");
 		writeFileSync(
