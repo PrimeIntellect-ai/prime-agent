@@ -413,6 +413,14 @@ describe("agent trace upload", () => {
 		const sessionFile = sessionManager.getSessionFile()!;
 		const signature = await stat(sessionFile);
 		await advanceTimersUntil(() => readOutboxEntry(tempDir, sessionFile)?.size === signature.size);
+		// The request starts before the upload cursor and completion log are written.
+		await advanceTimersUntil(() => {
+			const logPath = getAgentTracesLogPath();
+			return (
+				existsSync(logPath) &&
+				readFileSync(logPath, "utf8").includes(`uploaded session uploaded-session (123 bytes) [${sessionFile}]`)
+			);
+		});
 	});
 
 	it("coalesces new content that persists during an in-flight upload into one follow-up upload", async () => {
@@ -493,6 +501,16 @@ describe("agent trace upload", () => {
 		sessionManager.appendMessage(createAssistantMessage("hi"));
 		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(1_000);
 		await advanceTimersUntil(() => calls.length === 1);
+
+		// The request starts before the upload cursor and completion log are written.
+		const sessionFile = sessionManager.getSessionFile() as string;
+		await advanceTimersUntil(() => {
+			const logPath = getAgentTracesLogPath();
+			return (
+				existsSync(logPath) &&
+				readFileSync(logPath, "utf8").includes(`uploaded session uploaded-session (123 bytes) [${sessionFile}]`)
+			);
+		});
 
 		setTimeoutSpy.mockClear();
 		sessionManager.appendMessage(createUserMessage("next"));
@@ -1440,6 +1458,15 @@ describe("agent trace upload", () => {
 
 		await advanceTimersUntil(() => calls.length === 1);
 		expect(attempts).toBe(2);
+		// The request starts before the upload cursor and completion log are written.
+		const sessionFile = sessionManager.getSessionFile() as string;
+		await advanceTimersUntil(() => {
+			const logPath = getAgentTracesLogPath();
+			return (
+				existsSync(logPath) &&
+				readFileSync(logPath, "utf8").includes(`uploaded session uploaded-session (123 bytes) [${sessionFile}]`)
+			);
+		});
 	});
 
 	it("retries the intent marker on the next persist after a failed write", async () => {
