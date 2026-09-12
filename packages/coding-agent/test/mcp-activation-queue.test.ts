@@ -213,21 +213,22 @@ describe("ENG-6108 /plugins stdio server management", () => {
 });
 
 describe("ENG-6108 guarded credential commit", () => {
-	function fakeWithStore() {
+	function fakeWithStore(authStorageOverride?: AuthStorage) {
 		const store = McpConnectionStore.open(join(mkdtempSync(join(tmpdir(), "guarded-")), "mcp-connections.json"));
-		const authStorage = AuthStorage.inMemory();
+		const authStorage = authStorageOverride ?? AuthStorage.inMemory();
 		const showStatus = vi.fn();
+		const showWarning = vi.fn();
 		const fake = {
 			mcpConnectionStore: store,
 			modelRegistry: { authStorage },
 			ui: { requestRender: vi.fn() },
 			showStatus,
-			showWarning: vi.fn(),
+			showWarning,
 			handleReloadCommand: vi.fn(async () => true),
 			uiServices: { settingsManager: { getGlobalMcpServers: () => undefined } },
 		} as unknown as Record<string, unknown>;
 		Object.setPrototypeOf(fake, InteractiveMode.prototype);
-		return { fake, store, authStorage, showStatus };
+		return { fake, store, authStorage, showStatus, showWarning };
 	}
 
 	const callAddAccount = (fake: Record<string, unknown>) =>
@@ -282,36 +283,121 @@ describe("ENG-6108 guarded credential commit", () => {
 		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
 	});
 
-	test("an ordinary login that wrote the real key mid-flight is never clobbered or deleted", async () => {
-		const { fake, store, authStorage, showStatus } = fakeWithStore();
+	test("a bystander written by ANOTHER client's ordinary login survives finalization (two real storage instances)", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "mcp-auth-"));
+		const authPath = join(tempDir, "auth.json");
+		const clientA = AuthStorage.create(authPath);
+		const clientB = AuthStorage.create(authPath);
+		const { fake, store, showStatus } = fakeWithStore(clientA);
+		const bystander = {
+			type: "oauth" as const,
+			access: "ordinary-login-for-acme-2",
+			refresh: "r2",
+			expires: Date.now() + 7200_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		};
 		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
-			runMcpLogin: stagedLogin(authStorage, (stagedServerId) => {
-				// Another client's ORDINARY login writes the real account key
-				// while OUR reservation holds: the guarded commit must refuse
-				// the move and the rollback must never delete the bystander.
-				void stagedServerId;
-				authStorage.set("mcp:acme-2", {
-					type: "oauth",
-					access: "ordinary-login-for-acme-2",
-					refresh: "r2",
-					expires: Date.now() + 7200_000,
-					endpoint: "https://mcp.acme.test/mcp",
-				});
+			runMcpLogin: stagedLogin(clientA, () => {
+				// ANOTHER client's ordinary login writes the real account key
+				// after our staging, before our finalize. Client A's per-instance
+				// cache never sees it — only the on-disk conditional move under
+				// the auth backend's own file lock can refuse the clobber.
+				clientB.set("mcp:acme-2", bystander);
 			}),
 		});
 		await callAddAccount(fake);
-		// The bystander credential survives byte-for-byte.
-		expect(authStorage.get("mcp:acme-2")).toEqual({
-			type: "oauth",
-			access: "ordinary-login-for-acme-2",
-			refresh: "r2",
-			expires: expect.any(Number),
-			endpoint: "https://mcp.acme.test/mcp",
-		});
+		// A fresh reader of the shared credential file sees the bystander
+		// credential byte-for-byte — never our staged value.
+		const fresh = AuthStorage.create(authPath);
+		expect(fresh.get("mcp:acme-2")).toEqual(bystander);
 		// Our staged credential was discarded, and no record resurrected.
-		expect(authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"))).toEqual([]);
+		expect(fresh.list().filter((id) => id.startsWith("mcp:acme-2--"))).toEqual([]);
 		expect(store.get("acme-2")).toBeUndefined();
 		expect(JSON.stringify(showStatus.mock.calls)).toContain("discarded");
+	});
+
+	test("a generic /logout in another client after the finalize leaves an honest unbound record, never corruption", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "mcp-auth-"));
+		const authPath = join(tempDir, "auth.json");
+		const clientA = AuthStorage.create(authPath);
+		const clientB = AuthStorage.create(authPath);
+		const { fake, store } = fakeWithStore(clientA);
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: stagedLogin(clientA),
+		});
+		await callAddAccount(fake);
+		// The finalize moved the staged credential onto the real key on disk.
+		const fresh = AuthStorage.create(authPath);
+		const realCredential = fresh.get("mcp:acme-2");
+		expect(realCredential?.type).toBe("oauth");
+		if (realCredential?.type === "oauth") {
+			expect(realCredential.access).toContain("staged-for-");
+		}
+		expect(store.get("acme-2")).toBeDefined();
+		// The generic /logout route removes the credential directly (the exact
+		// authStorage.logout call runLogout makes). Last-writer-wins atomically
+		// under the auth backend lock: the credential is gone, and the record
+		// survives to show an honest unbound/Reconnect state — no corruption.
+		clientB.logout("mcp:acme-2");
+		expect(AuthStorage.create(authPath).get("mcp:acme-2")).toBeUndefined();
+		expect(store.get("acme-2")).toBeDefined();
+	});
+
+	test("a removeAccount whose record write fails after the logout reports the honest partial state", async () => {
+		const { fake, store, authStorage, showWarning, showStatus } = fakeWithStore();
+		// A real record AND a real credential for the account.
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme-2",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme (acme-2)",
+			status: "connected",
+			createdAt: at,
+			updatedAt: at,
+		});
+		authStorage.set("mcp:acme-2", {
+			type: "oauth",
+			access: "real-for-acme-2",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		// Fail the FIRST store write: the removeAccount's record save.
+		const actualModule =
+			await vi.importActual<typeof import("../src/utils/atomic-file.js")>("../src/utils/atomic-file.js");
+		const real = actualModule.writeFileAtomicSync;
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("simulated remove write failure");
+		});
+		// Drive the REAL removeAction branch.
+		await (
+			fake as unknown as {
+				connectServiceFromPicker: (this: unknown, ...args: unknown[]) => Promise<void>;
+			}
+		).connectServiceFromPicker.call(
+			fake,
+			{
+				serviceId: "acme-2",
+				label: "Acme (acme-2)",
+				connectionStatus: "connected",
+				connectable: false,
+				removeAction: true,
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{},
+		);
+		vi.mocked(writeFileAtomicSync).mockImplementation(real);
+		// The logout is PRESERVED (credential gone); the record survives on disk.
+		expect(authStorage.get("mcp:acme-2")).toBeUndefined();
+		expect(store.get("acme-2")).toBeDefined();
+		// The wording reports the honest partial state and never claims the
+		// account is still connected.
+		const calls = JSON.stringify([...showWarning.mock.calls, ...showStatus.mock.calls]);
+		expect(calls).toContain("Logged out account acme-2");
+		expect(calls).toContain("could not be saved");
+		expect(calls).toContain("try again to finish cleanup");
+		expect(calls).not.toContain("still connected");
 	});
 
 	test("a finalize whose record write fails: credentials restored to staged, account key untouched, reservation released, honest message", async () => {

@@ -264,6 +264,13 @@ export class McpConnectionStore {
 	 * critical section, so disconnects share the store->auth lock ordering with
 	 * finalizeAttempt — a concurrent finalize can never re-add an orphan
 	 * credential after a disconnect removed the account.
+	 *
+	 * Outcomes: "removed" (record gone, write committed), "credential-only"
+	 * (no record existed; a credential-only integration logged out),
+	 * "logged-out" (the logout committed durably but the RECORD write failed —
+	 * the partial state is reported honestly and the logout is never restored),
+	 * "missing" (nothing existed), "failed" (nothing committed: the cleanup
+	 * threw or never ran).
 	 */
 	removeAccount(options: {
 		connectionId: string;
@@ -462,7 +469,13 @@ export class McpConnectionStore {
 										? "credential-only"
 										: "missing";
 								deferred.push((didCommit) =>
-									didCommit ? operation.resolve(outcome) : operation.resolve("failed"),
+									didCommit
+										? operation.resolve(outcome)
+										: // The credential logout already committed durably: never claim
+											// plain failure. "logged-out" reports the honest partial
+											// state (credential gone, record save failed, retry to
+											// finish); the logout is PRESERVED, never restored.
+											operation.resolve(credentialRemoved ? "logged-out" : "failed"),
 								);
 							} catch {
 								operation.resolve("failed");
@@ -583,7 +596,7 @@ export type { McpConnectionsFile, PendingOp };
  * grants, failed record saves) but the credential logout ran. "missing":
  * nothing to remove. "failed": the durable write failed — nothing committed.
  */
-export type McpRemoveAccountResult = "removed" | "credential-only" | "missing" | "failed";
+export type McpRemoveAccountResult = "removed" | "credential-only" | "logged-out" | "missing" | "failed";
 
 /**
  * Outcome of a guarded finalize. "committed": record write landed. "denied":

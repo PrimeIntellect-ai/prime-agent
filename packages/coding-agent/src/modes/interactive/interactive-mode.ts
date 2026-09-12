@@ -77,6 +77,7 @@ import {
 	uploadAllAgentTraces,
 } from "../../core/agent-traces.js";
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
+import type { AuthCredential } from "../../core/auth-storage.js";
 import {
 	type AgentCronJob,
 	type AgentHeartbeatManagementAction,
@@ -8806,9 +8807,17 @@ export class InteractiveMode {
 				},
 			});
 			// Honest outcomes: removed/credential-only changed durable state,
-			// missing is a no-op, failed means the change could not be saved.
+			// missing is a no-op, logged-out keeps the durable logout but says
+			// the record save failed, and failed is state-neutral (the cleanup
+			// may or may not have run — it never claims a specific state).
 			if (loggedOut === "failed") {
-				this.showWarning(`The change could not be saved; ${server} is still connected.`);
+				this.showWarning(`The change could not be saved; try logging out ${server} again.`);
+				return;
+			}
+			if (loggedOut === "logged-out") {
+				this.showWarning(
+					`Logged out ${server}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
+				);
 				return;
 			}
 			if (loggedOut === "missing") {
@@ -9117,9 +9126,17 @@ export class InteractiveMode {
 			});
 			// Honest outcomes: removed/credential-only removed the account (the
 			// credential-only case still had a credential to log out), missing is
-			// a no-op, failed means the change could not be saved.
+			// a no-op, logged-out keeps the durable logout but says the record
+			// save failed, and failed is state-neutral (the cleanup may or may
+			// not have run — it never claims a specific state).
 			if (removed === "failed") {
-				this.showWarning(`The change could not be saved; account ${service.serviceId} is still connected.`);
+				this.showWarning(`The change could not be saved; try removing account ${service.serviceId} again.`);
+				return;
+			}
+			if (removed === "logged-out") {
+				this.showWarning(
+					`Logged out account ${service.serviceId}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
+				);
 				return;
 			}
 			if (removed === "missing") {
@@ -9144,9 +9161,17 @@ export class InteractiveMode {
 				},
 			});
 			// Honest outcomes: removed/credential-only disconnected the account,
-			// missing is a no-op, failed means the change could not be saved.
+			// missing is a no-op, logged-out keeps the durable logout but says the
+			// record save failed, and failed is state-neutral (the cleanup may or
+			// may not have run — it never claims a specific state).
 			if (disconnected === "failed") {
-				this.showWarning(`The change could not be saved; ${service.label} is still connected.`);
+				this.showWarning(`The change could not be saved; try disconnecting ${service.label} again.`);
+				return;
+			}
+			if (disconnected === "logged-out") {
+				this.showWarning(
+					`Logged out ${service.label}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
+				);
 				return;
 			}
 			if (disconnected === "missing") {
@@ -9274,35 +9299,39 @@ export class InteractiveMode {
 			// the compensate callback runs under the SAME lock; if the rollback
 			// itself fails the result is recovery-required and the credential is
 			// RETAINED (never discarded) for manual recovery.
-			let ourStagedCredential: { access?: string } | undefined;
+			let movedCredential: AuthCredential | undefined;
 			const finalization = await this.getMcpConnectionStore().finalizeAttempt({
 				connectionId,
 				attemptId,
 				commit: (record) => {
-					const staged = this.modelRegistry.authStorage.get(stagedKey);
-					if (!staged) return record;
-					if (this.modelRegistry.authStorage.get(realKey)) {
-						// Occupied by another login's credential: never overwrite.
+					// Atomic, disk-authoritative staged->real move under the AUTH
+					// backend's own file lock: the store's lock cannot cover an
+					// ordinary login in another process, so the conditional move
+					// reads CURRENT on-disk data — a bystander credential written
+					// after our staging is never clobbered by a get/set race.
+					const move = this.modelRegistry.authStorage.moveStagedCredential(stagedKey, realKey);
+					if (move.status === "occupied") {
+						// An ordinary login wrote the account key mid-flight.
 						throw new Error("account key occupied by another login");
 					}
-					// Recovery data captured BEFORE any side effect.
-					ourStagedCredential = staged as { access?: string };
-					this.modelRegistry.authStorage.set(realKey, staged);
-					this.modelRegistry.authStorage.remove(stagedKey);
+					// Recovery data captured BEFORE the move lands as durable.
+					if (move.status === "moved") {
+						movedCredential = move.credential;
+					}
 					return record;
 				},
 				compensate: () => {
-					const moved = this.modelRegistry.authStorage.get(realKey);
-					if (
-						!moved ||
-						!ourStagedCredential ||
-						(moved as { access?: string }).access !== ourStagedCredential.access
-					) {
-						// Not ours (bystander, or ours never moved): touch nothing.
+					if (!movedCredential) {
+						// Never moved: nothing of ours to undo.
 						return;
 					}
-					this.modelRegistry.authStorage.set(stagedKey, moved);
-					this.modelRegistry.authStorage.remove(realKey);
+					// Undo only OUR OWN write: restore ours to the staged slot
+					// only when it is empty, then delete it from the real slot
+					// only when it is still exactly ours — a credential written
+					// by anyone else is never deleted, and ours is never
+					// dropped while the restore would leave it nowhere.
+					this.modelRegistry.authStorage.restoreCredentialIfAbsent(stagedKey, movedCredential);
+					this.modelRegistry.authStorage.removeIfCredentialMatches(realKey, movedCredential);
 				},
 			});
 			if (finalization === "recovery-required") {
