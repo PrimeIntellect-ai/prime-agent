@@ -8,8 +8,10 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	EventStream,
+	isContextOverflow,
 	streamSimple,
 	type ToolResultMessage,
+	type Usage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import type {
@@ -448,7 +450,66 @@ async function runLoop(
 	await emit({ type: "agent_end", messages: newMessages });
 }
 
+const MAX_EMPTY_TURN_ATTEMPTS = 3;
+
+/** Wraps a throw that interrupts empty-turn retries so the discarded attempts' paid spend rides with the original failure (`cause`). */
+export class EmptyTurnRetryFailure extends Error {
+	readonly discardedAttempts: Usage[];
+
+	constructor(cause: unknown, discardedAttempts: Usage[]) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		this.name = "EmptyTurnRetryFailure";
+		this.discardedAttempts = discardedAttempts;
+	}
+}
+
+/** No tool calls and no visible text on a normal stop: completion here would silently abandon the task. Error/abort/length turns are signals of their own. */
+function isEmptyAssistantTurn(message: AssistantMessage): boolean {
+	if (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "length") {
+		return false;
+	}
+	return !message.content.some(
+		(part) => part.type === "toolCall" || (part.type === "text" && part.text.trim().length > 0),
+	);
+}
+
 async function streamAssistantResponse(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+): Promise<AssistantMessage> {
+	const discardedUsage: Usage[] = [];
+	for (let attempt = 1; ; attempt++) {
+		let message: AssistantMessage;
+		try {
+			message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
+		} catch (error) {
+			throw discardedUsage.length > 0 ? new EmptyTurnRetryFailure(error, discardedUsage) : error;
+		}
+		// Overflow turns must pass through untouched so compaction recovery can see them.
+		if (isEmptyAssistantTurn(message) && !isContextOverflow(message, config.model.contextWindow)) {
+			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
+				// Neither resent to the provider nor finalized (message_end is what makes a turn durable).
+				context.messages.pop();
+				discardedUsage.push(message.usage);
+				continue;
+			}
+			message.stopReason = "error";
+			message.errorMessage = `Model returned an empty response (no output content or tool calls) ${MAX_EMPTY_TURN_ATTEMPTS} times in a row`;
+		}
+		if (discardedUsage.length > 0) {
+			// Paid spend survives the discard; context estimation reads message.usage alone.
+			message.discardedUsage = discardedUsage;
+		}
+		await emit({ type: "message_end", message });
+		return message;
+	}
+}
+
+/** Runs one assistant stream and places the final message in context, without emitting message_end. */
+async function streamAssistantResponseAttempt(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
@@ -465,7 +526,6 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
-		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	};
 
@@ -559,7 +619,6 @@ async function streamAssistantResponse(
 					if (!addedPartial) {
 						await emit({ type: "message_start", message: { ...finalMessage } });
 					}
-					await emit({ type: "message_end", message: finalMessage });
 					return finalMessage;
 				}
 			}
@@ -572,7 +631,6 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
-		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	} catch (error) {
 		if (signal?.aborted && isAbortError(error)) {

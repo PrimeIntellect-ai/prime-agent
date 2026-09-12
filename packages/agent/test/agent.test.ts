@@ -96,6 +96,47 @@ describe("Agent", () => {
 		expect(reasoning).toBe("off");
 	});
 
+	// One pin per carrier property: spend survives whatever was thrown (primitives
+	// cannot carry properties; frozen errors reject them) and the ORIGINAL text surfaces.
+	it.each<[string, () => unknown, string]>([
+		["a primitive rejection", () => "provider hiccup", "provider hiccup"],
+		["a frozen error rejection", () => Object.freeze(new Error("frozen failure")), "frozen failure"],
+	])("preserves discarded spend when a later attempt throws %s", async (_name, makeThrown, expectedText) => {
+		let call = 0;
+		const emptyThinking = (): AssistantMessage => ({
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking: "pondering" }],
+			usage: {
+				input: 50,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 60,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.02 },
+			},
+		});
+		const agent = new Agent({
+			streamFn: () => {
+				call += 1;
+				if (call === 2) {
+					throw makeThrown();
+				}
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: emptyThinking() });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("hello");
+
+		const failure = agent.state.messages.at(-1) as AssistantMessage;
+		expect(failure.stopReason).toBe("error");
+		expect(failure.errorMessage).toContain(expectedText);
+		expect(failure.discardedUsage).toMatchObject([{ input: 50, output: 10, cost: { total: 0.02 } }]);
+	});
+
 	it("should create an agent instance with custom initial state", () => {
 		const customModel = getModel("openai", "gpt-4o-mini");
 		const agent = new Agent({

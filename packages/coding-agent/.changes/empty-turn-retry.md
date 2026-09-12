@@ -1,0 +1,2 @@
+- Surfaced an RLM child whose final turn ended in an error (e.g. exhausted empty-response retries) to the parent as a child failure message instead of a bare completed-without-reply notice.
+- Removed the orphaned streaming bubble a discarded empty-turn attempt left in the interactive transcript; a superseding assistant stream replaces it.

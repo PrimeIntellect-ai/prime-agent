@@ -368,6 +368,44 @@ describe("AgentSession retry and event characterization", () => {
 		});
 	}
 
+	it("keeps a dropped retry carrier's spend in live session stats", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		const spend = (input: number, output: number) => ({
+			input,
+			output,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: input + output,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+		});
+		const failed: AssistantMessage = {
+			...fauxAssistantMessage("", { stopReason: "error", errorMessage: "empty response" }),
+			usage: spend(40, 6),
+			discardedUsage: [spend(30, 4)],
+		};
+		const recovered: AssistantMessage = { ...fauxAssistantMessage("recovered"), usage: spend(50, 8) };
+		harness.setResponses([failed, recovered]);
+
+		await harness.session.prompt("test");
+
+		// The auto-retry drop removes the carrier from live state, but the
+		// transcript keeps it; live stats must not lose its (discarded) spend.
+		const persisted = { input: 0, output: 0 };
+		for (const entry of harness.sessionManager.getEntries()) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const assistant = entry.message as AssistantMessage;
+			for (const usage of [assistant.usage, ...(assistant.discardedUsage ?? [])]) {
+				persisted.input += usage.input;
+				persisted.output += usage.output;
+			}
+		}
+		const stats = harness.session.getSessionStats();
+		expect(persisted.input).toBeGreaterThan(0);
+		expect(stats.tokens.input).toBe(persisted.input);
+		expect(stats.tokens.output).toBe(persisted.output);
+	});
+
 	it("waits at least the provider-requested Retry-After delay before retrying", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
 		harnesses.push(harness);

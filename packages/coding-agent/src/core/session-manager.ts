@@ -1061,6 +1061,7 @@ interface SessionScanAccumulator {
 	lastActivityTime?: number;
 	// Fold attribution aggregates like the loader: either disk representation cancels to the same own spend.
 	assistantUsageById: Map<string, Usage>;
+	discardedAttemptUsage: Usage;
 	attributedChildUsage: Usage;
 	summarizationUsage: Usage;
 }
@@ -1139,6 +1140,7 @@ function createSessionScanAccumulator(): SessionScanAccumulator {
 		firstMessage: "",
 		allMessagesText: "",
 		assistantUsageById: new Map<string, Usage>(),
+		discardedAttemptUsage: emptyUsage(),
 		attributedChildUsage: emptyUsage(),
 		summarizationUsage: emptyUsage(),
 	};
@@ -1312,6 +1314,9 @@ function foldSessionScanLine(acc: SessionScanAccumulator, lineBuffer: Buffer): v
 	const message = (entry as SessionMessageEntry).message;
 	if (message.role === "assistant" && (message as { usage?: Usage }).usage) {
 		acc.assistantUsageById.set(entry.id, (message as { usage: Usage }).usage);
+		for (const discarded of (message as { discardedUsage?: Usage[] }).discardedUsage ?? []) {
+			addAssistantUsage(acc.discardedAttemptUsage, discarded);
+		}
 	}
 	if (message.role === "assistant") {
 		const assistant = message as { provider?: string; model?: string };
@@ -1344,6 +1349,7 @@ function snapshotSessionInfo(
 			assistantUsageById: new Map(persistent.assistantUsageById),
 			attributedChildUsage: cloneUsage(persistent.attributedChildUsage),
 			summarizationUsage: cloneUsage(persistent.summarizationUsage),
+			discardedAttemptUsage: cloneUsage(persistent.discardedAttemptUsage),
 		};
 		foldSessionScanLine(acc, tornTail);
 	}
@@ -1353,6 +1359,7 @@ function snapshotSessionInfo(
 		addAssistantUsage(usageTotal, usage);
 	}
 	addAssistantUsage(usageTotal, acc.summarizationUsage);
+	addAssistantUsage(usageTotal, acc.discardedAttemptUsage);
 	subtractAssistantUsage(usageTotal, acc.attributedChildUsage);
 	const header = acc.header;
 	const cwd = typeof header.cwd === "string" ? header.cwd : "";

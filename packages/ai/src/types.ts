@@ -219,6 +219,8 @@ export interface AssistantMessage {
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
+	/** Per-request spend of same-turn attempts discarded before message_end (e.g. empty-turn retries). Spend accounting must add these; context estimation must not. */
+	discardedUsage?: Usage[];
 	stopReason: StopReason;
 	stopReasonRaw?: string; // Provider's raw stop/finish reason when it mapped to "error" (e.g. "refusal", "SAFETY")
 	errorMessage?: string;

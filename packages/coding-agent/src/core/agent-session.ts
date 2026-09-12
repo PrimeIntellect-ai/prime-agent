@@ -84,6 +84,7 @@ import {
 	type AgentAutonomousStatus,
 	type AutonomousRuntimeState,
 	addAutonomousContinuation,
+	addAutonomousDiscardedUsage,
 	addAutonomousUsage,
 	autonomousStatus,
 	createAutonomousRuntimeState,
@@ -2415,7 +2416,9 @@ export class AgentSession {
 		if (!this._goalState.objective) {
 			return false;
 		}
-		if (message.stopReason === "error" || message.stopReason === "aborted") {
+		// Discarded attempts were normal-stop spend: charged even when the turn itself failed.
+		const failedTurn = message.stopReason === "error" || message.stopReason === "aborted";
+		if (failedTurn && !message.discardedUsage) {
 			return false;
 		}
 		if (this._goalAccountedAssistantMessages.has(message)) {
@@ -2430,7 +2433,10 @@ export class AgentSession {
 			return false;
 		}
 		this._goalAccountedAssistantMessages.add(message);
-		const tokenDelta = goalTokenDeltaForUsage(message.usage);
+		const tokenDelta = (message.discardedUsage ?? []).reduce(
+			(sum, usage) => sum + goalTokenDeltaForUsage(usage),
+			failedTurn ? 0 : goalTokenDeltaForUsage(message.usage),
+		);
 		const goal = this._goalWithAccountedWallClock();
 		const nextGoal: GoalState = {
 			...goal,
@@ -3881,6 +3887,7 @@ export class AgentSession {
 				if (assistantMsg.stopReason !== "error") {
 					addAutonomousUsage(this._autonomousState, assistantMsg.usage);
 				}
+				addAutonomousDiscardedUsage(this._autonomousState, assistantMsg.discardedUsage);
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
 					this._assistantTurnsSinceAutoRefine++;
 					// In serialized mode, kick off background refinement planning
@@ -11209,15 +11216,22 @@ export class AgentSession {
 						emitChildUpdate();
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
-						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
+						const failedTurn = assistant.stopReason === "error" || assistant.stopReason === "aborted";
+						// Discarded attempts were paid normal-stop spend: attributed even on failed turns.
+						const attributable = failedTurn ? emptyUsage() : cloneUsage(assistant.usage);
+						for (const discarded of assistant.discardedUsage ?? []) {
+							addAssistantUsage(attributable, discarded);
+						}
+						const hasAttributableSpend = !failedTurn || (assistant.discardedUsage?.length ?? 0) > 0;
+						if (hasAttributableSpend) {
 							// Flush before the fold: a persisted aggregate may only include
 							// completions whose childUsage is durable with or before it.
 							flushPendingChildUsageIfStale();
-							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
+							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), attributable);
 							if (parentAssistantForUsage) {
 								const unindexedUsage =
 									this._rlmUnindexedChildUsage.get(parentAssistantForUsage) ?? emptyUsage();
-								addAssistantUsage(unindexedUsage, assistant.usage);
+								addAssistantUsage(unindexedUsage, attributable);
 								this._rlmUnindexedChildUsage.set(parentAssistantForUsage, unindexedUsage);
 								this._ownUsageMemo = undefined;
 								const origin = rlmChildUsageOrigin(child.messages, assistant);
@@ -11231,7 +11245,7 @@ export class AgentSession {
 									pendingChildUsageTimer.unref?.();
 								}
 								const bucket = pendingChildUsage.get(origin) ?? emptyUsage();
-								addAssistantUsage(bucket, assistant.usage);
+								addAssistantUsage(bucket, attributable);
 								pendingChildUsage.set(origin, bucket);
 							}
 						}
@@ -11301,15 +11315,27 @@ export class AgentSession {
 					!run.suppressTerminalNotice &&
 					child._parentReplyCount === parentReplyCountBeforeRun
 				) {
-					const lastAssistantText = child.getLastAssistantText();
-					await deliverTerminalMessageToParent(
-						createRlmChildTerminalNoticeMessage({
-							kind: "completed_without_reply",
-							childId: run.id,
-							sessionName,
-							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
-						}),
-					);
+					// A graceful error turn resolves promptAndWait; surface it or the parent never learns the task failed.
+					const lastAssistant = this._findLastAssistantInMessages(child.messages);
+					if (lastAssistant?.stopReason === "error") {
+						await deliverTerminalMessageToParent(
+							createRlmChildFailureMessage({
+								childId: run.id,
+								sessionName,
+								error: lastAssistant.errorMessage ?? "Assistant turn failed",
+							}),
+						);
+					} else {
+						const lastAssistantText = child.getLastAssistantText();
+						await deliverTerminalMessageToParent(
+							createRlmChildTerminalNoticeMessage({
+								kind: "completed_without_reply",
+								childId: run.id,
+								sessionName,
+								lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
+							}),
+						);
+					}
 				}
 				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
@@ -12401,15 +12427,33 @@ export class AgentSession {
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 
+		const countedSpend = new Set<AssistantMessage>();
+		const addSpend = (assistantMsg: AssistantMessage) => {
+			if (countedSpend.has(assistantMsg)) return;
+			countedSpend.add(assistantMsg);
+			for (const usage of [assistantMsg.usage, ...(assistantMsg.discardedUsage ?? [])]) {
+				totalInput += usage.input;
+				totalOutput += usage.output;
+				totalCacheRead += usage.cacheRead;
+				totalCacheWrite += usage.cacheWrite;
+				totalCost += usage.cost.total;
+			}
+		};
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
 				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalCost += assistantMsg.usage.cost.total;
+				addSpend(assistantMsg);
+			}
+		}
+		// Persisted-but-not-live spend since the latest compaction (auto-retry drops the failed
+		// carrier from live state); identity dedupe keeps it branch-scoped and count-once.
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "compaction") break;
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				addSpend(entry.message as AssistantMessage);
 			}
 		}
 

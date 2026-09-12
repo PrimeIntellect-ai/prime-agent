@@ -1,0 +1,1 @@
+- Added an optional `discardedUsage` field to assistant messages carrying the aggregated spend of same-turn attempts discarded before `message_end`.

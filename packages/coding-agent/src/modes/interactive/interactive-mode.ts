@@ -5678,6 +5678,18 @@ export class InteractiveMode {
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
+		// Still open = no message_end yet: drop a discarded empty attempt's component,
+		// but finalize an interrupted real partial in place (never delete visible output).
+		if (this.streamingComponent && this.streamingMessage) {
+			const hadVisibleOutput = this.streamingMessage.content.some(
+				(part) => part.type === "toolCall" || (part.type === "text" && part.text.trim().length > 0),
+			);
+			if (hadVisibleOutput) {
+				this.streamingComponent.updateContent(this.streamingMessage, false);
+			} else {
+				this.chatContainer.removeChild(this.streamingComponent);
+			}
+		}
 		this.streamingComponent = new AssistantMessageComponent(
 			undefined,
 			this.hideThinkingBlock,
