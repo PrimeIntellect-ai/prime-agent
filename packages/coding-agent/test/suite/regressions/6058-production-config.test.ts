@@ -208,13 +208,13 @@ describe("ENG-6058 production identity isolation", () => {
 		const restarted = AuthStorage.create(authPath, { primeCliConfigPath: configPath });
 		await expect(restarted.getApiKey("prime-inference")).resolves.toBe("production-key");
 		expect(restarted.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "file-team" });
-		await expect(getPrimeAgentTraceCredential(restarted, { configPath })).resolves.toMatchObject({
+		await expect(getPrimeAgentTraceCredential(restarted)).resolves.toMatchObject({
 			apiKey: "production-key",
 		});
 		restarted.logout("prime-inference");
 		const loggedOut = AuthStorage.create(authPath, { primeCliConfigPath: configPath });
 		await expect(loggedOut.getApiKey("prime-inference")).resolves.toBeUndefined();
-		await expect(getPrimeAgentTraceCredential(loggedOut, { configPath })).resolves.toBeUndefined();
+		await expect(getPrimeAgentTraceCredential(loggedOut)).resolves.toBeUndefined();
 		expect(JSON.parse(readFileSync(configPath, "utf8")).api_key).toBe("dev-key");
 	});
 });

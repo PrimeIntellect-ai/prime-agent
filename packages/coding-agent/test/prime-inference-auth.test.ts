@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { constants, publicEncrypt } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +8,6 @@ import {
 	checkPrimeAgentTracesAccess,
 	checkPrimeInferenceAccess,
 	fetchPrimeTeams,
-	loadPrimeCliConfig,
 	loginPrimeAgentTraces,
 	loginPrimeInference,
 } from "../src/core/prime-inference-auth.js";
@@ -90,71 +89,33 @@ describe("Prime Inference auth", () => {
 		vi.unstubAllEnvs();
 	});
 
-	it("loads Prime CLI config with defaults", () => {
-		writeFileSync(
-			configPath,
-			JSON.stringify({
-				api_key: "prime-key",
-				base_url: "https://prime-api.example/api/v1",
-				frontend_url: "https://prime-app.example/",
-			}),
-		);
-
-		expect(loadPrimeCliConfig(configPath)).toEqual({
-			apiKey: "prime-key",
-			baseUrl: "https://prime-api.example",
-			frontendUrl: "https://prime-app.example",
-			inferenceUrl: "https://api.pinference.ai/api/v1",
-			path: configPath,
-			teamIdFromEnv: false,
+	it("imports the production CLI file team without changing it or applying PRIME_TEAM_ID", async () => {
+		vi.stubEnv("PRIME_TEAM_ID", "env-team");
+		const original = JSON.stringify({
+			api_key: "prime-key",
+			base_url: "https://api.primeintellect.ai/api/v1/",
+			frontend_url: "https://app.primeintellect.ai/",
+			inference_url: "https://api.pinference.ai/api/v1/",
+			team_id: "file-team",
+			team_name: "Research",
+			team_role: "admin",
 		});
-	});
-
-	it("loads Prime CLI team selection", () => {
-		writeFileSync(
-			configPath,
-			JSON.stringify({
-				api_key: "prime-key",
-				team_id: "team-1",
-				team_name: "Research",
-				team_role: "admin",
-			}),
-		);
-
-		expect(loadPrimeCliConfig(configPath)).toMatchObject({
-			apiKey: "prime-key",
-			teamId: "team-1",
-			teamName: "Research",
-			teamRole: "admin",
-			teamIdFromEnv: false,
+		writeFileSync(configPath, original);
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			expect(getUrl(input)).toBe("https://api.primeintellect.ai/api/v1/user/whoami");
+			expect(getAuthorization(init)).toBe("Bearer prime-key");
+			return jsonResponse({ data: { scope: { inference: { write: true } } } });
 		});
-	});
+		const onAuth = vi.fn();
 
-	it("lets PRIME_TEAM_ID override Prime CLI team selection", () => {
-		const originalTeamId = process.env.PRIME_TEAM_ID;
-		process.env.PRIME_TEAM_ID = "env-team";
-		writeFileSync(
-			configPath,
-			JSON.stringify({
-				team_id: "file-team",
-				team_name: "Research",
-				team_role: "admin",
-			}),
-		);
-
-		try {
-			expect(loadPrimeCliConfig(configPath)).toMatchObject({
-				teamId: "env-team",
-				teamIdFromEnv: true,
-			});
-			expect(loadPrimeCliConfig(configPath).teamName).toBeUndefined();
-		} finally {
-			if (originalTeamId === undefined) {
-				delete process.env.PRIME_TEAM_ID;
-			} else {
-				process.env.PRIME_TEAM_ID = originalTeamId;
-			}
-		}
+		await expect(loginPrimeInference({ onAuth }, { configPath, fetchFn: fetchMock })).resolves.toEqual({
+			apiKey: "prime-key",
+			source: "prime-cli",
+			primeTeam: { teamId: "file-team", name: "Research", role: "admin" },
+		});
+		expect(onAuth).not.toHaveBeenCalled();
+		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(readFileSync(configPath, "utf8")).toBe(original);
 	});
 
 	it("fetches Prime teams across paginated responses", async () => {

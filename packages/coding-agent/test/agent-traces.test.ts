@@ -318,11 +318,13 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
-			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-			}),
+			authStorage: AuthStorage.inMemory(
+				{
+					[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				},
+				{ primeCliConfigPath: configPath, usePrimeCliConfig: true },
+			),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			configPath,
 			fetchFn: createFetchRecorder(calls),
 			reloadConfig: false,
 		});
@@ -1557,7 +1559,6 @@ describe("agent trace upload", () => {
 				sessionFile: session.getSessionFile(),
 				authStorage,
 				settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-				configPath,
 				fetchFn: createFetchRecorder(calls),
 				reloadConfig: false,
 			});
@@ -1585,7 +1586,6 @@ describe("agent trace upload", () => {
 			sessionFile: session.getSessionFile(),
 			authStorage,
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			configPath,
 			fetchFn: createFetchRecorder(calls),
 			reloadConfig: false,
 		});
@@ -1609,7 +1609,6 @@ describe("agent trace upload", () => {
 				{ primeCliConfigPath: configPath, usePrimeCliConfig: true },
 			),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-			configPath,
 			fetchFn: createFetchRecorder(calls),
 			reloadConfig: false,
 		});

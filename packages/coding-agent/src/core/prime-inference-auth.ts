@@ -1,18 +1,8 @@
 import { Buffer } from "node:buffer";
 import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
-import {
-	chmodSync,
-	closeSync,
-	existsSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import type { OAuthAuthInfo } from "@earendil-works/pi-ai";
 
 export const PRIME_INFERENCE_PROVIDER_ID = "prime-inference";
@@ -34,16 +24,11 @@ export type PrimeInferenceLoginResult = {
 	primeTeam?: PrimeTeam | null;
 };
 
-export type PrimeCliConfig = {
+type PrimeCliConfig = {
 	apiKey?: string;
-	baseUrl: string;
-	frontendUrl: string;
-	inferenceUrl: string;
-	path: string;
 	teamId?: string;
 	teamName?: string;
 	teamRole?: string;
-	teamIdFromEnv: boolean;
 };
 
 export type PrimeInferenceLoginCallbacks = {
@@ -138,71 +123,6 @@ function readPrimeCliConfigData(configPath: string): Record<string, unknown> {
 	return data;
 }
 
-function writePrimeCliConfigData(configPath: string, data: Record<string, unknown>): void {
-	const dir = dirname(configPath);
-	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true, mode: 0o700 });
-	}
-	const tempPath = join(
-		dir,
-		`.${basename(configPath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
-	);
-	let fd: number | undefined = openSync(tempPath, "wx", 0o600);
-	try {
-		writeFileSync(fd, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
-		closeSync(fd);
-		fd = undefined;
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, configPath);
-		chmodSync(configPath, 0o600);
-	} finally {
-		if (fd !== undefined) {
-			closeSync(fd);
-		}
-		if (existsSync(tempPath)) {
-			rmSync(tempPath, { force: true });
-		}
-	}
-}
-
-function clearPrimeTeamFields(data: Record<string, unknown>): void {
-	delete data.team_id;
-	delete data.team_name;
-	delete data.team_role;
-}
-
-export function loadPrimeCliConfig(configPath: string = defaultPrimeCliConfigPath()): PrimeCliConfig {
-	const data = readPrimeCliConfigData(configPath);
-	const teamIdFromEnv = stringEnv("PRIME_TEAM_ID");
-	const teamId = teamIdFromEnv ?? stringField(data, "team_id");
-
-	const config: PrimeCliConfig = {
-		baseUrl: normalizeBaseUrl(stringField(data, "base_url")),
-		frontendUrl: normalizeUrl(stringField(data, "frontend_url"), DEFAULT_PRIME_FRONTEND_URL),
-		inferenceUrl: normalizeUrl(stringField(data, "inference_url"), DEFAULT_PRIME_INFERENCE_URL),
-		path: configPath,
-		teamIdFromEnv: teamIdFromEnv !== undefined,
-	};
-	const apiKey = stringField(data, "api_key");
-	if (apiKey) {
-		config.apiKey = apiKey;
-	}
-	if (teamId) {
-		config.teamId = teamId;
-	}
-	if (!teamIdFromEnv) {
-		const teamName = stringField(data, "team_name");
-		const teamRole = stringField(data, "team_role");
-		if (teamName) {
-			config.teamName = teamName;
-		}
-		if (teamRole) {
-			config.teamRole = teamRole;
-		}
-	}
-	return config;
-}
-
 function loadProductionPrimeCliConfig(configPath?: string): PrimeCliConfig | undefined {
 	const path = getPrimeCliConfigPath(configPath);
 	const data = readPrimeCliConfigData(path);
@@ -220,14 +140,9 @@ function loadProductionPrimeCliConfig(configPath?: string): PrimeCliConfig | und
 	}
 	return {
 		apiKey: stringField(data, "api_key"),
-		baseUrl: DEFAULT_PRIME_API_BASE_URL,
-		frontendUrl: DEFAULT_PRIME_FRONTEND_URL,
-		inferenceUrl: DEFAULT_PRIME_INFERENCE_URL,
-		path,
 		teamId: stringField(data, "team_id"),
 		teamName: stringField(data, "team_name"),
 		teamRole: stringField(data, "team_role"),
-		teamIdFromEnv: false,
 	};
 }
 
@@ -239,42 +154,6 @@ function importedPrimeTeam(config: PrimeCliConfig): PrimeTeam | null {
 				...(config.teamRole ? { role: config.teamRole } : {}),
 			}
 		: null;
-}
-
-export function savePrimeCliApiKey(apiKey: string, configPath: string = defaultPrimeCliConfigPath()): PrimeCliConfig {
-	const data = readPrimeCliConfigData(configPath);
-	data.api_key = apiKey;
-	clearPrimeTeamFields(data);
-	writePrimeCliConfigData(configPath, data);
-	return loadPrimeCliConfig(configPath);
-}
-
-export function clearPrimeCliCredentials(configPath: string = defaultPrimeCliConfigPath()): PrimeCliConfig {
-	const data = readPrimeCliConfigData(configPath);
-	delete data.api_key;
-	clearPrimeTeamFields(data);
-	writePrimeCliConfigData(configPath, data);
-	return loadPrimeCliConfig(configPath);
-}
-
-export function savePrimeCliTeamSelection(
-	team: PrimeTeam | null,
-	configPath: string = defaultPrimeCliConfigPath(),
-): PrimeCliConfig {
-	const data = readPrimeCliConfigData(configPath);
-	if (team) {
-		data.team_id = team.teamId;
-		data.team_name = team.name;
-		if (team.role) {
-			data.team_role = team.role;
-		} else {
-			delete data.team_role;
-		}
-	} else {
-		clearPrimeTeamFields(data);
-	}
-	writePrimeCliConfigData(configPath, data);
-	return loadPrimeCliConfig(configPath);
 }
 
 export function resolvePrimeInferenceAuthConfig(): PrimeChallengeConfig {
