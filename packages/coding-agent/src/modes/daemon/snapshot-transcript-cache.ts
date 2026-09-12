@@ -93,7 +93,9 @@ export class SnapshotTranscriptCache {
 		this.snapshotId = options.snapshotId;
 		this.activeSessionId = options.activeSessionId;
 		if (options.messages) {
-			this.encodeMessages(options.messages);
+			for (const chunk of createSnapshotTranscriptChunks({ ...options, messages: options.messages })) {
+				this.storeChunk(chunk);
+			}
 			this.completed = true;
 		}
 	}
@@ -222,35 +224,6 @@ export class SnapshotTranscriptCache {
 			this.cacheDirectory = undefined;
 		}
 		this.chunks.length = 0;
-	}
-
-	private encodeMessages(messages: readonly AgentMessage[]): void {
-		let serializedMessages: string[] = [];
-		let serializedBytes = 0;
-		const flush = () => {
-			if (serializedMessages.length === 0) {
-				return;
-			}
-			const index = this.chunks.length;
-			const prefix =
-				`{"type":"session_snapshot_chunk","activeSessionId":${JSON.stringify(this.options.activeSessionId)},` +
-				`"snapshotId":${JSON.stringify(this.options.snapshotId)},"index":${index},"messages":[`;
-			const line = Buffer.from(`${prefix}${serializedMessages.join(",")}]}\n`);
-			this.storeChunk(line);
-			serializedMessages = [];
-			serializedBytes = 0;
-		};
-
-		for (const message of messages) {
-			const serialized = JSON.stringify(message);
-			const bytes = Buffer.byteLength(serialized) + (serializedMessages.length > 0 ? 1 : 0);
-			if (serializedMessages.length > 0 && serializedBytes + bytes > this.targetChunkBytes) {
-				flush();
-			}
-			serializedMessages.push(serialized);
-			serializedBytes += bytes;
-		}
-		flush();
 	}
 
 	private storeChunk(buffer: Buffer): void {

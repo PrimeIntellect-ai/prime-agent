@@ -104,7 +104,11 @@ interface SupervisorWorkerHarness {
 }
 
 describe("deferred session frames during snapshot streams", () => {
-	it.each([1, 2])("worker: replays frames only after all %i queued snapshots complete", async (streamCount) => {
+	it.each([
+		[1, false],
+		[2, false],
+		[2, true],
+	] as const)("worker: replays after %i snapshots (final fails=%s)", async (streamCount, failFinal) => {
 		const daemon = new AgentDaemon(join(tmpdir(), "deferred-frames-worker.sock"), {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -125,6 +129,7 @@ describe("deferred session frames during snapshot streams", () => {
 		} as unknown as ActiveSessionState;
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
+			catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void>;
 			broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
 			streamWorkerSnapshot(
 				client: DaemonSocketClient,
@@ -135,6 +140,7 @@ describe("deferred session frames during snapshot streams", () => {
 				snapshotAlreadyMarked: boolean,
 			): Promise<void>;
 		};
+		vi.spyOn(internals, "catchUpBackpressuredClient").mockResolvedValue();
 		internals.sessions.set(activeSessionId, state);
 		const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
 
@@ -142,9 +148,10 @@ describe("deferred session frames during snapshot streams", () => {
 		const chunkGate = new Promise<void>((resolve) => {
 			releaseChunk = resolve;
 		});
-		async function* gatedTranscript(): AsyncGenerator<Buffer> {
+		async function* gatedTranscript(fail = false): AsyncGenerator<Buffer> {
 			yield Buffer.from(`{"type":"session_snapshot_chunk"}`);
 			await chunkGate;
+			if (fail) throw new Error("last snapshot failed");
 			yield Buffer.from(`{"type":"session_snapshot_chunk"}`);
 		}
 		const transcript = gatedTranscript();
@@ -164,7 +171,7 @@ describe("deferred session frames during snapshot streams", () => {
 				internals.streamWorkerSnapshot(
 					client,
 					streamedResult(),
-					gatedTranscript(),
+					gatedTranscript(failFinal),
 					"attach",
 					markClientSnapshotStreaming(client, activeSessionId),
 					true,
@@ -177,29 +184,32 @@ describe("deferred session frames during snapshot streams", () => {
 		expect(written.length).toBeGreaterThan(0);
 
 		releaseChunk();
-		await Promise.all(streams);
+		const outcomes = await Promise.allSettled(streams);
+		expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(failFinal ? 1 : 0);
 
 		const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
 		const frames = decoder.push(Buffer.concat(written));
 		const outboundTypes = frames.map((frame) => (frame.header.kind === "outbound" ? frame.header.outboundType : ""));
 		expect(outboundTypes).toEqual([
-			...Array.from({ length: streamCount }, () => [
-				"session_snapshot_begin",
-				"session_snapshot_chunk",
-				"session_snapshot_chunk",
-				"session_snapshot_end",
-			]).flat(),
-			"session_event",
-			"session_event",
+			...Array.from({ length: streamCount }, (_, index) =>
+				failFinal && index === streamCount - 1
+					? ["session_snapshot_begin", "session_snapshot_chunk", "session_snapshot_failed"]
+					: ["session_snapshot_begin", "session_snapshot_chunk", "session_snapshot_chunk", "session_snapshot_end"],
+			).flat(),
+			...(failFinal ? [] : ["session_event", "session_event"]),
 		]);
 		const replayed = frames
 			.filter((frame) => frame.header.kind === "outbound" && frame.header.outboundType === "session_event")
 			.map((frame) => JSON.parse(frame.payload.toString("utf8")));
-		expect(replayed).toEqual([
-			expect.objectContaining({ event: { type: "session_info_changed", name: "change-2" } }),
-			expect.objectContaining({ event: { type: "session_info_changed", name: "change-3" } }),
-		]);
-		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(0);
+		expect(replayed).toEqual(
+			failFinal
+				? []
+				: [
+						expect.objectContaining({ event: { type: "session_info_changed", name: "change-2" } }),
+						expect.objectContaining({ event: { type: "session_info_changed", name: "change-3" } }),
+					],
+		);
+		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(failFinal ? 1 : 0);
 		socket.destroy();
 	});
 
@@ -285,7 +295,8 @@ describe("deferred session frames during snapshot streams", () => {
 		socket.destroy();
 	});
 
-	it.each([false, true])("supervisor: replays payloads only while attached (detached=%s)", async (detached) => {
+	const supervisorScenarios = ["attached", "detached", "replaced", "failed", "failed-detached"];
+	it.each(supervisorScenarios)("supervisor: replay (%s)", async (scenario) => {
 		const supervisor = new DaemonSupervisor(join(tmpdir(), "deferred-frames-supervisor.sock"), {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			descriptorDir: join(tmpdir(), "deferred-frames-supervisor-state"),
@@ -309,6 +320,7 @@ describe("deferred session frames during snapshot streams", () => {
 		const internals = supervisor as unknown as {
 			clients: Set<DaemonSocketClient>;
 			workers: Map<string, SupervisorWorkerHarness>;
+			catchUpClient(client: DaemonSocketClient): Promise<void>;
 			streamSnapshot(
 				client: DaemonSocketClient,
 				worker: SupervisorWorkerHarness,
@@ -318,6 +330,7 @@ describe("deferred session frames during snapshot streams", () => {
 			): Promise<void>;
 			handleWorkerFrame(worker: SupervisorWorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
+		vi.spyOn(internals, "catchUpClient").mockResolvedValue();
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
 
@@ -336,13 +349,28 @@ describe("deferred session frames during snapshot streams", () => {
 		transcript.waitForChunk = async (index: number) => {
 			if (index === 1) {
 				await chunkGate;
+				if (scenario.startsWith("failed")) throw new Error("snapshot failed");
 			}
 			return waitForChunk(index);
 		};
 
 		const stream = internals.streamSnapshot(client, worker, streamedResult(), transcript, "attach");
+		const completion = stream.catch((error: unknown) => error);
 		await nextMacroTaskTurn();
 		// The stream is parked before the end record; relayed frames are withheld.
+		if (scenario === "replaced") {
+			internals.handleWorkerFrame(worker, {
+				header: {
+					kind: "outbound",
+					outboundType: "session_replaced",
+					activeSessionId,
+					payloadEncoding: "jsonl",
+				},
+				payload: Buffer.from(
+					`${JSON.stringify({ type: "session_replaced", activeSessionId, state: streamedResult().snapshot.state, messages: [] })}\n`,
+				),
+			});
+		}
 		internals.handleWorkerFrame(worker, {
 			header: {
 				kind: "outbound",
@@ -364,24 +392,45 @@ describe("deferred session frames during snapshot streams", () => {
 			payload: Buffer.from(`${JSON.stringify(sessionEventMessage(3))}\n`),
 		});
 
-		if (detached) client.attachedActiveSessionIds.delete(activeSessionId);
+		if (scenario.endsWith("detached")) client.attachedActiveSessionIds.delete(activeSessionId);
 		releaseChunk();
-		await stream;
+		const error = await completion;
+		if (scenario.startsWith("failed")) expect(error).toBeInstanceOf(Error);
+		else expect(error).toBeUndefined();
 
 		const lines = written.join("").split("\n").filter(Boolean);
 		const parsed = lines.map((line) => JSON.parse(line) as { type: string });
 		expect(parsed.map((entry) => entry.type)).toEqual([
 			"session_snapshot_begin",
 			"session_snapshot_chunk",
-			"session_snapshot_end",
-			...(detached ? [] : ["session_event", "session_event"]),
+			scenario.startsWith("failed") ? "session_snapshot_failed" : "session_snapshot_end",
+			...(scenario === "attached" ? ["session_event", "session_event"] : []),
 		]);
 		expect(client.deferredSessionPayloads?.size ?? 0).toBe(0);
-		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(0);
+		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(scenario === "replaced" || scenario === "failed" ? 1 : 0);
+		if (scenario === "replaced") {
+			const before = written.length;
+			const frame: PrivateFrame<DaemonWorkerFrameHeader> = {
+				header: { kind: "outbound", outboundType: "session_event", activeSessionId, payloadEncoding: "jsonl" },
+				payload: Buffer.from(`${JSON.stringify(sessionEventMessage(4))}\n`),
+			};
+			internals.handleWorkerFrame(worker, frame);
+			expect(written).toHaveLength(before);
+			const replacement = internals.streamSnapshot(client, worker, streamedResult(), transcript, "attach");
+			internals.handleWorkerFrame(worker, frame);
+			await replacement;
+			expect(written.map((line) => JSON.parse(line).type).slice(before)).toEqual([
+				"session_snapshot_begin",
+				"session_snapshot_chunk",
+				"session_snapshot_end",
+				"session_event",
+			]);
+		}
+		transcript.dispose();
 		socket.destroy();
 	});
 
-	it.each(["backpressure", "closed", "detached"] as const)("worker: stops replay after %s", async (scenario) => {
+	it.each(["backpressure", "closed", "detached", "replaced"] as const)("worker: stop after %s", async (scenario) => {
 		const daemon = new AgentDaemon(join(tmpdir(), "deferred-frames-stop.sock"), {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -406,6 +455,7 @@ describe("deferred session frames during snapshot streams", () => {
 		} as unknown as ActiveSessionState;
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
+			catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void>;
 			broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
 			streamWorkerSnapshot(
 				client: DaemonSocketClient,
@@ -416,6 +466,7 @@ describe("deferred session frames during snapshot streams", () => {
 				marked: boolean,
 			): Promise<void>;
 		};
+		vi.spyOn(internals, "catchUpBackpressuredClient").mockResolvedValue();
 		internals.sessions.set(activeSessionId, state);
 		let release!: () => void;
 		const gate = new Promise<void>((resolve) => {
@@ -445,6 +496,15 @@ describe("deferred session frames during snapshot streams", () => {
 			if (scenario === "closed")
 				internals.broadcastToSession(state, { type: "session_closed", activeSessionId, reason: "killed" });
 			if (scenario === "detached") client.attachedActiveSessionIds.delete(activeSessionId);
+			if (scenario === "replaced") {
+				internals.broadcastToSession(state, {
+					type: "session_replaced",
+					activeSessionId,
+					state: streamedResult().snapshot.state,
+					messages: [],
+				});
+				internals.broadcastToSession(state, sessionEventMessage(4));
+			}
 			release();
 			await stream;
 			const eventWrites = write.mock.calls.filter(([chunk]) => JSON.parse(String(chunk)).type === "session_event");
@@ -460,6 +520,22 @@ describe("deferred session frames during snapshot streams", () => {
 				).toHaveLength(1);
 			}
 			if (scenario === "closed") expect(written.some((message) => message.type === "session_closed")).toBe(true);
+			if (scenario === "replaced") {
+				internals.broadcastToSession(state, sessionEventMessage(5));
+				expect(written.some((message) => message.type === "session_event")).toBe(false);
+				expect(client.catchupPurposes?.get(activeSessionId)).toBe("replacement");
+				const replacement = internals.streamWorkerSnapshot(
+					client,
+					streamedResult(),
+					transcript(),
+					"attach",
+					markClientSnapshotStreaming(client, activeSessionId),
+					true,
+				);
+				internals.broadcastToSession(state, sessionEventMessage(6));
+				await replacement;
+				expect(written.filter((message) => message.type === "session_event")).toEqual([sessionEventMessage(6)]);
+			}
 		} finally {
 			release();
 			socket.destroy();

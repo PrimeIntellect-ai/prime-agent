@@ -5433,16 +5433,23 @@ export class DaemonSupervisor {
 			}
 			throw streamError;
 		} finally {
+			if (
+				!snapshotDelivered &&
+				client.attachedActiveSessionIds.has(result.activeSessionId) &&
+				client.deferredSessionPayloads?.get(result.activeSessionId)?.length
+			) {
+				this.queueCatchup(client, result.activeSessionId, "resync");
+			}
 			releaseSnapshotReservation();
 			releaseTranscript();
-			// Payloads withheld during the stream replay now that the snapshot
-			// is complete: each deferred payload is newer than the streamed
-			// snapshot, and the client applies it as an ordinary live event.
 			this.releaseDeferredSessionPayloads(client, result.activeSessionId, snapshotDelivered);
 		}
 	}
 
 	private reserveSnapshotStream(client: DaemonSocketClient, activeSessionId: string): () => void {
+		if (!client.snapshotActiveSessionIds?.has(activeSessionId)) {
+			client.deferredSessionPayloadsDropped?.delete(activeSessionId);
+		}
 		client.snapshotStreaming = true;
 		client.snapshotActiveSessionIds ??= new Set();
 		client.snapshotActiveSessionIds.add(activeSessionId);
@@ -5463,7 +5470,6 @@ export class DaemonSupervisor {
 			} else {
 				client.snapshotActiveSessionCounts?.delete(activeSessionId);
 				client.snapshotActiveSessionIds?.delete(activeSessionId);
-				client.deferredSessionPayloadsDropped?.delete(activeSessionId);
 			}
 			client.snapshotStreaming = (client.snapshotActiveSessionIds?.size ?? 0) > 0;
 			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
@@ -5515,6 +5521,7 @@ export class DaemonSupervisor {
 			}
 			client.catchupActiveSessionIds?.delete(resolvedId);
 			client.catchupPurposes?.delete(resolvedId);
+			client.deferredSessionPayloadsDropped?.delete(resolvedId);
 			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
 			void this.syncWorkerExtensionUi(resolvedId);
 			void this.evictEmptySessionOnLastDetach(resolvedId);
@@ -5929,6 +5936,8 @@ export class DaemonSupervisor {
 				// catch-up snapshot.
 				if (outboundType === "session_replaced") {
 					this.discardDeferredSessionPayloads(client, activeSessionId);
+					client.deferredSessionPayloadsDropped ??= new Set();
+					client.deferredSessionPayloadsDropped.add(activeSessionId);
 					this.queueCatchup(client, activeSessionId, "replacement");
 					continue;
 				}
@@ -5939,6 +5948,7 @@ export class DaemonSupervisor {
 				this.queueCatchup(client, activeSessionId, "resync");
 				continue;
 			}
+			if (client.deferredSessionPayloadsDropped?.has(activeSessionId)) continue;
 			if (client.backpressured === true) {
 				this.queueCatchup(client, activeSessionId, outboundType === "session_replaced" ? "replacement" : "resync");
 				continue;
@@ -6009,21 +6019,14 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/**
-	 * Defer a relayed payload that arrived while a snapshot stream is active
-	 * for that session on this client. Deferred payloads replay when the
-	 * stream completes instead of each one triggering a full snapshot
-	 * re-transfer. Returns false when the buffer overflows; the caller then
-	 * queues a catch-up snapshot.
-	 */
+	/** Hold relayed payloads until the snapshot finishes; false requests a catch-up. */
 	private deferSessionPayload(client: DaemonSocketClient, activeSessionId: string, payload: Buffer): boolean {
 		if (client.deferredSessionPayloadsDropped?.has(activeSessionId)) {
 			return false;
 		}
 		const payloads = client.deferredSessionPayloads?.get(activeSessionId) ?? [];
 		if (payloads.length >= MAX_DEFERRED_SESSION_PAYLOADS) {
-			// Stop deferring this session for the rest of the stream: a catch-up
-			// snapshot is already queued and supersedes anything buffered.
+			// A catch-up snapshot supersedes the buffered payloads.
 			client.deferredSessionPayloadsDropped ??= new Set();
 			client.deferredSessionPayloadsDropped.add(activeSessionId);
 			this.discardDeferredSessionPayloads(client, activeSessionId);

@@ -3920,6 +3920,111 @@ describe("DaemonAgentConnection deferred session events", () => {
 		}
 	});
 
+	it.each([
+		["replacement", false],
+		["replacement", true],
+		["streamed replacement", true],
+		["reattach", false],
+		["reattach", true],
+	] as const)("discards overflow recovery across %s (recovery started=%s)", async (change, recoveryStarted) => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			deferSessionEvents: true,
+		});
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		try {
+			await connection.attach();
+			for (let sequence = 13; sequence <= 1013; sequence++)
+				emitSequencedSessionEvent(fakeClient, "active-1", sequence);
+			const request = fakeClient.request.bind(fakeClient);
+			vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+				if (command.type === "attach" && change === "streamed replacement") {
+					const result = createAttachResult("active-1", undefined, undefined, 1013);
+					result.snapshotStream = { id: "old-recovery", messageCount: 0, targetChunkBytes: 512 * 1024 };
+					fakeClient.emitMessage({
+						type: "session_snapshot_begin",
+						activeSessionId: "active-1",
+						snapshotId: "old-recovery",
+						snapshot: result.snapshot,
+						messageCount: 0,
+						targetChunkBytes: 512 * 1024,
+						purpose: "attach",
+					});
+					return { type: "response", command: command.type, success: true, data: result };
+				}
+				if (command.type === "attach") await gate;
+				if (command.type === "switch_session")
+					return {
+						type: "response",
+						command: command.type,
+						success: false,
+						error: "Session already active",
+						errorInfo: {
+							code: "session_already_active",
+							activeSessionId: "active-2",
+							sessionPath: "/tmp/target.jsonl",
+						},
+					};
+				if (command.type === "reattach")
+					return {
+						type: "response",
+						command: command.type,
+						success: true,
+						data: createAttachResult("active-2", undefined, undefined, 1),
+					};
+				return request(command, ...options);
+			});
+			const delivered: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				delivered.push(event);
+			});
+			const flush = recoveryStarted ? connection.flushBufferedSessionEvents() : undefined;
+			await nextMessageLoopTurn();
+			if (change === "reattach") {
+				await connection.switchSession("/tmp/target.jsonl");
+			} else {
+				fakeClient.emitMessage({
+					type: "session_replaced",
+					activeSessionId: "active-1",
+					state: createConnectionState("active-1", "replacement"),
+					messages: [],
+				});
+			}
+			const activeSessionId = change === "reattach" ? "active-2" : "active-1";
+			const sequence = change === "reattach" ? 2 : 1014;
+			emitSequencedSessionEvent(fakeClient, activeSessionId, sequence);
+			if (change === "streamed replacement") {
+				fakeClient.emitMessage({
+					type: "session_snapshot_end",
+					activeSessionId: "active-1",
+					snapshotId: "old-recovery",
+					chunkCount: 0,
+					lastEventSequence: 1013,
+					lastEventCursor: { generation: "generation-active-1", sequence: 1013 },
+				});
+			}
+			release();
+			await (flush ?? connection.flushBufferedSessionEvents());
+			expect(delivered.map((event) => event.type)).toEqual(["session_replaced", "session_event"]);
+			expect(delivered[1]).toEqual({
+				type: "session_event",
+				event: { type: "session_info_changed", name: String(sequence) },
+			});
+			if (change !== "reattach")
+				expect(
+					(connection as unknown as { latestSnapshot: { state: AgentConnectionState } }).latestSnapshot.state
+						.sessionId,
+				).toBe("replacement");
+			expect((await connection.getState()).activeSessionId).toBe(activeSessionId);
+		} finally {
+			release();
+			await connection.dispose();
+		}
+	});
+
 	it("keeps live events behind the whole replay and shares concurrent flushes", async () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {

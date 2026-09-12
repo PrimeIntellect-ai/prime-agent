@@ -1,1 +1,2 @@
 - Sped up transcript rendering on image-capable terminals: a cell-size response now re-renders only image components instead of invalidating every component cache.
+- Sped up width calculations for plain text when rendering long transcripts.
