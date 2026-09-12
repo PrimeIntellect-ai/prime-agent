@@ -1,0 +1,1 @@
+- Fixed project Python skills (`.prime/agent/skills/*/pyproject.toml`) being built and imported at startup without consent: they now require a persisted per-project trust decision (interactive prompt or `/trust-project-skills`), stay markdown-only until trusted, and install into a per-project kernel venv instead of the shared `~/.prime/agent/kernel-venv`.

@@ -13,6 +13,7 @@ import { McpManager } from "./mcp/mcp-manager.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { findInitialModel } from "./model-resolver.js";
+import { createProjectSkillTrustStore, type ProjectSkillTrustStore } from "./project-skill-trust.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
@@ -62,6 +63,9 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 
 	/** MCP integration manager. When omitted, MCP host handlers are not wired. */
 	mcpManager?: McpManager;
+
+	/** Trust store for project Python skills. Default: file store in agentDir. */
+	projectSkillTrust?: ProjectSkillTrustStore;
 
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
@@ -373,6 +377,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		sessionStartEvent: options.sessionStartEvent,
 		prewarmIpythonKernel: options.prewarmIpythonKernel,
+		projectSkillTrust: options.projectSkillTrust ?? createProjectSkillTrustStore(agentDir),
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,

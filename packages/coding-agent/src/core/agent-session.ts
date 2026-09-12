@@ -34,6 +34,7 @@ import {
 	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
+import { getAgentDir } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -197,6 +198,17 @@ import {
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
+import {
+	applyProjectSkillTrust,
+	createProjectSkillTrustStore,
+	describeProjectSkillTrust,
+	formatProjectSkillTrustPrompt,
+	PROJECT_SKILL_TRUST_CHOICES,
+	PROJECT_SKILL_TRUST_COMMAND,
+	type ProjectSkillTrustChoice,
+	type ProjectSkillTrustStatus,
+	type ProjectSkillTrustStore,
+} from "./project-skill-trust.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./prompt-templates.js";
 import {
@@ -493,6 +505,12 @@ export interface AgentSessionConfig {
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	autonomous?: AgentAutonomousConfig;
 	prewarmIpythonKernel?: boolean;
+	/**
+	 * Persisted per-project trust decisions for project Python skills. Defaults to
+	 * the file store in agentDir. Untrusted project Python skills are exposed as
+	 * markdown-only skills and never installed into or imported by the kernel.
+	 */
+	projectSkillTrust?: ProjectSkillTrustStore;
 	autoRefineReviewer?: AutoRefineReviewer;
 	/**
 	 * When true, auto-refine runs synchronously between turns at the
@@ -1351,6 +1369,10 @@ export class AgentSession {
 	/** True once the runtime has been built once; later builds are in-process rebuilds (/reload). */
 	private _ipythonRuntimeBuilt = false;
 	private readonly _prewarmIpythonKernel: boolean;
+	private readonly _projectSkillTrust: ProjectSkillTrustStore;
+	/** Set when the user answered "not now": stay quiet for the rest of this session. */
+	private _projectSkillTrustDeferred = false;
+	private _projectSkillTrustPromptAbort?: AbortController;
 	private _rlmDepth: number;
 	private readonly _configuredRlmMaxDepth: number | undefined;
 	private _rlmMaxDepth: number;
@@ -1464,6 +1486,8 @@ export class AgentSession {
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
+		this._projectSkillTrust =
+			config.projectSkillTrust ?? createProjectSkillTrustStore(config.agentDir ?? getAgentDir());
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
 		this._rlmSessionDir = config.rlmSessionDir;
@@ -4352,6 +4376,7 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
+		this._projectSkillTrustPromptAbort?.abort();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
@@ -9272,6 +9297,97 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		this.promptProjectSkillTrust();
+	}
+
+	/**
+	 * Ask for a trust decision on this project's Python skills when one is still
+	 * needed and a UI is bound. Not awaited: the selector waits on the user while
+	 * the client finishes starting up, and the kernel keeps prewarming without the
+	 * project skills. Safe to call again, e.g. when a UI client attaches to a
+	 * daemon session whose bind-time prompt had nobody to answer it.
+	 */
+	promptProjectSkillTrust(): void {
+		void this._promptProjectSkillTrust();
+	}
+
+	/** Trust state of this project's Python skills and the skills it applies to. */
+	getProjectSkillTrust(): ProjectSkillTrustStatus {
+		return describeProjectSkillTrust(
+			this._resourceLoader.getSkills().skills,
+			this._projectSkillTrust.getDecision(this._cwd),
+		);
+	}
+
+	/**
+	 * Persist a trust decision for this project's Python skills and rebuild the
+	 * runtime so the kernel picks up (or drops) the project packages.
+	 */
+	setProjectSkillTrust(decision: ProjectSkillTrustChoice): void {
+		this._projectSkillTrust.setDecision(this._cwd, decision);
+		this._rebuildRuntimeForSkillChange();
+	}
+
+	private _rebuildRuntimeForSkillChange(): void {
+		this._buildRuntime({
+			activeToolNames: this.getActiveToolNames(),
+			includeAllExtensionTools: true,
+		});
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
+	/**
+	 * Only prompts when a UI is bound. Headless modes (print, JSON, ACP, subagents)
+	 * never prompt, so an undecided project stays untrusted there.
+	 */
+	private async _promptProjectSkillTrust(): Promise<void> {
+		if (this._projectSkillTrustPromptAbort || this._projectSkillTrustDeferred) return;
+		if (this._rlmDepth > 0 || this._disposed || this._disposing) return;
+		const ui = this._extensionUIContext;
+		if (!ui || !this._extensionRunner.hasUI()) return;
+		const status = this.getProjectSkillTrust();
+		if (status.skills.length === 0 || status.decision !== "undecided") return;
+		const abort = new AbortController();
+		this._projectSkillTrustPromptAbort = abort;
+		const names = status.skills.map((skill) => skill.name);
+		let choice: string | undefined;
+		try {
+			choice = await ui.select(
+				formatProjectSkillTrustPrompt(names),
+				[PROJECT_SKILL_TRUST_CHOICES.trust, PROJECT_SKILL_TRUST_CHOICES.notNow, PROJECT_SKILL_TRUST_CHOICES.never],
+				{ signal: abort.signal },
+			);
+		} catch {
+			return;
+		} finally {
+			if (this._projectSkillTrustPromptAbort === abort) this._projectSkillTrustPromptAbort = undefined;
+		}
+		if (abort.signal.aborted || this._disposed || this._disposing) return;
+		// Dismissed, or no client could answer (a daemon session bound before its
+		// client attached): stay undecided and ask again when a UI shows up.
+		if (choice === undefined) return;
+		if (choice === PROJECT_SKILL_TRUST_CHOICES.trust) {
+			this.setProjectSkillTrust("trusted");
+			ui.notify(
+				`Trusted project Python skills: ${names.join(", ")}. Installing them into the project kernel.`,
+				"info",
+			);
+			return;
+		}
+		if (choice === PROJECT_SKILL_TRUST_CHOICES.never) {
+			this._projectSkillTrust.setDecision(this._cwd, "denied");
+			ui.notify(
+				`Project Python skills stay disabled for this project: ${names.join(", ")}. Run /${PROJECT_SKILL_TRUST_COMMAND} on to enable them.`,
+				"info",
+			);
+			return;
+		}
+		this._projectSkillTrustDeferred = true;
+		ui.notify(
+			`Project Python skills are disabled this session: ${names.join(", ")}. Run /${PROJECT_SKILL_TRUST_COMMAND} on to enable them.`,
+			"warning",
+		);
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -9699,7 +9815,9 @@ export class AgentSession {
 	 * and compact skills are withheld when disabled for this session.
 	 */
 	private _modelVisibleSkills(): Skill[] {
-		let skills = this._resourceLoader.getSkills().skills;
+		let skills = applyProjectSkillTrust(this._resourceLoader.getSkills().skills, () =>
+			this._projectSkillTrust.getDecision(this._cwd),
+		);
 		if (!this._includeGoals) {
 			skills = skills.filter((skill) => skill.name !== GOAL_SKILL_NAME);
 		}

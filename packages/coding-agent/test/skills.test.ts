@@ -286,6 +286,7 @@ describe("skills", () => {
 					importName: "python_skill",
 					packagePath: skillDir,
 					pyprojectPath: join(skillDir, "pyproject.toml"),
+					scope: "temporary",
 				},
 			]);
 			expect(diagnostics).toHaveLength(0);

@@ -9,6 +9,7 @@ export {
 	hasFileBasedHerdrIntegration,
 	herdrAgentStateExtension,
 } from "./builtin/herdr-agent-state.js";
+export { createProjectSkillTrustExtension } from "./builtin/project-skill-trust.js";
 export {
 	createExtensionRuntime,
 	discoverAndLoadExtensions,

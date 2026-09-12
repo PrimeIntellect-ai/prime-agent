@@ -298,6 +298,7 @@ export class ReplKernelManager {
 				(await ensureKernelPython({
 					pythonSkills: this.options.pythonSkills,
 					onProgress: startOptions.onBootstrapProgress,
+					projectDir: this.options.cwd,
 				}));
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			this.options.python = python;

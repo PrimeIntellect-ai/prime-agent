@@ -17,6 +17,10 @@ import type { AgentAutonomousConfig } from "../../src/core/autonomous.js";
 import type { ExtensionRunner } from "../../src/core/extensions/index.js";
 import { convertToLlm, HARNESS_DIGEST_CUSTOM_TYPE } from "../../src/core/messages.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
+import {
+	createInMemoryProjectSkillTrustStore,
+	type ProjectSkillTrustStore,
+} from "../../src/core/project-skill-trust.js";
 import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import type { Settings } from "../../src/core/settings-manager.js";
@@ -88,6 +92,8 @@ export interface HarnessOptions {
 	autoRefineReviewer?: AutoRefineReviewer;
 	serializedRefine?: boolean;
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Trust store for project Python skills. Default: in-memory (never the user's real store). */
+	projectSkillTrust?: ProjectSkillTrustStore;
 }
 
 export interface Harness {
@@ -217,6 +223,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		projectSkillTrust: options.projectSkillTrust ?? createInMemoryProjectSkillTrustStore(),
 	});
 
 	const events: AgentSessionEvent[] = [];
