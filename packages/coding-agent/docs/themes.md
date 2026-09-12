@@ -79,9 +79,12 @@ vim ~/.prime/agent/themes/my-theme.json
     "toolPendingBg": "#1e1e2e",
     "toolSuccessBg": "#1e2e1e",
     "toolErrorBg": "#2e1e1e",
+    "toolDiffAddedBg": "#0a2f0a",
+    "toolDiffRemovedBg": "#2f0a0a",
     "toolPanelBg": "#2d2d38",
     "toolTitle": "primary",
     "toolOutput": "",
+    "mdBody": "",
     "mdHeading": "#ffaa00",
     "mdLink": "primary",
     "mdLinkUrl": "secondary",
@@ -94,6 +97,7 @@ vim ~/.prime/agent/themes/my-theme.json
     "mdListBullet": "#00ffff",
     "toolDiffAdded": "#00ff00",
     "toolDiffRemoved": "#ff0000",
+    "toolDiffText": "secondary",
     "toolDiffContext": "secondary",
     "syntaxComment": "secondary",
     "syntaxKeyword": "primary",
@@ -140,13 +144,13 @@ vim ~/.prime/agent/themes/my-theme.json
 
 - `name` is required and must be unique.
 - `vars` is optional. Define reusable colors here, then reference them in `colors`.
-- `colors` must define all 51 required tokens.
+- `colors` must define all required tokens. `mdBody` is optional and defaults to `text`.
 
 The `$schema` field enables editor auto-completion and validation.
 
 ## Color Tokens
 
-Every theme must define all 51 color tokens. There are no optional colors.
+Every theme must define the color tokens below except `mdBody`, which defaults to `text` when omitted.
 
 ### Core UI (11 colors)
 
@@ -164,7 +168,7 @@ Every theme must define all 51 color tokens. There are no optional colors.
 | `text` | Default text (usually `""`) |
 | `thinkingText` | Thinking block text |
 
-### Backgrounds & Content (12 colors)
+### Backgrounds & Content (14 colors)
 
 | Token | Purpose |
 |-------|---------|
@@ -177,14 +181,17 @@ Every theme must define all 51 color tokens. There are no optional colors.
 | `toolPendingBg` | Tool box (pending) |
 | `toolSuccessBg` | Tool box (success) |
 | `toolErrorBg` | Tool box (error) |
+| `toolDiffAddedBg` | Added-line background in tool diffs |
+| `toolDiffRemovedBg` | Removed-line background in tool diffs |
 | `toolPanelBg` | Tool panel background |
 | `toolTitle` | Tool title |
 | `toolOutput` | Tool output text |
 
-### Markdown (10 colors)
+### Markdown (11 colors)
 
 | Token | Purpose |
 |-------|---------|
+| `mdBody` | Assistant output body text (optional; defaults to `text`) |
 | `mdHeading` | Headings |
 | `mdLink` | Link text |
 | `mdLinkUrl` | Link URL |
@@ -196,12 +203,13 @@ Every theme must define all 51 color tokens. There are no optional colors.
 | `mdHr` | Horizontal rule |
 | `mdListBullet` | List bullets |
 
-### Tool Diffs (3 colors)
+### Tool Diffs (4 colors)
 
 | Token | Purpose |
 |-------|---------|
 | `toolDiffAdded` | Added lines |
 | `toolDiffRemoved` | Removed lines |
+| `toolDiffText` | Text on added and removed diff backgrounds |
 | `toolDiffContext` | Context lines |
 
 ### Syntax Highlighting (9 colors)

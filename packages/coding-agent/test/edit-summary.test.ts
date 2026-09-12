@@ -141,14 +141,15 @@ describe("edit summaries", () => {
 describe("formatFileChangeSummaryLine", () => {
 	beforeAll(() => initTheme("dark"));
 
-	test("keeps the truncated path stable when the ctrl+j hint flips", () => {
-		const change = { added: 3, removed: 1 };
-		const path = "src/some/deeply/nested/directory/with-a-long-file-name.ts";
-		const width = 44;
-		const pathPart = (line: string) => stripAnsi(line).replace(/\s*\+\d+ -\d+.*$/, "");
-		const expanded = formatFileChangeSummaryLine(path, undefined, change, true, width);
-		const collapsed = formatFileChangeSummaryLine(path, undefined, change, false, width);
-		expect(stripAnsi(expanded)).toContain("…");
-		expect(pathPart(expanded)).toBe(pathPart(collapsed));
+	test("preserves change counts when truncating a path without shortcut hints", () => {
+		const line = formatFileChangeSummaryLine(
+			"src/some/deeply/nested/directory/with-a-long-file-name.ts",
+			undefined,
+			{ added: 3, removed: 1 },
+			44,
+		);
+		expect(stripAnsi(line)).toContain("…");
+		expect(stripAnsi(line)).toMatch(/\+3 -1$/);
+		expect(stripAnsi(line)).not.toContain("Ctrl+O");
 	});
 });

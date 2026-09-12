@@ -106,21 +106,25 @@ describe("ENG-4533 recap layout", () => {
 
 		expect(previous).toHaveLength(2);
 		expect(updated).toHaveLength(2);
-		expect(stripAnsi(updated[0] ?? "")).toContain("Recap: Preparing the fix plan");
+		expect(stripAnsi(updated[1] ?? "")).toContain("Recap: Preparing the fix plan");
 	});
 
-	it("does not reserve blank space before the first recap", () => {
+	it("shows the detail status before the first recap", () => {
 		const mode = createRenderMode();
 
-		expect(render(mode)).toEqual([]);
+		expect(render(mode)).toHaveLength(2);
+		expect(stripAnsi(render(mode)[1] ?? "")).toContain("Collapsed mode");
 	});
 
 	it("keeps long recaps to one row on narrow terminals", () => {
 		const mode = createRenderMode("Reviewing the implementation and preparing a clean regression test");
+		Object.assign(mode, { getPromptContextLabel: () => undefined });
 		const lines = render(mode, 24);
 
 		expect(lines).toHaveLength(2);
-		expect(visibleWidth(lines[0] ?? "")).toBe(24);
-		expect(stripAnsi(lines[0] ?? "")).toContain("Recap:");
+		expect(visibleWidth(lines[1] ?? "")).toBe(24);
+		expect(stripAnsi(lines[1] ?? "")).toContain("Recap:");
+		expect(stripAnsi(lines[1] ?? "").trimEnd()).toMatch(/…$/);
+		expect(lines[0]).toBe("");
 	});
 });

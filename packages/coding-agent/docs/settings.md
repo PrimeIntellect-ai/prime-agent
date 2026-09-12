@@ -18,7 +18,6 @@ Edit directly or use `/settings` for common options.
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
-| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
 #### thinkingBudgets
@@ -35,6 +34,8 @@ Edit directly or use `/settings` for common options.
 ```
 
 ### UI & Display
+
+Conversation output starts in overview. Ctrl+O cycles through details and all output; the old `hideThinkingBlock` setting no longer controls visibility.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|

@@ -1,0 +1,20 @@
+- Changed model, provider, and MCP pickers to compact inline lists with responsive search and keyboard navigation.
+- Added selected-model catalog prices for input, cached input, and output per million tokens.
+- Split the configuration menu into separate single-purpose pickers and dropped the tab bar and tab navigation; each command opens only its own picker.
+- Changed model rows to right-align the provider label with a require sign in hint beside it, and to list signed-in providers first with Prime Inference pinned on top when signed in.
+- Added per-model effort squares to the models picker; left/right adjusts the highlighted model's reasoning level and Enter applies the model and effort together.
+- Fixed the models picker search to keep signed-in providers above unsigned matches, with Prime Inference pinned on top of the signed-in group.
+- Softened the selected row highlight in menu pickers: the selection background blends toward the editor surface and the selected label renders bold instead of accent-colored.
+- Refined the effort squares: clusters align across rows with arrow hints on the highlighted row, spaced squares in a stronger purple, and the selected level labeled beside them.
+- Folded the USD per million tokens unit into the model detail header line and left clear whitespace at the end of the detail block.
+- Rounded model picker token prices to at most three decimals, showing sub-$0.001 rates as <0.001 instead of a misleading $0.
+- Centered the models picker effort cluster near the row midpoint with square glyphs; fills render light gray and reserve the saturated purple for the highlighted row.
+- Removed the explanatory title and subtitle lines from the model, provider, and MCP pickers; the search row now leads each picker.
+- Moved the model detail pricing unit onto the price row as "dollars per 1 million tokens" and left the provider/model line bare.
+- Fixed the effort cluster so changing the level never shifts the row; the level label renders in a fixed-width cell sized to the longest supported level name.
+- Refined the model picker effort marks to the larger medium-square glyphs, softened the effort purple, and shortened the pricing unit to "$ / 1M tokens".
+- Dropped the provider/model-id line from the inline model detail block; the prices now follow the list row directly.
+- Settled the effort marks on the filled ■ and empty □ squares, the largest square pair the terminal fonts cover.
+- Tightened the effort square spacing; the squares now render edge to edge and the cluster stays centered.
+- Fixed model selection retaining focus until the model and explicitly selected effort finish applying, preserving the default effort when it is untouched.
+- Fixed arrow keys editing model searches and removed the unused configuration-tab binding.

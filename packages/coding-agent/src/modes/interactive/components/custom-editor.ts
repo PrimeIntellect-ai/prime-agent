@@ -24,7 +24,6 @@ export interface CustomEditorOptions extends EditorOptions {
 export class CustomEditor extends Editor {
 	private keybindings: KeybindingsManager;
 	private defaultPromptPrefix: string;
-	private readonly configuredPaddingX: number;
 	private placeholder: string | undefined;
 	private readonly placeholderColor: (text: string) => string;
 	private readonly isArgumentCommand: (name: string) => boolean;
@@ -47,7 +46,6 @@ export class CustomEditor extends Editor {
 		super(tui, theme, { ...options, promptPrefix });
 		this.keybindings = keybindings;
 		this.defaultPromptPrefix = promptPrefix;
-		this.configuredPaddingX = options?.paddingX ?? 0;
 		this.placeholder = options?.placeholder;
 		this.placeholderColor = options?.placeholderColor ?? ((text) => text);
 		this.isArgumentCommand = options?.isArgumentCommand ?? (() => false);
@@ -284,7 +282,7 @@ export class CustomEditor extends Editor {
 
 	private getEffectivePaddingX(width: number): number {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
-		const configuredPaddingX = Math.min(this.configuredPaddingX, maxPadding);
+		const configuredPaddingX = Math.min(this.getPaddingX(), maxPadding);
 		return this.backgroundColor !== undefined
 			? Math.min(Math.max(configuredPaddingX, 2), maxPadding)
 			: configuredPaddingX;

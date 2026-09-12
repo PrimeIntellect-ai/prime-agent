@@ -853,14 +853,7 @@ describe("AgentsViewMode", () => {
 			expect(render("with-model")).toContain("glm-4.7");
 			expect(render("bare")).toMatch(/\s-\s/);
 			expect(render("bare")).not.toContain("glm-4.7");
-			// The actions panel shows the same recorded model instead of "unknown".
-			Reflect.set(
-				view,
-				"selectedIndex",
-				rows.findIndex((row) => row.summary.sessionId === "with-model"),
-			);
-			const actions = (invoke("renderActions", view, 120) as string[]).map(stripAnsi).join("\n");
-			expect(actions).toContain("Model: prime-inference/glm-4.7");
+			expect(Reflect.get(AgentsViewMode.prototype, "renderActions")).toBeUndefined();
 		} finally {
 			stopThemeWatcher();
 		}
@@ -900,14 +893,127 @@ describe("AgentsViewMode", () => {
 			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
 			const lines = rendered.map(stripAnsi);
 			expect(lines.filter((line) => /Model/.test(line) && /Age/i.test(line))).toHaveLength(1);
-			expect(lines.some((line) => line.startsWith("Running"))).toBe(true);
-			expect(lines.some((line) => line.startsWith("Idle"))).toBe(true);
+			expect(rendered[0]).toBe(
+				theme.bold(buildCompactAgentsViewLayout(Reflect.get(view, "rows") as AgentsViewRow[], 120).legend),
+			);
+			expect(lines[1]).toBe("");
+			expect(lines[2]).toBe("Running (1)");
+			expect(rendered[2]).toContain(theme.fg("muted", "Running (1)"));
+			expect(lines).toContain("Idle (1)");
+			expect(lines).not.toContain("Inactive (0)");
 			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
 			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
 			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
 			for (const line of rendered) {
 				expect(invoke("finalizeRenderedLine", view, line, 120)).not.toContain("\x1b[48");
 			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders a shared color-coded status circle for idle and inactive rows", () => {
+		const summaries = [
+			summary({
+				id: "busy",
+				activeSessionId: "busy",
+				sessionId: "busy-session",
+				sessionName: "busy",
+				activity: "working",
+				isStreaming: true,
+			}),
+			summary({
+				id: "idle",
+				activeSessionId: "idle",
+				sessionId: "idle-session",
+				sessionName: "idle",
+				sessionFile: "/tmp/idle.jsonl",
+			}),
+		];
+		const archived: AgentConnectionSavedSessionInfo = {
+			id: "archived",
+			path: "/tmp/archived.jsonl",
+			cwd: "/tmp/project",
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 2,
+			firstMessage: "Fix authentication",
+			allMessagesText: "",
+			name: "archived session",
+		};
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		try {
+			Reflect.set(view, "lastListedSummaries", summaries);
+			Reflect.set(view, "savedSessions", [archived]);
+			invoke("reconcileCatalogs", view);
+			Reflect.set(view, "selectedIndex", -1);
+			Reflect.set(view, "ui", { terminal: { rows: 60 }, requestRender: () => {} });
+			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
+			const output = rendered.map(stripAnsi).join("\n");
+			expect(output).toContain("Running (1)");
+			expect(output).toContain("Idle (1)");
+			expect(output).toContain("Inactive (1)");
+			const runningRow = rendered.find((line) => stripAnsi(line).includes("busy"))!;
+			const idleRow = rendered.find((line) => stripAnsi(line).includes("idle"))!;
+			const inactiveRow = rendered.find((line) => stripAnsi(line).includes("archived session"))!;
+			expect(runningRow).toContain(theme.bold("◇"));
+			expect(idleRow).toContain(theme.bold(theme.fg("warning", "•")));
+			expect(inactiveRow).toContain(theme.bold(theme.fg("dim", "•")));
+			expect(stripAnsi(runningRow)).toMatch(/◇ busy/u);
+			expect(stripAnsi(idleRow)).toMatch(/• idle/u);
+			expect(stripAnsi(inactiveRow)).toMatch(/• archived session/u);
+			expect(output).not.toContain("●");
+			expect(output).not.toContain("✓");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("omits empty status categories and keeps feedback when no sessions match", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		const finish = vi.fn();
+		Reflect.set(view, "finish", finish);
+		const render = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
+		const expectEmptyList = (message: string) => {
+			expect(render()).toEqual([message]);
+			expect(Reflect.get(view, "rows")).toEqual([]);
+			invoke("moveSelection", view, 1);
+			invoke("openSelected", view);
+			expect(finish).not.toHaveBeenCalled();
+		};
+		try {
+			invoke("reconcileCatalogs", view);
+			expectEmptyList("No sessions yet.");
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "Review changes" })]);
+			invoke("reconcileCatalogs", view);
+			expect(render()).not.toContain("Running (0)");
+			expect(render()).toContain("Idle (1)");
+			expect(render()).not.toContain("Inactive (0)");
+			invoke("setSearchQuery", view, "unmatched-session");
+			expectEmptyList("No sessions match your search.");
+			invoke("setSearchQuery", view, "");
+			invoke("moveSelection", view, 1);
+			invoke("openSelected", view);
+			expect(finish).toHaveBeenCalledWith(
+				expect.objectContaining({ summary: expect.objectContaining({ sessionName: "Review changes" }) }),
+			);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it.each(["replyTarget", "renameTarget"])("uses the preserved search for empty-state copy during %s", (target) => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		try {
+			Reflect.set(view, target, { summary: summary() });
+			Reflect.set(view, "actionModeSearchQuery", "");
+			Reflect.set(view, "editor", { getText: () => "a reply or new name" });
+			expect((invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi)).toEqual(["No sessions yet."]);
+			Reflect.set(view, "actionModeSearchQuery", "missing session");
+			Reflect.set(view, "editor", { getText: () => "" });
+			expect((invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi)).toEqual([
+				"No sessions match your search.",
+			]);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -1013,31 +1119,123 @@ describe("AgentsViewMode", () => {
 			Reflect.set(view, "selectedIndex", rows.length - 1);
 			Reflect.set(view, "ui", { terminal: { rows: 13 }, requestRender: () => {} });
 			const lines = (invoke("renderSessionRows", view, 120, 4) as string[]).map(stripAnsi);
-			expect(lines[1]).toContain("...");
+			expect(lines[1]).toBe("");
+			expect(lines[2]).toContain("...");
 			expect(lines).toHaveLength(4);
 			const lastTitle = rows.at(-1)!.title;
 			expect(lines.some((line) => line.includes(lastTitle))).toBe(true);
+			for (let maxRows = 1; maxRows <= 10; maxRows += 1) {
+				for (let selectedIndex = 0; selectedIndex < rows.length; selectedIndex += 1) {
+					Reflect.set(view, "selectedIndex", selectedIndex);
+					const viewport = invoke("renderSessionRows", view, 120, maxRows) as string[];
+					const selected = viewport.filter((line) => line.includes("\0agents-view-selected-row\0"));
+					expect(viewport.length).toBeLessThanOrEqual(maxRows);
+					expect(selected).toHaveLength(1);
+					expect(selected[0]).toContain(rows[selectedIndex]!.title);
+				}
+			}
 		} finally {
 			stopThemeWatcher();
 		}
 	});
 
-	it("reveals usage details through actions and closes them before searching", () => {
+	it("strips provider prefixes from compact row model labels", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
 		try {
 			Reflect.set(view, "lastListedSummaries", [
-				summary({ sessionName: "parent", usage: { inputTokens: 1234, outputTokens: 56, cost: 1.23 } }),
+				summary({
+					model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "internal/glm-5.3-fast" },
+					usage: { inputTokens: 100, outputTokens: 10, cost: 0.12 },
+				}),
 			]);
 			invoke("reconcileCatalogs", view);
-			view.handleInput("?");
-			const actions = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-			expect(actions).toContain("1234 in");
-			expect(actions).toContain("$1.23");
-			view.handleInput("p");
-			expect(Reflect.get(view, "showActions")).toBe(false);
 			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-			expect(rows).toContain("parent");
-			expect(rows).not.toContain("1234 in");
+			expect(rows).toContain("glm-5.3-fast");
+			expect(rows).not.toContain("internal/");
+			expect(rows).not.toContain("prime-inference");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps search to a quiet single row and reports nested depth in three metadata lines", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+		try {
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "Review changes" })]);
+			invoke("reconcileCatalogs", view);
+			const prompt = invoke("renderPrompt", view, 80) as string[];
+			expect(prompt).toHaveLength(1);
+			expect(stripAnsi(prompt[0]!)).toContain("Search sessions");
+			expect(prompt[0]).not.toContain("\x1b[48;");
+			const globalLines = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi);
+			const searchIndex = globalLines.findIndex((line) => line.includes("Search sessions"));
+			expect(globalLines[searchIndex - 1]).toBe("");
+			expect(globalLines[searchIndex - 2]!.trim()).not.toBe("");
+			expect(globalLines[searchIndex + 1]).toBe("");
+			expect(globalLines[searchIndex + 2]).toMatch(/Session\s+Model/);
+			expect(globalLines.join("\n")).not.toContain("All sessions");
+			expect(globalLines.join("\n")).not.toContain("back ·");
+			expect(globalLines.filter((line) => /prime agent|agents \d|cwd /.test(line))).toHaveLength(3);
+			expect(globalLines.join("\n")).toContain("cwd /tmp");
+			expect(globalLines.join("\n")).not.toMatch(/depth\s+|model\s+/);
+			for (let height = 1; height <= 6; height += 1) {
+				const shortLines = (invoke("renderContent", view, 80, height) as string[]).map(stripAnsi);
+				expect(shortLines.length).toBeLessThanOrEqual(height);
+				expect(shortLines.join("\n")).toContain("Search sessions");
+				if (height > 1) expect(shortLines.join("\n")).toContain("Review changes");
+			}
+			Reflect.set(view, "scopeRootSummary", summary({ sessionName: "Fix authentication", rlmDepth: 3 }));
+			for (const width of [40, 100]) {
+				const lines = (invoke("renderContent", view, width, 40) as string[]).map(stripAnsi);
+				expect(lines.filter((line) => /prime agent|agents \d|depth /.test(line))).toHaveLength(3);
+				expect(lines.join("\n")).toContain("depth 4");
+				expect(lines.join("\n")).not.toMatch(/scope\s+|cwd\s+|model\s+/);
+				if (width === 100) expect(lines.join("\n")).toContain("← back · Fix authentication › subagents");
+			}
+			Reflect.set(view, "scopeRootSummary", undefined);
+			const restored = (invoke("renderContent", view, 100, 40) as string[]).map(stripAnsi).join("\n");
+			expect(restored).toContain("cwd /tmp");
+			expect(restored).not.toContain("depth ");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps abandoned saved entries out of rows and section counts before, during, and after search", () => {
+		const abandoned: AgentConnectionSavedSessionInfo = {
+			path: "/tmp/abandoned.jsonl",
+			id: "abandoned-session",
+			cwd: "/tmp/project",
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			firstMessage: "(no messages)",
+			allMessagesText: "",
+		};
+		const persistentState: AgentsViewPersistentState = { savedCatalogLoaded: true, savedSessions: [abandoned] };
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+		try {
+			Reflect.set(view, "lastListedSummaries", [summary({ sessionName: "active", messageCount: 0 })]);
+			invoke("reconcileCatalogs", view);
+			const rowIds = () => (Reflect.get(view, "rows") as AgentsViewRow[]).map((row) => row.summary.sessionId);
+			const expectNoAbandonedRows = () => {
+				expect(rowIds()).not.toContain("abandoned-session");
+				const rendered = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
+				expect(rendered).not.toContain("Inactive");
+				expect(rendered).not.toContain("(no messages)");
+				expect(invoke("getAgentCountsText", view)).toBe(`0 running, ${rowIds().length} idle, 0 inactive`);
+			};
+			expect(rowIds()).toEqual(["scope-session"]);
+			expectNoAbandonedRows();
+			for (const query of ["abandoned-session", "(no messages)", "project", "active"]) {
+				invoke("setSearchQuery", view, query);
+				expectNoAbandonedRows();
+			}
+			expect(rowIds()).toEqual(["scope-session"]);
+			invoke("setSearchQuery", view, "");
+			expect(rowIds()).toEqual(["scope-session"]);
+			expectNoAbandonedRows();
+			expect(persistentState.savedSessions).toEqual([abandoned]);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -1069,7 +1267,9 @@ describe("AgentsViewMode", () => {
 			Reflect.set(view, "lastListedSummaries", [parent, child, secondChild]);
 			invoke("reconcileCatalogs", view);
 			expect(rows()).toHaveLength(1);
-			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▸");
+			const collapsedRow = invoke("renderRow", view, rows()[0], 120) as string;
+			expect(collapsedRow).not.toContain("▸");
+			expect(collapsedRow).not.toContain("▾");
 			const collapsed = lines();
 			const parentIndex = collapsed.findIndex((line) => line.includes("parent"));
 			expect(collapsed[parentIndex + 1]).toBe("  2 subagents running");
@@ -1078,7 +1278,9 @@ describe("AgentsViewMode", () => {
 			view.handleInput("\x1b[1;3C");
 			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent", "subagent"]);
 			expect(lines().join("\n")).not.toContain("subagents running");
-			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▾");
+			const expandedRow = invoke("renderRow", view, rows()[0], 120) as string;
+			expect(expandedRow).not.toContain("▸");
+			expect(expandedRow).not.toContain("▾");
 			view.handleInput("\x1b[1;3C");
 			expect(rows()).toHaveLength(1);
 			expect(lines()).toContain("  2 subagents running");

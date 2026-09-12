@@ -1,4 +1,5 @@
 import { type Component, TruncatedText, visibleWidth } from "@earendil-works/pi-tui";
+import chalk from "chalk";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
@@ -86,6 +87,28 @@ describe("MenuPanel", () => {
 		expect(stripAnsi(lines.at(-1) ?? "").trim()).toBe("");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBe(40);
+		}
+	});
+
+	it("renders selected rows with a bold non-accent primary and a soft highlight", () => {
+		const previousChalkLevel = chalk.level;
+		chalk.level = 3;
+		try {
+			const fullRow = new MenuRow({ primary: "openai/gpt-5", secondary: "openai", selected: true });
+			const fullOutput = fullRow.render(40).join("\n");
+			expect(stripAnsi(fullOutput)).toContain("openai/gpt-5");
+			expect(fullOutput).toContain("\x1b[1m");
+			expect(fullOutput).not.toContain(theme.getFgAnsi("accent"));
+			expect(fullOutput).toContain(theme.getBgAnsi("selectedBg"));
+
+			const inlineRow = new MenuRow({ primary: "GPT 5.5", trailing: ["openai"], selected: true, inline: true });
+			const inlineOutput = inlineRow.renderContent(80).join("\n");
+			expect(stripAnsi(inlineOutput)).toContain("GPT 5.5");
+			expect(inlineOutput).toContain("\x1b[1m");
+			expect(inlineOutput).not.toContain(theme.getFgAnsi("accent"));
+			expect(inlineOutput).toContain(theme.getBgAnsi("selectedBg"));
+		} finally {
+			chalk.level = previousChalkLevel;
 		}
 	});
 

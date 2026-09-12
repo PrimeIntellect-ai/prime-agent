@@ -1,0 +1,4 @@
+- Changed refinement notices to show a spaced purple status line and softer semantic summary in overview and details, with full change counts and diffs in all output.
+- Added expandable Title and Description diffs with the same red and green backgrounds as file edits, preserving other fields and failure details.
+- Changed successful compaction notices to show a purple Context compacted header and softer summary preview, with the full summary and token/focus metadata in all output.
+- Fixed refinement notices to stay purple across themes and avoid extra blank lines before following prose.

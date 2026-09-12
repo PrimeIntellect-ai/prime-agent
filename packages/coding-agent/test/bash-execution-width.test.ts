@@ -1,7 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 /** Minimal TUI stub that only exposes terminal.columns */
 function createTuiStub(columns: number): { columns: number; stub: any } {
@@ -74,6 +75,23 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		}
 	});
 
+	it("expands long completed output without leaving an empty hint row", () => {
+		const { stub } = createTuiStub(120);
+		const component = new BashExecutionComponent("print-lines", stub);
+		component.appendOutput(Array.from({ length: 25 }, (_, index) => `line ${index}`).join("\n"));
+		component.setComplete(0, false);
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("... 5 more lines");
+		expect(collapsed).not.toContain("Ctrl+O");
+
+		component.setExpanded(true);
+		const expanded = component.render(120).map((line) => stripAnsi(line).trimEnd());
+		expect(expanded.join("\n")).toContain("line 0");
+		expect(expanded.join("\n")).not.toContain("more lines");
+		expect(expanded.join("\n")).not.toContain("Ctrl+O");
+		expect(expanded.at(-2)?.trim()).toBe("line 24");
+	});
+
 	it("renders an inline failure state via setFailed", () => {
 		const { stub } = createTuiStub(120);
 		const component = new BashExecutionComponent("boom", stub);
@@ -86,5 +104,15 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 			.join("\n");
 		expect(rendered).toContain("failed: spawn failure");
 		expect(rendered).not.toContain("Running...");
+	});
+
+	it("renders the command header at normal weight with its color kept", () => {
+		const { stub } = createTuiStub(120);
+		const component = new BashExecutionComponent("npm test", stub);
+		component.setComplete(0, false);
+
+		const raw = component.render(120).join("\n");
+		expect(raw).toContain(theme.fg("bashMode", "$ npm test"));
+		expect(raw).not.toContain("[1m");
 	});
 });

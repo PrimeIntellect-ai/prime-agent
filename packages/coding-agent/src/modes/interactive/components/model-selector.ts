@@ -1,4 +1,10 @@
-import { type Model, modelsAreEqual } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	getSupportedThinkingLevels,
+	type Model,
+	type ModelThinkingLevel,
+	modelsAreEqual,
+} from "@earendil-works/pi-ai";
 import {
 	type Component,
 	Container,
@@ -8,11 +14,15 @@ import {
 	Spacer,
 	Text,
 	type TUI,
+	truncateToWidth,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.js";
+import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.js";
 import { theme } from "../theme/theme.js";
 import { keyHint } from "./keybinding-hints.js";
 import {
+	getInlineTrailingWidth,
 	getMenuListLayout,
 	MenuList,
 	MenuPanel,
@@ -112,18 +122,34 @@ export interface ModelSelectorOptions {
 	subtitle?: string;
 	getRows?: () => number;
 	recentModels?: ReadonlyArray<string>;
+	inline?: boolean;
+	thinkingLevel?: ModelThinkingLevel;
 }
 
 type ModelScope = "all" | "scoped";
 
 const PREFERRED_VISIBLE_MODELS = 10;
 const MODEL_LIST_RESERVED_ROWS = {
-	base: 7,
+	base: 4,
 	detail: 2,
 };
 const MODEL_SCROLL_INDICATOR_ROWS = 1;
 const MODEL_HELP_MIN_ROWS = 12;
 const MODEL_DETAIL_MIN_ROWS = 14;
+const EFFORT_NAME_COLUMN_MAX = 30;
+const EFFORT_NAME_COLUMN_MIN = 12;
+const PRICE_UNIT_TEXT = "$ / 1M tokens";
+/** Wide detail columns must still fit the longest label, "Cached input". */
+const PRICE_COLUMN_MIN_WIDTH = 13;
+
+interface EffortLayout {
+	nameColumn: number;
+	squareSlots: number;
+	gap: number;
+	labelWidth: number;
+	showLabel: boolean;
+	showCluster: boolean;
+}
 
 /**
  * Component that renders a model selector with search
@@ -149,12 +175,18 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private searchQuery = "";
 	private currentModel?: Model<any>;
 	private modelRegistry: ModelRegistry;
-	private onSelectCallback: (model: Model<any>) => void;
+	private onSelectCallback: (model: Model<any>, thinkingLevel?: ModelThinkingLevel) => void;
 	private onCancelCallback: () => void;
 	private availableModels?: ReadonlyArray<Model<any>>;
 	private configuredProviders?: ReadonlySet<string>;
 	private recentRank: Map<string, number>;
 	private errorMessage?: string;
+	private configuredAuth = new Map<string, boolean>();
+	private readonly effortLevels = new Map<string, ModelThinkingLevel>();
+	private readonly editedEffortModels = new Set<string>();
+	private initialThinkingLevel?: ModelThinkingLevel;
+	private readonly inline: boolean;
+	private renderWidth = 80;
 	private tui: TUI;
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
 	private scope: ModelScope = "all";
@@ -178,7 +210,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		currentModel: Model<any> | undefined,
 		modelRegistry: ModelRegistry,
 		scopedModels: ReadonlyArray<ScopedModelItem>,
-		onSelect: (model: Model<any>) => void,
+		onSelect: (model: Model<any>, thinkingLevel?: ModelThinkingLevel) => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
 		options: ModelSelectorOptions = {},
@@ -186,6 +218,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		super();
 
 		this.tui = tui;
+		this.inline = options.inline === true;
 		this.currentModel = currentModel;
 		this.modelRegistry = modelRegistry;
 		this.scopedModels = scopedModels;
@@ -194,18 +227,20 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.onCancelCallback = onCancel;
 		this.availableModels = options.availableModels;
 		this.configuredProviders = options.configuredProviders;
+		this.initialThinkingLevel = options.thinkingLevel;
 		this.recentRank = new Map((options.recentModels ?? []).map((key, i) => [key, i]));
 		this.viewport = { getRows: options.getRows };
 		this.getHeaderRows = options.header ? (options.getHeaderRows ?? (() => 2)) : () => 0;
 
 		this.panel = new MenuPanel({
-			title: "Models",
-			subtitle: options.subtitle ?? "All models across supported providers.",
+			title: "",
+			subtitle: options.subtitle,
+			inline: this.inline,
 		});
 		this.addChild(this.panel);
 		if (options.header) {
 			this.panel.addChild(options.header);
-			this.panel.addChild(new Spacer(1));
+			if (!this.inline) this.panel.addChild(new Spacer(1));
 		}
 
 		// Add hint about model filtering
@@ -220,7 +255,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.panel.addChild(this.headerHelpContainer);
 
 		// Create search input
-		this.searchInput = new MenuSearchInput("Search models");
+		this.searchInput = new MenuSearchInput("Search models", this.inline);
 		if (initialSearchInput) {
 			this.searchInput.setValue(initialSearchInput);
 		}
@@ -229,10 +264,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		};
 		this.panel.addChild(this.searchInput);
 
-		this.panel.addChild(new Spacer(1));
+		if (!this.inline) this.panel.addChild(new Spacer(1));
 
 		// Create list container
-		this.listContainer = new MenuList({ compact: () => this.listLayout.compact });
+		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: this.inline });
 		this.panel.addChild(this.listContainer);
 		this.updateResponsiveLayout();
 
@@ -277,6 +312,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private loadModels(): void {
 		let models: ModelItem[];
 		this.errorMessage = undefined;
+		this.configuredAuth.clear();
 
 		if (this.availableModels === undefined) {
 			this.modelRegistry.refresh();
@@ -343,7 +379,144 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private isProviderConfigured(item: ModelItem): boolean {
-		return this.configuredProviders?.has(item.provider) || this.modelRegistry.hasConfiguredAuth(item.model);
+		const key = this.getModelKey(item);
+		let configured = this.configuredAuth.get(key);
+		if (configured === undefined) {
+			configured = this.configuredProviders?.has(item.provider) || this.modelRegistry.hasConfiguredAuth(item.model);
+			this.configuredAuth.set(key, configured);
+		}
+		return configured;
+	}
+
+	private isPinnedProvider(item: ModelItem): boolean {
+		return item.provider === PRIME_INFERENCE_PROVIDER_ID && this.isProviderConfigured(item);
+	}
+
+	private getSelectableLevels(item: ModelItem): ModelThinkingLevel[] {
+		const levels = getSupportedThinkingLevels(item.model);
+		if (levels.length === 1 && levels[0] === "off") return [];
+		return levels;
+	}
+
+	private getEffort(item: ModelItem): ModelThinkingLevel | undefined {
+		const levels = this.getSelectableLevels(item);
+		if (levels.length === 0) return undefined;
+		const key = this.getModelKey(item);
+		const stored = this.effortLevels.get(key);
+		if (stored !== undefined && levels.includes(stored)) return stored;
+		const initial = this.initialThinkingLevel ?? "off";
+		const level = levels.includes(initial) ? initial : clampThinkingLevel(item.model, initial);
+		const resolved = levels.includes(level) ? level : levels[0]!;
+		this.effortLevels.set(key, resolved);
+		return resolved;
+	}
+
+	private adjustEffort(item: ModelItem, direction: number): boolean {
+		const levels = this.getSelectableLevels(item);
+		if (levels.length === 0) return false;
+		const current = this.getEffort(item) ?? levels[0]!;
+		const index = levels.indexOf(current);
+		const next = levels[(index + direction + levels.length) % levels.length]!;
+		this.effortLevels.set(this.getModelKey(item), next);
+		this.editedEffortModels.add(this.getModelKey(item));
+		return true;
+	}
+
+	private getTrailingSegments(item: ModelItem, isCurrent: boolean, isConfigured: boolean): string[] {
+		const segments: string[] = [];
+		if (isCurrent) segments.push("current");
+		if (!isConfigured) segments.push("require sign in");
+		segments.push(item.provider);
+		return segments;
+	}
+
+	private getEffortLayout(startIndex: number, endIndex: number): EffortLayout {
+		const empty: EffortLayout = {
+			nameColumn: 0,
+			squareSlots: 0,
+			gap: 0,
+			labelWidth: 0,
+			showLabel: false,
+			showCluster: false,
+		};
+		const reasoningItems: ModelItem[] = [];
+		for (let i = startIndex; i < endIndex; i++) {
+			const item = this.filteredModels[i];
+			if (item && this.getSelectableLevels(item).length > 0) reasoningItems.push(item);
+		}
+		if (reasoningItems.length === 0) return empty;
+
+		const width = this.renderWidth;
+		let maxTrailingWidth = 0;
+		for (let i = startIndex; i < endIndex; i++) {
+			const item = this.filteredModels[i];
+			if (!item) continue;
+			const segments = this.getTrailingSegments(
+				item,
+				modelsAreEqual(this.currentModel, item.model),
+				this.isProviderConfigured(item),
+			);
+			maxTrailingWidth = Math.max(maxTrailingWidth, getInlineTrailingWidth(segments, width));
+		}
+		const available = Math.max(1, width - 2 - maxTrailingWidth - 2);
+
+		const maxNameColumn = Math.min(
+			Math.max(...reasoningItems.map((item) => visibleWidth(item.model.name))),
+			EFFORT_NAME_COLUMN_MAX,
+		);
+		const squareSlots = Math.max(
+			...reasoningItems.map((item) => this.getSelectableLevels(item).filter((level) => level !== "off").length),
+		);
+		const clusterWidth = squareSlots;
+		// Fixed label cell sized to the longest supported level name, so changing
+		// the selected level never changes the cluster span or its centered gap.
+		const labelWidth = Math.max(
+			...reasoningItems.flatMap((item) => this.getSelectableLevels(item).map((level) => visibleWidth(level))),
+		);
+		// Arrow slots and the spaces around the squares and label. The ladder
+		// keeps one of those columns as the gap after the name cell, shrinks the
+		// name column next, and only then drops the label or the whole cluster,
+		// so rows stay aligned at every width.
+		const arrowsAndGaps = 6;
+		// Sit the cluster near the row's horizontal center, clamped between the
+		// name column and the trailing zone.
+		const place = (nameColumn: number, showLabel: boolean): EffortLayout => {
+			const span = clusterWidth + (showLabel ? labelWidth + 5 : 4);
+			const desired = Math.floor(width / 2 - span / 2) - 2 - nameColumn;
+			const gap = Math.max(1, Math.min(desired, available - nameColumn - span));
+			return { nameColumn, squareSlots, gap, labelWidth, showLabel, showCluster: true };
+		};
+		if (maxNameColumn + clusterWidth + labelWidth + arrowsAndGaps <= available) {
+			return place(maxNameColumn, true);
+		}
+		const labelNameColumn = available - clusterWidth - labelWidth - arrowsAndGaps;
+		if (labelNameColumn >= EFFORT_NAME_COLUMN_MIN) {
+			return place(Math.min(maxNameColumn, labelNameColumn), true);
+		}
+		if (maxNameColumn + clusterWidth + arrowsAndGaps <= available) {
+			return place(maxNameColumn, false);
+		}
+		const clusterNameColumn = available - clusterWidth - arrowsAndGaps;
+		if (clusterNameColumn >= EFFORT_NAME_COLUMN_MIN) {
+			return place(Math.min(maxNameColumn, clusterNameColumn), false);
+		}
+		return empty;
+	}
+
+	private renderEffortSquares(
+		levels: ModelThinkingLevel[],
+		effort: ModelThinkingLevel | undefined,
+		squareSlots: number,
+		selected: boolean,
+	): string {
+		const onLevels = levels.filter((level) => level !== "off");
+		if (onLevels.length === 0) return "";
+		const filledColor = selected ? theme.getEffortSquareColor() : (glyph: string) => theme.fg("muted", glyph);
+		const filled = effort === undefined || effort === "off" ? 0 : onLevels.indexOf(effort) + 1;
+		const squares = onLevels.map((_, index) => (index < filled ? filledColor("■") : theme.fg("dim", "□")));
+		// The glyphs carry their own cell padding, so render them edge to edge.
+		const marks = squares.join("");
+		return marks + " ".repeat(Math.max(0, squareSlots - visibleWidth(marks)));
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
@@ -351,6 +524,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		sorted.sort((a, b) => {
 			const configuredDiff = Number(this.isProviderConfigured(b)) - Number(this.isProviderConfigured(a));
 			if (configuredDiff !== 0) return configuredDiff;
+			const pinnedDiff = Number(this.isPinnedProvider(b)) - Number(this.isPinnedProvider(a));
+			if (pinnedDiff !== 0) return pinnedDiff;
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent !== bIsCurrent) return aIsCurrent ? -1 : 1;
@@ -398,9 +573,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			});
 			matches.sort(
 				(a, b) =>
+					Number(this.isProviderConfigured(b.item)) - Number(this.isProviderConfigured(a.item)) ||
+					Number(this.isPinnedProvider(b.item)) - Number(this.isPinnedProvider(a.item)) ||
 					a.quality - b.quality ||
 					a.score - b.score ||
-					Number(this.isProviderConfigured(b.item)) - Number(this.isProviderConfigured(a.item)) ||
 					Number(modelsAreEqual(this.currentModel, b.item.model)) -
 						Number(modelsAreEqual(this.currentModel, a.item.model)) ||
 					this.recentRankOf(a.item) - this.recentRankOf(b.item) ||
@@ -415,6 +591,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	override render(width: number): string[] {
+		this.renderWidth = width;
 		const previousLayoutKey = this.responsiveLayoutKey;
 		this.updateResponsiveLayout();
 		if (this.responsiveLayoutKey !== previousLayoutKey) {
@@ -436,6 +613,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
 
 		// Show visible slice of filtered models
+		const effortLayout = this.inline
+			? this.getEffortLayout(startIndex, endIndex)
+			: { nameColumn: 0, squareSlots: 0, gap: 0, labelWidth: 0, showLabel: false, showCluster: false };
+
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i];
 			if (!item) continue;
@@ -447,14 +628,33 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				? isCurrent
 					? theme.fg("success", "current")
 					: undefined
-				: theme.fg("warning", isCurrent ? "current · sign in" : "sign in");
+				: theme.fg("warning", isCurrent ? "current · require sign in" : "require sign in");
+			const inlineSegments = this.getTrailingSegments(item, isCurrent, isConfigured);
+			let primary = this.inline ? item.model.name : item.id;
+			if (this.inline && effortLayout.showCluster) {
+				const levels = this.getSelectableLevels(item);
+				const effort = this.getEffort(item);
+				if (levels.length > 0 && effort !== undefined) {
+					const nameCell = truncateToWidth(item.model.name, effortLayout.nameColumn, "…", true);
+					const gap = " ".repeat(effortLayout.gap);
+					const leftArrow = isSelected ? theme.fg("dim", "←") : " ";
+					const rightArrow = isSelected ? theme.fg("dim", "→") : " ";
+					const squares = this.renderEffortSquares(levels, effort, effortLayout.squareSlots, isSelected);
+					const label = effortLayout.showLabel ? theme.fg("muted", effort.padEnd(effortLayout.labelWidth)) : "";
+					primary = label
+						? `${nameCell}${gap}${leftArrow} ${squares} ${rightArrow} ${label}`
+						: `${nameCell}${gap}${leftArrow} ${squares} ${rightArrow}`;
+				}
+			}
 
 			this.listContainer.addChild(
 				new MenuRow({
-					primary: item.id,
-					secondary: item.provider,
-					meta,
+					primary,
+					secondary: this.inline ? undefined : item.provider,
+					meta: this.inline ? undefined : meta,
+					trailing: this.inline ? inlineSegments : undefined,
 					selected: isSelected,
+					inline: this.inline,
 				}),
 			);
 		}
@@ -476,7 +676,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new Text(theme.fg("muted", "No matching models"), 0, 0));
 		} else {
 			const selected = this.filteredModels[this.selectedIndex];
-			if (selected && this.shouldShowSelectedDetails()) {
+			if (selected && this.inline && this.getInlineDetailRows() > 0) {
+				this.listContainer.addChild({
+					render: (width) => this.renderInlineModelDetails(selected, width),
+					invalidate: () => {},
+				});
+			} else if (selected && !this.inline && this.shouldShowSelectedDetails()) {
 				this.listContainer.addChild(new Spacer(1));
 				this.listContainer.addChild(new Text(theme.fg("muted", selected.model.name), 0, 0));
 			}
@@ -495,6 +700,19 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			}
 			return;
 		}
+		// Keep arrows available for editing a filter; an empty filter controls effort.
+		if (
+			this.searchInput.getValue() === "" &&
+			(kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.editor.cursorRight"))
+		) {
+			const direction = kb.matches(keyData, "tui.editor.cursorLeft") ? -1 : 1;
+			const selected = this.filteredModels[this.selectedIndex];
+			if (selected && this.adjustEffort(selected, direction)) {
+				this.updateList();
+				this.tui.requestRender();
+				return;
+			}
+		}
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			const selectableCount = this.getSelectableCount();
@@ -508,6 +726,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (selectableCount === 0) return;
 			this.selectedIndex = this.selectedIndex === selectableCount - 1 ? 0 : this.selectedIndex + 1;
 			this.updateList();
+		} else if (kb.matches(keyData, "tui.select.pageUp") || kb.matches(keyData, "tui.select.pageDown")) {
+			const direction = kb.matches(keyData, "tui.select.pageUp") ? -1 : 1;
+			this.selectedIndex = Math.max(
+				0,
+				Math.min(this.filteredModels.length - 1, this.selectedIndex + direction * this.listLayout.visibleItems),
+			);
+			this.updateList();
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
@@ -519,19 +744,19 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 		// Pass everything else to search input
 		else {
+			const previousQuery = this.searchInput.getValue();
 			this.searchInput.handleInput(keyData);
-			this.filterModels(this.searchInput.getValue());
+			if (previousQuery !== this.searchInput.getValue()) this.filterModels(this.searchInput.getValue());
 		}
-	}
-
-	private handleSelect(model: Model<any>): void {
-		this.onSelectCallback(model);
 	}
 
 	private handleConfirm(): void {
 		const selectedModel = this.filteredModels[this.selectedIndex];
 		if (selectedModel) {
-			this.handleSelect(selectedModel.model);
+			const effort = this.editedEffortModels.has(this.getModelKey(selectedModel))
+				? this.getEffort(selectedModel)
+				: undefined;
+			this.onSelectCallback(selectedModel.model, effort);
 			return;
 		}
 	}
@@ -545,6 +770,30 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private updateResponsiveLayout(): void {
+		if (this.inline) {
+			this.headerHelpContainer.clear();
+			const scopeRows = this.scopeText ? 1 : 0;
+			if (this.scopeText) {
+				this.headerHelpContainer.addChild({
+					render: (width) => [
+						truncateToWidth(theme.fg("muted", `${this.getScopeText()} · ${this.getScopeHintText()}`), width),
+					],
+					invalidate: () => {},
+				});
+			}
+			const detailRows = this.getInlineDetailRows();
+			this.listLayout = getMenuListLayout({
+				getRows: this.viewport.getRows,
+				preferredVisibleItems: 8,
+				totalItems: this.filteredModels.length,
+				reservedRows: this.getHeaderRows() + 3 + scopeRows + detailRows,
+				comfortableItemRows: 1,
+				comfortableListPaddingRows: 0,
+				scrollIndicatorRows: 1,
+			});
+			this.responsiveLayoutKey = `inline:${this.getHeaderRows()}:${detailRows}:${this.listLayout.visibleItems}:${this.renderWidth}`;
+			return;
+		}
 		const showHeaderHelp = this.shouldShowHeaderHelp();
 		let headerHelpRows = 0;
 		this.headerHelpContainer.clear();
@@ -588,6 +837,51 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private shouldShowHeaderHelp(): boolean {
 		return this.hasRows(MODEL_HELP_MIN_ROWS);
+	}
+
+	private getInlineDetailRows(): number {
+		const detailRows = this.renderWidth >= 58 ? 4 : 5;
+		return this.hasRows(this.getHeaderRows() + 5 + (this.scopeText ? 1 : 0) + detailRows) ? detailRows : 0;
+	}
+
+	private renderInlineModelDetails(item: ModelItem, width: number): string[] {
+		const price = (value: number | undefined) => {
+			if (value === undefined || !Number.isFinite(value) || value < 0) return "—";
+			if (value === 0) return "$0";
+			const rounded = Math.round(value * 1000) / 1000;
+			return rounded === 0 ? "<0.001" : `$${rounded}`;
+		};
+		const entries = [
+			["Input", price(item.model.cost?.input)],
+			["Cached input", price(item.model.cost?.cacheRead)],
+			["Output", price(item.model.cost?.output)],
+		];
+		const unit = theme.fg("muted", PRICE_UNIT_TEXT);
+		const lines = [""];
+		if (width >= 58) {
+			// Shrink the columns so the unit can trail the Output column.
+			const columnWidth = Math.max(
+				PRICE_COLUMN_MIN_WIDTH,
+				Math.floor((width - 2 - (visibleWidth(PRICE_UNIT_TEXT) + 1)) / 3),
+			);
+			const row = (index: number) =>
+				entries
+					.map((entry) => {
+						const text = entry[index] ?? "";
+						return text + " ".repeat(Math.max(0, columnWidth - visibleWidth(text)));
+					})
+					.join("");
+			lines.push(`${theme.fg("muted", row(0))} ${unit}`, row(1));
+		} else {
+			lines.push(
+				...entries.map(([label, value], index) => {
+					const suffix = index === entries.length - 1 ? ` ${unit}` : "";
+					return `${theme.fg("muted", `${label}:`)} ${value}${suffix}`;
+				}),
+			);
+		}
+		lines.push("");
+		return lines.map((line) => truncateToWidth(` ${line}`, width, "…", true));
 	}
 
 	private shouldShowSelectedDetails(): boolean {
