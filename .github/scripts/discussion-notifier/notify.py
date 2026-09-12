@@ -86,7 +86,7 @@ def restore_state(directory: Path) -> dict | None:
     ]
     latest = None
     for artifact in sorted(
-        artifacts, key=lambda artifact: artifact["id"], reverse=True
+        artifacts, key=lambda artifact: artifact["created_at"], reverse=True
     ):
         run = json.loads(
             gh(
