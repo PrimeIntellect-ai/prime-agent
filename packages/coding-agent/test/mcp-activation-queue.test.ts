@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { type Component, Container, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { logoutMcpAccount, type McpRemoveAccountResult } from "../src/core/mcp/connection-store.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
@@ -33,6 +33,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 type ActivationQueueThis = {
+	chatContainer: Container;
 	connectionState: { isStreaming: boolean; isCompacting: boolean; messageCount: number };
 	pendingPostRunActivation: { message: string; successMessage: string } | undefined;
 	pulseTimer: ReturnType<typeof setInterval> | undefined;
@@ -44,6 +45,9 @@ type ActivationQueueThis = {
 
 function createFakeMode(): ActivationQueueThis {
 	const fake: ActivationQueueThis = {
+		// Main's patchConnectionState now pulses working state off
+		// chatContainer children; the fake carries a real (empty) container.
+		chatContainer: new Container(),
 		connectionState: { isStreaming: false, isCompacting: false, messageCount: 0 },
 		pendingPostRunActivation: undefined,
 		pulseTimer: undefined,

@@ -20,6 +20,7 @@ import {
 	nextMcpConnectionId,
 	pagePluginViews,
 	resolveMcpServiceCatalog,
+	sameGrantToken,
 	searchPluginViews,
 	verifyMcpConnection,
 } from "../src/core/mcp/service-catalog.js";
@@ -423,6 +424,19 @@ describe("verifyMcpConnection", () => {
 		});
 		expect(record.status).toBe("pending");
 		expect(record.lastError).toBe("network-unreachable");
+	});
+
+	it("binds verification currency to the exact probed token (equal, different, empty, length)", async () => {
+		// Equal: the probed token matches the current grant.
+		expect(sameGrantToken("token-a", "token-a")).toBe(true);
+		// Different token of equal length: constant-time inequality.
+		expect(sameGrantToken("token-a", "token-b")).toBe(false);
+		// Empty grants stay current against empty (nothing to rotate).
+		expect(sameGrantToken("", "")).toBe(true);
+		// A rotated token of a different length must still compare unequal.
+		expect(sameGrantToken("short", "a-much-longer-rotated-token")).toBe(false);
+		// Replacement of the same length is still detected.
+		expect(sameGrantToken("token-a", "token-x")).toBe(false);
 	});
 
 	it("discards a stale verify result when the connection is logged out mid-probe", async () => {

@@ -3,7 +3,7 @@
 // and the kernel inventory. Pure data assembly over auth.json credentials and
 // connection records; no secrets ever leave this module.
 
-import { createHash } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { LocalCatalogLoadResult, McpServiceEntry } from "@earendil-works/pi-ai/mcp";
@@ -830,7 +830,6 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 			await connectionStore.flush().catch(() => undefined);
 			return record;
 		}
-		const bindingAtProbe = authBindingFor(token);
 		const result = await probe({
 			url: endpoint,
 			getToken: () => token,
@@ -855,8 +854,7 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 		// result is stale and must not mark the connection verified. The same guard
 		// is re-evaluated under the store lock at flush time.
 		const isStillCurrent = () =>
-			authBindingFor(currentCredentialBindingValue(authStorage, connectionId, usesOAuth, bearerTokenEnvVar)) ===
-			bindingAtProbe;
+			sameGrantToken(token, currentCredentialBindingValue(authStorage, connectionId, usesOAuth, bearerTokenEnvVar));
 		if (!isStillCurrent()) {
 			return { ...record, status: "pending", lastError: MCP_PROBE_ERRORS.CREDENTIAL_CHANGED };
 		}
@@ -911,7 +909,15 @@ function currentCredentialBindingValue(
 	return "";
 }
 
-/** Short non-reversible hash binding a verification to one exact grant. */
-export function authBindingFor(value: string): string {
-	return createHash("sha256").update(value).digest("hex").slice(0, 16);
+/**
+ * Constant-time equality between the EXACT token a verification probed and the
+ * current grant value: rotation, logout, or a second login's replacement makes
+ * the comparison false so a stale probe result can never mark the new grant
+ * verified. Byte length is checked first (length is not secret material);
+ * timingSafeEqual never leaks content, and the raw token never leaves memory.
+ */
+export function sameGrantToken(probed: string, current: string): boolean {
+	const left = Buffer.from(probed, "utf8");
+	const right = Buffer.from(current, "utf8");
+	return left.length === right.length && timingSafeEqual(left, right);
 }
