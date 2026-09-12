@@ -1,13 +1,19 @@
-import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
-import * as sessionManager from "../src/core/session-manager.js";
-import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
-import { type DaemonCommand, type DaemonResponse, failure, success } from "../src/modes/daemon/daemon-protocol.js";
-import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
-import type { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { type AgentCronJob, AgentCronJobStore } from "../../../src/core/cron-jobs.js";
+import * as sessionManager from "../../../src/core/session-manager.js";
+import type { DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
+import {
+	type DaemonCommand,
+	type DaemonResponse,
+	failure,
+	success,
+} from "../../../src/modes/daemon/daemon-protocol.js";
+import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js";
+import type { RlmSpawnLedger } from "../../../src/modes/daemon/rlm-ledger.js";
+
+import { createHarness, type Harness } from "../harness.js";
 
 interface SupervisorHarness {
 	defaultSessionConfig: { agentDir: string };
@@ -22,18 +28,17 @@ interface SupervisorHarness {
 	handleWorkerFrame(worker: unknown, frame: unknown): void;
 }
 
-const tempDirs: string[] = [];
+const harnesses: Harness[] = [];
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	for (const directory of tempDirs.splice(0)) {
-		rmSync(directory, { recursive: true, force: true });
-	}
+	for (const harness of harnesses.splice(0)) harness.cleanup();
 });
 
-function createSupervisorHarness(): SupervisorHarness {
-	const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-heartbeats-"));
-	tempDirs.push(directory);
+async function createSupervisorHarness(): Promise<SupervisorHarness> {
+	const harness = await createHarness();
+	harnesses.push(harness);
+	const directory = harness.tempDir;
 	return new DaemonSupervisor(join(directory, "daemon.sock"), {
 		defaultSessionConfig: { agentDir: directory, cwd: directory },
 		descriptorDir: join(directory, "workers"),
@@ -47,9 +52,9 @@ function worker(lifecycle: "ready" | "recovering" | "failed", connected = true) 
 	};
 }
 
-describe("daemon supervisor heartbeat aggregation", () => {
+describe("RES-1343 heartbeat catalog timeouts", () => {
 	it("shares concurrent refreshes across clients while preserving response ids", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		supervisor.workers.set("ready", worker("ready"));
 		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
 			success(command.id, command.type, { heartbeats: [] }),
@@ -81,7 +86,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	});
 
 	it("clears a rejected refresh so the next request can recover", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		const scan = vi
 			.spyOn(supervisor, "collectPassiveScheduledJobs")
 			.mockRejectedValueOnce(new Error("unreadable ledger"))
@@ -96,7 +101,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	});
 
 	it("starts a fresh read after changes without letting the older read overwrite its snapshot", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		const target = { ...worker("ready"), heartbeatSnapshot: [], heartbeatSnapshotStale: false };
 		supervisor.workers.set("ready", target);
 		vi.spyOn(supervisor, "collectPassiveScheduledJobs").mockResolvedValue([]);
@@ -127,7 +132,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	it.each(["", "\n \t\r\n", "\n".repeat(65_536), "malformed JSON\n", "\n{broken\n \t\n"])(
 		"only scans scheduled transcripts while retaining ancestry, imported session ids, and archived filtering (case %#)",
 		async (prefix) => {
-			const supervisor = createSupervisorHarness();
+			const supervisor = await createSupervisorHarness();
 			const directory = realpathSync(supervisor.defaultSessionConfig.agentDir);
 			const [parent, child, archived, unrelated] = ["parent", "child", "archived", "unrelated"].map((name) => {
 				const manager = sessionManager.SessionManager.create(directory, join(directory, "sessions"));
@@ -187,7 +192,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	it.each(["\n", "x"])(
 		"rejects oversized header probes instead of returning a partial catalog (case %#)",
 		async (prefix) => {
-			const supervisor = createSupervisorHarness();
+			const supervisor = await createSupervisorHarness();
 			const directory = realpathSync(supervisor.defaultSessionConfig.agentDir);
 			const manager = sessionManager.SessionManager.create(directory, join(directory, "sessions"));
 			manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
@@ -201,7 +206,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	);
 
 	it("uses the last complete worker snapshot during recovery", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		const first = worker("ready");
 		const second = worker("ready");
 		supervisor.workers.set("first", first);
@@ -236,7 +241,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	});
 
 	it("returns a worker failure instead of a partial catalog", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		const first = worker("ready");
 		const second = worker("ready");
 		supervisor.workers.set("first", first);
@@ -257,7 +262,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	});
 
 	it("does not fall back to a snapshot after the worker reports heartbeat changes", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		const target = {
 			...worker("ready"),
 			heartbeatSnapshot: [{ job: { id: "heartbeat-1" } }],
@@ -282,7 +287,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	});
 
 	it("fails rather than returning a partial catalog without a cached snapshot", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		supervisor.workers.set("ready", worker("ready"));
 		supervisor.workers.set("recovering", worker("recovering", false));
 		supervisor.forwardToWorker = vi.fn(async (_target, command) =>
@@ -302,7 +307,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	});
 
 	it("skips terminally failed workers without blocking healthy heartbeats", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		supervisor.workers.set("healthy", worker("ready"));
 		supervisor.workers.set("failed", worker("failed", false));
 		supervisor.forwardToWorker = vi.fn(async (_target, command) =>
@@ -322,7 +327,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 	});
 
 	it("routes management by cached job ownership after a session unloads", async () => {
-		const supervisor = createSupervisorHarness();
+		const supervisor = await createSupervisorHarness();
 		const target = {
 			...worker("ready"),
 			heartbeatSnapshot: [{ job: { id: "heartbeat-1", activeSessionId: "unloaded-session" } }],
