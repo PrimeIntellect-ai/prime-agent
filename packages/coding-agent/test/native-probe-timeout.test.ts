@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -66,8 +66,10 @@ printf '%s\\n' '${version}'
 			symlinkSync(targets[0], join(bin, "previous"));
 			const journal = join(managed, ".activation-state");
 			if (operation === "recovery") writeFileSync(journal, `${targets[1]}\n${targets[0]}\n`);
+			let child: ChildProcess | undefined;
+			let result: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
 			try {
-				const child = spawn("sh", [installer, "--rollback"], {
+				const installerChild = spawn("sh", [installer, "--rollback"], {
 					env: {
 						...process.env,
 						HOME: root,
@@ -80,16 +82,17 @@ printf '%s\\n' '${version}'
 					timeout: operation === "recovery" ? 27000 : 17000,
 					killSignal: "SIGKILL",
 				});
+				child = installerChild;
 				let output = "";
-				child.stdout.on("data", (chunk) => {
+				installerChild.stdout.on("data", (chunk) => {
 					output += chunk.toString();
 				});
-				child.stderr.on("data", (chunk) => {
+				installerChild.stderr.on("data", (chunk) => {
 					output += chunk.toString();
 				});
-				const result = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((done, reject) => {
-					child.once("error", reject);
-					child.once("exit", (code, signal) => done({ code, signal }));
+				result = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((done, reject) => {
+					installerChild.once("error", reject);
+					installerChild.once("exit", (code, signal) => done({ code, signal }));
 				});
 				await expect.poll(() => existsSync(probePids), { timeout: 3000 }).toBe(true);
 				expect(existsSync(join(managed, ".install-lock"))).toBe(true);
@@ -104,6 +107,8 @@ printf '%s\\n' '${version}'
 				for (const pid of readFileSync(probePids, "utf8").trim().split("\n").map(Number))
 					expect(() => process.kill(pid, 0)).toThrow();
 			} finally {
+				if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+				await result;
 				if (existsSync(probePids))
 					for (const pid of readFileSync(probePids, "utf8").trim().split("\n").map(Number)) {
 						try {

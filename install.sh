@@ -1899,15 +1899,10 @@ prime_agent_native_validate_release_metadata() {
 prime_agent_native_probe() (
 	# macOS does not ship timeout; keep the deadline independent of Node and Python.
 	native_probe_pid=
-	native_probe_watchdog=
 	trap '
 		if [ -n "$native_probe_pid" ]; then
 			kill -KILL "$native_probe_pid" 2>/dev/null || :
 			wait "$native_probe_pid" 2>/dev/null || :
-		fi
-		if [ -n "$native_probe_watchdog" ]; then
-			kill -TERM "$native_probe_watchdog" 2>/dev/null || :
-			wait "$native_probe_watchdog" 2>/dev/null || :
 		fi
 	' EXIT
 	trap 'exit 130' INT
@@ -1915,23 +1910,18 @@ prime_agent_native_probe() (
 	trap 'exit 129' HUP
 	"$@" &
 	native_probe_pid=$!
-	(
-		native_probe_timer=
-		trap '
-			if [ -n "$native_probe_timer" ]; then
-				kill "$native_probe_timer" 2>/dev/null || :
-				wait "$native_probe_timer" 2>/dev/null || :
-			fi
-		' EXIT
-		trap 'exit 0' INT TERM HUP
-		sleep 10 &
-		native_probe_timer=$!
-		wait "$native_probe_timer" || exit 1
-		native_probe_timer=
-		printf 'error: executable probe timed out after 10 seconds.\n' >&2
-		kill -KILL "$native_probe_pid" 2>/dev/null || :
-	) &
-	native_probe_watchdog=$!
+	native_probe_ticks=0
+	while kill -0 "$native_probe_pid" 2>/dev/null; do
+		if [ "$native_probe_ticks" -ge 100 ]; then
+			printf 'error: executable probe timed out after 10 seconds.\n' >&2
+			kill -KILL "$native_probe_pid" 2>/dev/null || :
+			wait "$native_probe_pid" 2>/dev/null || :
+			native_probe_pid=
+			exit 124
+		fi
+		sleep 0.1
+		native_probe_ticks=$((native_probe_ticks + 1))
+	done
 	if wait "$native_probe_pid"; then native_probe_status=0; else native_probe_status=$?; fi
 	native_probe_pid=
 	exit "$native_probe_status"
