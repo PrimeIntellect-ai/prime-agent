@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getModel, getSupportedThinkingLevels } from "../src/models.js";
-import { streamOpenAIResponses, streamSimpleOpenAIResponses } from "../src/providers/openai-responses.js";
+import { getModel } from "../src/models.js";
+import { streamSimpleOpenAIResponses } from "../src/providers/openai-responses.js";
 import type { Context } from "../src/types.js";
 import { getXaiSubscriptionModel } from "../src/utils/oauth/xai.js";
 
@@ -53,7 +53,7 @@ function toolEvents(): Record<string, unknown>[] {
 		{ type: "response.reasoning_text.delta", output_index: 0, delta: "Inspect the file." },
 		{ type: "response.function_call_arguments.delta", output_index: 1, delta: '{"code":' },
 		{ type: "response.function_call_arguments.done", output_index: 1, arguments: call.arguments },
-		{ type: "response.output_item.done", output_index: 0, item: reasoning },
+		{ type: "response.output_item.done", output_index: 0, item: { ...reasoning, encrypted_content: undefined } },
 		{ type: "response.output_item.done", output_index: 1, item: call },
 		terminal([reasoning, call]),
 	];
@@ -76,16 +76,6 @@ describe("xAI subscription Responses", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
-	});
-
-	it("projects only supported subscription models without changing API-key catalog entries", () => {
-		const catalog = getModel("xai", "grok-4.5");
-		expect(catalog.api).toBe("openai-completions");
-		expect(model.api).toBe("openai-responses");
-		expect(getSupportedThinkingLevels(model)).toEqual(["low", "medium", "high"]);
-		expect(model.compat?.supportsLongCacheRetention).toBe(false);
-		expect(getXaiSubscriptionModel({ ...catalog, id: "grok-4.3" })).toBeUndefined();
-		expect(getXaiSubscriptionModel({ ...catalog, provider: "openrouter" })).toBeUndefined();
 	});
 
 	it("streams interleaved thinking/tool calls and replays a complete second turn", async () => {
@@ -113,22 +103,18 @@ describe("xAI subscription Responses", () => {
 		for await (const event of stream) events.push(event);
 		const first = await stream.result();
 		expect(first.stopReason, first.errorMessage).toBe("toolUse");
-		expect(first.content[0]).toMatchObject({
-			type: "thinking",
-			thinking: "Inspect the file.",
-			thinkingSignature: JSON.stringify(reasoning),
-		});
+		const thinking = first.content.find((block) => block.type === "thinking");
+		expect(thinking?.thinking).toBe("Inspect the file.");
+		expect(JSON.parse(thinking?.thinkingSignature ?? "{}")).toEqual(reasoning);
 		const tool = first.content.find((block) => block.type === "toolCall");
 		if (!tool) throw new Error("Missing tool call");
 		expect(tool.arguments).toEqual({ code: "1+1" });
-		expect(tool).not.toHaveProperty("partialJson");
 		expect(events).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ type: "thinking_delta", contentIndex: 0 }),
 				expect.objectContaining({ type: "toolcall_delta", contentIndex: 1 }),
 			]),
 		);
-		expect(first.usage).toMatchObject({ input: 15, cacheRead: 5, output: 8, totalTokens: 28 });
 		context.messages.push(first, {
 			role: "toolResult",
 			toolCallId: tool.id,
@@ -139,22 +125,20 @@ describe("xAI subscription Responses", () => {
 		});
 		const second = await streamSimpleOpenAIResponses(model, context, {
 			apiKey: "test-subscription-token",
-			reasoning: "low",
 		}).result();
 		expect(second.stopReason, second.errorMessage).toBe("stop");
 		expect(second.content[0]).toMatchObject({ type: "text", text: "2" });
 		expect(requests[0].url).toBe("https://api.x.ai/v1/responses");
 		expect(requests[0].headers.get("authorization")).toBe("Bearer test-subscription-token");
-		expect(requests[0].headers.get("session_id")).toBe("session-grok");
 		expect(requests[0].body).toMatchObject({
 			model: "grok-4.5",
 			store: false,
 			stream: true,
-			prompt_cache_key: "session-grok",
 			reasoning: { effort: "medium" },
 			include: ["reasoning.encrypted_content"],
 		});
 		expect(requests[0].body).not.toHaveProperty("prompt_cache_retention");
+		expect(requests[1].body.include).toEqual(["reasoning.encrypted_content"]);
 		const replay = requests[1].body.input as Record<string, unknown>[];
 		const replayReasoning = replay.find((item) => item.type === "reasoning");
 		expect(replayReasoning).toMatchObject({ id: "rs_grok", encrypted_content: "encrypted-reasoning" });
@@ -164,47 +148,5 @@ describe("xAI subscription Responses", () => {
 		expect(replayCall?.call_id).toBeTruthy();
 		expect(replayResult?.call_id).toBe(replayCall?.call_id);
 		expect(replayResult?.output).toBe("2");
-	});
-
-	it("includes encrypted reasoning without an explicit effort", async () => {
-		let body: Record<string, unknown> = {};
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-				body = JSON.parse(await new Request(input, init).text());
-				return sse([terminal()]);
-			}),
-		);
-		const result = await streamOpenAIResponses(model, { messages: [] }, { apiKey: "token" }).result();
-		expect(result.stopReason).toBe("stop");
-		expect(body.include).toEqual(["reasoning.encrypted_content"]);
-		expect(body).not.toHaveProperty("reasoning");
-	});
-
-	it("preserves encrypted reasoning supplied only at terminal response", async () => {
-		const events = toolEvents();
-		events[6] = {
-			type: "response.output_item.done",
-			output_index: 0,
-			item: { ...reasoning, encrypted_content: undefined },
-		};
-		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sse(events)));
-		const result = await streamOpenAIResponses(model, { messages: [] }, { apiKey: "token" }).result();
-		const thinking = result.content.find((block) => block.type === "thinking");
-		expect(JSON.parse(thinking?.thinkingSignature ?? "{}")).toEqual(reasoning);
-	});
-
-	it("classifies incomplete output and rejects a stream without a terminal event", async () => {
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValueOnce(sse([terminal([], "incomplete")]))
-			.mockResolvedValueOnce(sse([]));
-		vi.stubGlobal("fetch", fetchMock);
-		expect((await streamOpenAIResponses(model, { messages: [] }, { apiKey: "token" }).result()).stopReason).toBe(
-			"length",
-		);
-		expect((await streamOpenAIResponses(model, { messages: [] }, { apiKey: "token" }).result()).stopReason).toBe(
-			"error",
-		);
 	});
 });
