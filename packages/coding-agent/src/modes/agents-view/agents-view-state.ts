@@ -1,4 +1,4 @@
-import { basename, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
 import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
@@ -140,8 +140,49 @@ function formatAgeLabel(timestamp: string): string {
 	return minutes < 120 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`;
 }
 
+const SESSION_IDENTITY_CACHE_LIMIT = 4096;
+const SESSION_IDENTITY_CACHE_TTL_MS = 60_000;
+interface CachedSessionIdentity {
+	value: string;
+	expiresAt: number;
+}
+// Cache misses too to avoid repeated filesystem calls during rebuilds. File creation
+// and symlink changes can take up to a minute to appear in these UI-only caches.
+const canonicalSessionPathCache = new Map<string, CachedSessionIdentity>();
+const rosterAgentIdCache = new Map<string, CachedSessionIdentity>();
+
+function cachedSessionIdentity(cache: Map<string, CachedSessionIdentity>, key: string, compute: () => string): string {
+	const now = Date.now();
+	const cached = cache.get(key);
+	if (cached) {
+		cache.delete(key);
+		if (cached.expiresAt > now) {
+			cache.set(key, cached);
+			return cached.value;
+		}
+	}
+	const value = compute();
+	if (cache.size >= SESSION_IDENTITY_CACHE_LIMIT) {
+		const oldestKey = cache.keys().next().value;
+		if (oldestKey !== undefined) cache.delete(oldestKey);
+	}
+	cache.set(key, { value, expiresAt: now + SESSION_IDENTITY_CACHE_TTL_MS });
+	return value;
+}
+
 function canonicalSessionPath(path: string): string {
-	return resolve(canonicalizePath(path));
+	const key = isAbsolute(path) ? path : `${process.cwd()}\0${path}`;
+	return cachedSessionIdentity(canonicalSessionPathCache, key, () => resolve(canonicalizePath(path)));
+}
+
+function cachedRosterAgentIdForSummary(summary: SessionSummary): string {
+	const key = JSON.stringify([
+		summary.parentSessionPath,
+		summary.parentActiveSessionId,
+		summary.rlmChildId,
+		summary.parentSessionPath && !isAbsolute(summary.parentSessionPath) ? process.cwd() : undefined,
+	]);
+	return cachedSessionIdentity(rosterAgentIdCache, key, () => rosterAgentIdForSummary(summary));
 }
 
 function fileIdentity(path: string): string {
@@ -151,7 +192,7 @@ function fileIdentity(path: string): string {
 function summaryIdentityAliases(summary: SessionSummary): string[] {
 	return [
 		summary.runtimeKind === "subagent" && summary.rlmChildId
-			? `agent:${rosterAgentIdForSummary(summary)}`
+			? `agent:${cachedRosterAgentIdForSummary(summary)}`
 			: undefined,
 		summary.sessionFile ? fileIdentity(summary.sessionFile) : undefined,
 		`session:${summary.sessionId}`,
@@ -408,8 +449,8 @@ export function getUnifiedSessionAncestorSessionIds(
 export function filterUnifiedSessions(
 	records: readonly UnifiedSessionRecord[],
 	matches: (searchableText: string) => boolean,
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
 ): UnifiedSessionRecord[] {
-	const index = buildUnifiedSessionIndex(records);
 	const retained = new Set<UnifiedSessionRecord>();
 	for (const record of records) {
 		if (!matches(record.searchableText)) continue;
@@ -428,8 +469,8 @@ export function filterUnifiedSessions(
 export function filterEmptyAgentsViewSessions(
 	records: readonly UnifiedSessionRecord[],
 	preservedSessionIds: ReadonlySet<string> = new Set(),
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
 ): UnifiedSessionRecord[] {
-	const index = buildUnifiedSessionIndex(records);
 	const retained = new Set<UnifiedSessionRecord>();
 	for (const record of records) {
 		const summary = summaryForUnifiedRecord(record);
@@ -718,7 +759,7 @@ export function collectSubagentDescendantSummaries(
 
 export function getAgentsViewSummaryIdentity(summary: SessionSummary): string {
 	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
-		return `agent:${rosterAgentIdForSummary(summary)}`;
+		return `agent:${cachedRosterAgentIdForSummary(summary)}`;
 	}
 	if (summary.sessionFile) {
 		return fileIdentity(summary.sessionFile);
@@ -1175,7 +1216,7 @@ function getSessionSubtitle(summary: SessionSummary): string {
 	return parts.join("  ");
 }
 
-function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
+export function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
 	if (summary.statusLabel !== undefined) {
 		return summary.statusLabel;
 	}

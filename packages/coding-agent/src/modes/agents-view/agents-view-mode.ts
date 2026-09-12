@@ -67,6 +67,7 @@ import {
 	type StartupNotices,
 } from "../shared/startup-notices.js";
 import {
+	type AgentsViewRecursiveRollup,
 	type AgentsViewRow,
 	type AgentsViewScopeFrame,
 	type AgentsViewScopeKey,
@@ -81,6 +82,7 @@ import {
 	formatHeartbeatBadge,
 	getAgentsViewSelectionKey,
 	getAgentsViewSessionTitle,
+	getSessionStatusLabel,
 	getAgentsViewSummaryIdentity as getSummaryIdentity,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
@@ -102,6 +104,7 @@ import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "./roster-sto
 import { matchesSearchText } from "./session-view-search.js";
 
 const HEARTBEAT_POLL_INTERVAL_MS = 15000;
+const SAVED_CATALOG_RECONCILE_INTERVAL_MS = 75;
 const RECONNECT_TIMEOUT_MS = 120000;
 const RECONNECT_RETRY_MS = 1000;
 const EXIT_HINT_DURATION_MS = 2000;
@@ -671,6 +674,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private heartbeats: AgentConnectionHeartbeat[] = [];
 	private unifiedRecords: UnifiedSessionRecord[] = [];
 	private unifiedIndex: UnifiedSessionIndex = buildUnifiedSessionIndex([]);
+	private recursiveRollups: ReadonlyMap<UnifiedSessionRecord, AgentsViewRecursiveRollup> = new Map();
 	private scopedRecords: UnifiedSessionRecord[] = [];
 	private scopeKey: AgentsViewScopeKey | undefined;
 	private scopeRootSummary: SessionSummary | undefined;
@@ -678,6 +682,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private savedCatalogGeneration = 0;
 	private heartbeatCatalogGeneration = 0;
 	private savedCatalogRefreshPending = false;
+	private savedCatalogReconcileTimer: ReturnType<typeof setTimeout> | undefined;
 	private expandedSubagentParents = new Set<string>();
 	// Agent row identities whose full spawn program is currently shown.
 	// The program key toggles each agent shown ↔ hidden.
@@ -900,8 +905,6 @@ export class AgentsViewMode implements Component, Focusable {
 			const hasRunning = this.rows.some((row) => row.section === "running");
 			const hasStaleAge = this.rows.some((row) => row.summary.lastHeardFromAt !== undefined);
 			if (!hasRunning && !hasStaleAge) return;
-			// Age labels are baked into rows at build time; ticking them needs a rebuild.
-			if (hasStaleAge) this.rebuildRows();
 			if (hasRunning) this.workingIconFrame += 1;
 			this.ui.requestRender();
 		}, WORKING_ICON_INTERVAL_MS);
@@ -1297,8 +1300,10 @@ export class AgentsViewMode implements Component, Focusable {
 			...(this.scopeKey ? [this.scopeKey.sessionId] : []),
 			...this.heartbeats.map((heartbeat) => heartbeat.job.sessionId),
 		]);
-		const records = filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds);
-		return query.trim() ? filterUnifiedSessions(records, (text) => matchesSearchText(text, query)) : records;
+		const records = filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds, this.unifiedIndex);
+		return query.trim()
+			? filterUnifiedSessions(records, (text) => matchesSearchText(text, query), this.unifiedIndex)
+			: records;
 	}
 
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
@@ -1309,7 +1314,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
-			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.recursiveRollups,
 			this.anchorSessionId,
 		);
 		const index =
@@ -2158,6 +2163,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
 		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.heartbeats);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
+		this.recursiveRollups = computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex);
 		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
 		migrateAgentsViewIdentitySet(this.programShownParents, this.unifiedIndex.byKey);
 
@@ -2179,7 +2185,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
-			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.recursiveRollups,
 			this.anchorSessionId,
 		);
 		this.applyPendingAncestorExpansion();
@@ -2200,6 +2206,10 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		const generation = ++this.savedCatalogGeneration;
 		this.persistentState.savedCatalogGeneration = generation;
+		if (this.savedCatalogReconcileTimer) {
+			clearTimeout(this.savedCatalogReconcileTimer);
+			this.savedCatalogReconcileTimer = undefined;
+		}
 		this.savedCatalogRefreshPending = true;
 		this.savedCatalogReady = false;
 		const successfulSessions = this.lastSuccessfulSavedSessions;
@@ -2210,9 +2220,16 @@ export class AgentsViewMode implements Component, Focusable {
 			const onSession = (session: AgentConnectionSavedSessionInfo) => {
 				if (generation !== this.savedCatalogGeneration) return;
 				progressiveSessions.set(resolvePath(canonicalizePath(session.path)), session);
-				this.savedSessions = [...progressiveSessions.values()];
-				this.persistentState.savedSessions = this.savedSessions;
-				this.reconcileCatalogs();
+				// Keep a bounded batch window so a continuous stream still appears progressively.
+				if (this.savedCatalogReconcileTimer) return;
+				this.savedCatalogReconcileTimer = setTimeout(() => {
+					if (generation !== this.savedCatalogGeneration) return;
+					this.savedCatalogReconcileTimer = undefined;
+					this.savedSessions = [...progressiveSessions.values()];
+					this.persistentState.savedSessions = this.savedSessions;
+					this.reconcileCatalogs();
+				}, SAVED_CATALOG_RECONCILE_INTERVAL_MS);
+				this.savedCatalogReconcileTimer.unref?.();
 			};
 			const sessions = await listDaemonSavedSessions(
 				this.requireClient(),
@@ -2246,6 +2263,10 @@ export class AgentsViewMode implements Component, Focusable {
 			return false;
 		} finally {
 			if (generation === this.savedCatalogGeneration) {
+				if (this.savedCatalogReconcileTimer) {
+					clearTimeout(this.savedCatalogReconcileTimer);
+					this.savedCatalogReconcileTimer = undefined;
+				}
 				this.savedCatalogRefreshPending = false;
 				this.resolveMissingSelectionAnchor();
 			}
@@ -2359,6 +2380,10 @@ export class AgentsViewMode implements Component, Focusable {
 		this.stopped = true;
 		this.savedCatalogGeneration += 1;
 		this.heartbeatCatalogGeneration += 1;
+		if (this.savedCatalogReconcileTimer) {
+			clearTimeout(this.savedCatalogReconcileTimer);
+			this.savedCatalogReconcileTimer = undefined;
+		}
 		if (this.heartbeatPollTimer) {
 			clearInterval(this.heartbeatPollTimer);
 			this.heartbeatPollTimer = undefined;
@@ -2555,9 +2580,11 @@ export class AgentsViewMode implements Component, Focusable {
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
 		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
 		const status =
-			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
-				? row.statusLabel
-				: undefined;
+			row.summary.lastHeardFromAt !== undefined
+				? getSessionStatusLabel(row.summary, row.heartbeat)
+				: row.summary.statusLabel !== undefined
+					? row.statusLabel
+					: undefined;
 		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
 		const cells = [
 			formatTableCell(title, layout.nameWidth),
