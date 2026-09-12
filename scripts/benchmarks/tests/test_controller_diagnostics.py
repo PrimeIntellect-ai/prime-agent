@@ -128,20 +128,6 @@ class ControllerDiagnosticsTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 require_success(saved)
 
-    def test_adjacent_fstrings_are_concatenated_before_the_slice(self):
-        failure = "x" * 500
-        role, phase, count, trial, repeated = "main", "measure", 10, 1, 2
-        original = (
-            f"{role} {phase}: skipped {count - trial - 1} remaining trials after "
-            f"{repeated} identical consecutive failures; last cause: {failure}"[:500]
-        )
-        explicit = (
-            f"{role} {phase}: skipped {count - trial - 1} remaining trials after "
-            f"{repeated} identical consecutive failures; last cause: {failure}"
-        )[:500]
-        self.assertEqual(original, explicit)
-        self.assertEqual(len(original), 500)
-
     def test_old_reports_default_to_no_operational_warnings(self):
         payload = fixture().model_dump()
         payload.pop("warnings")
