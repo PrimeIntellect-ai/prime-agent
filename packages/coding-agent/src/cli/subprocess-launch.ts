@@ -1,10 +1,16 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isBunBinary } from "../config.js";
+import { getNativeInstallation } from "../utils/native-installation.js";
 
 export interface CliSubprocessLaunchSpec {
 	command: string;
 	args: string[];
+}
+
+export function createUpdatedCliSubprocessLaunchSpec(args: readonly string[]): CliSubprocessLaunchSpec {
+	const native = isBunBinary ? getNativeInstallation() : undefined;
+	return native ? { command: native.launcher, args: [...args] } : createCliSubprocessLaunchSpec(args);
 }
 
 export function createCliSubprocessEnv(

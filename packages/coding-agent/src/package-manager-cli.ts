@@ -28,6 +28,7 @@ import {
 	launchDaemonUpdateRestartCoordinator,
 	waitForActiveDaemonUpdateRestartCoordinator,
 } from "./cli/daemon-update-restart.js";
+import { getNativeUpdatePlan } from "./cli/native-update.js";
 import {
 	APP_NAME,
 	CONFIG_DIR_NAME,
@@ -36,6 +37,7 @@ import {
 	getLegacyDaemonUpdateRestartManifestPath,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
+	isBunBinary,
 	PACKAGE_NAME,
 	SELF_UPDATE_INTERACTIVE_CHILD_ENV,
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
@@ -86,6 +88,7 @@ interface PackageCommandOptions {
 	updateTarget?: UpdateTarget;
 	local: boolean;
 	force: boolean;
+	rollback: boolean;
 	help: boolean;
 	daemonSocketPath?: string;
 	restartCoordinator: boolean;
@@ -166,6 +169,7 @@ Options:
   --extensions            Update installed packages only
   --extension <source>    Update one package only
   --force                 Reinstall ${APP_NAME} even if the current version is latest
+  --rollback              Restore the previous compiled release
   --daemon-socket <path>  Restart the daemon listening on this exact socket
 
 Commands:
@@ -199,6 +203,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 
 	let local = false;
 	let force = false;
+	let rollback = false;
 	let help = false;
 	let invalidOption: string | undefined;
 	let invalidArgument: string | undefined;
@@ -253,6 +258,13 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			} else {
 				invalidOption = invalidOption ?? arg;
 			}
+			continue;
+		}
+		if (arg === "--rollback") {
+			if (command === "update") {
+				rollback = true;
+				selfFlag = true;
+			} else invalidOption = invalidOption ?? arg;
 			continue;
 		}
 
@@ -365,12 +377,15 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		}
 	}
 
+	if (rollback && (extensionsFlag || extensionFlagSource || (source && !isSelfUpdateSource(source))))
+		conflictingOptions = "--rollback only applies to Prime Agent itself";
 	return {
 		command,
 		source,
 		updateTarget,
 		local,
 		force,
+		rollback,
 		help,
 		daemonSocketPath,
 		restartCoordinator,
@@ -431,6 +446,7 @@ interface SelfUpdatePlan {
 	packageName: string;
 	shouldRun: boolean;
 	targetVersion?: string;
+	command?: SelfUpdateCommand;
 }
 
 function setSelfUpdateNoChangeExitCode(): void {
@@ -438,7 +454,13 @@ function setSelfUpdateNoChangeExitCode(): void {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : undefined;
 }
 
-async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
+async function getSelfUpdatePlan(force: boolean, rollback = false): Promise<SelfUpdatePlan> {
+	if (isBunBinary) {
+		const plan = await getNativeUpdatePlan({ force, rollback });
+		if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
+		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
+	}
+	if (rollback) throw new Error("Rollback is only available for managed compiled installations.");
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION);
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
@@ -1565,17 +1587,19 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
+					const selfUpdatePlan = await getSelfUpdatePlan(options.force, options.rollback);
 					if (!selfUpdatePlan.shouldRun) {
 						setSelfUpdateNoChangeExitCode();
 						return true;
 					}
-					const selfUpdateCommand = getSelfUpdateCommand(
-						PACKAGE_NAME,
-						selfUpdateNpmCommand,
-						selfUpdatePlan.installSpec,
-						selfUpdatePlan.packageName,
-					);
+					const selfUpdateCommand =
+						selfUpdatePlan.command ??
+						getSelfUpdateCommand(
+							PACKAGE_NAME,
+							selfUpdateNpmCommand,
+							selfUpdatePlan.installSpec,
+							selfUpdatePlan.packageName,
+						);
 					if (!selfUpdateCommand) {
 						printSelfUpdateUnavailable(
 							selfUpdateNpmCommand,

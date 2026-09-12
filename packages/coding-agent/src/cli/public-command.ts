@@ -133,7 +133,7 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			if (hasLegacyPackageTarget) {
 				return fail("Package updates moved to the package command.", `Use "${APP_NAME} package update [source]".`);
 			}
-			const options = parseBooleanOptions(rest, new Set(["--force"]), "update");
+			const options = parseBooleanOptions(rest, new Set(["--force", "--rollback"]), "update");
 			if (!options) return HANDLED;
 			await handlePackageCommand(["update", "--self", ...options]);
 			return HANDLED;

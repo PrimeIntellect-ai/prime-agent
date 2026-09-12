@@ -14,7 +14,7 @@ import {
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
 import { isProcessAlive, spawnHidden } from "../utils/child-process.js";
-import { createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
+import { createUpdatedCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
 export const DAEMON_UPDATE_RESTART_COORDINATOR_FLAG = "--internal-update-restart-coordinator";
 export const DAEMON_UPDATE_RESTART_STATUS_FLAG = "--internal-update-restart-status";
@@ -538,7 +538,7 @@ export async function launchDaemonUpdateRestartCoordinator(
 	const statusPath = createStatusPath(agentDir, socketPath, requestId);
 	const inheritedOrigin = process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV];
 	const originActiveSessionId = options.originActiveSessionId ?? inheritedOrigin;
-	const launch = createCliSubprocessLaunchSpec([
+	const launch = createUpdatedCliSubprocessLaunchSpec([
 		"update",
 		DAEMON_UPDATE_RESTART_COORDINATOR_FLAG,
 		"--daemon-socket",
