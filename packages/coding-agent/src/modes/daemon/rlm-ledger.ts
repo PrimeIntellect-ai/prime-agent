@@ -41,6 +41,8 @@ export const RLM_LEDGER_DIR = "rlm-ledger";
 export const RLM_LEDGER_MAX_BYTES = 32 * 1024 * 1024;
 export const RLM_LEDGER_MAX_RECORDS = 100_000;
 
+const SESSION_HEADER_PROBE_MAX_BYTES = 1024 * 1024;
+
 export type RlmLedgerDeleteReason = "user" | "parent-teardown" | "revoked" | "gc";
 
 interface RlmLedgerMetaRecord {
@@ -600,16 +602,28 @@ export class RlmSpawnLedger {
 		let loadMetadata = metadataArtifact === undefined;
 		if (metadataArtifact !== undefined) {
 			// Imported transcripts can have a filename different from their session id.
+			let bytesRead = 0;
 			try {
-				for await (const line of readLinesAsBuffers(path)) {
+				for await (const line of readLinesAsBuffers(path, { end: SESSION_HEADER_PROBE_MAX_BYTES - 1 })) {
+					bytesRead += line.length + 1;
+					if (bytesRead >= SESSION_HEADER_PROBE_MAX_BYTES) break;
 					const text = line.toString("utf8").trim();
 					if (!text) continue;
-					const header = JSON.parse(text) as { id?: unknown } | null;
-					if (typeof header?.id === "string") id = header.id;
+					let header: { type?: unknown; id?: unknown } | null;
+					try {
+						header = JSON.parse(text);
+					} catch {
+						continue;
+					}
+					if (header?.type === "session" && typeof header.id === "string") id = header.id;
 					break;
 				}
 			} catch {
 				// Unreadable headers retain the filename-based fallback below.
+			}
+			// A truncated probe cannot establish artifact ownership; fail instead of hiding scheduled jobs.
+			if (bytesRead >= SESSION_HEADER_PROBE_MAX_BYTES) {
+				throw new Error(`Session header exceeds ${SESSION_HEADER_PROBE_MAX_BYTES} byte probe limit: ${path}`);
 			}
 			loadMetadata = await stat(join(getSessionArtifactPathForFile(path, id), metadataArtifact)).then(
 				() => true,

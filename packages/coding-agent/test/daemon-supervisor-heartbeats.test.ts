@@ -124,7 +124,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		expect(target.heartbeatSnapshotStale).toBe(false);
 	});
 
-	it.each(["", "\n \t\r\n", "\n".repeat(65_536)])(
+	it.each(["", "\n \t\r\n", "\n".repeat(65_536), "malformed JSON\n", "\n{broken\n \t\n"])(
 		"only scans scheduled transcripts while retaining ancestry, imported session ids, and archived filtering (case %#)",
 		async (prefix) => {
 			const supervisor = createSupervisorHarness();
@@ -181,6 +181,22 @@ describe("daemon supervisor heartbeat aggregation", () => {
 				path === parentFile ? {} : undefined,
 			);
 			await expect(supervisor.collectPassiveScheduledJobs()).resolves.toEqual([]);
+		},
+	);
+
+	it.each(["\n", "x"])(
+		"rejects oversized header probes instead of returning a partial catalog (case %#)",
+		async (prefix) => {
+			const supervisor = createSupervisorHarness();
+			const directory = realpathSync(supervisor.defaultSessionConfig.agentDir);
+			const manager = sessionManager.SessionManager.create(directory, join(directory, "sessions"));
+			manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+			manager.flushNow();
+			const file = manager.getSessionFile()!;
+			writeFileSync(file, `${prefix.repeat(2 * 1024 * 1024)}\n${readFileSync(file, "utf8")}`);
+			const readInfo = vi.spyOn(sessionManager, "readSessionInfo");
+			await expect(supervisor.collectPassiveScheduledJobs()).rejects.toThrow("1048576 byte probe limit");
+			expect(readInfo).not.toHaveBeenCalled();
 		},
 	);
 
