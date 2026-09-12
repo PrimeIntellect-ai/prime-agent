@@ -36,7 +36,8 @@ type FakeInteractiveMode = {
 		abortBash: Mock;
 	};
 	subagentSummaryLine: { invalidate: Mock };
-	ui: { requestRender: Mock; onDebug?: () => void };
+	editorContainer: { children: unknown[] };
+	ui: { requestRender: Mock; onDebug?: () => void; hasOverlay: () => boolean };
 	updatePendingMessagesDisplay: Mock;
 	showError: Mock;
 	showTreeSelector: Mock;
@@ -107,7 +108,8 @@ function createInteractiveFake(options: {
 			abortBash: vi.fn(),
 		},
 		subagentSummaryLine: { invalidate: vi.fn() },
-		ui: { requestRender: vi.fn() },
+		editorContainer: { children: [editor] },
+		ui: { requestRender: vi.fn(), hasOverlay: () => false },
 		queueSelection: { isBrowsing: false, reset: () => "" },
 		updatePendingMessagesDisplay: vi.fn(),
 		showError: vi.fn(),

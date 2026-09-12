@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pwd
@@ -38,6 +39,7 @@ SOURCE = HOMES / "builder/source"
 RESULTS = ROOT / "results"
 VERSION = "0.0.0-benchmark"
 ORIGIN = "http://127.0.0.1:18741"
+BUN_VERSION = "1.4.0"
 
 
 def clean_error(error: Exception) -> str:
@@ -142,6 +144,41 @@ def memory(uid: int) -> list[ProcessMemory]:
     return processes
 
 
+def prepare_native_artifact(agent: Path, artifacts: Path, log: Path) -> bool:
+    build = agent / "scripts/build-binary.mjs"
+    assemble = SOURCE / "scripts/assemble-release-archives.mjs"
+    if not build.exists() and not assemble.exists():
+        return False
+    if not build.is_file() or not assemble.is_file():
+        raise RuntimeError("Compiled release build scripts are incomplete")
+    tools = SOURCE / ".benchmark-bun"
+    run_as(
+        "builder",
+        ["npm", "install", "--prefix", str(tools), "--no-audit", "--no-fund", f"bun@{BUN_VERSION}"],
+        SOURCE,
+        timeout=180,
+        log=log,
+    )
+    run_as(
+        "builder",
+        ["node", str(build), "--platform", "linux-x64"],
+        SOURCE,
+        timeout=600,
+        log=log,
+        extra_env={"BUN_BINARY": str(tools / "node_modules/.bin/bun")},
+    )
+    run_as(
+        "builder",
+        ["node", str(assemble), str(agent / "binaries"), str(artifacts), VERSION],
+        SOURCE,
+        timeout=180,
+        log=log,
+    )
+    if not (artifacts / f"prime-agent-{VERSION}-linux-x64.tar.gz").is_file():
+        raise RuntimeError("Compiled Linux x64 release archive is missing")
+    return True
+
+
 def prepare(request: Request, side: Side) -> None:
     log = RESULTS / "build.log"
     source_url = f"https://github.com/{request.source_repository}.git"
@@ -187,9 +224,14 @@ def prepare(request: Request, side: Side) -> None:
         log=log,
     )
     artifacts = agent / "release/benchmark/artifacts"
-    side.artifacts = {path.name: path.stat().st_size for path in sorted(artifacts.glob("*.tgz"))}
-    if len(side.artifacts) != 4:
+    if len(list(artifacts.glob("*.tgz"))) != 4:
         raise RuntimeError("Expected the four release package tarballs")
+    native = prepare_native_artifact(agent, artifacts, log)
+    archives = sorted([*artifacts.glob("*.tgz"), *artifacts.glob("*.tar.gz")])
+    side.artifacts = {path.name: path.stat().st_size for path in archives}
+    (artifacts / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in archives)
+    )
     record(side, "bundle", 0, sum(side.artifacts.values()))
     release = ROOT / "www/releases" / f"v{VERSION}"
     release.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +240,9 @@ def prepare(request: Request, side: Side) -> None:
         side.runtime[name] = run_as("builder", [name, "--version"], SOURCE).strip()
     side.runtime["kernel"] = os.uname().release
     side.runtime["machine"] = os.uname().machine
-    side.runtime["artifact_format"] = "npm-tarballs"
+    side.runtime["artifact_format"] = "npm-tarballs+linux-x64-native" if native else "npm-tarballs"
+    if native:
+        side.runtime["bun"] = BUN_VERSION
     cpu = Path("/proc/cpuinfo").read_text()
     side.runtime["cpu"] = next(
         (line.partition(":")[2].strip() for line in cpu.splitlines() if line.startswith("model name")),
@@ -228,6 +272,14 @@ def disk_bytes(home: Path) -> int:
     return int(output.split()[0])
 
 
+def verify_installation_format(home: Path, side: Side) -> None:
+    with (home / ".local/bin/prime-agent").open("rb") as executable:
+        compiled = executable.read(4) == b"\x7fELF"
+    side.runtime["installation_format"] = "compiled" if compiled else "npm"
+    if side.runtime.get("artifact_format") == "npm-tarballs+linux-x64-native" and not compiled:
+        raise RuntimeError("Expected the compiled installation, but the installer selected Node")
+
+
 def install(request: Request, side: Side, trial: int) -> None:
     user = f"benchmark{trial + 1}"
     subprocess.run(
@@ -244,6 +296,7 @@ def install(request: Request, side: Side, trial: int) -> None:
             timeout=240,
             log=RESULTS / f"install-{trial}.log",
             extra_env={
+                "PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS": "1",
                 "PRIME_AGENT_DOWNLOAD_BASE_URL": ORIGIN,
                 "PRIME_AGENT_INSTALLER_PLAIN": "1",
                 "PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL": "1",
@@ -255,6 +308,7 @@ def install(request: Request, side: Side, trial: int) -> None:
         version = run_as(user, ["prime-agent", "--version"], home, merge_output=True).strip()
         if VERSION not in version:
             raise RuntimeError(f"Installed version does not match the packed release: {version[:100]}")
+        verify_installation_format(home, side)
         if not (home / ".prime/agent/kernel-venv/bin/python").exists():
             raise RuntimeError("The installer's Python bootstrap did not complete")
         record(side, "install", trial, elapsed)
