@@ -1,1 +1,3 @@
 - Fixed repeated full transcript scans when refreshing large saved-session catalogs.
+- Fixed repeated filesystem path checks when refreshing RLM session catalogs.
+- Fixed saved-session deletion records when a path alias changes during deletion.
