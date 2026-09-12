@@ -2082,6 +2082,7 @@ export class DaemonSupervisor {
 					this.write(client, success(command.id, command.type, attached.result));
 					this.detachClient(client, command.activeSessionId);
 					releaseSnapshotReservation();
+					this.releaseDeferredSessionPayloads(client, targetActiveSessionId, true);
 					return undefined;
 				} catch (error) {
 					releaseTranscript?.();
@@ -2089,6 +2090,7 @@ export class DaemonSupervisor {
 						this.detachClient(client, targetActiveSessionId);
 					}
 					releaseSnapshotReservation();
+					this.releaseDeferredSessionPayloads(client, targetActiveSessionId, targetWasAttached);
 					throw error;
 				}
 			}

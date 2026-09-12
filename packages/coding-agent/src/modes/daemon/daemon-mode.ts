@@ -6998,11 +6998,17 @@ export class AgentDaemon {
 		// Mark before the registry read so later events queue behind this snapshot.
 		const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
 		void this.prepareReplacementSnapshot(client, state, message, snapshotSignal).catch((error) => {
-			finishClientSnapshotStreaming(client, state.activeSessionId);
 			this.log(`could not prepare replacement snapshot: ${String(error)}`);
-			if (!client.socket.destroyed && this.sessions.get(state.activeSessionId) === state) {
+			if (
+				!client.socket.destroyed &&
+				!snapshotSignal.aborted &&
+				client.attachedActiveSessionIds.has(state.activeSessionId) &&
+				this.sessions.get(state.activeSessionId) === state
+			) {
 				this.write(client, message);
+				this.flushDeferredSessionFrames(client, state.activeSessionId);
 			}
+			finishClientSnapshotStreaming(client, state.activeSessionId);
 			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
 				void this.catchUpBackpressuredClient(client).catch((catchupError) =>
 					this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),

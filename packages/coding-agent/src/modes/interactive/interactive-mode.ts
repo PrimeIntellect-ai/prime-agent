@@ -6535,6 +6535,7 @@ export class InteractiveMode {
 			this.applyConnectionStateSnapshot(state);
 			this.restoreTurnStartFromMessages(context.messages);
 			await this.renderSessionContext(context, {
+				clearChat: true,
 				updateFooter: true,
 				populateHistory: true,
 				limitTranscript: true,
@@ -6554,13 +6555,11 @@ export class InteractiveMode {
 		} finally {
 			if (this.initialRenderPromise === render) {
 				this.initialRenderPromise = undefined;
+				// Release deferred events even if the last queued render failed. Do not
+				// await listener delivery: session-replaced handlers share that queue.
+				void this.agentConnection.flushBufferedSessionEvents?.();
 			}
 		}
-		// A deferring connection held session events back so they could not race
-		// the initial build; replay them now on the finished transcript. Not
-		// awaited: this also runs inside the session-replaced event queue, where
-		// awaiting listener delivery would deadlock.
-		void this.agentConnection.flushBufferedSessionEvents?.();
 	}
 
 	private async restoreStreamingMessageFromSnapshot(message: AgentMessage | undefined): Promise<void> {

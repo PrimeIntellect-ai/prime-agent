@@ -738,6 +738,52 @@ describe("InteractiveMode working timer", () => {
 		};
 	}
 
+	test.each(["success", "snapshot failure", "render failure"])(
+		"releases deferred events after the last queued render: %s",
+		async (outcome) => {
+			const snapshot = { state: createConnectionState(), messages: [userMessage("Only one copy.", 100)] };
+			const firstSnapshot = createDeferred<AgentConnectionSnapshot>();
+			const lastSnapshot = createDeferred<AgentConnectionSnapshot>();
+			const flushBufferedSessionEvents = vi.fn(() => new Promise<void>(() => {}));
+			const harness = Object.assign(
+				{},
+				createInitialTimerHarness(snapshot),
+				createRenderSessionContextHarness().harness,
+				{
+					agentConnection: {
+						getInitialSnapshot: vi
+							.fn()
+							.mockReturnValueOnce(firstSnapshot.promise)
+							.mockReturnValueOnce(lastSnapshot.promise),
+						flushBufferedSessionEvents,
+					},
+					renderSessionContext: vi.fn(renderSessionContext),
+				},
+			);
+			Object.setPrototypeOf(harness, InteractiveMode.prototype);
+			const first = harness.renderInitialMessages();
+			const last = harness.renderInitialMessages();
+			const completion =
+				outcome === "success" ? expect(last).resolves.toBeUndefined() : expect(last).rejects.toThrow(outcome);
+			firstSnapshot.resolve(snapshot);
+			await first;
+			expect(flushBufferedSessionEvents).not.toHaveBeenCalled();
+			const firstChildren = [...harness.chatContainer.children];
+			expect(firstChildren.length).toBeGreaterThan(0);
+			if (outcome === "snapshot failure") lastSnapshot.reject(new Error(outcome));
+			else {
+				if (outcome === "render failure") harness.renderSessionContext.mockRejectedValueOnce(new Error(outcome));
+				lastSnapshot.resolve(snapshot);
+			}
+			await completion;
+			expect(flushBufferedSessionEvents).toHaveBeenCalledOnce();
+			expect(harness.chatContainer.children).toHaveLength(firstChildren.length);
+			if (outcome === "success") {
+				expect(harness.chatContainer.children.some((child) => firstChildren.includes(child))).toBe(false);
+			}
+		},
+	);
+
 	test("restores the first active-run starter instead of a steering message", async () => {
 		const harness = createInitialTimerHarness({
 			state: createConnectionState({ isStreaming: true }),
@@ -1524,11 +1570,13 @@ describe("InteractiveMode connection events", () => {
 		).toHaveBeenCalledTimes(2);
 		expect(renderSessionContextMock).toHaveBeenCalledTimes(2);
 		expect(renderSessionContextMock).toHaveBeenNthCalledWith(1, expect.anything(), {
+			clearChat: true,
 			updateFooter: true,
 			populateHistory: true,
 			limitTranscript: true,
 		});
 		expect(renderSessionContextMock).toHaveBeenNthCalledWith(2, expect.anything(), {
+			clearChat: true,
 			updateFooter: true,
 			populateHistory: true,
 			limitTranscript: true,
