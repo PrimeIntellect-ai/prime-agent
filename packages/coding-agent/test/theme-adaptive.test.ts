@@ -307,6 +307,52 @@ describe("adaptive TUI theme colors", () => {
 		expect(selection).toMatch(/\x1b\[48;2;\d+;\d+;\d+mx\x1b\[49m/);
 	});
 
+	it("blends the soft selection halfway toward the editor surface", () => {
+		setDefaultTerminalColors({
+			foreground: { r: 235, g: 219, b: 178 },
+			background: { r: 29, g: 32, b: 33 },
+		});
+
+		const soft = theme.getSoftSelectionBackgroundColor()("x");
+		expect(soft).toMatch(/\x1b\[48;2;\d+;\d+;\d+mx\x1b\[49m/);
+		const selectionLuminance = extractRgbLuminance(theme.bg("selectedBg", "x"));
+		const surfaceLuminance = extractRgbLuminance(theme.bg("userMessageBg", "x"));
+		const softLuminance = extractRgbLuminance(soft);
+		expect(softLuminance).toBeLessThan(selectionLuminance);
+		expect(softLuminance).toBeGreaterThan(surfaceLuminance);
+		expect(Math.abs(softLuminance - (selectionLuminance + surfaceLuminance) / 2)).toBeLessThan(1.5);
+	});
+
+	it("keeps the plain selection background for soft highlights when the terminal background is unknown", () => {
+		expect(theme.getSoftSelectionBackgroundColor()("x")).toBe(theme.bg("selectedBg", "x"));
+	});
+
+	it("strengthens the soft selection when quantization collapses it into the editor surface", () => {
+		// Prime selectedBg #222226 and userMessageBg #1a1a1f quantize to the same
+		// 256-color cell for every blend alpha, so the soft highlight falls back
+		// to the adaptive selection machinery to stay visible.
+		setThemeInstance(
+			new Theme(
+				{} as ConstructorParameters<typeof Theme>[0],
+				{ selectedBg: "#222226", userMessageBg: "#1a1a1f" } as ConstructorParameters<typeof Theme>[1],
+				"256color",
+			),
+		);
+		setDefaultTerminalColors({
+			foreground: { r: 235, g: 219, b: 178 },
+			background: { r: 29, g: 32, b: 33 },
+		});
+
+		const soft = theme.getSoftSelectionBackgroundColor()("x");
+		const match = /48;5;(\d+)m/.exec(soft);
+		if (!match) throw new Error(`Expected 256-color background escape, got: ${JSON.stringify(soft)}`);
+		const surfaceMatch = /48;5;(\d+)m/.exec(theme.bg("userMessageBg", "x"));
+		if (!surfaceMatch) throw new Error("Expected a 256-color editor surface escape");
+		expect(Number(match[1])).not.toBe(Number(surfaceMatch[1]));
+
+		initTheme("prime");
+	});
+
 	it("uses COLORFGBG for automatic default theme selection when OSC colors are unavailable", () => {
 		process.env.COLORFGBG = "0;15";
 		clearDefaultTerminalColors();

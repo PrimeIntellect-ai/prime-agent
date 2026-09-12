@@ -1,0 +1,3 @@
+.venv/
+results/
+.ruff_cache/

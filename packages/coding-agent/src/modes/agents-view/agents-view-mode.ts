@@ -76,6 +76,7 @@ import {
 	buildUnifiedSessionIndex,
 	computeRecursiveRollups,
 	createUnattachableChildOpenResult,
+	filterEmptyAgentsViewSessions,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
 	getAgentsViewSelectionKey,
@@ -109,8 +110,7 @@ const STATUS_MESSAGE_DURATION_MS = 4500;
 const SEARCH_PROMPT_PLACEHOLDER = "Search sessions";
 const REPLY_PROMPT_FALLBACK_PLACEHOLDER = "Write a reply to this agent";
 const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
-const COMPLETED_ROW_ICON = "✓";
-const NEEDS_INPUT_ROW_ICON = "●";
+const STATUS_ROW_ICON = "•";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
 
@@ -121,7 +121,6 @@ export interface AgentsViewModeOptions {
 	createUiServicesForSession?: (summary: SessionSummary) => Promise<InteractiveModeUiServices>;
 	migratedProviders?: string[];
 	modelFallbackMessage?: string;
-	startupModelId?: string;
 	verbose?: boolean;
 	recoverDaemon?: () => Promise<void>;
 	reconnectTimeoutMs?: number;
@@ -665,7 +664,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private deleteConfirmTimer: ReturnType<typeof setTimeout> | undefined;
 	private workingIconFrame = 0;
 	private rows: AgentsViewRow[] = [];
-	private showActions = false;
 	private lastListedSummaries: SessionSummary[] = [];
 	private lastVisibleSummaries: SessionSummary[] = [];
 	private savedSessions: AgentConnectionSavedSessionInfo[] = [];
@@ -840,23 +838,16 @@ export class AgentsViewMode implements Component, Focusable {
 				this.editor.invalidate();
 			},
 		};
-		this.splash = new BrandSplashHeader(
-			VERSION,
-			() => this.getSplashModelId(),
-			() => this.getSplashCwd(),
-			undefined,
-			{
-				topPadding: true,
-				getExtraMetadata: () => {
-					const root = this.scopeRootSummary;
-					return [
-						{ label: "agents", value: this.getAgentCountsText() },
-						{ label: "scope", value: root ? getAgentsViewSessionTitle(root) : "global" },
-						{ label: "depth", value: String(getAgentsViewDepth(root)) },
-					];
-				},
+		this.splash = new BrandSplashHeader(VERSION, () => this.getSplashCwd(), undefined, {
+			topPadding: true,
+			getExtraMetadata: () => {
+				const root = this.scopeRootSummary;
+				return [
+					{ label: "agents", value: this.getAgentCountsText() },
+					...(root ? [{ label: "depth", value: String(getAgentsViewDepth(root)) }] : []),
+				];
 			},
-		);
+		});
 	}
 
 	async run(): Promise<AgentsViewRunResult> {
@@ -921,12 +912,6 @@ export class AgentsViewMode implements Component, Focusable {
 
 	handleInput(data: string): void {
 		this.clearStickyStatusMessage();
-		if (this.showActions) {
-			this.showActions = false;
-			this.ui.requestRender();
-			if (this.keybindings.matches(data, "app.shortcuts") || this.keybindings.matches(data, "tui.select.cancel"))
-				return;
-		}
 		if (this.renameTarget) {
 			if (this.keybindings.matches(data, "tui.select.cancel")) {
 				this.exitRenameMode();
@@ -972,11 +957,6 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		if (!this.replyTarget && this.editor.getText().length === 0) {
-			if (this.keybindings.matches(data, "app.shortcuts")) {
-				this.showActions = !this.showActions;
-				this.ui.requestRender();
-				return;
-			}
 			if (this.keybindings.matches(data, "app.agents.expand")) {
 				const row = this.rows[this.selectedIndex];
 				if (row && (row.kind === "subagent-summary" || row.descendantCount > 0)) this.toggleSubagentList(row);
@@ -1028,6 +1008,11 @@ export class AgentsViewMode implements Component, Focusable {
 		const noticeLines = this.renderStartupNotices(width);
 		if (noticeLines.length > 0) {
 			headerLines.push("", ...noticeLines);
+		}
+		const root = this.scopeRootSummary;
+		if (root) {
+			const scopeLabel = `${keyText("app.agents.back")} back · ${getAgentsViewSessionTitle(root)} › subagents`;
+			headerLines.push("", truncateToWidth(theme.fg("dim", scopeLabel), width));
 		}
 		headerLines.push("");
 
@@ -1307,7 +1292,13 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private getFilteredRecords(): UnifiedSessionRecord[] {
 		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
-		return filterUnifiedSessions(this.scopedRecords, (text) => matchesSearchText(text, query));
+		const preservedSessionIds = new Set([
+			...(this.anchorSessionId ? [this.anchorSessionId] : []),
+			...(this.scopeKey ? [this.scopeKey.sessionId] : []),
+			...this.heartbeats.map((heartbeat) => heartbeat.job.sessionId),
+		]);
+		const records = filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds);
+		return query.trim() ? filterUnifiedSessions(records, (text) => matchesSearchText(text, query)) : records;
 	}
 
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
@@ -2321,10 +2312,20 @@ export class AgentsViewMode implements Component, Focusable {
 			this.selectedActiveSessionId = undefined;
 			return;
 		}
+		const selectedIdentity = this.selectedRowIdentity ?? this.persistentState.selectedRowIdentity;
+		const exactIndex =
+			selectedIdentity === undefined
+				? -1
+				: this.rows.findIndex((row) => row.selectable && row.identity === selectedIdentity);
+		if (exactIndex >= 0) {
+			this.selectedIndex = exactIndex;
+			this.syncSelectedRowState();
+			return;
+		}
 		const resolution = resolveAgentsViewSelectionState(
 			this.rows,
 			this.selectedIndex,
-			this.selectedRowIdentity ?? this.persistentState.selectedRowIdentity,
+			selectedIdentity,
 			this.selectedSessionKey ?? this.persistentState.selectedSessionKey,
 		);
 		this.selectedIndex = resolution.index;
@@ -2489,7 +2490,6 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private renderSessionRows(width: number, maxRows: number): string[] {
 		if (maxRows <= 0) return [];
-		if (this.showActions) return this.renderActions(width).slice(0, maxRows);
 		const layout = buildCompactAgentsViewLayout(this.rows, width);
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.rows);
@@ -2502,10 +2502,12 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		if (displayItems.length === 0) {
-			return [theme.fg("dim", "No sessions match your search.")];
+			const query =
+				this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+			return [theme.fg("dim", query.trim() ? "No sessions match your search." : "No sessions yet.")];
 		}
-		// Reserve the shared column header before calculating the selection viewport.
-		const headerRows = maxRows > 1 ? 1 : 0;
+		// Reserve the column header and its spacer, leaving at least one session row visible.
+		const headerRows = Math.min(2, maxRows - 1);
 		const visibleRows = maxRows - headerRows;
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
@@ -2522,13 +2524,14 @@ export class AgentsViewMode implements Component, Focusable {
 		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
 			if (item.type === "spacer") return "";
 			if (item.type === "heading") {
-				return theme.bold(truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
+				return theme.fg("muted", truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
 			}
 			return this.renderRow(item.row, width, layout);
 		});
 		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
 		if (showTrailingEllipsis) lines.push(theme.fg("dim", "  ..."));
-		if (headerRows > 0) lines.unshift(theme.fg("muted", layout.legend));
+		if (headerRows > 1) lines.unshift("");
+		if (headerRows > 0) lines.unshift(theme.bold(layout.legend));
 		return lines;
 	}
 
@@ -2567,41 +2570,12 @@ export class AgentsViewMode implements Component, Focusable {
 		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
 		const cells = [
 			formatTableCell(title, layout.nameWidth),
-			formatTableCell(theme.fg("muted", formatSessionModel(row.summary)), layout.modelWidth),
+			formatTableCell(theme.fg("muted", formatSessionModel(row)), layout.modelWidth),
 		];
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
-		cells.push(theme.fg("muted", details));
+		cells.push(theme.fg("dim", details));
 		return markRow(formatTableCell(cells.join("  "), width));
 	}
-
-	private renderActions(width: number): string[] {
-		const selected = this.rows[this.selectedIndex];
-		// The summary row is an expansion control; its details are the owning row's.
-		const row =
-			selected?.kind === "subagent-summary"
-				? this.rows.find((candidate) => candidate.identity === selected.parentIdentity)
-				: selected;
-		const actions = [
-			`${keyText("tui.select.confirm")} open   ${keyText("app.agents.open")} open   ${keyText("app.agents.new")} new`,
-			`${keyText("app.agents.expand")} expand/collapse subagents   ${keyText("app.agents.program")} program`,
-			`${keyText("app.agents.reply")} reply/resume   ${keyText("app.agents.rename")} rename   ${keyText("app.agents.delete")} stop/delete`,
-			`${keyText("app.shortcuts")} close actions`,
-		];
-		if (row) {
-			const model = row.summary.model;
-			const usage = row.summary.usage;
-			actions.push(
-				"",
-				row.title,
-				`Model: ${model ? `${model.provider}/${model.id}` : "unknown"}${row.summary.thinkingLevel ? ` · ${row.summary.thinkingLevel}` : ""}`,
-				`Directory: ${row.summary.cwd}`,
-				`Tokens: ${usage?.inputTokens ?? 0} in · ${usage?.outputTokens ?? 0} out`,
-				`Cost: $${(usage?.cost ?? 0).toFixed(2)} session · $${row.recursiveCost.toFixed(2)} including subagents`,
-			);
-		}
-		return actions.flatMap((line) => wrapTextWithAnsi(theme.fg("muted", line), width));
-	}
-
 	// Spawn-code rows are read-only context. They render deemphasized — muted
 	// text on a panel background (applied in finalizeRenderedLine) so the program
 	// reads as one quiet segmented block rather than competing with agent rows.
@@ -2729,11 +2703,8 @@ export class AgentsViewMode implements Component, Focusable {
 		return Math.max(0, rows - dockHeight);
 	}
 
-	private getSplashModelId(): string | undefined {
-		return this.rows[this.selectedIndex]?.summary.model?.id ?? this.options.startupModelId;
-	}
-
-	private getSplashCwd(): string {
+	private getSplashCwd(): string | undefined {
+		if (this.scopeRootSummary) return undefined;
 		return this.rows[this.selectedIndex]?.summary.cwd ?? this.options.uiServices.getInitialCwd();
 	}
 
@@ -2742,9 +2713,8 @@ export class AgentsViewMode implements Component, Focusable {
 			case "running":
 				return workingIconFrame(this.workingIconFrame);
 			case "idle":
-				return NEEDS_INPUT_ROW_ICON;
 			case "inactive":
-				return COMPLETED_ROW_ICON;
+				return STATUS_ROW_ICON;
 			default: {
 				const _exhaustive: never = section;
 				return _exhaustive;
@@ -2757,9 +2727,9 @@ export class AgentsViewMode implements Component, Focusable {
 			case "running":
 				return theme.bold(icon);
 			case "idle":
-				return theme.fg("warning", icon);
+				return theme.bold(theme.fg("warning", icon));
 			case "inactive":
-				return theme.fg("dim", icon);
+				return theme.bold(theme.fg("dim", icon));
 			default: {
 				const _exhaustive: never = section;
 				return _exhaustive;
@@ -2831,10 +2801,7 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
 	const detailsWidth = costWidth + 2 + ageWidth;
 	const available = Math.max(0, width - detailsWidth - 4);
-	const desiredModelWidth = sessions.reduce(
-		(size, row) => Math.max(size, visibleWidth(formatSessionModel(row.summary))),
-		12,
-	);
+	const desiredModelWidth = sessions.reduce((size, row) => Math.max(size, visibleWidth(formatSessionModel(row))), 12);
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
 	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
@@ -2872,8 +2839,16 @@ function formatTableCell(value: string, width: number): string {
 	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
-function formatSessionModel(summary: SessionSummary): string {
-	return summary.model?.id ?? "-";
+// Model ids can embed a provider path ("moonshotai/kimi-k2"); the column shows
+// the bare model name plus the thinking level ("kimi-k2:high") when one is
+// active — "off" reads as noise, so it and absent levels render bare (saved
+// rows carry no level).
+function formatSessionModel(row: AgentsViewRow): string {
+	const id = row.summary.model?.id ?? row.record?.saved?.model?.modelId;
+	if (!id) return "-";
+	const bare = id.slice(id.lastIndexOf("/") + 1) || id;
+	const level = row.summary.thinkingLevel;
+	return level && level !== "off" ? `${bare}:${level}` : bare;
 }
 
 function formatSessionDuration(summary: SessionSummary): string {

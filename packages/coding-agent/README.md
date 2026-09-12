@@ -182,9 +182,7 @@ See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json
 | Escape | Clear the input without interrupting active work |
 | Escape twice | Open `/tree` |
 | Ctrl+L | Open model selector |
-| Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
-| Ctrl+O | Collapse/expand tool output |
-| Ctrl+T | Collapse/expand thinking blocks |
+| Ctrl+O | Cycle overview → thinking and file diffs → all output |
 
 ### Message Queue
 

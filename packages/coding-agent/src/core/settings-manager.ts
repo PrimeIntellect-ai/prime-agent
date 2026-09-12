@@ -148,7 +148,6 @@ export interface Settings {
 	telemetry?: TelemetrySettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
-	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
@@ -956,16 +955,6 @@ export class SettingsManager {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
 		};
-	}
-
-	getHideThinkingBlock(): boolean {
-		return this.settings.hideThinkingBlock ?? false;
-	}
-
-	setHideThinkingBlock(hide: boolean): void {
-		this.globalSettings.hideThinkingBlock = hide;
-		this.markModified("hideThinkingBlock");
-		this.save();
 	}
 
 	getShellPath(): string | undefined {

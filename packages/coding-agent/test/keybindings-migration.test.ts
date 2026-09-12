@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
-import { KeybindingsManager } from "../src/core/keybindings.js";
+import { KEYBINDINGS, KeybindingsManager } from "../src/core/keybindings.js";
 import { runMigrations } from "../src/migrations.js";
 
 describe("keybindings migration", () => {
@@ -90,26 +90,33 @@ describe("keybindings migration", () => {
 
 	it("gives explicit editor bindings precedence over application defaults", () => {
 		const keybindings = new KeybindingsManager({
-			"tui.editor.cursorUp": ["up", "ctrl+p"],
+			"tui.editor.cursorUp": ["up", "ctrl+o"],
 			"tui.editor.cursorDown": ["down", "ctrl+n"],
 		});
 
-		expect(keybindings.getKeys("tui.editor.cursorUp")).toEqual(["up", "ctrl+p"]);
-		expect(keybindings.getKeys("app.messages.expand")).toEqual([]);
+		expect(keybindings.getKeys("tui.editor.cursorUp")).toEqual(["up", "ctrl+o"]);
+		expect(keybindings.getKeys("app.tools.expand")).toEqual([]);
 		expect(keybindings.getKeys("app.models.toggleProvider")).toEqual(["ctrl+p"]);
 		expect(keybindings.getKeys("app.agents.new")).toEqual(["ctrl+n"]);
 	});
 
 	it("reports an application default that is explicitly retained against an editor binding", () => {
 		const keybindings = new KeybindingsManager({
-			"tui.editor.cursorUp": ["up", "ctrl+p"],
-			"app.messages.expand": "ctrl+p",
+			"tui.editor.cursorUp": ["up", "ctrl+o"],
+			"app.tools.expand": "ctrl+o",
 		});
 
 		expect(keybindings.getConflicts()).toContainEqual({
-			key: "ctrl+p",
-			keybindings: ["tui.editor.cursorUp", "app.messages.expand"],
+			key: "ctrl+o",
+			keybindings: ["tui.editor.cursorUp", "app.tools.expand"],
 		});
-		expect(keybindings.getKeys("app.messages.expand")).toEqual(["ctrl+p"]);
+		expect(keybindings.getKeys("app.tools.expand")).toEqual(["ctrl+o"]);
+	});
+
+	it("does not define an independent message expansion action", () => {
+		expect(KEYBINDINGS).not.toHaveProperty("app.messages.expand");
+		const keybindings = new KeybindingsManager({ "tui.editor.cursorUp": ["up", "ctrl+p"] });
+		expect(keybindings.getKeys("tui.editor.cursorUp")).toEqual(["up", "ctrl+p"]);
+		expect(keybindings.getKeys("app.tools.expand")).toEqual(["ctrl+o"]);
 	});
 });

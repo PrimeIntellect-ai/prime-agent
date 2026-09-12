@@ -185,7 +185,7 @@ git add packages/foo.ts
 	it("keeps the python preview for bash-looking text inside a multiline string", () => {
 		expect(previewIpythonCode('doc = """\nbash("git status")\n"""')).toEqual({
 			language: "python",
-			text: 'bash("git status")',
+			text: 'doc = """',
 		});
 		expect(previewIpythonCode(`doc = """usage"""\nr = await bash('git status')`)).toEqual({
 			language: "bash",
@@ -203,5 +203,35 @@ p = Path("packages/foo.ts")
 p.write_text("hello")
 PY`;
 		expect(previewBashCommand(command)).toEqual({ language: "python", text: "write packages/foo.ts" });
+	});
+
+	it.each(['"""', "'''", 'r"""', "r'''", 'f"""'])("ignores multiline string bodies in previews (%s)", (opening) => {
+		const code = [
+			'issue_title = "example"',
+			`issue_body = ${opening}## Summary`,
+			"```ts",
+			"if (!env || state.clientEnv) return;",
+			"```",
+			'path = "/wrong/path"',
+			'path.write_text("not executed")',
+			opening.slice(-3),
+			"print(len(issue_body))",
+		].join("\n");
+		expect(previewPythonCode(code)).toEqual({ language: "python", text: 'issue_title = "example"' });
+		expect(previewPythonCode(`${code}\nsend_issue(issue_title, issue_body)`)).toEqual({
+			language: "python",
+			text: "send_issue(issue_title, issue_body)",
+		});
+	});
+
+	it("ignores unfinished strings while streaming and quotes inside comments", () => {
+		expect(previewPythonCode('body = """draft\nclient.execute("example")')).toEqual({
+			language: "python",
+			text: 'body = """draft',
+		});
+		expect(previewPythonCode('# """ inside a comment\nrun_check()')).toEqual({
+			language: "python",
+			text: "run_check()",
+		});
 	});
 });

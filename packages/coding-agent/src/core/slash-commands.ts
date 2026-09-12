@@ -86,7 +86,7 @@ interface BuiltinSlashCommandAlias {
 
 const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
-	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "[search]", takesArgument: true },
+	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "[search]" },
 	{ name: "effort", description: "Select reasoning/thinking level (opens selector UI)", argumentHint: "[level]" },
 	{ name: "fast", description: "Toggle OpenAI Fast mode" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
@@ -167,8 +167,9 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{
 		name: "autonomous",
-		description: "Set or view autonomous mode",
-		argumentHint: "[status|on|off]",
+		description: "Set or view autonomous mode with an optional budget",
+		argumentHint:
+			"[status|off|on [--max-continuations <n>] [--max-turns <n>] [--max-tokens <n>] [--timeout-ms <n>] [--gate <command>]]",
 		takesArgument: true,
 	},
 	{

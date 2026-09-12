@@ -1,7 +1,10 @@
 import stripAnsi from "strip-ansi";
 import { describe, expect, test, vi } from "vitest";
 import { AgentsViewMode } from "../../../src/modes/agents-view/agents-view-mode.js";
-import { buildUnifiedSessionIndex } from "../../../src/modes/agents-view/agents-view-state.js";
+import {
+	buildUnifiedSessionIndex,
+	reconcileUnifiedSessions,
+} from "../../../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createDeferred as deferred } from "../scheduling.js";
@@ -380,6 +383,7 @@ describe("#502 unified session view regressions", () => {
 		{ mode: "search", prompt: ["prompt top", "prompt input", "prompt bottom"] },
 		{ mode: "reply", prompt: ["prompt top", "reply header", "reply gap", "prompt input", "prompt bottom"] },
 	])("short content reserves the $mode editor and a session row ahead of startup chrome", ({ prompt }) => {
+		initTheme("dark");
 		const renderSessionRows = vi.fn(() => ["session row"]);
 		const harness = {
 			splash: { render: () => Array.from({ length: 8 }, () => "splash") },
@@ -404,15 +408,19 @@ describe("#502 unified session view regressions", () => {
 			renameTarget: mode === "rename" ? { identity: "target" } : undefined,
 			actionModeSearchQuery: "needle",
 			editor: { getText: () => "action editor text" },
-			scopedRecords: [
-				{ identity: "match", identityAliases: [], section: "idle", searchableText: "needle session" },
-				{ identity: "other", identityAliases: [], section: "idle", searchableText: "other session" },
-			],
+			heartbeats: [],
+			scopedRecords: reconcileUnifiedSessions(
+				[
+					{ ...summary("match"), sessionName: "needle session" },
+					{ ...summary("other"), sessionName: "other session" },
+				],
+				[],
+			),
 		};
 
 		const filtered =
 			privateMethod<(this: typeof harness) => Array<{ identity: string }>>("getFilteredRecords").call(harness);
-		expect(filtered.map((record) => record.identity)).toEqual(["match"]);
+		expect(filtered.map((record) => record.identity)).toEqual(["session:session-match"]);
 	});
 
 	test("inactive rows keep total cost and age visible in a narrow row", () => {
@@ -499,22 +507,23 @@ describe("#502 unified session view regressions", () => {
 			);
 
 		const full = render(160);
-		expect(full).toMatch(/Inspect agents view\s+gpt-5\.6-terra\s+Investigate a variable background status/);
+		// The active thinking level rides the compact id; both must stay visible.
+		expect(full).toMatch(/Inspect agents view\s+gpt-5\.6-terra:high\s+Investigate a variable background status/);
 		for (const width of [60, 80, 120]) {
-			expect(render(width)).toContain("gpt-5.6-terra");
+			expect(render(width)).toContain("gpt-5.6-terra:high");
 			expect(render(width)).toHaveLength(width);
 		}
 		const narrow = render(100);
-		expect(narrow).toContain("gpt-5.6-terra");
+		expect(narrow).toContain("gpt-5.6-terra:high");
 		expect(narrow).not.toContain("prime-inference/");
 
 		subagent.summary.summary = "";
-		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra:high/);
 
 		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
 		subagent.summary.runtimeKind = undefined;
 		subagent.summary.rlmChildId = "effort-child";
-		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra/);
+		expect(render(100)).toMatch(/Inspect agents view\s+gpt-5\.6-terra:high/);
 
 		subagent.summary.thinkingLevel = "off";
 		subagent.summary.summary = "A later summary";

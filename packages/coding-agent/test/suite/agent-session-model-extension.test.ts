@@ -450,7 +450,10 @@ describe("AgentSession model and extension characterization", () => {
 				.map((message) => ({ role: message.role, text: getMessageText(message) })),
 		).toEqual([
 			{ role: "custom", text: "heartbeat model context" },
-			{ role: "custom", text: "Check whether the long-running task needs another step." },
+			{
+				role: "custom",
+				text: "[heartbeat: every 5m run#2]\n\nCheck whether the long-running task needs another step.",
+			},
 		]);
 		expect(getAssistantTexts(harness)).toContain("heartbeat");
 	});

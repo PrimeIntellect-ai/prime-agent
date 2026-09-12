@@ -198,6 +198,40 @@ describeRuntime("#2053 background kernel bash residency", () => {
 		}
 	});
 
+	it("withdraws the queued completion notice when a later cell reads the result", async () => {
+		const notice = createDeferred<void>();
+		const release = createDeferred<void>();
+		try {
+			const { session, kernel } = await start(async () => {
+				notice.resolve();
+				await release.promise;
+			});
+			harness!.setResponses([
+				async () => {
+					// The notice queues while the model is busy in the cell that reads the result.
+					release.resolve();
+					await vi.waitFor(() => expect(session.getSteeringMessages()).toHaveLength(1));
+					const read = await kernel.execute("handle.output()");
+					expect(read.result).toContain("read-later");
+					await vi.waitFor(() => expect(session.getSteeringMessages()).toEqual([]));
+					return fauxAssistantMessage("Read the background result directly.");
+				},
+			]);
+			await kernel.execute("from rlm import bash\nhandle = bash('printf read-later')");
+			await notice.promise;
+			await session.prompt("Keep working.");
+			await session.waitForIdle();
+			expect(
+				session.messages.filter(
+					(message) => message.role === "custom" && message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+				),
+			).toEqual([]);
+			expect(harness!.eventsOfType("agent_start")).toHaveLength(1);
+		} finally {
+			release.resolve();
+		}
+	});
+
 	it("reports a terminal readiness failure without retrying or retaining completed work", async () => {
 		const beforeCompletion = vi.fn(async () => {});
 		const { session, kernel } = await start(beforeCompletion, false);

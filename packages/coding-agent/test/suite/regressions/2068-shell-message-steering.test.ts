@@ -24,6 +24,13 @@ function completeShell(harness: Harness) {
 	return (harness.session as unknown as KernelSession)._createKernelHostHandlers()["bash.completed"]!(completion);
 }
 
+function readShellResult(harness: Harness, command = completion.command) {
+	return (harness.session as unknown as KernelSession)._createKernelHostHandlers()["bash.consumed"]!({
+		pid: completion.pid,
+		command,
+	});
+}
+
 function shellMessages(harness: Harness) {
 	return harness.session.messages.filter(
 		(message) => message.role === "custom" && message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
@@ -81,7 +88,7 @@ describe("#2068 shell message steering", () => {
 			const queued = harness.session.getSessionActionRecoverySnapshot().actions;
 			expect(queued).toContainEqual(expect.objectContaining({ delivery: "next_turn_boundary" }));
 			const preview = harness.session.getSteeringMessagePreviews()[0]!;
-			expect(preview).toBe("Shell message received: pid 42, exit 0");
+			expect(preview).toBe("Background command finished: pid 42, exit 0");
 			expect(formatQueuedMessagePreview(preview, "Steering")).toBe(preview);
 		} finally {
 			release.resolve();
@@ -93,8 +100,7 @@ describe("#2068 shell message steering", () => {
 		expect(harness.eventsOfType("agent_end")[0]!.messages.filter((message) => message.role === "assistant")).toEqual([
 			expect.objectContaining({ stopReason: "toolUse" }),
 		]);
-		expect(consumed.text).toContain("Shell message received.\nSource: bash");
-		expect(consumed.text).toContain("pid 42, exit code 0");
+		expect(consumed.text).toBe('[bash-done pid:42 exit:0]\n\nCommand: "npm test"');
 		expect(shellMessages(harness)).toHaveLength(1);
 		expect(harness.eventsOfType("agent_start")).toHaveLength(2);
 		expect(harness.eventsOfType("agent_end")).toHaveLength(2);
@@ -107,7 +113,7 @@ describe("#2068 shell message steering", () => {
 		harness.setResponses([
 			(context) => {
 				requests++;
-				expect(getMessageText(context.messages.at(-1))).toContain("Source: bash");
+				expect(getMessageText(context.messages.at(-1))).toContain("[bash-done pid:42 exit:0]");
 				return fauxAssistantMessage("Inspected the shell result.");
 			},
 		]);
@@ -115,9 +121,56 @@ describe("#2068 shell message steering", () => {
 		await harness.session.waitForIdle();
 		expect(requests).toBe(1);
 		expect(shellMessages(harness)).toHaveLength(1);
+		// A result read after delivery has nothing to withdraw.
+		await readShellResult(harness);
+		expect(shellMessages(harness)).toHaveLength(1);
 		expect(isAgentSessionMessage(shellMessages(harness)[0]!)).toBe(false);
 		expect(harness.session.getSteeringMessages()).toEqual([]);
 		expect(harness.session.getFollowUpMessages()).toEqual([]);
+	});
+
+	it("withdraws a queued shell notice once the kernel reads the result", async () => {
+		const started = createDeferred<void>();
+		const release = createDeferred<void>();
+		const tool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Hold the current tool until released",
+			parameters: Type.Object({}),
+			execute: async () => {
+				started.resolve();
+				await release.promise;
+				return { content: [{ type: "text", text: "released" }], details: {} };
+			},
+		};
+		const harness = await createHarness({ tools: [tool] });
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Finished the original work."),
+		]);
+		const original = harness.session.prompt("Continue working.");
+		try {
+			await started.promise;
+			await completeShell(harness);
+			expect(harness.session.getSteeringMessages()).toHaveLength(1);
+			// pids are reused across handles, so another command must not withdraw this notice.
+			await readShellResult(harness, "other command");
+			expect(harness.session.getSteeringMessages()).toHaveLength(1);
+			// pid reuse can queue an identical key twice; one read withdraws one notice.
+			await completeShell(harness);
+			expect(harness.session.getSteeringMessages()).toHaveLength(2);
+			await readShellResult(harness);
+			expect(harness.session.getSteeringMessages()).toHaveLength(1);
+			await readShellResult(harness);
+			expect(harness.session.getSteeringMessages()).toEqual([]);
+		} finally {
+			release.resolve();
+			await original;
+		}
+		await harness.session.waitForIdle();
+		expect(shellMessages(harness)).toEqual([]);
+		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
 	});
 
 	it("renders shell-specific queue and transcript labels without generic delivery prefixes", () => {
@@ -132,11 +185,11 @@ describe("#2068 shell message steering", () => {
 				.render(120)
 				.join("\n")
 				.replace(/\u001b\[[0-9;]*m/g, "");
-		expect(render()).toContain("◆ Shell message received · pid 42 · exit 0");
+		expect(render()).toContain("✓ Background shell command finished");
 		expect(render()).not.toMatch(/Follow-up:|Steering:|Agent message received/);
 		component.setExpanded(true);
-		expect(render()).toContain("Source: bash");
+		expect(render()).toContain("[bash-done pid:42 exit:0]");
 		expect(render()).toContain("npm test");
-		expect(render()).toContain("Inspect the saved BashHandle");
+		expect(render()).not.toContain("Inspect the saved BashHandle");
 	});
 });

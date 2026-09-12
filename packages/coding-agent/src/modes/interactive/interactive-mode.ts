@@ -82,6 +82,7 @@ import {
 	DEFAULT_HEARTBEAT_DELIVERY_MODE,
 	parseHeartbeatCommand,
 } from "../../core/cron-jobs.js";
+import { DEFAULT_THINKING_LEVEL } from "../../core/defaults.js";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -135,7 +136,7 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
-import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
+import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -193,7 +194,7 @@ import {
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
 import { ConfigurationMenuComponent, type ConfigurationMenuTab } from "./components/configuration-menu.js";
 import { formatContextTree } from "./components/context-tree-format.js";
-import { isCompactAgentMessageNeighbor } from "./components/conversation-components.js";
+import { createConversationSpacing, createShellCompletionComponent } from "./components/conversation-components.js";
 import { CountdownTimer } from "./components/countdown-timer.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { CustomMessageComponent } from "./components/custom-message.js";
@@ -204,14 +205,20 @@ import { type FileChangeSummary, formatTotalChangeSummary, mergeTurnFileChanges 
 import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
-import { FEATURE_HINT_ANIMATION_INTERVAL_MS, FeatureHintComponent } from "./components/feature-hint.js";
 import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
-import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
+import {
+	formatConversationDetailStatus,
+	formatKeyText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "./components/keybinding-hints.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
+import { PromptContextLine } from "./components/prompt-context-line.js";
 import { styleArgumentTokens } from "./components/prompt-highlight.js";
 import {
 	MalformedRefinementOutcomeMessageComponent,
@@ -228,8 +235,8 @@ import {
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
 import {
-	countDirectSubagentStatuses,
 	countRosterSubagentStatuses,
+	countSubtreeSubagentStatuses,
 	SubagentSummaryLine,
 } from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
@@ -241,7 +248,6 @@ import {
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
-import { FeatureHintDeck } from "./feature-hints.js";
 import { scopeHeartbeatsToSession } from "./heartbeat-scope.js";
 import {
 	collectMarkedImages,
@@ -295,20 +301,6 @@ interface PendingToolCallRenderInput {
 const HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS = 15_000;
 const HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS = 120_000;
 const MODEL_CATALOG_REFRESH_TTL_MS = 60_000;
-const FEATURE_HINT_DELAY_MS = 5_000;
-
-export const START_HINTS = [
-	'Try "refactor @<filepath>"',
-	'Try "fix bugs in @<filepath>"',
-	'Try "add tests for @<filepath>"',
-	'Try "explain how @<filepath> works"',
-	'Try "improve performance in @<filepath>"',
-] as const;
-
-export function getRandomStartHint(random = Math.random): (typeof START_HINTS)[number] {
-	return START_HINTS[Math.floor(random() * START_HINTS.length)] ?? START_HINTS[0];
-}
-
 function isLabeledQueuedPreview(message: string): boolean {
 	return (
 		message.startsWith(`${HEARTBEAT_PROMPT_PREVIEW_LABEL}: `) ||
@@ -338,19 +330,6 @@ export function styleQueuedMessagePreview(
 
 function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
-}
-
-interface AgentMessagesExpandable {
-	setAgentMessagesExpanded(expanded: boolean): void;
-}
-
-function hasAgentMessagesExpansion(obj: unknown): obj is AgentMessagesExpandable {
-	return (
-		typeof obj === "object" &&
-		obj !== null &&
-		"setAgentMessagesExpanded" in obj &&
-		typeof (obj as AgentMessagesExpandable).setAgentMessagesExpanded === "function"
-	);
 }
 
 interface EditDiffsExpandable {
@@ -446,25 +425,22 @@ export interface BrandSplashMetadataLine {
 export interface BrandSplashHeaderOptions {
 	logo?: string;
 	topPadding?: boolean;
+	getModelId?: () => string | undefined;
 	getExtraMetadata?: () => readonly BrandSplashMetadataLine[];
-	getHideStartHint?: () => boolean;
-	getStartHint?: () => string;
 }
 
 export class BrandSplashHeader implements Component {
 	private readonly logoRaw: string[];
 	private readonly logoCanvasWidth: number;
-	private readonly gutter = 4;
-	private readonly labelWidth = 9;
+	private readonly gutter = 3;
 
 	constructor(
 		private readonly version: string,
-		private readonly getModelId: () => string | undefined,
-		private readonly getCwd: () => string,
+		private readonly getCwd: () => string | undefined,
 		private readonly verboseInstructions?: string,
 		private readonly options: BrandSplashHeaderOptions = {},
 	) {
-		this.logoRaw = (options.logo ?? PRIME_BUTTERFLY_LOGO).split("\n");
+		this.logoRaw = (options.logo ?? PRIME_COMPACT_BUTTERFLY_LOGO).split("\n");
 		this.logoCanvasWidth = this.logoRaw.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 	}
 
@@ -476,41 +452,50 @@ export class BrandSplashHeader implements Component {
 		const safeWidth = Math.max(1, width);
 		const paddingX = safeWidth > 1 ? 1 : 0;
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
-		const metaWidth = contentWidth - this.logoCanvasWidth - this.gutter;
-		const showMeta = metaWidth >= this.labelWidth + 8;
-		const valueWidth = Math.max(1, metaWidth - this.labelWidth);
-		const labelled = (label: string, value: string) => {
-			const displayValue =
-				label === "cwd" ? truncatePathMiddle(value, valueWidth) : truncateToWidth(value, valueWidth);
-			return theme.fg("dim", label.padEnd(this.labelWidth)) + theme.fg("muted", displayValue);
-		};
+		const showLogo = this.logoCanvasWidth > 0 && contentWidth - this.logoCanvasWidth - this.gutter >= 24;
+		const metaWidth = showLogo ? contentWidth - this.logoCanvasWidth - this.gutter : contentWidth;
 		const extraMetadata = this.options.getExtraMetadata?.() ?? [];
-		const hideStartHint = this.options.getHideStartHint?.() ?? false;
-		const startHint = this.options.getStartHint?.() ?? "type to search sessions";
-		const metaLines = showMeta
-			? [
-					labelled("version", `v${this.version}`),
-					labelled("model", this.getModelId() ?? "—"),
-					labelled("cwd", formatSplashCwd(this.getCwd())),
-					...extraMetadata.map((line) => labelled(line.label, line.value)),
-					...(hideStartHint ? [] : ["", theme.fg("dim", startHint)]),
-				]
-			: [];
-		const metaStart = Math.max(0, Math.floor((this.logoRaw.length - metaLines.length) / 2));
+		const version = theme.fg("muted", `v${this.version}`);
+		const titleText = "prime agent";
+		const title = theme.fg("text", titleText);
+		const modelLabel = "model ";
+		const cwdLabel = "cwd ";
+		const cwd = this.getCwd();
+		const metaLines = [
+			...(visibleWidth(`${titleText} v${this.version}`) <= metaWidth ? [`${title} ${version}`] : [title, version]),
+			...(this.options.getModelId
+				? [
+						`${theme.fg("dim", modelLabel)}${theme.fg(
+							"muted",
+							truncateToWidth(
+								this.options.getModelId() ?? "—",
+								Math.max(1, metaWidth - visibleWidth(modelLabel)),
+							),
+						)}`,
+					]
+				: []),
+			...extraMetadata.map(({ label, value }) => `${theme.fg("dim", `${label} `)}${theme.fg("muted", value)}`),
+			...(cwd === undefined
+				? []
+				: [
+						`${theme.fg("dim", cwdLabel)}${theme.fg("muted", truncatePathMiddle(formatSplashCwd(cwd), Math.max(1, metaWidth - visibleWidth(cwdLabel))))}`,
+					]),
+		];
 		const lines = this.options.topPadding ? [""] : [];
-		lines.push(
-			...this.logoRaw.map((line, index) => {
-				const colored = theme.fg("text", line);
-				const meta = index >= metaStart && index < metaStart + metaLines.length ? metaLines[index - metaStart] : "";
-				const padding = showMeta
-					? " ".repeat(Math.max(0, this.logoCanvasWidth - visibleWidth(line) + this.gutter))
-					: "";
-				const content = truncateToWidth(colored + padding + meta, contentWidth, "");
-				return (
-					" ".repeat(paddingX) + content + " ".repeat(Math.max(0, safeWidth - paddingX - visibleWidth(content)))
-				);
-			}),
-		);
+		const rowCount = Math.max(showLogo ? this.logoRaw.length : 0, metaLines.length);
+		const metaStartIndex = showLogo ? Math.floor((rowCount - metaLines.length) / 2) : 0;
+		for (let index = 0; index < rowCount; index++) {
+			const logoLine = showLogo ? (this.logoRaw[index] ?? "") : "";
+			const logo = showLogo
+				? theme.fg("text", logoLine) + " ".repeat(this.logoCanvasWidth - visibleWidth(logoLine) + this.gutter)
+				: "";
+			const metaIndex = index - metaStartIndex;
+			const metaLine = metaIndex >= 0 && metaIndex < metaLines.length ? metaLines[metaIndex] : "";
+			const content = truncateToWidth(logo + metaLine, contentWidth);
+			lines.push(
+				" ".repeat(paddingX) + content + " ".repeat(Math.max(0, safeWidth - paddingX - visibleWidth(content))),
+			);
+		}
 
 		if (this.verboseInstructions) {
 			lines.push(" ".repeat(safeWidth));
@@ -569,6 +554,17 @@ const HEARTBEAT_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
 		label: "--follow-up <instruction>",
 		description: "Deliver as a follow-up after the current turn finishes",
 	},
+];
+
+const TRACES_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
+	{ value: "status", label: "status", description: "Show trace sharing status" },
+	{ value: "on", label: "on", description: "Enable automatic trace uploads" },
+	{ value: "off", label: "off", description: "Disable automatic trace uploads" },
+	{ value: "preview", label: "preview", description: "Preview the current session trace" },
+	{ value: "upload", label: "upload", description: "Alias of upload-current" },
+	{ value: "upload-current", label: "upload-current", description: "Upload the current session trace" },
+	{ value: "upload-all", label: "upload-all", description: "Upload all persisted traces" },
+	{ value: "login", label: "login", description: "Configure the Prime API key for trace uploads" },
 ];
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -919,7 +915,6 @@ export class InteractiveMode {
 	private statusContainer: Container;
 	private queuedMessagesContainer: Container;
 	private sideQuestionContainer: Container;
-	private featureHintContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private readonly promptStashStore: ClientPromptStashStore | undefined;
@@ -942,7 +937,6 @@ export class InteractiveMode {
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
 	private keybindings: KeybindingsManager;
 	private version: string;
-	private readonly startHint = getRandomStartHint();
 	private isInitialized = false;
 	private onInputCallback?: (text: string | undefined) => void;
 	private submittedInputBehavior: "steer" | "followUp" = "steer";
@@ -962,14 +956,6 @@ export class InteractiveMode {
 	// Start of the in-flight run; survives loader teardown so the elapsed display doesn't reset on re-entry.
 	private turnStartedAt: number | undefined = undefined;
 	private workingTimer: NodeJS.Timeout | undefined = undefined;
-	private readonly featureHintDeck = new FeatureHintDeck();
-	private currentFeatureHint: string | undefined;
-	private featureHintEligibleAt = 0;
-	private featureHintTimer: NodeJS.Timeout | undefined;
-	private featureHintAnimationTimer: NodeJS.Timeout | undefined;
-	private featureHintComponent: FeatureHintComponent | undefined;
-	private featureHintRunPending = false;
-	private featureHintSuppressedByQueue = false;
 	private pulseTimer: NodeJS.Timeout | undefined = undefined;
 	private pulseFrame = 0;
 	private readonly activityTracker = new AgentActivityTracker();
@@ -978,8 +964,6 @@ export class InteractiveMode {
 	private contextUsageTokenBaseline = 0;
 	// Refresh ordering: a stale failure must never clobber a newer success.
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
-	private readonly defaultHiddenThinkingLabel = "Thinking...";
-	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private ctrlCExitHintExpiresAt = 0;
 	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -1037,10 +1021,9 @@ export class InteractiveMode {
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
-	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
 
-	private hideThinkingBlock = false;
+	private hideThinkingBlock = true;
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -1053,6 +1036,8 @@ export class InteractiveMode {
 	private connectionModelsFetchedAt = 0;
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
+	private closeConfigurationMenu: (() => void) | undefined;
+	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
 	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
@@ -1161,7 +1146,6 @@ export class InteractiveMode {
 		this.statusContainer = new Container();
 		this.queuedMessagesContainer = new Container();
 		this.sideQuestionContainer = new Container();
-		this.featureHintContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.recapContainer = new Container();
@@ -1173,8 +1157,6 @@ export class InteractiveMode {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
 			isArgumentCommand: builtinSlashCommandTakesArgument,
-			placeholder: this.startHint,
-			placeholderColor: (text) => theme.fg("dim", text),
 		});
 		this.editor = this.defaultEditor;
 		this.mainContainer = new Container();
@@ -1191,6 +1173,7 @@ export class InteractiveMode {
 			() => this.getTrayLocationLabel(),
 			() => this.getTrayContextLabel(),
 			() => this.getTrayOverrideLabel(),
+			() => this.isInlinePickerOpen(),
 		);
 		this.subagentSummaryLine.setOpenable(this.options.returnToAgentsView === true);
 		this.subagentSummaryLine.onOpen = () => void this.openScopedAgentsView();
@@ -1200,8 +1183,6 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.settingsManager.getCompactionEnabled());
 		this.setGoalAnnouncementBaseline(emptyGoalState());
-
-		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 
 		setRegisteredThemes(this.uiServices.getThemes());
 		initTheme(this.settingsManager.getTheme(), true);
@@ -1337,7 +1318,7 @@ export class InteractiveMode {
 			aliases: command.aliases,
 			description: command.description,
 			argumentHint: command.argumentHint,
-			takesArgument: command.takesArgument,
+			takesArgument: command.takesArgument === true,
 		}));
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
@@ -1360,6 +1341,12 @@ export class InteractiveMode {
 		if (heartbeatCommand) {
 			heartbeatCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
 				this.getHeartbeatArgumentCompletions(prefix);
+		}
+
+		const tracesCommand = slashCommands.find((command) => command.name === "traces");
+		if (tracesCommand) {
+			tracesCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				this.getTracesArgumentCompletions(prefix);
 		}
 
 		const connectionCommands = this.connectionCommands;
@@ -1432,12 +1419,12 @@ export class InteractiveMode {
 
 		this.ui.addChild(this.headerContainer);
 
-		// Brand splash: side-panel layout with structured runtime metadata on the right.
+		// Compact butterfly beside runtime metadata.
 		// The model/cwd are read through live getters, so they fill in once the
 		// connection state loads (rebindCurrentSession below). Onboarding, when
 		// required, renders as a full-screen overlay on top of this header.
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			// Verbose: include the full keybinding cheatsheet under the brand mark.
+			// Verbose: include the full keybinding cheatsheet below the header.
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 			const verboseInstructions = this.options.verbose
 				? [
@@ -1449,10 +1436,7 @@ export class InteractiveMode {
 						keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
 						rawKeyHint("/effort", "to set thinking level"),
 						hint("app.model.select", "to select model"),
-						hint("app.tools.expand", "to expand tools"),
-						hint("app.messages.expand", "to expand agent messages"),
-						hint("app.edits.expand", "to expand edit diffs"),
-						hint("app.thinking.toggle", "to expand thinking"),
+						hint("app.tools.expand", "to cycle conversation detail"),
 						hint("app.subagents.focus", "to inspect subagents"),
 						hint("app.editor.external", "for external editor"),
 						hint("app.prompt.stash", "to stash prompt"),
@@ -1463,17 +1447,10 @@ export class InteractiveMode {
 						rawKeyHint("drop files", "to attach"),
 					].join("\n")
 				: undefined;
-			this.builtInHeader = new BrandSplashHeader(
-				this.version,
-				() => this.getCurrentModelId(),
-				() => this.getCurrentCwd(),
-				verboseInstructions,
-				{
-					topPadding: true,
-					getHideStartHint: () => !this.isNewChat(),
-					getStartHint: () => this.startHint,
-				},
-			);
+			this.builtInHeader = new BrandSplashHeader(this.version, () => this.getCurrentCwd(), verboseInstructions, {
+				topPadding: true,
+				getModelId: () => this.getCurrentModelId(),
+			});
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
 		} else {
@@ -1483,12 +1460,13 @@ export class InteractiveMode {
 		}
 
 		this.mainContainer.addChild(this.mainViewContainer);
-		this.renderWidgets(); // Initialize with default spacer
+		this.renderWidgets();
 		this.mainContainer.addChild(this.widgetContainerAbove);
 		this.renderRecap();
 		for (const container of this.getPromptContextContainers()) {
 			this.mainContainer.addChild(container);
 		}
+		this.mainContainer.addChild(this.recapContainer);
 		this.mainContainer.addChild(this.editorContainer);
 		this.mainContainer.addChild(this.subagentSummaryLine);
 		this.mainContainer.addChild(this.widgetContainerBelow);
@@ -1816,11 +1794,8 @@ export class InteractiveMode {
 	}
 
 	private async showOnboardingModelSelection(splash: OnboardingSplashHandle): Promise<void> {
-		try {
-			await this.showConfigurationMenu("models");
-		} finally {
-			splash.dismiss();
-		}
+		splash.dismiss();
+		await this.showConfigurationMenu("models");
 	}
 
 	private async runOnboardingFlow(showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash()): Promise<void> {
@@ -2560,7 +2535,6 @@ export class InteractiveMode {
 			this.connectionState?.autoCompactionEnabled ?? this.settingsManager.getCompactionEnabled(),
 		);
 		this.footerDataProvider.setCwd(this.getCurrentCwd());
-		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -2890,7 +2864,6 @@ export class InteractiveMode {
 	}
 
 	private resetCurrentSessionRenderState(options?: { clearPromptStash?: boolean }): void {
-		this.endFeatureHintRun();
 		this.chatContainer.clear();
 		this.shortcutGuideContainer.clear();
 		this.pendingMessagesContainer.clear();
@@ -2900,7 +2873,6 @@ export class InteractiveMode {
 		// The selection and its stashed draft belong to the previous session;
 		// every editor draft is cleared below, so discard rather than restore.
 		this.queueSelection.reset();
-		this.featureHintSuppressedByQueue = false;
 		if (options?.clearPromptStash) {
 			this.promptStash = undefined;
 			if (this.promptStashState) this.promptStashState.queuedStashes = undefined;
@@ -3066,19 +3038,20 @@ export class InteractiveMode {
 				return componentAfterLoad;
 			}
 
+			const spacing = createConversationSpacing(this.chatContainer.children);
 			const component = new ToolExecutionComponent(
 				latestToolCall.name,
 				latestToolCall.id,
 				latestToolCall.arguments,
 				{
 					showImages: this.settingsManager.getShowImages(),
+					shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
 				},
 				toolDefinition,
 				this.ui,
 				this.getCurrentCwd(),
 			);
 			component.setExpanded(this.toolOutputExpanded);
-			component.setAgentMessagesExpanded(this.agentMessagesExpanded);
 			component.setEditDiffsExpanded(this.editDiffsExpanded);
 			if (this.startedToolCalls.has(latestToolCall.id)) {
 				component.markExecutionStarted();
@@ -3284,11 +3257,9 @@ export class InteractiveMode {
 		this.loadingAnimation = this.createWorkingLoader();
 		this.statusContainer.addChild(this.loadingAnimation);
 		this.startWorkingTimer();
-		this.startFeatureHintPresentation();
 	}
 
 	private stopWorkingLoader(): void {
-		this.clearFeatureHintPresentation();
 		if (this.workingTimer) {
 			clearInterval(this.workingTimer);
 			this.workingTimer = undefined;
@@ -3301,114 +3272,12 @@ export class InteractiveMode {
 		this.statusContainer.clear();
 	}
 
-	private startFeatureHintPresentation(): void {
-		this.clearFeatureHintPresentation();
-		if (this.shouldSuppressFeatureHint()) {
-			return;
-		}
-		if (this.featureHintEligibleAt === 0) {
-			this.featureHintEligibleAt = Date.now() + FEATURE_HINT_DELAY_MS;
-		}
-		const delay = Math.max(0, this.featureHintEligibleAt - Date.now());
-		if (delay === 0) {
-			this.showFeatureHint();
-			return;
-		}
-		this.featureHintTimer = setTimeout(() => {
-			this.featureHintTimer = undefined;
-			this.showFeatureHint();
-		}, delay);
-		this.featureHintTimer.unref?.();
-	}
-
-	private showFeatureHint(): void {
-		if (
-			this.shouldSuppressFeatureHint() ||
-			!this.loadingAnimation ||
-			!this.shouldShowWorkingLoader() ||
-			!this.statusContainer.children.includes(this.loadingAnimation)
-		) {
-			return;
-		}
-		if (!this.currentFeatureHint) {
-			const hint = this.featureHintDeck.next({
-				getKeybinding: (action) => {
-					const key = keyText(action);
-					return key ? this.capitalizeKey(key) : undefined;
-				},
-				isResidentSession: this.options.returnToAgentsView === true,
-			});
-			this.currentFeatureHint = hint?.text;
-		}
-		if (!this.currentFeatureHint) {
-			return;
-		}
-		this.featureHintComponent = new FeatureHintComponent(this.currentFeatureHint);
-		this.featureHintContainer.addChild(this.featureHintComponent);
-		this.renderRecap();
-		this.featureHintAnimationTimer = setInterval(() => {
-			this.featureHintComponent?.advance();
-			this.ui.requestRender();
-		}, FEATURE_HINT_ANIMATION_INTERVAL_MS);
-		this.featureHintAnimationTimer.unref?.();
-		this.ui.requestRender();
-	}
-
-	private clearFeatureHintPresentation(): void {
-		if (this.featureHintTimer) {
-			clearTimeout(this.featureHintTimer);
-			this.featureHintTimer = undefined;
-		}
-		if (this.featureHintAnimationTimer) {
-			clearInterval(this.featureHintAnimationTimer);
-			this.featureHintAnimationTimer = undefined;
-		}
-		if (this.featureHintComponent) {
-			this.featureHintContainer.removeChild(this.featureHintComponent);
-			this.featureHintComponent = undefined;
-			this.renderRecap();
-		}
-	}
-
-	private resumeFeatureHintPresentation(): void {
-		if (
-			!this.shouldSuppressFeatureHint() &&
-			this.loadingAnimation &&
-			this.shouldShowWorkingLoader() &&
-			this.statusContainer.children.includes(this.loadingAnimation)
-		) {
-			this.startFeatureHintPresentation();
-		}
-	}
-
-	private shouldSuppressFeatureHint(): boolean {
-		const { steering, followUp } = this.getAllQueuedMessages();
-		return steering.length > 0 || followUp.length > 0;
-	}
-
-	private endFeatureHintRun(): void {
-		this.clearFeatureHintPresentation();
-		this.currentFeatureHint = undefined;
-		this.featureHintEligibleAt = 0;
-		this.featureHintRunPending = false;
-	}
-
-	private prepareFeatureHintRun(message: AgentMessage): void {
-		if (!this.featureHintRunPending) return;
-		if (message.role === "assistant") {
-			this.featureHintRunPending = false;
-			return;
-		}
-		if (!startsAgentRun(message)) return;
-
-		this.endFeatureHintRun();
-		if (this.shouldShowWorkingLoader()) {
-			this.startFeatureHintPresentation();
-		}
-	}
-
 	private updateWorkingPulse(): void {
-		const active = this.isAgentStreaming();
+		const active =
+			this.isAgentStreaming() ||
+			this.chatContainer.children.some(
+				(component) => component instanceof ToolExecutionComponent && component.hasRunningBackgroundShell(),
+			);
 		if (!active) {
 			this.stopWorkingPulse();
 			return;
@@ -3420,6 +3289,7 @@ export class InteractiveMode {
 	}
 
 	private tickWorkingPulse(): void {
+		this.updateWorkingPulse();
 		this.pulseFrame += 1;
 		setWorkingPulseFrame(this.pulseFrame);
 		this.ui.requestRender();
@@ -3551,17 +3421,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private setHiddenThinkingLabel(label?: string): void {
-		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-			}
-		}
-		if (this.streamingComponent) {
-			this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-		}
-		this.ui.requestRender();
+	private setHiddenThinkingLabel(_label?: string): void {
+		// Retain the extension/daemon UI hook; conversation thinking no longer has a heading.
 	}
 
 	private setExtensionWidget(
@@ -3617,6 +3478,7 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		this.closeConfigurationMenu?.();
 		this.cancelActiveConnectionExtensionUiRequests();
 		this.closeHeartbeatManager();
 		if (this.extensionSelector) {
@@ -3646,49 +3508,43 @@ export class InteractiveMode {
 		if (this.loadingAnimation) {
 			this.updateWorkingLoaderMessage();
 		}
-		this.setHiddenThinkingLabel();
 	}
 
 	private static readonly MAX_WIDGET_LINES = 10;
 
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
-		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
+		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true);
+		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false);
 		this.ui.requestRender();
 	}
 
 	private renderRecap(): void {
 		if (!this.recapContainer) return;
 		this.recapContainer.clear();
-		const recap = this.sessionRecap?.trim();
 		const showChanges = !this.isAgentStreaming() && this.agentRunFileChanges.size > 0;
 		if (showChanges) {
 			this.recapContainer.addChild(
 				new TruncatedText(formatTotalChangeSummary([...this.agentRunFileChanges.values()]), 1, 0),
 			);
 		}
-		if (recap) {
-			this.recapContainer.addChild(new TruncatedText(theme.fg("dim", `Recap: ${recap}`), 1, 0));
-		}
-		if ((recap || showChanges) && !this.featureHintComponent) {
-			this.recapContainer.addChild(new Spacer(1));
-		}
+		this.recapContainer.addChild(
+			new PromptContextLine(
+				() => this.sessionRecap,
+				(maxWidth) => this.getPromptContextLabel(maxWidth),
+			),
+		);
 		this.ui.requestRender();
 	}
 
 	private renderWidgetContainer(
 		container: Container,
 		widgets: Map<string, Component & { dispose?(): void }>,
-		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
 		container.clear();
 
 		if (widgets.size === 0) {
-			if (spacerWhenEmpty) {
-				container.addChild(new Spacer(1));
-			}
 			return;
 		}
 
@@ -4212,9 +4068,6 @@ export class InteractiveMode {
 		};
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
-		this.defaultEditor.onAction("app.messages.expand", () => this.toggleAgentMessageExpansion());
-		this.defaultEditor.onAction("app.edits.expand", () => this.toggleEditDiffExpansion());
-		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
 			void this.showHeartbeatManager();
@@ -4543,6 +4396,7 @@ export class InteractiveMode {
 			this.sideQuestionComponent.addTurn(event);
 		} else {
 			this.sideQuestionComponent = new SideQuestionComponent(event, this.settingsManager.getEditorPaddingX());
+			this.sideQuestionComponent.setExpanded(this.toolOutputExpanded);
 			this.sideQuestionContainer.addChild(new Spacer(1));
 			this.sideQuestionContainer.addChild(this.sideQuestionComponent);
 		}
@@ -5405,9 +5259,6 @@ export class InteractiveMode {
 		this.updateConnectionStateFromEvent(event);
 		// A new user message resets the activity tracker to 0, so the in-flight baseline must
 		// reset with it. (agent_start on auto-retry does not reset the tracker.)
-		if (event.type === "message_start") {
-			this.prepareFeatureHintRun(event.message);
-		}
 		if (event.type === "message_start" && (event.message.role === "user" || isAgentSessionMessage(event.message))) {
 			this.contextUsageTokenBaseline = 0;
 			this.clearShortcutGuide();
@@ -5419,7 +5270,6 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
-				this.featureHintRunPending = this.getRetryAttempt() === 0;
 				this.resetPendingToolState();
 				this.renderRecap();
 				if (this.settingsManager.getShowTerminalProgress()) {
@@ -5485,6 +5335,7 @@ export class InteractiveMode {
 				const component = new BashExecutionComponent(event.command, this.ui, event.excludeFromContext, {
 					suppressLeadingSpace: this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				});
+				component.setExpanded(this.toolOutputExpanded);
 				if (ownSideBash && this.sideQuestionComponent) {
 					// Same component as the main thread, mounted inside the pane.
 					this.sideQuestionComponent.addBash(component);
@@ -5827,12 +5678,9 @@ export class InteractiveMode {
 			undefined,
 			this.hideThinkingBlock,
 			this.getMarkdownThemeWithSettings(),
-			this.hiddenThinkingLabel,
 			{
 				expanded: this.toolOutputExpanded,
-				precededByToolActivity:
-					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
-					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+				precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,
 				mermaidTransform: this.mermaidMarkdownTransform,
 				cwd: this.getCurrentCwd(),
 			},
@@ -6037,7 +5885,7 @@ export class InteractiveMode {
 						sessionId: this.connectionState?.sessionId,
 						sessionFile: this.connectionState?.sessionFile,
 					})
-				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId),
+				: countSubtreeSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}
@@ -6066,7 +5914,8 @@ export class InteractiveMode {
 	}
 
 	private focusSubagentSummary(): boolean {
-		if (!this.subagentSummaryLine.isSelectable() || this.getTrayOverrideLabel()) return false;
+		if (this.isInlinePickerOpen() || !this.subagentSummaryLine.isSelectable() || this.getTrayOverrideLabel())
+			return false;
 		this.ui.setFocus(this.subagentSummaryLine);
 		this.ui.requestRender();
 		return true;
@@ -6086,24 +5935,23 @@ export class InteractiveMode {
 			this.toggleToolOutputExpansion();
 			return;
 		}
-		if (this.keybindings.matches(data, "app.messages.expand")) {
-			this.toggleAgentMessageExpansion();
-			return;
-		}
-		// A raw "\n" is a newline for the editor, not ctrl+j.
-		if (data !== "\n" && this.keybindings.matches(data, "app.edits.expand")) {
-			this.toggleEditDiffExpansion();
-			return;
-		}
-		if (this.keybindings.matches(data, "app.thinking.toggle")) {
-			this.toggleThinkingBlockVisibility();
-			return;
-		}
 		this.focusEditor();
 		this.editor.handleInput(data);
 	}
 
+	// Pickers mount either as overlays (model/provider/MCP menu) or in place of
+	// the editor (thinking, settings, and scoped-model selectors); the tray stays
+	// hidden while either surface is up. Autocomplete keeps focus in the editor.
+	private isInlinePickerOpen(): boolean {
+		const editorAutocomplete =
+			this.editor instanceof CustomEditor && this.editor.focused && this.editor.isShowingAutocomplete();
+		if (this.ui.hasOverlay() && !editorAutocomplete) return true;
+		const editorChild = this.editorContainer.children[0];
+		return editorChild !== undefined && editorChild !== this.editor;
+	}
+
 	private getTrayOverrideLabel(): string | undefined {
+		if (this.isInlinePickerOpen()) return undefined;
 		if (this.isCtrlCExitHintVisible()) {
 			const clearKey = keyText("app.clear");
 			return clearKey ? `Press ${clearKey} again to exit` : "Press again to exit";
@@ -6116,61 +5964,64 @@ export class InteractiveMode {
 	}
 
 	private getTrayLocationLabel(): string | undefined {
-		const modelLabel = this.getModelTrayLabel();
+		if (this.isInlinePickerOpen()) return undefined;
+		const sessionDepth = this.options.sessionDepth;
 		const hasChildren = this.options.sessionHasChildren === true || (this.subagentSnapshots?.size ?? 0) > 0;
-		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
-		const shortcutsHint = this.getShortcutsTrayHint();
+		// Depth is subagent-session context: a root session (depth 0) never shows
+		// a depth label, even while its children run.
+		const depthLabel = sessionDepth ? formatAgentDepthLabel(sessionDepth, hasChildren) : undefined;
 		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
-			.filter((label): label is string => label !== undefined)
-			.join("  ");
-	}
-
-	private getShortcutsTrayHint(): string | undefined {
-		if (!this.isNewChat() || this.editor.getText().length > 0) {
-			return undefined;
-		}
-		return keyText("app.shortcuts") ? keyHint("app.shortcuts", "for shortcuts") : "/hotkeys for shortcuts";
+		return [agentsHint, depthLabel].filter((label): label is string => label !== undefined).join("  ");
 	}
 
 	private isNewChat(): boolean {
 		return (this.connectionState?.messageCount ?? 0) === 0 && this.connectionState?.isStreaming !== true;
 	}
 
-	private getModelTrayLabel(): string {
+	private getPromptContextLabel(maxWidth: number): string | undefined {
+		if (maxWidth < 1) return undefined;
+		return theme.fg(
+			"dim",
+			truncateToWidth(formatConversationDetailStatus(this.toolOutputExpanded, this.editDiffsExpanded), maxWidth, ""),
+		);
+	}
+
+	private getModelContextLabel(maxWidth = Number.MAX_SAFE_INTEGER): string | undefined {
+		if (maxWidth < 1) return undefined;
 		const model = this.getCurrentModel();
-		if (!model) {
-			return "—";
-		}
-		const parts = [model.name];
-		if (model.reasoning) {
-			const level = this.connectionState?.thinkingLevel ?? "off";
-			if (level !== "off") {
-				parts.push(level);
+		const parts: string[] = [];
+		if (model) {
+			const providerPrefix = `${model.provider}/`;
+			const modelId = model.id.startsWith(providerPrefix) ? model.id.slice(providerPrefix.length) : model.id;
+			const effort = model.reasoning ? this.connectionState?.thinkingLevel : undefined;
+			parts.push(effort ? `${modelId}:${effort.toLowerCase()}` : modelId);
+			if (this.connectionState?.serviceTier === "priority") {
+				parts.push("fast");
 			}
 		}
-		if (this.connectionState?.serviceTier === "priority") {
-			parts.push("fast");
+		const usage = this.getConnectionContextUsage();
+		if (usage && typeof usage.tokens === "number" && typeof usage.percent === "number") {
+			parts.push(`${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`);
 		}
-		return parts.join(" • ");
+		if (parts.length === 0) return undefined;
+		return theme.fg("dim", truncateToWidth(parts.join(" · "), maxWidth, ""));
 	}
 
 	private getAgentsViewTrayHint(): string | undefined {
 		if (!this.options.returnToAgentsView) {
 			return undefined;
 		}
-		return keyHint("app.agents.back", "agents/resume");
+		return keyHint("app.agents.back", "manage");
 	}
 
 	private getTrayContextLabel(): string | undefined {
+		if (this.isInlinePickerOpen()) return undefined;
 		const goalLabel = this.getTrayGoalLabel();
 		const heartbeatLabel = this.getTrayHeartbeatLabel();
-		const usage = this.getConnectionContextUsage();
-		const contextLabel =
-			usage && typeof usage.tokens === "number" && typeof usage.percent === "number"
-				? `${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`
-				: undefined;
-		return [goalLabel, heartbeatLabel, contextLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		return (
+			[goalLabel, heartbeatLabel, this.getModelContextLabel()].filter((label) => label !== undefined).join(" · ") ||
+			undefined
+		);
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {
@@ -6358,9 +6209,11 @@ export class InteractiveMode {
 		}
 		if (isAgentSessionMessage(message)) {
 			return new AgentMessageComponent(message, this.getMarkdownThemeWithSettings(), {
-				suppressLeadingSpace: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
+				shouldAddLeadingSpace: createConversationSpacing(this.chatContainer.children).shouldAddLeadingSpace,
 			});
 		}
+		const shellCompletion = createShellCompletionComponent(message, this.chatContainer.children);
+		if (shellCompletion) return shellCompletion;
 		if (isInjectedPromptMessage(message)) {
 			return new InjectedPromptMessageComponent(message, this.getMarkdownThemeWithSettings());
 		}
@@ -6379,6 +6232,7 @@ export class InteractiveMode {
 				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext, {
 					suppressLeadingSpace: this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				});
+				component.setExpanded(this.toolOutputExpanded);
 				if (message.output) {
 					component.appendOutput(message.output);
 				}
@@ -6395,7 +6249,7 @@ export class InteractiveMode {
 				if (message.display) {
 					const component = this.createDisplayedCustomMessageComponent(message);
 					if (isExpandable(component)) {
-						component.setExpanded(this.expansionStateFor(component));
+						component.setExpanded(this.toolOutputExpanded);
 					}
 					if (hasEditDiffsExpansion(component)) {
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
@@ -6476,12 +6330,9 @@ export class InteractiveMode {
 					message,
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
-					this.hiddenThinkingLabel,
 					{
 						expanded: this.toolOutputExpanded,
-						precededByToolActivity:
-							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
-							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+						precededByToolActivity: createConversationSpacing(this.chatContainer.children).precededByToolActivity,
 						mermaidTransform: this.mermaidMarkdownTransform,
 						cwd: this.getCurrentCwd(),
 					},
@@ -6592,6 +6443,7 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
+						const spacing = createConversationSpacing(this.chatContainer.children);
 						const component = new ToolExecutionComponent(
 							content.name,
 							content.id,
@@ -6599,13 +6451,13 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								includeImageDimensions: false,
+								shouldAddLeadingSpace: () => spacing.shouldAddLeadingSpace(true),
 							},
 							this.getCachedToolDefinition(content.name),
 							this.ui,
 							this.getCurrentCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						component.setAgentMessagesExpanded(this.agentMessagesExpanded);
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
 						selectLatestToolExpandHint(this.chatContainer.children, component);
 						this.chatContainer.addChild(component);
@@ -6643,6 +6495,7 @@ export class InteractiveMode {
 			}
 		}
 
+		this.updateWorkingPulse();
 		for (const [toolCallId, component] of renderedPendingTools) {
 			component.setIncludeImageDimensions(true);
 			this.pendingTools.set(toolCallId, component);
@@ -7288,11 +7141,11 @@ export class InteractiveMode {
 	}
 
 	private getPromptContextContainers(): Container[] {
-		return [this.recapContainer, this.featureHintContainer, this.queuedMessagesContainer, this.sideQuestionContainer];
+		return [this.queuedMessagesContainer, this.sideQuestionContainer];
 	}
 
 	private getPromptDockComponents(): Component[] {
-		return [this.editorContainer, this.subagentSummaryLine, this.footerSlot];
+		return [this.recapContainer, this.editorContainer, this.subagentSummaryLine, this.footerSlot];
 	}
 
 	/** Enter or leave fullscreen rendering without touching the persisted setting. */
@@ -7333,27 +7186,19 @@ export class InteractiveMode {
 	}
 
 	private toggleToolOutputExpansion(): void {
-		this.setToolsExpanded(!this.toolOutputExpanded);
-	}
-
-	private toggleAgentMessageExpansion(): void {
-		this.agentMessagesExpanded = !this.agentMessagesExpanded;
-		this.applyChatExpansion();
-	}
-
-	private toggleEditDiffExpansion(): void {
-		this.editDiffsExpanded = !this.editDiffsExpanded;
-		this.applyChatExpansion();
+		this.setChatDetail(this.toolOutputExpanded ? "overview" : this.editDiffsExpanded ? "all" : "details");
 	}
 
 	private setToolsExpanded(expanded: boolean): void {
-		this.toolOutputExpanded = expanded;
-		this.applyChatExpansion();
+		this.setChatDetail(expanded ? "all" : "overview");
 	}
 
-	/** Expansion state for a chat component: agent messages toggle separately from tools. */
-	private expansionStateFor(component: unknown): boolean {
-		return component instanceof AgentMessageComponent ? this.agentMessagesExpanded : this.toolOutputExpanded;
+	/** Presentation only: never rewrite messages, settings, or the session trace. */
+	private setChatDetail(detail: "overview" | "details" | "all"): void {
+		this.toolOutputExpanded = detail === "all";
+		this.editDiffsExpanded = detail !== "overview";
+		this.hideThinkingBlock = detail === "overview";
+		this.applyChatExpansion();
 	}
 
 	private applyChatExpansion(): void {
@@ -7361,12 +7206,17 @@ export class InteractiveMode {
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(this.toolOutputExpanded);
 		}
-		for (const child of this.chatContainer.children) {
-			if (isExpandable(child)) {
-				child.setExpanded(this.expansionStateFor(child));
+		for (const child of new Set([
+			...this.chatContainer.children,
+			...this.pendingBashComponents,
+			this.activeBashComponent,
+			this.sideQuestionComponent,
+		])) {
+			if (child instanceof AssistantMessageComponent) {
+				child.setHideThinkingBlock(this.hideThinkingBlock);
 			}
-			if (hasAgentMessagesExpansion(child)) {
-				child.setAgentMessagesExpanded(this.agentMessagesExpanded);
+			if (isExpandable(child)) {
+				child.setExpanded(this.toolOutputExpanded);
 			}
 			if (hasEditDiffsExpansion(child)) {
 				child.setEditDiffsExpanded(this.editDiffsExpanded);
@@ -7381,27 +7231,6 @@ export class InteractiveMode {
 		} else {
 			this.ui.requestRenderPreservingViewport();
 		}
-	}
-
-	private toggleThinkingBlockVisibility(): void {
-		this.hideThinkingBlock = !this.hideThinkingBlock;
-		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
-
-		void (async () => {
-			// Rebuild chat from session messages
-			await this.rebuildChatFromMessages();
-
-			// If streaming, re-add the streaming component with updated visibility and re-render
-			if (this.streamingComponent && this.streamingMessage) {
-				this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-				this.streamingComponent.updateContent(this.streamingMessage);
-				this.chatContainer.addChild(this.streamingComponent);
-			}
-
-			this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
-		})().catch((error) => {
-			this.showError(error instanceof Error ? error.message : String(error));
-		});
 	}
 
 	private openExternalEditor(): void {
@@ -7518,13 +7347,6 @@ export class InteractiveMode {
 			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
-		if (hasQueuedMessages && !this.featureHintSuppressedByQueue) {
-			this.featureHintSuppressedByQueue = true;
-			this.clearFeatureHintPresentation();
-		} else if (!hasQueuedMessages && this.featureHintSuppressedByQueue) {
-			this.featureHintSuppressedByQueue = false;
-			this.resumeFeatureHintPresentation();
-		}
 	}
 
 	private flushPendingBashComponents(): void {
@@ -7582,7 +7404,6 @@ export class InteractiveMode {
 					availableThinkingLevels: state.availableThinkingLevels,
 					currentTheme: this.settingsManager.getTheme() || "prime",
 					availableThemes: getAvailableThemes(),
-					hideThinkingBlock: this.hideThinkingBlock,
 					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
@@ -7670,18 +7491,6 @@ export class InteractiveMode {
 							this.ui.invalidate();
 							this.ui.requestRender();
 						}
-					},
-					onHideThinkingBlockChange: (hidden) => {
-						this.hideThinkingBlock = hidden;
-						this.settingsManager.setHideThinkingBlock(hidden);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
-							}
-						}
-						void this.rebuildChatFromMessages().catch((error) => {
-							this.showError(error instanceof Error ? error.message : String(error));
-						});
 					},
 					onMermaidRenderingModeChange: (mode) => {
 						this.settingsManager.setMermaidRenderingMode(mode);
@@ -8013,6 +7822,14 @@ export class InteractiveMode {
 		return filtered.length === 0 ? null : filtered;
 	}
 
+	private getTracesArgumentCompletions(prefix: string): AutocompleteItem[] | null {
+		const term = prefix.trim().toLowerCase();
+		const filtered = term
+			? TRACES_ARGUMENT_COMPLETIONS.filter((item) => item.value.toLowerCase().startsWith(term))
+			: TRACES_ARGUMENT_COMPLETIONS;
+		return filtered.length === 0 ? null : filtered;
+	}
+
 	private currentModelSupportsFastMode(): boolean {
 		const model = this.getCurrentModel();
 		return model !== undefined && supportsFastMode(model);
@@ -8101,17 +7918,19 @@ export class InteractiveMode {
 		});
 	}
 
-	private applyThinkingLevel(level: ThinkingLevel): void {
-		void this.agentConnection
+	private applyThinkingLevel(level: ThinkingLevel): Promise<boolean> {
+		return this.agentConnection
 			.setThinkingLevel(level)
 			.then(() => {
 				this.patchConnectionState({ thinkingLevel: level });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
 				this.showStatus(`Thinking level: ${level}`);
+				return true;
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
+				return false;
 			});
 	}
 
@@ -8120,40 +7939,31 @@ export class InteractiveMode {
 	}
 
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
+		if (this.configurationModelSelection) return this.configurationModelSelection;
+		this.closeConfigurationMenu?.();
 		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
 		const providerOptions = authFlows.getLoginProviderOptions();
 
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
 			let settled = false;
-			let hidden = false;
-			let removed = false;
+			let busy = false;
 			let menu: ConfigurationMenuComponent;
-			const hide = () => {
-				if (removed) return;
-				removed = true;
-				hidden = true;
-				handle?.hide();
+			const restoreEditor = () => {
+				if (!this.editorContainer.children.includes(menu)) return;
+				this.editorContainer.clear();
+				this.editorContainer.addChild(this.editor);
+				this.ui.setFocus(this.editor);
 				this.ui.requestRender();
 			};
-			const conceal = () => {
-				if (hidden || removed) return;
-				hidden = true;
-				handle?.setHidden(true);
-				this.ui.requestRender();
-			};
-			const show = () => {
-				if (!hidden || removed || settled) return;
-				hidden = false;
-				handle?.setHidden(false);
-				handle?.focus();
-				this.ui.requestRender();
+			const focus = () => {
+				if (!settled && this.editorContainer.children.includes(menu)) this.ui.setFocus(menu);
 			};
 			const finish = () => {
 				if (settled) return;
 				settled = true;
-				hide();
+				restoreEditor();
+				if (this.closeConfigurationMenu === finish) this.closeConfigurationMenu = undefined;
 				resolve();
 			};
 			const refreshModels = (force: boolean) => {
@@ -8168,12 +7978,13 @@ export class InteractiveMode {
 					});
 			};
 			const authenticate = (provider: AuthSelectorProvider, tab: "providers" | "mcp-connections") => {
-				if (settled) return;
+				if (settled || busy) return;
+				busy = true;
 				void authFlows
 					.loginProvider(provider)
 					.then(async (authResult) => {
 						if (settled) return;
-						handle?.focus();
+						focus();
 						menu.refreshAuthentication();
 						if (authResult.status !== "success") return;
 
@@ -8189,6 +8000,7 @@ export class InteractiveMode {
 						}
 
 						await this.prepareForModelSelectionAfterLogin(authResult);
+						if (settled) return;
 						menu.updateModels(
 							this.getCurrentModel(),
 							this.getCachedModelCandidates(),
@@ -8198,8 +8010,11 @@ export class InteractiveMode {
 						refreshModels(true);
 					})
 					.catch((error) => {
-						handle?.focus();
-						this.showError(error instanceof Error ? error.message : String(error));
+						focus();
+						if (!settled) this.showError(error instanceof Error ? error.message : String(error));
+					})
+					.finally(() => {
+						busy = false;
 					});
 			};
 
@@ -8215,37 +8030,61 @@ export class InteractiveMode {
 				configuredProviders: this.connectionConfiguredProviders,
 				recentModels: this.settingsManager.getRecentModels(),
 				initialModelSearch,
-				getRows: () => this.ui.terminal.rows,
+				thinkingLevel: this.getCurrentModel()?.reasoning
+					? this.connectionState?.thinkingLevel
+					: (this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL),
+				getRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 				requestRender: () => this.ui.requestRender(),
 				onSelectProvider: (provider) => authenticate(provider, "providers"),
 				onSelectMcpConnection: (provider) => authenticate(provider, "mcp-connections"),
-				onSelectModel: (model) => {
+				onSelectModel: (model, thinkingLevel) => {
+					if (settled || busy) return;
+					busy = true;
 					void (async () => {
 						let completed = false;
+						let selectionInFlight: Promise<void> | undefined;
 						try {
 							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions);
-							handle?.focus();
+							if (settled) return;
+							focus();
 							menu.refreshAuthentication();
 							menu.updateModels(
 								this.getCurrentModel(),
 								this.getCachedModelCandidates(),
 								this.connectionConfiguredProviders,
 							);
-							if (!ready || settled) return;
-							conceal();
-							await this.completeModelSelection(model);
-							completed = true;
+							if (!ready) return;
+							menu.setBusy(true);
+							const selection = (async () => {
+								await this.completeModelSelection(model);
+								if (settled) return false;
+								return thinkingLevel === undefined || (await this.applyThinkingLevel(thinkingLevel));
+							})();
+							selectionInFlight = selection.then(
+								() => {},
+								() => {},
+							);
+							this.configurationModelSelection = selectionInFlight;
+							completed = await selection;
 						} catch (error) {
-							show();
-							this.showError(error instanceof Error ? error.message : String(error));
+							focus();
+							if (!settled) this.showError(error instanceof Error ? error.message : String(error));
 						} finally {
+							busy = false;
+							if (this.configurationModelSelection === selectionInFlight)
+								this.configurationModelSelection = undefined;
+							menu.setBusy(false);
 							if (completed) finish();
 						}
 					})();
 				},
 				onCancel: finish,
 			});
-			handle = this.showFullPaneOverlay(menu, 96);
+			this.closeConfigurationMenu = finish;
+			this.editorContainer.clear();
+			this.editorContainer.addChild(menu);
+			focus();
+			this.ui.requestRender();
 			refreshModels(initialModelSearch !== undefined);
 		});
 	}
@@ -8962,7 +8801,6 @@ export class InteractiveMode {
 				activeHeader.setExpanded(this.toolOutputExpanded);
 			}
 			setRegisteredThemes(this.uiServices.getThemes());
-			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 			const themeName = this.settingsManager.getTheme();
 			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
 			if (!themeResult.success) {
@@ -9278,13 +9116,13 @@ export class InteractiveMode {
 		const stats = await this.agentConnection.getSessionStats();
 		const sessionName = this.getCurrentSessionName();
 
-		let info = `${theme.bold("Session Info")}\n\n`;
+		let info = `Session Info\n\n`;
 		if (sessionName) {
 			info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
 		}
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
-		info += `${theme.bold("Messages")}\n`;
+		info += `Messages\n`;
 		info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
 		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
 		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
@@ -9299,7 +9137,7 @@ export class InteractiveMode {
 
 	private handleLogsCommand(): void {
 		const logsDir = getLogsDir();
-		let info = `${theme.bold("Logs")}\n\n`;
+		let info = `Logs\n\n`;
 		info += `${theme.fg("dim", "Directory:")} ${logsDir}\n\n`;
 
 		let files: string[] = [];
@@ -9332,7 +9170,7 @@ export class InteractiveMode {
 
 	private async handleSystemPromptCommand(): Promise<void> {
 		const prompt = await this.agentConnection.getSystemPrompt();
-		const header = `${theme.bold("System Prompt")} ${theme.fg("dim", `(${prompt.length} chars)`)}`;
+		const header = `System Prompt ${theme.fg("dim", `(${prompt.length} chars)`)}`;
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(header, 1, 0));
@@ -9404,7 +9242,7 @@ export class InteractiveMode {
 
 	private formatTracePreview(result: Extract<AgentTracePreviewResult, { status: "ready" }>): string {
 		const lines = [
-			theme.bold("Trace Preview"),
+			"Trace Preview",
 			theme.fg("dim", "Nothing has been uploaded by this command."),
 			"",
 			`${theme.fg("dim", "File:")} ${result.sessionFile}`,
@@ -9423,7 +9261,7 @@ export class InteractiveMode {
 		if (result.gitCommit) {
 			lines.push(`${theme.fg("dim", "Git commit:")} ${result.gitCommit}`);
 		}
-		lines.push("", theme.bold("Raw JSONL payload preview"));
+		lines.push("", "Raw JSONL payload preview");
 		if (result.contentPreview) {
 			lines.push(result.contentPreview);
 			if (result.truncated) {
@@ -9465,7 +9303,7 @@ export class InteractiveMode {
 			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
 			const state = await this.agentConnection.getState();
 			const info = [
-				theme.bold("Trace Sharing"),
+				"Trace Sharing",
 				"",
 				`${theme.fg("dim", "Automatic uploads:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
 				`${theme.fg("dim", "Credential:")} ${credential?.label ?? "Not configured"}`,
@@ -9779,7 +9617,7 @@ export class InteractiveMode {
 		const next = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "-";
 		const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : "-";
 		const lines = [
-			theme.bold("Heartbeat"),
+			"Heartbeat",
 			"",
 			`${theme.fg("dim", "Status:")} ${job.status}`,
 			`${theme.fg("dim", "Every:")} ${job.schedule.expression}`,
@@ -9811,7 +9649,7 @@ export class InteractiveMode {
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("accent", "What's New"), 1, 0));
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
 		this.chatContainer.addChild(new DynamicBorder());
@@ -9845,9 +9683,6 @@ export class InteractiveMode {
 		const shortcutsKey = this.getAppKeyDisplay("app.shortcuts");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
-		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
-		const expandEdits = this.getAppKeyDisplay("app.edits.expand");
-		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const promptStash = this.getAppKeyDisplay("app.prompt.stash");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
@@ -9859,8 +9694,8 @@ export class InteractiveMode {
 \`${clearInput}\` interrupt · press twice to rewind or clear the prompt
 
 **Controls**
-\`${selectModel}\` select model · \`/effort\` set reasoning · \`${expandTools}\` tool output
-\`${expandMessages}\` agent messages · \`${expandEdits}\` edit diffs · \`${toggleThinking}\` thinking blocks · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
+\`${selectModel}\` select model · \`/effort\` set reasoning · \`${expandTools}\` overview → thinking + diffs → all output
+\`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
 \`${pasteImage}\` paste image
 
 **Help**
@@ -9898,9 +9733,6 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 		const exit = this.getAppKeyDisplay("app.exit");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
-		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
-		const expandEdits = this.getAppKeyDisplay("app.edits.expand");
-		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const focusSubagents = this.getAppKeyDisplay("app.subagents.focus");
 		const manageHeartbeats = this.getAppKeyDisplay("app.heartbeats.open");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
@@ -9947,10 +9779,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 | \`${clear}\` | Interrupt current operation (first) / exit (second) |
 ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shortcutsKey ? `| \`${shortcutsKey}\` | Show quick shortcuts |\n` : ""}| \`${exit}\` | Exit (when editor is empty) |
 | \`${selectModel}\` | Open model selector |
-| \`${expandTools}\` | Toggle tool output expansion |
-| \`${expandMessages}\` | Toggle agent message expansion |
-| \`${expandEdits}\` | Toggle edit diff expansion |
-| \`${toggleThinking}\` | Toggle thinking block visibility |
+| \`${expandTools}\` | Cycle overview → thinking + diffs → all output |
 | \`${focusSubagents}\` | Focus the subagent summary / open the scoped agents view |
 | \`${manageHeartbeats}\` | Manage heartbeats |
 | \`${externalEditor}\` | Edit message in external editor |
@@ -10114,6 +9943,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		this.closeConfigurationMenu?.();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
 		this.clearEscapeRepeat();
@@ -10122,7 +9952,6 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		}
 		this.stopWorkingLoader();
 		this.discardRefineLoader();
-		this.endFeatureHintRun();
 		this.stopWorkingPulse();
 		this.stopGoalTrayTimer();
 		this.closeHeartbeatManager();

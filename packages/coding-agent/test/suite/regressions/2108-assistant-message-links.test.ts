@@ -63,7 +63,6 @@ describe("assistant Markdown file links", () => {
 			{ ...message, content: [{ type: "text", text: `[Audit report](${href})` }] },
 			false,
 			undefined,
-			undefined,
 			{ cwd },
 		);
 		const lines = component.render(80);
@@ -107,7 +106,7 @@ describe("assistant Markdown file links", () => {
 	});
 
 	test("streamed reference links and thinking links retain their base after invalidation", () => {
-		const component = new AssistantMessageComponent(undefined, false, undefined, undefined, { cwd });
+		const component = new AssistantMessageComponent(undefined, false, undefined, { cwd });
 		component.updateContent({ ...message, content: [{ type: "text", text: "[Audit report][report]" }] }, true);
 		expect(linkTargets(component.render(80))).toEqual([]);
 		component.updateContent(
@@ -127,7 +126,7 @@ describe("assistant Markdown file links", () => {
 
 	test("keeps the visible path fallback when the terminal does not support hyperlinks", () => {
 		setCapabilities({ images: null, trueColor: true, hyperlinks: false });
-		const component = new AssistantMessageComponent(message, false, undefined, undefined, { cwd });
+		const component = new AssistantMessageComponent(message, false, undefined, { cwd });
 		const lines = component.render(80);
 		expect(linkTargets(lines)).toEqual([]);
 		expect(stripAnsi(lines.join("\n")).trim()).toBe("Audit report (audit-out/report.md)");

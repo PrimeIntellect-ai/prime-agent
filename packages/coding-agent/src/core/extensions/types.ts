@@ -145,7 +145,7 @@ export interface ExtensionUIContext {
 	 */
 	setWorkingIndicator(options?: WorkingIndicatorOptions): void;
 
-	/** Set the label shown for hidden thinking blocks. Call with no argument to restore default. */
+	/** @deprecated No effect: thinking is displayed without a heading. Retained for existing extension/daemon callers. */
 	setHiddenThinkingLabel(label?: string): void;
 
 	/** Set a widget to display above or below the editor. Accepts string array or component factory. */

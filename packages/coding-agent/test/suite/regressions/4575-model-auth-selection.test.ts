@@ -84,7 +84,7 @@ describe("ENG-4575 model authentication", () => {
 		const unauthenticatedRow = lines.findIndex((line) => line.includes("requires-auth"));
 		expect(authenticatedRow).toBeGreaterThanOrEqual(0);
 		expect(authenticatedRow).toBeLessThan(unauthenticatedRow);
-		expect(lines[unauthenticatedRow]).toContain("current · sign in");
+		expect(lines[unauthenticatedRow]).toContain("current · require sign in");
 
 		selector.handleInput("\r");
 		expect(selectedProvider).toBe(unauthenticated.provider);
