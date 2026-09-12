@@ -1896,6 +1896,47 @@ prime_agent_native_validate_release_metadata() {
 	case "$native_metadata_source" in http://*|https://*) ;; *) return 1 ;; esac
 }
 
+prime_agent_native_probe() (
+	# macOS does not ship timeout; keep the deadline independent of Node and Python.
+	native_probe_pid=
+	native_probe_watchdog=
+	trap '
+		if [ -n "$native_probe_pid" ]; then
+			kill -KILL "$native_probe_pid" 2>/dev/null || :
+			wait "$native_probe_pid" 2>/dev/null || :
+		fi
+		if [ -n "$native_probe_watchdog" ]; then
+			kill -TERM "$native_probe_watchdog" 2>/dev/null || :
+			wait "$native_probe_watchdog" 2>/dev/null || :
+		fi
+	' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+	"$@" &
+	native_probe_pid=$!
+	(
+		native_probe_timer=
+		trap '
+			if [ -n "$native_probe_timer" ]; then
+				kill "$native_probe_timer" 2>/dev/null || :
+				wait "$native_probe_timer" 2>/dev/null || :
+			fi
+		' EXIT
+		trap 'exit 0' INT TERM HUP
+		sleep 10 &
+		native_probe_timer=$!
+		wait "$native_probe_timer" || exit 1
+		native_probe_timer=
+		printf 'error: executable probe timed out after 10 seconds.\n' >&2
+		kill -KILL "$native_probe_pid" 2>/dev/null || :
+	) &
+	native_probe_watchdog=$!
+	if wait "$native_probe_pid"; then native_probe_status=0; else native_probe_status=$?; fi
+	native_probe_pid=
+	exit "$native_probe_status"
+)
+
 prime_agent_native_verify_release_target() {
 	native_verify_target="$1"
 	native_verify_label="$2"
@@ -1905,7 +1946,7 @@ prime_agent_native_verify_release_target() {
 	fi
 	native_verify_dir="$native_metadata_dir"
 	native_verify_version="$native_metadata_version"
-	if ! "$native_verify_dir/prime-agent" --version >"$prime_agent_native_stage/$native_verify_label.version" 2>"$prime_agent_native_stage/$native_verify_label.probe.log"; then
+	if ! prime_agent_native_probe "$native_verify_dir/prime-agent" --version >"$prime_agent_native_stage/$native_verify_label.version" 2>"$prime_agent_native_stage/$native_verify_label.probe.log"; then
 		cat "$prime_agent_native_stage/$native_verify_label.probe.log" >&2
 		printf 'error: the %s release executable could not be validated. The active release was kept.\n' "$native_verify_label" >&2
 		return 1
@@ -1914,7 +1955,7 @@ prime_agent_native_verify_release_target() {
 		printf 'error: the %s release executable reports a different version. The active release was kept.\n' "$native_verify_label" >&2
 		return 1
 	fi
-	if ! "$native_verify_dir/prime-agent" --help >"$prime_agent_native_stage/$native_verify_label.help" 2>"$prime_agent_native_stage/$native_verify_label.help.log"; then
+	if ! prime_agent_native_probe "$native_verify_dir/prime-agent" --help >"$prime_agent_native_stage/$native_verify_label.help" 2>"$prime_agent_native_stage/$native_verify_label.help.log"; then
 		cat "$prime_agent_native_stage/$native_verify_label.help.log" >&2
 		printf 'error: the %s release executable failed its help probe. The active release was kept.\n' "$native_verify_label" >&2
 		return 1
@@ -2123,7 +2164,7 @@ prime_agent_install_native() {
 	for native_asset in prime-agent package.json install.sh prime-agent-runtime/pyproject.toml prime-agent-runtime/src/rlm/repl.py theme/prime.json export-html/template.html photon_rs_bg.wasm; do
 		[ -f "$native_extracted/$native_asset" ] || { printf 'error: missing archive asset: %s\n' "$native_asset" >&2; exit 1; }
 	done
-	if ! "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
+	if ! prime_agent_native_probe "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
 		cat "$prime_agent_native_stage/probe.log" >&2
 		prime_agent_native_cleanup
 		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then
@@ -2134,7 +2175,7 @@ prime_agent_install_native() {
 		printf 'error: the compiled executable cannot run on this machine.\n' >&2; exit 1
 	fi
 	[ "$(cat "$prime_agent_native_stage/version")" = "$native_version" ] || { printf 'error: archive version mismatch.\n' >&2; exit 1; }
-	"$native_extracted/prime-agent" --help >"$prime_agent_native_stage/help"
+	prime_agent_native_probe "$native_extracted/prime-agent" --help >"$prime_agent_native_stage/help"
 	prime_agent_native_check_public_link
 	native_digest=$(awk '{ print $1 }' "$prime_agent_native_stage/selected.sha256")
 	native_release_name="$native_version-$native_platform-$native_digest"

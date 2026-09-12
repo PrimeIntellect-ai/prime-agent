@@ -7,3 +7,4 @@
 - Fixed failed activation recovery discarding the state needed to retry restoring the previous release.
 - Fixed damaged compiled installations blocking repair and rollback to a healthy retained release.
 - Fixed rollback planning after interrupted activation and provided repair guidance for older retained installers without recovery support.
+- Fixed stalled executable checks holding the installer lock indefinitely during installation, rollback, or activation recovery.
