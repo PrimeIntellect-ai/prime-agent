@@ -10,6 +10,7 @@ import {
 	fetchPrimeTeams,
 	loginPrimeAgentTraces,
 	loginPrimeInference,
+	resolvePrimeInferenceAuthConfig,
 } from "../src/core/prime-inference-auth.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
@@ -77,6 +78,7 @@ describe("Prime Inference auth", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		if (originalTraceBaseUrl === undefined) {
 			delete process.env.PRIME_AGENT_TRACES_BASE_URL;
 		} else {
@@ -86,7 +88,6 @@ describe("Prime Inference auth", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		vi.restoreAllMocks();
-		vi.unstubAllEnvs();
 	});
 
 	it("imports the production CLI file team without changing it or applying PRIME_TEAM_ID", async () => {
@@ -200,18 +201,74 @@ describe("Prime Inference auth", () => {
 		expect(fetchMock).toHaveBeenCalledOnce();
 	});
 
-	it("does not import production CLI credentials into an explicit trace target", async () => {
-		process.env.PRIME_AGENT_TRACES_BASE_URL = "https://trace-api.example/api/v1";
+	it.each([
+		[
+			"PRIME_AGENT_INFERENCE_API_BASE_URL",
+			"https://custom.example/api/v1/",
+			loginPrimeInference,
+			"https://custom.example",
+		],
+		[
+			"PRIME_AGENT_INFERENCE_FRONTEND_URL",
+			"https://custom.example/",
+			loginPrimeInference,
+			"https://api.primeintellect.ai",
+		],
+		[
+			"PRIME_AGENT_TRACES_BASE_URL",
+			"https://custom.example/api/v1/",
+			loginPrimeAgentTraces,
+			"https://custom.example",
+		],
+	] as const)("does not import CLI credentials with %s", async (env, value, login, baseUrl) => {
+		vi.stubEnv(env, value);
 		writeFileSync(configPath, JSON.stringify({ api_key: "prime-cli-key" }));
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			expect(getUrl(input)).toBe("https://trace-api.example/api/v1/auth_challenge/generate");
+			expect(getUrl(input)).toBe(`${baseUrl}/api/v1/auth_challenge/generate`);
 			expect(getAuthorization(init)).toBeUndefined();
 			throw new Error("stop before browser");
 		});
-		await expect(loginPrimeAgentTraces({ onAuth: vi.fn() }, { configPath, fetchFn: fetchMock })).rejects.toThrow(
+		await expect(login({ onAuth: vi.fn() }, { configPath, fetchFn: fetchMock })).rejects.toThrow(
 			"stop before browser",
 		);
 		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		{ base_url: "https://dev.example" },
+		{ frontend_url: "https://dev.example" },
+		{ inference_url: "https://dev.example" },
+		{ base_url: null },
+	])("rejects ineligible CLI URLs %j without sending its key", async (urls) => {
+		const original = JSON.stringify({ api_key: "dev-key", ...urls });
+		writeFileSync(configPath, original);
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			expect(getUrl(input)).toBe("https://api.primeintellect.ai/api/v1/auth_challenge/generate");
+			expect(getAuthorization(init)).toBeUndefined();
+			throw new Error("stop before browser");
+		});
+		await expect(loginPrimeInference({ onAuth: vi.fn() }, { configPath, fetchFn: fetchMock })).rejects.toThrow(
+			"stop before browser",
+		);
+		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(readFileSync(configPath, "utf8")).toBe(original);
+	});
+
+	it("normalizes Agent-only auth endpoints independently of unrelated settings", () => {
+		vi.stubEnv("PRIME_AGENT_INFERENCE_API_BASE_URL", "  ");
+		vi.stubEnv("PRIME_AGENT_INFERENCE_FRONTEND_URL", "  ");
+		vi.stubEnv("PRIME_API_BASE_URL", "https://unrelated.example");
+		vi.stubEnv("PRIME_AGENT_TRACES_BASE_URL", "https://traces.example");
+		expect(resolvePrimeInferenceAuthConfig()).toEqual({
+			baseUrl: "https://api.primeintellect.ai",
+			frontendUrl: "https://app.primeintellect.ai",
+		});
+		vi.stubEnv("PRIME_AGENT_INFERENCE_API_BASE_URL", " https://custom.example/api/v1/ ");
+		vi.stubEnv("PRIME_AGENT_INFERENCE_FRONTEND_URL", " https://app.example/ ");
+		expect(resolvePrimeInferenceAuthConfig()).toEqual({
+			baseUrl: "https://custom.example",
+			frontendUrl: "https://app.example",
+		});
 	});
 
 	it("throws contextual errors for invalid Prime whoami JSON", async () => {

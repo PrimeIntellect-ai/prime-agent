@@ -1546,42 +1546,17 @@ describe("agent trace upload", () => {
 		expect(calls).toHaveLength(0);
 	});
 
-	it.each([undefined, "https://api.primeintellect.ai/api/v1", "http://localhost:8000"])(
-		"never uploads with CLI-only credentials (base URL %s)",
-		async (baseUrl) => {
-			const session = writeSession(tempDir, join(tempDir, "sessions"), "cli-only-session");
-			const calls: FetchCall[] = [];
-			const configPath = join(tempDir, "prime-config.json");
-			writeFileSync(configPath, JSON.stringify({ api_key: "cli-key", base_url: baseUrl }));
-			const authStorage = AuthStorage.inMemory({}, { primeCliConfigPath: configPath, usePrimeCliConfig: true });
-
-			const result = await uploadAgentTraceFile({
-				sessionFile: session.getSessionFile(),
-				authStorage,
-				settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-				fetchFn: createFetchRecorder(calls),
-				reloadConfig: false,
-			});
-
-			expect(result).toEqual({ status: "missing_credentials" });
-			expect(calls).toHaveLength(0);
-		},
-	);
-
-	it("stale Agent credentials cannot fall back to a changed CLI key for traces", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "stale-credential-session");
+	it.each([false, true])("does not fall back to CLI credentials for trace upload (stale: %s)", async (stale) => {
+		const session = writeSession(tempDir, join(tempDir, "sessions"), "cli-fallback-session");
 		const calls: FetchCall[] = [];
 		const configPath = join(tempDir, "prime-config.json");
-		writeFileSync(configPath, JSON.stringify({ api_key: "cli-key" }));
-		const authStorage = AuthStorage.inMemory(
-			{
-				[PRIME_INFERENCE_PROVIDER_ID]: { type: "api_key", key: "agent-key" },
-			},
-			{ primeCliConfigPath: configPath, usePrimeCliConfig: true },
-		);
-		expect(authStorage.markAuthStale(PRIME_INFERENCE_PROVIDER_ID)).toBe(true);
-		writeFileSync(configPath, JSON.stringify({ api_key: "fresh-cli-key" }));
-
+		writeFileSync(configPath, JSON.stringify({ api_key: "cli-key", base_url: "https://api.primeintellect.ai" }));
+		const authStorage = AuthStorage.inMemory({}, { primeCliConfigPath: configPath });
+		if (stale) {
+			authStorage.setPrimeInferenceApiKey("agent-key");
+			expect(authStorage.markAuthStale(PRIME_INFERENCE_PROVIDER_ID)).toBe(true);
+			writeFileSync(configPath, JSON.stringify({ api_key: "changed-cli-key" }));
+		}
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage,
@@ -1589,7 +1564,6 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 			reloadConfig: false,
 		});
-
 		expect(result).toEqual({ status: "missing_credentials" });
 		expect(calls).toHaveLength(0);
 	});

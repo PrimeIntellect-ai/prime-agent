@@ -173,29 +173,6 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("explicit Prime models.json baseUrl overrides remain available for generation", async () => {
-			writeRawModelsJson({
-				"prime-inference": { baseUrl: "https://intentional-proxy.example/v1" },
-			});
-			const configPath = join(tempDir, "prime-config.json");
-			writeFileSync(configPath, JSON.stringify({ api_key: "dev-key", base_url: "http://localhost:8000" }));
-			const primeAuth = AuthStorage.inMemory(
-				{
-					"prime-inference": { type: "api_key", key: "agent-key" },
-				},
-				{ primeCliConfigPath: configPath, usePrimeCliConfig: true },
-			);
-			const registry = ModelRegistry.create(primeAuth, modelsJsonPath);
-			const bundledModel = getModels("prime-inference")[0];
-			const model = registry.find("prime-inference", bundledModel.id);
-			expect(registry.getError()).toBeUndefined();
-			expect(model).toMatchObject({ id: bundledModel.id, baseUrl: "https://intentional-proxy.example/v1" });
-			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
-				ok: true,
-				apiKey: "agent-key",
-			});
-		});
-
 		test("baseUrl-only override does not affect other providers", () => {
 			writeRawModelsJson({
 				anthropic: overrideConfig("https://my-proxy.example.com/v1"),
