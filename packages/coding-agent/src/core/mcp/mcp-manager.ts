@@ -145,7 +145,7 @@ export class McpManager {
 
 	/** Catalog service ids that own their name: user settings cannot shadow them. */
 	private isReservedServerName(server: string): boolean {
-		return this.services.some((service) => service.bundledSkill && service.serviceId === server);
+		return this.services.some((service) => service.legacyBuiltin && service.serviceId === server);
 	}
 
 	/** Whether a user-declared server name is owned by the user rather than the catalog. */
@@ -189,13 +189,13 @@ export class McpManager {
 	}
 
 	/**
-	 * Register OAuth providers for catalog services beyond the bundled slice. A
+	 * Register OAuth providers for catalog services beyond the legacy slice. A
 	 * user-declared server that owns the name always wins: no provider is
 	 * registered against the official endpoint for an id the user repointed.
 	 */
 	private registerCatalogProviders(): void {
 		for (const service of this.services) {
-			if (service.bundledSkill) continue;
+			if (service.legacyBuiltin) continue;
 			if (service.transport.type !== "http" || !service.transport.url) continue;
 			if (service.setup.status !== "ready") continue;
 			if (service.authStrategy !== "oauth" && service.authStrategy !== "unknown") continue;
@@ -262,11 +262,15 @@ export class McpManager {
 		return typeof endpoint === "string" && endpoint === integration.config.url;
 	}
 
-	/** `-<server>/SKILL.md` overrides for every bundled integration the user isn't logged into. */
+	/**
+	 * `-<server>/SKILL.md` overrides for legacy built-ins the user isn't logged
+	 * into. Applies while the legacy skill packages still ship; once the authored
+	 * wrappers are removed these overrides become harmless no-ops.
+	 */
 	getDisabledBuiltinSkillOverrides(): string[] {
 		const overrides: string[] = [];
 		for (const service of this.services) {
-			if (!service.bundledSkill) continue;
+			if (!service.legacyBuiltin) continue;
 			const integration = this.integrations.get(service.serviceId);
 			if (integration && !this.isAuthed(integration)) {
 				overrides.push(`-${service.serviceId}/SKILL.md`);

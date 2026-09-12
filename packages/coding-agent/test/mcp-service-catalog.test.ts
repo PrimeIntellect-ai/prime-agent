@@ -1,8 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createMcpOAuthProvider } from "@earendil-works/pi-ai/mcp";
+import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { MCP_PROBE_ERRORS } from "../src/core/mcp/connection-probe.js";
 import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import {
 	buildConnectionViews,
@@ -26,8 +29,8 @@ function serviceFixture(overrides: Partial<McpServiceDescriptor> = {}): McpServi
 		transport: { type: "http", url: "https://mcp.acme.test/mcp" },
 		authStrategy: "oauth",
 		setup: { status: "ready" },
-		catalogVerified: true,
-		bundledSkill: false,
+		metadataReviewed: true,
+		legacyBuiltin: false,
 		...overrides,
 	};
 }
@@ -163,9 +166,24 @@ describe("service catalog views", () => {
 		expect(views[0]?.setupHint).toBe("Requires a developer app.");
 	});
 
-	it("marks imported, unvetted catalog entries as unverified while staying connectable", () => {
+	it("never offers Connect for sse, stdio, or http-template transports", () => {
 		const views = buildPluginViews({
-			services: [serviceFixture({ catalogVerified: false })],
+			services: [
+				serviceFixture({ serviceId: "sse-svc", label: "SSE Svc", transport: { type: "other" } }),
+				serviceFixture({ serviceId: "stdio-svc", label: "Stdio Svc", transport: { type: "stdio" } }),
+				serviceFixture({ serviceId: "tmpl-svc", label: "Tmpl Svc", transport: { type: "http-template" } }),
+			],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views.every((view) => view.connectionStatus === "setup_required" && !view.connectable)).toBe(true);
+		expect(views.every((view) => typeof view.setupHint === "string" && view.setupHint.length > 0)).toBe(true);
+	});
+
+	it("marks imported, metadata-unreviewed catalog entries as unverified while staying connectable", () => {
+		const views = buildPluginViews({
+			services: [serviceFixture({ metadataReviewed: false })],
 			userServers: undefined,
 			authStorage,
 			connectionStore: store,
@@ -174,7 +192,7 @@ describe("service catalog views", () => {
 		expect(views[0]?.connectable).toBe(true);
 	});
 
-	it("keeps user-declared servers working when the catalog adds the same id (user owns non-bundled ids)", () => {
+	it("keeps user-declared servers working when the catalog adds the same id (user owns non-legacy ids)", () => {
 		const userServers: Record<string, McpServerConfig> = {
 			acme: { type: "http", url: "https://custom.acme.test/mcp", oauth: true },
 		};
@@ -194,7 +212,7 @@ describe("service catalog views", () => {
 			notion: { type: "http", url: "https://proxy.test/mcp", oauth: true },
 		};
 		const views = buildPluginViews({
-			services: [serviceFixture({ serviceId: "notion", label: "Notion", bundledSkill: true })],
+			services: [serviceFixture({ serviceId: "notion", label: "Notion", legacyBuiltin: true })],
 			userServers,
 			authStorage,
 			connectionStore: store,
@@ -272,10 +290,23 @@ describe("verifyMcpConnection", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "svc-verify-"));
 		authStorage = AuthStorage.inMemory();
 		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		resetOAuthProviders();
+		// Production registers the catalog OAuth provider before login, so
+		// authStorage.getApiKey resolves the stored grant.
+		registerOAuthProvider(
+			createMcpOAuthProvider({ server: "acme", label: "Acme", url: "https://mcp.acme.test/mcp" }),
+		);
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "grant-a",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
 	});
 
 	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
+		resetOAuthProviders();
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
 	it("records connected with the discovered tool count after a successful handshake", async () => {
@@ -294,7 +325,7 @@ describe("verifyMcpConnection", () => {
 		expect(store.get("acme")?.status).toBe("connected");
 	});
 
-	it("records error when the server rejects the credential", async () => {
+	it("records error with a fixed safe category when the server rejects the credential", async () => {
 		const record = await verifyMcpConnection({
 			authStorage,
 			connectionStore: store,
@@ -303,10 +334,12 @@ describe("verifyMcpConnection", () => {
 			label: "Acme",
 			endpoint: "https://mcp.acme.test/mcp",
 			usesOAuth: true,
-			probe: async () => ({ ok: false, error: "MCP verification at https://mcp.acme.test/mcp failed: HTTP 401" }),
+			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.UNAUTHORIZED }),
 		});
 		expect(record.status).toBe("error");
-		expect(record.lastError).toContain("401");
+		// The failure is a fixed category; the endpoint URL never leaks into it.
+		expect(record.lastError).toBe("http-unauthorized");
+		expect(record.lastError).not.toContain("mcp.acme.test");
 	});
 
 	it("keeps pending (not error) when verification could not run — a broken probe is not a broken grant", async () => {
@@ -318,10 +351,70 @@ describe("verifyMcpConnection", () => {
 			label: "Acme",
 			endpoint: "https://mcp.acme.test/mcp",
 			usesOAuth: true,
-			probe: async () => ({ ok: false, error: "MCP verification failed: request failed" }),
+			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.NETWORK }),
 		});
 		expect(record.status).toBe("pending");
-		expect(record.lastError).toContain("request failed");
+		expect(record.lastError).toBe("network-unreachable");
+	});
+
+	it("discards a stale verify result when the connection is logged out mid-probe", async () => {
+		let releaseProbe: (() => void) | undefined;
+		const probeGate = new Promise<void>((resolve) => {
+			releaseProbe = resolve;
+		});
+		const verifyPromise = verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => {
+				await probeGate;
+				return { ok: true, toolCount: 4 };
+			},
+		});
+		// Logout lands while the probe is in flight.
+		authStorage.logout(mcpCredentialKey("acme"));
+		releaseProbe?.();
+		const record = await verifyPromise;
+		expect(record.status).toBe("pending");
+		expect(record.lastError).toBe("credential-changed");
+		// The stale result must never persist a connected record.
+		expect(store.get("acme")).toBeUndefined();
+	});
+
+	it("discards a stale verify result when the grant rotates mid-probe", async () => {
+		let releaseProbe: (() => void) | undefined;
+		const probeGate = new Promise<void>((resolve) => {
+			releaseProbe = resolve;
+		});
+		const verifyPromise = verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => {
+				await probeGate;
+				return { ok: true, toolCount: 4 };
+			},
+		});
+		// The credential rotates (re-login/refresh) while the probe is in flight.
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "grant-b",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		releaseProbe?.();
+		const record = await verifyPromise;
+		expect(record.status).toBe("pending");
+		expect(record.lastError).toBe("credential-changed");
+		expect(store.get("acme")?.status).not.toBe("connected");
 	});
 
 	it("persists records across store reloads", async () => {
@@ -353,7 +446,7 @@ describe("defaultServiceCatalogProvider", () => {
 		expect(ids).toEqual(["linear", "notion"]);
 		for (const service of services) {
 			expect(service.transport.type).toBe("http");
-			expect(service.bundledSkill).toBe(true);
+			expect(service.legacyBuiltin).toBe(true);
 		}
 	});
 });

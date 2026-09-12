@@ -3,10 +3,11 @@
 // and the kernel inventory. Pure data assembly over auth.json credentials and
 // connection records; no secrets ever leave this module.
 
+import { createHash } from "node:crypto";
 import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
-import { probeMcpEndpoint } from "./connection-probe.js";
+import { MCP_PROBE_ERRORS, probeMcpEndpoint } from "./connection-probe.js";
 import type { McpConnectionRecord, McpConnectionStore } from "./connection-store.js";
 
 /**
@@ -67,10 +68,10 @@ export interface McpServiceDescriptor {
 	transport: { type: "http"; url: string } | { type: "http-template" | "stdio" | "other" };
 	authStrategy: "oauth" | "api_key" | "none" | "unknown";
 	setup: { status: "ready" | "requires-setup"; reason?: string };
-	/** False for imported (not yet vetted) catalog entries. */
-	catalogVerified: boolean;
-	/** True only when a bundled authored skill package ships for this service. */
-	bundledSkill: boolean;
+	/** True only for legacy built-ins whose provider OAuth metadata was reviewed. Never a runtime/interop claim. */
+	metadataReviewed: boolean;
+	/** True for pre-catalog legacy built-ins; their ids stay reserved. */
+	legacyBuiltin: boolean;
 }
 
 export type McpServiceCatalogProvider = () => readonly McpServiceDescriptor[];
@@ -89,8 +90,8 @@ export function defaultServiceCatalogProvider(): McpServiceCatalogProvider {
 			transport: { type: "http" as const, url: entry.url },
 			authStrategy: entry.oauth?.kind === "oauth" ? ("oauth" as const) : ("none" as const),
 			setup: { status: "ready" as const },
-			catalogVerified: true,
-			bundledSkill: true,
+			metadataReviewed: true,
+			legacyBuiltin: true,
 		}));
 }
 
@@ -224,7 +225,7 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 		...(service.publisher ? { publisher: service.publisher } : {}),
 		...(service.docsUrl ? { docsUrl: service.docsUrl } : {}),
 		...(setupHint ? { setupHint } : {}),
-		...(service.catalogVerified ? {} : { unverified: true }),
+		...(service.metadataReviewed ? {} : { unverified: true }),
 	};
 }
 
@@ -264,7 +265,7 @@ function catalogServiceView(
 		...(service.publisher ? { publisher: service.publisher } : {}),
 		...(service.docsUrl ? { docsUrl: service.docsUrl } : {}),
 		...(status.setupHint ? { setupHint: status.setupHint } : {}),
-		...(service.catalogVerified ? {} : { unverified: true }),
+		...(service.metadataReviewed ? {} : { unverified: true }),
 		...(status.record?.verifiedAt ? { verifiedAt: status.record.verifiedAt } : {}),
 		...(status.record?.toolCount !== undefined ? { toolCount: status.record.toolCount } : {}),
 	};
@@ -322,17 +323,17 @@ export interface BuildViewsOptions {
 export function buildPluginViews(options: BuildViewsOptions): McpPluginView[] {
 	const { services, userServers, authStorage, connectionStore } = options;
 	const userEntries = Object.entries(userServers ?? {});
-	const bundledIds = new Set(services.filter((service) => service.bundledSkill).map((service) => service.serviceId));
+	const reservedIds = new Set(services.filter((service) => service.legacyBuiltin).map((service) => service.serviceId));
 	const userViews = new Map<string, McpPluginView>();
 	for (const [name, config] of userEntries) {
 		// Dead shadows: a user entry cannot override a bundled catalog service.
-		if (bundledIds.has(name)) continue;
+		if (reservedIds.has(name)) continue;
 		userViews.set(name, userServerView(name, config, authStorage, connectionStore));
 	}
 	const views: McpPluginView[] = [];
 	for (const service of services) {
 		// A user-declared server owns the id for non-bundled services; no duplicate card.
-		if (!service.bundledSkill && userViews.has(service.serviceId)) continue;
+		if (!service.legacyBuiltin && userViews.has(service.serviceId)) continue;
 		views.push(catalogServiceView(service, authStorage, connectionStore));
 	}
 	views.push(...userViews.values());
@@ -351,10 +352,10 @@ export function buildConnectionViews(
 ): McpConnectionView[] {
 	const { services, userServers, authStorage, connectionStore, acpServers } = options;
 	const views: McpConnectionView[] = [];
-	const bundledIds = new Set(services.filter((service) => service.bundledSkill).map((service) => service.serviceId));
+	const reservedIds = new Set(services.filter((service) => service.legacyBuiltin).map((service) => service.serviceId));
 	const connected = new Set<string>();
 	for (const service of services) {
-		if (bundledIds.has(service.serviceId) && userServers?.[service.serviceId] !== undefined) continue;
+		if (reservedIds.has(service.serviceId) && userServers?.[service.serviceId] !== undefined) continue;
 		const plugin = catalogServiceView(service, authStorage, connectionStore);
 		if (plugin.connectionIds.length === 0) continue;
 		connected.add(service.serviceId);
@@ -370,7 +371,7 @@ export function buildConnectionViews(
 		});
 	}
 	for (const [name, config] of Object.entries(userServers ?? {})) {
-		if (bundledIds.has(name)) continue;
+		if (reservedIds.has(name)) continue;
 		const plugin = userServerView(name, config, authStorage, connectionStore);
 		if (plugin.connectionIds.length === 0) continue;
 		connected.add(name);
@@ -472,35 +473,97 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 		updatedAt: now,
 	};
 	try {
-		const getToken = async (): Promise<string> => {
-			if (usesOAuth) {
-				const token = await authStorage.getApiKey(mcpCredentialKey(connectionId));
-				return token ?? "";
-			}
-			if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
-			return "";
-		};
+		// Resolve the token once: the probe and the binding check below both refer to
+		// exactly this grant revision (getApiKey refreshes under its lock first).
+		const token = await resolveConnectionToken(authStorage, connectionId, usesOAuth, bearerTokenEnvVar);
+		// An OAuth connection verifies against its own grant: without a usable token
+		// there is nothing to verify, and an anonymous probe must not produce a
+		// "connected" record.
+		if (usesOAuth && !token) {
+			record.status = "pending";
+			record.lastError = MCP_PROBE_ERRORS.UNKNOWN;
+			connectionStore.queueVerifyResult(record, () => true);
+			await connectionStore.flush().catch(() => undefined);
+			return record;
+		}
+		const bindingAtProbe = authBindingFor(token);
 		const result = await probe({
 			url: endpoint,
-			getToken,
+			getToken: () => token,
 			...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
 		});
 		if (result.ok) {
 			record.status = "connected";
 			record.verifiedAt = Date.now();
 			record.toolCount = result.toolCount;
-		} else if (/\bHTTP 40[13]\b/.test(result.error)) {
+		} else if (result.error === MCP_PROBE_ERRORS.UNAUTHORIZED) {
+			// The server rejected the credential: a real reconnection state.
 			record.status = "error";
 			record.lastError = result.error;
 		} else {
+			// Verification could not complete (network/timeout/protocol): the grant
+			// stays intact, so this is pending rather than a broken connection.
 			record.status = "pending";
 			record.lastError = result.error;
 		}
-	} catch (error) {
+		// Bind the result to the current grant revision: if the credential changed
+		// or disappeared while the probe ran (logout, rotation, reconnect), the
+		// result is stale and must not mark the connection verified. The same guard
+		// is re-evaluated under the store lock at flush time.
+		const isStillCurrent = () =>
+			authBindingFor(currentCredentialBindingValue(authStorage, connectionId, usesOAuth, bearerTokenEnvVar)) ===
+			bindingAtProbe;
+		if (!isStillCurrent()) {
+			return { ...record, status: "pending", lastError: MCP_PROBE_ERRORS.CREDENTIAL_CHANGED };
+		}
+		connectionStore.queueVerifyResult(record, isStillCurrent);
+		await connectionStore.flush();
+		return record;
+	} catch {
 		record.status = "pending";
-		record.lastError = `verification failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500);
+		record.lastError = MCP_PROBE_ERRORS.UNKNOWN;
+		connectionStore.queueVerifyResult(record, () => true);
+		await connectionStore.flush().catch(() => undefined);
+		return record;
 	}
-	connectionStore.upsert(record);
-	await connectionStore.flush();
-	return record;
+}
+
+/** Resolve the usable token for a connection; empty string when unauthenticated. */
+async function resolveConnectionToken(
+	authStorage: AuthStorage,
+	connectionId: string,
+	usesOAuth: boolean,
+	bearerTokenEnvVar: string | undefined,
+): Promise<string> {
+	if (usesOAuth) {
+		const token = await authStorage.getApiKey(mcpCredentialKey(connectionId));
+		return token ?? "";
+	}
+	if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
+	return "";
+}
+
+/**
+ * The current grant revision as a short stable hash. Reads through the storage
+ * cache (the writer process is this process in interactive flows), so the flush-time
+ * guard observes changes made here; cross-process changes are ordered by the file
+ * lock in the same reload cycle the daemon already performs on refresh.
+ */
+function currentCredentialBindingValue(
+	authStorage: AuthStorage,
+	connectionId: string,
+	usesOAuth: boolean,
+	bearerTokenEnvVar: string | undefined,
+): string {
+	if (usesOAuth) {
+		const credential = authStorage.get(mcpCredentialKey(connectionId));
+		return credential?.type === "oauth" && typeof credential.access === "string" ? credential.access : "";
+	}
+	if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
+	return "";
+}
+
+/** Short non-reversible hash binding a verification to one exact grant. */
+export function authBindingFor(value: string): string {
+	return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }

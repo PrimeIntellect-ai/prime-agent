@@ -346,8 +346,8 @@ const CATALOG_SERVICE: McpServiceDescriptor = {
 	transport: { type: "http", url: "https://mcp.acme.test/mcp" },
 	authStrategy: "oauth",
 	setup: { status: "ready" },
-	catalogVerified: true,
-	bundledSkill: false,
+	metadataReviewed: true,
+	legacyBuiltin: false,
 };
 
 describe("McpManager service catalog handlers", () => {
@@ -355,7 +355,7 @@ describe("McpManager service catalog handlers", () => {
 	let authStorage: AuthStorage;
 	let store: McpConnectionStore;
 	let probeCalls: Array<{ url: string; token: string }>;
-	let probeResult: { ok: true; toolCount: number } | { ok: false; error: string };
+	let probeResult: { ok: true; toolCount: number } | { ok: false; error: "http-unauthorized" };
 
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "mcp-catalog-"));
@@ -496,11 +496,13 @@ describe("McpManager service catalog handlers", () => {
 			refresh: "r",
 			expires: Date.now() + 3600_000,
 		});
-		probeResult = { ok: false, error: "MCP verification at https://mcp.linear.app/mcp failed: HTTP 401" };
+		probeResult = { ok: false, error: "http-unauthorized" };
 		const manager = createManager();
 		const record = await manager.verifyConnection("linear");
 		expect(record.status).toBe("error");
+		expect(record.lastError).toBe("http-unauthorized");
 		expect(authStorage.get("mcp:linear")).toBeDefined();
+		expect(store.get("linear")?.lastError).not.toContain("mcp.linear.app");
 	});
 
 	it("reloads connection records written by the interactive client on refresh()", async () => {

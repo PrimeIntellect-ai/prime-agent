@@ -923,6 +923,25 @@ export function formatAgentDepthLabel(depth: number | undefined, hasChildren: bo
 	return `depth ${depth}`;
 }
 
+/**
+ * Map a fixed verification category to user-readable wording. The persisted
+ * record keeps only the category; this layer adds the friendly explanation.
+ */
+const MCP_VERIFICATION_ISSUES: Record<string, string> = {
+	"http-unauthorized": "the endpoint rejected the stored credentials (reconnect)",
+	"verification-timeout": "the endpoint did not respond in time",
+	"network-unreachable": "the endpoint could not be reached",
+	"server-rejected-handshake": "the server rejected the MCP handshake",
+	"http-error": "the endpoint returned an HTTP error",
+	"invalid-response": "the endpoint returned an invalid MCP response",
+	"verification-failed": "the handshake could not be completed",
+	"credential-changed": "the stored credentials changed during verification",
+};
+
+function formatMcpVerificationIssue(category: string | undefined): string {
+	return MCP_VERIFICATION_ISSUES[category ?? ""] ?? "the endpoint did not complete an MCP handshake";
+}
+
 export class InteractiveMode {
 	private static readonly EXIT_HINT_DURATION_MS = 2000;
 	private static readonly ESCAPE_REPEAT_WINDOW_MS = 500;
@@ -1092,6 +1111,8 @@ export class InteractiveMode {
 
 	private unsubscribe?: () => void;
 	private mcpConnectionStore?: McpConnectionStore;
+	/** MCP changes made while streaming/compacting; activated at the next safe boundary. */
+	private pendingPostRunActivation: { message: string; successMessage: string } | undefined;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	private autoCompactionLoader: Loader | undefined = undefined;
@@ -2746,6 +2767,7 @@ export class InteractiveMode {
 			}
 			case "agent_end":
 				this.patchConnectionState({ isStreaming: false, activeToolNames: [] });
+				void this.maybeRunQueuedMcpActivation();
 				break;
 			case "session_action_update":
 				this.patchConnectionState({ sessionActions: event.actions });
@@ -2756,6 +2778,7 @@ export class InteractiveMode {
 				break;
 			case "compaction_end":
 				this.patchConnectionState({ isCompacting: false });
+				void this.maybeRunQueuedMcpActivation();
 				break;
 			case "session_info_changed":
 				this.patchConnectionState({ sessionName: event.name });
@@ -8219,7 +8242,7 @@ export class InteractiveMode {
 						if (tab === "mcp-connections") {
 							if (!authResult.providerId.startsWith("mcp:")) return;
 							if (this.isAgentStreaming() || this.isAgentCompacting()) {
-								this.showStatus("Connected. Run /reload (after the current turn) to activate the integration.");
+								this.queueMcpActivationForNextBoundary(`Connected ${authResult.providerName}.`);
 								return;
 							}
 							finish();
@@ -8929,16 +8952,16 @@ export class InteractiveMode {
 						verification.toolCount !== undefined ? ` (${verification.toolCount} tools verified)` : ""
 					}.`
 				: verification
-					? `Login succeeded for ${service.label}, but connection verification did not complete: ${
-							verification.lastError ?? "the endpoint did not respond to an MCP handshake"
-						}. The connection is saved; retry from /plugins.`
+					? `Login succeeded for ${service.label}, but connection verification did not complete: ${formatMcpVerificationIssue(
+							verification.lastError,
+						)}. The connection is saved; retry from /plugins.`
 					: `Connected ${service.label}. (Verification result could not be saved.)`;
 		await this.reloadAfterMcpChange(message);
 	}
 
 	private async reloadAfterMcpChange(message: string, successMessage = message): Promise<void> {
 		if (this.isAgentStreaming() || this.isAgentCompacting()) {
-			this.showStatus(`${message} The change was saved. Run /reload after the current turn to activate it.`);
+			this.queueMcpActivationForNextBoundary(message, successMessage);
 			return;
 		}
 		const reloaded = await this.handleReloadCommand();
@@ -8946,6 +8969,28 @@ export class InteractiveMode {
 			this.showStatus(successMessage);
 		} else {
 			this.showWarning(`${message} The change remains saved, but it is not active in this session.`);
+		}
+	}
+
+	/**
+	 * Defer an MCP change's activation to the next safe boundary (agent run end and
+	 * compaction end both check); the user never has to run /reload manually.
+	 */
+	private queueMcpActivationForNextBoundary(message: string, successMessage = message): void {
+		this.pendingPostRunActivation = { message, successMessage };
+		this.showStatus(`${message} It will activate automatically when the current turn finishes.`);
+	}
+
+	private async maybeRunQueuedMcpActivation(): Promise<void> {
+		if (!this.pendingPostRunActivation) return;
+		if (this.isAgentStreaming() || this.isAgentCompacting()) return;
+		const pending = this.pendingPostRunActivation;
+		this.pendingPostRunActivation = undefined;
+		const reloaded = await this.handleReloadCommand();
+		if (reloaded) {
+			this.showStatus(pending.successMessage);
+		} else {
+			this.showWarning(`${pending.message} The change remains saved, but it is not active in this session.`);
 		}
 	}
 
@@ -9130,6 +9175,7 @@ export class InteractiveMode {
 
 		try {
 			await this.agentConnection.reload();
+			this.pendingPostRunActivation = undefined;
 			this.toolDefinitionCache.clear();
 			this.keybindings.reload();
 			const activeHeader = this.customHeader ?? this.builtInHeader;
