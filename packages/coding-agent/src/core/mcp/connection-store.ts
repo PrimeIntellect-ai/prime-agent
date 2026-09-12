@@ -84,6 +84,17 @@ type PendingOp =
 			resolve: (result: McpFinalizeResult) => void;
 	  }
 	| {
+			kind: "removeAccountForProvider";
+			/** The raw MCP credential provider id the user selected. */
+			providerId: string;
+			/**
+			 * Disk-authoritative auth surface: `hasVerified` for current-state
+			 * refusal decisions, `removeVerified` for the durable cleanup.
+			 */
+			authStorage: { hasVerified: (provider: string) => boolean; removeVerified: (provider: string) => boolean };
+			resolve: (result: McpRemoveAccountResult) => void;
+	  }
+	| {
 			kind: "removeAccount";
 			connectionId: string;
 			/**
@@ -99,16 +110,26 @@ type PendingOp =
 			resolve: (result: McpRemoveAccountResult) => void;
 	  };
 
-/** The account + credential key a generic MCP logout acts on. */
-export interface McpAccountLogoutTarget {
-	/** The account whose pending attempt is cancelled / record preserved. */
-	connectionId: string;
-	/**
-	 * The auth key whose credential is verified-removed: the staged key itself
-	 * for staged-key logouts, the account key otherwise.
-	 */
-	credentialKey: string;
-}
+/** The account + credential key a generic MCP logout acts on, or a refusal. */
+export type McpAccountLogoutTarget =
+	| {
+			status: "logout";
+			/** The account whose pending attempt is cancelled / record preserved. */
+			connectionId: string;
+			/**
+			 * The auth key whose credential is verified-removed: the staged key
+			 * itself for staged-key logouts, the account key otherwise.
+			 */
+			credentialKey: string;
+	  }
+	| {
+			/**
+			 * The staged key's RECORDED attempt already ended (its nonce matches a
+			 * non-pending record): fail CLOSED — never delete the newer account
+			 * credential, never delete the record, never claim the logout happened.
+			 */
+			status: "stale";
+	  };
 
 /**
  * Resolve the account behind an MCP credential id for the generic logout
@@ -123,38 +144,39 @@ export function resolveMcpAccountLogoutTarget(
 	const candidate = providerId.slice("mcp:".length);
 	const accountKey = `mcp:${candidate}`;
 	if (records.some((record) => record.connectionId === candidate) || !candidate.includes("--")) {
-		return { connectionId: candidate, credentialKey: accountKey };
+		return { status: "logout", connectionId: candidate, credentialKey: accountKey };
 	}
 	const stagedMatch = records.find(
-		(record) =>
-			record.status === "pending" &&
-			record.attemptId !== undefined &&
-			`${record.connectionId}--${record.attemptId}` === candidate,
+		(record) => record.attemptId !== undefined && `${record.connectionId}--${record.attemptId}` === candidate,
 	);
 	if (stagedMatch) {
-		return { connectionId: stagedMatch.connectionId, credentialKey: accountKey };
+		if (stagedMatch.status === "pending") {
+			return { status: "logout", connectionId: stagedMatch.connectionId, credentialKey: accountKey };
+		}
+		// The nonce matches a record whose attempt already committed
+		// (connected/error): the staged selection is stale — refuse.
+		return { status: "stale" };
 	}
-	return { connectionId: candidate, credentialKey: accountKey };
+	return { status: "logout", connectionId: candidate, credentialKey: accountKey };
 }
 
 /**
  * The shared one-op MCP account logout for the generic /logout route:
  * verified credential deletion AND pending-attempt cancellation in ONE
- * store-locked removeAccount (store->auth ordering), with exact-first id
- * resolution. The route delegates BEFORE touching auth; a failed verified
- * removal fails the whole op and cancels nothing.
+ * store-locked critical section (store->auth ordering), with the id resolved
+ * from CURRENT state UNDER the lock — never a stale pre-lock snapshot. A
+ * staged-key selection whose attempt already completed (or whose staged
+ * credential already moved onto the account key) REFUSES fail-closed: the
+ * newer credential and the record stay, and the honest outcome is "refused",
+ * never a success claim. The route delegates BEFORE touching auth; a failed
+ * verified removal fails the whole op and cancels nothing.
  */
 export function logoutMcpAccount(
 	providerId: string,
 	store: McpConnectionStore,
-	authStorage: { removeVerified: (provider: string) => boolean },
+	authStorage: { hasVerified: (provider: string) => boolean; removeVerified: (provider: string) => boolean },
 ): Promise<McpRemoveAccountResult> {
-	const target = resolveMcpAccountLogoutTarget(providerId, store.records());
-	return store.removeAccount({
-		connectionId: target.connectionId,
-		preserveCompletedRecord: true,
-		authCleanup: () => authStorage.removeVerified(target.credentialKey),
-	});
+	return store.removeAccountForProvider({ providerId, authStorage });
 }
 
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -226,7 +248,7 @@ function serializeRecords(records: ReadonlyMap<string, McpConnectionRecord>): st
 /** One-shot attempt operations: they carry a resolver and never requeue. */
 type OneShotOperation = Extract<
 	PendingOp,
-	{ kind: "reserve" | "removeReservation" | "finalizeAttempt" | "removeAccount" }
+	{ kind: "reserve" | "removeReservation" | "finalizeAttempt" | "removeAccount" | "removeAccountForProvider" }
 >;
 
 function isOneShotOperation(operation: PendingOp): operation is OneShotOperation {
@@ -234,7 +256,8 @@ function isOneShotOperation(operation: PendingOp): operation is OneShotOperation
 		operation.kind === "reserve" ||
 		operation.kind === "removeReservation" ||
 		operation.kind === "finalizeAttempt" ||
-		operation.kind === "removeAccount"
+		operation.kind === "removeAccount" ||
+		operation.kind === "removeAccountForProvider"
 	);
 }
 
@@ -334,6 +357,34 @@ export class McpConnectionStore {
 	 * never restored), "missing" (nothing existed), "failed" (nothing
 	 * committed: the cleanup threw or never ran).
 	 */
+	/**
+	 * The generic /logout route's MCP account logout: ONE store-locked op that
+	 * resolves the account id from CURRENT records, refuses stale staged-key
+	 * selections fail-closed, verifies the credential removal (throwing on
+	 * auth-file write failures), cancels PENDING attempts, and PRESERVES
+	 * completed records (honest unbound/Reconnect state).
+	 */
+	removeAccountForProvider(options: {
+		providerId: string;
+		authStorage: { hasVerified: (provider: string) => boolean; removeVerified: (provider: string) => boolean };
+	}): Promise<McpRemoveAccountResult> {
+		return new Promise<McpRemoveAccountResult>((resolve) => {
+			let settled = false;
+			const settle = (result: McpRemoveAccountResult): void => {
+				if (settled) return;
+				settled = true;
+				resolve(result);
+			};
+			this.pendingOps.push({
+				kind: "removeAccountForProvider",
+				providerId: options.providerId,
+				authStorage: options.authStorage,
+				resolve: settle,
+			});
+			void this.flush().catch(() => settle("failed"));
+		});
+	}
+
 	removeAccount(options: {
 		connectionId: string;
 		/** Returns whether a credential was actually removed. */
@@ -461,6 +512,7 @@ export class McpConnectionStore {
 					if (isOneShotOperation(operation)) {
 						if (operation.kind === "finalizeAttempt") operation.resolve("denied");
 						else if (operation.kind === "removeAccount") operation.resolve("failed");
+						else if (operation.kind === "removeAccountForProvider") operation.resolve("failed");
 						else operation.resolve(false);
 					}
 				}
@@ -522,6 +574,66 @@ export class McpConnectionStore {
 								}
 							} catch {
 								operation.resolve(false);
+							}
+						} else if (operation.kind === "removeAccountForProvider") {
+							oneShot.add(operation);
+							try {
+								// Resolve from CURRENT state under THIS lock: a
+								// staged-key selection that raced a completing
+								// finalize acts on what the lock sees — never a
+								// pre-lock cache snapshot.
+								const target = resolveMcpAccountLogoutTarget(operation.providerId, [...records.values()]);
+								if (target.status === "stale") {
+									// Fail CLOSED: the recorded attempt already
+									// ended — keep the record, keep the newer
+									// credential, never claim the logout.
+									operation.resolve("refused");
+								} else {
+									const accountKey = `mcp:${target.connectionId}`;
+									const stagedSelection = target.credentialKey !== accountKey;
+									const stagedStillThere = stagedSelection
+										? operation.authStorage.hasVerified(target.credentialKey)
+										: true;
+									const realOccupied = stagedSelection ? operation.authStorage.hasVerified(accountKey) : false;
+									if (stagedSelection && !stagedStillThere && realOccupied) {
+										// A finalize already moved the staged
+										// credential onto the account key while
+										// this logout queued behind its lock:
+										// deleting the pending record would orphan
+										// the moved credential. Refuse.
+										operation.resolve("refused");
+									} else {
+										// Verified cleanup FIRST (store->auth): a
+										// throwing auth write fails the whole op
+										// and cancels nothing.
+										const credentialRemoved = operation.authStorage.removeVerified(target.credentialKey);
+										const existing = records.get(target.connectionId);
+										const existed = existing !== undefined;
+										// Generic-logout semantics: cancel PENDING
+										// attempts, PRESERVE completed records
+										// (honest unbound/Reconnect state).
+										const removeRecord = existed && existing.status === "pending";
+										if (removeRecord) {
+											records.delete(target.connectionId);
+										}
+										const outcome: McpRemoveAccountResult = removeRecord
+											? "removed"
+											: existed
+												? "preserved"
+												: credentialRemoved
+													? "credential-only"
+													: "missing";
+										deferred.push((didCommit) =>
+											didCommit
+												? operation.resolve(outcome)
+												: // The logout committed durably but the record save failed:
+													// report the honest partial state, never restore.
+													operation.resolve(credentialRemoved ? "logged-out" : "failed"),
+										);
+									}
+								}
+							} catch {
+								operation.resolve("failed");
 							}
 						} else if (operation.kind === "removeAccount") {
 							oneShot.add(operation);
@@ -678,7 +790,14 @@ export type { McpConnectionsFile, PendingOp };
  * grants, failed record saves) but the credential logout ran. "missing":
  * nothing to remove. "failed": the durable write failed — nothing committed.
  */
-export type McpRemoveAccountResult = "removed" | "preserved" | "credential-only" | "logged-out" | "missing" | "failed";
+export type McpRemoveAccountResult =
+	| "removed"
+	| "preserved"
+	| "refused"
+	| "credential-only"
+	| "logged-out"
+	| "missing"
+	| "failed";
 
 /**
  * Outcome of a guarded finalize. "committed": record write landed. "denied":

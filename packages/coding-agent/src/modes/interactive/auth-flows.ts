@@ -222,6 +222,16 @@ export class ProviderAuthFlows {
 						// finalize that could re-create the credential after it.
 						if (providerOption.id.startsWith("mcp:") && this.host.onMcpAccountLogout) {
 							const outcome = await this.host.onMcpAccountLogout(providerOption.id);
+							if (outcome === "refused") {
+								// The staged login already completed while this
+								// logout raced it: the account stays connected —
+								// say so explicitly, never "Logged out".
+								this.host.showStatus(
+									`The login attempt for ${providerOption.name} already completed; the account remains connected. Manage it from /plugins.`,
+								);
+								resolve(providerOption.id);
+								return;
+							}
 							if (outcome === "failed") {
 								throw new Error(
 									`Logout failed: the change could not be saved; try logging out ${providerOption.name} again.`,

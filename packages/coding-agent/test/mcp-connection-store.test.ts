@@ -6,7 +6,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import {
+	logoutMcpAccount,
+	type McpConnectionRecord,
+	McpConnectionStore,
+	resolveMcpAccountLogoutTarget,
+} from "../src/core/mcp/connection-store.js";
 import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
 
 // The store's atomic write is the seam for write-failure regressions; the real
@@ -607,6 +613,79 @@ describe("ENG-6108 durable account reservations", () => {
 		// A failed logout never poisons later operations.
 		await expect(client.removeAccount({ connectionId: "acme-9", authCleanup: () => false })).resolves.toBe("missing");
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a staged-key logout queued behind a finalize-first move refuses fail-closed (no orphan)", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "staged-logout-race-"));
+		const storePath = join(tempDir, "mcp-connections.json");
+		const authPath = join(tempDir, "auth.json");
+		const loginClient = AuthStorage.create(authPath);
+		const routeClient = AuthStorage.create(authPath);
+		const finalizingStore = McpConnectionStore.open(storePath);
+		const warmedStore = McpConnectionStore.open(storePath);
+		const at = Date.now();
+		const mine = nonce();
+		await finalizingStore.reserveConnectionId(record("acme-2", at, mine));
+		loginClient.set(`mcp:acme-2--${mine}`, {
+			type: "oauth",
+			access: `staged-for-acme-2--${mine}`,
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+
+		// The finalize holds the store lock; its commit moves the staged
+		// credential to the real key. MID-COMMIT, the other client's staged-key
+		// logout fires through the REAL exported handler — it queues behind
+		// our lock and must act on CURRENT state, not the stale snapshot.
+		let routeLogout: Promise<import("../src/core/mcp/connection-store.js").McpRemoveAccountResult> | undefined;
+		const finalization = finalizingStore.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: (current) => {
+				routeLogout = logoutMcpAccount(`mcp:acme-2--${mine}`, warmedStore, routeClient);
+				const moved = loginClient.moveStagedCredential(`mcp:acme-2--${mine}`, "mcp:acme-2");
+				expect(moved.status).toBe("moved");
+				// The real flow's commit returns the pending record unchanged;
+				// verification updates it later.
+				return current;
+			},
+		});
+
+		await expect(finalization).resolves.toBe("committed");
+		const outcome = await routeLogout;
+		// Fail-closed refusal: never a success claim while the account lives.
+		expect(outcome).toBe("refused");
+		const fresh = AuthStorage.create(authPath);
+		// The moved credential SURVIVES on the real key...
+		const survivingCredential = fresh.get("mcp:acme-2");
+		expect(survivingCredential?.type).toBe("oauth");
+		if (survivingCredential?.type === "oauth") {
+			expect(survivingCredential.access).toBe(`staged-for-acme-2--${mine}`);
+		}
+		// ...AND the record survives — no orphan either way.
+		const survivingRecord = McpConnectionStore.open(storePath).get("acme-2");
+		expect(survivingRecord).toBeDefined();
+		expect([survivingCredential === undefined, survivingRecord !== undefined]).toContain(true);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("resolveMcpAccountLogoutTarget marks a nonce-matched non-pending record as stale", () => {
+		const records = [
+			{ connectionId: "acme-2", status: "connected", attemptId: "nonce-1" },
+			{ connectionId: "other", status: "pending", attemptId: "nonce-2" },
+		];
+		expect(resolveMcpAccountLogoutTarget("mcp:acme-2--nonce-1", records)).toEqual({ status: "stale" });
+		expect(resolveMcpAccountLogoutTarget("mcp:other--nonce-2", records)).toEqual({
+			status: "logout",
+			connectionId: "other",
+			credentialKey: "mcp:other--nonce-2",
+		});
+		expect(resolveMcpAccountLogoutTarget("mcp:acme-2", records)).toEqual({
+			status: "logout",
+			connectionId: "acme-2",
+			credentialKey: "mcp:acme-2",
+		});
 	});
 
 	it("removeAccount with preserveCompletedRecord cancels PENDING attempts but PRESERVES finished accounts", async () => {

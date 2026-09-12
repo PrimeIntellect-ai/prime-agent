@@ -287,6 +287,33 @@ describe("ProviderAuthFlows", () => {
 		expect(statusMessages.join("\n")).toContain("could not be saved");
 	});
 
+	it("a refused stale staged logout reports the completed login explicitly, never Logged out", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		authStorage.set("mcp:acme-2--attempt-1", {
+			type: "oauth",
+			access: "staged-for-attempt-1",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const { host, overlays, statusMessages } = createHost(authStorage);
+		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = vi.fn(
+			async () => "refused" as McpRemoveAccountResult,
+		);
+
+		const logoutResult = new ProviderAuthFlows(host).runLogout();
+		expect(overlays).toHaveLength(1);
+		for (const char of "acme-2") {
+			overlays[0]?.handleInput?.(char);
+		}
+		overlays[0]?.handleInput?.("\r");
+		await expect(logoutResult).resolves.toBe("mcp:acme-2--attempt-1");
+		const messages = statusMessages.join("\n");
+		expect(messages).toContain("already completed");
+		expect(messages).toContain("remains connected");
+		expect(messages).not.toContain("Logged out of acme-2");
+	});
+
 	it("non-MCP logouts stay unchanged: the route removes them directly", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
 		authStorage.set("anthropic", { type: "api_key", key: "sk-ant-test" });
