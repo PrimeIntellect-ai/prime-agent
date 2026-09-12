@@ -4,4 +4,4 @@
 - Restricted installed-account repair to its exact saved connection id at its durable approved endpoint, so changed catalog URLs are never silently followed and a pending placeholder alone is not treated as approval.
 - Changed unreviewed imported OAuth entries to offer an explicit Connect attempt (with an unverified notice) instead of a blanket metadata-review block, while keeping real API-key, setup-required, and registered-client restrictions.
 - Ordered the service catalog so connected accounts and ready-to-connect services appear first, with every service still searchable and visible.
-- Added optional per-server OAuth client identity settings (`oauthClientId`, `oauthClientSecretEnvVar`, `oauthClientMetadataUrl`, `oauthScopes`) with fail-closed secret resolution, ready for the OAuth engine's client negotiation.
+- Added optional per-server OAuth client identity settings (`oauthClientId`, `oauthClientSecretEnvVar`, `oauthClientMetadataUrl`, `oauthScopes`), wired through one shared provider factory into both login and refresh registrations; a configured secret environment variable that is missing or empty fails closed before any network request.

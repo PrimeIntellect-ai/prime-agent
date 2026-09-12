@@ -3,7 +3,7 @@
 // real MCP handshake, and serves mcp.* host-requests including the service-catalog inventory.
 
 import { join } from "node:path";
-import { createMcpOAuthProvider, registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
+import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { getAgentDir } from "../../config.js";
 import type { AuthStorage } from "../auth-storage.js";
@@ -15,6 +15,7 @@ import { type McpConnectionRecord, McpConnectionStore } from "./connection-store
 import {
 	buildConnectionViews,
 	buildPluginViews,
+	createConfiguredMcpProvider,
 	decodePluginCursor,
 	defaultServiceCatalogProvider,
 	filterPluginViewsByStatus,
@@ -25,6 +26,7 @@ import {
 	oauthGrantUsable,
 	pagePluginViews,
 	reservedMcpOwnership,
+	resolveMcpOAuthIdentity,
 	searchPluginViews,
 	verifyMcpConnection,
 } from "./service-catalog.js";
@@ -270,7 +272,7 @@ export class McpManager {
 	 */
 	registerAllProviders(): void {
 		registerBuiltinMcpOAuthProviders();
-		const desired = new Map<string, ReturnType<typeof createMcpOAuthProvider>>();
+		const desired = new Map<string, ReturnType<typeof createConfiguredMcpProvider>>();
 		for (const service of this.services) {
 			if (service.legacyBuiltin) continue;
 			if (service.transport.type !== "http" || !service.transport.url) continue;
@@ -279,10 +281,12 @@ export class McpManager {
 			if (this.isUserOwnedName(service.serviceId)) continue;
 			desired.set(
 				this.providerId(service.serviceId),
-				createMcpOAuthProvider({
+				createConfiguredMcpProvider({
 					server: service.serviceId,
 					label: service.label,
 					url: service.transport.url,
+					reviewedScopes: service.reviewedScopes,
+					clientRegistration: service.clientRegistration,
 				}),
 			);
 		}
@@ -292,10 +296,11 @@ export class McpManager {
 			if (!integration.usesOAuth) continue;
 			desired.set(
 				this.providerId(integration.server),
-				createMcpOAuthProvider({
+				createConfiguredMcpProvider({
 					server: integration.server,
 					label: integration.label,
 					url: integration.config.url,
+					identity: resolveMcpOAuthIdentity(integration.config),
 				}),
 			);
 		}
@@ -309,12 +314,19 @@ export class McpManager {
 			const service = this.services.find((entry) => entry.serviceId === record.serviceId);
 			if (!service || service.transport.type !== "http" || !service.transport.url) continue;
 			if (this.isUserOwnedName(record.connectionId)) continue;
+			const parentConfig = this.getUserServers()?.[record.serviceId];
 			desired.set(
 				this.providerId(record.connectionId),
-				createMcpOAuthProvider({
+				createConfiguredMcpProvider({
 					server: record.connectionId,
 					label: `${service.label} (${record.connectionId})`,
 					url: service.transport.url,
+					// A per-account record inherits its PARENT's client identity:
+					// settings config for user-declared parents, catalog
+					// advisory for catalog parents — never the bare record.
+					identity: service.legacyBuiltin ? {} : resolveMcpOAuthIdentity(parentConfig),
+					reviewedScopes: service.reviewedScopes,
+					clientRegistration: service.clientRegistration,
 				}),
 			);
 		}

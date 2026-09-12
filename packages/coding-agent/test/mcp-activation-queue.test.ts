@@ -1243,7 +1243,12 @@ describe("ENG-6108 /plugins account state actions", () => {
 			showStatus,
 			showWarning: vi.fn(),
 			handleReloadCommand: vi.fn(async () => true),
-			uiServices: { settingsManager: { getGlobalMcpServers: () => undefined } },
+			uiServices: {
+				settingsManager: {
+					getGlobalMcpServers: () => undefined,
+					getMcpCatalogSources: () => [],
+				},
+			},
 		} as unknown as Record<string, unknown>;
 		Object.setPrototypeOf(fake, InteractiveMode.prototype);
 		return { fake, store, authStorage, showStatus, runMcpLogin };
@@ -1327,6 +1332,7 @@ describe("ENG-6108 /plugins account state actions", () => {
 	test("a login whose verification result cannot be saved reports pending, never Connected", async () => {
 		const { fake, showStatus } = fakeFor({});
 		const brokenStore = {
+			load: vi.fn(),
 			get: vi.fn(() => undefined),
 			records: vi.fn(() => []),
 			flush: vi.fn(async () => undefined),
@@ -1374,7 +1380,10 @@ describe("ENG-6108 /plugins account state actions", () => {
 			updatedAt: at,
 		});
 		(fake as unknown as Record<string, unknown>).uiServices = {
-			settingsManager: { getGlobalMcpServers: () => ({ "acme-2": { type: "http", url: "https://x.test/mcp" } }) },
+			settingsManager: {
+				getGlobalMcpServers: () => ({ "acme-2": { type: "http", url: "https://x.test/mcp" } }),
+				getMcpCatalogSources: () => [],
+			},
 		};
 		await callConnect(
 			fake,
@@ -1402,6 +1411,8 @@ describe("ENG-6108 /plugins add-account flow", () => {
 		const authStorage = AuthStorage.inMemory();
 		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
 		// The first account exists: allocation must land on acme-2, not overwrite.
+		// A connected record carries its verification evidence: the durable
+		// endpoint approval the Add-account exception requires.
 		const now = Date.now();
 		store.upsert({
 			connectionId: "acme",
@@ -1409,6 +1420,8 @@ describe("ENG-6108 /plugins add-account flow", () => {
 			endpoint: "https://mcp.acme.test/mcp",
 			label: "Acme",
 			status: "connected",
+			verifiedAt: now,
+			toolCount: 2,
 			createdAt: now,
 			updatedAt: now,
 		});
@@ -1431,7 +1444,12 @@ describe("ENG-6108 /plugins add-account flow", () => {
 			showStatus,
 			showWarning: vi.fn(),
 			handleReloadCommand: vi.fn(async () => true),
-			uiServices: { settingsManager: { getGlobalMcpServers: () => undefined } },
+			uiServices: {
+				settingsManager: {
+					getGlobalMcpServers: () => undefined,
+					getMcpCatalogSources: () => [],
+				},
+			},
 		} as unknown as Record<string, unknown>;
 		Object.setPrototypeOf(fake, InteractiveMode.prototype);
 

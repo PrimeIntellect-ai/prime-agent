@@ -7,7 +7,7 @@ import { timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { LocalCatalogLoadResult, McpServiceEntry } from "@earendil-works/pi-ai/mcp";
-import { loadLocalServiceCatalog, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
+import { createMcpOAuthProvider, loadLocalServiceCatalog, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
 import type { AuthCredential, AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import { MCP_PROBE_ERRORS, probeMcpEndpoint } from "./connection-probe.js";
@@ -82,6 +82,10 @@ export interface McpServiceDescriptor {
 	setup: { status: "ready" | "requires-setup"; reason?: string };
 	/** True only for legacy built-ins whose provider OAuth metadata was reviewed. Never a runtime/interop claim. */
 	metadataReviewed: boolean;
+	/** Advisory client-registration capability mirrored from the catalog (shapes engine error guidance only). */
+	clientRegistration?: "dynamic" | "pre-registered" | "unknown";
+	/** Reviewed upstream scope hints; joined into the engine's requested scopes when present. */
+	reviewedScopes?: string[];
 	/** True for pre-catalog legacy built-ins; their ids stay reserved. */
 	legacyBuiltin: boolean;
 	/** True when the entry came from a user-declared local catalog file (trusted by construction). */
@@ -131,6 +135,10 @@ function mapCatalogEntry(entry: McpServiceEntry, localSource: boolean): McpServi
 			...(entry.setup.reason ? { reason: entry.setup.reason } : {}),
 		},
 		metadataReviewed: entry.verification?.status === "metadata-reviewed",
+		...(entry.auth.clientRegistration ? { clientRegistration: entry.auth.clientRegistration } : {}),
+		...(entry.auth.reviewedScopes !== undefined && entry.auth.reviewedScopes.length > 0
+			? { reviewedScopes: [...entry.auth.reviewedScopes] }
+			: {}),
 		legacyBuiltin: entry.legacyBuiltin === true,
 		...(localSource ? { localSource: true } : {}),
 	};
@@ -213,6 +221,7 @@ export function resolveMcpServiceCatalog(options: {
 			authStrategy: "oauth",
 			setup: { status: "ready" },
 			metadataReviewed: false,
+			clientRegistration: "unknown",
 			legacyBuiltin: false,
 			// Pinned-from-record is its OWN trust state: the source vanished, so
 			// the pin reuses user-placed trust semantics for NOTHING — it keeps
@@ -383,6 +392,14 @@ export function mcpLoginEligibility(options: {
 			? exactRecord.endpoint
 			: undefined
 		: boundEndpoint;
+	if (options.addAccount && concreteOAuthEndpoint(repairEndpoint)) {
+		// Add allocates a NEW account id for an INSTALLED service whose own
+		// record proves the endpoint was approved (verified connection or
+		// bound credential): the new account lands at that same durable
+		// endpoint, never at a changed or unreviewed URL. A pending shell
+		// alone still lacks evidence and stays denied.
+		return { allowed: true, endpoint: repairEndpoint };
+	}
 	if (!options.addAccount && !config && concreteOAuthEndpoint(repairEndpoint)) {
 		return { allowed: true, endpoint: repairEndpoint, repair: true };
 	}
@@ -425,6 +442,43 @@ export function resolveMcpOAuthIdentity(config: McpServerConfig | undefined): Mc
 		identity.scopes = [...config.oauthScopes];
 	}
 	return identity;
+}
+
+/**
+ * The ONE host factory for MCP OAuth providers: every registration site
+ * (manager refresh providers, staged login, post-finalize real id) builds the
+ * provider here so the identity resolved at LOGIN time is byte-identical to
+ * the one used at REFRESH time — the engine pins client identity on the
+ * stored credential and refuses mismatches, so a drifting factory would break
+ * refresh spuriously. Settings identity wins over catalog scope hints; a
+ * catalog NEVER supplies secrets.
+ */
+export function createConfiguredMcpProvider(options: {
+	server: string;
+	label?: string;
+	url: string;
+	identity?: McpOAuthIdentity;
+	/** Reviewed catalog scope hints; used only when no settings scopes exist. */
+	reviewedScopes?: readonly string[];
+	clientRegistration?: "dynamic" | "pre-registered" | "unknown";
+}): ReturnType<typeof createMcpOAuthProvider> {
+	const identity = options.identity ?? {};
+	const scopes =
+		identity.scopes !== undefined
+			? identity.scopes.join(" ")
+			: options.reviewedScopes !== undefined && options.reviewedScopes.length > 0
+				? [...options.reviewedScopes].join(" ")
+				: undefined;
+	return createMcpOAuthProvider({
+		server: options.server,
+		...(options.label !== undefined ? { label: options.label } : {}),
+		url: options.url,
+		...(identity.clientId !== undefined ? { clientId: identity.clientId } : {}),
+		...(identity.clientSecret !== undefined ? { clientSecret: identity.clientSecret } : {}),
+		...(identity.clientMetadataUrl !== undefined ? { clientMetadataUrl: identity.clientMetadataUrl } : {}),
+		...(scopes !== undefined ? { scopes } : {}),
+		...(options.clientRegistration !== undefined ? { clientRegistration: options.clientRegistration } : {}),
+	});
 }
 
 export function mcpCredentialKey(connectionId: string): string {

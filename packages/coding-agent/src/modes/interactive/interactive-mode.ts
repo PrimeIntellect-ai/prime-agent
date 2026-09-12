@@ -13,7 +13,7 @@ import {
 	supportsFastMode,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
-import { BUILTIN_MCP_CATALOG, createMcpOAuthProvider } from "@earendil-works/pi-ai/mcp";
+import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type {
 	AutocompleteItem,
@@ -110,12 +110,14 @@ import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
 	accountStateFor,
 	buildPluginViews,
+	createConfiguredMcpProvider,
 	type McpPluginView,
 	type McpServiceDescriptor,
 	mcpCredentialKey,
 	mcpLoginEligibility,
 	nextMcpConnectionId,
 	reservedMcpOwnership,
+	resolveMcpOAuthIdentity,
 	resolveServiceCatalogWithDiagnostics,
 	verifyMcpConnection,
 } from "../../core/mcp/service-catalog.js";
@@ -8773,14 +8775,29 @@ export class InteractiveMode {
 		return { services: resolution.descriptors, views, diagnostics: resolution.diagnostics };
 	}
 
+	/**
+	 * Catalog resolution WITHOUT reloading the store: mid-flow admission
+	 * keeps this process's pending (unflushed) record writes visible — a
+	 * load() here would wipe in-memory state a queued op still owns. The
+	 * authoritative cross-process gate stays the claim/reserve/finalize ops
+	 * under the store's file lock.
+	 */
+	private resolveCurrentServiceCatalog(): readonly McpServiceDescriptor[] {
+		return resolveServiceCatalogWithDiagnostics(
+			this.settingsManager.getMcpCatalogSources(),
+			this.getMcpConnectionStore().records(),
+		).descriptors;
+	}
+
 	private getMcpLoginEligibility(
 		connectionId: string,
 		catalogServiceId = connectionId,
 		addAccount = false,
 		locked?: { record: McpConnectionRecord },
 		explicitLogin = false,
+		precomputedService?: McpServiceDescriptor,
 	): ReturnType<typeof mcpLoginEligibility> {
-		const { services } = this.buildServiceCatalogViews();
+		const services = precomputedService ? [precomputedService] : this.resolveCurrentServiceCatalog();
 		const record = locked ? locked.record : this.getMcpConnectionStore().get(connectionId);
 		const service = services.find((entry) => entry.serviceId === (record?.serviceId ?? catalogServiceId));
 		const userServers = this.settingsManager.getGlobalMcpServers() ?? {};
@@ -9015,7 +9032,7 @@ export class InteractiveMode {
 			service.usesOAuth &&
 			target?.usesOAuth &&
 			!service.loginPending &&
-			this.getMcpLoginEligibility(catalogServiceId, catalogServiceId, true).allowed
+			this.getMcpLoginEligibility(catalogServiceId, catalogServiceId, true, undefined, false, definition).allowed
 		) {
 			accountCards.push({
 				...service,
@@ -9190,12 +9207,11 @@ export class InteractiveMode {
 			await this.reloadAfterMcpChange(`Removed account ${service.serviceId}.`);
 			return false;
 		}
-		this.getMcpConnectionStore().load();
 		if (service.loginPending || this.getMcpConnectionStore().get(service.serviceId)?.attemptId !== undefined) {
 			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
 			return false;
 		}
-		const { services: currentServices } = this.buildServiceCatalogViews();
+		const currentServices = this.resolveCurrentServiceCatalog();
 		const catalog = currentServices.find(
 			(entry) => entry.serviceId === (options.catalogServiceId ?? service.serviceId),
 		);
@@ -9314,7 +9330,7 @@ export class InteractiveMode {
 			this.showStatus(service.setupHint ?? `${service.label} cannot be connected automatically in this build.`);
 			return { status: "failed" };
 		}
-		const { services: currentServices } = this.buildServiceCatalogViews();
+		const currentServices = this.resolveCurrentServiceCatalog();
 		const definition = currentServices.find(
 			(entry) => entry.serviceId === (options.catalogServiceId ?? service.serviceId),
 		);
@@ -9455,9 +9471,26 @@ export class InteractiveMode {
 			return released && discarded;
 		};
 		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
+		// ONE login-time client identity, shared by the staged login and the
+		// post-finalize real-id registration: the engine pins the client
+		// identity on the stored credential and refuses drift at refresh, so
+		// both registrations must resolve the exact same config. Settings
+		// identity applies to user-owned servers; reserved builtins never take
+		// a user-configured client identity.
+		const parentConfig = this.settingsManager.getGlobalMcpServers()?.[options.catalogServiceId ?? service.serviceId];
+		const loginIdentity = definition?.legacyBuiltin ? {} : resolveMcpOAuthIdentity(parentConfig);
 		let result: AuthenticationResult;
 		try {
-			registerOAuthProvider(createMcpOAuthProvider({ server: stagedServerId, label: loginLabel, url: targetUrl }));
+			registerOAuthProvider(
+				createConfiguredMcpProvider({
+					server: stagedServerId,
+					label: loginLabel,
+					url: targetUrl,
+					identity: loginIdentity,
+					reviewedScopes: definition?.reviewedScopes,
+					clientRegistration: definition?.clientRegistration,
+				}),
+			);
 			result = await this.createAuthFlows().runMcpLogin(stagedServerId, loginLabel);
 		} catch {
 			result = { status: "failed" };
@@ -9565,10 +9598,13 @@ export class InteractiveMode {
 			// Committed: the real id now owns the credential — register its
 			// provider and drop the staged registration.
 			registerOAuthProvider(
-				createMcpOAuthProvider({
+				createConfiguredMcpProvider({
 					server: connectionId,
 					label: `${service.label} (${connectionId})`,
 					url: targetUrl,
+					identity: loginIdentity,
+					reviewedScopes: definition?.reviewedScopes,
+					clientRegistration: definition?.clientRegistration,
 				}),
 			);
 			unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
