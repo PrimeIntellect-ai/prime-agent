@@ -224,6 +224,7 @@ type RenderSessionContextHarness = {
 	getRetryAttempt: () => number;
 	ui: { requestRender: () => void };
 	addMessageToChat: (message: AgentMessage, options?: { populateHistory?: boolean }) => void;
+	showWarning: (warningMessage: string) => void;
 	connectionState?: AgentConnectionState;
 };
 
@@ -272,6 +273,7 @@ function createRenderSessionContextHarness(overrides: Partial<RenderSessionConte
 		getRetryAttempt: () => 0,
 		ui: { requestRender: vi.fn() },
 		addMessageToChat,
+		showWarning: vi.fn(),
 		...overrides,
 	};
 	Object.setPrototypeOf(harness, InteractiveMode.prototype);
@@ -482,6 +484,43 @@ describe("InteractiveMode.renderSessionContext", () => {
 		expect(addMessageToChat.mock.calls[0]?.[0]).toMatchObject({ content: "message 0" });
 		expect(renderAll(chatContainer)).not.toContain("old transcript");
 		expect(renderAll(chatContainer)).not.toContain("for faster open");
+	});
+
+	test("still renders the transcript when tool definition preloading fails", async () => {
+		const showWarning = vi.fn();
+		const { harness, chatContainer, addMessageToChat } = createRenderSessionContextHarness({
+			preloadToolDefinitions: vi.fn(async () => {
+				throw new Error("daemon transport unavailable");
+			}),
+			showWarning,
+		});
+		const messages = [userMessage("message 0", 0), userMessage("message 1", 1)];
+
+		await renderMessages(harness, messages, { clearChat: true });
+
+		expect(showWarning).toHaveBeenCalledWith(expect.stringContaining("daemon transport unavailable"));
+		expect(addMessageToChat).toHaveBeenCalledTimes(2);
+		expect(chatContainer.children).toHaveLength(2);
+	});
+
+	test("keeps rendering later messages when one message fails to render", async () => {
+		const chatContainer = new Container();
+		const addMessageToChat = vi.fn((message: AgentMessage) => {
+			if (message.role === "user" && message.content === "broken") {
+				throw new Error("render boom");
+			}
+			chatContainer.addChild({ render: () => ["assistant"], invalidate: () => {} });
+		});
+		const { harness } = createRenderSessionContextHarness({ chatContainer, addMessageToChat });
+
+		await renderMessages(harness, [userMessage("first", 0), userMessage("broken", 1), userMessage("last", 2)], {
+			clearChat: true,
+		});
+
+		expect(addMessageToChat).toHaveBeenCalledTimes(3);
+		// Two rendered messages plus the inline failure placeholder.
+		expect(chatContainer.children).toHaveLength(3);
+		expect(renderAll(chatContainer)).toContain("Failed to render a user message");
 	});
 
 	test("populates editor history from the full transcript when initial rendering is capped", async () => {
