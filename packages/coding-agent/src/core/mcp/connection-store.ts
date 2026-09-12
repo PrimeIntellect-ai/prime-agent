@@ -906,8 +906,6 @@ function safeReadFileSync(path: string): string | undefined {
 	}
 }
 
-export type { McpConnectionsFile, PendingOp };
-
 /**
  * Outcome of an account-removal transaction. "removed": record + credential
  * both cleared under the lock. "credential-only": no record existed (legacy

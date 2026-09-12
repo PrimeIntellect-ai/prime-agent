@@ -108,10 +108,11 @@ describe("createAgentSessionFromServices", () => {
 
 	it("advertises enabled generic MCP servers and refreshes the prompt on reload", async () => {
 		/**
-		 * The enabled-generic-servers line: user-declared servers plus eligible
-		 * (credential-free no-auth) catalog services the kernel generic route
-		 * dispatches. The exact catalog contents evolve, so the contract pins
-		 * WHICH servers appear, not the full list.
+		 * The enabled-generic-servers line: user-declared servers plus per-account
+		 * records; a catalog entry appears only when it is explicitly public
+		 * no-auth AND setup-ready (credential-free dispatch — api_key and
+		 * requires-setup rows fail closed). The exact catalog contents evolve, so
+		 * the contract pins WHICH servers appear, not the full list.
 		 */
 		const enabledServersLine = (prompt: string): string => {
 			const match = prompt.match(/Enabled generic MCP servers: ([^\n]*)\./);
@@ -164,9 +165,9 @@ describe("createAgentSessionFromServices", () => {
 			expect(initialPrompt).toContain(
 				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in the Python REPL, not as top-level native tool namespaces or installed Python skills.",
 			);
-			const initialEnabled = enabledServersLine(initialPrompt);
-			expect(initialEnabled).toContain("`filesystem`");
-			expect(initialEnabled).toContain("`zebra`");
+			// Zero none+ready catalog rows exist today, so the enabled line is
+			// exactly the user-declared servers.
+			expect(enabledServersLine(initialPrompt)).toBe("`filesystem`, `zebra`");
 			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');
 			expect(initialPrompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
 			for (const hidden of [
@@ -199,9 +200,7 @@ describe("createAgentSessionFromServices", () => {
 				],
 				"owner-a",
 			);
-			const acpEnabled = enabledServersLine(session.systemPrompt);
-			expect(acpEnabled).toContain("`filesystem`");
-			expect(acpEnabled).toContain("`zebra`");
+			expect(enabledServersLine(session.systemPrompt)).toBe("`filesystem`, `zebra`");
 			expect(session.systemPrompt).not.toContain('await mcp.list_tools("task")');
 			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["mcp_list_tools_task", "mcp_call_task"]));
 			expect(session.systemPrompt).not.toContain("task-secret");
@@ -218,9 +217,7 @@ describe("createAgentSessionFromServices", () => {
 			expect(execute).toHaveBeenCalledOnce();
 			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");
 			expect(execute.mock.calls[0]?.[0]).toContain('["task"]');
-			const releasedEnabled = enabledServersLine(session.systemPrompt);
-			expect(releasedEnabled).toContain("`filesystem`");
-			expect(releasedEnabled).toContain("`zebra`");
+			expect(enabledServersLine(session.systemPrompt)).toBe("`filesystem`, `zebra`");
 			expect(session.getAllTools().map((tool) => tool.name)).not.toContain("mcp_call_task");
 			expect(session.getActiveToolNames()).not.toContain("mcp_call_task");
 
@@ -229,10 +226,7 @@ describe("createAgentSessionFromServices", () => {
 			await settingsManager.flush();
 			await session.reload();
 
-			const reloadedEnabled = enabledServersLine(session.systemPrompt);
-			expect(reloadedEnabled).toContain("`added`");
-			expect(reloadedEnabled).toContain("`zebra`");
-			expect(reloadedEnabled).not.toContain("`filesystem`");
+			expect(enabledServersLine(session.systemPrompt)).toBe("`added`, `zebra`");
 			expect(session.systemPrompt).toContain('await mcp.list_tools("added")');
 			expect(session.systemPrompt).not.toContain('await mcp.list_tools("filesystem")');
 			expect(session.systemPrompt).not.toContain("new-secret");

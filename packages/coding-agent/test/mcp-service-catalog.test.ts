@@ -7,7 +7,7 @@ import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-a
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { MCP_PROBE_ERRORS } from "../src/core/mcp/connection-probe.js";
-import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
+import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import {
 	buildConnectionViews,
 	buildPluginViews,
@@ -173,6 +173,34 @@ describe("service catalog views", () => {
 		expect(views[0]?.connectionStatus).toBe("connected");
 		expect(views[0]?.toolCount).toBe(7);
 		expect(views[0]?.verifiedAt).toBeGreaterThan(0);
+	});
+
+	it("treats wrong-type and empty-access credentials as no usable grant (shared rule with dispatch)", () => {
+		authStorage.set(mcpCredentialKey("acme"), { type: "api_key", key: "not-an-oauth-grant" });
+		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
+		// Wrong type, no record: never connected, never pending.
+		expect(buildPluginViews(options)[0]?.connectionStatus).toBe("not_connected");
+
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		} as never);
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		// Empty access with a record: the stale connection reports Reconnect,
+		// matching dispatch eligibility (the shared oauthGrantUsable rule).
+		expect(buildPluginViews(options)[0]?.connectionStatus).toBe("error");
+		expect(buildPluginViews(options)[0]?.setupHint).toContain("Stored credentials are missing");
 	});
 
 	it("downgrades a connected record when the credential disappears", () => {
@@ -948,5 +976,75 @@ describe("resolveMcpServiceCatalog", () => {
 		});
 		expect(capped.descriptors).toHaveLength(500);
 		expect(capped.diagnostics.some((line) => line.includes("capped at 500"))).toBe(true);
+	});
+	it("retains EVERY installed serviceId under cap pressure, in-source or pinned", () => {
+		const huge: McpServiceEntry[] = Array.from({ length: 600 }, (_, index) =>
+			bundledEntry({ server: `bulk-${index}` }),
+		);
+		const now = Date.now();
+		const records = [
+			{
+				connectionId: "bulk-550",
+				serviceId: "bulk-550",
+				endpoint: "https://bulk-550.example/mcp",
+				label: "In-Source",
+				status: "connected",
+				createdAt: now,
+				updatedAt: now,
+			},
+			{
+				connectionId: "pinned-svc",
+				serviceId: "pinned-svc",
+				endpoint: "https://pinned.example/mcp",
+				label: "Vanished Source",
+				status: "connected",
+				createdAt: now,
+				updatedAt: now,
+			},
+		] satisfies Array<McpConnectionRecord>;
+		const capped = resolveMcpServiceCatalog({
+			localSources: ["/huge.json"],
+			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
+			records,
+		});
+		// The cap still binds (500), but BOTH installed serviceIds survive —
+		// the in-source one is retained instead of sliced away, and the
+		// vanished-source pin is never the first thing discarded.
+		expect(capped.descriptors).toHaveLength(500);
+		const kept = new Set(capped.descriptors.map((descriptor) => descriptor.serviceId));
+		expect(kept.has("bulk-550")).toBe(true);
+		expect(kept.has("pinned-svc")).toBe(true);
+		expect(capped.diagnostics.some((line) => line.includes("capped at 500"))).toBe(true);
+		expect(capped.diagnostics.some((line) => line.includes("Installed connections are always kept"))).toBe(true);
+	});
+
+	it("keeps an installed inventory that ALONE exceeds the cap, with an explicit diagnostic", () => {
+		const huge: McpServiceEntry[] = Array.from({ length: 50 }, (_, index) =>
+			bundledEntry({ server: `bulk-${index}` }),
+		);
+		const now = Date.now();
+		const records = Array.from({ length: 510 }, (_, index) => ({
+			connectionId: `installed-${index}`,
+			serviceId: `installed-${index}`,
+			endpoint: "https://installed.example/mcp",
+			label: `Installed ${index}`,
+			status: "connected" as const,
+			createdAt: now,
+			updatedAt: now,
+		}));
+		const capped = resolveMcpServiceCatalog({
+			localSources: ["/huge.json"],
+			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
+			records,
+		});
+		// Manageability never drops: all 510 installed serviceIds are kept even
+		// though they alone exceed the cap, the diagnostic says so explicitly,
+		// and non-installed candidates were the ones trimmed.
+		const kept = capped.descriptors.map((descriptor) => descriptor.serviceId);
+		expect(kept).toHaveLength(510);
+		expect(records.every((record) => kept.includes(record.serviceId))).toBe(true);
+		expect(capped.diagnostics.some((line) => line.includes("installed connections alone exceeded the cap"))).toBe(
+			true,
+		);
 	});
 });

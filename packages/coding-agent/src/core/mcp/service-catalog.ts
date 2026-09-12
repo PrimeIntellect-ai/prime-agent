@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { LocalCatalogLoadResult, McpServiceEntry } from "@earendil-works/pi-ai/mcp";
 import { loadLocalServiceCatalog, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
-import type { AuthStorage } from "../auth-storage.js";
+import type { AuthCredential, AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import { MCP_PROBE_ERRORS, probeMcpEndpoint } from "./connection-probe.js";
 import type { McpConnectionRecord, McpConnectionStore } from "./connection-store.js";
@@ -217,10 +217,25 @@ export function resolveMcpServiceCatalog(options: {
 	}
 	const descriptors = [...byId.values()];
 	if (descriptors.length > MAX_TOTAL_CATALOG_ENTRIES) {
+		// Installed connections are manageability anchors: EVERY serviceId with
+		// records survives the cap — whether its descriptor is pinned from the
+		// record or still present in a source — and only non-installed entries
+		// fill the remaining budget. When installed connections alone exceed
+		// the cap they still win and the diagnostic states it explicitly
+		// instead of silently dropping manageability.
+		const installedIds = new Set((options.records ?? []).map((record) => record.serviceId));
+		const kept = descriptors.filter((descriptor) => installedIds.has(descriptor.serviceId));
+		const budget = Math.max(0, MAX_TOTAL_CATALOG_ENTRIES - kept.length);
+		const fill = descriptors.filter((descriptor) => !installedIds.has(descriptor.serviceId)).slice(0, budget);
+		const ignored = descriptors.length - kept.length - fill.length;
 		diagnostics.push(
-			`MCP service catalog capped at ${MAX_TOTAL_CATALOG_ENTRIES} entries; ${descriptors.length - MAX_TOTAL_CATALOG_ENTRIES} entries were ignored.`,
+			`MCP service catalog capped at ${MAX_TOTAL_CATALOG_ENTRIES} entries; ${ignored} entries were ignored. Installed connections are always kept${
+				kept.length > MAX_TOTAL_CATALOG_ENTRIES
+					? ` (installed connections alone exceeded the cap: ${kept.length} kept)`
+					: ""
+			}.`,
 		);
-		return { descriptors: descriptors.slice(0, MAX_TOTAL_CATALOG_ENTRIES), diagnostics };
+		return { descriptors: [...kept, ...fill], diagnostics };
 	}
 	return { descriptors, diagnostics };
 }
@@ -268,22 +283,41 @@ export function nextMcpConnectionId(serviceId: string, taken: (id: string) => bo
 	throw new Error(`No free connection id for service ${serviceId}`);
 }
 
-interface CredentialSnapshot {
-	exists: boolean;
-	expiresAt?: number;
-	hasRefresh: boolean;
-	endpoint?: string;
+/** Why a stored OAuth grant is not usable at an endpoint. */
+export type OAuthGrantUsabilityReason =
+	| "missing"
+	| "wrong-type"
+	| "empty-access"
+	| "unbound"
+	| "cross-endpoint"
+	| "expired-no-refresh";
+
+export interface OAuthGrantUsability {
+	usable: boolean;
+	reason?: OAuthGrantUsabilityReason;
 }
 
-function oauthSnapshot(authStorage: AuthStorage, connectionId: string): CredentialSnapshot {
-	const credential = authStorage.get(mcpCredentialKey(connectionId));
-	if (!credential || credential.type !== "oauth") return { exists: false, hasRefresh: false };
-	return {
-		exists: true,
-		expiresAt: typeof credential.expires === "number" ? credential.expires : undefined,
-		hasRefresh: Boolean(credential.refresh),
-		endpoint: typeof credential.endpoint === "string" ? credential.endpoint : undefined,
-	};
+/**
+ * ONE shared rule for whether a stored credential is a usable OAuth grant at an
+ * endpoint: typed oauth, non-empty access, bound to exactly this endpoint, and
+ * not expired without a refresh token (Boolean(refresh) semantics). The
+ * manager's dispatch eligibility, the account-state resolver, and the picker
+ * all consume this predicate so their answers can never drift; verified
+ * Connected status and pending-probe needs stay the CALLER's state machine on
+ * top of `usable`.
+ */
+export function oauthGrantUsable(credential: AuthCredential | undefined, endpoint: string): OAuthGrantUsability {
+	if (credential === undefined) return { usable: false, reason: "missing" };
+	if (credential.type !== "oauth") return { usable: false, reason: "wrong-type" };
+	if (typeof credential.access !== "string" || credential.access.length === 0) {
+		return { usable: false, reason: "empty-access" };
+	}
+	if (credential.endpoint === undefined) return { usable: false, reason: "unbound" };
+	if (credential.endpoint !== endpoint) return { usable: false, reason: "cross-endpoint" };
+	if (typeof credential.expires === "number" && credential.expires <= Date.now() && !credential.refresh) {
+		return { usable: false, reason: "expired-no-refresh" };
+	}
+	return { usable: true };
 }
 
 function bearerTokenPresent(bearerTokenEnvVar: string | undefined): boolean {
@@ -315,8 +349,27 @@ function httpConnectionStatus(options: {
 	const { connectionId, endpoint, authStorage, connectionStore, usesOAuth, bearerTokenEnvVar } = options;
 	const record = connectionStore.get(connectionId);
 	if (usesOAuth) {
-		const credential = oauthSnapshot(authStorage, connectionId);
-		if (!credential.exists) {
+		// ONE shared grant-usability rule (with the manager's dispatch
+		// eligibility): wrong-type, empty-access, unbound, cross-endpoint, and
+		// expired-no-refresh grants are all unusable here too.
+		const grant = oauthGrantUsable(authStorage.get(mcpCredentialKey(connectionId)), endpoint);
+		if (!grant.usable) {
+			if (grant.reason === "unbound" || grant.reason === "cross-endpoint") {
+				// Endpoint binding: a token must prove where it belongs before it
+				// counts as usable — for catalog services and user servers alike.
+				return {
+					status: "error",
+					setupHint: "Stored credentials are not bound to this endpoint. Reconnect required.",
+				};
+			}
+			if (grant.reason === "expired-no-refresh") {
+				return {
+					status: "error",
+					setupHint: "Stored credentials expired without a refresh token. Reconnect required.",
+				};
+			}
+			// No usable grant (missing, wrong-type, or empty access): a record
+			// without one is a stale connection, not a fresh one.
 			if (record?.status === "pending" && record.attemptId === undefined) {
 				return {
 					status: "not_connected",
@@ -324,7 +377,6 @@ function httpConnectionStatus(options: {
 					record,
 				};
 			}
-			// A record without credentials is a stale connection, not a fresh one.
 			if (record) {
 				return {
 					status: "error",
@@ -333,21 +385,6 @@ function httpConnectionStatus(options: {
 				};
 			}
 			return { status: "not_connected" };
-		}
-		// Endpoint binding: a token must prove where it belongs before it counts as
-		// usable — for catalog services and user servers alike. Unbound legacy
-		// grants are ambiguous and demand an explicit reconnect.
-		if (credential.endpoint === undefined || credential.endpoint !== endpoint) {
-			return {
-				status: "error",
-				setupHint: "Stored credentials are not bound to this endpoint. Reconnect required.",
-			};
-		}
-		if (credential.expiresAt !== undefined && credential.expiresAt <= Date.now() && !credential.hasRefresh) {
-			return {
-				status: "error",
-				setupHint: "Stored credentials expired without a refresh token. Reconnect required.",
-			};
 		}
 		if (record?.status === "connected") return { status: "connected", record };
 		if (record?.status === "pending") {

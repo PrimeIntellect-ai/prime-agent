@@ -98,9 +98,6 @@ export interface McpServiceEntry {
 	supportUrl?: string;
 }
 
-/** Backward-compatible alias; the extended entry type supersedes the old shape. */
-export type McpCatalogEntry = McpServiceEntry;
-
 /** Shape of the generated catalog.json file. */
 export interface CatalogFileShape {
 	version: number;

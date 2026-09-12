@@ -334,6 +334,193 @@ describe("McpManager", () => {
 		});
 		expect(authStorage.get("mcp:task")).toMatchObject({ access: "stored-oauth-token" });
 	});
+
+	it("fails closed with empty auth on the REAL bundled catalog: zero none+ready rows are enabled, aws-devops-agent included", () => {
+		const manager = new McpManager({ authStorage });
+		// No user servers, empty auth: the enabled generic set is exactly the
+		// bundled rows that are explicitly public no-auth AND setup-ready —
+		// zero such rows exist today, so api_key/requires-setup rows
+		// (aws-devops-agent) must never appear.
+		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
+		expect(manager.listStatus().find((s) => s.server === "aws-devops-agent")?.enabled).toBe(false);
+	});
+
+	it("never enables a catalog api_key row even when its token env var is set (no field-id inference)", () => {
+		process.env.CATALOG_API_KEY_TEST = "some-key";
+		try {
+			const manager = new McpManager({
+				authStorage,
+				getServiceCatalog: () => [
+					{
+						serviceId: "needs-key",
+						label: "Needs Key",
+						aliases: [],
+						transport: { type: "http", url: "https://key.example/mcp" },
+						authStrategy: "api_key",
+						setup: { status: "requires-setup", reason: "requires an API key" },
+						metadataReviewed: true,
+						legacyBuiltin: false,
+					},
+				],
+			});
+			expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
+			expect(manager.listStatus().find((s) => s.server === "needs-key")?.enabled).toBe(false);
+		} finally {
+			delete process.env.CATALOG_API_KEY_TEST;
+		}
+	});
+
+	it("enables only the explicitly public no-auth setup-ready catalog row; requires-setup and unknown fail closed", async () => {
+		const manager = new McpManager({
+			authStorage,
+			getServiceCatalog: () => [
+				{
+					serviceId: "public-docs",
+					label: "Public Docs",
+					aliases: [],
+					transport: { type: "http", url: "https://public.example/mcp" },
+					authStrategy: "none",
+					setup: { status: "ready" },
+					metadataReviewed: true,
+					legacyBuiltin: false,
+				},
+				{
+					serviceId: "blocked-setup",
+					label: "Blocked Setup",
+					aliases: [],
+					transport: { type: "http", url: "https://blocked.example/mcp" },
+					authStrategy: "none",
+					setup: { status: "requires-setup", reason: "manual setup" },
+					metadataReviewed: true,
+					legacyBuiltin: false,
+				},
+				{
+					serviceId: "unknown-auth",
+					label: "Unknown Auth",
+					aliases: [],
+					transport: { type: "http", url: "https://unknown.example/mcp" },
+					authStrategy: "unknown",
+					setup: { status: "ready" },
+					metadataReviewed: true,
+					legacyBuiltin: false,
+				},
+			],
+		});
+		expect(manager.getEnabledPersistentGenericServers()).toEqual(["public-docs"]);
+		expect(manager.listStatus().find((s) => s.server === "blocked-setup")?.enabled).toBe(false);
+		expect(manager.listStatus().find((s) => s.server === "unknown-auth")?.enabled).toBe(false);
+		const handlers = manager.hostHandlers();
+		await expect(handlers["mcp.config"]({ server: "public-docs" })).resolves.toEqual({
+			type: "http",
+			url: "https://public.example/mcp",
+		});
+		await expect(handlers["mcp.config"]({ server: "blocked-setup" })).resolves.toEqual({});
+		await expect(handlers["mcp.config"]({ server: "unknown-auth" })).resolves.toEqual({});
+	});
+
+	it("oauth grant matrix: expired-no-refresh, wrong-type, and empty-access credentials are not authed; refreshable ones are", async () => {
+		const catalog: McpServiceDescriptor[] = [
+			{
+				serviceId: "svc-a",
+				label: "Service A",
+				aliases: [],
+				transport: { type: "http", url: "https://svc-a.example/mcp" },
+				authStrategy: "oauth",
+				setup: { status: "ready" },
+				metadataReviewed: true,
+				legacyBuiltin: false,
+			},
+			{
+				serviceId: "svc-b",
+				label: "Service B",
+				aliases: [],
+				transport: { type: "http", url: "https://svc-b.example/mcp" },
+				authStrategy: "oauth",
+				setup: { status: "ready" },
+				metadataReviewed: true,
+				legacyBuiltin: false,
+			},
+			{
+				serviceId: "svc-c",
+				label: "Service C",
+				aliases: [],
+				transport: { type: "http", url: "https://svc-c.example/mcp" },
+				authStrategy: "oauth",
+				setup: { status: "ready" },
+				metadataReviewed: true,
+				legacyBuiltin: false,
+			},
+		];
+		// svc-a: expired WITHOUT refresh -> refused.
+		authStorage.set("mcp:svc-a", {
+			type: "oauth",
+			access: "expired",
+			refresh: "",
+			expires: Date.now() - 1000,
+			endpoint: "https://svc-a.example/mcp",
+		});
+		// svc-b: expired WITH refresh -> refreshable, stays eligible.
+		authStorage.set("mcp:svc-b", {
+			type: "oauth",
+			access: "expiring",
+			refresh: "r",
+			expires: Date.now() - 1000,
+			endpoint: "https://svc-b.example/mcp",
+		});
+		// svc-c: wrong-type entry at the MCP key -> refused.
+		authStorage.set("mcp:svc-c", { type: "api_key", key: "not-an-oauth-grant" });
+		const manager = new McpManager({ authStorage, getServiceCatalog: () => catalog });
+		expect(manager.listStatus().find((s) => s.server === "svc-a")?.enabled).toBe(false);
+		expect(manager.listStatus().find((s) => s.server === "svc-b")?.enabled).toBe(true);
+		expect(manager.listStatus().find((s) => s.server === "svc-c")?.enabled).toBe(false);
+		const handlers = manager.hostHandlers();
+		await expect(handlers["mcp.config"]({ server: "svc-b" })).resolves.toEqual({
+			type: "http",
+			url: "https://svc-b.example/mcp",
+			oauth: true,
+		});
+		await expect(handlers["mcp.config"]({ server: "svc-c" })).resolves.toEqual({});
+
+		// Empty access on the oauth type is equally refused.
+		authStorage.set("mcp:svc-c", {
+			type: "oauth",
+			access: "",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://svc-c.example/mcp",
+		} as never);
+		manager.refresh();
+		expect(manager.listStatus().find((s) => s.server === "svc-c")?.enabled).toBe(false);
+	});
+
+	it("a configured bearer env var is the ONLY credential source: no stale-OAuth fall-through when it is unset", () => {
+		// A stale OAuth grant sits under the id, but the server's configured
+		// credential source is the env var — while unset, nothing is enabled.
+		authStorage.set("mcp:beared", {
+			type: "oauth",
+			access: "stale",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://beared.example/mcp",
+		});
+		const manager = new McpManager({
+			authStorage,
+			getServiceCatalog: () => [],
+			getUserServers: () => ({
+				beared: { type: "http", url: "https://beared.example/mcp", bearerTokenEnvVar: "BEARED_TOKEN_TEST" },
+			}),
+		});
+		expect(manager.listStatus().find((s) => s.server === "beared")?.enabled).toBe(false);
+		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
+
+		process.env.BEARED_TOKEN_TEST = "present";
+		try {
+			manager.refresh();
+			expect(manager.listStatus().find((s) => s.server === "beared")?.enabled).toBe(true);
+		} finally {
+			delete process.env.BEARED_TOKEN_TEST;
+		}
+	});
 });
 async function waitForCondition(condition: () => boolean, timeoutMs = 2000): Promise<void> {
 	const startedAt = Date.now();

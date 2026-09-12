@@ -1,5 +1,4 @@
 export type {
-	McpCatalogEntry,
 	McpServiceAuth,
 	McpServiceEntry,
 	McpServiceProvenance,

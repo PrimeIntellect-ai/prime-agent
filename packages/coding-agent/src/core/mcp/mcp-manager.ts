@@ -21,6 +21,7 @@ import {
 	type McpPluginView,
 	type McpServiceCatalogProvider,
 	type McpServiceDescriptor,
+	oauthGrantUsable,
 	pagePluginViews,
 	searchPluginViews,
 	verifyMcpConnection,
@@ -59,6 +60,13 @@ interface ResolvedIntegration {
 	usesOAuth: boolean;
 	/** True when this came from Settings.mcpServers (may override a catalog name). */
 	userDeclared?: boolean;
+	/**
+	 * Catalog entries only: the descriptor is explicitly public no-auth AND
+	 * setup-ready, so credential-free dispatch is honest. api_key and
+	 * requires-setup entries fail closed until the user adds the server
+	 * manually (the picker already shows them as setup_required).
+	 */
+	credentialFreeEligible?: boolean;
 	/** Parent catalog service id for per-account connections (records keep it). */
 	catalogServiceId?: string;
 }
@@ -180,6 +188,7 @@ export class McpManager {
 					...(usesOAuth ? { oauth: true } : {}),
 				},
 				usesOAuth,
+				credentialFreeEligible: service.authStrategy === "none" && service.setup.status === "ready",
 			});
 		}
 		// Per-account connections ("acme-2"): each record of a catalog service is
@@ -290,17 +299,26 @@ export class McpManager {
 		if (integration.userDeclared && this.isReservedServerName(integration.server)) return false;
 		if (integration.config.type === "stdio") return true;
 		const { bearerTokenEnvVar } = integration.config;
-		if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
-		if (bearerTokenEnvVar && process.env[bearerTokenEnvVar]?.trim()) {
-			return true;
+		if (!integration.userDeclared && !integration.usesOAuth) {
+			// Catalog entry without OAuth: credential-free dispatch ONLY for an
+			// explicitly public no-auth, setup-ready descriptor. api_key and
+			// requires-setup entries fail closed until the user adds the server
+			// manually — matching the picker setup_required view. Credential
+			// binding is never inferred from setup field ids.
+			return integration.credentialFreeEligible === true;
 		}
-		const cred = this.authStorage.get(this.providerId(integration.server));
-		if (cred === undefined) return false;
-		// Every stored token must prove where it belongs — catalog services and
-		// user-declared servers alike, matching the kernel's _bound_auth refusal.
-		// Unbound legacy grants and cross-endpoint tokens require explicit reconnect.
-		const endpoint = (cred as { endpoint?: string }).endpoint;
-		return typeof endpoint === "string" && endpoint === integration.config.url;
+		if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
+		if (bearerTokenEnvVar) {
+			// The configured env var is the ONLY credential source for this
+			// server: when it is unset, a stale OAuth credential stored under the
+			// same id must never authorize dispatch.
+			return Boolean(process.env[bearerTokenEnvVar]?.trim());
+		}
+		// ONE shared grant-usability rule (with the picker/account-state
+		// resolver): typed oauth, non-empty access, endpoint binding, and no
+		// expired-without-refresh state — dispatch eligibility and the picker
+		// can never disagree.
+		return oauthGrantUsable(this.authStorage.get(this.providerId(integration.server)), integration.config.url).usable;
 	}
 
 	/**
