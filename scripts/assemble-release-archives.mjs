@@ -49,7 +49,12 @@ export function assembleBinaryArchives({ binaryDir, artifactsDir, version, requi
 			execFileSync("tar", ["-czf", output, "-C", staging, "prime-agent", ...binaryAssets], {
 				env: { ...process.env, COPYFILE_DISABLE: "1" },
 			});
-			archives.push({ platform, file, sha256: createHash("sha256").update(readFileSync(output)).digest("hex") });
+			archives.push({
+				platform,
+				file,
+				sha256: createHash("sha256").update(readFileSync(output)).digest("hex"),
+				executableSha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+			});
 		} finally {
 			rmSync(staging, { recursive: true, force: true });
 		}

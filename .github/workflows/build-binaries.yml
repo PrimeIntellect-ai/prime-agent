@@ -1,6 +1,8 @@
 name: Release Prime Agent
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches:
       - main
@@ -14,7 +16,7 @@ on:
         type: string
 
 concurrency:
-  group: release-prime-agent
+  group: ${{ github.event_name == 'pull_request' && format('release-validation-pr-{0}', github.event.pull_request.number) || 'release-prime-agent' }}
   cancel-in-progress: false
   queue: max
 
@@ -22,7 +24,25 @@ permissions:
   contents: read
 
 jobs:
+  trust:
+    name: Contributor trust
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ github.event_name != 'pull_request' || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - name: Check pull request author
+        id: vouch
+        if: github.event_name == 'pull_request'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          user: ${{ github.event.pull_request.user.login }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   release-context:
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,7 +79,14 @@ jobs:
           publish_beta=false
           publish_production=false
 
-          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # Exercise both real packer paths without release credentials or publication.
+            production_version=$(node -p "require('./package.json').version")
+            build_ref="$GITHUB_SHA_VALUE"
+            beta_version="${production_version}-beta.${RUN_NUMBER}.${RUN_ATTEMPT}.${GITHUB_SHA_VALUE::7}"
+            publish_beta=true
+            publish_production=true
+          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
             if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
               echo "Manual releases must run from the default branch (${DEFAULT_BRANCH}), not ${REF_NAME}." >&2
               exit 1
@@ -118,6 +145,8 @@ jobs:
   standalone:
     needs: release-context
     uses: ./.github/workflows/standalone-binaries.yml
+    with:
+      build_ref: ${{ needs.release-context.outputs.build_ref }}
 
   build:
     runs-on: ubuntu-latest
@@ -171,7 +200,7 @@ jobs:
       - name: Pack production release
         if: env.PUBLISH_PRODUCTION == 'true'
         env:
-          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ github.event_name == 'pull_request' && 'https://example.invalid/prime-agent-validation' || vars.R2_PUBLIC_BASE_URL }}
         run: |
           test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
           npm run release:pack -- \
@@ -184,7 +213,7 @@ jobs:
       - name: Pack beta release
         if: env.PUBLISH_BETA == 'true'
         env:
-          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ github.event_name == 'pull_request' && 'https://example.invalid/prime-agent-validation' || vars.R2_PUBLIC_BASE_URL }}
         run: |
           test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
           npm run release:pack -- \
@@ -247,9 +276,89 @@ jobs:
           path: packages/coding-agent/release/beta/artifacts/*
           if-no-files-found: error
 
-  publish:
-    runs-on: ubuntu-latest
+  validate-macos:
+    name: Final release (${{ matrix.platform }})
     needs: [release-context, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: darwin-x64
+            runner: macos-15-intel
+    env:
+      BUILD_REF: ${{ needs.release-context.outputs.build_ref }}
+      PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
+      PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
+    steps:
+      - name: Checkout validation source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.BUILD_REF }}
+          persist-credentials: false
+          path: source
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.11.7'
+          enable-cache: false
+
+      - name: Install validation dependencies
+        working-directory: source
+        run: npm ci
+
+      - name: Download exact final release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: prime-agent-*
+          path: ${{ runner.temp }}/final-artifacts
+
+      - name: Download tested executable identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: standalone-${{ matrix.platform }}
+          path: ${{ runner.temp }}/standalone-reference
+
+      - name: Remove the build paths from the test machine
+        run: mv "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/validation-source"
+
+      - name: Verify and exercise exact final Mac archives
+        working-directory: ${{ runner.temp }}/validation-source
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          export PRIME_AGENT_TEST_UV=$(command -v uv)
+          for channel in production beta; do
+            if [ "$channel" = production ] && [ "$PUBLISH_PRODUCTION" != true ]; then continue; fi
+            if [ "$channel" = beta ] && [ "$PUBLISH_BETA" != true ]; then continue; fi
+            artifacts="$RUNNER_TEMP/final-artifacts/prime-agent-$channel"
+            node scripts/validate-macos-release.mjs "$artifacts" "$TARGET_PLATFORM" \
+              "$RUNNER_TEMP/standalone-reference/binaries.json" \
+              "$RUNNER_TEMP/macos-validation/$channel-$TARGET_PLATFORM.json"
+            export PRIME_AGENT_TEST_ARCHIVE=$(find "$artifacts" -maxdepth 1 -name "*-$TARGET_PLATFORM.tar.gz")
+            test -n "$PRIME_AGENT_TEST_ARCHIVE"
+            (cd packages/coding-agent && npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts)
+          done
+
+      - name: Upload native validation receipts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-validation-${{ matrix.platform }}
+          path: ${{ runner.temp }}/macos-validation/*.json
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    needs: [release-context, build, validate-macos]
     permissions:
       contents: write
     env:
@@ -284,6 +393,22 @@ jobs:
         with:
           name: prime-agent-beta
           path: release-artifacts/beta
+
+      - name: Download native validation receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: macos-validation-*
+          path: macos-validation
+          merge-multiple: true
+
+      - name: Match native validation to publication artifacts
+        run: |
+          if [ "$PUBLISH_PRODUCTION" = true ]; then
+            node scripts/verify-macos-validation-receipts.mjs release-artifacts/production macos-validation production
+          fi
+          if [ "$PUBLISH_BETA" = true ]; then
+            node scripts/verify-macos-validation-receipts.mjs release-artifacts/beta macos-validation beta
+          fi
 
       - name: Prepare installer
         run: |
