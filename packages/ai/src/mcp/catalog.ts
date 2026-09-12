@@ -9,10 +9,11 @@
 import { getOAuthProvider, registerOAuthProvider } from "../utils/oauth/index.js";
 import { CATALOG_DATA } from "./catalog.data.generated.js";
 import { createMcpOAuthProvider, type McpOAuthConfig } from "./oauth.js";
+import { isLiteralPrivateOrLoopbackHost } from "./url-checks.js";
 
 export interface McpServiceProvenance {
-	/** Upstream catalog the definition came from, or `prime` for curated data. */
-	source: "openai-plugins" | "claude-plugins-official" | "prime";
+	/** Upstream catalog the definition came from, `prime` for curated data, or `user` for local sources. */
+	source: "openai-plugins" | "claude-plugins-official" | "prime" | "user";
 	repository?: string;
 	commit?: string;
 	path?: string;
@@ -76,10 +77,18 @@ export interface McpServiceEntry {
 	transport: McpServiceTransport;
 	auth: McpServiceAuth;
 	setup: McpServiceSetup;
-	/** `verified` only for integrations Prime has actually connected; imports stay `unverified`. */
-	verification: { status: "verified" | "unverified" };
-	/** True only when a bundled authored skill package ships for this service. */
-	bundledSkill: boolean;
+	/**
+	 * Entry-level review state, never a runtime claim: `metadata-reviewed` means
+	 * public provider OAuth metadata was reviewed for an already-shipped legacy
+	 * integration; `unverified` means imported only. Distinct from per-account
+	 * connection verification, which the host owns.
+	 */
+	verification: { status: "metadata-reviewed" | "unverified" };
+	/**
+	 * True only for legacy built-in integrations that pre-date the catalog; their
+	 * ids stay reserved. Not a claim about shipped skill packages.
+	 */
+	legacyBuiltin: boolean;
 	/** Present on OAuth-strategy entries; keeps `usesOAuth: entry.oauth?.kind === "oauth"` working. */
 	oauth?: Omit<McpOAuthConfig, "server" | "url"> & { kind: "oauth" };
 	provenance: McpServiceProvenance[];
@@ -100,12 +109,14 @@ export interface CatalogFileShape {
 	entries: McpServiceEntry[];
 }
 
+export { isLiteralPrivateOrLoopbackHost } from "./url-checks.js";
+
 const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const TRANSPORT_TYPES = new Set(["http", "http-template", "sse", "stdio"]);
 const AUTH_STRATEGIES = new Set(["oauth", "api_key", "none", "unknown"]);
 const CLIENT_REGISTRATIONS = new Set(["dynamic", "pre-registered", "unknown"]);
 const SETUP_STATUSES = new Set(["ready", "requires-setup"]);
-const PROVENANCE_SOURCES = new Set(["openai-plugins", "claude-plugins-official", "prime"]);
+const PROVENANCE_SOURCES = new Set(["openai-plugins", "claude-plugins-official", "prime", "user"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -133,8 +144,8 @@ function requireHttpsUrl(entryId: string, field: string, value: unknown): string
 	if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) {
 		return fail(entryId, `${field} must be an absolute HTTPS URL without credentials or a fragment`);
 	}
-	if (["127.0.0.1", "localhost", "0.0.0.0", "::1"].includes(parsed.hostname)) {
-		return fail(entryId, `${field} must not be a loopback endpoint`);
+	if (isLiteralPrivateOrLoopbackHost(parsed.hostname)) {
+		return fail(entryId, `${field} must not be a literal loopback, private, link-local or unspecified endpoint`);
 	}
 	return url;
 }
@@ -271,10 +282,10 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 	if (!isRecord(entry.verification) || typeof entry.verification.status !== "string") {
 		fail(entryId, "verification must be an object with a status");
 	}
-	if (entry.verification.status !== "verified" && entry.verification.status !== "unverified") {
-		fail(entryId, 'verification.status must be "verified" or "unverified"');
+	if (entry.verification.status !== "metadata-reviewed" && entry.verification.status !== "unverified") {
+		fail(entryId, 'verification.status must be "metadata-reviewed" or "unverified"');
 	}
-	if (typeof entry.bundledSkill !== "boolean") fail(entryId, "bundledSkill must be a boolean");
+	if (typeof entry.legacyBuiltin !== "boolean") fail(entryId, "legacyBuiltin must be a boolean");
 
 	let oauth: McpServiceEntry["oauth"];
 	if (entry.oauth !== undefined) {
@@ -328,7 +339,7 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 		auth,
 		setup,
 		verification: { status: entry.verification.status },
-		bundledSkill: entry.bundledSkill,
+		legacyBuiltin: entry.legacyBuiltin,
 		...(oauth !== undefined ? { oauth } : {}),
 		provenance,
 		homepage: typeof entry.homepage === "string" ? entry.homepage : undefined,
@@ -374,10 +385,11 @@ const CATALOG = parseCatalog(CATALOG_DATA);
 export const SERVICE_CATALOG: readonly McpServiceEntry[] = CATALOG.entries;
 
 /**
- * Built-in MCP integrations we ship a skill package for (the `bundledSkill`
- * slice of the catalog). User servers go in the `mcpServers` setting instead.
+ * Legacy built-in integrations that pre-date the catalog (the `legacyBuiltin`
+ * slice): their ids stay reserved. User servers go in the `mcpServers` setting
+ * instead; local catalog sources cannot shadow or rebind these ids.
  */
-export const BUILTIN_MCP_CATALOG: readonly McpServiceEntry[] = SERVICE_CATALOG.filter((entry) => entry.bundledSkill);
+export const BUILTIN_MCP_CATALOG: readonly McpServiceEntry[] = SERVICE_CATALOG.filter((entry) => entry.legacyBuiltin);
 
 /** The full catalog (also available as the `SERVICE_CATALOG` const). */
 export function listServiceCatalog(): readonly McpServiceEntry[] {

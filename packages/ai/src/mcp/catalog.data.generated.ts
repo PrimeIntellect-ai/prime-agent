@@ -25,7 +25,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 		"stdio": 32,
 		"ready": 80,
 		"requiresSetup": 60,
-		"verified": 2,
+		"metadataReviewed": 2,
 		"oauthStrategy": 14,
 		"apiKeyStrategy": 32,
 		"mergedFromBothSources": 16
@@ -65,7 +65,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -99,7 +99,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -143,7 +143,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -178,7 +178,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -225,7 +225,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -265,7 +265,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -308,7 +308,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -410,7 +410,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud-including-firebase-and-looker"
 			],
@@ -456,7 +456,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-web-services"
 			],
@@ -495,7 +495,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -529,7 +529,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -560,7 +560,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -591,7 +591,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -622,7 +622,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -658,7 +658,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -701,7 +701,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-web-services"
 			],
@@ -751,7 +751,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-web-services"
 			],
@@ -801,7 +801,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-web-services"
 			],
@@ -852,7 +852,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -907,7 +907,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-web-services"
 			],
@@ -953,7 +953,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-web-services"
 			],
@@ -1002,7 +1002,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"microsoft-azure"
 			],
@@ -1065,7 +1065,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"bigquery",
 				"google-cloud-including-firebase-and-looker"
@@ -1106,7 +1106,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -1150,7 +1150,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1181,7 +1181,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1212,7 +1212,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1244,7 +1244,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -1342,7 +1342,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"cloud-sql",
 				"cloud-sql-for-mysql",
@@ -1446,7 +1446,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"cloud-sql",
 				"cloud-sql-for-postgresql",
@@ -1550,7 +1550,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"cloud-sql",
 				"cloud-sql-for-sql-server",
@@ -1594,7 +1594,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -1640,7 +1640,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1678,7 +1678,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1716,7 +1716,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1768,7 +1768,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1806,7 +1806,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1853,7 +1853,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1888,7 +1888,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1923,7 +1923,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -1962,7 +1962,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -2007,7 +2007,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -2157,7 +2157,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud",
 				"google-cloud-including-firebase-and-looker",
@@ -2219,7 +2219,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -2294,7 +2294,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud-including-firebase-and-looker"
 			],
@@ -2357,7 +2357,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-web-services"
 			],
@@ -2408,7 +2408,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -2469,7 +2469,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"domino-data-lab"
 			],
@@ -2504,7 +2504,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -2558,7 +2558,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -2590,7 +2590,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -2624,7 +2624,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -2677,7 +2677,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud-including-firebase-and-looker"
 			],
@@ -2745,7 +2745,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"firebase",
 				"firestore",
@@ -2785,7 +2785,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -2816,7 +2816,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -2864,7 +2864,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -2917,7 +2917,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -2949,7 +2949,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -2983,7 +2983,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -3023,7 +3023,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -3083,7 +3083,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud",
 				"google-cloud-including-firebase-and-looker"
@@ -3124,7 +3124,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -3165,7 +3165,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3198,7 +3198,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -3234,7 +3234,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3267,7 +3267,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -3302,7 +3302,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3334,7 +3334,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3367,7 +3367,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3405,7 +3405,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3438,7 +3438,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3469,7 +3469,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3513,7 +3513,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -3567,7 +3567,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud",
 				"google-cloud-including-firebase-and-looker"
@@ -3606,7 +3606,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3644,9 +3644,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"status": "ready"
 			},
 			"verification": {
-				"status": "verified"
+				"status": "metadata-reviewed"
 			},
-			"bundledSkill": true,
+			"legacyBuiltin": true,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -3665,7 +3665,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 				},
 				{
 					"source": "prime",
-					"note": "pre-existing built-in integration; OAuth dynamic client registration (plus CIMD) verified against public provider metadata"
+					"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata"
 				}
 			],
 			"homepage": "https://linear.app/",
@@ -3698,7 +3698,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3730,7 +3730,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3846,7 +3846,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud-including-firebase-and-looker"
 			],
@@ -3884,7 +3884,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3915,7 +3915,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3950,7 +3950,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -3987,7 +3987,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4024,7 +4024,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4062,7 +4062,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4094,7 +4094,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4131,7 +4131,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -4176,7 +4176,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4215,7 +4215,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4250,7 +4250,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4286,7 +4286,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4319,9 +4319,9 @@ export const CATALOG_DATA: CatalogFileShape = {
 				"status": "ready"
 			},
 			"verification": {
-				"status": "verified"
+				"status": "metadata-reviewed"
 			},
-			"bundledSkill": true,
+			"legacyBuiltin": true,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -4339,7 +4339,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 				},
 				{
 					"source": "prime",
-					"note": "pre-existing built-in integration; OAuth dynamic client registration (plus CIMD) verified against public provider metadata"
+					"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata"
 				}
 			],
 			"homepage": "https://www.notion.so/",
@@ -4378,7 +4378,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4416,7 +4416,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"paypal"
 			],
@@ -4467,7 +4467,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -4518,7 +4518,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -4550,7 +4550,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4583,7 +4583,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -4625,7 +4625,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4658,7 +4658,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4693,7 +4693,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4726,7 +4726,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4760,7 +4760,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4793,7 +4793,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4830,7 +4830,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4869,7 +4869,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"amazon-sagemaker-ai",
 				"amazon-web-services"
@@ -4909,7 +4909,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -4948,7 +4948,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -4983,7 +4983,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -5026,7 +5026,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5060,7 +5060,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -5101,7 +5101,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -5158,7 +5158,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5208,7 +5208,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -5283,7 +5283,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"google-cloud-including-firebase-and-looker"
 			],
@@ -5323,7 +5323,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -5365,7 +5365,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5398,7 +5398,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -5440,7 +5440,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5478,7 +5478,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5526,7 +5526,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{
@@ -5571,7 +5571,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [
 				"hashicorp-hcp-terraform"
 			],
@@ -5608,7 +5608,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5643,7 +5643,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5688,7 +5688,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5732,7 +5732,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5775,7 +5775,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -5819,7 +5819,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5852,7 +5852,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5883,7 +5883,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5927,7 +5927,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -5975,7 +5975,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -6023,7 +6023,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -6073,7 +6073,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "openai-plugins",
@@ -6131,7 +6131,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -6179,7 +6179,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -6227,7 +6227,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -6262,7 +6262,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"provenance": [
 				{
 					"source": "claude-plugins-official",
@@ -6302,7 +6302,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 			"verification": {
 				"status": "unverified"
 			},
-			"bundledSkill": false,
+			"legacyBuiltin": false,
 			"aliases": [],
 			"provenance": [
 				{

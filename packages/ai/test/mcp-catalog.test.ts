@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildCatalog, type ClaudeFixture, type OpenAiFixture, type Overrides } from "../scripts/import-mcp-catalog.js";
@@ -7,11 +8,18 @@ import {
 	getCatalogEntry,
 	getServiceCatalogEntry,
 	listServiceCatalog,
+	type McpServiceEntry,
 	registerBuiltinMcpOAuthProviders,
 	SERVICE_CATALOG,
 	searchServiceCatalog,
 	validateMcpServiceEntry,
 } from "../src/mcp/catalog.js";
+import {
+	loadLocalServiceCatalog,
+	MAX_LOCAL_CATALOG_BYTES,
+	MAX_LOCAL_CATALOG_ENTRIES,
+	userProvenance,
+} from "../src/mcp/local-catalog.js";
 import { getOAuthProvider, resetOAuthProviders } from "../src/utils/oauth/index.js";
 
 const catalogDir = path.resolve(__dirname, "../mcp-catalog");
@@ -51,7 +59,7 @@ describe("MCP service catalog", () => {
 			url: "https://mcp.notion.com/mcp",
 		});
 		expect(notion?.oauth).toEqual({ kind: "oauth" });
-		// The legacy lookup stays bundled-slice-only: imported services are not "built-in".
+		// The legacy lookup stays legacy-builtin-only: imported services are not "built-in".
 		expect(getCatalogEntry("github")).toBeUndefined();
 	});
 
@@ -184,32 +192,60 @@ describe("MCP service catalog", () => {
 		}
 	});
 
-	it("verifies only the pre-existing built-ins and keeps every import unverified", () => {
-		const verified = SERVICE_CATALOG.filter((entry) => entry.verification.status === "verified");
-		expect(verified.map((entry) => entry.server).sort()).toEqual(["linear", "notion"]);
+	it("marks only the legacy built-ins as metadata-reviewed; every import stays unverified", () => {
+		const metadataReviewed = SERVICE_CATALOG.filter((entry) => entry.verification.status === "metadata-reviewed");
+		expect(metadataReviewed.map((entry) => entry.server).sort()).toEqual(["linear", "notion"]);
 		for (const entry of SERVICE_CATALOG) {
 			if (entry.server === "linear" || entry.server === "notion") continue;
 			expect(entry.verification.status).toBe("unverified");
 		}
+		// The review claim is scoped to public metadata, not runtime interop.
+		const linear = getServiceCatalogEntry("linear");
+		const primeNote = linear?.provenance.find((prov) => prov.source === "prime")?.note ?? "";
+		expect(primeNote).toMatch(/reviewed against public provider metadata/);
+		expect(primeNote).not.toMatch(/verified against/);
 	});
 
-	it("rejects malformed entries", () => {
+	it("rejects malformed entries and literal private endpoints", () => {
 		const good = getServiceCatalogEntry("linear");
 		expect(good).toBeDefined();
 		expect(() => validateMcpServiceEntry(good)).not.toThrow();
 		if (!good) throw new Error("unreachable");
 		expect(() => validateMcpServiceEntry({ ...good, server: "Not Upper" })).toThrow(/server id/);
-		expect(() => validateMcpServiceEntry({ ...good, transport: { type: "http", url: "http://x.dev/mcp" } })).toThrow(
-			/HTTPS/,
-		);
-		expect(() =>
-			validateMcpServiceEntry({ ...good, transport: { type: "http", url: "https://mcp.linear.app/mcp" }, url: "" }),
-		).toThrow(/url must equal/);
 		expect(() => validateMcpServiceEntry({ ...good, auth: { ...good.auth, strategy: "weird" } })).toThrow(/strategy/);
 		expect(() =>
 			validateMcpServiceEntry({ ...good, oauth: { kind: "oauth" }, auth: { ...good.auth, strategy: "api_key" } }),
 		).toThrow(/oauth is only allowed on oauth-strategy/);
 		expect(() => validateMcpServiceEntry({ ...good, aliases: ["linear", "Linear"] })).toThrow(/aliases/);
+		// Literal loopback/private/link-local/unspecified endpoints are rejected structurally.
+		for (const badUrl of [
+			"https://127.0.0.1/mcp",
+			"https://127.0.0.2/mcp",
+			"https://127.8.8.8/mcp",
+			"https://[::1]/mcp",
+			"https://[::]/mcp",
+			"https://[::ffff:127.0.0.1]/mcp",
+			"https://10.1.2.3/mcp",
+			"https://172.16.0.1/mcp",
+			"https://192.168.1.4/mcp",
+			"https://169.254.1.1/mcp",
+			"https://0.0.0.0/mcp",
+			"https://[fe80::1]/mcp",
+			"https://localhost/mcp",
+			"https://box.localhost/mcp",
+		]) {
+			expect(() =>
+				validateMcpServiceEntry({ ...good, transport: { type: "http", url: badUrl }, url: badUrl }),
+			).toThrow(/loopback, private/);
+		}
+		// Public hosts are untouched by the literal checks.
+		expect(
+			validateMcpServiceEntry({
+				...good,
+				transport: { type: "http", url: "https://mcp.example.com/mcp" },
+				url: "https://mcp.example.com/mcp",
+			}),
+		).toBeDefined();
 	});
 
 	it("rebuilds the committed catalog byte-for-byte from the pinned fixtures", async () => {
@@ -239,5 +275,135 @@ describe("MCP service catalog", () => {
 			expect(exclusion.reason.length).toBeGreaterThan(3);
 		}
 		expect(report.excluded.map((entry) => entry.key)).toContain("claude-plugins-official/dropbox/claude_app_mcp");
+	});
+});
+
+describe("Local MCP service sources", () => {
+	function tempDir(): string {
+		return fs.mkdtempSync(path.join(os.tmpdir(), "pi-mcp-local-"));
+	}
+
+	function writeLocal(dir: string, name: string, data: unknown): string {
+		const filePath = path.join(dir, name);
+		fs.writeFileSync(filePath, typeof data === "string" ? data : JSON.stringify(data, null, "\t"));
+		return filePath;
+	}
+
+	function validLocalEntry(overrides: Partial<McpServiceEntry> = {}): Record<string, unknown> {
+		return {
+			server: "acme-docs",
+			service: "acme-docs",
+			label: "Acme Docs",
+			url: "https://mcp.docs.acme.example.com/mcp",
+			aliases: ["acme", "acme documentation"],
+			transport: { type: "http", url: "https://mcp.docs.acme.example.com/mcp" },
+			auth: { strategy: "oauth", clientRegistration: "unknown" },
+			setup: { status: "ready" },
+			verification: { status: "unverified" },
+			legacyBuiltin: false,
+			provenance: [userProvenance("added locally by the user")],
+			...overrides,
+		};
+	}
+
+	it("loads and validates a local source file", () => {
+		const dir = tempDir();
+		const filePath = writeLocal(dir, "mcp-services.json", {
+			version: 1,
+			entries: [validLocalEntry()],
+		});
+		const result = loadLocalServiceCatalog(filePath);
+		expect(result.entries).toHaveLength(1);
+		expect(result.entries[0].server).toBe("acme-docs");
+		expect(result.entries[0].provenance[0].source).toBe("user");
+		expect(result.path).toBe(filePath);
+	});
+
+	it("treats a missing file as empty and refuses directories", () => {
+		const dir = tempDir();
+		expect(loadLocalServiceCatalog(path.join(dir, "absent.json"))).toEqual({ entries: [], path: "" });
+		expect(() => loadLocalServiceCatalog(dir)).toThrow(/directory/);
+	});
+
+	it("bounds file size and entry counts with visible errors", () => {
+		const dir = tempDir();
+		const big = writeLocal(dir, "big.json", {
+			version: 1,
+			entries: [validLocalEntry(), { note: "x".repeat(MAX_LOCAL_CATALOG_BYTES) }],
+		});
+		expect(() => loadLocalServiceCatalog(big)).toThrow(/bytes/);
+		const many = {
+			version: 1,
+			entries: Array.from({ length: MAX_LOCAL_CATALOG_ENTRIES + 1 }, (_value, index) =>
+				validLocalEntry({
+					server: `acme-${index}`,
+					service: `acme-${index}`,
+					url: `https://mcp-${index}.acme.example.com/mcp`,
+					transport: { type: "http", url: `https://mcp-${index}.acme.example.com/mcp` },
+				}),
+			),
+		};
+		const manyPath = writeLocal(dir, "many.json", many);
+		expect(() => loadLocalServiceCatalog(manyPath)).toThrow(new RegExp(`maximum is ${MAX_LOCAL_CATALOG_ENTRIES}`));
+	});
+
+	it("rejects bad versions, malformed JSON and invalid entries with file context", () => {
+		const dir = tempDir();
+		const badVersion = writeLocal(dir, "bad-version.json", { version: 2, entries: [] });
+		expect(() => loadLocalServiceCatalog(badVersion)).toThrow(/unsupported version/);
+		const badJson = writeLocal(dir, "bad.json", "{ not json");
+		expect(() => loadLocalServiceCatalog(badJson)).toThrow(/not valid JSON/);
+		const invalidEntry = writeLocal(dir, "invalid.json", {
+			version: 1,
+			entries: [validLocalEntry({ url: "" })],
+		});
+		expect(() => loadLocalServiceCatalog(invalidEntry)).toThrow(/entry 0/);
+	});
+
+	it("never lets local entries claim vendor or Prime trust", () => {
+		const dir = tempDir();
+		const vendor = writeLocal(dir, "vendor.json", {
+			version: 1,
+			entries: [
+				validLocalEntry({
+					provenance: [{ source: "openai-plugins", repository: "openai/plugins" }],
+				}),
+			],
+		});
+		expect(() => loadLocalServiceCatalog(vendor)).toThrow(/may only carry provenance source "user"/);
+		const prime = writeLocal(dir, "prime.json", {
+			version: 1,
+			entries: [validLocalEntry({ provenance: [{ source: "prime" }] })],
+		});
+		expect(() => loadLocalServiceCatalog(prime)).toThrow(/may only carry provenance source "user"/);
+	});
+
+	it("refuses to shadow or rebind bundled ids and duplicates within the file", () => {
+		const dir = tempDir();
+		const collision = writeLocal(dir, "collision.json", {
+			version: 1,
+			entries: [validLocalEntry({ server: "notion", service: "notion", label: "Notion" })],
+		});
+		expect(() => loadLocalServiceCatalog(collision)).toThrow(/collides with the bundled catalog entry/);
+		const duplicate = writeLocal(dir, "duplicate.json", {
+			version: 1,
+			entries: [validLocalEntry(), validLocalEntry()],
+		});
+		expect(() => loadLocalServiceCatalog(duplicate)).toThrow(/duplicate local id/);
+	});
+
+	it("applies the same literal endpoint rules to local sources", () => {
+		const dir = tempDir();
+		const loopback = writeLocal(dir, "loopback.json", {
+			version: 1,
+			entries: [
+				validLocalEntry({
+					server: "acme-local",
+					url: "https://127.0.0.2/mcp",
+					transport: { type: "http", url: "https://127.0.0.2/mcp" },
+				}),
+			],
+		});
+		expect(() => loadLocalServiceCatalog(loopback)).toThrow(/loopback, private/);
 	});
 });

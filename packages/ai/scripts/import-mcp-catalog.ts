@@ -20,6 +20,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isLiteralPrivateOrLoopbackHost } from "../src/mcp/url-checks.js";
 
 // ---------------------------------------------------------------------------
 // Input types (fixture snapshots of the pinned public upstream catalogs)
@@ -100,9 +101,9 @@ export interface OverrideEntry {
 	/** Brand grouping id (defaults to the provider slug). */
 	service?: string;
 	aliases?: string[];
-	verification?: "verified" | "unverified";
+	verification?: "metadata-reviewed" | "unverified";
 	clientRegistration?: "dynamic" | "pre-registered" | "unknown";
-	bundledSkill?: boolean;
+	legacyBuiltin?: boolean;
 	setup?: "ready" | "requires-setup";
 	setupReason?: string;
 	setupFields?: CatalogSetupField[];
@@ -169,8 +170,8 @@ export interface CatalogEntry {
 	transport: CatalogTransport;
 	auth: CatalogAuth;
 	setup: CatalogSetup;
-	verification: { status: "verified" | "unverified" };
-	bundledSkill: boolean;
+	verification: { status: "metadata-reviewed" | "unverified" };
+	legacyBuiltin: boolean;
 	oauth?: { kind: "oauth" };
 	provenance: CatalogProvenance[];
 	homepage?: string;
@@ -240,7 +241,7 @@ function reviewedUrl(raw: string): string | undefined {
 
 function isLoopbackUrl(raw: string): boolean {
 	const host = /^\w+:\/\/([^/?#]+)/.exec(raw)?.[1]?.split(":")[0]?.toLowerCase();
-	return host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0" || host === "::1";
+	return isLiteralPrivateOrLoopbackHost(host ?? "");
 }
 
 const TEMPLATE_RE = /\$\{([^}]+)\}/g;
@@ -591,7 +592,7 @@ export function buildCatalog(
 				continue;
 			}
 			if (isLoopbackUrl(url)) {
-				excluded.push({ key, reason: "loopback endpoint; local server, not a remote service" });
+				excluded.push({ key, reason: "loopback/private endpoint; local server, not a remote service" });
 				claudeExcluded++;
 				continue;
 			}
@@ -725,7 +726,7 @@ export function buildCatalog(
 					fields: fields.length > 0 ? fields : undefined,
 				},
 				verification: { status: override?.verification ?? "unverified" },
-				bundledSkill: override?.bundledSkill ?? false,
+				legacyBuiltin: override?.legacyBuiltin ?? false,
 				aliases: [template.plugin, template.serverName, ...(template.provider ? [template.provider] : [])],
 				provenance: [template.provenance, ...(override ? [primeProvenance(override)] : [])],
 				...(strategy === "oauth" ? { oauth: { kind: "oauth" } } : {}),
@@ -754,7 +755,7 @@ export function buildCatalog(
 					fields: record.auth.fields.length > 0 ? record.auth.fields : undefined,
 				},
 				verification: { status: override?.verification ?? "unverified" },
-				bundledSkill: override?.bundledSkill ?? false,
+				legacyBuiltin: override?.legacyBuiltin ?? false,
 				aliases: [record.plugin, record.serverName, ...(record.provider ? [record.provider] : [])],
 				provenance: [record.provenance, ...(override ? [primeProvenance(override)] : [])],
 				...(strategy === "oauth" ? { oauth: { kind: "oauth" } } : {}),
@@ -784,7 +785,7 @@ export function buildCatalog(
 					fields: fields.length > 0 ? fields : undefined,
 				},
 				verification: { status: override?.verification ?? "unverified" },
-				bundledSkill: override?.bundledSkill ?? false,
+				legacyBuiltin: override?.legacyBuiltin ?? false,
 				aliases: [record.plugin, ...(record.provider ? [record.provider] : [])],
 				provenance: [record.provenance, ...(override ? [primeProvenance(override)] : [])],
 			},
@@ -797,7 +798,7 @@ export function buildCatalog(
 		if (override) {
 			if (override.verification) entry.verification = { status: override.verification };
 			if (override.clientRegistration) entry.auth.clientRegistration = override.clientRegistration;
-			if (override.bundledSkill !== undefined) entry.bundledSkill = override.bundledSkill;
+			if (override.legacyBuiltin !== undefined) entry.legacyBuiltin = override.legacyBuiltin;
 			if (override.setup) entry.setup.status = override.setup;
 			if (override.setupReason) entry.setup.reason = override.setupReason;
 			if (override.setupFields) entry.setup.fields = override.setupFields;
@@ -839,7 +840,7 @@ export function buildCatalog(
 		stdio: entries.filter((entry) => entry.transport.type === "stdio").length,
 		ready: entries.filter((entry) => entry.setup.status === "ready").length,
 		requiresSetup: entries.filter((entry) => entry.setup.status === "requires-setup").length,
-		verified: entries.filter((entry) => entry.verification.status === "verified").length,
+		metadataReviewed: entries.filter((entry) => entry.verification.status === "metadata-reviewed").length,
 		oauthStrategy: entries.filter((entry) => entry.auth.strategy === "oauth").length,
 		apiKeyStrategy: entries.filter((entry) => entry.auth.strategy === "api_key").length,
 		mergedFromBothSources: entries.filter(
@@ -953,7 +954,7 @@ function buildHttpEntry(
 				}
 			: { status: "ready" },
 		verification: { status: override?.verification ?? "unverified" },
-		bundledSkill: override?.bundledSkill ?? false,
+		legacyBuiltin: override?.legacyBuiltin ?? false,
 		provenance,
 		homepage: records.map((record) => record.homepage).find((value): value is string => !!value),
 		privacyUrl: records.map((record) => record.privacyUrl).find((value): value is string => !!value),

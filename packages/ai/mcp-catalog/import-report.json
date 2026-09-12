@@ -227,7 +227,7 @@
 		},
 		{
 			"key": "claude-plugins-official/cockroachdb/cockroachdb-toolbox-http",
-			"reason": "loopback endpoint; local server, not a remote service"
+			"reason": "loopback/private endpoint; local server, not a remote service"
 		},
 		{
 			"key": "claude-plugins-official/deploy-on-aws/awsknowledge",
@@ -250,7 +250,7 @@
 		"stdio": 32,
 		"ready": 80,
 		"requiresSetup": 60,
-		"verified": 2,
+		"metadataReviewed": 2,
 		"oauthStrategy": 14,
 		"apiKeyStrategy": 32,
 		"mergedFromBothSources": 16

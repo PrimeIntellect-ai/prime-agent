@@ -2,22 +2,22 @@
 	"$comment": "Prime-curated adjustments layered on the deterministic import. Keys are '<source>/<plugin>/<server>' identity triples from the pinned fixtures (stdio adapters are keyed '<source>/<plugin>'). This file is review data, never credentials: it can rename ids/labels, group brands, and mark verified/dynamic-registration knowledge, but cannot add OAuth client ids or secrets.",
 	"servers": {
 		"openai-plugins/linear/linear": {
-			"bundledSkill": true,
-			"verification": "verified",
+			"verification": "metadata-reviewed",
 			"clientRegistration": "dynamic",
-			"note": "pre-existing built-in integration; OAuth dynamic client registration (plus CIMD) verified against public provider metadata",
+			"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata",
 			"aliases": [
 				"linear-app"
-			]
+			],
+			"legacyBuiltin": true
 		},
 		"openai-plugins/notion/notion": {
-			"bundledSkill": true,
-			"verification": "verified",
+			"verification": "metadata-reviewed",
 			"clientRegistration": "dynamic",
-			"note": "pre-existing built-in integration; OAuth dynamic client registration (plus CIMD) verified against public provider metadata",
+			"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata",
 			"aliases": [
 				"notion-workspace"
-			]
+			],
+			"legacyBuiltin": true
 		},
 		"openai-plugins/slack/slack": {
 			"clientRegistration": "pre-registered",
