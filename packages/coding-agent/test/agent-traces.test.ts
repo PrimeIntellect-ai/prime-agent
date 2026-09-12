@@ -149,36 +149,61 @@ describe("agent trace upload", () => {
 		delete process.env.PRIME_API_BASE_URL;
 	});
 
-	afterEach(() => {
+	// Fire-and-forget trace uploads can still be writing under ENV_AGENT_DIR
+	// when the test body returns, so cleanup flushes them and retries removal.
+	async function flushAsyncWork(): Promise<void> {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+
+	async function rmTempDirSafely(dir: string): Promise<void> {
+		await flushAsyncWork();
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			try {
+				rmSync(dir, { recursive: true, force: true });
+				return;
+			} catch (error) {
+				if (attempt === 3) throw error;
+				await new Promise<void>((resolve) => setTimeout(resolve, 10 * attempt));
+			}
+		}
+	}
+
+	afterEach(async () => {
 		vi.restoreAllMocks();
 		vi.useRealTimers();
-		if (originalAgentDir === undefined) {
-			delete process.env[ENV_AGENT_DIR];
-		} else {
-			process.env[ENV_AGENT_DIR] = originalAgentDir;
-		}
-		if (originalTraceApiKey === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_API_KEY;
-		} else {
-			process.env.PRIME_AGENT_TRACES_API_KEY = originalTraceApiKey;
-		}
-		if (originalPrimeApiKey === undefined) {
-			delete process.env.PRIME_API_KEY;
-		} else {
-			process.env.PRIME_API_KEY = originalPrimeApiKey;
-		}
-		if (originalTraceBaseUrl === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_BASE_URL;
-		} else {
-			process.env.PRIME_AGENT_TRACES_BASE_URL = originalTraceBaseUrl;
-		}
-		if (originalPrimeBaseUrl === undefined) {
-			delete process.env.PRIME_API_BASE_URL;
-		} else {
-			process.env.PRIME_API_BASE_URL = originalPrimeBaseUrl;
-		}
-		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
+		try {
+			// Flush straggler uploads and remove the temp dir while ENV_AGENT_DIR
+			// still points at it, so late writes land inside the dir being removed.
+			if (tempDir && existsSync(tempDir)) {
+				await rmTempDirSafely(tempDir);
+			}
+		} finally {
+			if (originalAgentDir === undefined) {
+				delete process.env[ENV_AGENT_DIR];
+			} else {
+				process.env[ENV_AGENT_DIR] = originalAgentDir;
+			}
+			if (originalTraceApiKey === undefined) {
+				delete process.env.PRIME_AGENT_TRACES_API_KEY;
+			} else {
+				process.env.PRIME_AGENT_TRACES_API_KEY = originalTraceApiKey;
+			}
+			if (originalPrimeApiKey === undefined) {
+				delete process.env.PRIME_API_KEY;
+			} else {
+				process.env.PRIME_API_KEY = originalPrimeApiKey;
+			}
+			if (originalTraceBaseUrl === undefined) {
+				delete process.env.PRIME_AGENT_TRACES_BASE_URL;
+			} else {
+				process.env.PRIME_AGENT_TRACES_BASE_URL = originalTraceBaseUrl;
+			}
+			if (originalPrimeBaseUrl === undefined) {
+				delete process.env.PRIME_API_BASE_URL;
+			} else {
+				process.env.PRIME_API_BASE_URL = originalPrimeBaseUrl;
+			}
 		}
 	});
 
