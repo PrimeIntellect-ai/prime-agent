@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -322,7 +323,7 @@ describe("Local MCP service sources", () => {
 	it("treats a missing file as empty and refuses directories", () => {
 		const dir = tempDir();
 		expect(loadLocalServiceCatalog(path.join(dir, "absent.json"))).toEqual({ entries: [], path: "" });
-		expect(() => loadLocalServiceCatalog(dir)).toThrow(/directory/);
+		expect(() => loadLocalServiceCatalog(dir)).toThrow(/directories, FIFOs and devices are refused/);
 	});
 
 	it("bounds file size and entry counts with visible errors", () => {
@@ -405,5 +406,108 @@ describe("Local MCP service sources", () => {
 			],
 		});
 		expect(() => loadLocalServiceCatalog(loopback)).toThrow(/loopback, private/);
+		// IPv6 unique-local fc00::/7 is rejected like other private ranges.
+		for (const badUrl of ["https://[fc00::1]/mcp", "https://[fd12::3456]/mcp"]) {
+			const ula = writeLocal(dir, `ula-${badUrl.slice(8, 13)}.json`, {
+				version: 1,
+				entries: [
+					validLocalEntry({
+						server: "acme-ula",
+						url: badUrl,
+						transport: { type: "http", url: badUrl },
+					}),
+				],
+			});
+			expect(() => loadLocalServiceCatalog(ula)).toThrow(/loopback, private/);
+		}
+	});
+
+	it("never lets local entries self-assert legacy-builtin or review status", () => {
+		const dir = tempDir();
+		const builtin = writeLocal(dir, "builtin.json", {
+			version: 1,
+			entries: [validLocalEntry({ legacyBuiltin: true })],
+		});
+		expect(() => loadLocalServiceCatalog(builtin)).toThrow(/cannot claim legacyBuiltin/);
+		const reviewed = writeLocal(dir, "reviewed.json", {
+			version: 1,
+			entries: [validLocalEntry({ verification: { status: "metadata-reviewed" } })],
+		});
+		expect(() => loadLocalServiceCatalog(reviewed)).toThrow(/local sources are always unverified/);
+	});
+
+	it("refuses special files instead of hanging on them", () => {
+		const dir = tempDir();
+		// Directories are refused up front.
+		expect(() => loadLocalServiceCatalog(dir)).toThrow(/not a regular file/);
+		// FIFOs (POSIX only) must be refused as non-regular files, never read.
+		if (process.platform !== "win32") {
+			const fifoPath = path.join(dir, "fifo");
+			execFileSync("mkfifo", [fifoPath]);
+			expect(() => loadLocalServiceCatalog(fifoPath)).toThrow(/not a regular file/);
+		}
+	});
+
+	it("bounds the actual read, not a stale stat size", () => {
+		const dir = tempDir();
+		// A file larger than the maximum is refused from the bounded read itself.
+		const big = writeLocal(dir, "big.json", {
+			version: 1,
+			entries: [validLocalEntry(), { note: "x".repeat(MAX_LOCAL_CATALOG_BYTES) }],
+		});
+		expect(() => loadLocalServiceCatalog(big)).toThrow(new RegExp(`maximum of ${MAX_LOCAL_CATALOG_BYTES} bytes`));
+	});
+
+	it("never echoes raw input values in diagnostics", () => {
+		const dir = tempDir();
+		const marker = "SYNTHETIC_SECRET_TOKEN_XYZ";
+		// Malformed JSON containing a secret-looking marker.
+		const badJson = writeLocal(
+			dir,
+			"bad.json",
+			`{
+  "entries": [{"token": "${marker}"}]`,
+		);
+		let message = "";
+		try {
+			loadLocalServiceCatalog(badJson);
+		} catch (error) {
+			message = (error as Error).message;
+		}
+		expect(message).toMatch(/not valid JSON/);
+		expect(message).not.toContain(marker);
+		// A syntactically invalid URL input triggers the no-echo parse failure.
+		const badUrlEntry = writeLocal(dir, "bad-url-entry.json", {
+			version: 1,
+			entries: [
+				validLocalEntry({
+					url: "ht tp://ex ample",
+					transport: { type: "http", url: "ht tp://ex ample" },
+				}),
+			],
+		});
+		let urlMessage = "";
+		try {
+			loadLocalServiceCatalog(badUrlEntry);
+		} catch (error) {
+			urlMessage = (error as Error).message;
+		}
+		expect(urlMessage).toMatch(/not an absolute URL/);
+		expect(urlMessage).not.toContain("ht tp://ex ample");
+		// An entry id that is oversized/secret-ish is echoed only in bounded form.
+		const longId = "a".repeat(300) + marker;
+		const longIdFile = writeLocal(dir, "long-id.json", {
+			version: 1,
+			entries: [validLocalEntry({ server: longId, service: longId })],
+		});
+		let idMessage = "";
+		try {
+			loadLocalServiceCatalog(longIdFile);
+		} catch (error) {
+			idMessage = (error as Error).message;
+		}
+		expect(idMessage).toMatch(/server id/);
+		expect(idMessage).not.toContain(marker);
+		expect(idMessage.length).toBeLessThan(400);
 	});
 });

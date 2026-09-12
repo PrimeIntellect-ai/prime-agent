@@ -3,15 +3,18 @@
  *
  * Loads a single local JSON file of service entries and validates it against
  * the same contract as the bundled catalog. The loader is deliberately narrow:
- * synchronous file read + JSON parse + structural validation, bounded size and
- * entry counts, no execution, no network, and no credential access —
- * credentials live exclusively in the host's credential storage.
+ * a bounded read of a regular file + JSON parse + structural validation, no
+ * execution, no network, and no credential access — credentials live
+ * exclusively in the host's credential storage.
  *
  * The loader rejects anything that would let a local file masquerade as
- * trusted: provenance may only claim the `user` source, and ids colliding
+ * trusted: provenance may only claim the `user` source, `legacyBuiltin` and
+ * `metadata-reviewed` review status cannot be self-asserted, and ids colliding
  * with bundled catalog entries are refused (no silent override/rebind of
- * built-ins). How local entries interact with `mcpServers` settings is host
- * policy; this module only provides the validated entries.
+ * built-ins). Errors are visible and bounded: they name the file, entry index
+ * and problem category, and never echo raw input values (a malformed URL or
+ * JSON may carry secrets). How local entries interact with `mcpServers`
+ * settings is host policy; this module only provides the validated entries.
  */
 
 import * as fs from "node:fs";
@@ -30,7 +33,7 @@ export const MAX_LOCAL_CATALOG_ENTRIES = 50;
 export interface LocalCatalogLoadResult {
 	/** Validated local entries, frozen, in file order (ids guaranteed unique and non-bundled). */
 	entries: readonly McpServiceEntry[];
-	/** Absolute path the entries were loaded from (empty when the file does not exist). */
+	/** Path the entries were loaded from (empty when the file does not exist). */
 	path: string;
 }
 
@@ -47,28 +50,59 @@ export function loadLocalServiceCatalog(filePath: string): LocalCatalogLoadResul
 	if (!fs.existsSync(filePath)) {
 		return { entries: [], path: "" };
 	}
-	const stat = fs.statSync(filePath);
-	if (stat.isDirectory()) {
-		throw new Error(`Local service source ${filePath} is a directory, expected a JSON file`);
+	let stats: fs.Stats;
+	try {
+		stats = fs.statSync(filePath);
+	} catch {
+		// Vanished between the existence check and stat: treat as absent.
+		return { entries: [], path: "" };
 	}
-	if (stat.size > MAX_LOCAL_CATALOG_BYTES) {
+	// Only regular files (symlinks to regular files included). FIFOs, sockets and
+	// devices are refused so a special file can never hang the read.
+	if (!stats.isFile()) {
 		throw new Error(
-			`Local service source ${filePath} is ${stat.size} bytes; the maximum is ${MAX_LOCAL_CATALOG_BYTES}`,
+			`Local service source ${filePath} is not a regular file; directories, FIFOs and devices are refused`,
 		);
 	}
-	const raw = fs.readFileSync(filePath, "utf8");
+	// Bounded read of at most MAX_LOCAL_CATALOG_BYTES + 1 bytes: the stale-stat
+	// size is never trusted, and oversized files are refused from the read itself.
+	let fd: number | undefined;
+	const chunks: Buffer[] = [];
+	try {
+		fd = fs.openSync(filePath, "r");
+		const chunkSize = 64 * 1024;
+		let total = 0;
+		for (;;) {
+			const chunk = Buffer.alloc(chunkSize);
+			const bytesRead = fs.readSync(fd, chunk, 0, chunkSize, null);
+			if (bytesRead === 0) break;
+			total += bytesRead;
+			if (total > MAX_LOCAL_CATALOG_BYTES) {
+				throw new Error(`Local service source ${filePath} exceeds the maximum of ${MAX_LOCAL_CATALOG_BYTES} bytes`);
+			}
+			chunks.push(bytesRead === chunkSize ? chunk : chunk.subarray(0, bytesRead));
+		}
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+	const raw = Buffer.concat(chunks).toString("utf8");
+
 	let data: unknown;
 	try {
 		data = JSON.parse(raw);
 	} catch (error) {
-		throw new Error(`Local service source ${filePath} is not valid JSON: ${(error as Error).message}`);
+		// Never echo the parser message: it can quote raw (possibly secret) source text.
+		const position = /position (\d+)/.exec((error as Error).message)?.[1];
+		throw new Error(
+			`Local service source ${filePath} is not valid JSON${position ? ` (parse error near byte ${position})` : ""}`,
+		);
 	}
 	if (typeof data !== "object" || data === null || Array.isArray(data)) {
 		throw new Error(`Local service source ${filePath} must be an object with a version and an entries array`);
 	}
 	const record = data as Record<string, unknown>;
 	if (record.version !== 1) {
-		throw new Error(`Local service source ${filePath} has unsupported version ${String(record.version)}; expected 1`);
+		throw new Error(`Local service source ${filePath} has an unsupported version; expected 1`);
 	}
 	if (!Array.isArray(record.entries)) {
 		throw new Error(`Local service source ${filePath} must contain an entries array`);
@@ -97,6 +131,17 @@ export function loadLocalServiceCatalog(filePath: string): LocalCatalogLoadResul
 		if (entry.provenance.length === 0) {
 			throw new Error(
 				`${at} (${entry.server}): local entries need at least one provenance record with source "user"`,
+			);
+		}
+		// Review status and legacy-builtin trust cannot be self-asserted by a local file.
+		if (entry.legacyBuiltin) {
+			throw new Error(
+				`${at} (${entry.server}): local entries cannot claim legacyBuiltin; it is reserved for Prime built-ins`,
+			);
+		}
+		if (entry.verification.status !== "unverified") {
+			throw new Error(
+				`${at} (${entry.server}): local entries cannot claim "${entry.verification.status}"; local sources are always unverified`,
 			);
 		}
 		if (seenLocal.has(entry.server)) {

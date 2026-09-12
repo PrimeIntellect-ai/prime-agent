@@ -122,8 +122,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Bounded echo of an entry id in errors: never reprint untrusted long/secret-ish input. */
+function safeEntryId(entryId: string): string {
+	return entryId.length > 64 ? `${entryId.slice(0, 64)}…` : entryId;
+}
+
 function fail(entryId: string, message: string): never {
-	throw new Error(`catalog entry ${entryId}: ${message}`);
+	throw new Error(`catalog entry ${safeEntryId(entryId)}: ${message}`);
 }
 
 function requireString(entryId: string, field: string, value: unknown): string {
@@ -139,7 +144,8 @@ function requireHttpsUrl(entryId: string, field: string, value: unknown): string
 	try {
 		parsed = new URL(url);
 	} catch {
-		return fail(entryId, `${field} is not an absolute URL: ${url}`);
+		// Do not echo the input value: it may carry query tokens or other secrets.
+		return fail(entryId, `${field} is not an absolute URL`);
 	}
 	if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) {
 		return fail(entryId, `${field} must be an absolute HTTPS URL without credentials or a fragment`);

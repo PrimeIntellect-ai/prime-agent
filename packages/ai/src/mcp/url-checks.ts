@@ -38,6 +38,8 @@ export function isLiteralPrivateOrLoopbackHost(hostname: string): boolean {
 			);
 		}
 		if ((expanded[0] & 0xffc0) === 0xfe80) return true;
+		// IPv6 unique-local fc00::/7 (fc00:: - fdff::)
+		if ((expanded[0] & 0xfe00) === 0xfc00) return true;
 	}
 	return false;
 }
