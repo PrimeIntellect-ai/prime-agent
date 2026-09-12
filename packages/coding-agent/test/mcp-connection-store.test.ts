@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
@@ -15,7 +15,9 @@ vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
 });
 
 const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
-const STORE_MODULE = resolve(TEST_DIR, "../src/core/mcp/connection-store.js");
+// A file URL stays a valid ESM import specifier on every platform; a resolved
+// absolute OS path does not (Windows drive-letter paths are not specifiers).
+const STORE_MODULE_URL = new URL("../src/core/mcp/connection-store.js", import.meta.url).href;
 
 /**
  * Real-process first-writer worker. Loaded through the project tsx loader so it
@@ -27,7 +29,7 @@ const STORE_MODULE = resolve(TEST_DIR, "../src/core/mcp/connection-store.js");
 const FIRST_CREATE_WORKER_SOURCE = `
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { McpConnectionStore } from ${JSON.stringify(STORE_MODULE)};
+import { McpConnectionStore } from ${JSON.stringify(STORE_MODULE_URL)};
 const [storePath, barrierPath, readyDir, connectionId] = process.argv.slice(2);
 const store = McpConnectionStore.open(storePath);
 writeFileSync(join(readyDir, "ready-" + connectionId), connectionId);
@@ -177,7 +179,10 @@ describe("McpConnectionStore concurrency", () => {
 				.sort(),
 		).toEqual(["alpha", "beta", "gamma"]);
 		// The exclusive create keeps the file owner-private regardless of umask.
-		expect(statSync(path).mode & 0o777).toBe(0o600);
+		// Windows mode bits do not map meaningfully, so only POSIX asserts exactly.
+		if (process.platform !== "win32") {
+			expect(statSync(path).mode & 0o777).toBe(0o600);
+		}
 	});
 
 	it("requeues operations when the atomic write fails and retries them in order", async () => {
@@ -291,6 +296,9 @@ describe("McpConnectionStore multi-process first create", () => {
 				.map((record) => record.connectionId)
 				.sort(),
 		).toEqual([...ids].sort());
-		expect(statSync(path).mode & 0o777).toBe(0o600);
+		// Windows mode bits do not map meaningfully, so only POSIX asserts exactly.
+		if (process.platform !== "win32") {
+			expect(statSync(path).mode & 0o777).toBe(0o600);
+		}
 	}, 30_000);
 });
