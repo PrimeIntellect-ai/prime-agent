@@ -63,7 +63,7 @@ describe("session catalog cache and standalone export", () => {
 
 	it("evicts an oversized usage map while keeping returned totals correct", async () => {
 		const path = join(dir, "oversized.jsonl");
-		const count = 100_001;
+		const count = 400_001;
 		const records = [line(header)];
 		for (let i = 0; i < count; i++)
 			records.push(

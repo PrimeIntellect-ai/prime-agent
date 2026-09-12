@@ -1,0 +1,1 @@
+- Fixed repeated full transcript scans when refreshing large saved-session catalogs.
