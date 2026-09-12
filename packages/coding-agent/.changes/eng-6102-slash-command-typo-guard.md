@@ -1,0 +1,1 @@
+- Typo'd slash commands now fail fast with a suggested correction instead of being sent to the model as a prompt; genuine messages that merely start with a slash still pass through.

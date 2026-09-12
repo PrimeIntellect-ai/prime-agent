@@ -299,9 +299,13 @@ import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 import {
+	BUILTIN_SLASH_COMMANDS,
+	findSlashCommandSuggestion,
+	isBuiltinSlashCommandName,
 	parseRefineCommandOptions,
 	parseSessionSlashCommand,
 	parseSlashCommand,
+	SESSION_SLASH_COMMAND_NAMES,
 	type SessionSlashCommand,
 	type SlashCommandInfo,
 } from "./slash-commands.js";
@@ -4669,12 +4673,47 @@ export class AgentSession {
 		images: ImageContent[] | undefined,
 		policy: SubmissionNormalizationPolicy,
 	): NormalizedSubmission {
+		if (policy.expandPromptTemplates) this._throwIfUnknownSlashCommand(text);
 		let expandedText = text;
 		if (policy.expandSkills) expandedText = this._expandSkillCommand(expandedText);
 		if (policy.expandPromptTemplates) {
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 		}
 		return { kind: "prompt", text: expandedText, images };
+	}
+
+	/**
+	 * Reject slash-command typos before they burn a model round trip and
+	 * pollute the transcript. Only fires when a registered command name is
+	 * close enough to be the intended one; anything else passes through so
+	 * genuine prompts that merely start with "/" keep working.
+	 */
+	private _throwIfUnknownSlashCommand(text: string): void {
+		const parsed = parseSlashCommand(text);
+		if (!parsed) return;
+		// No registered command name is anywhere near this long; oversized
+		// /-prefixed inputs are prompts, and fuzzy-matching them would be
+		// quadratic work on the event loop.
+		if (parsed.name.length > 64) return;
+		if (isBuiltinSlashCommandName(parsed.name)) return;
+		if (this.promptTemplates.some((template) => template.name === parsed.name)) return;
+		if (
+			parsed.name.startsWith("skill:") &&
+			this.resourceLoader.getSkills().skills.some((skill) => skill.name === parsed.name.slice("skill:".length))
+		) {
+			return;
+		}
+		const skills = this.resourceLoader.getSkills().skills.map((skill) => skill.name);
+		const candidates = [
+			...BUILTIN_SLASH_COMMANDS.flatMap((command) => [command.name, ...(command.aliases ?? [])]),
+			...SESSION_SLASH_COMMAND_NAMES,
+			...this.promptTemplates.map((template) => template.name),
+			...this._extensionRunner.getRegisteredCommands().map((command) => command.invocationName),
+			...skills.map((skill) => `skill:${skill}`),
+		];
+		const suggestion = findSlashCommandSuggestion(parsed.name, candidates);
+		if (!suggestion) return;
+		throw new Error(`Unknown command: /${parsed.name}. Did you mean /${suggestion}?`);
 	}
 
 	private _normalizeSubmission(
