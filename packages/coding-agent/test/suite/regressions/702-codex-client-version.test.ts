@@ -76,7 +76,7 @@ describe("issue #702 codex model discovery client version", () => {
 
 		authStorage.set("openai-codex", {
 			type: "oauth",
-			access: codexAccessToken("account-123") + "-rotated",
+			access: `${codexAccessToken("account-123")}-rotated`,
 			refresh: "rotated-refresh-token",
 			expires: Date.now() + 60 * 60 * 1000,
 			accountId: "account-123",
