@@ -5560,7 +5560,7 @@ export class AgentDaemon {
 				await deliverSnapshotFailure(new Error(`Snapshot ${stream.id} was aborted`));
 				return;
 			}
-			await this.writeWorkerSnapshotRecord(
+			const snapshotDelivered = await this.writeWorkerSnapshotRecord(
 				client,
 				{
 					type: "session_snapshot_end",
@@ -5573,6 +5573,7 @@ export class AgentDaemon {
 				purpose,
 				transferSignal,
 			);
+			if (!snapshotDelivered) return;
 			// Frames withheld during the stream replay now that the snapshot is
 			// complete: every deferred frame is newer than the streamed
 			// snapshot, and the client applies them as ordinary live events. A
@@ -6934,6 +6935,7 @@ export class AgentDaemon {
 				continue;
 			}
 			if (sequencedMessage.type === "session_closed") {
+				this.discardDeferredSessionFrames(client, state.activeSessionId);
 				client.catchupActiveSessionIds?.delete(state.activeSessionId);
 				client.catchupPurposes?.delete(state.activeSessionId);
 				this.write(client, sequencedMessage);
@@ -7524,16 +7526,22 @@ export class AgentDaemon {
 
 	/** Replay frames deferred during a completed snapshot stream, in order. */
 	private flushDeferredSessionFrames(client: DaemonSocketClient, activeSessionId: string): void {
+		// A queued snapshot would overwrite an earlier replay of this shared buffer.
+		if ((client.snapshotActiveSessionCounts?.get(activeSessionId) ?? 1) > 1) return;
 		const frames = client.deferredSessionOutbounds?.get(activeSessionId);
 		if (!frames || frames.length === 0) {
 			return;
 		}
 		client.deferredSessionOutbounds?.delete(activeSessionId);
+		if (!client.attachedActiveSessionIds.has(activeSessionId)) return;
 		for (const frame of frames) {
 			if (client.socket.destroyed) {
 				return;
 			}
-			this.write(client, frame);
+			if (client.backpressured || !this.write(client, frame)) {
+				this.queueClientCatchup(client, activeSessionId, "resync");
+				return;
+			}
 		}
 	}
 
@@ -7850,9 +7858,6 @@ export function finishClientSnapshotStreaming(client: DaemonSocketClient, active
 		client.deferredSessionPayloadsDropped?.delete(activeSessionId);
 	}
 	client.snapshotStreaming = (client.snapshotActiveSessionIds?.size ?? 0) > 0;
-	if (!client.snapshotStreaming) {
-		client.backpressured = false;
-	}
 }
 
 export function cancelPendingExtensionUiRequests(state: ActiveSessionState): void {

@@ -5406,7 +5406,7 @@ export class DaemonSupervisor {
 				}
 				chunkCount++;
 			}
-			await this.writeSnapshotRecord(client, {
+			snapshotDelivered = await this.writeSnapshotRecord(client, {
 				type: "session_snapshot_end",
 				activeSessionId: result.activeSessionId,
 				snapshotId: stream.id,
@@ -5414,7 +5414,6 @@ export class DaemonSupervisor {
 				lastEventSequence: result.lastEventSequence,
 				lastEventCursor: result.lastEventCursor,
 			});
-			snapshotDelivered = true;
 		} catch (error) {
 			const streamError = error instanceof Error ? error : new Error(String(error));
 			if (!client.socket.destroyed) {
@@ -5464,12 +5463,9 @@ export class DaemonSupervisor {
 			} else {
 				client.snapshotActiveSessionCounts?.delete(activeSessionId);
 				client.snapshotActiveSessionIds?.delete(activeSessionId);
-			}
-			client.snapshotStreaming = (client.snapshotActiveSessionIds?.size ?? 0) > 0;
-			if (!client.snapshotStreaming) {
-				client.backpressured = false;
 				client.deferredSessionPayloadsDropped?.delete(activeSessionId);
 			}
+			client.snapshotStreaming = (client.snapshotActiveSessionIds?.size ?? 0) > 0;
 			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
 				void this.catchUpClient(client).catch((error) =>
 					this.log(`Failed to catch up client ${client.id}: ${String(error)}`),
@@ -6046,11 +6042,15 @@ export class DaemonSupervisor {
 			return;
 		}
 		client.deferredSessionPayloads?.delete(activeSessionId);
+		if (!client.attachedActiveSessionIds.has(activeSessionId)) return;
 		for (const payload of payloads) {
 			if (client.socket.destroyed) {
 				return;
 			}
-			this.writeSerialized(client, payload);
+			if (client.backpressured || !this.writeSerialized(client, payload)) {
+				this.queueCatchup(client, activeSessionId, "resync");
+				return;
+			}
 		}
 	}
 
