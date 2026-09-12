@@ -20,9 +20,6 @@ export interface AppKeybindings {
 	"app.model.select": true;
 	"app.model.toggleScope": true;
 	"app.tools.expand": true;
-	"app.messages.expand": true;
-	"app.edits.expand": true;
-	"app.thinking.toggle": true;
 	"app.subagents.focus": true;
 	"app.heartbeats.open": true;
 	"app.heartbeats.openSelected": true;
@@ -86,18 +83,7 @@ export const KEYBINDINGS = {
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.model.toggleScope": { defaultKeys: "alt+s", description: "Toggle model selector scope" },
-	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output", defaultKeyScope: "editor" },
-	"app.messages.expand": {
-		defaultKeys: "ctrl+p",
-		description: "Toggle agent message expansion",
-		defaultKeyScope: "editor",
-	},
-	"app.edits.expand": { defaultKeys: "ctrl+j", description: "Toggle edit diffs", defaultKeyScope: "editor" },
-	"app.thinking.toggle": {
-		defaultKeys: "ctrl+t",
-		description: "Toggle thinking blocks",
-		defaultKeyScope: "editor",
-	},
+	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Cycle conversation detail", defaultKeyScope: "editor" },
 	"app.subagents.focus": {
 		defaultKeys: "alt+a",
 		description: "Open child agents",
@@ -269,7 +255,6 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	suspend: "app.suspend",
 	selectModel: "app.model.select",
 	expandTools: "app.tools.expand",
-	toggleThinking: "app.thinking.toggle",
 	focusSubagents: "app.subagents.focus",
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",

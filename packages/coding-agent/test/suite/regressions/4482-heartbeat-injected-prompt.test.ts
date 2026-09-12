@@ -502,7 +502,7 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		expect(collapsed).toContain("♥");
 		expect(collapsed).toContain("Heartbeat prompt");
 		expect(collapsed).toContain("every 5m");
-		expect(collapsed).toContain("to expand");
+		expect(collapsed).not.toContain("cycle detail");
 		expect(collapsed).not.toContain("Check whether the long-running task needs another step.");
 
 		component.setExpanded(true);

@@ -738,6 +738,34 @@ describe("InteractiveMode startup hints", () => {
 		expect(getLabel(subagent)).toBe("depth 1");
 	});
 
+	it("keeps remapped conversation detail shortcuts out of the footer while typing", () => {
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": ["ctrl+e", "ctrl+g"] }));
+		const mode = createMode(2, false, () => "draft prompt");
+		const label = stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+
+		expect(label).toBe("");
+		expect(label).not.toContain("detail");
+		expect(label).not.toContain("Ctrl+E");
+		expect(label).not.toContain("Ctrl+O");
+		expect(label).not.toContain("Ctrl+G");
+	});
+
+	it("omits the detail hint when the binding is disabled", () => {
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": [] }));
+		const label = stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(createMode(1)));
+
+		expect(label).toBe("");
+		expect(label).not.toContain("detail");
+	});
+
+	it("keeps the footer free of detail shortcuts while an overlay owns the input", () => {
+		const mode = createMode(1);
+		mode.ui.hasOverlay = () => true;
+		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
+
+		expect(label).toBeUndefined();
+	});
+
 	it("keeps the question-mark shortcut guide compact", () => {
 		const guide = Reflect.get(InteractiveMode.prototype, "getShortcutGuide").call(createMode());
 

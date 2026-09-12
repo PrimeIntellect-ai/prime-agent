@@ -450,22 +450,20 @@ describe("ToolExecutionComponent parity", () => {
 		const collapsed = stripAnsi(component.render(120).join("\n"));
 		expect(collapsed).not.toContain("-1 before");
 		expect(collapsed).toContain("+1 -1");
-		// The collapsed `╰─ path +N -M` summary line carries the ctrl+j hint —
-		// and it is the only carrier: the header must not duplicate it.
-		expect(collapsed.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
-		expect(collapsed.split("to expand").length - 1).toBe(1);
+		// The file summary keeps its counts without inline detail hints.
+		expect(collapsed.split("\n").find((line) => line.includes("╰─"))).not.toContain("cycle detail");
+		expect(collapsed).not.toContain("Ctrl+O");
 
 		component.setEditDiffsExpanded(true);
 		const withDiffLines = stripAnsi(component.render(120).join("\n")).split("\n");
-		// The summary line stays put; the diff renders under it, indented to its text column.
+		// The summary stays put while diff rows use the normal content margin.
 		const summaryIndex = withDiffLines.findIndex((line) => line.includes("╰─ README.md +1 -1"));
 		expect(summaryIndex).toBeGreaterThanOrEqual(0);
-		expect(withDiffLines[summaryIndex]).toContain("to collapse");
-		const textColumn = withDiffLines[summaryIndex].indexOf("README.md");
+		expect(withDiffLines[summaryIndex]).not.toContain("cycle detail");
 		const removed = withDiffLines.find((line) => line.includes("-1 before"));
 		const added = withDiffLines.find((line) => line.includes("+1 after"));
-		expect(removed?.startsWith(" ".repeat(textColumn))).toBe(true);
-		expect(added?.startsWith(" ".repeat(textColumn))).toBe(true);
+		expect(removed?.trimEnd()).toBe(" -1 before");
+		expect(added?.trimEnd()).toBe(" +1 after");
 
 		component.setEditDiffsExpanded(false);
 		const collapsedAgain = stripAnsi(component.render(120).join("\n"));
@@ -517,7 +515,7 @@ describe("ToolExecutionComponent parity", () => {
 		}
 	});
 
-	test("built-in edit summary truncates a long path to one row and keeps counts and hint", () => {
+	test("built-in edit summary truncates a long path to one row and keeps counts", () => {
 		const longPath = "deeply/nested/directory/structure/with/a/really/long/file-name-that-overflows.md";
 		const component = new ToolExecutionComponent(
 			"edit",
@@ -537,13 +535,13 @@ describe("ToolExecutionComponent parity", () => {
 		expect(summaryLines.length).toBe(1);
 		expect(summaryLines[0]).toContain("…");
 		expect(summaryLines[0]).toContain("+1 -1");
-		expect(summaryLines[0]).toContain("to expand");
+		expect(summaryLines[0]).not.toContain("cycle detail");
 		for (const line of lines) {
 			expect(line.length).toBeLessThanOrEqual(40);
 		}
 	});
 
-	test("built-in edit diff rows keep the summary text column when a diff line wraps", () => {
+	test("built-in edit diff rows wrap at the normal content margin", () => {
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-4g",
@@ -563,12 +561,12 @@ describe("ToolExecutionComponent parity", () => {
 		const lines = stripAnsi(component.render(60).join("\n")).split("\n");
 		const summaryIndex = lines.findIndex((line) => line.includes("╰─ README.md"));
 		expect(summaryIndex).toBeGreaterThanOrEqual(0);
-		const textColumn = lines[summaryIndex].indexOf("README.md");
+		const textColumn = 1;
 		const diffRows: string[] = [];
 		for (let i = summaryIndex + 1; i < lines.length && lines[i].trim() !== ""; i++) {
 			diffRows.push(lines[i]);
 		}
-		// The single logical diff line wraps; every continuation row stays anchored at the text column.
+		// Wrapped rows retain the normal one-column content inset.
 		expect(diffRows.length).toBeGreaterThan(1);
 		for (const row of diffRows) {
 			expect(row.startsWith(" ".repeat(textColumn))).toBe(true);
@@ -577,7 +575,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(diffRows.join(" ")).toContain("tau");
 	});
 
-	test("renders exactly one ctrl+j hint before and after the result lands", async () => {
+	test("keeps file summaries free of detail hints before and after the result lands", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "edit-hint-"));
 		const filePath = join(dir, "sample.txt");
 		writeFileSync(filePath, "before\n");
@@ -595,21 +593,27 @@ describe("ToolExecutionComponent parity", () => {
 			component.render(120);
 			// The preview computes asynchronously; poll until it lands.
 			await vi.waitFor(() => {
-				expect(stripAnsi(component.render(120).join("\n"))).toContain("to expand");
+				expect(stripAnsi(component.render(120).join("\n"))).toContain("╰─ sample.txt +1 -1");
 			});
-			// Pre-result: the preview's summary line already carries the hint.
+			// The preview shows complete file counts before the result arrives.
 			const preResult = stripAnsi(component.render(120).join("\n"));
-			expect(preResult.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
-			expect(preResult.split("to expand").length - 1).toBe(1);
+			expect(preResult.split("\n").find((line) => line.includes("╰─"))).not.toContain("cycle detail");
+			expect(preResult).not.toContain("Ctrl+O");
 
-			// A successful result keeps a single hint on the summary line.
+			// A successful result keeps the same compact summary.
 			component.updateResult(
 				{ content: [], details: { diff: "-1 before\n+1 after", firstChangedLine: 1 }, isError: false },
 				false,
 			);
 			const settled = stripAnsi(component.render(120).join("\n"));
-			expect(settled.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
-			expect(settled.split("to expand").length - 1).toBe(1);
+			expect(settled.split("\n").find((line) => line.includes("╰─"))).not.toContain("cycle detail");
+			expect(settled).not.toContain("Ctrl+O");
+			expect(
+				settled
+					.split("\n")
+					.find((line) => line.includes("╰─"))
+					?.trim(),
+			).toBe("╰─ sample.txt +1 -1");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -881,7 +885,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(collapsed).not.toMatch(/1 - before/);
 		expect(collapsed).not.toMatch(/1 \+ after/);
 
-		// Tool expansion shows the full source but never the diff; that belongs to ctrl+j.
+		// The source and diff flags are independent at the component level.
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain('hidden_side_effect = "only in full source"');

@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (refinement colors have purple defaults)",
+			"description": "Theme color definitions (mdBody defaults to text; refinement colors have purple defaults)",
 			"required": [
 				"accent",
 				"border",
@@ -199,6 +199,10 @@
 				"toolOutput": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool execution box output text color"
+				},
+				"mdBody": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Markdown body text (assistant output); defaults to text"
 				},
 				"mdHeading": {
 					"$ref": "#/$defs/colorValue",

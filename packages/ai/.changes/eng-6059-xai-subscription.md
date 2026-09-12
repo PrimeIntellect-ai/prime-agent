@@ -1,0 +1,1 @@
+- Added xAI subscription device-code authentication and Responses support for all bundled Grok tool models while preserving API-key access.

@@ -99,6 +99,7 @@ type AuthSourceCandidate = {
 type AuthApiKeyResult = {
 	apiKey?: string;
 	sourceToken?: AuthSourceToken;
+	credentialType?: AuthCredential["type"];
 };
 
 export interface AuthStorageBackend {
@@ -1102,7 +1103,7 @@ export class AuthStorage {
 											storedCandidate)
 									: storedCandidate,
 							);
-				return { apiKey, sourceToken };
+				return { apiKey, sourceToken, credentialType: "api_key" };
 			}
 		}
 
@@ -1123,6 +1124,7 @@ export class AuthStorage {
 							const refreshedCandidate = this.getStoredAuthCandidate(providerId);
 							return {
 								apiKey: result.apiKey,
+								credentialType: "oauth",
 								sourceToken: refreshedCandidate
 									? this.getAuthSourceTokenForCandidate(providerId, refreshedCandidate)
 									: undefined,
@@ -1138,6 +1140,7 @@ export class AuthStorage {
 							const updatedCandidate = this.getStoredAuthCandidate(providerId);
 							return {
 								apiKey: provider.getApiKey(updatedCred),
+								credentialType: "oauth",
 								sourceToken: updatedCandidate
 									? this.getAuthSourceTokenForCandidate(providerId, updatedCandidate)
 									: undefined,
@@ -1150,6 +1153,7 @@ export class AuthStorage {
 				} else {
 					return {
 						apiKey: provider.getApiKey(cred),
+						credentialType: "oauth",
 						sourceToken: this.getAuthSourceTokenForCandidate(providerId, storedCandidate),
 					};
 				}

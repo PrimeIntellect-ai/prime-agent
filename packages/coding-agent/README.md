@@ -80,6 +80,9 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
+- xAI Grok (eligible subscriptions)
+
+Select the xAI subscription entry in `/login` to sign in. Model access depends on your xAI account entitlement. See [xAI setup](docs/providers.md#xai-grok).
 
 **API keys:**
 - Anthropic
@@ -182,9 +185,7 @@ See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json
 | Escape | Clear the input without interrupting active work |
 | Escape twice | Open `/tree` |
 | Ctrl+L | Open model selector |
-| Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
-| Ctrl+O | Collapse/expand tool output |
-| Ctrl+T | Collapse/expand thinking blocks |
+| Ctrl+O | Cycle overview → thinking and file diffs → all output |
 
 ### Message Queue
 

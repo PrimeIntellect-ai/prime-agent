@@ -6,7 +6,7 @@ import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { McpRemoveAccountResult } from "../src/core/mcp/connection-store.js";
-import type { ModelRegistry } from "../src/core/model-registry.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -394,6 +394,19 @@ describe("ProviderAuthFlows", () => {
 		expect(delegated).not.toHaveBeenCalled();
 		expect(logout).toHaveBeenCalledWith("anthropic");
 		expect(statusMessages.join("\n")).toContain("Removed stored API key for anthropic");
+	});
+
+	it("includes xAI subscription and API-key entries from the provider registry", () => {
+		const { host } = createHost(AuthStorage.inMemory());
+		const flows = new ProviderAuthFlows({
+			...host,
+			modelRegistry: ModelRegistry.inMemory(host.modelRegistry.authStorage),
+		});
+
+		expect(flows.getLoginProviderOptions().filter((provider) => provider.id === "xai")).toEqual([
+			{ id: "xai", name: "xAI (Grok)", authType: "oauth" },
+			{ id: "xai", name: "xAI (Grok)", authType: "api_key" },
+		]);
 	});
 
 	it("opens login on the requested MCP Connections category", async () => {

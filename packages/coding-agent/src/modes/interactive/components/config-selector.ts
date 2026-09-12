@@ -161,7 +161,7 @@ class ConfigSelectorHeader implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const title = theme.bold("Resource Configuration");
+		const title = "Resource Configuration";
 		const sep = theme.fg("muted", " · ");
 		const hint = rawKeyHint("space", "toggle") + sep + rawKeyHint("esc", "close");
 		const hintWidth = visibleWidth(hint);
@@ -333,7 +333,7 @@ class ResourceList implements Component, Focusable {
 
 			if (entry.type === "group") {
 				// Main group header (no cursor)
-				const groupLine = theme.fg("accent", theme.bold(entry.group.label));
+				const groupLine = theme.fg("accent", entry.group.label);
 				lines.push(truncateToWidth(`  ${groupLine}`, width, ""));
 			} else if (entry.type === "subgroup") {
 				// Subgroup header (indented, no cursor)

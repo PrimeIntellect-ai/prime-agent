@@ -1,0 +1,1 @@
+- Fixed the follow-output hint shifting horizontally while scrolling over tabs or wide characters.

@@ -1,0 +1,1 @@
+- Added xAI Grok subscription authentication through the existing `/login` menu for all bundled tool models, with auth changes applied to the current session.

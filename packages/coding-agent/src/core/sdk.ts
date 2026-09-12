@@ -284,16 +284,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
+			const auth = await modelRegistry.getApiKeyAndHeaders(model, options?.headers);
 			if (!auth.ok) {
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			return streamSimple(model, context, {
+			const requestModel = auth.requestModel ?? model;
+			return streamSimple(requestModel, context, {
 				...options,
 				apiKey: auth.apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
-				headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
+				headers: auth.headers,
 			});
 		},
 		onPayload: async (payload, _model) => {

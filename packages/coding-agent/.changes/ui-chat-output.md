@@ -1,0 +1,19 @@
+- Changed assistant message body text to a new dimmed `mdBody` theme color, easing the wall of bright default-foreground text while headings, links, and code keep their styling.
+- Changed prime-theme inline code to a darker neutral (#c8c8cd) so it stays distinct from the dimmed body text.
+- Added a three-stage Ctrl+O cycle for overview, thinking and file diffs, and all output, replacing the separate Ctrl+J and Ctrl+T conversation shortcuts without changing saved traces.
+- Changed thinking rows to stay hidden in overview and appear as dim text without a repeated heading in the other detail modes, including newly streamed thinking.
+- Changed collapsed tool-call previews to render plain and dim instead of green or syntax-highlighted code, with dim line counts and durations, while expanded blocks keep full highlighting.
+- Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
+- Changed the conversation row hierarchy: event-row trailing detail (agent-message participants, tool command previews, line counts, durations) renders dim while leading labels keep their colors.
+- Changed background shell completions to update identifiable command rows, with compact fallback notices and full notifications shown once at their original conversation position in all output.
+- Replaced repeated conversation detail shortcut hints with a status label showing the current detail mode and configurable expand or collapse shortcut.
+- Changed expanded file diffs to start at the normal chat inset while preserving code indentation and diff gutters.
+- Changed sent and received agent messages to keep compact notices in overview and details, show full bodies only in all output, and use the shared detail cycle instead of a separate Ctrl+P toggle.
+- Fixed spacing after background shell completions and matched unique literal assignment-only shell launches to their completion notices.
+- Fixed multiline Python string colors across source lines and narrow wrapping, kept embedded string content out of collapsed code previews, and preserved statements after closing quotes.
+- Changed expanded Python cells to nest input directly under the summary, align marked output beneath it, and separate full tool and message blocks.
+- Fixed unwanted gaps between compact tool and agent-message rows when empty assistant messages or hidden thinking appear between them.
+- Fixed missing separation between refinement notices and subsequent collapsed background shell completions.
+- Fixed custom themes without `mdBody`, large expanded agent messages, and slow or unmatched shell completions caused by malformed launch arguments or blank lines.
+- Removed obsolete thinking-visibility settings and unused transcript heading and hint state.
+- Fixed indefinitely animated shell rows after ambiguous completion notifications while keeping unmatched results at their original timeline position.

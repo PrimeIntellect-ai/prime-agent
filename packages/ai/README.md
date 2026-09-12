@@ -75,7 +75,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Cerebras**
 - **Cloudflare AI Gateway**
 - **Cloudflare Workers AI**
-- **xAI**
+- **xAI** (API key or Grok/X subscription)
 - **OpenRouter**
 - **Vercel AI Gateway**
 - **MiniMax**
@@ -1096,13 +1096,22 @@ const key = getEnvApiKey('openai');  // checks OPENAI_API_KEY
 
 ## OAuth Providers
 
-Several providers require OAuth authentication instead of static API keys:
+OAuth authentication is available for these providers and subscriptions:
 
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
+- **xAI** (Grok/X subscription, device-code login)
 
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
+
+### xAI subscription
+
+In Prime Agent, run `/login` and select the **xAI subscription** entry. Open the displayed HTTPS URL and enter the device code. `XAI_API_KEY` and API-key login remain supported. Stored subscription credentials take priority over `XAI_API_KEY`; an explicit `--api-key` override uses API-key routing.
+
+All bundled xAI tool-capable language models can use subscription authentication through the Responses API. Each model keeps its own reasoning and input capabilities; only verified reasoning-effort controls are sent. Account eligibility, available models, and usage limits are controlled by xAI; signing in does not guarantee access or unlimited usage.
+
+SDK callers can use `loginXai(callbacks)` and `getOAuthApiKey("xai", credentials)` from `prime-agent-ai/oauth`. Persist refreshed credentials securely. When the effective credential is an xAI subscription, pass `getXaiSubscriptionModel(getModel("xai", "grok-4.5"))` to `stream` or `complete` with the resolved access token. The helper accepts configured xAI model descriptors and returns `undefined` for other providers. Do not apply this projection to API keys: the generated API-key models remain unchanged. Subscription requests use `https://api.x.ai/v1`.
 
 ### Vertex AI
 
