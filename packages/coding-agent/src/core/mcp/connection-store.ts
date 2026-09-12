@@ -32,6 +32,8 @@ export interface McpConnectionRecord {
 	toolCount?: number;
 	/** Fixed, safe failure category (never URLs or server-controlled text). */
 	lastError?: string;
+	/** Opaque one-time ownership nonce for a pending reservation/login attempt. */
+	attemptId?: string;
 }
 
 interface McpConnectionsFile {
@@ -57,9 +59,22 @@ type PendingOp =
 	| {
 			kind: "removeReservation";
 			connectionId: string;
-			/** Ownership marker: only OUR pending reservation is removed. */
-			createdAt: number;
+			/** Opaque ownership nonce: only OUR pending reservation is removed. */
+			attemptId: string;
 			resolve: (removed: boolean) => void;
+	  }
+	| {
+			kind: "finalizeAttempt";
+			connectionId: string;
+			/** Opaque ownership nonce: the credential commit lands only for ours. */
+			attemptId: string;
+			/**
+			 * Runs under the file lock ONLY when ownership holds; returns the
+			 * committed record. Caller-side effects (credential moves) belong here
+			 * so they share the store's lock ordering with cancel/remove.
+			 */
+			commit: (record: McpConnectionRecord) => McpConnectionRecord;
+			resolve: (committed: boolean) => void;
 	  };
 
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -91,6 +106,8 @@ function sanitizeRecord(raw: unknown, connectionId: string): McpConnectionRecord
 	if (typeof value.toolCount === "number") record.toolCount = value.toolCount;
 	const lastError = string(value.lastError);
 	if (lastError) record.lastError = lastError.slice(0, MAX_LAST_ERROR_LENGTH);
+	const attemptId = string(value.attemptId);
+	if (attemptId) record.attemptId = attemptId.slice(0, 100);
 	return record;
 }
 
@@ -168,9 +185,11 @@ export class McpConnectionStore {
 	/**
 	 * Atomically reserve a NEW connection id across processes, under the store's
 	 * file lock, as a durable pending record written before any login starts.
-	 * Resolves false when the id already exists on disk (or the write failed);
-	 * callers then try the next candidate id. The pending marker makes the id
-	 * visible to every other process's allocations and to reconnect flows.
+	 * The record must carry a fresh opaque attemptId nonce (the ownership token
+	 * for cancel and finalize). Resolves true only after the record write
+	 * COMMITS; false when the id already exists on disk or the write failed —
+	 * no ghost reservation is queued. The pending marker makes the id visible
+	 * to every other process's allocations and to reconnect flows.
 	 */
 	reserveConnectionId(record: McpConnectionRecord): Promise<boolean> {
 		return new Promise<boolean>((resolve) => {
@@ -187,10 +206,10 @@ export class McpConnectionStore {
 
 	/**
 	 * Remove OUR pending reservation after a cancelled or failed login. Ownership
-	 * is validated under the lock (same id, still pending, same createdAt), so a
+	 * is the opaque attempt nonce (same id, still pending, same attempt), so a
 	 * late callback can never remove — or resurrect — another account's record.
 	 */
-	removeReservation(connectionId: string, createdAt: number): Promise<boolean> {
+	removeReservation(connectionId: string, attemptId: string): Promise<boolean> {
 		return new Promise<boolean>((resolve) => {
 			let settled = false;
 			const settle = (removed: boolean): void => {
@@ -198,7 +217,39 @@ export class McpConnectionStore {
 				settled = true;
 				resolve(removed);
 			};
-			this.pendingOps.push({ kind: "removeReservation", connectionId, createdAt, resolve: settle });
+			this.pendingOps.push({ kind: "removeReservation", connectionId, attemptId, resolve: settle });
+			void this.flush().catch(() => settle(false));
+		});
+	}
+
+	/**
+	 * Guarded credential commit for a successful login attempt. `commit` runs
+	 * under the store's file lock ONLY when the reservation is still ours
+	 * (same id, still pending, same attempt nonce) — the caller moves staged
+	 * credentials there, sharing this lock's ordering with cancel/remove.
+	 * Resolves true only after the record write commits; false when ownership
+	 * was lost or the write failed, in which case the staged credential stays
+	 * under the attempt key for the caller to discard.
+	 */
+	finalizeAttempt(options: {
+		connectionId: string;
+		attemptId: string;
+		commit: (record: McpConnectionRecord) => McpConnectionRecord;
+	}): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const settle = (committed: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(committed);
+			};
+			this.pendingOps.push({
+				kind: "finalizeAttempt",
+				connectionId: options.connectionId,
+				attemptId: options.attemptId,
+				commit: options.commit,
+				resolve: settle,
+			});
 			void this.flush().catch(() => settle(false));
 		});
 	}
@@ -256,6 +307,15 @@ export class McpConnectionStore {
 				// Splice only after acquiring the lock: operations queued while we
 				// waited belong to this flush, not the previous one.
 				const operations = this.pendingOps.splice(0);
+				// One-shot attempt operations (reserve/remove/finalize) resolve
+				// only AFTER the atomic write commits: a failed write means no
+				// durable reservation/removal/finalize happened, so the caller
+				// must NOT start a login on a ghost. Losing branches (id taken,
+				// not our reservation) resolve false immediately — nothing of
+				// theirs was applied. One-shot ops never requeue: retrying an
+				// interactive intent after a failed write would be a surprise.
+				const deferred: Array<(committed: boolean) => void> = [];
+				const oneShot = new Set<PendingOp>();
 				try {
 					for (const operation of operations) {
 						if (operation.kind === "remove") {
@@ -263,22 +323,44 @@ export class McpConnectionStore {
 						} else if (operation.kind === "upsert") {
 							this.applyUpsert(records, operation.record);
 						} else if (operation.kind === "reserve") {
+							oneShot.add(operation);
 							// Atomic under the file lock: exactly one cross-process
 							// contender wins the id; the loser allocates another.
 							if (records.has(operation.record.connectionId)) {
 								operation.resolve(false);
 							} else {
 								this.applyUpsert(records, operation.record);
-								operation.resolve(true);
+								deferred.push((didCommit) => didCommit && operation.resolve(true));
 							}
 						} else if (operation.kind === "removeReservation") {
+							oneShot.add(operation);
 							const existing = records.get(operation.connectionId);
-							if (existing?.status === "pending" && existing.createdAt === operation.createdAt) {
+							if (
+								existing?.status === "pending" &&
+								existing.attemptId !== undefined &&
+								existing.attemptId === operation.attemptId
+							) {
 								records.delete(operation.connectionId);
-								operation.resolve(true);
+								deferred.push((didCommit) => didCommit && operation.resolve(true));
 							} else {
 								// Not ours (completed, replaced, or gone): a late
 								// callback never removes another account's record.
+								operation.resolve(false);
+							}
+						} else if (operation.kind === "finalizeAttempt") {
+							oneShot.add(operation);
+							const existing = records.get(operation.connectionId);
+							if (
+								existing?.status === "pending" &&
+								existing.attemptId !== undefined &&
+								existing.attemptId === operation.attemptId
+							) {
+								this.applyUpsert(records, operation.commit(existing));
+								deferred.push((didCommit) => didCommit && operation.resolve(true));
+							} else {
+								// Ownership lost (removed, replaced by another
+								// attempt, or completed elsewhere): the credential
+								// commit must NOT land on this account.
 								operation.resolve(false);
 							}
 						} else if (operation.isStillCurrent()) {
@@ -292,12 +374,16 @@ export class McpConnectionStore {
 						throw lockCompromisedError ?? new Error("MCP connection store lock was compromised");
 					this.recordsById = records;
 					committed = true;
+					for (const settle of deferred) settle(true);
 				} finally {
-					// The write failed (or the lock was compromised): put the batch
-					// back at the FRONT, ahead of anything queued meanwhile.
-					// Operations are idempotent and verify guards re-evaluate under
-					// the lock, so the next flush retries cleanly and drops nothing.
-					if (!committed) this.pendingOps.unshift(...operations);
+					if (!committed) {
+						// The write failed (or the lock was compromised): durable
+						// records put the batch back at the FRONT — idempotent ops
+						// retry cleanly — but one-shot attempt ops resolve false and
+						// are dropped: no ghost reservation, no surprise finalize.
+						this.pendingOps.unshift(...operations.filter((operation) => !oneShot.has(operation)));
+						for (const settle of deferred) settle(false);
+					}
 				}
 			} finally {
 				if (lockCompromised) await release().catch(() => undefined);

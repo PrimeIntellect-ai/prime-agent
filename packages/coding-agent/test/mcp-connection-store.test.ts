@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -304,14 +305,16 @@ describe("McpConnectionStore multi-process first create", () => {
 });
 
 describe("ENG-6108 durable account reservations", () => {
-	const record = (connectionId: string, createdAt: number) => ({
+	const nonce = (): string => `attempt-${randomUUID()}`;
+	const record = (connectionId: string, at: number, attemptId: string) => ({
 		connectionId,
 		serviceId: "acme",
 		endpoint: "https://mcp.acme.test/mcp",
 		label: `Acme (${connectionId})`,
 		status: "pending" as const,
-		createdAt,
-		updatedAt: createdAt,
+		createdAt: at,
+		updatedAt: at,
+		attemptId,
 	});
 
 	it("two clients reserving the same id concurrently: exactly one wins, the loser sees the durable marker", async () => {
@@ -322,8 +325,8 @@ describe("ENG-6108 durable account reservations", () => {
 		const at = Date.now();
 		// Barrier: both clients enqueue the reservation before either flush lands.
 		const [a, b] = await Promise.all([
-			clientA.reserveConnectionId(record("acme-2", at)),
-			clientB.reserveConnectionId(record("acme-2", at)),
+			clientA.reserveConnectionId(record("acme-2", at, nonce())),
+			clientB.reserveConnectionId(record("acme-2", at, nonce())),
 		]);
 		// Exactly one winner; the durable pending marker blocks the loser.
 		expect(a || b).toBe(true);
@@ -334,35 +337,81 @@ describe("ENG-6108 durable account reservations", () => {
 		// The loser re-reads and allocates the NEXT id atomically.
 		const loser = a ? clientB : clientA;
 		loser.load();
-		const next = await loser.reserveConnectionId(record("acme-3", at + 1));
+		const nextAttempt = nonce();
+		const next = await loser.reserveConnectionId(record("acme-3", at + 1, nextAttempt));
 		expect(next).toBe(true);
 		expect(loser.get("acme-3")?.status).toBe("pending");
+		// Finalize moves the pending reservation to the committed account state
+		// under the lock, only for the owning attempt.
+		expect(
+			await loser.finalizeAttempt({
+				connectionId: "acme-3",
+				attemptId: nextAttempt,
+				commit: (current) => current,
+			}),
+		).toBe(true);
+		// A different attempt id cannot finalize someone else's reservation.
+		const otherAttempt = nonce();
+		expect(await loser.reserveConnectionId(record("acme-5", at + 2, otherAttempt))).toBe(true);
+		expect(
+			await loser.finalizeAttempt({
+				connectionId: "acme-5",
+				attemptId: "not-the-owner",
+				commit: (current) => current,
+			}),
+		).toBe(false);
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
-	it("removeReservation is ownership-validated: only OUR pending marker disappears", async () => {
+	it("a failed record write resolves the reservation FALSE: no durable marker, no ghost retry, no login may start", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "reserve-write-fail-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		const mine = nonce();
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("simulated reservation write failure");
+		});
+		// Commit-gated resolution: the caller learns the reservation did NOT land.
+		await expect(client.reserveConnectionId(record("acme-2", at, mine))).resolves.toBe(false);
+		// Nothing durable: a fresh reader sees no marker, and the failed one-shot
+		// op was dropped (never requeued for a surprise later commit).
+		const fresh = McpConnectionStore.open(path);
+		expect(fresh.get("acme-2")).toBeUndefined();
+		// The next attempt on the same id works normally.
+		const retryNonce = nonce();
+		await expect(client.reserveConnectionId(record("acme-2", at, retryNonce))).resolves.toBe(true);
+		expect(McpConnectionStore.open(path).get("acme-2")?.attemptId).toBe(retryNonce);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("removeReservation is ownership-validated by the attempt nonce: only OUR pending marker disappears", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "reserve-cancel-"));
 		const path = join(tempDir, "mcp-connections.json");
 		const client = McpConnectionStore.open(path);
 		const at = Date.now();
-		expect(await client.reserveConnectionId(record("acme-2", at))).toBe(true);
+		const mine = nonce();
+		expect(await client.reserveConnectionId(record("acme-2", at, mine))).toBe(true);
 
-		// A different owner (wrong createdAt) cannot remove it.
-		expect(await client.removeReservation("acme-2", at + 999)).toBe(false);
+		// A different owner (wrong nonce) cannot remove it.
+		expect(await client.removeReservation("acme-2", nonce())).toBe(false);
 		expect(client.get("acme-2")).toBeDefined();
 
-		// A completed account is not a reservation anymore.
-		client.upsert({
-			...record("acme-2", at),
-			status: "connected",
-		});
-		await client.flush();
-		expect(await client.removeReservation("acme-2", at)).toBe(false);
+		// A completed account is not a reservation anymore: finalize first.
+		expect(
+			await client.finalizeAttempt({
+				connectionId: "acme-2",
+				attemptId: mine,
+				commit: (current) => ({ ...current, status: "connected" as const }),
+			}),
+		).toBe(true);
+		expect(await client.removeReservation("acme-2", mine)).toBe(false);
 		expect(client.get("acme-2")?.status).toBe("connected");
 
 		// The true owner cancels a still-pending reservation.
-		expect(await client.reserveConnectionId(record("acme-4", at))).toBe(true);
-		expect(await client.removeReservation("acme-4", at)).toBe(true);
+		const cancelMine = nonce();
+		expect(await client.reserveConnectionId(record("acme-4", at, cancelMine))).toBe(true);
+		expect(await client.removeReservation("acme-4", cancelMine)).toBe(true);
 		expect(client.get("acme-4")).toBeUndefined();
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});

@@ -33,6 +33,8 @@ export interface McpPluginView {
 	connectionIds: string[];
 	/** View-only marker: this row removes the account instead of connecting. */
 	removeAction?: boolean;
+	/** Catalog metadata aliases (searchable; never runtime claims). */
+	aliases?: string[];
 	description?: string;
 	category?: string;
 	publisher?: string;
@@ -207,7 +209,9 @@ export function resolveMcpServiceCatalog(options: {
 			setup: { status: "ready" },
 			metadataReviewed: false,
 			legacyBuiltin: false,
-			localSource: true,
+			// Pinned-from-record is its OWN trust state: the source vanished, so
+			// the pin reuses user-placed trust semantics for NOTHING — it keeps
+			// the installed connection manageable but never one-click connectable.
 			pinnedFromRecord: true,
 		});
 	}
@@ -401,7 +405,10 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 			Boolean(http) &&
 			service.setup.status === "ready" &&
 			usesOAuth &&
-			(service.metadataReviewed || service.localSource === true),
+			(service.metadataReviewed || service.localSource === true) &&
+			// A pinned (vanished-source) service has no reviewed OAuth metadata
+			// to connect through — its accounts manage in place, never re-login.
+			service.pinnedFromRecord !== true,
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		connectionIds: [],
@@ -411,7 +418,81 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 		...(service.docsUrl ? { docsUrl: service.docsUrl } : {}),
 		...(setupHint ? { setupHint } : {}),
 		...(service.metadataReviewed ? {} : { unverified: true }),
+		...(service.aliases.length > 0 ? { aliases: service.aliases } : {}),
 	};
+}
+
+/**
+ * One account's honestly-computed state: the credential binding (present,
+ * bound to this endpoint, not expired) and the connection record are combined
+ * through httpConnectionStatus, so expiry, retargeting, and missing grants
+ * surface as reconnect-required regardless of what the record last said.
+ * The SAME computation backs the plugin aggregate, the connection inventory,
+ * and the account picker — one truth, no stale record.status reads.
+ */
+export interface McpAccountState {
+	connectionId: string;
+	status: "connected" | "pending" | "error" | "not_connected" | "disabled" | "setup_required";
+	setupHint?: string;
+	toolCount?: number;
+	verifiedAt?: number;
+	lastError?: string;
+}
+
+export function accountStateFor(options: {
+	connectionId: string;
+	endpoint: string;
+	authStorage: AuthStorage;
+	connectionStore: McpConnectionStore;
+	usesOAuth?: boolean;
+}): McpAccountState {
+	const state = httpConnectionStatus({
+		connectionId: options.connectionId,
+		endpoint: options.endpoint,
+		authStorage: options.authStorage,
+		connectionStore: options.connectionStore,
+		usesOAuth: options.usesOAuth ?? true,
+	});
+	return {
+		connectionId: options.connectionId,
+		status: state.status,
+		...(state.setupHint ? { setupHint: state.setupHint } : {}),
+		...(state.record?.toolCount !== undefined ? { toolCount: state.record.toolCount } : {}),
+		...(state.record?.verifiedAt ? { verifiedAt: state.record.verifiedAt } : {}),
+		...(state.record?.lastError ? { lastError: state.record.lastError } : {}),
+	};
+}
+
+/** Every account of a service (primary first), each with its computed state. */
+export function accountStatesFor(options: {
+	service: Pick<McpServiceDescriptor, "serviceId" | "transport">;
+	authStorage: AuthStorage;
+	connectionStore: McpConnectionStore;
+}): McpAccountState[] {
+	const url = options.service.transport.type === "http" ? options.service.transport.url : undefined;
+	if (!url) return [];
+	const accounts: McpAccountState[] = [
+		accountStateFor({
+			connectionId: options.service.serviceId,
+			endpoint: url,
+			authStorage: options.authStorage,
+			connectionStore: options.connectionStore,
+		}),
+	];
+	for (const record of options.connectionStore.records()) {
+		if (record.serviceId !== options.service.serviceId || record.connectionId === options.service.serviceId) {
+			continue;
+		}
+		accounts.push(
+			accountStateFor({
+				connectionId: record.connectionId,
+				endpoint: url,
+				authStorage: options.authStorage,
+				connectionStore: options.connectionStore,
+			}),
+		);
+	}
+	return accounts.filter((account) => account.status !== "not_connected");
 }
 
 function catalogServiceView(
@@ -422,47 +503,18 @@ function catalogServiceView(
 	if (service.transport.type !== "http" || !service.transport.url) {
 		return catalogServiceNotConnectedView(service);
 	}
-	const url = service.transport.url;
-	const usesOAuth = service.authStrategy === "oauth" || service.authStrategy === "unknown";
-	const primary = httpConnectionStatus({
-		connectionId: service.serviceId,
-		endpoint: url,
-		authStorage,
-		connectionStore,
-		usesOAuth,
-	});
-	if (primary.status === "not_connected" && service.authStrategy === "none") {
-		return catalogServiceNotConnectedView(service);
-	}
-	// Per-account aggregation: every record of this service is one account, and
-	// the primary credential counts as the first account. Each account's status
-	// reflects its OWN bound credential; accounts without a usable bound grant
-	// are Reconnect-required, never silently dropped.
-	type AccountState = { connectionId: string; status: string; record?: McpConnectionRecord };
-	const accounts: AccountState[] = [];
-	if (primary.status !== "not_connected" && primary.status !== "setup_required") {
-		accounts.push({
-			connectionId: service.serviceId,
-			status: primary.status,
-			...(primary.record ? { record: primary.record } : {}),
-		});
-	}
-	for (const record of connectionStore.records()) {
-		if (record.serviceId !== service.serviceId || record.connectionId === service.serviceId) continue;
-		const credential = authStorage.get(mcpCredentialKey(record.connectionId));
-		const bound =
-			credential?.type === "oauth" && typeof credential.endpoint === "string" && credential.endpoint === url;
-		if (bound) {
-			accounts.push({ connectionId: record.connectionId, status: record.status, record });
-		} else {
-			accounts.push({
-				connectionId: record.connectionId,
-				status: "error",
-				record: { ...record, status: "error", lastError: MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL },
-			});
-		}
-	}
+	const accounts = accountStatesFor({ service, authStorage, connectionStore });
 	if (accounts.length === 0) {
+		const primary = httpConnectionStatus({
+			connectionId: service.serviceId,
+			endpoint: service.transport.url,
+			authStorage,
+			connectionStore,
+			usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+		});
+		if (primary.status === "not_connected" && service.authStrategy === "none") {
+			return catalogServiceNotConnectedView(service);
+		}
 		const view = catalogServiceNotConnectedView(service);
 		// setup.required entries keep their reason; a status-computed hint (binding
 		// or expiry problems) wins; otherwise the candidate/transport hints stay.
@@ -478,12 +530,9 @@ function catalogServiceView(
 	const anyPending = accounts.some((account) => account.status === "pending");
 	const aggregate = anyConnected ? "connected" : anyPending ? "pending" : "error";
 	const newestConnected = accounts
-		.filter((account) => account.status === "connected" && account.record !== undefined)
-		.sort((left, right) => (right.record?.verifiedAt ?? 0) - (left.record?.verifiedAt ?? 0))[0];
-	const errorHint =
-		aggregate === "error"
-			? (accounts.find((account) => account.record?.lastError)?.record?.lastError ?? primary.setupHint)
-			: primary.setupHint;
+		.filter((account) => account.status === "connected")
+		.sort((left, right) => (right.verifiedAt ?? 0) - (left.verifiedAt ?? 0))[0];
+	const errorHint = accounts.find((account) => account.status === "error")?.setupHint;
 	const setupHint = service.pinnedFromRecord
 		? "This service's catalog source is unavailable; its connection keeps the pinned definition."
 		: errorHint;
@@ -494,7 +543,7 @@ function catalogServiceView(
 		// Error rows keep the Reconnect action; connected/pending rows manage
 		// their accounts through the picker instead of re-logging in.
 		connectable: aggregate === "error",
-		usesOAuth,
+		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		// Every account id, so the account picker can manage each one.
 		connectionIds: accounts.map((account) => account.connectionId),
@@ -504,8 +553,9 @@ function catalogServiceView(
 		...(service.docsUrl ? { docsUrl: service.docsUrl } : {}),
 		...(setupHint ? { setupHint } : {}),
 		...(service.metadataReviewed ? {} : { unverified: true }),
-		...(newestConnected?.record?.verifiedAt ? { verifiedAt: newestConnected.record.verifiedAt } : {}),
-		...(newestConnected?.record?.toolCount !== undefined ? { toolCount: newestConnected.record.toolCount } : {}),
+		...(newestConnected?.verifiedAt ? { verifiedAt: newestConnected.verifiedAt } : {}),
+		...(newestConnected?.toolCount !== undefined ? { toolCount: newestConnected.toolCount } : {}),
+		...(service.aliases.length > 0 ? { aliases: service.aliases } : {}),
 	};
 }
 
@@ -599,42 +649,26 @@ export function buildConnectionViews(
 		if (reservedIds.has(service.serviceId) && userServers?.[service.serviceId] !== undefined) continue;
 		const plugin = catalogServiceView(service, authStorage, connectionStore);
 		if (plugin.connectionIds.length === 0) continue;
-		// The primary row exists only when the primary id is an account (its
-		// credential or record exists); a disconnected default never emits a
-		// phantom inventory entry.
-		if (plugin.connectionIds.includes(service.serviceId)) {
-			const primaryRecord = connectionStore.get(service.serviceId);
-			connected.add(service.serviceId);
+		// One inventory row per account, each with the SAME centralized,
+		// honestly-computed status (credential binding + expiry + record) —
+		// never a raw record.status that could claim a stale Connected.
+		for (const account of accountStatesFor({ service, authStorage, connectionStore })) {
+			connected.add(account.connectionId);
 			views.push({
-				connectionId: service.serviceId,
+				connectionId: account.connectionId,
 				serviceId: service.serviceId,
-				label: service.label,
-				status: primaryRecord?.status ?? "pending",
+				label:
+					account.connectionId === service.serviceId
+						? service.label
+						: `${service.label} (${account.connectionId})`,
+				status:
+					account.status === "not_connected" || account.status === "setup_required"
+						? "not_connected"
+						: account.status,
 				usesOAuth: plugin.usesOAuth,
 				transport: "http",
 				source: "catalog",
-				...(primaryRecord?.lastError ? { setupHint: primaryRecord.lastError } : {}),
-			});
-		}
-		// Every additional account of the service is its own connection entry,
-		// with its own status — the inventory never hides alias accounts.
-		for (const record of connectionStore.records()) {
-			if (record.serviceId !== service.serviceId || record.connectionId === service.serviceId) continue;
-			const credential = authStorage.get(mcpCredentialKey(record.connectionId));
-			const bound =
-				credential?.type === "oauth" &&
-				typeof credential.endpoint === "string" &&
-				credential.endpoint === (service.transport.type === "http" ? service.transport.url : "");
-			connected.add(record.connectionId);
-			views.push({
-				connectionId: record.connectionId,
-				serviceId: record.serviceId,
-				label: `${service.label} (${record.connectionId})`,
-				status: bound ? record.status : "error",
-				usesOAuth: true,
-				transport: "http",
-				source: "catalog",
-				...(bound ? {} : { setupHint: MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL }),
+				...(account.setupHint ? { setupHint: account.setupHint } : {}),
 			});
 		}
 	}
@@ -679,8 +713,9 @@ export function searchPluginViews(views: readonly McpPluginView[], query: string
 			[
 				view.serviceId,
 				view.label,
-				// Account ids are searchable too — the kernel's search_plugins
-				// documents aliases as part of the match surface.
+				// Catalog metadata aliases and account ids are searchable — the
+				// kernel's search_plugins documents both as match surface.
+				...(view.aliases ?? []),
 				...view.connectionIds,
 				...(view.description ? [view.description] : []),
 				view.category,

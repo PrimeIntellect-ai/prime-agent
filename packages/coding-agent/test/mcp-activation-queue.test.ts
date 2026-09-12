@@ -203,6 +203,118 @@ describe("ENG-6108 /plugins stdio server management", () => {
 	});
 });
 
+describe("ENG-6108 guarded credential commit", () => {
+	function fakeWithStore() {
+		const store = McpConnectionStore.open(join(tmpdir(), `guarded-${Date.now()}/mcp-connections.json`));
+		const authStorage = AuthStorage.inMemory();
+		const showStatus = vi.fn();
+		const fake = {
+			mcpConnectionStore: store,
+			modelRegistry: { authStorage },
+			ui: { requestRender: vi.fn() },
+			showStatus,
+			showWarning: vi.fn(),
+			handleReloadCommand: vi.fn(async () => true),
+			uiServices: { settingsManager: { getGlobalMcpServers: () => undefined } },
+		} as unknown as Record<string, unknown>;
+		Object.setPrototypeOf(fake, InteractiveMode.prototype);
+		return { fake, store, authStorage, showStatus };
+	}
+
+	const callAddAccount = (fake: Record<string, unknown>) =>
+		(
+			fake as unknown as {
+				connectServiceFromPicker: (this: unknown, ...args: unknown[]) => Promise<void>;
+			}
+		).connectServiceFromPicker.call(
+			fake,
+			{
+				serviceId: "acme",
+				label: "Add another account",
+				connectionStatus: "not_connected",
+				connectionIds: [],
+				connectable: true,
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{ catalogServiceId: "acme", addAccount: true, knownIds: new Set(["acme"]) },
+		);
+
+	/** A login that writes the STAGED credential and runs `midFlight` first. */
+	function stagedLogin(authStorage: AuthStorage, midFlight?: (stagedServerId: string) => void) {
+		return vi.fn(async (serverId: string) => {
+			midFlight?.(serverId);
+			authStorage.set(`mcp:${serverId}`, {
+				type: "oauth",
+				access: `staged-for-${serverId}`,
+				refresh: "r",
+				expires: Date.now() + 3600_000,
+				endpoint: "https://mcp.acme.test/mcp",
+			});
+			return { status: "success" } as const;
+		});
+	}
+
+	test("late login SUCCESS after the reservation was removed: the credential never lands and the account stays gone", async () => {
+		const { fake, store, authStorage, showStatus } = fakeWithStore();
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: stagedLogin(authStorage, (stagedServerId) => {
+				// Another client removes OUR pending reservation mid-login.
+				const nonce = stagedServerId.split("--")[1];
+				void store.removeReservation("acme-2", nonce);
+			}),
+		});
+		await callAddAccount(fake);
+		// The real account key NEVER received the late credential.
+		expect(authStorage.get("mcp:acme-2")).toBeUndefined();
+		// No staged leftovers and no resurrected record.
+		expect(store.get("acme-2")).toBeUndefined();
+		const stagedLeftovers = authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"));
+		expect(stagedLeftovers).toEqual([]);
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
+	});
+
+	test("same id, new owner: a replaced reservation is finalized by ITS attempt only; the stale attempt's credential is discarded", async () => {
+		const { fake, store, authStorage, showStatus } = fakeWithStore();
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: stagedLogin(authStorage, (stagedServerId) => {
+				// The first attempt is cancelled; a second client wins the same id
+				// with its own nonce and stores its own credential.
+				const nonce = stagedServerId.split("--")[1];
+				void store.removeReservation("acme-2", nonce);
+				const now = Date.now();
+				authStorage.set("mcp:acme-2", {
+					type: "oauth",
+					access: "second-owner-credential",
+					refresh: "r",
+					expires: Date.now() + 3600_000,
+					endpoint: "https://mcp.acme.test/mcp",
+				});
+				store.upsert({
+					connectionId: "acme-2",
+					serviceId: "acme",
+					endpoint: "https://mcp.acme.test/mcp",
+					label: "Acme (acme-2)",
+					status: "pending",
+					createdAt: now,
+					updatedAt: now,
+					attemptId: `second-owner-${now}`,
+				});
+				void store.flush();
+			}),
+		});
+		await callAddAccount(fake);
+		// The new owner's credential is intact; the stale attempt's staged
+		// credential was discarded, never overwriting the account.
+		expect(authStorage.get("mcp:acme-2")).toMatchObject({
+			access: "second-owner-credential",
+		});
+		expect(store.get("acme-2")).toBeDefined();
+		const stagedLeftovers = authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"));
+		expect(stagedLeftovers).toEqual([]);
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
+	});
+});
+
 describe("ENG-6108 /plugins account state actions", () => {
 	function fakeFor(options: {
 		authStorage?: AuthStorage;
@@ -384,7 +496,7 @@ describe("ENG-6108 /plugins add-account flow", () => {
 			createdAt: now,
 			updatedAt: now,
 		});
-		const runMcpLogin = vi.fn(async () => ({ status: "success" }) as const);
+		const runMcpLogin = vi.fn(async (_serverId: string, _label?: string) => ({ status: "success" }) as const);
 		const showStatus = vi.fn();
 		const fake = {
 			mcpConnectionStore: store,
@@ -407,8 +519,14 @@ describe("ENG-6108 /plugins add-account flow", () => {
 			{ catalogServiceId: "acme", addAccount: true },
 		);
 
-		// The second account got its OWN id, provider, and login target.
-		expect(runMcpLogin).toHaveBeenCalledWith("acme-2", "Acme (acme-2)");
+		// The second account got its OWN id: the login targets the per-attempt
+		// STAGED id (<id>--<nonce>); the credential moves to mcp:acme-2 only
+		// through the guarded finalize.
+		const loginCall = runMcpLogin.mock.calls[0];
+		expect(loginCall?.[1]).toBe("Acme (acme-2)");
+		expect(String(loginCall?.[0])).toMatch(/^acme-2--[0-9a-f-]{36}$/);
+		// After the guarded finalize the staged registration is gone; the REAL
+		// account provider is registered for the id.
 		expect(getOAuthProvider("mcp:acme-2")).toBeDefined();
 		const record = store.get("acme-2");
 		expect(record?.connectionId).toBe("acme-2");

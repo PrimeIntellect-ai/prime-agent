@@ -101,6 +101,7 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.j
 import { type McpConnectionRecord, McpConnectionStore } from "../../core/mcp/connection-store.js";
 import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
+	accountStateFor,
 	buildPluginViews,
 	type McpPluginView,
 	type McpServiceDescriptor,
@@ -8967,14 +8968,20 @@ export class InteractiveMode {
 		target: { url?: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean } | undefined,
 		options: { knownIds: Set<string> },
 	): Promise<void> {
-		const store = this.getMcpConnectionStore();
 		const catalogServiceId = service.serviceId;
 		const accountCards: McpPluginView[] = [];
 		for (const connectionId of service.connectionIds) {
-			const record = store.get(connectionId);
-			// An account whose record vanished (error state before any record
-			// write) still gets a manageable card synthesized from the parent view.
-			const status = record?.status ?? service.connectionStatus;
+			// Centralized per-account state: credential binding, expiry, and the
+			// record combine through the SAME computation as the plugin aggregate
+			// and the inventory — the picker never trusts a raw record.status.
+			const state = accountStateFor({
+				connectionId,
+				endpoint: target?.url ?? "",
+				authStorage: this.modelRegistry.authStorage,
+				connectionStore: this.getMcpConnectionStore(),
+				usesOAuth: service.usesOAuth,
+			});
+			const status = state.status === "not_connected" ? service.connectionStatus : state.status;
 			accountCards.push({
 				...service,
 				serviceId: connectionId,
@@ -8982,7 +8989,8 @@ export class InteractiveMode {
 				connectionIds: [connectionId],
 				connectionStatus: status,
 				connectable: status === "error",
-				...(record?.toolCount !== undefined ? { toolCount: record.toolCount } : {}),
+				...(state.setupHint ? { setupHint: state.setupHint } : {}),
+				...(state.toolCount !== undefined ? { toolCount: state.toolCount } : {}),
 			});
 			// Explicit per-account remove action, state-independent.
 			accountCards.push({
@@ -9142,7 +9150,8 @@ export class InteractiveMode {
 		// visible to every other client's allocations), never a configured
 		// user/catalog id, and cleaned up with ownership validation on cancel.
 		let connectionId = service.serviceId;
-		let reservationCreatedAt: number | undefined;
+		let attemptId: string | undefined;
+		let stagedServerId: string | undefined;
 		if (options.addAccount === true) {
 			const store = this.getMcpConnectionStore();
 			const taken = (id: string): boolean =>
@@ -9154,6 +9163,9 @@ export class InteractiveMode {
 			for (let attempt = 0; attempt < 20; attempt++) {
 				const candidate = nextMcpConnectionId(service.serviceId, (id) => taken(id) || usedIds.has(id));
 				const now = Date.now();
+				const nonce = randomUUID();
+				// Durable, commit-gated reservation: the pending marker (with the
+				// opaque attempt nonce) only counts once the record write commits.
 				const won = await store.reserveConnectionId({
 					connectionId: candidate,
 					serviceId: options.catalogServiceId ?? service.serviceId,
@@ -9162,18 +9174,75 @@ export class InteractiveMode {
 					status: "pending",
 					createdAt: now,
 					updatedAt: now,
+					attemptId: nonce,
 				});
 				if (won) {
 					connectionId = candidate;
-					reservationCreatedAt = now;
+					attemptId = nonce;
 					break;
 				}
 				usedIds.add(candidate);
 			}
-			if (reservationCreatedAt === undefined) {
+			if (attemptId === undefined) {
 				this.showStatus(`Could not allocate a free account id for ${service.label}.`);
 				return;
 			}
+			// The OAuth credential stages under a per-attempt key; the real
+			// account key is only written by the guarded finalize below.
+			stagedServerId = `${connectionId}--${attemptId}`;
+			registerOAuthProvider(
+				createMcpOAuthProvider({
+					server: stagedServerId,
+					label: `${service.label} (${connectionId})`,
+					url: targetUrl,
+				}),
+			);
+		}
+		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
+		const result = await this.createAuthFlows().runMcpLogin(stagedServerId ?? connectionId, loginLabel);
+		if (result.status !== "success") {
+			// Cancelled or failed login: release OUR reservation only. Ownership
+			// is the attempt nonce, so a late callback can never remove — or
+			// resurrect — another client's account.
+			if (options.addAccount === true && attemptId !== undefined) {
+				await this.getMcpConnectionStore().removeReservation(connectionId, attemptId);
+				if (stagedServerId !== undefined) {
+					this.modelRegistry.authStorage.remove(mcpCredentialKey(stagedServerId));
+					unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
+				}
+			}
+			return;
+		}
+		if (options.addAccount === true && attemptId !== undefined && stagedServerId !== undefined) {
+			const stagedKey = mcpCredentialKey(stagedServerId);
+			// Guarded commit: the staged credential moves to the REAL account key
+			// under the store's file lock, only while our reservation is still
+			// ours — cancel/remove share the same lock ordering, so a removed or
+			// replaced account can never receive a late login's credential.
+			const committed = await this.getMcpConnectionStore().finalizeAttempt({
+				connectionId,
+				attemptId,
+				commit: (record) => {
+					const staged = this.modelRegistry.authStorage.get(stagedKey);
+					if (staged) {
+						this.modelRegistry.authStorage.set(mcpCredentialKey(connectionId), staged);
+						this.modelRegistry.authStorage.remove(stagedKey);
+					}
+					return record;
+				},
+			});
+			if (!committed) {
+				// Ownership lost or the write failed: discard the staged
+				// credential; the account keeps its own state untouched.
+				this.modelRegistry.authStorage.remove(stagedKey);
+				unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
+				this.showStatus(
+					`The account ${connectionId} was removed or replaced during login; the login result was discarded.`,
+				);
+				return;
+			}
+			// The real id now owns the credential: register its provider and drop
+			// the staged registration.
 			registerOAuthProvider(
 				createMcpOAuthProvider({
 					server: connectionId,
@@ -9181,18 +9250,7 @@ export class InteractiveMode {
 					url: targetUrl,
 				}),
 			);
-		}
-		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
-		const result = await this.createAuthFlows().runMcpLogin(connectionId, loginLabel);
-		if (result.status !== "success") {
-			// Cancelled or failed login: release OUR reservation only. The
-			// ownership check (id + pending + createdAt) means a late callback can
-			// never remove or resurrect another client's account.
-			if (options.addAccount === true && reservationCreatedAt !== undefined) {
-				await this.getMcpConnectionStore().removeReservation(connectionId, reservationCreatedAt);
-				unregisterOAuthProvider(`mcp:${connectionId}`);
-			}
-			return;
+			unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
 		}
 		// A stored token is not "Connected": verify with a real MCP handshake. The
 		// record's serviceId stays the catalog id; the connectionId is the account.
