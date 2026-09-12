@@ -1,0 +1,2 @@
+- Fixed Prime Agent production credentials and team selection to stay independent of Prime CLI configuration, with validated CLI credential reuse only during explicit login.
+- Fixed explicit Prime CLI credential import for the default SDK services factory.

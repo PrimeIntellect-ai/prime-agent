@@ -302,6 +302,13 @@ function main() {
 		);
 
 		copyPackageContents(packagePath(releasePackage.packageDir), stagingDir, packageJson);
+		if (releasePackage.packageDir === "coding-agent" && args.binaryDir) {
+			const bundleDir = join(stagingDir, "dist/bundle");
+			renameSync(join(bundleDir, "cli.js"), join(bundleDir, "cli-node.js"));
+			cpSync(join(stagingDir, "dist/cli/npm-native-bridge.js"), join(bundleDir, "cli.js"));
+			cpSync(join(root, "install.sh"), join(stagingDir, "dist/install.sh"));
+			writeJson(join(stagingDir, "dist/native-release.json"), { baseUrl: args.baseUrl, version: releaseVersion });
+		}
 
 		const tarballName = run("npm", ["pack", stagingDir, "--pack-destination", artifactsDir, "--silent"], root)
 			.split("\n")

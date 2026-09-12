@@ -457,6 +457,10 @@ describe("AgentSessionRuntime characterization", () => {
 
 	it("keeps semantic spawn lineage through the production runtime factory", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-factory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		vi.stubEnv("HOME", tempDir);
+		cleanups.push(() => {
+			vi.unstubAllEnvs();
+		});
 		mkdirSync(tempDir, { recursive: true });
 		cleanups.push(() => rmSync(tempDir, { recursive: true, force: true }));
 		const faux = registerFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
@@ -517,6 +521,8 @@ describe("AgentSessionRuntime characterization", () => {
 			},
 		});
 		cleanups.push(() => created.session.dispose());
+		expect(created.services.modelRegistry.authStorage).toBe(created.services.authStorage);
+		expect(created.services.authStorage.getPrimeCliConfigPath()).toBe(join(tempDir, ".prime", "config.json"));
 		await created.session.bindExtensions({});
 
 		const ledgerPath = join(childSessionDir, SEMANTIC_EDGES_LEDGER_FILENAME);

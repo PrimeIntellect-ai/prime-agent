@@ -394,18 +394,23 @@ class NotificationTests(unittest.TestCase):
                         notify.deliver(item, "/services/test")
                 connection.return_value.request.assert_called_once()
 
-    def test_restores_latest_reservation_regardless_of_run_conclusion(self):
+    def test_restores_latest_trusted_reservation_by_creation_time(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             saved = state()
             (path / "state.json").write_text(json.dumps(saved))
             artifacts = [
                 {
-                    "id": i,
+                    "id": artifact_id,
                     "expired": False,
-                    "workflow_run": {"id": i * 10, "head_branch": branch},
+                    "created_at": created_at,
+                    "workflow_run": {"id": run_id, "head_branch": branch},
                 }
-                for i, branch in [(1, "main"), (3, "feature/test"), (2, "main")]
+                for artifact_id, run_id, branch, created_at in [
+                    (300, 10, "main", "2026-09-12T01:00:00Z"),
+                    (100, 30, "feature/test", "2026-09-12T03:00:00Z"),
+                    (200, 20, "main", "2026-09-12T02:00:00Z"),
+                ]
             ]
             with patch.object(
                 notify,
@@ -438,6 +443,7 @@ class NotificationTests(unittest.TestCase):
                     {
                         "id": i,
                         "expired": False,
+                        "created_at": f"2026-09-12T00:0{i}:00Z",
                         "workflow_run": {"id": i * 10, "head_branch": "main"},
                     }
                     for i in [1, 2]
@@ -463,6 +469,7 @@ class NotificationTests(unittest.TestCase):
         artifact = {
             "id": 1,
             "expired": True,
+            "created_at": "2026-09-12T00:01:00Z",
             "workflow_run": {"id": 10, "head_branch": "main"},
         }
         with patch.object(

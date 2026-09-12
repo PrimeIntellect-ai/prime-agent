@@ -7,7 +7,6 @@ import { appendRotatingLog, getAgentDir, getAgentTracesLogPath, getSessionsDir, 
 import { readFirstLineSync } from "../utils/file-lines.js";
 import type { AuthStorage } from "./auth-storage.js";
 import {
-	loadPrimeCliConfig,
 	PRIME_AGENT_TRACES_PROVIDER_ID,
 	PRIME_INFERENCE_PROVIDER_ID,
 	resolvePrimeAgentTracesBaseUrl,
@@ -64,7 +63,6 @@ export interface AgentTraceUploadOptions {
 	/** Require the global automatic-sharing opt-in. Set false only for an explicit one-shot upload command. */
 	requireEnabled?: boolean;
 	baseUrl?: string;
-	configPath?: string;
 	fetchFn?: typeof fetch;
 	reloadConfig?: boolean;
 	requestTimeoutMs?: number;
@@ -79,7 +77,6 @@ export interface AgentTraceUploadInstallOptions {
 	authStorage: AuthStorage;
 	settingsManager: SettingsManager;
 	baseUrl?: string;
-	configPath?: string;
 	fetchFn?: typeof fetch;
 	requestTimeoutMs?: number;
 	/** The session's semantic-edge ledger; registered with the outbox as its own delivery kind. */
@@ -838,7 +835,7 @@ export async function catchUpAgentTraceUploads(
 
 export async function getPrimeAgentTraceCredential(
 	authStorage: AuthStorage,
-	options: { reloadAuth?: boolean; configPath?: string } = {},
+	options: { reloadAuth?: boolean } = {},
 ): Promise<AgentTraceCredential | undefined> {
 	const traceEnvKey = stringEnv("PRIME_AGENT_TRACES_API_KEY");
 	if (traceEnvKey) {
@@ -865,11 +862,6 @@ export async function getPrimeAgentTraceCredential(
 		if (primeKey) {
 			return { apiKey: primeKey, source: "prime-inference", label: "Prime Inference credential" };
 		}
-	}
-
-	const primeCliKey = loadPrimeCliConfig(options.configPath).apiKey;
-	if (primeCliKey) {
-		return { apiKey: primeCliKey, source: "prime-cli", label: "Prime CLI credential" };
 	}
 
 	return undefined;
@@ -962,7 +954,6 @@ async function performAgentTraceUpload(
 	}
 
 	const credential = await getPrimeAgentTraceCredential(options.authStorage, {
-		configPath: options.configPath,
 		reloadAuth: options.reloadConfig !== false,
 	});
 	if (!credential) {

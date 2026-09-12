@@ -8,7 +8,6 @@ import {
 	checkPrimeAgentTracesAccess,
 	checkPrimeInferenceAccess,
 	fetchPrimeTeams,
-	loadPrimeCliConfig,
 	loginPrimeAgentTraces,
 	loginPrimeInference,
 	PRIME_AGENT_TRACES_PROVIDER_ID,
@@ -17,6 +16,7 @@ import {
 	PRIME_INFERENCE_PROVIDER_NAME,
 	type PrimeTeam,
 	resolvePrimeAgentTracesBaseUrl,
+	resolvePrimeInferenceAuthConfig,
 } from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
@@ -350,17 +350,6 @@ export class ProviderAuthFlows {
 			});
 		}
 
-		if (!options.some((option) => option.id === PRIME_INFERENCE_PROVIDER_ID)) {
-			const primeInferenceStatus = authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID);
-			if (primeInferenceStatus.source === "prime_cli") {
-				options.push({
-					id: PRIME_INFERENCE_PROVIDER_ID,
-					name: PRIME_INFERENCE_PROVIDER_NAME,
-					authType: "api_key",
-				});
-			}
-		}
-
 		return options.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
@@ -469,24 +458,7 @@ export class ProviderAuthFlows {
 	}
 
 	private getPrimeInferenceDefaultTeamStatus(): string {
-		const configPath = this.host.modelRegistry.authStorage.getPrimeCliConfigPath();
-		if (configPath) {
-			let config: ReturnType<typeof loadPrimeCliConfig>;
-			try {
-				config = loadPrimeCliConfig(configPath);
-			} catch {
-				return "Using personal account.";
-			}
-			if (config.teamIdFromEnv) {
-				return "Using team from PRIME_TEAM_ID.";
-			}
-			if (config.teamName) {
-				return `Using team "${config.teamName}".`;
-			}
-			if (config.teamId) {
-				return "Using Prime CLI team.";
-			}
-		}
+		if (process.env.PRIME_TEAM_ID?.trim()) return "Using team from PRIME_TEAM_ID.";
 		const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
 		if (storedTeam) {
 			return `Using team "${storedTeam.name}".`;
@@ -499,27 +471,28 @@ export class ProviderAuthFlows {
 
 	private async selectPrimeInferenceTeam(apiKey: string, dialog: LoginDialogComponent): Promise<string | undefined> {
 		try {
-			const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-			if (config.teamIdFromEnv) {
+			if (process.env.PRIME_TEAM_ID?.trim()) {
 				this.host.modelRegistry.authStorage.reload();
 				return "Using team from PRIME_TEAM_ID.";
 			}
 
 			dialog.showProgress("Loading Prime teams...");
-			const teams = await fetchPrimeTeams(apiKey, config.baseUrl, { signal: dialog.signal });
+			const teams = await fetchPrimeTeams(apiKey, resolvePrimeInferenceAuthConfig().baseUrl, {
+				signal: dialog.signal,
+			});
 			if (dialog.signal.aborted) {
 				return this.getPrimeInferenceDefaultTeamStatus();
 			}
 			if (teams.length === 0) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null);
+				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null, apiKey);
 				return "Using personal account.";
 			}
 
 			const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
-			const currentTeamId = storedTeam === null ? undefined : (storedTeam?.teamId ?? config.teamId);
+			const currentTeamId = storedTeam === null ? undefined : storedTeam?.teamId;
 			const selectedTeam = await this.showPrimeTeamSelector(teams, currentTeamId);
 			if (selectedTeam !== undefined) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(selectedTeam);
+				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(selectedTeam, apiKey);
 			}
 			return selectedTeam
 				? `Using team "${selectedTeam.name}".`
@@ -536,8 +509,9 @@ export class ProviderAuthFlows {
 		apiKey: string,
 		dialog: LoginDialogComponent,
 		closeDialog: () => void,
+		primeTeam?: PrimeTeam | null,
 	): Promise<AuthenticationResult> {
-		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey);
+		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey, primeTeam);
 		const teamStatus = await this.selectPrimeInferenceTeam(apiKey, dialog);
 
 		closeDialog();
@@ -547,7 +521,6 @@ export class ProviderAuthFlows {
 			"api_key",
 			teamStatus,
 			"provider",
-			this.host.modelRegistry.authStorage.getPrimeCliConfigPath() ?? getAuthPath(),
 		);
 	}
 
@@ -621,6 +594,7 @@ export class ProviderAuthFlows {
 				},
 				{
 					configPath: this.host.modelRegistry.authStorage.getPrimeCliConfigPath(),
+					usePrimeCliConfig: this.host.modelRegistry.authStorage.getPrimeCliConfigPath() !== undefined,
 				},
 			);
 			// When the browser challenge cannot start or breaks down, keep the dialog
@@ -656,8 +630,9 @@ export class ProviderAuthFlows {
 			if (result.source === "manual") {
 				browserAbort.abort();
 				dialog.showProgress("Checking Prime Inference access...");
-				const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-				const access = await checkPrimeInferenceAccess(result.apiKey, config.baseUrl, { signal: dialog.signal });
+				const access = await checkPrimeInferenceAccess(result.apiKey, resolvePrimeInferenceAuthConfig().baseUrl, {
+					signal: dialog.signal,
+				});
 				if (dialog.signal.aborted) {
 					closeDialog();
 					return { status: "cancelled" };
@@ -668,7 +643,12 @@ export class ProviderAuthFlows {
 				}
 			}
 
-			return await this.completePrimeInferenceLogin(result.apiKey, dialog, closeDialog);
+			return await this.completePrimeInferenceLogin(
+				result.apiKey,
+				dialog,
+				closeDialog,
+				"primeTeam" in result ? result.primeTeam : undefined,
+			);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
@@ -723,16 +703,22 @@ export class ProviderAuthFlows {
 		};
 
 		try {
-			const browserLogin = loginPrimeAgentTraces({
-				onAuth: (info) => {
-					dialog.showAuth(info.url, info.instructions);
-					armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
+			const browserLogin = loginPrimeAgentTraces(
+				{
+					onAuth: (info) => {
+						dialog.showAuth(info.url, info.instructions);
+						armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
+					},
+					onProgress: (message) => {
+						dialog.showProgress(message);
+					},
+					signal: browserAbort.signal,
 				},
-				onProgress: (message) => {
-					dialog.showProgress(message);
+				{
+					configPath: this.host.modelRegistry.authStorage.getPrimeCliConfigPath(),
+					usePrimeCliConfig: this.host.modelRegistry.authStorage.getPrimeCliConfigPath() !== undefined,
 				},
-				signal: browserAbort.signal,
-			});
+			);
 			const browserLoginOrFallback = browserLogin.catch((error: unknown) => {
 				if (browserAbort.signal.aborted) {
 					throw error;
