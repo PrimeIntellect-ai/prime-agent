@@ -385,6 +385,8 @@ export default function (pi: ExtensionAPI) {
 
 The default export can also be `async`. Prime Agent waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
 
+Schedule timers via `ctx.setTimeout`/`ctx.setInterval` (error-isolated, auto-cancelled on unload); raw global timers are unsupported for scheduling extension work.
+
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
 - Additional orchestration workflows and plan modes

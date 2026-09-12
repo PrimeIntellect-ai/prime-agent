@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import type { ExtensionContext } from "../src/core/extensions/types.js";
+import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -176,6 +179,69 @@ describe("AgentSession dynamic tool registration", () => {
 		expect(session.getActiveToolNames()).toContain("hidden_tool");
 		expect(session.systemPrompt).not.toContain("hidden_tool");
 		expect(session.systemPrompt).not.toContain("Description should not appear in available tools");
+
+		session.dispose();
+	});
+
+	it("keeps session_start ctx timers running across a runtime-only MCP set change", async () => {
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const sessionManager = SessionManager.inMemory();
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		let ticks = 0;
+		let scheduled = false;
+		let capturedCtx: ExtensionContext | undefined;
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						capturedCtx = ctx;
+						if (scheduled) return;
+						scheduled = true;
+						ctx.setInterval(() => {
+							ticks++;
+						}, 5);
+					});
+				},
+			],
+		});
+		await resourceLoader.reload();
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager,
+			sessionManager,
+			authStorage,
+			resourceLoader,
+		});
+		Reflect.set(session, "_mcpManager", new McpManager({ authStorage }));
+
+		vi.useFakeTimers();
+		try {
+			await session.bindExtensions({});
+			await vi.advanceTimersByTimeAsync(20);
+			const ticksBeforeRebuild = ticks;
+			const preRebuildCtx = capturedCtx;
+
+			session.replaceAcpMcpServers(
+				[{ name: "task", type: "http", url: "https://task.example/mcp", headers: {} }],
+				"owner-a",
+			);
+			await vi.advanceTimersByTimeAsync(50);
+			expect(ticks).toBeGreaterThan(ticksBeforeRebuild);
+
+			await session.reload();
+			const ticksAtReload = ticks;
+			await vi.advanceTimersByTimeAsync(200);
+			expect(ticks).toBe(ticksAtReload);
+			expect(() => preRebuildCtx?.setTimeout(() => undefined, 5)).toThrow(/stale/);
+		} finally {
+			vi.useRealTimers();
+		}
 
 		session.dispose();
 	});

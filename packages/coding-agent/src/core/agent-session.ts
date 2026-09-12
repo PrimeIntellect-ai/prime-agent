@@ -5340,7 +5340,7 @@ export class AgentSession {
 
 		const command = this._extensionRunner.getCommand(commandName);
 		if (!command) return undefined;
-		const context = this._extensionRunner.createCommandContext();
+		const context = this._extensionRunner.createCommandContext(command.sourceInfo.path);
 		return Promise.resolve()
 			.then(() => command.handler(args, context))
 
@@ -9646,6 +9646,7 @@ export class AgentSession {
 			extensionsResult.runtime.getExecEnv = this._execEnvProvider;
 		}
 
+		const previousRunner: ExtensionRunner | undefined = this._extensionRunner;
 		this._extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -9653,6 +9654,14 @@ export class AgentSession {
 			this.sessionManager,
 			this._modelRegistry,
 		);
+		// Retire only when the extension world restarts (reload); runtime-only rebuilds adopt the timer host instead, so session_start timers survive and unload still cancels them.
+		if (previousRunner) {
+			if (previousRunner.builtFromSameExtensions(extensionsResult.extensions)) {
+				this._extensionRunner.adoptHostTimers(previousRunner);
+			} else {
+				previousRunner.retire();
+			}
+		}
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
@@ -12647,9 +12656,10 @@ export class AgentSession {
 	// =========================================================================
 
 	createReplacedSessionContext(): ReplacedSessionContext {
+		// The initiating extension is not in scope here; label timers with the context kind instead.
 		const context = Object.defineProperties(
 			{},
-			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
+			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext("<session-replacement>")),
 		) as ReplacedSessionContext;
 		context.sendMessage = (message, options) => this.sendCustomMessage(message, options);
 		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);

@@ -308,6 +308,18 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/**
+	 * Schedule a callback on a host-owned timer. Unlike the global `setTimeout`, thrown
+	 * errors are reported through the extension error boundary instead of crashing the
+	 * process, and pending timers are cancelled when the extension host unloads.
+	 */
+	setTimeout(callback: () => void | Promise<void>, ms: number): ReturnType<typeof setTimeout>;
+	/** Cancel a timer created with `ctx.setTimeout`. Accepts undefined like the global `clearTimeout`. */
+	clearTimeout(handle: ReturnType<typeof setTimeout> | undefined): void;
+	/** Schedule a repeating callback on a host-owned timer. Same guarantees as `ctx.setTimeout`. */
+	setInterval(callback: () => void | Promise<void>, ms: number): ReturnType<typeof setInterval>;
+	/** Cancel a timer created with `ctx.setInterval`. Accepts undefined like the global `clearInterval`. */
+	clearInterval(handle: ReturnType<typeof setInterval> | undefined): void;
 }
 
 /**

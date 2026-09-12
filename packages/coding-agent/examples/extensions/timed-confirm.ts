@@ -46,7 +46,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Show a timed confirm using AbortSignal (manual approach)",
 		handler: async (_args, ctx) => {
 			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), 5000);
+			const timeoutId = ctx.setTimeout(() => controller.abort(), 5000);
 
 			ctx.ui.notify("Dialog will auto-cancel in 5 seconds...", "info");
 
@@ -56,7 +56,7 @@ export default function (pi: ExtensionAPI) {
 				{ signal: controller.signal },
 			);
 
-			clearTimeout(timeoutId);
+			ctx.clearTimeout(timeoutId);
 
 			if (confirmed) {
 				ctx.ui.notify("Confirmed by user!", "info");
