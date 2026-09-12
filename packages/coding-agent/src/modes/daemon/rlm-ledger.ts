@@ -16,7 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { EventLog } from "../../core/event-log.js";
 import { canonicalSessionPath } from "../../core/session-lease.js";
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
-import { readFirstLineSync } from "../../utils/file-lines.js";
+import { readFirstLineSync, readLinesAsBuffers } from "../../utils/file-lines.js";
 
 /**
  * Daemon-owned RLM spawn ledger.
@@ -597,19 +597,26 @@ export class RlmSpawnLedger {
 		// name, so the name comes from this read — writer-owned display data,
 		// not authority.
 		let id = basename(path, ".jsonl");
+		let loadMetadata = metadataArtifact === undefined;
 		if (metadataArtifact !== undefined) {
 			// Imported transcripts can have a filename different from their session id.
 			try {
-				const header = JSON.parse(readFirstLineSync(path) ?? "null") as { id?: unknown } | null;
-				if (typeof header?.id === "string") id = header.id;
+				for await (const line of readLinesAsBuffers(path)) {
+					const text = line.toString("utf8").trim();
+					if (!text) continue;
+					const header = JSON.parse(text) as { id?: unknown } | null;
+					if (typeof header?.id === "string") id = header.id;
+					break;
+				}
 			} catch {
 				// Unreadable headers retain the filename-based fallback below.
 			}
+			loadMetadata = await stat(join(getSessionArtifactPathForFile(path, id), metadataArtifact)).then(
+				() => true,
+				() => false,
+			);
 		}
-		const info =
-			metadataArtifact === undefined || existsSync(join(getSessionArtifactPathForFile(path, id), metadataArtifact))
-				? await readSessionInfo(path).catch(() => null)
-				: null;
+		const info = loadMetadata ? await readSessionInfo(path).catch(() => null) : null;
 		if (info) {
 			const { parentSessionPath: _headerParent, rlmDepth: _headerDepth, ...display } = info;
 			return {

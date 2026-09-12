@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -124,61 +124,65 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		expect(target.heartbeatSnapshotStale).toBe(false);
 	});
 
-	it("only scans scheduled transcripts while retaining ancestry, session ids, and archived filtering", async () => {
-		const supervisor = createSupervisorHarness();
-		const directory = realpathSync(supervisor.defaultSessionConfig.agentDir);
-		const [parent, child, archived, unrelated] = ["parent", "child", "archived", "unrelated"].map((name) => {
-			const manager = sessionManager.SessionManager.create(directory, join(directory, "sessions"));
-			manager.newSession({ parentSession: join(directory, "stale-parent.jsonl"), rlmDepth: 9 });
-			manager.appendSessionInfo(name);
-			manager.appendMessage({ role: "user", content: name, timestamp: 1 });
-			if (name === "archived") manager.appendSessionState({ status: "archived" });
-			manager.flushNow();
-			return manager;
-		});
-		const parentFile = parent!.getSessionFile()!;
-		const childFile = join(directory, "sessions", "imported-child.jsonl");
-		renameSync(child!.getSessionFile()!, childFile);
-		await supervisor.rlmSpawnLedger().appendSpawn({
-			childId: "sub-11111111",
-			parent: parentFile,
-			child: childFile,
-			depth: 1,
-			name: "ledger-child",
-		});
-		const store = AgentCronJobStore.forSessionArtifacts();
-		for (const manager of [child!, archived!]) {
-			store.registerSessionArtifact(manager.getSessionId(), manager.getSessionArtifactDir()!);
-			store.createHeartbeat({
-				activeSessionId: manager.getSessionId(),
-				sessionId: manager.getSessionId(),
-				sessionFile: manager === child ? childFile : manager.getSessionFile()!,
-				cwd: directory,
-				scheduleText: "every 1h",
-				prompt: "continue",
+	it.each(["", "\n \t\r\n", "\n".repeat(65_536)])(
+		"only scans scheduled transcripts while retaining ancestry, imported session ids, and archived filtering (case %#)",
+		async (prefix) => {
+			const supervisor = createSupervisorHarness();
+			const directory = realpathSync(supervisor.defaultSessionConfig.agentDir);
+			const [parent, child, archived, unrelated] = ["parent", "child", "archived", "unrelated"].map((name) => {
+				const manager = sessionManager.SessionManager.create(directory, join(directory, "sessions"));
+				manager.newSession({ parentSession: join(directory, "stale-parent.jsonl"), rlmDepth: 9 });
+				manager.appendSessionInfo(name);
+				manager.appendMessage({ role: "user", content: name, timestamp: 1 });
+				if (name === "archived") manager.appendSessionState({ status: "archived" });
+				manager.flushNow();
+				return manager;
 			});
-		}
-		const readInfo = vi.spyOn(sessionManager, "readSessionInfo");
-		const jobs = await supervisor.collectPassiveScheduledJobs();
-		expect(jobs).toHaveLength(1);
-		expect(jobs[0]).toMatchObject({
-			rootSessionFile: parentFile,
-			info: {
-				id: child!.getSessionId(),
+			const parentFile = parent!.getSessionFile()!;
+			const childFile = join(directory, "sessions", "imported-child.jsonl");
+			renameSync(child!.getSessionFile()!, childFile);
+			writeFileSync(childFile, prefix + readFileSync(childFile, "utf8"));
+			await supervisor.rlmSpawnLedger().appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: childFile,
+				depth: 1,
 				name: "ledger-child",
-				firstMessage: "child",
-				parentSessionPath: parentFile,
-				rlmDepth: 1,
-			},
-		});
-		expect(readInfo).toHaveBeenCalledTimes(2);
-		expect(readInfo).not.toHaveBeenCalledWith(parentFile);
-		expect(readInfo).not.toHaveBeenCalledWith(unrelated!.getSessionFile());
-		vi.spyOn(supervisor, "findWorkerBySessionFile").mockImplementation((path) =>
-			path === parentFile ? {} : undefined,
-		);
-		await expect(supervisor.collectPassiveScheduledJobs()).resolves.toEqual([]);
-	});
+			});
+			const store = AgentCronJobStore.forSessionArtifacts();
+			for (const manager of [child!, archived!]) {
+				store.registerSessionArtifact(manager.getSessionId(), manager.getSessionArtifactDir()!);
+				store.createHeartbeat({
+					activeSessionId: manager.getSessionId(),
+					sessionId: manager.getSessionId(),
+					sessionFile: manager === child ? childFile : manager.getSessionFile()!,
+					cwd: directory,
+					scheduleText: "every 1h",
+					prompt: "continue",
+				});
+			}
+			const readInfo = vi.spyOn(sessionManager, "readSessionInfo");
+			const jobs = await supervisor.collectPassiveScheduledJobs();
+			expect(jobs).toHaveLength(1);
+			expect(jobs[0]).toMatchObject({
+				rootSessionFile: parentFile,
+				info: {
+					id: child!.getSessionId(),
+					name: "ledger-child",
+					firstMessage: "child",
+					parentSessionPath: parentFile,
+					rlmDepth: 1,
+				},
+			});
+			expect(readInfo).toHaveBeenCalledTimes(2);
+			expect(readInfo).not.toHaveBeenCalledWith(parentFile);
+			expect(readInfo).not.toHaveBeenCalledWith(unrelated!.getSessionFile());
+			vi.spyOn(supervisor, "findWorkerBySessionFile").mockImplementation((path) =>
+				path === parentFile ? {} : undefined,
+			);
+			await expect(supervisor.collectPassiveScheduledJobs()).resolves.toEqual([]);
+		},
+	);
 
 	it("uses the last complete worker snapshot during recovery", async () => {
 		const supervisor = createSupervisorHarness();
