@@ -832,6 +832,85 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Disk-authoritative credential read under the backend's own file lock —
+	 * a cross-instance writer is always visible, unlike the cached `get()`.
+	 * Used to capture the full identity a guarded login's compare-and-swap
+	 * expects to replace (legacy/credential-only accounts included).
+	 */
+	getVerified(provider: string): AuthCredential | undefined {
+		return this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			return { result: currentData[provider] };
+		});
+	}
+
+	/**
+	 * Atomic full-identity compare-and-swap move for guarded MCP logins that
+	 * REPLACE an existing grant (reconnect): move `stagedProvider`'s
+	 * credential to `provider` ONLY when the on-disk value at `provider` is
+	 * exactly `expectedOld` (or absent, for fresh accounts) — read and written
+	 * under the backend's own file lock. A credential written by anyone else is
+	 * never clobbered; the result reports "occupied" so callers can refuse and
+	 * preserve the newer account. Returns the exact credential that moved (for
+	 * full-identity rollback).
+	 */
+	replaceStagedCredential(
+		stagedProvider: string,
+		provider: string,
+		expectedOld: AuthCredential | undefined,
+	): { status: "occupied" } | { status: "nothing" } | { status: "replaced"; credential: AuthCredential } {
+		type ReplaceOutcome =
+			| { status: "occupied" }
+			| { status: "nothing" }
+			| { status: "replaced"; credential: AuthCredential };
+		const outcome = this.storage.withLock<ReplaceOutcome>((current) => {
+			const currentData = this.parseStorageData(current);
+			const existing = currentData[provider];
+			if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(expectedOld)) {
+				return { result: { status: "occupied" as const } };
+			}
+			const staged = currentData[stagedProvider];
+			if (!staged) {
+				return { result: { status: "nothing" as const } };
+			}
+			const merged: AuthStorageData = { ...currentData, [provider]: staged };
+			delete merged[stagedProvider];
+			return {
+				result: { status: "replaced" as const, credential: staged },
+				next: JSON.stringify(merged, null, 2),
+			};
+		});
+		// Post-success only: refresh the cache under the same lock discipline.
+		if (outcome.status === "replaced") {
+			this.reload();
+		}
+		return outcome;
+	}
+
+	/**
+	 * Atomic full-identity compare-and-swap write: set `provider` to `next`
+	 * ONLY when the on-disk value is exactly `expected`. Used to roll back a
+	 * guarded replacement (restoring the PREVIOUS credential) and to undo
+	 * only this attempt's own write — a newer writer is never clobbered.
+	 */
+	replaceCredentialIfMatches(provider: string, expected: AuthCredential, next: AuthCredential): boolean {
+		const replaced = this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			const existing = currentData[provider];
+			if (existing === undefined || JSON.stringify(existing) !== JSON.stringify(expected)) {
+				return { result: false };
+			}
+			const merged: AuthStorageData = { ...currentData, [provider]: next };
+			return { result: true, next: JSON.stringify(merged, null, 2) };
+		});
+		if (replaced) {
+			this.data[provider] = next;
+			this.clearStaleAuthSource(provider, "stored");
+		}
+		return replaced;
+	}
+
+	/**
 	 * List all providers with credentials.
 	 */
 	list(): string[] {

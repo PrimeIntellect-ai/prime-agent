@@ -8624,6 +8624,26 @@ export class InteractiveMode {
 				void this.maybeWarnAboutAnthropicSubscriptionAuth();
 			},
 			onMcpAccountLogout: (providerId) => this.logoutMcpAccount(providerId),
+			onMcpAccountLogin: async (providerId) => {
+				// The generic /login service options and the config menu route
+				// through the ONE guarded connect operation; unresolvable names
+				// return undefined so loginProvider falls back to the raw dialog
+				// (an internal detail for providers with no endpoint).
+				const name = providerId.slice("mcp:".length);
+				if (!name || name.includes("--")) {
+					return undefined;
+				}
+				const routed = await this.connectMcpAccountByName(name);
+				return routed
+					? {
+							status: "success",
+							providerId,
+							providerName: name,
+							authType: "oauth",
+							kind: "service",
+						}
+					: { status: "failed" };
+			},
 		});
 	}
 
@@ -8699,8 +8719,13 @@ export class InteractiveMode {
 				this.showError("Usage: /mcp login <name> (e.g. /mcp login linear)");
 				return;
 			}
-			const result = await this.createAuthFlows().runMcpLogin(server);
-			if (result.status === "success") await this.reloadAfterMcpChange(`Connected ${server}.`);
+			// /mcp login routes through the ONE guarded connect operation (claim
+			// -> staged OAuth -> guarded finalize): the raw dialog that wrote the
+			// final credential directly is gone.
+			const routed = await this.connectMcpAccountByName(server);
+			if (!routed) {
+				this.showError(`No endpoint configured for ${server}; add it with /mcp add or connect from /plugins.`);
+			}
 			return;
 		}
 
@@ -8995,6 +9020,42 @@ export class InteractiveMode {
 		});
 	}
 
+	/**
+	 * Route a user-facing MCP login by NAME (/mcp login, the generic /login
+	 * service options, the config menu) through the ONE guarded connect
+	 * operation: the account is claimed under the store's file lock first,
+	 * the OAuth credential stages, and the guarded finalize commits it — a
+	 * concurrent logout can cancel us and a late callback can never
+	 * reactivate or clobber the account. Returns false when no endpoint can
+	 * be resolved for the name.
+	 */
+	private async connectMcpAccountByName(name: string): Promise<boolean> {
+		const record = this.getMcpConnectionStore().get(name);
+		const userServer = this.settingsManager.getGlobalMcpServers()?.[name];
+		const settingsUrl = userServer?.type === "http" ? userServer.url : undefined;
+		const { services } = this.buildServiceCatalogViews();
+		const catalogService = services.find((entry) => entry.serviceId === name || entry.aliases.includes(name));
+		const catalogUrl = catalogService?.transport.type === "http" ? catalogService.transport.url : undefined;
+		const url = record?.endpoint ?? settingsUrl ?? catalogUrl;
+		if (!url) {
+			return false;
+		}
+		await this.connectServiceFromPicker(
+			{
+				serviceId: name,
+				label: record?.label ?? catalogService?.label ?? name,
+				connectionStatus: record ? record.status : "not_connected",
+				connectionIds: record ? [name] : [],
+				connectable: true,
+				usesOAuth: true,
+				source: catalogService ? "catalog" : "user",
+			},
+			{ url, usesOAuth: true, managedBySettings: userServer !== undefined },
+			{},
+		);
+		return true;
+	}
+
 	private async connectServiceFromPicker(
 		service: McpPluginView,
 		target:
@@ -9012,19 +9073,19 @@ export class InteractiveMode {
 			addAccount?: boolean;
 			knownIds?: ReadonlySet<string>;
 		} = {},
-	): Promise<void> {
+	): Promise<boolean> {
 		if (target?.transport === "stdio" && target.name) {
 			const serverName = target.name;
 			const config = this.settingsManager.getGlobalMcpServers()?.[serverName];
 			if (!config) {
 				this.showStatus(`${service.label} is no longer present in settings.`);
-				return;
+				return false;
 			}
 			if (config.type !== "stdio" || config.enabled === false) {
 				this.showStatus(
 					`${service.label} is disabled. Re-enable or remove it with /mcp, or edit your settings file.`,
 				);
-				return;
+				return false;
 			}
 			this.settingsManager.setGlobalMcpServer(serverName, { ...config, enabled: false }, true);
 			await this.settingsManager.flush();
@@ -9032,7 +9093,7 @@ export class InteractiveMode {
 			await this.reloadAfterMcpChange(
 				`Disabled local server ${service.label}. Manage it with /mcp or your settings file.`,
 			);
-			return;
+			return false;
 		}
 		// Explicit per-account remove: credential AND record removal in ONE
 		// store-locked step (the same lock ordering finalize uses), then reload.
@@ -9055,27 +9116,27 @@ export class InteractiveMode {
 			// not have run — it never claims a specific state).
 			if (removed === "failed") {
 				this.showWarning(`The change could not be saved; try removing account ${service.serviceId} again.`);
-				return;
+				return false;
 			}
 			if (removed === "logged-out") {
 				this.showWarning(
 					`Logged out account ${service.serviceId}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
 				);
-				return;
+				return false;
 			}
 			if (removed === "missing") {
 				this.showStatus(`Account ${service.serviceId} is no longer present.`);
-				return;
+				return false;
 			}
 			await this.reloadAfterMcpChange(`Removed account ${service.serviceId}.`);
-			return;
+			return false;
 		}
 		if (service.connectionStatus === "connected") {
 			if (target?.managedBySettings && !service.usesOAuth) {
 				this.showStatus(
 					`${service.label} is configured through settings; manage it with /mcp remove ${service.serviceId}.`,
 				);
-				return;
+				return false;
 			}
 			const disconnected = await this.getMcpConnectionStore().removeAccount({
 				connectionId: service.serviceId,
@@ -9094,20 +9155,20 @@ export class InteractiveMode {
 			// may not have run — it never claims a specific state).
 			if (disconnected === "failed") {
 				this.showWarning(`The change could not be saved; try disconnecting ${service.label} again.`);
-				return;
+				return false;
 			}
 			if (disconnected === "logged-out") {
 				this.showWarning(
 					`Logged out ${service.label}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
 				);
-				return;
+				return false;
 			}
 			if (disconnected === "missing") {
 				this.showStatus(`${service.label} is no longer connected.`);
-				return;
+				return false;
 			}
 			await this.reloadAfterMcpChange(`Disconnected ${service.label}.`);
-			return;
+			return false;
 		}
 		// Pending accounts retry verification explicitly — no login needed, the
 		// grant already exists; "retry from /plugins" must actually work.
@@ -9136,24 +9197,31 @@ export class InteractiveMode {
 						? `Verification did not complete: ${formatMcpVerificationIssue(retried.lastError)}. The connection is saved; retry from /plugins.`
 						: "The verification result could not be saved. The connection is saved; retry from /plugins.";
 			await this.reloadAfterMcpChange(retriedMessage);
-			return;
+			return false;
 		}
 		if (!service.connectable || !target) {
 			this.showStatus(service.setupHint ?? `${service.label} cannot be connected automatically in this build.`);
-			return;
+			return false;
 		}
 		const targetUrl = target.url;
 		if (!targetUrl) {
 			this.showStatus(`${service.label} cannot be connected automatically in this build.`);
-			return;
+			return false;
 		}
-		// Adding an account allocates a NEW connection id: a durable pending
-		// reservation under the store's file lock (atomic across processes,
-		// visible to every other client's allocations), never a configured
-		// user/catalog id, and cleaned up with ownership validation on cancel.
+		// EVERY user-facing MCP login is guarded (initial connect, reconnect,
+		// add account): the account is claimed under the store's file lock first
+		// — a durable pending reservation for a fresh id, a nonce claim on an
+		// existing record — so a concurrent logout can cancel us and a late
+		// OAuth callback can never reactivate or clobber the account.
 		let connectionId = service.serviceId;
 		let attemptId: string | undefined;
 		let stagedServerId: string | undefined;
+		let claimedExistingRecord = false;
+		// The full on-disk identity a guarded REPLACE expects to swap out —
+		// captured for EVERY login, even without a record: legacy
+		// credential-only accounts can hold a grant with no record, and a
+		// reconnect must replace it without clearing it first.
+		let expectedOldCredential: AuthCredential | undefined;
 		if (options.addAccount === true) {
 			const store = this.getMcpConnectionStore();
 			const taken = (id: string): boolean =>
@@ -9187,77 +9255,138 @@ export class InteractiveMode {
 			}
 			if (attemptId === undefined) {
 				this.showStatus(`Could not allocate a free account id for ${service.label}.`);
-				return;
+				return false;
 			}
-			// The OAuth credential stages under a per-attempt key; the real
-			// account key is only written by the guarded finalize below.
-			stagedServerId = `${connectionId}--${attemptId}`;
-			registerOAuthProvider(
-				createMcpOAuthProvider({
-					server: stagedServerId,
-					label: `${service.label} (${connectionId})`,
-					url: targetUrl,
-				}),
-			);
-		}
-		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
-		const result = await this.createAuthFlows().runMcpLogin(stagedServerId ?? connectionId, loginLabel);
-		if (result.status !== "success") {
-			// Cancelled or failed login: release OUR reservation only. Ownership
-			// is the attempt nonce, so a late callback can never remove — or
-			// resurrect — another client's account.
-			if (options.addAccount === true && attemptId !== undefined) {
-				await this.getMcpConnectionStore().removeReservation(connectionId, attemptId);
-				if (stagedServerId !== undefined) {
-					this.modelRegistry.authStorage.remove(mcpCredentialKey(stagedServerId));
-					unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
+		} else {
+			const store = this.getMcpConnectionStore();
+			const nonce = randomUUID();
+			// Disk-authoritative identity capture (never the per-instance cache):
+			// an intentional replacement CASes against exactly this value, and a
+			// newer external writer refuses instead of being clobbered.
+			expectedOldCredential = this.modelRegistry.authStorage.getVerified(mcpCredentialKey(connectionId));
+			const existing = store.get(connectionId);
+			if (existing === undefined) {
+				const now = Date.now();
+				const won = await store.reserveConnectionId({
+					connectionId,
+					serviceId: options.catalogServiceId ?? service.serviceId,
+					endpoint: targetUrl,
+					label: service.label,
+					status: "pending",
+					createdAt: now,
+					updatedAt: now,
+					attemptId: nonce,
+				});
+				if (!won) {
+					this.showStatus(`${service.label} is already being connected from another client.`);
+					return false;
 				}
+			} else {
+				const claimed = await store.claimConnectionId({ connectionId, attemptId: nonce });
+				if (!claimed) {
+					this.showStatus(`${service.label} is already being connected from another client.`);
+					return false;
+				}
+				claimedExistingRecord = true;
 			}
-			return;
+			attemptId = nonce;
 		}
-		if (options.addAccount === true && attemptId !== undefined && stagedServerId !== undefined) {
+		// The OAuth credential ALWAYS stages under a per-attempt key; the real
+		// account key is only written by the guarded finalize below.
+		stagedServerId = `${connectionId}--${attemptId}`;
+		registerOAuthProvider(
+			createMcpOAuthProvider({
+				server: stagedServerId,
+				label: `${service.label} (${connectionId})`,
+				url: targetUrl,
+			}),
+		);
+		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
+		const result = await this.createAuthFlows().runMcpLogin(stagedServerId, loginLabel);
+		if (result.status !== "success") {
+			// Cancelled or failed login: release OUR claim/reservation only.
+			// Ownership is the attempt nonce, so a late callback can never
+			// remove — or resurrect — another client's account, and a cancelled
+			// reconnect leaves the existing credential and record untouched.
+			if (attemptId !== undefined) {
+				if (claimedExistingRecord) {
+					await this.getMcpConnectionStore().releaseClaim({ connectionId, attemptId });
+				} else {
+					await this.getMcpConnectionStore().removeReservation(connectionId, attemptId);
+				}
+				this.modelRegistry.authStorage.remove(mcpCredentialKey(stagedServerId));
+				unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
+			}
+			return false;
+		}
+		{
 			const stagedKey = mcpCredentialKey(stagedServerId);
 			const realKey = mcpCredentialKey(connectionId);
 			// Guarded commit: the staged credential moves to the REAL account key
-			// under the store's file lock, only while our reservation is still
-			// ours. The move is REFUSED when a bystander credential appeared at
-			// the real key (an ordinary login in another client): it is never
-			// clobbered, and the rollback only ever undoes OUR OWN write — a
-			// newer credential is never deleted. When the record write fails,
-			// the compensate callback runs under the SAME lock; if the rollback
-			// itself fails the result is recovery-required and the credential is
-			// RETAINED (never discarded) for manual recovery.
+			// under the store's file lock, only while our claim is still ours.
+			// A FRESH account (no existing grant) moves set-if-absent — a
+			// bystander credential is never clobbered. A REPLACEMENT (reconnect,
+			// or a legacy grant with no record) CASes against the captured full
+			// identity; a newer external credential refuses. When the record
+			// write fails, the compensate runs under the SAME lock and RESTORES
+			// the previous credential (never delete-only, never clobbering a
+			// newer writer); a failed rollback surfaces recovery-required with
+			// the credential RETAINED.
 			let movedCredential: AuthCredential | undefined;
+			let replacedPrevious: AuthCredential | undefined;
 			const finalization = await this.getMcpConnectionStore().finalizeAttempt({
 				connectionId,
 				attemptId,
 				commit: (record) => {
-					// Atomic, disk-authoritative staged->real move under the AUTH
-					// backend's own file lock: the store's lock cannot cover an
-					// ordinary login in another process, so the conditional move
-					// reads CURRENT on-disk data — a bystander credential written
-					// after our staging is never clobbered by a get/set race.
-					const move = this.modelRegistry.authStorage.moveStagedCredential(stagedKey, realKey);
+					// Atomic, disk-authoritative move under the AUTH backend's
+					// own file lock: the store's lock cannot cover an ordinary
+					// login in another process, so the conditional move reads
+					// CURRENT on-disk data.
+					const move =
+						expectedOldCredential === undefined
+							? this.modelRegistry.authStorage.moveStagedCredential(stagedKey, realKey)
+							: this.modelRegistry.authStorage.replaceStagedCredential(
+									stagedKey,
+									realKey,
+									expectedOldCredential,
+								);
 					if (move.status === "occupied") {
-						// An ordinary login wrote the account key mid-flight.
-						throw new Error("account key occupied by another login");
+						// A newer external credential owns the account key.
+						throw new Error("account key occupied by a newer login");
 					}
-					// Recovery data captured BEFORE the move lands as durable.
-					if (move.status === "moved") {
+					if (move.status === "replaced") {
+						movedCredential = move.credential;
+						replacedPrevious = expectedOldCredential;
+					} else if (move.status === "moved") {
 						movedCredential = move.credential;
 					}
-					return record;
+					// Pending-verification: the commit CONSUMES the nonce and
+					// clears the previous verification state — an old Connected
+					// status never carries onto a newly replaced grant.
+					const {
+						attemptId: _consumedNonce,
+						verifiedAt: _oldVerifiedAt,
+						toolCount: _oldToolCount,
+						lastError: _oldLastError,
+						...pendingRecord
+					} = record;
+					return { ...pendingRecord, status: "pending", updatedAt: Date.now() };
 				},
 				compensate: () => {
 					if (!movedCredential) {
 						// Never moved: nothing of ours to undo.
-						return;
+						return false;
 					}
-					// Undo only OUR OWN write: restore ours to the staged slot
-					// only when it is empty, then delete it from the real slot
-					// only when it is still exactly ours — a credential written
-					// by anyone else is never deleted, and ours is never
-					// dropped while the restore would leave it nowhere.
+					if (replacedPrevious !== undefined) {
+						// RESTORE the previous credential (never delete-only) via
+						// a full-identity CAS: a newer writer is never clobbered.
+						this.modelRegistry.authStorage.replaceCredentialIfMatches(realKey, movedCredential, replacedPrevious);
+						return false;
+					}
+					// Fresh-account rollback: restore ours to the staged slot only
+					// when it is empty, then delete it from the real slot only
+					// when it is still exactly ours — a credential written by
+					// anyone else is never deleted.
 					this.modelRegistry.authStorage.restoreCredentialIfAbsent(stagedKey, movedCredential);
 					this.modelRegistry.authStorage.removeIfCredentialMatches(realKey, movedCredential);
 				},
@@ -9270,22 +9399,28 @@ export class InteractiveMode {
 				this.showWarning(
 					`The login for account ${connectionId} could not be committed. The credential is retained and can be recovered; retry from /plugins or remove the placeholder account.`,
 				);
-				return;
+				return false;
 			}
 			if (finalization !== "committed") {
-				// Denied (ownership lost or the real key is occupied) or
-				// compensated (the write failed and the rollback restored every
-				// side effect): discard the staged credential — the account keeps
-				// its own state — and release our reservation with honest wording.
+				// Denied (ownership lost — cancelled by a logout or replaced by
+				// another attempt — or the real key is occupied by a newer
+				// external credential) or compensated (the write failed and the
+				// rollback restored every side effect): discard the staged
+				// credential — the account keeps its own state — and release our
+				// claim/reservation with honest wording.
 				this.modelRegistry.authStorage.remove(stagedKey);
 				unregisterOAuthProvider(mcpCredentialKey(stagedServerId));
-				const reservationCleaned = await this.getMcpConnectionStore().removeReservation(connectionId, attemptId);
+				if (claimedExistingRecord) {
+					await this.getMcpConnectionStore().releaseClaim({ connectionId, attemptId });
+				} else {
+					await this.getMcpConnectionStore().removeReservation(connectionId, attemptId);
+				}
 				this.showStatus(
-					`The account ${connectionId} was removed or replaced during login, or the change could not be saved; the login result was discarded and the account is unchanged.${
-						reservationCleaned ? "" : " A pending placeholder may remain; remove it from the account picker."
+					`The account ${connectionId} was logged out or replaced during login, or the change could not be saved; the login result was discarded and the account is unchanged.${
+						claimedExistingRecord ? "" : " A pending placeholder may remain; remove it from the account picker."
 					}`,
 				);
-				return;
+				return false;
 			}
 			// Committed: the real id now owns the credential — register its
 			// provider and drop the staged registration.
@@ -9327,6 +9462,7 @@ export class InteractiveMode {
 						)}. The connection is saved; retry from /plugins.`
 					: `${accountPrefix}Login succeeded for ${loginLabel}, but the verification result could not be saved. The connection is saved; retry from /plugins.`;
 		await this.reloadAfterMcpChange(message);
+		return true;
 	}
 
 	private async reloadAfterMcpChange(message: string, successMessage = message): Promise<void> {

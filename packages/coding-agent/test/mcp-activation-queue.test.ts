@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
-import type { McpRemoveAccountResult } from "../src/core/mcp/connection-store.js";
+import { logoutMcpAccount, type McpRemoveAccountResult } from "../src/core/mcp/connection-store.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
 import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
 
@@ -289,7 +289,7 @@ describe("ENG-6108 guarded credential commit", () => {
 		expect(store.get("acme-2")).toBeUndefined();
 		const stagedLeftovers = authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"));
 		expect(stagedLeftovers).toEqual([]);
-		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("logged out or replaced during login");
 	});
 
 	test("logoutMcpAccount resolves exact ids first, cancels pending attempts, and preserves completed records", async () => {
@@ -361,6 +361,207 @@ describe("ENG-6108 guarded credential commit", () => {
 		});
 		await expect(logoutAccount.call(fake, "mcp:odd--key")).resolves.toBe("credential-only");
 		expect(authStorage.get("mcp:odd--key")).toBeUndefined();
+	});
+
+	test("an error-state reconnect routes through the guarded claim: full-identity CAS, pending-verification, nonce consumed", async () => {
+		const { fake, store, authStorage, showStatus } = fakeWithStore();
+		const at = Date.now();
+		// An EXISTING account: an error record with a real (old) credential and
+		// stale verification fields that must NOT carry onto the new grant.
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "error",
+			verifiedAt: at - 9999,
+			toolCount: 3,
+			lastError: "http_unauthorized",
+			createdAt: at,
+			updatedAt: at,
+		});
+		const oldCredential = {
+			type: "oauth" as const,
+			access: "old-grant",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		};
+		authStorage.set("mcp:acme", oldCredential);
+		let stagedIdSeen = "";
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: vi.fn(async (serverId: string) => {
+				// The login ONLY ever sees the staged id — never the real one.
+				stagedIdSeen = serverId;
+				authStorage.set(`mcp:${serverId}`, {
+					type: "oauth",
+					access: "new-grant",
+					refresh: "r",
+					expires: at + 3600_000,
+					endpoint: "https://mcp.acme.test/mcp",
+				});
+				return { status: "success" as const };
+			}),
+		});
+		await (
+			fake as unknown as {
+				connectServiceFromPicker: (this: unknown, ...args: unknown[]) => Promise<boolean>;
+			}
+		).connectServiceFromPicker.call(
+			fake,
+			{
+				serviceId: "acme",
+				label: "Acme",
+				connectionStatus: "error",
+				connectable: true,
+				usesOAuth: true,
+				source: "catalog",
+				connectionIds: ["acme"],
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{},
+		);
+		// The login was handed the STAGED id only.
+		expect(stagedIdSeen).toMatch(/^acme--/);
+		// The FULL-IDENTITY CAS replaced the old grant...
+		const replacedCredential = authStorage.get("mcp:acme");
+		expect(replacedCredential?.type).toBe("oauth");
+		if (replacedCredential?.type === "oauth") {
+			expect(replacedCredential.access).toBe("new-grant");
+		}
+		// ...the record is PENDING-VERIFICATION with the nonce CONSUMED and the
+		// old verification state cleared (no stale Connected/verifiedAt).
+		const record = store.get("acme");
+		expect(record?.status).toBe("pending");
+		expect(record?.attemptId).toBeUndefined();
+		expect(record?.verifiedAt).toBeUndefined();
+		expect(record?.toolCount).toBeUndefined();
+		// The OLD failure detail never carries onto the new grant (a fresh
+		// verification failure of its own is honest).
+		expect(record?.lastError).not.toBe("http_unauthorized");
+		// No staged leftovers.
+		expect(authStorage.list().filter((id) => id.startsWith("mcp:acme--"))).toEqual([]);
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("Login succeeded for Acme");
+	});
+
+	test("a cancelled reconnect preserves the existing credential and account unchanged", async () => {
+		const { fake, store, authStorage } = fakeWithStore();
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: at,
+			toolCount: 2,
+			createdAt: at,
+			updatedAt: at,
+		});
+		const oldCredential = {
+			type: "oauth" as const,
+			access: "old-grant",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		};
+		authStorage.set("mcp:acme", oldCredential);
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: vi.fn(async () => ({ status: "cancelled" as const })),
+		});
+		await (
+			fake as unknown as {
+				connectServiceFromPicker: (this: unknown, ...args: unknown[]) => Promise<boolean>;
+			}
+		).connectServiceFromPicker.call(
+			fake,
+			{
+				serviceId: "acme",
+				label: "Acme",
+				connectionStatus: "error",
+				connectable: true,
+				usesOAuth: true,
+				source: "catalog",
+				connectionIds: ["acme"],
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{},
+		);
+		// The claim was RELEASED: the record keeps its status with NO nonce...
+		const record = store.get("acme");
+		expect(record?.status).toBe("connected");
+		expect(record?.attemptId).toBeUndefined();
+		expect(record?.verifiedAt).toBe(at);
+		// ...and the old credential survives byte-for-byte.
+		expect(authStorage.get("mcp:acme")).toEqual(oldCredential);
+		expect(authStorage.list().filter((id) => id.startsWith("mcp:acme--"))).toEqual([]);
+	});
+
+	test("a late reconnect success after a logout is discarded honestly", async () => {
+		const { fake, store, authStorage, showStatus } = fakeWithStore();
+		const at = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: at,
+			toolCount: 2,
+			createdAt: at,
+			updatedAt: at,
+		});
+		const oldCredential = {
+			type: "oauth" as const,
+			access: "old-grant",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		};
+		authStorage.set("mcp:acme", oldCredential);
+		(fake as unknown as Record<string, unknown>).createAuthFlows = () => ({
+			runMcpLogin: vi.fn(async (serverId: string) => {
+				// Mid-login, the user's logout cancels the claim: the staged-key
+				// logout clears the ACTIVE nonce on the claimed record.
+				const nonce = serverId.split("--")[1];
+				await logoutMcpAccount(`mcp:acme--${nonce}`, store, authStorage);
+				authStorage.set(`mcp:${serverId}`, {
+					type: "oauth",
+					access: "late-new-grant",
+					refresh: "r",
+					expires: at + 3600_000,
+					endpoint: "https://mcp.acme.test/mcp",
+				});
+				return { status: "success" as const };
+			}),
+		});
+		await (
+			fake as unknown as {
+				connectServiceFromPicker: (this: unknown, ...args: unknown[]) => Promise<boolean>;
+			}
+		).connectServiceFromPicker.call(
+			fake,
+			{
+				serviceId: "acme",
+				label: "Acme",
+				connectionStatus: "error",
+				connectable: true,
+				usesOAuth: true,
+				source: "catalog",
+				connectionIds: ["acme"],
+			},
+			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
+			{},
+		);
+		// The late grant NEVER landed: the old credential survives byte-for-byte...
+		expect(authStorage.get("mcp:acme")).toEqual(oldCredential);
+		// ...the record survives its connected status with the claim gone...
+		const record = store.get("acme");
+		expect(record?.status).toBe("connected");
+		expect(record?.attemptId).toBeUndefined();
+		// ...no staged leftovers, and the honest discard wording.
+		expect(authStorage.list().filter((id) => id.startsWith("mcp:acme--"))).toEqual([]);
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("discarded");
 	});
 
 	test("the REAL generic /logout fired inside the finalize commit is never defeated by the race", async () => {
@@ -712,7 +913,7 @@ describe("ENG-6108 guarded credential commit", () => {
 		expect(store.get("acme-2")).toBeDefined();
 		const stagedLeftovers = authStorage.list().filter((id) => id.startsWith("mcp:acme-2--"));
 		expect(stagedLeftovers).toEqual([]);
-		expect(JSON.stringify(showStatus.mock.calls)).toContain("removed or replaced during login");
+		expect(JSON.stringify(showStatus.mock.calls)).toContain("logged out or replaced during login");
 	});
 });
 
@@ -825,6 +1026,11 @@ describe("ENG-6108 /plugins account state actions", () => {
 			flush: vi.fn(async () => undefined),
 			upsert: vi.fn(),
 			remove: vi.fn(),
+			reserveConnectionId: vi.fn(async () => true),
+			claimConnectionId: vi.fn(async () => true),
+			releaseClaim: vi.fn(async () => true),
+			removeReservation: vi.fn(async () => true),
+			finalizeAttempt: vi.fn(async () => "committed"),
 			queueVerifyResult: vi.fn(() => {
 				throw new Error("boom");
 			}),

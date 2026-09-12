@@ -287,6 +287,48 @@ describe("ProviderAuthFlows", () => {
 		expect(statusMessages.join("\n")).toContain("could not be saved");
 	});
 
+	it("the generic /login service option for an MCP account delegates to the guarded host hook", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const delegated = vi.fn(async () => ({
+			status: "success" as const,
+			providerId: "mcp:acme",
+			providerName: "Acme",
+			authType: "oauth" as const,
+			kind: "service" as const,
+		}));
+		(host as { onMcpAccountLogin?: unknown }).onMcpAccountLogin = delegated;
+
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "mcp:acme",
+			name: "Acme",
+			authType: "oauth",
+			category: "service",
+		});
+
+		// The MCP login went through the guarded hook — never a raw dialog
+		// writing the final credential directly.
+		expect(delegated).toHaveBeenCalledWith("mcp:acme");
+		expect(result.status).toBe("success");
+	});
+
+	it("an unresolvable MCP login falls back to the raw dialog (internal detail)", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		(host as { onMcpAccountLogin?: unknown }).onMcpAccountLogin = vi.fn(async () => undefined);
+
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "mcp:acme",
+			name: "Acme",
+			authType: "oauth",
+			category: "service",
+		});
+
+		// The hook declined (unresolvable): the raw dialog path ran against the
+		// missing provider and failed honestly — never a crash.
+		expect(result).toEqual({ status: "failed" });
+	});
+
 	it("a refused stale staged logout reports state-neutrally, never Logged out or Connected", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
 		authStorage.set("mcp:acme-2--attempt-1", {

@@ -105,6 +105,15 @@ export interface ProviderAuthFlowsHost {
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
 	/**
+	 * OWNS the MCP account login for the generic /login service options and
+	 * the config menu: the host runs the ONE guarded connect operation
+	 * (claim under the store lock, staged OAuth, guarded finalize) instead
+	 * of the raw provider dialog writing the final credential directly.
+	 * Return undefined ONLY when the account cannot be resolved — the raw
+	 * dialog stays an internal detail for unresolvable providers.
+	 */
+	onMcpAccountLogin?(providerId: string): Promise<AuthenticationResult | undefined>;
+	/**
 	 * OWNS the entire MCP account logout for the generic /logout route: the
 	 * host must perform verified credential deletion AND pending-attempt
 	 * cancellation under ONE connection-store critical section (store->auth)
@@ -183,6 +192,15 @@ export class ProviderAuthFlows {
 	loginProvider(providerOption: AuthSelectorProvider): Promise<AuthenticationResult> {
 		const kind = providerOption.category === "service" ? "service" : "provider";
 		if (providerOption.authType === "oauth") {
+			// MCP account logins are DELEGATED to the host's guarded connect
+			// operation BEFORE any dialog writes the final credential: a
+			// concurrent logout can cancel the attempt and a late callback
+			// can never reactivate or clobber the account.
+			if (providerOption.id.startsWith("mcp:") && this.host.onMcpAccountLogin) {
+				return this.host
+					.onMcpAccountLogin(providerOption.id)
+					.then((handled) => handled ?? this.showLoginDialog(providerOption.id, providerOption.name, kind));
+			}
 			return this.showLoginDialog(providerOption.id, providerOption.name, kind);
 		}
 		if (providerOption.id === PRIME_INFERENCE_PROVIDER_ID) {

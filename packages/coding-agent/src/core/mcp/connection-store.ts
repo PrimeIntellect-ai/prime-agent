@@ -51,6 +51,20 @@ type PendingOp =
 			isStillCurrent: () => boolean;
 	  }
 	| {
+			kind: "claimConnectionId";
+			connectionId: string;
+			/** Opaque ownership nonce stamped onto the EXISTING record. */
+			attemptId: string;
+			resolve: (claimed: boolean) => void;
+	  }
+	| {
+			kind: "releaseClaim";
+			connectionId: string;
+			/** Only OUR claim is released; the record and its status survive. */
+			attemptId: string;
+			resolve: (released: boolean) => void;
+	  }
+	| {
 			kind: "reserve";
 			record: McpConnectionRecord;
 			/** Cross-process atomic allocation: true when this store won the id. */
@@ -107,26 +121,16 @@ type PendingOp =
 			resolve: (result: McpRemoveAccountResult) => void;
 	  };
 
-/** The account + credential key a generic MCP logout acts on, or a refusal. */
-export type McpAccountLogoutTarget =
-	| {
-			status: "logout";
-			/** The account whose pending attempt is cancelled / record preserved. */
-			connectionId: string;
-			/**
-			 * The auth key whose credential is verified-removed: the staged key
-			 * itself for staged-key logouts, the account key otherwise.
-			 */
-			credentialKey: string;
-	  }
-	| {
-			/**
-			 * The staged key's RECORDED attempt already ended (its nonce matches a
-			 * non-pending record): fail CLOSED — never delete the newer account
-			 * credential, never delete the record, never claim the logout happened.
-			 */
-			status: "stale";
-	  };
+/** The account + credential key a generic MCP logout acts on. */
+export interface McpAccountLogoutTarget {
+	/** The account whose active attempt is cancelled / record preserved. */
+	connectionId: string;
+	/**
+	 * The auth key whose credential is verified-removed: the staged key itself
+	 * for staged-key logouts, the account key otherwise.
+	 */
+	credentialKey: string;
+}
 
 /**
  * Resolve the account behind an MCP credential id for the generic logout
@@ -141,20 +145,19 @@ export function resolveMcpAccountLogoutTarget(
 	const candidate = providerId.slice("mcp:".length);
 	const accountKey = `mcp:${candidate}`;
 	if (records.some((record) => record.connectionId === candidate) || !candidate.includes("--")) {
-		return { status: "logout", connectionId: candidate, credentialKey: accountKey };
+		return { connectionId: candidate, credentialKey: accountKey };
 	}
 	const stagedMatch = records.find(
 		(record) => record.attemptId !== undefined && `${record.connectionId}--${record.attemptId}` === candidate,
 	);
 	if (stagedMatch) {
-		if (stagedMatch.status === "pending") {
-			return { status: "logout", connectionId: stagedMatch.connectionId, credentialKey: accountKey };
-		}
-		// The nonce matches a record whose attempt already committed
-		// (connected/error): the staged selection is stale — refuse.
-		return { status: "stale" };
+		// A nonce match is ALWAYS a LIVE attempt (a pending reservation or a
+		// claimed reconnect on any-status record — successful finalizes CONSUME
+		// the nonce, so no stale nonces survive on completed records): the
+		// staged-key logout cancels it, clearing the ACTIVE nonce.
+		return { connectionId: stagedMatch.connectionId, credentialKey: accountKey };
 	}
-	return { status: "logout", connectionId: candidate, credentialKey: accountKey };
+	return { connectionId: candidate, credentialKey: accountKey };
 }
 
 /**
@@ -248,12 +251,23 @@ function serializeRecords(records: ReadonlyMap<string, McpConnectionRecord>): st
 /** One-shot attempt operations: they carry a resolver and never requeue. */
 type OneShotOperation = Extract<
 	PendingOp,
-	{ kind: "reserve" | "removeReservation" | "finalizeAttempt" | "removeAccount" | "removeAccountForProvider" }
+	{
+		kind:
+			| "reserve"
+			| "claimConnectionId"
+			| "releaseClaim"
+			| "removeReservation"
+			| "finalizeAttempt"
+			| "removeAccount"
+			| "removeAccountForProvider";
+	}
 >;
 
 function isOneShotOperation(operation: PendingOp): operation is OneShotOperation {
 	return (
 		operation.kind === "reserve" ||
+		operation.kind === "claimConnectionId" ||
+		operation.kind === "releaseClaim" ||
 		operation.kind === "removeReservation" ||
 		operation.kind === "finalizeAttempt" ||
 		operation.kind === "removeAccount" ||
@@ -319,6 +333,54 @@ export class McpConnectionStore {
 				resolve(won);
 			};
 			this.pendingOps.push({ kind: "reserve", record: { ...record }, resolve: settle });
+			void this.flush().catch(() => settle(false));
+		});
+	}
+
+	/**
+	 * Claim an EXISTING account record for a guarded login (reconnect): OUR
+	 * nonce is stamped on the record (any status) under the file lock, so the
+	 * finalize owns it and cancel (releaseClaim) restores the record exactly.
+	 * One-shot: settles on I/O or lock failure, never requeues.
+	 */
+	claimConnectionId(options: { connectionId: string; attemptId: string }): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const settle = (claimed: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(claimed);
+			};
+			this.pendingOps.push({
+				kind: "claimConnectionId",
+				connectionId: options.connectionId,
+				attemptId: options.attemptId,
+				resolve: settle,
+			});
+			void this.flush().catch(() => settle(false));
+		});
+	}
+
+	/**
+	 * Release OUR claim on an existing account record: only the nonce is
+	 * cleared — the record, its status, and any credential survive untouched
+	 * (a cancelled reconnect preserves the account exactly).
+	 * One-shot: settles on I/O or lock failure, never requeues.
+	 */
+	releaseClaim(options: { connectionId: string; attemptId: string }): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const settle = (released: boolean): void => {
+				if (settled) return;
+				settled = true;
+				resolve(released);
+			};
+			this.pendingOps.push({
+				kind: "releaseClaim",
+				connectionId: options.connectionId,
+				attemptId: options.attemptId,
+				resolve: settle,
+			});
 			void this.flush().catch(() => settle(false));
 		});
 	}
@@ -544,6 +606,45 @@ export class McpConnectionStore {
 					for (const operation of operations) {
 						if (operation.kind === "remove") {
 							records.delete(operation.connectionId);
+						} else if (operation.kind === "claimConnectionId") {
+							oneShot.add(operation);
+							try {
+								const existing = records.get(operation.connectionId);
+								if (existing === undefined) {
+									operation.resolve(false);
+								} else {
+									// Stamp OUR nonce on the existing record (any
+									// status): the guarded reconnect owns it for the
+									// finalize; cancel releases via releaseClaim.
+									records.set(operation.connectionId, {
+										...existing,
+										attemptId: operation.attemptId,
+									});
+									deferred.push((didCommit) => operation.resolve(didCommit));
+								}
+							} catch {
+								operation.resolve(false);
+							}
+						} else if (operation.kind === "releaseClaim") {
+							oneShot.add(operation);
+							try {
+								const existing = records.get(operation.connectionId);
+								if (
+									existing === undefined ||
+									existing.attemptId === undefined ||
+									existing.attemptId !== operation.attemptId
+								) {
+									operation.resolve(false);
+								} else {
+									// Release OUR claim only: the record, its
+									// status, and any credential survive untouched.
+									const { attemptId: _released, ...withoutClaim } = existing;
+									records.set(operation.connectionId, withoutClaim);
+									deferred.push((didCommit) => operation.resolve(didCommit));
+								}
+							} catch {
+								operation.resolve(false);
+							}
 						} else if (operation.kind === "upsert") {
 							this.applyUpsert(records, operation.record);
 						} else if (operation.kind === "reserve") {
@@ -587,12 +688,7 @@ export class McpConnectionStore {
 								// finalize acts on what the lock sees — never a
 								// pre-lock cache snapshot.
 								const target = resolveMcpAccountLogoutTarget(operation.providerId, [...records.values()]);
-								if (target.status === "stale") {
-									// Fail CLOSED: the recorded attempt already
-									// ended — keep the record, keep the newer
-									// credential, never claim the logout.
-									operation.resolve("refused");
-								} else {
+								{
 									const accountKey = `mcp:${target.connectionId}`;
 									const stagedSelection = target.credentialKey !== accountKey;
 									// Verified cleanup FIRST (store->auth): a
@@ -610,10 +706,12 @@ export class McpConnectionStore {
 										// unbound state); an explicit account Remove
 										// deletes it later.
 										const existing = records.get(target.connectionId);
-										if (existing?.status === "pending" && existing.attemptId !== undefined) {
-											// Invalidate the attempt nonce so the in-flight
-											// login's denied/occupied path can no longer
-											// removeReservation-delete this preserved record.
+										if (existing?.attemptId !== undefined) {
+											// Invalidate the ACTIVE attempt nonce on ANY status
+											// (pending marker or a claimed connected/error
+											// account): the in-flight login can no longer
+											// finalize, and its denied path can never delete
+											// this preserved record.
 											const { attemptId: _cancelled, ...withoutAttempt } = existing;
 											records.set(target.connectionId, withoutAttempt);
 										}
@@ -630,12 +728,18 @@ export class McpConnectionStore {
 									} else {
 										// Account-key logout: cancel PENDING attempts
 										// (the record goes with the attempt), PRESERVE
-										// completed records (honest unbound/Reconnect).
+										// completed records (honest unbound/Reconnect) —
+										// clearing any ACTIVE claim nonce so an
+										// in-flight reconnect cannot re-write the
+										// credential the user just logged out.
 										const existing = records.get(target.connectionId);
 										const existed = existing !== undefined;
 										const removeRecord = existed && existing.status === "pending";
 										if (removeRecord) {
 											records.delete(target.connectionId);
+										} else if (existing?.attemptId !== undefined) {
+											const { attemptId: _cancelled, ...withoutAttempt } = existing;
+											records.set(target.connectionId, withoutAttempt);
 										}
 										const outcome: McpRemoveAccountResult = removeRecord
 											? "removed"
@@ -699,11 +803,10 @@ export class McpConnectionStore {
 							oneShot.add(operation);
 							try {
 								const existing = records.get(operation.connectionId);
-								if (
-									existing?.status === "pending" &&
-									existing.attemptId !== undefined &&
-									existing.attemptId === operation.attemptId
-								) {
+								if (existing?.attemptId !== undefined && existing.attemptId === operation.attemptId) {
+									// Ownership is the EXPLICIT nonce, on any record status:
+									// a claimed connected/error account (guarded reconnect)
+									// finalizes like a pending reservation.
 									// Recovery is registered BEFORE any side effect:
 									// a throwing or partial commit callback still
 									// gets its rollback attempt under this lock.

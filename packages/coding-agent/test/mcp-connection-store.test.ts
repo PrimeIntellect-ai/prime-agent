@@ -582,6 +582,126 @@ describe("ENG-6108 durable account reservations", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
+	it("claims and releases settle exactly once on a failed batch write (no requeue, no ghost claim)", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "claim-fail-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const client = McpConnectionStore.open(path);
+		const at = Date.now();
+		// A finished account to claim.
+		const mine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, mine));
+		const finalized = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: (current) => ({ ...current, status: "connected" as const }),
+		});
+		expect(finalized).toBe("committed");
+
+		// TWO claims batched into ONE failing write: both settle false (never
+		// hang, never requeue as ghost claims). The failure is injected into
+		// the batch's single record write.
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("simulated claim write failure");
+		});
+		const nonceA = nonce();
+		const nonceB = nonce();
+		const claimA = client.claimConnectionId({ connectionId: "acme-2", attemptId: nonceA });
+		const claimB = client.claimConnectionId({ connectionId: "acme-2", attemptId: nonceB });
+		await expect(claimA).resolves.toBe(false);
+		await expect(claimB).resolves.toBe(false);
+		// The disk record carries NEITHER failed claim's nonce (nothing
+		// half-applied, no ghost claim for a later flush to materialize).
+		const attemptAfterFailure = McpConnectionStore.open(path).get("acme-2")?.attemptId;
+		expect([nonceA, nonceB]).not.toContain(attemptAfterFailure);
+
+		// A retry claim still works after the failure.
+		const retryNonce = nonce();
+		await expect(client.claimConnectionId({ connectionId: "acme-2", attemptId: retryNonce })).resolves.toBe(true);
+		// ...and releases the same way (one-shot, ownership-checked).
+		await expect(client.releaseClaim({ connectionId: "acme-2", attemptId: retryNonce })).resolves.toBe(true);
+		await expect(client.releaseClaim({ connectionId: "acme-2", attemptId: retryNonce })).resolves.toBe(false);
+		expect(McpConnectionStore.open(path).get("acme-2")?.attemptId).toBeUndefined();
+		expect(McpConnectionStore.open(path).get("acme-2")?.status).toBe("connected");
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("a claim's finalize on an EXISTING (non-pending) record commits, consumes the nonce, and rolls back with the previous credential", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "claim-finalize-"));
+		const path = join(tempDir, "mcp-connections.json");
+		const authPath = join(tempDir, "auth.json");
+		const client = McpConnectionStore.open(path);
+		const auth = AuthStorage.create(authPath);
+		const at = Date.now();
+		// A CONNECTED account with an old grant.
+		const mine = nonce();
+		await client.reserveConnectionId(record("acme-2", at, mine));
+		const finalized = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: mine,
+			commit: (current) => ({ ...current, status: "connected" as const }),
+		});
+		expect(finalized).toBe("committed");
+		const oldCredential = {
+			type: "oauth" as const,
+			access: "old-grant",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		};
+		auth.set("mcp:acme-2", oldCredential);
+
+		// Claim the existing record and stage the new credential.
+		const claimNonce = nonce();
+		await expect(client.claimConnectionId({ connectionId: "acme-2", attemptId: claimNonce })).resolves.toBe(true);
+		auth.set(`mcp:acme-2--${claimNonce}`, {
+			type: "oauth",
+			access: "new-grant",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const expectedOld = auth.getVerified("mcp:acme-2");
+
+		// A failing RECORD write makes the compensate run under the same lock:
+		// it must RESTORE the previous credential (never delete-only).
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("simulated record write failure");
+		});
+		const outcome = await client.finalizeAttempt({
+			connectionId: "acme-2",
+			attemptId: claimNonce,
+			commit: (record) => {
+				const move = auth.replaceStagedCredential(`mcp:acme-2--${claimNonce}`, "mcp:acme-2", expectedOld);
+				expect(move.status).toBe("replaced");
+				const { attemptId: _consumed, ...pending } = record;
+				return { ...pending, status: "pending" as const };
+			},
+			compensate: () => {
+				// Full-identity CAS restore of the previous credential.
+				auth.replaceCredentialIfMatches(
+					"mcp:acme-2",
+					{
+						type: "oauth",
+						access: "new-grant",
+						refresh: "r",
+						expires: at + 3600_000,
+						endpoint: "https://mcp.acme.test/mcp",
+					},
+					oldCredential,
+				);
+			},
+		});
+		expect(outcome).toBe("compensated");
+		// The PREVIOUS credential is restored byte-for-byte...
+		expect(AuthStorage.create(authPath).get("mcp:acme-2")).toEqual(oldCredential);
+		// ...the record keeps its connected status with the claim still held
+		// (the write failed; the claim was never consumed).
+		const recordAfter = McpConnectionStore.open(path).get("acme-2");
+		expect(recordAfter?.status).toBe("connected");
+		expect(recordAfter?.attemptId).toBe(claimNonce);
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
 	it("a removeAccount whose verified auth cleanup FAILS preserves the record on disk", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "auth-fail-logout-"));
 		const path = join(tempDir, "mcp-connections.json");
@@ -734,19 +854,22 @@ describe("ENG-6108 durable account reservations", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
-	it("resolveMcpAccountLogoutTarget marks a nonce-matched non-pending record as stale", () => {
+	it("resolveMcpAccountLogoutTarget treats a nonce match as a LIVE attempt on any record status", () => {
 		const records = [
 			{ connectionId: "acme-2", status: "connected", attemptId: "nonce-1" },
 			{ connectionId: "other", status: "pending", attemptId: "nonce-2" },
 		];
-		expect(resolveMcpAccountLogoutTarget("mcp:acme-2--nonce-1", records)).toEqual({ status: "stale" });
+		// A nonce match is ALWAYS live (claimed reconnects carry nonces on
+		// connected/error records; successful finalizes consume them).
+		expect(resolveMcpAccountLogoutTarget("mcp:acme-2--nonce-1", records)).toEqual({
+			connectionId: "acme-2",
+			credentialKey: "mcp:acme-2--nonce-1",
+		});
 		expect(resolveMcpAccountLogoutTarget("mcp:other--nonce-2", records)).toEqual({
-			status: "logout",
 			connectionId: "other",
 			credentialKey: "mcp:other--nonce-2",
 		});
 		expect(resolveMcpAccountLogoutTarget("mcp:acme-2", records)).toEqual({
-			status: "logout",
 			connectionId: "acme-2",
 			credentialKey: "mcp:acme-2",
 		});
