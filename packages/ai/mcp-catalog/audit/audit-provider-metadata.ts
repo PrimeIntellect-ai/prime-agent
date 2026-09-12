@@ -436,13 +436,19 @@ function engineSelectProtectedResource(
 	return undefined;
 }
 
-/** Honest, bounded reason for a fail-closed PRM discovery (mirrors oauth.ts). */
+/**
+ * Honest, bounded reason for a FAIL-CLOSED PRM discovery (mirrors oauth.ts:
+ * a followed pointer fails on any error; a well-known candidate continues only
+ * on exactly 4xx, so 5xx/fetch errors and served-but-invalid documents throw).
+ * The all-4xx case is NOT a failure — the engine falls back to origin-level
+ * authorization-server discovery — and gets no note.
+ */
 function engineSelectionNote(
 	attempts: PrmAttempt[],
 	endpoint: string,
 	hasPath: boolean,
 	hasHeader: boolean,
-): string {
+): string | undefined {
 	const attemptByKind = (kind: PrmAttempt["kind"]) => attempts.find((attempt) => attempt.kind === kind);
 	const served = (attempt: PrmAttempt | undefined): boolean => !!attempt && attempt.status === "available";
 	if (hasHeader) {
@@ -459,9 +465,21 @@ function engineSelectionNote(
 	if (served(origin)) {
 		return "the origin-level protected-resource document fails the engine's audience/structure validation; PRM discovery fails closed";
 	}
-	return hasPath
-		? "no valid protected-resource document at the pathful or origin-level well-known locations"
-		: "no valid protected-resource document at the well-known location";
+	// The engine continues ONLY on exactly-4xx attempts. Network errors (no
+	// status), 5xx responses and 2xx/3xx non-JSON bodies all make jsonMetadata
+	// throw — fail closed, no origin-AS fallback.
+	const throwsInsteadOfContinuing = [pathful, origin].filter(
+		(attempt): attempt is PrmAttempt =>
+			!!attempt &&
+			attempt.status !== "available" &&
+			(attempt.httpStatus === undefined || attempt.httpStatus < 400 || attempt.httpStatus >= 500),
+	);
+	if (throwsInsteadOfContinuing.length > 0) {
+		return "a well-known protected-resource location failed with a non-4xx response or non-JSON document; PRM discovery fails closed (the engine only continues on 4xx)";
+	}
+	// All tried well-known candidates are exactly 4xx: the engine falls back to
+	// origin-level authorization-server discovery — not a failure, no note.
+	return undefined;
 }
 
 async function auditEndpoint(server: string, endpoint: string): Promise<AuditResult> {
@@ -505,7 +523,12 @@ async function auditEndpoint(server: string, endpoint: string): Promise<AuditRes
 	const protectedResource: AuditResult["protectedResource"] = {
 		attempts,
 		engineVisible: selected ? "available" : "unavailable",
-		...(selected ? { engineSelectedSourceUrl: selected.sourceUrl } : { selectionNote: engineSelectionNote(attempts, endpoint, hasPath, headerUrl !== undefined) }),
+		...(selected
+			? { engineSelectedSourceUrl: selected.sourceUrl }
+			: (() => {
+					const note = engineSelectionNote(attempts, endpoint, hasPath, headerUrl !== undefined);
+					return note ? { selectionNote: note } : {};
+				})()),
 	};
 
 	const issuer =

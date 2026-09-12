@@ -237,7 +237,15 @@ export interface AuditResult {
 	endpoint: string;
 	probe: { url: string; httpStatus?: number; resourceMetadataHeader?: string; error?: string };
 	protectedResource: {
-		attempts: Array<{ sourceUrl: string; kind: string; status: string; audienceMatches?: boolean; evidence?: AuditPrmEvidence }>;
+		attempts: Array<{
+			sourceUrl: string;
+			kind: string;
+			status: string;
+			audienceMatches?: boolean;
+			evidence?: AuditPrmEvidence;
+			httpStatus?: number;
+			error?: string;
+		}>;
 		engineVisible: "available" | "unavailable";
 		engineSelectedSourceUrl?: string;
 		selectionNote?: string;
@@ -645,13 +653,12 @@ function evidenceSupportsStandardOauth(result: AuditResult): boolean {
 	// query string never matches (LogRocket), and DCR-less providers never
 	// become oauth-ready regardless (Slack, HubSpot).
 	if (result.protectedResource.engineVisible === "available") return !audienceMismatched(result);
-	// A served-but-invalid document makes the engine throw with NO origin-AS
-	// fallback (fail closed) — never oauth-ready.
-	if (servedButFailClosed(result)) return false;
-	// No valid PRM document anywhere: the engine falls back to origin-level
-	// authorization-server discovery, so the captured AS evidence (issuer =
-	// endpoint origin, mirroring the same fallback) decides.
-	return true;
+	// No valid PRM document anywhere. oauth-ready via the origin-AS fallback
+	// requires the engine to actually REACH that fallback: no followed pointer
+	// (any pointer failure throws) and every tried well-known candidate exactly
+	// 4xx. Served-but-invalid documents, 5xx responses and fetch errors all
+	// throw with no fallback — the entry stays honestly unknown.
+	return engineFallsBackToOriginAs(result);
 }
 
 /** The engine's canonicalResource rule: bare origins collapse, paths and searches stay. */
@@ -677,13 +684,23 @@ function audienceMismatched(result: AuditResult): boolean {
 }
 
 /**
- * The script's engine-mirror selection fail-closes when a served document
- * misses the audience or structure validation; surface that reason honestly.
+ * The engine reaches its origin-level authorization-server fallback ONLY when
+ * no resource_metadata pointer was followed (a followed pointer fails closed
+ * on ANY error; a present-but-rejected pointer fails closed at URL validation)
+ * AND every well-known candidate it tried returned exactly a 4xx (the loop
+ * continues only on 4xx; 5xx, fetch errors and served-but-invalid documents
+ * all throw). Derived exactly from the recorded attempts.
  */
-function servedButFailClosed(result: AuditResult): boolean {
-	return (
-		result.protectedResource.engineVisible === "unavailable" &&
-		result.protectedResource.attempts.some((attempt) => attempt.status === "available")
+function engineFallsBackToOriginAs(result: AuditResult): boolean {
+	if (result.protectedResource.attempts.some((attempt) => attempt.kind === "header")) return false;
+	if (result.probe.resourceMetadataHeader) return false;
+	const wellKnown = result.protectedResource.attempts.filter(
+		(attempt) => attempt.kind === "pathful" || attempt.kind === "origin",
+	);
+	if (wellKnown.some((attempt) => attempt.status === "available")) return false;
+	return wellKnown.every(
+		(attempt) =>
+			attempt.httpStatus !== undefined && attempt.httpStatus >= 400 && attempt.httpStatus < 500,
 	);
 }
 
