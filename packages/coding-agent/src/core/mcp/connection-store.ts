@@ -9,7 +9,7 @@
 // instance's pending operations. Verification results apply under a guard so a
 // stale probe can never mark a newer grant (or a logged-out connection) verified.
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { realpathIfPresentSync, writeFileAtomicSync } from "../../utils/atomic-file.js";
@@ -171,8 +171,16 @@ export class McpConnectionStore {
 	flush(): Promise<void> {
 		const run = async (): Promise<void> => {
 			mkdirSync(dirname(this.path), { recursive: true });
-			if (!existsSync(this.path)) {
-				writeFileAtomicSync(this.path, serializeRecords(new Map()), { mode: 0o600 });
+			// Exclusive, non-truncating create. The previous exists-then-write-empty
+			// could rename an empty file over records another process had just
+			// written; "wx" only ever creates a brand-new inode, so a first writer
+			// can never wipe anything. Content always comes from the locked
+			// read-modify-write below, so the winner writes nothing here.
+			try {
+				closeSync(openSync(this.path, "wx", 0o600));
+				chmodSync(this.path, 0o600);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 			}
 			let lockCompromised = false;
 			let lockCompromisedError: Error | undefined;
@@ -190,24 +198,37 @@ export class McpConnectionStore {
 					lockCompromisedError = error as Error;
 				},
 			});
+			let committed = false;
 			try {
 				if (lockCompromised) throw lockCompromisedError ?? new Error("MCP connection store lock was compromised");
 				const records = parseRecords(safeReadFileSync(realpathIfPresentSync(this.path)));
 				// Splice only after acquiring the lock: operations queued while we
 				// waited belong to this flush, not the previous one.
 				const operations = this.pendingOps.splice(0);
-				for (const operation of operations) {
-					if (operation.kind === "remove") {
-						records.delete(operation.connectionId);
-					} else if (operation.kind === "upsert") {
-						this.applyUpsert(records, operation.record);
-					} else if (operation.isStillCurrent()) {
-						this.applyUpsert(records, operation.record);
+				try {
+					for (const operation of operations) {
+						if (operation.kind === "remove") {
+							records.delete(operation.connectionId);
+						} else if (operation.kind === "upsert") {
+							this.applyUpsert(records, operation.record);
+						} else if (operation.isStillCurrent()) {
+							this.applyUpsert(records, operation.record);
+						}
 					}
+					writeFileAtomicSync(realpathIfPresentSync(this.path), serializeRecords(records), {
+						mode: 0o600,
+					});
+					if (lockCompromised)
+						throw lockCompromisedError ?? new Error("MCP connection store lock was compromised");
+					this.recordsById = records;
+					committed = true;
+				} finally {
+					// The write failed (or the lock was compromised): put the batch
+					// back at the FRONT, ahead of anything queued meanwhile.
+					// Operations are idempotent and verify guards re-evaluate under
+					// the lock, so the next flush retries cleanly and drops nothing.
+					if (!committed) this.pendingOps.unshift(...operations);
 				}
-				writeFileAtomicSync(realpathIfPresentSync(this.path), serializeRecords(records), { mode: 0o600 });
-				if (lockCompromised) throw lockCompromisedError ?? new Error("MCP connection store lock was compromised");
-				this.recordsById = records;
 			} finally {
 				if (lockCompromised) await release().catch(() => undefined);
 				else await release();

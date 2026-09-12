@@ -1,8 +1,16 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
+import { writeFileAtomicSync } from "../src/utils/atomic-file.js";
+
+// The store's atomic write is the seam for write-failure regressions; the real
+// implementation stays the default so every other test hits the real disk path.
+vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/utils/atomic-file.js")>();
+	return { ...actual, writeFileAtomicSync: vi.fn(actual.writeFileAtomicSync) };
+});
 
 function recordFixture(connectionId: string, overrides: Partial<McpConnectionRecord> = {}): McpConnectionRecord {
 	const now = Date.now();
@@ -107,6 +115,58 @@ describe("McpConnectionStore concurrency", () => {
 				.map((record) => record.connectionId)
 				.sort(),
 		).toEqual(["service-0", "service-1", "service-2", "service-3"]);
+	});
+
+	it("creates the file exclusively when first-time writers race", async () => {
+		const instances = ["alpha", "beta", "gamma"].map((id) => {
+			const store = McpConnectionStore.open(path);
+			store.upsert(recordFixture(id));
+			return store;
+		});
+		await Promise.all(instances.map((store) => store.flush()));
+
+		const reopened = McpConnectionStore.open(path);
+		expect(
+			reopened
+				.records()
+				.map((record) => record.connectionId)
+				.sort(),
+		).toEqual(["alpha", "beta", "gamma"]);
+		// The exclusive create keeps the file owner-private regardless of umask.
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+	});
+
+	it("requeues operations when the atomic write fails and retries them in order", async () => {
+		const store = McpConnectionStore.open(path);
+		store.upsert(recordFixture("acme", { label: "v1", status: "pending" }));
+		store.upsert(recordFixture("acme", { label: "v2", status: "pending" }));
+		let verificationStillCurrent = true;
+		store.queueVerifyResult(
+			recordFixture("acme", { status: "connected", toolCount: 7, verifiedAt: 123 }),
+			() => verificationStillCurrent,
+		);
+
+		vi.mocked(writeFileAtomicSync).mockImplementationOnce(() => {
+			throw new Error("simulated write failure");
+		});
+		await expect(store.flush()).rejects.toThrow("simulated write failure");
+		// In-memory state kept the immediate upserts; the disk kept nothing.
+		expect(store.get("acme")?.label).toBe("v2");
+		const untouched = McpConnectionStore.open(path);
+		expect(untouched.get("acme")).toBeUndefined();
+
+		// Ops queued after the failed flush stay behind the requeued batch.
+		verificationStillCurrent = false; // the verification result went stale meanwhile
+		store.upsert(recordFixture("beta"));
+		await store.flush();
+
+		const reopened = McpConnectionStore.open(path);
+		// The requeued upserts re-applied in order (the later one wins), the
+		// stale verification was re-guarded and discarded, and the late op landed.
+		expect(reopened.get("acme")?.label).toBe("v2");
+		expect(reopened.get("acme")?.status).toBe("pending");
+		expect(reopened.get("acme")?.toolCount).toBeUndefined();
+		expect(reopened.get("beta")).toBeDefined();
 	});
 
 	it("keeps operations queued while another flush is in flight for the next flush", async () => {

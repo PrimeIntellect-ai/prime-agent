@@ -23,6 +23,7 @@ function createMcpFakeFetch(
 		sseCrlf?: boolean;
 		onDelete?: () => void;
 		onInitialize?: (body: unknown) => void;
+		deleteNeverReturns?: boolean;
 	} = {},
 ) {
 	const calls: FetchCall[] = [];
@@ -33,6 +34,7 @@ function createMcpFakeFetch(
 		if (method === "DELETE") {
 			deletes.push(init);
 			options.onDelete?.();
+			if (options.deleteNeverReturns) await new Promise(() => {});
 			return new Response(null, { status: 200 });
 		}
 		if (method === "GET") {
@@ -180,11 +182,51 @@ describe("probeMcpEndpoint", () => {
 		expect(serialized).not.toContain("mcp.acme.test");
 	});
 
+	it("still returns when the cleanup DELETE never responds", async () => {
+		const server = createMcpFakeFetch({ deleteNeverReturns: true });
+		const started = Date.now();
+		const result = await probeMcpEndpoint({
+			url: "https://mcp.acme.test/mcp",
+			getToken: () => FAKE_TOKEN,
+			cleanupTimeoutMs: 50,
+			fetchImpl: server.fetchImpl as unknown as typeof fetch,
+		});
+		expect(result).toEqual({ ok: true, toolCount: 1 });
+		expect(server.deletes).toHaveLength(1);
+		// Bounded by the cleanup grace, not by an unbounded DELETE.
+		expect(Date.now() - started).toBeLessThan(2000);
+	}, 5000);
+
+	it("still returns when the response body never completes", async () => {
+		const fetchImpl = vi.fn(async (_url: string | URL, init: RequestInit = {}) => {
+			const body = JSON.parse(String(init.body)) as { method: string };
+			if (body.method === "initialize") {
+				// Headers arrive; the body stream never yields a byte or closes.
+				return new Response(new ReadableStream({ start() {} }), {
+					status: 200,
+					headers: { "content-type": "application/json", "mcp-session-id": "probe-session" },
+				});
+			}
+			throw new Error(`unexpected method ${body.method}`);
+		});
+		const started = Date.now();
+		const result = await probeMcpEndpoint({
+			url: "https://mcp.acme.test/mcp",
+			getToken: () => FAKE_TOKEN,
+			timeoutMs: 40,
+			cleanupTimeoutMs: 50,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+		});
+		expect(result).toEqual({ ok: false, error: MCP_PROBE_ERRORS.TIMEOUT });
+		expect(Date.now() - started).toBeLessThan(2000);
+	}, 5000);
+
 	it("reports a fixed timeout category when the endpoint hangs", async () => {
 		const result = await probeMcpEndpoint({
 			url: "https://mcp.acme.test/mcp",
 			getToken: () => FAKE_TOKEN,
 			timeoutMs: 40,
+			cleanupTimeoutMs: 50,
 			fetchImpl: (async () => {
 				await new Promise(() => {});
 			}) as unknown as typeof fetch,
