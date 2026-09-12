@@ -76,7 +76,12 @@ OAuth metadata for every remote endpoint (102 http + 1 sse), captured by
   location (SDK parity — a 4xx at one location is not proof the other is
   absent); a candidate is selectable only when its document matches the
   endpoint audience under the engine's component comparison and carries
-  authorization servers, mirroring the engine's own validation.
+  authorization servers, mirroring the engine's own validation. Fail-closed
+  states carry an honest `selectionNote` (pointer failure, served-but-invalid
+  document, non-4xx/non-JSON well-known response). The all-4xx state is NOT a
+  failure: the engine falls back to origin-level authorization-server
+  discovery there, so no note is recorded and the captured AS evidence
+  (issuer = endpoint origin, mirroring the same fallback) decides readiness.
 
 The importer merges this evidence into `catalog.json` offline and
 deterministically:

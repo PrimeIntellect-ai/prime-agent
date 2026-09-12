@@ -110,8 +110,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://adobe-creativity.adobe.io/.well-known/oauth-authorization-server",
 						"https://adobe-creativity.adobe.io/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
@@ -1462,8 +1461,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-authorization-server",
 						"https://connect.aidevops.us-east-1.api.aws/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
@@ -2763,8 +2761,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-authorization-server",
 						"https://mediaflows.mcp.cloudinary.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
@@ -5329,8 +5326,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.intercom.com/.well-known/oauth-authorization-server",
 						"https://mcp.intercom.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
@@ -6218,8 +6214,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp-docs.mapbox.com/.well-known/oauth-authorization-server",
 						"https://mcp-docs.mapbox.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
@@ -8344,8 +8339,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.guide.sonatype.com/.well-known/oauth-authorization-server",
 						"https://mcp.guide.sonatype.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {
@@ -8853,8 +8847,7 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://docs.synthflow.ai/.well-known/oauth-authorization-server",
 						"https://docs.synthflow.ai/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12",
-					"note": "no valid protected-resource document at the pathful or origin-level well-known locations"
+					"fetchedAt": "2026-09-12"
 				}
 			},
 			"setup": {

@@ -46,8 +46,7 @@
 						"error": "http 403"
 					}
 				],
-				"engineVisible": "unavailable",
-				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
+				"engineVisible": "unavailable"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -1033,8 +1032,7 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable",
-				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
+				"engineVisible": "unavailable"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -1802,8 +1800,7 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable",
-				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
+				"engineVisible": "unavailable"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -3530,8 +3527,7 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable",
-				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
+				"engineVisible": "unavailable"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -4241,8 +4237,7 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable",
-				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
+				"engineVisible": "unavailable"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -6075,8 +6070,7 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable",
-				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
+				"engineVisible": "unavailable"
 			},
 			"authorizationServer": {
 				"sourceUrls": [
@@ -6408,8 +6402,7 @@
 						"error": "http 404"
 					}
 				],
-				"engineVisible": "unavailable",
-				"selectionNote": "no valid protected-resource document at the pathful or origin-level well-known locations"
+				"engineVisible": "unavailable"
 			},
 			"authorizationServer": {
 				"sourceUrls": [

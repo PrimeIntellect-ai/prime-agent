@@ -304,6 +304,18 @@ describe("MCP service catalog", () => {
 				expect(entry.auth.metadata).toBeUndefined();
 			}
 		}
+		// The engine-undefined fallback is exact: an all-4xx well-known state is
+		// NOT a failure — the engine falls back to origin-level AS discovery, so
+		// no fail-closed note is recorded, and readiness follows the AS evidence
+		// (Intercom flips via DCR; Adobe stays unknown with unavailable AS).
+		const intercom = getServiceCatalogEntry("intercom");
+		expect(intercom?.auth.metadata?.note).toBeUndefined();
+		expect(intercom?.auth.metadata?.dynamicClientRegistration).toBe(true);
+		expect(intercom?.setup.readiness).toBe("oauth-ready");
+		const adobe = getServiceCatalogEntry("adobe-for-creativity");
+		expect(adobe?.auth.metadata?.note).toBeUndefined();
+		expect(adobe?.auth.metadata?.status).toBe("unavailable");
+		expect(adobe?.setup.readiness).toBe("unknown");
 		// Observational AS scope universes are recorded but never imported as
 		// reviewed scopes, and no entry ever auto-requests them.
 		for (const entry of SERVICE_CATALOG) {
