@@ -79,7 +79,6 @@ describe("built-in slash commands", () => {
 
 	test("marks argument commands as taking a free-form argument", () => {
 		for (const [name, argumentHint] of [
-			["model", "[search]"],
 			["export", "[path]"],
 			["import", "<path.jsonl>"],
 			["name", "[name]"],
@@ -94,6 +93,7 @@ describe("built-in slash commands", () => {
 		});
 		expect(builtinSlashCommandTakesArgument("goal")).toBe(true);
 		expect(builtinSlashCommandTakesArgument("effort")).toBe(false);
+		expect(builtinSlashCommandTakesArgument("model")).toBe(false);
 		expect(builtinSlashCommandTakesArgument("thinking")).toBe(false);
 		expect(builtinSlashCommandTakesArgument("heartbeat")).toBe(true);
 		expect(builtinSlashCommandTakesArgument("mcp")).toBe(true);

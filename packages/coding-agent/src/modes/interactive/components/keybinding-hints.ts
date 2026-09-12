@@ -74,3 +74,9 @@ export function expandCollapseHint(keybinding: Keybinding, expanded: boolean): s
 export function rawKeyHint(key: string, description: string): string {
 	return theme.fg("dim", formatKeyText(key)) + theme.fg("muted", ` ${description}`);
 }
+
+export function formatConversationDetailStatus(allOutput: boolean, details: boolean): string {
+	const label = allOutput ? "Expanded" : details ? "Details" : "Collapsed";
+	const key = keyText("app.tools.expand", { primaryOnly: true });
+	return `${label} mode${key ? ` (${key} to ${allOutput ? "collapse" : "expand"})` : ""}`;
+}

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Render the Prime butterfly SVG to ASCII via half-block encoding.
+"""Render the Prime butterfly SVG as terminal-safe text art.
 
 Usage:
-  uv run scripts/render-logo.py [--width 60] [--threshold 96] [--svg path]
+  uv run scripts/render-logo.py [--width 60] [--threshold 96] [--style blocks] [--svg path]
 
 Outputs the rendered art to stdout.
 
@@ -29,7 +29,75 @@ def render(svg_path: Path, width: int, threshold: int, style: str) -> str:
     import cairosvg
     from PIL import Image
 
-    if style == "dots":
+    if style == "quadrants":
+        # Quadrant block characters encode a solid 2x2 grid. Halving the SVG's
+        # raster height compensates for terminal cells being roughly twice as tall
+        # as they are wide while retaining twice the horizontal edge resolution.
+        png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=width * 2)
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        bg = Image.new("RGBA", img.size, (0, 0, 0, 255))
+        bg.paste(img, (0, 0), img)
+        img = bg.convert("L").resize((width * 2, max(2, round(img.size[1] / 2))), Image.LANCZOS)
+        w, h = img.size
+        padded_h = h + (-h % 2)
+        if padded_h != h:
+            padded = Image.new("L", (w, padded_h), 0)
+            padded.paste(img, (0, 0))
+            img = padded
+            h = padded_h
+        px = img.load()
+        glyphs = (" ", "▘", "▝", "▀", "▖", "▌", "▞", "▛", "▗", "▚", "▐", "▜", "▄", "▙", "▟", "█")
+        rows = []
+        for y in range(0, h, 2):
+            row = ""
+            for x in range(0, w, 2):
+                mask = (
+                    (1 if px[x, y] > threshold else 0)
+                    | (2 if px[x + 1, y] > threshold else 0)
+                    | (4 if px[x, y + 1] > threshold else 0)
+                    | (8 if px[x + 1, y + 1] > threshold else 0)
+                )
+                row += glyphs[mask]
+            rows.append(row.rstrip())
+    elif style == "braille":
+        # A Braille cell is a 2 x 4 pixel grid. Terminal cells are typically twice as
+        # tall as they are wide, so those subpixels are approximately square and the
+        # SVG keeps its intended aspect without further vertical scaling.
+        png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=width * 2)
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        bg = Image.new("RGBA", img.size, (0, 0, 0, 255))
+        bg.paste(img, (0, 0), img)
+        img = bg.convert("L")
+        w, h = img.size
+        padded_w = w + (-w % 2)
+        padded_h = h + (-h % 4)
+        if (padded_w != w) or (padded_h != h):
+            padded = Image.new("L", (padded_w, padded_h), 0)
+            padded.paste(img, (0, 0))
+            img = padded
+            w, h = img.size
+        px = img.load()
+        dot_bits = (
+            (0, 0, 0),
+            (0, 1, 1),
+            (0, 2, 2),
+            (1, 0, 3),
+            (1, 1, 4),
+            (1, 2, 5),
+            (0, 3, 6),
+            (1, 3, 7),
+        )
+        rows = []
+        for y in range(0, h, 4):
+            row: list[str] = []
+            for x in range(0, w, 2):
+                mask = 0
+                for dx, dy, bit in dot_bits:
+                    if px[x + dx, y + dy] > threshold:
+                        mask |= 1 << bit
+                row.append(chr(0x2800 + mask) if mask else " ")
+            rows.append("".join(row).rstrip())
+    elif style == "dots":
         # 1 pixel = 1 character cell. Compensate for terminal cells being ~2x taller than wide
         # so the rendered shape keeps the original proportions.
         # Use ▪ (BLACK SMALL SQUARE) so adjacent cells read as a tightly packed dot matrix —
@@ -95,9 +163,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--style",
-        choices=("blocks", "dots"),
+		choices=("blocks", "braille", "dots", "quadrants"),
         default="blocks",
-        help="blocks = half-block ▀▄█; dots = mid-dot · matrix (default: blocks)",
+		help="blocks = half-block; braille = 2x4 dots; dots = square matrix; quadrants = solid 2x2 cells",
     )
     args = parser.parse_args()
 

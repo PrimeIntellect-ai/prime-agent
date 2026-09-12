@@ -1,0 +1,7 @@
+- Changed the agents view to hide abandoned empty saved sessions consistently during search, simplify model labels, and keep secondary metadata quiet.
+- Changed the agents list to separate the splash from search, bold the shared column headings, mute populated status groups, and omit the global scope label.
+- Changed idle and inactive rows to share one bold status circle distinguished by color, keeping the animated mark for running rows and sub-agent expansion available through its keybinding.
+- Replaced chat and agents splash logos with a compact solid butterfly beside centered runtime metadata, with a text heading in narrow terminals.
+- Changed the agents header to show three metadata lines: title and version, agent counts, and the working directory globally or numeric depth in nested views; retained the nested back breadcrumb and chat model line.
+- Removed duplicate prompt suggestions from chat and agents headers.
+- Fixed empty-state search feedback while replying to or renaming an agent.
