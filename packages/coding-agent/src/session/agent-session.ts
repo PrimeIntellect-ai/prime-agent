@@ -350,6 +350,7 @@ export class AgentSession {
 	private readonly _inputCheckpoints = new SessionInputCheckpoints(this._actionStore, {
 		getFence: () => this._commitFence,
 		getScheduler: () => this._inputScheduler,
+		isBusyForInputPump: () => this._isBusyForSessionInput("pump"),
 		getEventQueue: () => this._events.queue,
 		acquireFence: (signal) => this._acquireSessionActionCommitFence(signal),
 		getStore: () => this.sessionManager,
