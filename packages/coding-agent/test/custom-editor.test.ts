@@ -1,9 +1,10 @@
 import type { AutocompleteProvider, EditorTheme, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import stripAnsi from "strip-ansi";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
-import { initTheme, type ThemeColor, theme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, preloadCodeHighlighter, type ThemeColor, theme } from "../src/modes/interactive/theme/theme.js";
 
 const passthrough = (text: string) => text;
 
@@ -58,6 +59,10 @@ const autocompleteProvider: AutocompleteProvider = {
 };
 
 describe("CustomEditor", () => {
+	beforeAll(async () => {
+		await preloadCodeHighlighter();
+	});
+
 	beforeEach(() => {
 		setKeybindings(new KeybindingsManager());
 		vi.clearAllMocks();
@@ -277,6 +282,22 @@ describe("CustomEditor", () => {
 		expect(lines[1]).toContain("x".repeat(37));
 		expect(lines[1]).not.toContain("x".repeat(38));
 		expect(lines[1]).toContain("...");
+	});
+
+	it("updates placeholder and queue header alignment when editor padding changes", () => {
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager(), {
+			placeholder: "type to start",
+		});
+		editor.getHeaderLine = () => "queued message";
+
+		for (const padding of [5, 1]) {
+			editor.setPaddingX(padding);
+			const lines = editor.render(40).map((line) => stripAnsi(line));
+
+			expect(lines[1]!.indexOf("queued message")).toBe(padding);
+			expect(lines[3]!.indexOf("type to start")).toBe(padding + 3);
+			expect(lines.every((line) => visibleWidth(line) === 40)).toBe(true);
+		}
 	});
 
 	it("keeps the surface background across truncation resets in the header line", () => {

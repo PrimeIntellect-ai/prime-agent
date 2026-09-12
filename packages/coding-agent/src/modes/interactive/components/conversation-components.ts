@@ -236,6 +236,7 @@ export function buildConversationComponents(
 				? new RefinementOutcomeMessageComponent(message)
 				: new MalformedRefinementOutcomeMessageComponent();
 			component.setExpanded(expanded);
+			if (component instanceof RefinementOutcomeMessageComponent) component.setEditDiffsExpanded(editDiffsExpanded);
 			components.push(component);
 		} else if (isAgentSessionMessage(message) && message.display) {
 			const component = new AgentMessageComponent(message, options.markdownTheme, {

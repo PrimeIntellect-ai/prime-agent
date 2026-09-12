@@ -710,6 +710,15 @@ describe("agent trace upload", () => {
 		// The rate-limited cycle re-arms itself; the retry succeeds without any caller waiting.
 		await advanceTimersUntil(() => calls.length === 1);
 		expect(attempts).toBe(2);
+		// Receiving the request is not completion: wait for the durable cursor before teardown.
+		const sessionFile = sessionManager.getSessionFile()!;
+		const signature = await stat(sessionFile);
+		await advanceTimersUntil(() => readOutboxEntry(tempDir, sessionFile)?.size === signature.size);
+		expect(readOutboxEntry(tempDir, sessionFile)).toEqual({
+			sessionFile,
+			size: signature.size,
+			mtimeMs: signature.mtimeMs,
+		});
 	});
 
 	it.each([503])("honors Retry-After when retrying HTTP %i", async (status) => {

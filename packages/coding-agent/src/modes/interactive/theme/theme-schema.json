@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (mdBody defaults to text)",
+			"description": "Theme color definitions (mdBody defaults to text; refinement colors have purple defaults)",
 			"required": [
 				"accent",
 				"border",
@@ -159,6 +159,14 @@
 				"customMessageLabel": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Custom message type label color"
+				},
+				"refinementHeader": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Harness refinement status (defaults to purple)"
+				},
+				"refinementSummary": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Harness refinement semantic summary (defaults to softer purple)"
 				},
 				"toolPendingBg": {
 					"$ref": "#/$defs/colorValue",
