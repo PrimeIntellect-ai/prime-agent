@@ -388,6 +388,33 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
+	it.each([false, true])("handles the response before coalesced records (callback throws=%s)", async (throws) => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket);
+		const order: string[] = [];
+		client.onMessage((message) => order.push(message.type));
+		const request = client.request({ type: "attach", activeSessionId: "active-1" }, 30000, {
+			onResponse: () => {
+				order.push("response");
+				if (throws) throw new Error("response callback failed");
+			},
+		});
+		const { id } = JSON.parse(socket.writes[0]!) as { id: string };
+		socket.emit(
+			"data",
+			`${JSON.stringify({ id, type: "response", command: "attach", success: true })}\n` +
+				`${JSON.stringify({ type: "session_detached", activeSessionId: "active-1" })}\n`,
+		);
+		expect(order).toEqual(["response", "session_detached"]);
+		if (throws) await expect(request).rejects.toThrow("response callback failed");
+		else await expect(request).resolves.toMatchObject({ id, success: true });
+		client.close();
+	});
+
 	it("serializes list commands with all sessions requested", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 

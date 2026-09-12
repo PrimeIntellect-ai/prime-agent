@@ -103,6 +103,7 @@ type DaemonSnapshotBegin = Extract<DaemonOutbound, { type: "session_snapshot_beg
 
 interface DaemonSnapshotAssembly {
 	begin?: DaemonSnapshotBegin;
+	apply?: (snapshot: DaemonSessionSnapshot) => void;
 	chunks: Map<number, AgentMessage[]>;
 	promise: Promise<DaemonSessionSnapshot>;
 	resolve: (snapshot: DaemonSessionSnapshot) => void;
@@ -428,7 +429,25 @@ export class DaemonAgentConnection implements AgentConnection {
 							},
 			},
 			undefined,
-			options,
+			{
+				...options,
+				onResponse: (response) => {
+					if (
+						!response.success ||
+						this.disposed ||
+						this.terminalCloseEmitted ||
+						sessionRevision !== this.sessionRevision
+					)
+						return;
+					const result = response.data as SessionSummary | DaemonAttachResult;
+					this.activeSessionId = getAttachActiveSessionId(result);
+					if ("snapshot" in result && result.snapshotStream) {
+						this.getSnapshotAssembly(result.snapshotStream.id).apply = (snapshot) => {
+							if (sessionRevision === this.sessionRevision) this.applySessionSnapshot(snapshot, result.replay);
+						};
+					}
+				},
+			},
 		);
 		if (this.disposed || this.terminalCloseEmitted) throw new Error("Daemon session closed during attach");
 		if (sessionRevision !== this.sessionRevision) {
@@ -444,12 +463,19 @@ export class DaemonAgentConnection implements AgentConnection {
 			return;
 		}
 		this.activeSessionId = getAttachActiveSessionId(result);
-		const snapshot =
-			"snapshot" in result
-				? result.snapshotStream
-					? await this.waitForSnapshot(result.snapshotStream.id)
-					: result.snapshot
-				: undefined;
+		if ("snapshot" in result && result.snapshotStream) {
+			await this.waitForSnapshot(result.snapshotStream.id);
+		} else {
+			const attachCursor = getAttachLastEventCursor(result);
+			if (attachCursor) this.observeEventCursor(attachCursor);
+			this.lastEventSequence = maxEventSequence(this.lastEventSequence, getAttachLastEventSequence(result));
+			if ("snapshot" in result) {
+				this.applySessionSnapshot(result.snapshot, result.replay);
+			} else {
+				this.latestSnapshot = undefined;
+				this.latestSnapshotIsFresh = false;
+			}
+		}
 		if (this.disposed || this.terminalCloseEmitted) throw new Error("Daemon session closed during attach");
 		if (sessionRevision !== this.sessionRevision) return;
 		const summary = "snapshot" in result ? result.snapshot.summary : result;
@@ -459,17 +485,6 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.captureDaemonLogPath();
 		this.updateReconnectFailed = false;
 		this.terminalCloseEmitted = false;
-		const attachCursor = getAttachLastEventCursor(result);
-		if (attachCursor) {
-			this.observeEventCursor(attachCursor);
-		}
-		this.lastEventSequence = maxEventSequence(this.lastEventSequence, getAttachLastEventSequence(result));
-		if (snapshot && "snapshot" in result) {
-			this.applySessionSnapshot(snapshot, result.replay);
-		} else {
-			this.latestSnapshot = undefined;
-			this.latestSnapshotIsFresh = false;
-		}
 		// The roster bar is an accessory: its subscribe failure must never fail an
 		// otherwise-recovered session. The bar degrades; the next reconnect or rebind
 		// re-attaches through this same seam.
@@ -2295,10 +2310,11 @@ export class DaemonAgentConnection implements AgentConnection {
 			lastEventSequence: message.lastEventSequence,
 			lastEventCursor: message.lastEventCursor,
 		};
-		assembly.resolve(snapshot);
 		const purpose = assembly.begin.purpose ?? "attach";
+		// Attach owns the revision guard, but its snapshot must precede the next record in this socket read.
+		if (purpose === "attach") assembly.apply?.(snapshot);
+		assembly.resolve(snapshot);
 		clearTimeout(assembly.timeout);
-		// The attach request owns its snapshot so an obsolete recovery cannot replace a newer session.
 		if (purpose === "attach") return;
 		this.applySessionSnapshot(snapshot);
 		this.snapshotAssemblies.delete(message.snapshotId);

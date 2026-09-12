@@ -153,9 +153,9 @@ export class DaemonWorkerClient {
 		command: DaemonCommandBody,
 		timeoutMs = 30_000,
 		// Progress/recovery options are supervisor-transport features; a direct request fails fast instead of replaying (no double execution).
-		_options: DaemonClientRequestOptions = {},
+		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
-		return this.requestWire(command, timeoutMs);
+		return this.requestWire(command, timeoutMs, options.onResponse);
 	}
 
 	requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30_000): Promise<DaemonResponse> {
@@ -201,7 +201,11 @@ export class DaemonWorkerClient {
 		this.directClosingReason = undefined;
 	}
 
-	private async requestWire(command: DaemonWorkerWireCommandBody, timeoutMs: number): Promise<DaemonResponse> {
+	private async requestWire(
+		command: DaemonWorkerWireCommandBody,
+		timeoutMs: number,
+		onResponse?: DaemonClientRequestOptions["onResponse"],
+	): Promise<DaemonResponse> {
 		if (!this.channel || !this.socket || this.socket.destroyed) {
 			throw new Error("Daemon worker client is not connected");
 		}
@@ -214,7 +218,18 @@ export class DaemonWorkerClient {
 					new DaemonWorkerProbeTimeoutError(`Timed out waiting for daemon worker response to ${command.type}`),
 				);
 			}, timeoutMs);
-			this.pending.set(id, { resolve, reject, timeout });
+			this.pending.set(id, {
+				resolve: (response) => {
+					try {
+						onResponse?.(response);
+						resolve(response);
+					} catch (error) {
+						reject(error);
+					}
+				},
+				reject,
+				timeout,
+			});
 		});
 		try {
 			await this.channel.send(

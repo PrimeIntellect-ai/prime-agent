@@ -379,6 +379,7 @@ const CLIENT_CATCHUP_RETRY_MS = 250;
  * snapshot instead of buffering without limit.
  */
 const MAX_DEFERRED_SESSION_FRAMES = 256;
+const MAX_DEFERRED_SESSION_BYTES = 8 * 1024 * 1024;
 const UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS = 5000;
 const SUPERVISOR_FENCE_POLL_MS = 250;
 const UPDATE_RESTART_MARKER =
@@ -5597,7 +5598,7 @@ export class AgentDaemon {
 			// A failed final stream must recover any events held behind an earlier snapshot.
 			if (
 				(client.snapshotActiveSessionCounts?.get(result.activeSessionId) ?? 1) === 1 &&
-				client.deferredSessionOutbounds?.get(result.activeSessionId)?.length &&
+				client.deferredSessionOutbounds?.get(result.activeSessionId)?.frames.length &&
 				client.attachedActiveSessionIds.has(result.activeSessionId)
 			) {
 				this.queueClientCatchup(client, result.activeSessionId, "resync");
@@ -7510,17 +7511,22 @@ export class AgentDaemon {
 		if (client.deferredSessionFramesDropped?.has(activeSessionId)) {
 			return false;
 		}
-		const frames = client.deferredSessionOutbounds?.get(activeSessionId) ?? [];
-		if (frames.length >= MAX_DEFERRED_SESSION_FRAMES) {
+		const deferred = client.deferredSessionOutbounds?.get(activeSessionId) ?? { frames: [], bytes: 0 };
+		const bytes = Buffer.byteLength(serializeJsonLine(message));
+		if (
+			deferred.frames.length >= MAX_DEFERRED_SESSION_FRAMES ||
+			deferred.bytes + bytes > MAX_DEFERRED_SESSION_BYTES
+		) {
 			// A catch-up snapshot supersedes the buffered frames.
 			client.deferredSessionFramesDropped ??= new Set();
 			client.deferredSessionFramesDropped.add(activeSessionId);
 			this.discardDeferredSessionFrames(client, activeSessionId);
 			return false;
 		}
-		frames.push(message);
+		deferred.frames.push(message);
+		deferred.bytes += bytes;
 		client.deferredSessionOutbounds ??= new Map();
-		client.deferredSessionOutbounds.set(activeSessionId, frames);
+		client.deferredSessionOutbounds.set(activeSessionId, deferred);
 		return true;
 	}
 
@@ -7528,7 +7534,7 @@ export class AgentDaemon {
 	private flushDeferredSessionFrames(client: DaemonSocketClient, activeSessionId: string): void {
 		// A queued snapshot would overwrite an earlier replay of this shared buffer.
 		if ((client.snapshotActiveSessionCounts?.get(activeSessionId) ?? 1) > 1) return;
-		const frames = client.deferredSessionOutbounds?.get(activeSessionId);
+		const frames = client.deferredSessionOutbounds?.get(activeSessionId)?.frames;
 		if (!frames || frames.length === 0) {
 			return;
 		}

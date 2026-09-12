@@ -1,3 +1,4 @@
+import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -34,6 +35,7 @@ import {
 import { DaemonRoutedClient } from "../src/modes/daemon/daemon-routed-client.js";
 import type { DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { attachJsonlLineReader, serializeJsonLine } from "../src/modes/rpc/jsonl.js";
 
 class FakeDaemonClient {
 	readonly requests: DaemonCommand[] = [];
@@ -107,7 +109,7 @@ class FakeDaemonClient {
 					success: true,
 					data: { sessions: this.updateRestartSessions },
 				};
-			case "attach":
+			case "attach": {
 				if (this.attachFailures > 0) {
 					this.attachFailures--;
 					throw new Error("attach failed");
@@ -124,7 +126,7 @@ class FakeDaemonClient {
 						error: "Unknown active session: missing",
 					};
 				}
-				return {
+				const response: DaemonResponse = {
 					type: "response",
 					command: command.type,
 					success: true,
@@ -132,6 +134,9 @@ class FakeDaemonClient {
 						this.attachResultFactory?.(command) ??
 						createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
 				};
+				options.onResponse?.(response);
+				return response;
+			}
 			case "get_queue":
 				return {
 					type: "response",
@@ -881,7 +886,7 @@ describe("DaemonAgentConnection", () => {
 		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
 
 		await expect(DaemonAgentConnection.attach(routed, "active-1")).rejects.toThrow("Reason: shutdown");
-		expect(attachOptions).toEqual([{ recoverable: false }]);
+		expect(attachOptions).toEqual([expect.objectContaining({ recoverable: false })]);
 	});
 
 	it("absorbs a direct loss inside the held roster re-attach into a session-plane reattach", async () => {
@@ -2576,6 +2581,107 @@ describe("DaemonAgentConnection", () => {
 			lastEventSequence: 23,
 		});
 		expect(events).toEqual([]);
+	});
+
+	it.each([
+		["headless", "message_end"],
+		["headless", "message_update"],
+		["reconnect", "message_end"],
+		["reconnect", "message_update"],
+	] as const)("preserves %s %s coalesced with attach snapshot completion", async (mode, eventType) => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			deferSessionEvents: mode === "reconnect",
+			recoverDaemon: async () => {},
+		});
+		const input = new PassThrough();
+		const detachReader = attachJsonlLineReader(input, (line) => fakeClient.emitMessage(JSON.parse(line)));
+		try {
+			if (mode === "reconnect") {
+				await connection.attach();
+				await connection.flushBufferedSessionEvents();
+			}
+			const message = fauxAssistantMessage("new response");
+			fakeClient.attachResultFactory = (command) => {
+				const full = createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, {
+					state: { ...createConnectionState("active-1", "session-current"), isStreaming: true },
+					streamingMessage: fauxAssistantMessage("old partial response"),
+				});
+				const { messages: _messages, ...snapshot } = full.snapshot;
+				const records: DaemonOutbound[] = [
+					{
+						type: "session_snapshot_begin",
+						activeSessionId: "active-1",
+						snapshotId: "coalesced",
+						snapshot,
+						messageCount: 0,
+						targetChunkBytes: 512 * 1024,
+					},
+					{
+						type: "session_snapshot_end",
+						activeSessionId: "active-1",
+						snapshotId: "coalesced",
+						chunkCount: 0,
+						lastEventSequence: 12,
+						lastEventCursor: full.lastEventCursor,
+					},
+					{
+						type: "session_event",
+						activeSessionId: "active-1",
+						event:
+							eventType === "message_end"
+								? { type: eventType, message }
+								: {
+										type: eventType,
+										message,
+										assistantMessageEvent: {
+											type: "text_delta",
+											contentIndex: 0,
+											delta: "response",
+											partial: message,
+										},
+									},
+						meta: {
+							id: "active-1:13",
+							protocol: DAEMON_PROTOCOL_INFO,
+							activeSessionId: "active-1",
+							sequence: 13,
+							cursor: { generation: "generation-active-1", sequence: 13 },
+							emittedAt: "2026-01-01T00:00:00.000Z",
+						},
+					},
+				];
+				// All records dispatch before the attach response's promise continuation.
+				queueMicrotask(() => input.write(records.map(serializeJsonLine).join("")));
+				return { ...full, snapshotStream: { id: "coalesced", messageCount: 0, targetChunkBytes: 512 * 1024 } };
+			};
+			const events: AgentConnectionEvent[] = [];
+			connection.subscribe((event) => {
+				events.push(event);
+			});
+			if (mode === "reconnect") {
+				fakeClient.connected = false;
+				fakeClient.emitClose(new Error("socket closed"));
+				await vi.waitFor(() => expect(events.some((event) => event.type === "session_resynced")).toBe(true));
+			} else {
+				await connection.attach();
+			}
+			const snapshot = await connection.getInitialSnapshot();
+			expect(snapshot.streamingMessage).toEqual(eventType === "message_end" ? undefined : message);
+			expect(snapshot.lastEventCursor).toEqual({ generation: "generation-active-1", sequence: 13 });
+			expect(fakeClient.requests.map((request) => request.type)).toContain("get_messages");
+			expect(events).toContainEqual(
+				expect.objectContaining({ type: "session_event", event: expect.objectContaining({ type: eventType }) }),
+			);
+			for (const event of events) {
+				if (event.type === "session_resynced")
+					expect(event.snapshot.streamingMessage).toEqual(snapshot.streamingMessage);
+			}
+		} finally {
+			detachReader();
+			input.destroy();
+			await connection.dispose();
+		}
 	});
 
 	it("distinguishes chunked catch-up snapshots from runtime replacements", async () => {

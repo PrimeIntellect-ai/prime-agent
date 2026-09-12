@@ -36,7 +36,7 @@ export interface DaemonSocketClient {
 	 * (worker side: DaemonOutbound). They replay when the stream completes
 	 * instead of each one triggering a full snapshot re-transfer.
 	 */
-	deferredSessionOutbounds?: Map<string, DaemonOutbound[]>;
+	deferredSessionOutbounds?: Map<string, { frames: DaemonOutbound[]; bytes: number }>;
 	/** Worker-side sessions whose deferral buffer overflowed this stream. */
 	deferredSessionFramesDropped?: Set<string>;
 	/**

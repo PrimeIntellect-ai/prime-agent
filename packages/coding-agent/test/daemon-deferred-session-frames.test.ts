@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { AgentDaemon, markClientSnapshotStreaming } from "../src/modes/daemon/daemon-mode.js";
@@ -213,7 +214,11 @@ describe("deferred session frames during snapshot streams", () => {
 		socket.destroy();
 	});
 
-	it("worker: falls back to a resync catch-up when the deferral buffer overflows", async () => {
+	it.each([
+		["count", 257, 0],
+		["single payload", 1, 2 * 1024 * 1024],
+		["total bytes", 2, 1024 * 1024],
+	] as const)("worker: catches up when the deferral %s limit overflows", async (_limit, count, textLength) => {
 		const daemon = new AgentDaemon(join(tmpdir(), "deferred-frames-overflow.sock"), {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -274,11 +279,24 @@ describe("deferred session frames during snapshot streams", () => {
 			true,
 		);
 		await nextMacroTaskTurn();
-		// MAX_DEFERRED_SESSION_FRAMES is 256: the 257th event overflows, and
-		// every later event of the same stream queues a resync catch-up too.
-		for (let sequence = 2; sequence <= 2 + 257; sequence++) {
-			internals.broadcastToSession(state, sessionEventMessage(sequence));
+		for (let index = 0; index < count; index++) {
+			const outbound = sessionEventMessage(index + 2);
+			if (textLength && outbound.type === "session_event") {
+				const message = fauxAssistantMessage("é".repeat(textLength));
+				outbound.event = {
+					type: "message_update",
+					message,
+					assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "é", partial: message },
+				};
+			}
+			internals.broadcastToSession(state, outbound);
+			if (index < count - 1)
+				expect(client.deferredSessionOutbounds?.get(activeSessionId)?.frames).toHaveLength(index + 1);
 		}
+		expect(client.deferredSessionOutbounds?.size ?? 0).toBe(0);
+		// Once overflow requests a snapshot, later events cannot restart a partial replay.
+		internals.broadcastToSession(state, sessionEventMessage(count + 2));
+		expect(client.deferredSessionOutbounds?.size ?? 0).toBe(0);
 		releaseChunk();
 		await stream;
 
