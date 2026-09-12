@@ -10,7 +10,8 @@ receive a pending-trust comment; a maintainer can rerun after vouching.
 
 The controller resolves current `main` and the PR head to full SHAs, builds both in separate Prime
 sandboxes, and alternates their measurements. Both use the same trusted harness revision, image
-digest and resource allocation. No performance gate blocks merging.
+digest and resource allocation. Performance changes are informational, not a regression gate. Failed or
+incomplete measurements make the benchmark command fail, even when some metrics succeeded.
 The baseline is always current `main`, not the PR's target branch or merge base.
 
 ## Enable in GitHub
@@ -74,8 +75,13 @@ them, including when benchmarking the Bun migration stack.
 Stock tools, skills, daemon, persistence, and Python bootstrap remain enabled. Homes contain no
 credentials, extensions, MCP servers, or personal skills. The onboarding splash is marked as already
 shown before timing, so startup measures the editor rather than waiting for a person to sign in.
-The editor runs without a selected model; no prompts are submitted. These measurements cover the
-local startup path, not authenticated provider discovery or inference.
+The editor runs without a selected model; no prompts are submitted. Readiness requires a typed probe
+to appear in the terminal and be removed without Enter. Process creation and terminal input mode are
+not proof of editor readiness. Navigation labels, placeholders, and model names are not readiness
+signals. Both revisions use the same probe and launch-to-render timing; probe cleanup is untimed.
+Dropped input is retried every 20 ms, adding up to one retry interval plus terminal polling/rendering
+delay when the input handler starts after terminal raw mode. There is no fixed delay on the ready path.
+These measurements cover the local startup path, not authenticated provider discovery or inference.
 
 ### Python runtime
 
@@ -145,6 +151,13 @@ The controller stops scheduling work at 20 minutes or its $1 estimated budget ta
 has a 30-minute TTL. Teardown runs in `finally`; the independent completion workflow deletes any
 remaining sandboxes with the exact repository/run/attempt labels, including after cancellation.
 Cleanup enumerates all pages before deleting so pagination cannot skip a sandbox.
+
+By default, two consecutive identical failures stop further trials for that revision and phase
+(`failure_limit` in the configuration). Other independent phases can continue. A failed cold readiness
+probe skips warm startup because there is no verified cold session to retain; a failed first installation
+skips dependent interactive and runtime trials.
+Skipped trials are not measurements or successful samples. Failure causes and terminal transcripts
+remain in the result artifacts, which are uploaded even when the benchmark command fails.
 
 At the configured list rates, two sandboxes cost about $0.01/minute together. A 10-minute run costs
 about $0.10 in sandbox compute. There are no inference charges. Full sandbox lifetimes are recorded,

@@ -226,6 +226,27 @@ def render(report: Report) -> str:
             else "Benchmarking the latest PR commit. Results will appear here when this run finishes."
         )
         return "\n".join([*lines, message, "", result_link, ""])
+    errors = list(report.errors)
+    for name, side in (("main", report.main), ("PR", report.pr_head)):
+        if side.error:
+            errors.append(f"{name}: {side.error}")
+        errors.extend(
+            f"{name} {metric} trial {sample.trial}: {sample.error}"
+            for metric, samples in side.metrics.items()
+            for sample in samples
+            if sample.error
+        )
+    if report.status != "completed":
+        lines.extend(
+            [
+                "**Benchmark execution did not complete successfully. "
+                "Missing measurements are not performance wins.**",
+                "",
+            ]
+        )
+    if errors:
+        lines.extend(["**Failure diagnostics:**", "", *[f"- {escape(error)}" for error in errors[:3]], ""])
+        lines.extend(["See the saved per-trial logs and terminal transcripts for details.", ""])
     results = comparisons(report)
     counts = Counter(result.outcome for result in results.values())
     summary = [f"{counts[outcome]} {outcome}" for outcome in ("regressed", "improved", "no clear change")]
@@ -288,7 +309,11 @@ def render(report: Report) -> str:
             "Restore runs in a fresh kernel, including pandas imports; kernel startup is excluded.",
             "Kernel RSS covers the isolated Python process; loaded RSS follows the pandas workload.",
             "Costs estimate full sandbox lifetimes at configured rates, including setup and build.",
-            f"Budget target: ${report.config.budget_usd:g}; not a billing cap. Checks are informational.",
+            f"Budget target: ${report.config.budget_usd:g}; not a billing cap. "
+            "Performance changes are informational.",
+            "Failed or incomplete execution fails the workflow; saved artifacts remain available.",
+            f"Each side stops a phase after {report.config.failure_limit} identical consecutive failures.",
+            "Skipped trials are not attempted samples. Warm startup requires a successful cold launch.",
             "",
             "| Metric | Main successful/attempted | PR successful/attempted | Main spread | PR spread |",
             "| --- | ---: | ---: | ---: | ---: |",
@@ -300,16 +325,6 @@ def render(report: Report) -> str:
         lines.append(
             f"| {definition.title} | {len(values(left))}/{len(left)} | {len(values(right))}/{len(right)} | "
             f"{dispersion(left, definition)} | {dispersion(right, definition)} |"
-        )
-    errors = list(report.errors)
-    for name, side in (("main", report.main), ("PR", report.pr_head)):
-        if side.error:
-            errors.append(f"{name}: {side.error}")
-        errors.extend(
-            f"{name} {metric} trial {sample.trial}: {sample.error}"
-            for metric, samples in side.metrics.items()
-            for sample in samples
-            if sample.error
         )
     if errors:
         lines.extend(["", "Failures:", ""] + [f"- {escape(error)}" for error in errors[:30]])

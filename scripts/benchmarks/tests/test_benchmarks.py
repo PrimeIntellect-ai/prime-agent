@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 from pydantic import ValidationError
 
 from cli import completed_report, main, validate_completion, workflow_source
-from controller import Canceled, Controller, cleanup, labels, side_complete
+from controller import Canceled, Controller, cleanup, labels
 from github import TITLE, GitHub
 from report import MARKER, METRICS, RUNTIME_METRICS, comparison, render
 from schema import (
@@ -27,6 +27,7 @@ from schema import (
     Request,
     Side,
     load_report,
+    side_complete,
     write_json,
 )
 from terminal import QUERIES, Display, Terminal

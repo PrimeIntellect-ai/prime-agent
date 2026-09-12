@@ -19,7 +19,8 @@ from schema import (
     Request,
     Result,
     SandboxUsage,
-    Side,
+    report_complete,
+    trial_errors,
     write_json,
 )
 
@@ -89,6 +90,8 @@ class Controller:
 
     def save(self) -> None:
         self.report.errors = self.report.errors[:30]
+        if self.report.status == "completed" and not report_complete(self.report):
+            self.report.status = "partial"
         self.report = Report.model_validate(self.report.model_dump())
         write_json(self.results / "report.json", self.report)
         (self.results / "comment.md").write_text(render(self.report))
@@ -179,7 +182,7 @@ class Controller:
         started = time.monotonic()
         sandbox = self.sandboxes[role]
         args = [f"{REMOTE}/.venv/bin/python", f"{REMOTE}/worker.py", phase, "--trial", str(trial)]
-        command = f"{shlex.join(args)} > {REMOTE}/{phase}.log 2>&1"
+        command = f"{shlex.join(args)} > {REMOTE}/{phase}-{trial}.log 2>&1"
         job = self.client.start_background_job(sandbox.id, command)
         try:
             self.wait(sandbox, job, f"{role} {phase} {trial}")
@@ -231,10 +234,11 @@ class Controller:
             "archive.close()",
         ]
         result = self.client.execute_command(sandbox.id, shlex.join(args), timeout=30)
-        if result.exit_code == 0:
-            self.client.download_file(
-                sandbox.id, f"{REMOTE}/logs.tar.gz", str(self.results / f"{role}-logs.tar.gz")
-            )
+        if result.exit_code != 0:
+            raise RuntimeError(f"{role} log archive failed with exit code {result.exit_code}")
+        self.client.download_file(
+            sandbox.id, f"{REMOTE}/logs.tar.gz", str(self.results / f"{role}-logs.tar.gz")
+        )
 
     def run(self) -> None:
         old_handler = signal.signal(signal.SIGTERM, cancel)
@@ -269,44 +273,74 @@ class Controller:
                 except (Canceled, TimeoutError):
                     raise
                 except Exception as error:
-                    self.report.errors.append(f"{role} setup: {type(error).__name__}")
+                    self.report.errors.append(f"{role} setup: {error_message(error)}"[:500])
             for phase, count in (
                 ("install", self.report.config.install_trials),
                 ("measure", self.report.config.trials),
                 ("runtime", self.report.config.trials),
             ):
+                blocked: set[str] = set()
+                failures: dict[str, tuple[str, int]] = {}
+                if phase in ("measure", "runtime"):
+                    for role in ready:
+                        side = self.report.main if role == "main" else self.report.pr_head
+                        if not any(
+                            s.trial == 0 and s.value is not None for s in side.metrics.get("install", [])
+                        ):
+                            blocked.add(role)
+                            self.report.errors.append(
+                                f"{role} {phase}: skipped; first installation did not succeed"
+                            )
                 for trial in range(count):
                     for role in ready if trial % 2 == 0 else list(reversed(ready)):
+                        if role in blocked:
+                            continue
                         print(f"{role}: {phase} trial {trial + 1}/{count}", flush=True)
+                        failure = ""
                         try:
                             self.phase(role, phase, trial)
                         except (Canceled, TimeoutError):
                             raise
                         except Exception as error:
+                            failure = error_message(error)
+                        side = self.report.main if role == "main" else self.report.pr_head
+                        causes = trial_errors(side, phase, trial)
+                        if causes:
+                            failure = (
+                                "; ".join(causes)
+                                if not failure or any("measurement missing" not in cause for cause in causes)
+                                else failure
+                            )
+                        if failure:
+                            previous, repeated = failures.get(role, ("", 0))
+                            repeated = repeated + 1 if failure == previous else 1
+                            failures[role] = (failure, repeated)
                             if len(self.report.errors) < 25:
-                                self.report.errors.append(f"{role} {phase} {trial}: {type(error).__name__}")
+                                self.report.errors.append(f"{role} {phase} trial {trial}: {failure}"[:500])
+                            if repeated >= self.report.config.failure_limit and trial + 1 < count:
+                                blocked.add(role)
+                                self.report.errors.append(
+                                    f"{role} {phase}: skipped {count - trial - 1} remaining trials after "
+                                    f"{repeated} identical consecutive failures; last cause: {failure}"[:500]
+                                )
+                        else:
+                            failures.pop(role, None)
+                        self.save()
                         compute = sum(
                             elapsed_seconds(sandbox.created_at) * self.report.config.hourly_cost() / 3600
                             for sandbox in self.sandboxes.values()
                         )
                         if compute >= self.report.config.budget_usd:
                             raise TimeoutError("Reached the estimated run budget")
-            complete = all(
-                side_complete(side, self.report.config.trials, self.report.config.install_trials)
-                for side in (self.report.main, self.report.pr_head)
-            )
-            self.report.status = "completed" if complete and not self.report.errors else "partial"
+            self.report.status = "completed" if report_complete(self.report) else "partial"
             if not ready:
                 self.report.status = "failed"
-        except Canceled:
+        except Canceled as error:
             self.report.status = "canceled"
+            self.report.errors.append(error_message(error))
         except Exception as error:
             self.report.status = "failed"
-            message = str(error)
-            for key in ("PRIME_SANDBOX_API_KEY", "GITHUB_TOKEN"):
-                if os.environ.get(key):
-                    message = message.replace(os.environ[key], "[REDACTED]")
-            self.report.errors.append(message[:500])
+            self.report.errors.append(error_message(error))
         finally:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             for role, sandbox in self.sandboxes.items():
@@ -339,32 +373,13 @@ class Controller:
             signal.signal(signal.SIGTERM, old_handler)
 
 
+def error_message(error: Exception) -> str:
+    message = f"{type(error).__name__}: {error}"
+    for key in ("PRIME_SANDBOX_API_KEY", "GITHUB_TOKEN"):
+        if os.environ.get(key):
+            message = message.replace(os.environ[key], "[REDACTED]")
+    return message[:500]
+
+
 def cancel(_signum: int, _frame: object) -> None:
     raise Canceled("Workflow was canceled")
-
-
-def side_complete(side: Side, trials: int, installs: int) -> bool:
-    expected = {
-        "cold": trials,
-        "warm": trials,
-        "kernel_start": trials,
-        "kernel_exec": trials,
-        "bash": trials,
-        "git_status": trials,
-        "output": trials,
-        "mixed": trials,
-        "interrupt": trials,
-        "snapshot": trials,
-        "restore": trials,
-        "kernel_rss": trials,
-        "loaded_rss": trials,
-        "rss": trials,
-        "install": installs,
-        "disk": 1,
-        "bundle": 1,
-    }
-    return not side.error and all(
-        len(side.metrics.get(metric, [])) == count
-        and all(sample.value is not None for sample in side.metrics[metric])
-        for metric, count in expected.items()
-    )
