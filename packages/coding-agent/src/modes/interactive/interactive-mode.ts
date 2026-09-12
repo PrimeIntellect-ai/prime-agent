@@ -4071,6 +4071,8 @@ export class InteractiveMode {
 			void this.handleDebugCommand();
 		};
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
+		this.defaultEditor.onAction("app.model.cycleForward", () => this.handleModelCycle("forward"));
+		this.defaultEditor.onAction("app.model.cycleBackward", () => this.handleModelCycle("backward"));
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
@@ -7601,8 +7603,16 @@ export class InteractiveMode {
 			return;
 		}
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		this.applyModelSwitchUiState(state, model);
+	}
+
+	/** Patch model-derived connection state and refresh the UI that reads it. */
+	private applyModelSwitchUiState(
+		state: Pick<AgentConnectionState, "model" | "serviceTier" | "availableThinkingLevels">,
+		fallbackModel: AgentConnectionModel,
+	): void {
 		this.patchConnectionState({
-			model: state.model ?? model,
+			model: state.model ?? fallbackModel,
 			serviceTier: state.serviceTier,
 			availableThinkingLevels: state.availableThinkingLevels,
 		});
@@ -7953,6 +7963,32 @@ export class InteractiveMode {
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
 				return false;
+			});
+	}
+
+	private handleModelCycle(direction: "forward" | "backward"): void {
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
+		void connection
+			.cycleModel(direction)
+			.then(async (result) => {
+				if (!result) {
+					this.showStatus("No other models available to cycle");
+					return;
+				}
+				const state = await connection.getState();
+				if (
+					this.agentConnection !== connection ||
+					this.connectionState?.sessionId !== sessionId ||
+					(sessionId !== undefined && state.sessionId !== sessionId)
+				) {
+					return;
+				}
+				this.applyModelSwitchUiState(state, result.model);
+				this.showStatus(`Model: ${result.model.provider}/${result.model.id}`);
+			})
+			.catch((error) => {
+				this.showError(error instanceof Error ? error.message : String(error));
 			});
 	}
 
