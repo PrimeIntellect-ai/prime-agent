@@ -93,10 +93,10 @@ export type PackageSource =
 	  };
 
 /**
- * Remote/local MCP server an integration connects to. Built-in integrations
- * (Linear/Notion) are defined in the ai/mcp catalog; this is for user-declared
- * servers. The kernel-side integration package reads creds from auth.json
- * (`mcp:<name>`); login/refresh run host-side.
+ * Remote/local MCP server an integration connects to. Catalog services are
+ * defined in the ai/mcp service catalog; this is for user-declared servers.
+ * The kernel's generic mcp runtime reads creds from auth.json (`mcp:<name>`);
+ * login/refresh/verification run host-side.
  */
 export type McpServerConfig =
 	| {
@@ -107,6 +107,18 @@ export type McpServerConfig =
 			bearerTokenEnvVar?: string;
 			/** Use the generic OAuth login flow for this server. */
 			oauth?: boolean;
+			/** Pre-registered OAuth client id for this server (optional). */
+			oauthClientId?: string;
+			/**
+			 * Env var holding the OAuth client secret. When set, a missing or
+			 * empty env value fails the login/refresh — never a stale stored
+			 * secret fallback.
+			 */
+			oauthClientSecretEnvVar?: string;
+			/** Client identity metadata document URL (CIMD) for this server. */
+			oauthClientMetadataUrl?: string;
+			/** Requested OAuth scopes for this server (config > PRM > omit). */
+			oauthScopes?: string[];
 			/** Force-disable even when credentials exist. */
 			enabled?: boolean;
 			enabledTools?: string[];
@@ -153,6 +165,7 @@ export interface Settings {
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	mcpServers?: Record<string, McpServerConfig>; // User-declared MCP servers (name → config); built-ins are in the ai/mcp catalog
+	mcpCatalogSources?: string[]; // Extra local MCP service catalog files (~-relative ok); merged after the built-in catalog, first source wins per id
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
 	skills?: string[]; // Array of local skill file paths or directories
@@ -1220,6 +1233,11 @@ export class SettingsManager {
 	/** MCP execution is intentionally restricted to user/global settings. */
 	getGlobalMcpServers(): Record<string, McpServerConfig> | undefined {
 		return structuredClone(this.globalSettings.mcpServers);
+	}
+
+	/** Declared local service-catalog source paths (unexpanded ~ allowed). */
+	getMcpCatalogSources(): string[] {
+		return structuredClone(this.globalSettings.mcpCatalogSources ?? []);
 	}
 
 	setGlobalMcpServer(name: string, config: McpServerConfig, force = false): void {

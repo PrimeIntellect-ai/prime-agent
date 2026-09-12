@@ -140,8 +140,14 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logout", description: "Remove provider authentication" },
 	{
 		name: "mcp",
-		description: "Open MCP Connections or manage MCP integrations",
+		description: "Browse external services or manage MCP integrations",
 		argumentHint: "[add|list|get|remove|login|logout]",
+		takesArgument: true,
+	},
+	{
+		name: "plugins",
+		description: "Browse and connect external services",
+		argumentHint: "[search]",
 		takesArgument: true,
 	},
 	{

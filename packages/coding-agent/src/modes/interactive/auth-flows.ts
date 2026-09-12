@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
+import type { McpRemoveAccountResult } from "../../core/mcp/connection-store.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import {
 	checkPrimeAgentTracesAccess,
@@ -103,6 +104,24 @@ export interface ProviderAuthFlowsHost {
 	onAuthChanged?(): void | Promise<void>;
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
+	/**
+	 * OWNS the MCP account login for the generic /login service options and
+	 * the config menu: the host runs the ONE guarded connect operation
+	 * (claim under the store lock, staged OAuth, guarded finalize). There
+	 * is NO raw-dialog fallback for MCP ids — an unresolvable provider
+	 * reports an explicit configuration-required outcome; only the guarded
+	 * operation's private staging dialog exists.
+	 */
+	onMcpAccountLogin?(providerId: string): Promise<AuthenticationResult>;
+	/**
+	 * OWNS the entire MCP account logout for the generic /logout route: the
+	 * host must perform verified credential deletion AND pending-attempt
+	 * cancellation under ONE connection-store critical section (store->auth)
+	 * BEFORE the route reports anything. Called INSTEAD of
+	 * authStorage.logout for MCP credential ids; non-MCP logouts are
+	 * unaffected.
+	 */
+	onMcpAccountLogout?(providerId: string): Promise<McpRemoveAccountResult> | McpRemoveAccountResult;
 }
 
 export interface ProviderLoginOptions {
@@ -173,6 +192,15 @@ export class ProviderAuthFlows {
 	loginProvider(providerOption: AuthSelectorProvider): Promise<AuthenticationResult> {
 		const kind = providerOption.category === "service" ? "service" : "provider";
 		if (providerOption.authType === "oauth") {
+			// MCP account logins are DELEGATED to the host's guarded connect
+			// operation BEFORE any dialog writes the final credential: a
+			// concurrent logout can cancel the attempt and a late callback
+			// can never reactivate or clobber the account.
+			if (providerOption.id.startsWith("mcp:")) {
+				if (this.host.onMcpAccountLogin) return this.host.onMcpAccountLogin(providerOption.id);
+				this.host.showError("MCP account login requires the guarded host connection flow.");
+				return Promise.resolve({ status: "failed" });
+			}
 			return this.showLoginDialog(providerOption.id, providerOption.name, kind);
 		}
 		if (providerOption.id === PRIME_INFERENCE_PROVIDER_ID) {
@@ -207,7 +235,36 @@ export class ProviderAuthFlows {
 					close();
 
 					try {
-						this.host.modelRegistry.authStorage.logout(providerOption.id);
+						// MCP logouts are DELEGATED whole before this route touches
+						// auth: a plain authStorage.logout would race a concurrent
+						// finalize that could re-create the credential after it.
+						if (providerOption.id.startsWith("mcp:") && this.host.onMcpAccountLogout) {
+							const outcome = await this.host.onMcpAccountLogout(providerOption.id);
+							if (outcome === "refused") {
+								// State-neutral: the attempt is no longer current
+								// — no "Logged out" claim, and no Connected
+								// claim from mere token presence.
+								this.host.showStatus(
+									`This login attempt is no longer current; manage the account from /plugins.`,
+								);
+								resolve(providerOption.id);
+								return;
+							}
+							if (outcome === "failed") {
+								throw new Error(
+									`Logout failed: the change could not be saved; try logging out ${providerOption.name} again.`,
+								);
+							}
+							if (outcome === "logged-out") {
+								this.host.showStatus(
+									`Logged out of ${providerOption.name}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
+								);
+								resolve(providerOption.id);
+								return;
+							}
+						} else {
+							this.host.modelRegistry.authStorage.logout(providerOption.id);
+						}
 						this.host.modelRegistry.refresh();
 						await this.host.onAuthChanged?.();
 						const message =

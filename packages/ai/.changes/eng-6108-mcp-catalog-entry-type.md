@@ -1,0 +1,1 @@
+- Removed the unused public McpCatalogEntry type alias; use McpServiceEntry instead (ENG-6108).

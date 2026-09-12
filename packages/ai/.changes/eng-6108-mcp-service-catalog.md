@@ -1,0 +1,2 @@
+- Added a merged MCP service catalog (OpenAI + Claude upstreams, deduplicated with provenance) as the single JSON source for service integrations, exposed through `listServiceCatalog`/`getServiceCatalogEntry`/`searchServiceCatalog` and a deterministic offline importer with curated overrides.
+- Added local JSON service sources: a validated, bounded loader for user-authored services that cannot claim vendor trust, shadow built-ins, or carry credentials.

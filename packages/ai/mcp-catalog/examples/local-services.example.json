@@ -1,0 +1,86 @@
+{
+	"$comment": "Example local MCP service source. Copy to ~/.prime/agent/mcp-services.json (path set by the host wiring) and edit. Rules: version must be 1; entries use the same schema as the bundled catalog; provenance may only claim source \"user\"; ids must not collide with bundled catalog entries; no OAuth client ids or secrets ever belong in this file — credentials are stored separately by Prime when you connect.",
+	"version": 1,
+	"entries": [
+		{
+			"server": "acme-docs",
+			"service": "acme-docs",
+			"label": "Acme Docs",
+			"url": "https://mcp.docs.acme.example.com/mcp",
+			"description": "Acme's internal documentation MCP server.",
+			"aliases": [
+				"acme",
+				"acme documentation"
+			],
+			"publisher": "Acme",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.docs.acme.example.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "user",
+					"note": "added locally by me"
+				}
+			],
+			"homepage": "https://acme.example.com"
+		},
+		{
+			"server": "acme-metrics",
+			"service": "acme-metrics",
+			"label": "Acme Metrics",
+			"url": "",
+			"description": "Company metrics gateway; the endpoint is per-tenant.",
+			"aliases": [
+				"acme metrics"
+			],
+			"transport": {
+				"type": "http-template",
+				"template": "https://${ACME_METRICS_HOST}/mcp",
+				"variables": [
+					{
+						"name": "ACME_METRICS_HOST",
+						"description": "Your Acme metrics instance host"
+					}
+				]
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "provide your instance host and API token",
+				"fields": [
+					{
+						"id": "ACME_METRICS_TOKEN",
+						"label": "ACME_METRICS_TOKEN",
+						"description": "Environment variable ACME_METRICS_TOKEN",
+						"required": true
+					}
+				]
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "user",
+					"note": "added locally by me"
+				}
+			]
+		}
+	]
+}

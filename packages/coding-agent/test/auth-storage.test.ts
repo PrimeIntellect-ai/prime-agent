@@ -996,4 +996,85 @@ describe("AuthStorage", () => {
 			expect(apiKey).toBe("stored-key");
 		});
 	});
+
+	describe("atomic conditional credential writes", () => {
+		function credential(access: string): { type: "oauth"; access: string; refresh: string; expires: number } {
+			return {
+				type: "oauth",
+				access,
+				refresh: "r",
+				expires: Date.now() + 3600_000,
+			};
+		}
+
+		test("moveStagedCredential refuses to clobber a bystander written by ANOTHER instance", () => {
+			const clientA = AuthStorage.create(authJsonPath);
+			const clientB = AuthStorage.create(authJsonPath);
+			// A stages its login...
+			const staged = credential("staged-for-attempt");
+			const bystander = credential("ordinary-login");
+			clientA.set("mcp:acme-2--attempt-1", staged);
+			// ...then B's ordinary login writes the real key: A's per-instance
+			// cache cannot see it, so only a fresh on-disk read can refuse.
+			clientB.set("mcp:acme-2", bystander);
+
+			const move = clientA.moveStagedCredential("mcp:acme-2--attempt-1", "mcp:acme-2");
+
+			expect(move).toEqual({ status: "occupied" });
+			// A fresh reader sees the bystander byte-for-byte; the staged key survives.
+			const fresh = AuthStorage.create(authJsonPath);
+			expect(fresh.get("mcp:acme-2")).toEqual(bystander);
+			expect(fresh.get("mcp:acme-2--attempt-1")).toEqual(staged);
+		});
+
+		test("moveStagedCredential moves atomically when the real key is empty on disk", () => {
+			const clientA = AuthStorage.create(authJsonPath);
+			const clientB = AuthStorage.create(authJsonPath);
+			const staged = credential("staged-for-attempt");
+			clientA.set("mcp:acme-2--attempt-1", staged);
+			// B (a generic /logout in another client) removes the real key: the
+			// fresh on-disk read inside the move sees the honest empty state.
+			clientB.logout("mcp:acme-2");
+
+			const move = clientA.moveStagedCredential("mcp:acme-2--attempt-1", "mcp:acme-2");
+
+			expect(move.status).toBe("moved");
+			if (move.status === "moved") {
+				expect(move.credential).toEqual(staged);
+			}
+			const fresh = AuthStorage.create(authJsonPath);
+			expect(fresh.get("mcp:acme-2")).toEqual(staged);
+			expect(fresh.list()).toEqual(["mcp:acme-2"]);
+		});
+
+		test("removeIfCredentialMatches deletes ONLY the exact own credential", () => {
+			const clientA = AuthStorage.create(authJsonPath);
+			const clientB = AuthStorage.create(authJsonPath);
+			clientA.set("mcp:acme-2", credential("mine"));
+			// B replaces the credential with a NEWER one after our move: the
+			// exact-own check must refuse to delete it.
+			const newer = credential("newer-login");
+			clientB.set("mcp:acme-2", newer);
+
+			const removedStale = clientA.removeIfCredentialMatches("mcp:acme-2", credential("mine"));
+			const removedNewer = clientB.removeIfCredentialMatches("mcp:acme-2", newer);
+
+			expect(removedStale).toBe(false);
+			expect(removedNewer).toBe(true);
+			expect(AuthStorage.create(authJsonPath).list()).toEqual([]);
+		});
+
+		test("restoreCredentialIfAbsent never overwrites a newer writer", () => {
+			const clientA = AuthStorage.create(authJsonPath);
+			const clientB = AuthStorage.create(authJsonPath);
+			clientA.set("mcp:acme-2--attempt-1", credential("staged-for-attempt"));
+			const newer = credential("newer-login");
+			clientB.set("mcp:acme-2--attempt-1", newer);
+
+			const restored = clientA.restoreCredentialIfAbsent("mcp:acme-2--attempt-1", credential("staged-for-attempt"));
+
+			expect(restored).toBe(false);
+			expect(AuthStorage.create(authJsonPath).get("mcp:acme-2--attempt-1")).toEqual(newer);
+		});
+	});
 });

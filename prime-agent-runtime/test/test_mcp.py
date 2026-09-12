@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sys
+import traceback
 import socket
 import subprocess
 import tempfile
@@ -17,7 +18,7 @@ from unittest import mock
 
 from mcp.types import CallToolResult, TextContent
 from rlm import McpToolError, mcp
-from rlm.mcp_base import _parse_result
+from rlm.mcp import _parse_result
 
 
 _STDIO_FIXTURE = r"""import asyncio, json, os, sys
@@ -68,9 +69,15 @@ def run(coro):
 class FakeStack:
     def __init__(self):
         self.closed = 0
+        self.entered = []
 
     async def aclose(self):
         self.closed += 1
+
+    async def enter_async_context(self, cm):
+        result = await cm.__aenter__()
+        self.entered.append(cm)
+        return result
 
 
 class FakeSession:
@@ -709,6 +716,471 @@ class McpRegistryTest(unittest.TestCase):
                 self.assertEqual(mcp._registry._generations, {})
 
         run(scenario())
+
+
+class PagedSession:
+    """Session stand-in that answers tools/list with cursor-driven pages."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.cursors = []
+
+    async def list_tools(self, params=None):
+        self.cursors.append(None if params is None else params.cursor)
+        tools, next_cursor = self.pages[len(self.cursors) - 1]
+        return SimpleNamespace(tools=tools, next_cursor=next_cursor)
+
+
+class McpDiscoveryInventoryTest(unittest.TestCase):
+    """The host-backed inventory surface and live tool discovery."""
+
+    def setUp(self):
+        mcp._registry = mcp._Registry()
+
+    def generation(self, config, tools):
+        generation = mcp._Generation("svc", config)
+        generation.stack = FakeStack()
+        generation.session = FakeSession(tools)
+        run(generation.discover())
+        return generation
+
+    # -- inventory pass-through --------------------------------------------
+
+    def _patch_host(self, responses):
+        async def host_request(request_type, payload):
+            reply = responses[request_type]
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        return mock.patch.object(mcp, "host_request", host_request)
+
+    def test_list_connections_passes_through_and_scrubs_secret_keys(self):
+        responses = {
+            "mcp.list_connections": {
+                "connections": [
+                    {
+                        "connectionId": "notion",
+                        "label": "Notion",
+                        "status": "connected",
+                        "accessToken": "tok",
+                        "oauth": {"clientSecret": "cs", "kind": "oauth"},
+                    },
+                    {"connectionId": "acme", "status": "error", "setupHint": "configure API key"},
+                ]
+            }
+        }
+        with self._patch_host(responses):
+            connections = run(mcp.list_connections())
+        self.assertEqual([entry["connectionId"] for entry in connections], ["notion", "acme"])
+        notion = connections[0]
+        self.assertEqual(notion["label"], "Notion")
+        self.assertNotIn("accessToken", notion)
+        self.assertEqual(notion["oauth"], {"kind": "oauth"})
+        self.assertEqual(connections[1]["setupHint"], "configure API key")
+
+    def test_list_connections_rejects_malformed_host_data(self):
+        for reply in (
+            {"connections": [{"label": "no-connection-id"}]},
+            {"connections": ["not-a-dict"]},
+            {"connections": "no"},
+            ["not", "a", "dict"],
+        ):
+            with self._patch_host({"mcp.list_connections": reply}):
+                with self.assertRaises(RuntimeError):
+                    run(mcp.list_connections())
+
+    def test_inventory_wraps_host_failures_without_echoing_them(self):
+        with self._patch_host({"mcp.list_connections": RuntimeError("bridge is down")}):
+            with self.assertRaises(RuntimeError) as caught:
+                run(mcp.list_connections())
+        error = caught.exception
+        self.assertEqual(str(error), "MCP mcp.list_connections request failed")
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        formatted = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        self.assertNotIn("bridge is down", formatted)
+
+    def test_list_plugins_forwards_filters_limit_and_cursor(self):
+        captured = {}
+
+        async def host_request(request_type, payload):
+            captured["type"] = request_type
+            captured["payload"] = payload
+            return {
+                "plugins": [{"serviceId": "notion", "label": "Notion", "connectionStatus": "not_connected"}],
+                "nextCursor": "page-2",
+            }
+
+        with mock.patch.object(mcp, "host_request", host_request):
+            page = run(mcp.list_plugins(connection_status="not_connected", limit=5, cursor="page-1"))
+        self.assertEqual(captured["type"], "mcp.list_plugins")
+        self.assertEqual(
+            captured["payload"], {"connectionStatus": "not_connected", "limit": 5, "cursor": "page-1"}
+        )
+        self.assertEqual(page["nextCursor"], "page-2")
+        self.assertEqual(page["plugins"][0]["serviceId"], "notion")
+
+        with mock.patch.object(mcp, "host_request", host_request):
+            run(mcp.list_plugins())
+        self.assertEqual(captured["payload"], {"limit": 50})
+
+    def test_list_plugins_validates_inputs_and_host_shapes(self):
+        for kwargs in ({"connection_status": "maybe"}, {"limit": 0}, {"limit": 201}, {"limit": True}, {"cursor": "x" * 600}):
+            with self._patch_host({"mcp.list_plugins": {"plugins": []}}):
+                with self.assertRaises((ValueError, TypeError)):
+                    run(mcp.list_plugins(**kwargs))
+        for reply in ({"plugins": ["no"]}, {"plugins": [], "nextCursor": ""}):
+            with self._patch_host({"mcp.list_plugins": reply}):
+                with self.assertRaises(RuntimeError):
+                    run(mcp.list_plugins())
+
+    def test_search_plugins_sends_query_and_limit(self):
+        captured = {}
+
+        async def host_request(request_type, payload):
+            captured["type"] = request_type
+            captured["payload"] = payload
+            return {"plugins": [{"serviceId": "notion", "apiKey": "leak"}], "nextCursor": None}
+
+        with mock.patch.object(mcp, "host_request", host_request):
+            page = run(mcp.search_plugins("  Notion  "))
+        self.assertEqual(captured["type"], "mcp.search_plugins")
+        self.assertEqual(captured["payload"], {"query": "Notion", "limit": 10})
+        self.assertIsNone(page["nextCursor"])
+        self.assertNotIn("apiKey", page["plugins"][0])
+        for bad in ("", "   "):
+            with self._patch_host({"mcp.search_plugins": {"plugins": []}}):
+                with self.assertRaises(TypeError):
+                    run(mcp.search_plugins(bad))
+        with self._patch_host({"mcp.search_plugins": {"plugins": []}}):
+            with self.assertRaises(ValueError):
+                run(mcp.search_plugins("notion", limit=51))
+
+    # -- live tool discovery ------------------------------------------------
+
+    def test_describe_tool_returns_schema_copy(self):
+        schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+        generation = self.generation(
+            {"type": "http", "enabledTools": ["search-docs"]},
+            [
+                SimpleNamespace(name="search-docs", description="Search docs", inputSchema=schema),
+                SimpleNamespace(name="delete-docs", description="Delete docs", inputSchema={}),
+            ],
+        )
+        generation.server = "notion-work"
+
+        async def scenario():
+            with mock.patch.object(mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)):
+                described = await mcp.describe_tool("notion-work", "search-docs")
+                with self.assertRaises(KeyError):
+                    await mcp.describe_tool("notion-work", "missing-tool")
+                with self.assertRaises(PermissionError):
+                    await mcp.describe_tool("notion-work", "delete-docs")
+            return described
+
+        described = run(scenario())
+        self.assertEqual(described["inputSchema"], schema)
+        # Isolated copies: mutating the returned schema (nested included) must
+        # never reach the cached canonical inventory.
+        described["inputSchema"]["injected"] = True
+        described["name"] = "mutated"
+        self.assertNotIn("injected", generation.tools["search-docs"]["inputSchema"])
+        self.assertEqual(generation.tools["search-docs"]["name"], "search-docs")
+
+    def test_list_tools_returns_isolated_copies(self):
+        schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+        generation = self.generation(
+            {"type": "http"},
+            [SimpleNamespace(name="search-docs", description="Search docs", inputSchema=schema)],
+        )
+        generation.server = "notion"
+
+        async def scenario():
+            with mock.patch.object(mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)):
+                tools = await mcp.list_tools("notion")
+                tools[0]["inputSchema"]["injected"] = True
+                return await mcp.list_tools("notion")
+
+        again = run(scenario())
+        self.assertNotIn("injected", again[0]["inputSchema"])
+        self.assertNotIn("injected", generation.tools["search-docs"]["inputSchema"])
+
+    def test_search_tools_scoped_connection_matches_policy_and_limit(self):
+        tools = [
+            SimpleNamespace(name="search-docs", description="Search workspace documents", inputSchema={}),
+            SimpleNamespace(name="delete-doc", description="Remove documents", inputSchema={}),
+        ]
+        generation = self.generation({"type": "http", "enabledTools": ["search-docs"]}, tools)
+        generation.server = "notion-work"
+
+        async def scenario():
+            with mock.patch.object(mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)):
+                by_description = await mcp.search_tools("DOCUMENTS", connection_id="notion-work")
+                no_match = await mcp.search_tools("query", connection_id="notion-work")
+                limited = await mcp.search_tools("doc", connection_id="notion-work", limit=1)
+            with mock.patch.object(
+                mcp._registry, "_get_locked", mock.AsyncMock(side_effect=KeyError("unknown connection"))
+            ):
+                error = None
+                try:
+                    await mcp.search_tools("documents", connection_id="notion-work")
+                except KeyError as exc:
+                    error = exc
+            return by_description, no_match, limited, error
+
+        by_description, no_match, limited, error = run(scenario())
+        self.assertEqual(
+            by_description["tools"],
+            [{"connectionId": "notion-work", "name": "search-docs", "description": "Search workspace documents"}],
+        )
+        self.assertEqual(by_description["searched"], ["notion-work"])
+        self.assertEqual(by_description["unavailable"], [])
+        self.assertFalse(by_description["truncated"])
+        # No match is not an error, and the policy-disabled tool never matches.
+        self.assertEqual(no_match["tools"], [])
+        self.assertFalse(no_match["truncated"])
+        # Hitting the limit on the only policy-allowed match reports truncation.
+        self.assertTrue(limited["truncated"])
+        # A failing connection surfaces its error instead of hiding it.
+        self.assertIsNotNone(error)
+
+    def test_search_tools_without_connection_searches_connected_only(self):
+        tools = [SimpleNamespace(name="search-docs", description="Search workspace documents", inputSchema={})]
+        generation = self.generation({"type": "http"}, tools)
+        generation.server = "a"
+        broken = mcp.McpCredentialsUnavailable(
+            "MCP credentials for 'b' are not available. Ask the user to connect it"
+            " (/plugins or /mcp login b); do not ask them to set environment variables."
+        )
+
+        async def get_locked(server):
+            if server == "a":
+                return generation
+            raise broken
+
+        responses = {
+            "mcp.list_connections": {
+                "connections": [
+                    {"connectionId": "a", "status": "connected"},
+                    {"connectionId": "b", "status": "connected"},
+                    {"connectionId": "c", "status": "not_connected"},
+                    {"connectionId": "d", "status": "error"},
+                ]
+            }
+        }
+
+        async def scenario():
+            with self._patch_host(responses), mock.patch.object(
+                mcp._registry, "_get_locked", side_effect=get_locked
+            ):
+                return await mcp.search_tools("documents")
+
+        result = run(scenario())
+        self.assertEqual(result["tools"], [
+            {"connectionId": "a", "name": "search-docs", "description": "Search workspace documents"}
+        ])
+        self.assertEqual(result["searched"], ["a"])
+        self.assertEqual([entry["connectionId"] for entry in result["unavailable"]], ["b"])
+        self.assertEqual(
+            result["unavailable"][0]["error"],
+            "McpCredentialsUnavailable: credentials for this connection are not available; "
+            "the user must connect it",
+        )
+        self.assertFalse(result["truncated"])
+
+    def test_search_tools_bounds_servers_and_reports_truncation(self):
+        connections = {
+            "connections": [
+                {"connectionId": f"svc-{index}", "status": "connected"} for index in range(10)
+            ]
+        }
+        empty = self.generation({"type": "http"}, [])
+        calls = []
+
+        async def get_locked(server):
+            calls.append(server)
+            empty.server = server
+            return empty
+
+        async def scenario():
+            with self._patch_host({"mcp.list_connections": connections}), mock.patch.object(
+                mcp._registry, "_get_locked", side_effect=get_locked
+            ):
+                return await mcp.search_tools("anything")
+
+        result = run(scenario())
+        self.assertEqual(len(calls), mcp._MAX_TOOL_SEARCH_SERVERS)
+        self.assertEqual(result["searched"], [f"svc-{index}" for index in range(mcp._MAX_TOOL_SEARCH_SERVERS)])
+        self.assertTrue(result["truncated"])
+
+    def test_search_unavailable_never_echoes_raw_exception_text(self):
+        connections = {"connections": [{"connectionId": "leaky", "status": "connected"}]}
+        raw = "Connection failed: https://user:hunter2@evil.test/mcp?api_key=abc123 Authorization: Bearer tok-123-secret"
+
+        async def get_locked(server):
+            raise RuntimeError(raw)
+
+        async def scenario():
+            with self._patch_host({"mcp.list_connections": connections}), mock.patch.object(
+                mcp._registry, "_get_locked", side_effect=get_locked
+            ):
+                return await mcp.search_tools("documents")
+
+        result = run(scenario())
+        error = result["unavailable"][0]["error"]
+        self.assertEqual(error, "RuntimeError: the connection could not be opened or searched")
+        for leaked in ("hunter2", "abc123", "tok-123-secret", "evil.test", "Bearer"):
+            self.assertNotIn(leaked, error)
+
+    def test_host_inventory_failures_never_expose_the_original_exception(self):
+        raw = (
+            "GET https://user:hunter2@sync.test/mcp?token=tok-123-secret failed; "
+            "Authorization: Bearer tok-123-secret; body password=hunter2"
+        )
+
+        async def host_request(request_type, payload):
+            raise RuntimeError(raw)
+
+        with mock.patch.object(mcp, "host_request", host_request):
+            with self.assertRaises(RuntimeError) as caught:
+                run(mcp.list_connections())
+        error = caught.exception
+        self.assertEqual(str(error), "MCP mcp.list_connections request failed")
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        # The full formatted chain (not just str(exc)) must stay secret-free.
+        formatted = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        for leaked in ("hunter2", "tok-123-secret", "sync.test", "Authorization", "Bearer", "password"):
+            self.assertNotIn(leaked, formatted)
+
+    def test_host_inventory_timeouts_report_a_fixed_message(self):
+        async def slow_host_request(request_type, payload):
+            await asyncio.sleep(0.05)
+            return {"connections": []}
+
+        with mock.patch.object(mcp, "host_request", slow_host_request), mock.patch.object(
+            mcp, "_INVENTORY_TIMEOUT", 0.01
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                run(mcp.list_connections())
+        self.assertEqual(str(caught.exception), "MCP mcp.list_connections request timed out")
+
+    # -- tools/list pagination ----------------------------------------------
+
+    def test_discover_follows_cursor_pages(self):
+        tools_page_one = [SimpleNamespace(name="one", description="", inputSchema={})]
+        tools_page_two = [SimpleNamespace(name="two", description="", inputSchema={})]
+        session = PagedSession([(tools_page_one, "cursor-2"), (tools_page_two, None)])
+        generation = mcp._Generation("svc", {"type": "http"})
+        generation.session = session
+        run(generation.discover())
+        self.assertEqual(sorted(generation.tools), ["one", "two"])
+        self.assertEqual(session.cursors, [None, "cursor-2"])
+
+    def test_discover_repeated_cursor_raises_and_publishes_nothing(self):
+        tools = [SimpleNamespace(name="one", description="", inputSchema={})]
+        session = PagedSession([(tools, "same"), (tools, "same"), (tools, "same"), (tools, "same")])
+        generation = mcp._Generation("svc", {"type": "http"})
+        generation.session = session
+        with self.assertRaisesRegex(mcp.McpDiscoveryError, "repeated"):
+            run(generation.discover())
+        self.assertEqual(session.cursors, [None, "same"])
+        self.assertEqual(generation.tools, {})
+
+    def test_discover_page_cap_raises_instead_of_partial_inventory(self):
+        tools = [SimpleNamespace(name="one", description="", inputSchema={})]
+        pages = [(tools, f"cursor-{index}") for index in range(10)]
+        session = PagedSession(pages)
+        generation = mcp._Generation("svc", {"type": "http"})
+        generation.session = session
+        with mock.patch.object(mcp, "_MAX_TOOL_PAGES", 3):
+            with self.assertRaisesRegex(mcp.McpDiscoveryError, "partial"):
+                run(generation.discover())
+        self.assertEqual(session.cursors, [None, "cursor-0", "cursor-1"])
+        self.assertEqual(generation.tools, {})
+
+    def test_discover_malformed_cursor_raises(self):
+        tools = [SimpleNamespace(name="one", description="", inputSchema={})]
+        for bad_cursor in ("", 42, {}):
+            session = PagedSession([(tools, bad_cursor), (tools, None)])
+            generation = mcp._Generation("svc", {"type": "http"})
+            generation.session = session
+            with self.assertRaisesRegex(mcp.McpDiscoveryError, "malformed"):
+                run(generation.discover())
+            self.assertEqual(generation.tools, {})
+
+    # -- moved shared helpers ----------------------------------------------
+
+    def test_parse_result_text_and_non_text_content(self):
+        block = type("B", (), {"text": "hello"})()
+        result = type("R", (), {"content": [block], "structuredContent": None, "isError": False})()
+        self.assertEqual(mcp._parse_result(result), "hello")
+
+        image = SimpleNamespace(data="raw")
+        result = type("R", (), {"content": [image], "structuredContent": None, "isError": False})()
+        self.assertEqual(mcp._parse_result(result), [image])
+
+    def test_resolve_config_value_env_literal_and_command_forms(self):
+        with mock.patch.dict(os.environ, {"MY_MCP_KEY": "resolved-secret"}, clear=False):
+            self.assertEqual(mcp._resolve_config_value("MY_MCP_KEY"), "resolved-secret")
+        self.assertEqual(mcp._resolve_config_value("key-abc"), "key-abc")
+        self.assertEqual(mcp._resolve_config_value("!security find-key"), "")
+        self.assertEqual(mcp._resolve_config_value("  "), "")
+
+    def test_read_auth_reads_provider_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cred = {"type": "oauth", "access": "tok", "refresh": "r", "expires": 1, "endpoint": "https://e.test/mcp"}
+            (Path(tmp) / "auth.json").write_text(json.dumps({"mcp:demo": cred, "other": "junk"}))
+            with mock.patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}, clear=False):
+                self.assertEqual(mcp._read_auth("mcp:demo"), cred)
+                self.assertIsNone(mcp._read_auth("mcp:missing"))
+
+    def test_resolve_streamable_http_returns_callable(self):
+        self.assertTrue(callable(mcp._resolve_streamable_http()))
+
+    def test_open_http_passes_headers_for_headers_signature(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self):
+                return ("read", "write", None)
+
+            async def __aexit__(self, *args):
+                return False
+
+        def transport(url, headers=None):
+            captured["headers"] = headers
+            return _CM()
+
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp", "headers": {"X-A": "1"}})
+        generation.stack = FakeStack()
+        with mock.patch.object(mcp, "_resolve_streamable_http", lambda: transport):
+            streams = run(generation._open_http())
+        self.assertEqual(captured["headers"], {"X-A": "1"})
+        self.assertEqual(streams, ("read", "write"))
+
+    def test_open_http_builds_client_for_http_client_signature(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self):
+                return ("read", "write", None)
+
+            async def __aexit__(self, *args):
+                return False
+
+        def transport(url, *, http_client=None):
+            captured["http_client"] = http_client
+            return _CM()
+
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        with mock.patch.object(mcp, "_resolve_streamable_http", lambda: transport):
+            streams = run(generation._open_http())
+        self.assertIsNotNone(captured["http_client"])
+        self.assertEqual(streams, ("read", "write"))
+
 
 
 if __name__ == "__main__":

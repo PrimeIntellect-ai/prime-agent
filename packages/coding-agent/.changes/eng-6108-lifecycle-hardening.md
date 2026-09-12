@@ -1,0 +1,1 @@
+- Hardened MCP endpoint verification so an unresponsive server can never hang it: fetches, response bodies, and session-termination cleanup are now bounded by an abort signal with a cleanup grace deadline, and connection-record writes create the store file exclusively so a first writer cannot wipe another process's records, requeueing failed writes until they commit (ENG-6108).
