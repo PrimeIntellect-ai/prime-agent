@@ -2463,6 +2463,19 @@ export class InteractiveMode {
 				);
 				this.chatContainer.addChild(new Spacer(1));
 			}
+
+			const harnessDiagnostics = resourceSnapshot?.diagnostics.harness ?? [];
+			if (harnessDiagnostics.length > 0) {
+				const warningLines = this.formatDiagnostics(harnessDiagnostics, sourceInfos);
+				this.chatContainer.addChild(
+					new Text(
+						`${sectionHeader(diagnosticsHeader("Harness", harnessDiagnostics), "warning")}\n${warningLines}`,
+						0,
+						0,
+					),
+				);
+				this.chatContainer.addChild(new Spacer(1));
+			}
 		}
 	}
 

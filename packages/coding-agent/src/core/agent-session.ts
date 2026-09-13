@@ -8812,12 +8812,14 @@ export class AgentSession {
 		return latest?.digest;
 	}
 
-	/** Global harness state overlaid with this session's local state, when persisted. */
+	/** Global harness state overlaid with this session's local state and read-only package entries. */
 	private _loadMergedHarnessState(): HarnessState {
 		const localHarnessStateDir = this._localHarnessStateDir();
 		return mergeHarnessStates(
 			loadHarnessState(getGlobalHarnessStateDir(), "global"),
 			localHarnessStateDir ? loadHarnessState(localHarnessStateDir, "local") : undefined,
+			// Optional interface: a loader may omit getHarness or return no result.
+			this._resourceLoader.getHarness?.()?.state,
 		);
 	}
 
@@ -8993,10 +8995,11 @@ export class AgentSession {
 		}
 		const globalPlanningState = loadHarnessState(globalHarnessStateDir, "global");
 		const localPlanningState = localHarnessStateDir ? loadHarnessState(localHarnessStateDir, "local") : undefined;
+		const packagePlanningState = this._resourceLoader.getHarness?.()?.state;
 		const planningState =
 			requestedScope === "global"
-				? globalPlanningState
-				: mergeHarnessStates(globalPlanningState, localPlanningState);
+				? mergeHarnessStates(globalPlanningState, undefined, packagePlanningState)
+				: mergeHarnessStates(globalPlanningState, localPlanningState, packagePlanningState);
 		const history = this._loadRefinementHistory();
 		const rollbackTarget = options.rollbackId ? history.find((item) => item.id === options.rollbackId) : undefined;
 		let baselineScope = rollbackTarget
@@ -9137,13 +9140,16 @@ export class AgentSession {
 				edits: plan.proposal.edits.map((edit) => {
 					const localPrefix = "local:";
 					const globalPrefix = "global:";
+					const packagePrefix = "package:";
 					return {
 						...edit,
 						id: edit.id?.startsWith(localPrefix)
 							? edit.id.slice(localPrefix.length)
 							: edit.id?.startsWith(globalPrefix)
 								? edit.id.slice(globalPrefix.length)
-								: edit.id,
+								: edit.id?.startsWith(packagePrefix)
+									? edit.id.slice(packagePrefix.length)
+									: edit.id,
 					};
 				}),
 			};
@@ -9155,6 +9161,7 @@ export class AgentSession {
 				rollbackOf: plan.rollbackOf,
 				scope: targetScope,
 				baselineState: plan.baselineState,
+				packageState: this._resourceLoader.getHarness?.()?.state,
 			});
 			result.harnessStatePath = saveHarnessState(targetHarnessStateDir, state);
 			if (targetScope === "global") {

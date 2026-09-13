@@ -1,8 +1,8 @@
-> Prime Agent can help you create resource packages. Ask it to bundle your extensions, skills, prompt templates, or themes.
+> Prime Agent can help you create resource packages. Ask it to bundle your extensions, skills, prompt templates, themes, or continual harness entries.
 
 # Prime Agent Packages
 
-Prime Agent packages bundle extensions, skills, prompt templates, and themes so you can share them through npm or git. For compatibility with the inherited extension ecosystem, a package declares resources in `package.json` under the `pi` key, or uses conventional directories.
+Prime Agent packages bundle extensions, skills, prompt templates, themes, and read-only continual harness entries so you can share them through npm or git. For compatibility with the inherited extension ecosystem, a package declares resources in `package.json` under the `pi` key, or uses conventional directories.
 
 ## Table of Contents
 
@@ -10,6 +10,7 @@ Prime Agent packages bundle extensions, skills, prompt templates, and themes so 
 - [Package Sources](#package-sources)
 - [Creating a Prime Agent Package](#creating-a-prime-agent-package)
 - [Package Structure](#package-structure)
+- [Package Harness Entries](#package-harness-entries)
 - [Dependencies](#dependencies)
 - [Package Filtering](#package-filtering)
 - [Enable and Disable Resources](#enable-and-disable-resources)
@@ -118,7 +119,8 @@ Add a `pi` manifest to `package.json` or use conventional directories. Include t
     "extensions": ["./extensions"],
     "skills": ["./skills"],
     "prompts": ["./prompts"],
-    "themes": ["./themes"]
+    "themes": ["./themes"],
+    "harness": ["./harness"]
   }
 }
 ```
@@ -156,6 +158,40 @@ If no `pi` manifest is present, Prime Agent auto-discovers resources from these 
 - `skills/` recursively finds `SKILL.md` folders and loads top-level `.md` files as skills
 - `prompts/` loads `.md` files
 - `themes/` loads `.json` files
+- `harness/` loads `<kind>/<id>.json` continual harness entries (see [Package Harness Entries](#package-harness-entries))
+
+## Package Harness Entries
+
+A package can ship continual harness entries — prompt notes, memories, Python skill specs, and subagent specs — under a `harness` directory. Each entry is one JSON file laid out as `harness/<kind>/<id>.json`, where `<kind>` is one of `prompt`, `memory`, `skill`, or `subagent`:
+
+```json
+{
+  "kind": "memory",
+  "id": "team_policy",
+  "title": "Team policy",
+  "path": "Team policy",
+  "content": "Reuse the shared review subagent for all PR checks.",
+  "reference": {},
+  "arguments": {},
+  "metadata": {}
+}
+```
+
+Schema rules:
+
+- `kind`, `id`, `title`, and `content` are required nonempty strings; `kind` and `id` must match the file path.
+- `id` must match `[A-Za-z0-9_.-]+` and must not be a reserved name such as `prototype`.
+- `path` is optional and defaults to `policy` for prompt entries and `general` for the other kinds.
+- `reference`, `arguments`, and `metadata` are optional objects and default to `{}`. `version` is optional and defaults to `1`.
+- Skill entries require a Python `reference` object with `"type": "python"`, an import, and a callable or call pattern.
+- Invalid files are skipped with a diagnostic; they never break package loading.
+
+Mounted entries are read-only overlays:
+
+- They appear in the continual harness digest with a `package:` label and provenance (configured source, install scope, package revision, and package-relative file). Provenance never leaks local filesystem paths.
+- They are never copied into editable harness state or refinement history. `rlm.harness` CRUD and `/refine` cannot update or delete them; both only see editable stores. `/refine` may create an editable local or global entry with the same kind and id to override a package entry.
+- Editable local and global entries with the same `(kind, id)` shadow the package entry. Across packages, a project-scope package beats a user-scope package; remaining collisions produce a diagnostic.
+- `/reload`, `prime-agent package update`, and `prime-agent package remove` re-mount or unmount package entries without touching editable harness state.
 
 ## Dependencies
 
@@ -193,7 +229,8 @@ Filter what a package loads using the object form in settings:
       "extensions": ["extensions/*.ts", "!extensions/legacy.ts"],
       "skills": [],
       "prompts": ["prompts/review.md"],
-      "themes": ["+themes/legacy.json"]
+      "themes": ["+themes/legacy.json"],
+      "harness": ["harness/memory/*.json"]
     }
   ]
 }

@@ -4942,6 +4942,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		extensions?: ExtensionFixture[];
 		skills?: Array<{ filePath: string; name: string }>;
 		skillDiagnostics?: AgentConnectionResourceDiagnostic[];
+		harnessDiagnostics?: AgentConnectionResourceDiagnostic[];
 		useRealScopeGroups?: boolean;
 		useRealDiagnostics?: boolean;
 	}) {
@@ -4956,6 +4957,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 				prompts: [],
 				extensions: [],
 				themes: [],
+				harness: options.harnessDiagnostics ?? [],
 			},
 		};
 		const extensionRunner = {
@@ -5617,6 +5619,30 @@ describe("InteractiveMode.showLoadedResources", () => {
     indented detail"
 `);
 		expect(output).not.toContain("[Skill conflicts]");
+	});
+
+	test("shows package harness diagnostics in status output", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: true,
+			harnessDiagnostics: [
+				{
+					type: "collision",
+					message: "package harness memory:shared collision; keeping project-package",
+				},
+			],
+			useRealDiagnostics: true,
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+			showDiagnosticsWhenQuiet: true,
+		});
+
+		const output = normalizeRenderedOutput(fakeThis.chatContainer, 100);
+		expect(output).toMatchInlineSnapshot(`
+"[Harness conflicts]
+  package harness memory:shared collision; keeping project-package"
+`);
 	});
 });
 

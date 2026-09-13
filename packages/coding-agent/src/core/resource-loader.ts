@@ -15,6 +15,11 @@ import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResul
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.js";
 import type { PromptTemplate } from "./prompt-templates.js";
 import { loadPromptTemplates } from "./prompt-templates.js";
+import {
+	createEmptyPackageHarnessState,
+	loadPackageHarness,
+	type PackageHarnessLoadResult,
+} from "./refinement/package-harness.js";
 import { SettingsManager } from "./settings-manager.js";
 import type { Skill } from "./skills.js";
 import { loadSkills } from "./skills.js";
@@ -31,6 +36,8 @@ export interface ResourceLoader {
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
+	/** Read-only continual harness entries mounted from installed packages. */
+	getHarness?(): PackageHarnessLoadResult;
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
@@ -200,6 +207,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private promptDiagnostics: ResourceDiagnostic[];
 	private themes: Theme[];
 	private themeDiagnostics: ResourceDiagnostic[];
+	private packageHarness: PackageHarnessLoadResult;
 	private agentsFiles: Array<{ path: string; content: string }>;
 	private systemPrompt?: string;
 	private appendSystemPrompt: string[];
@@ -250,6 +258,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.promptDiagnostics = [];
 		this.themes = [];
 		this.themeDiagnostics = [];
+		this.packageHarness = { state: createEmptyPackageHarnessState(), diagnostics: [] };
 		this.agentsFiles = [];
 		this.appendSystemPrompt = [];
 		this.lastSkillPaths = [];
@@ -279,6 +288,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] } {
 		return { themes: this.themes, diagnostics: this.themeDiagnostics };
+	}
+
+	getHarness(): PackageHarnessLoadResult {
+		return this.packageHarness;
 	}
 
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> } {
@@ -364,6 +377,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const enabledSkillResources = getEnabledResources(resolvedPaths.skills);
 		const enabledPrompts = getEnabledPaths(resolvedPaths.prompts);
 		const enabledThemes = getEnabledPaths(resolvedPaths.themes);
+		// Package harness overlays are re-mounted on every reload: package updates
+		// and removals flow through without touching editable harness state.
+		const enabledHarnessResources = getEnabledResources(resolvedPaths.harness);
+		this.packageHarness = loadPackageHarness(enabledHarnessResources);
 
 		const mapSkillPath = (resource: { path: string; metadata: PathMetadata }): string => {
 			if (resource.metadata.source !== "auto" && resource.metadata.origin !== "package") {

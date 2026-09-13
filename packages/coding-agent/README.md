@@ -409,9 +409,9 @@ Place in `~/.prime/agent/themes/`, `.prime/agent/themes/`, or a [Prime Agent pac
 
 ### Prime Agent Packages
 
-Bundle and share extensions, skills, prompts, and themes via npm or git.
+Bundle and share extensions, skills, prompts, themes, and read-only continual harness entries via npm or git.
 
-> **Security:** Prime Agent packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
+> **Security:** Prime Agent packages run with full system access. Extensions execute arbitrary code, while skills and continual harness entries can instruct the model to perform actions including running executables. Review source code before installing third-party packages.
 
 ```bash
 prime-agent package install npm:@foo/prime-agent-tools
@@ -442,12 +442,13 @@ Create a package by adding the inherited `pi` manifest key to `package.json`:
     "extensions": ["./extensions"],
     "skills": ["./skills"],
     "prompts": ["./prompts"],
-    "themes": ["./themes"]
+    "themes": ["./themes"],
+    "harness": ["./harness"]
   }
 }
 ```
 
-Without a `pi` manifest, Prime Agent auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
+Without a `pi` manifest, Prime Agent auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`, `harness/`). Harness files use `harness/<prompt|memory|skill|subagent>/<id>.json`; each file needs at least `kind`, `id`, `title`, and `content`, and the `kind`/`id` must match its path. Entries mount as read-only overlays: they are visible in sessions, carry package provenance, never copy into editable harness state, and lose to local user/session entries with the same kind and id. `/refine` cannot update or delete them; it can only create an editable override.
 
 See [docs/packages.md](docs/packages.md).
 

@@ -35,6 +35,15 @@ describe("agent connection snapshots", () => {
 					extensions: [{ path: "/opt/prime/extensions/review/index.ts" }],
 					errors: [],
 				}),
+				getHarness: () => ({
+					diagnostics: [
+						{
+							type: "warning",
+							message: "package harness entry content must be a nonempty string",
+							path: "/opt/prime/harness/memory/invalid.json",
+						},
+					],
+				}),
 			},
 		} as unknown as AgentSession;
 
@@ -63,5 +72,12 @@ describe("agent connection snapshots", () => {
 			},
 		});
 		expect(snapshot.extensions[0]?.artifact).not.toHaveProperty("relativePath");
+		expect(snapshot.diagnostics.harness).toEqual([
+			{
+				type: "warning",
+				message: "package harness entry content must be a nonempty string",
+				path: "/opt/prime/harness/memory/invalid.json",
+			},
+		]);
 	});
 });

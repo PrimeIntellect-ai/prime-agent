@@ -87,7 +87,7 @@ export interface AgentConnectionSourceInfo {
 }
 
 export interface AgentConnectionResourceCollision {
-	resourceType: "extension" | "skill" | "prompt" | "theme";
+	resourceType: "extension" | "skill" | "prompt" | "theme" | "harness";
 	name: string;
 	winnerPath: string;
 	loserPath: string;
@@ -418,6 +418,7 @@ export interface AgentConnectionResourceDiagnostics {
 	prompts: AgentConnectionResourceDiagnostic[];
 	extensions: AgentConnectionResourceDiagnostic[];
 	themes: AgentConnectionResourceDiagnostic[];
+	harness: AgentConnectionResourceDiagnostic[];
 }
 
 export interface AgentConnectionResourceSnapshot {
