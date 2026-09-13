@@ -2,12 +2,12 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { compactRlmText } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
-import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
-import type { SessionUsageSummary } from "../../core/usage.js";
+import { compactRlmText } from "../../session/agent-session.js";
+import type { SessionUsageSummary } from "../../session/context/usage.js";
+import type { SessionActionSnapshot } from "../../session/input/action-store.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 

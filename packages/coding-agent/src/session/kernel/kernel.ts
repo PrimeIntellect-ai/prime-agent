@@ -4,11 +4,11 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "../../core/extensions/index.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "../../core/kernel/state-snapshot.js";
-import { type CustomMessage, IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "../../core/messages.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { PythonSkillRuntimeInfo } from "../../core/skills.js";
 import { createAllToolDefinitions } from "../../core/tools/index.js";
 import { IpythonKernelProvisioner } from "../../core/tools/ipython.js";
+import { type CustomMessage, IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "../context/messages.js";
 
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 export interface SessionKernelHost {

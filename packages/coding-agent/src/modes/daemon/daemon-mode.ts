@@ -64,7 +64,6 @@ import {
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
 } from "../../core/agent-observe.js";
-import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	type AgentSessionRuntime,
@@ -88,19 +87,7 @@ import {
 	shouldDeferHeartbeatCronJob,
 } from "../../core/cron-jobs.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
-import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
-import type {
-	CreateRlmRootSessionOptions,
-	CreateRlmSubagentRuntimeOptions,
-	RlmCreateSessionResult,
-	SubagentRuntimeHost,
-} from "../../core/rlm-runtime.js";
-import {
-	canPassivateSession,
-	type IdleEvictionMinutes,
-	type SessionPassivationSnapshot,
-} from "../../core/session-action-store.js";
 import { deleteSessionArtifacts, deleteSessionFile } from "../../core/session-file-actions.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
 import {
@@ -111,9 +98,17 @@ import {
 	SessionManager,
 } from "../../core/session-manager.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
-import type { SessionStats } from "../../core/session-stats.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import { type PromptOptions, rlmChildLabel } from "../../session/agent-session.js";
+import type {
+	CreateRlmRootSessionOptions,
+	CreateRlmSubagentRuntimeOptions,
+	RlmCreateSessionResult,
+	SubagentRuntimeHost,
+} from "../../session/children/runtime-contracts.js";
+import type { SessionStats } from "../../session/context/session-stats.js";
+import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../session/input/prompt-admission.js";
 import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
@@ -239,6 +234,11 @@ import {
 	type SnapshotTranscriptChunkSource,
 } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
+import {
+	canPassivateSession,
+	type IdleEvictionMinutes,
+	type SessionPassivationSnapshot,
+} from "./workers/residency-policy.js";
 
 export interface DaemonModeOptions {
 	socketPath?: string;

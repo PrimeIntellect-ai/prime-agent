@@ -6,6 +6,7 @@ import {
 	parseAgentSessionMessagePromptId,
 } from "../../core/agent-messages.js";
 import type { InputSource } from "../../core/extensions/index.js";
+import type { SessionManager } from "../../core/session-manager.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
@@ -14,11 +15,14 @@ import {
 	createAsyncBashCompletionMessage,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
-} from "../../core/messages.js";
-import { throwIfPromptAdmissionCancelled } from "../../core/prompt-admission.js";
-import { type ActionStore, canSelectSessionAction, type RuntimeActivity } from "../../core/session-action-store.js";
-import type { SessionManager } from "../../core/session-manager.js";
+} from "../context/messages.js";
 import { GOAL_CONTEXT_CUSTOM_TYPE, GOAL_CONTEXT_PREVIEW_LABEL } from "../goals/contracts.js";
+import type { AgentSessionEvent } from "../turns/events.js";
+import { createTurnExecutionPolicy, type TurnExecutionPolicy } from "../turns/turn-preparation.js";
+import { type ActionStore, canSelectSessionAction, type RuntimeActivity } from "./action-store.js";
+import type { SessionCommitFence, SessionCommitLease } from "./commit-fence.js";
+import type { SessionInputAdmission } from "./input-admission.js";
+import type { SessionInputScheduler } from "./input-scheduler.js";
 import {
 	buildPromptContent,
 	cloneCustomMessage,
@@ -28,12 +32,8 @@ import {
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
 	SessionInputAdmissionPausedError,
-} from "../prepared-actions.js";
-import type { AgentSessionEvent } from "../turns/events.js";
-import { createTurnExecutionPolicy, type TurnExecutionPolicy } from "../turns/turn-preparation.js";
-import type { SessionCommitFence, SessionCommitLease } from "./commit-fence.js";
-import type { SessionInputAdmission } from "./input-admission.js";
-import type { SessionInputScheduler } from "./input-scheduler.js";
+} from "./prepared-actions.js";
+import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import type { SubmissionNormalizer } from "./submission-normalization.js";
 export interface PromptOptions {
 	expandPromptTemplates?: boolean;

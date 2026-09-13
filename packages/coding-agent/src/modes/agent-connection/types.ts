@@ -2,10 +2,7 @@ import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi
 import type { Api, ImageContent, Model, ServiceTier, TextContent, Transport, Usage } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AuthSourceToken } from "../../core/auth-storage.js";
-import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
-import type { CompactionResult } from "../../core/compaction/index.js";
-import type { ContextTreeNode } from "../../core/context-tree.js";
 import type {
 	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
@@ -16,18 +13,21 @@ import type { ReplayBuiltInToolName } from "../../core/extensions/index.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
-import type { RefinementResult } from "../../core/refinement/index.js";
-import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
+import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import type { AgentAutonomousStatus } from "../../session/autonomy/autonomous.js";
+import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../session/children/max-depth.js";
+import type { CompactionResult } from "../../session/compaction/types.js";
+import type { ContextTreeNode } from "../../session/context/context-tree.js";
+import type { SessionStats } from "../../session/context/session-stats.js";
+import type { SessionUsageSummary } from "../../session/context/usage.js";
+import type { GoalState } from "../../session/goals/contracts.js";
 import type {
 	QueuedMessageLane,
 	QueuedMessageMutation,
 	QueuedMessageMutationStatus,
 	SessionActionSnapshot,
-} from "../../core/session-action-store.js";
-import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
-import type { SessionStats } from "../../core/session-stats.js";
-import type { SessionUsageSummary } from "../../core/usage.js";
-import type { GoalState } from "../../session/goals/contracts.js";
+} from "../../session/input/action-store.js";
+import type { RefinementResult } from "../../session/refinement/types.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
 /**

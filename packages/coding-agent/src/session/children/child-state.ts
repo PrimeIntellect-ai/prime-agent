@@ -1,6 +1,6 @@
-import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
+import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./max-depth.js";
 
 interface PersistedRlmMaxDepthState {
 	maxDepth: number;

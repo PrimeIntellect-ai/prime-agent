@@ -22,6 +22,7 @@
 
 ## Source Organization
 
+- Use the [refactoring guide](docs/refactoring.md) for structural changes across packages. Plan complete feature ownership, compatibility, migration coverage and validation before splitting files.
 - Follow the [source ownership rules](packages/coding-agent/docs/architecture.md#source-ownership-and-module-boundaries) when adding or extracting modules. The [source map](packages/coding-agent/src/README.md) documents current owners and ordering invariants.
 - Before a structural change, identify the feature owner, its state and lifecycle, its public API, and its allowed dependencies. Update the source map when ownership changes.
 - Group complete feature responsibilities into reviewable PRs. File size alone does not justify an abstraction or a separate PR.

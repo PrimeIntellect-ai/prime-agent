@@ -9,17 +9,17 @@ import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
-import type { CompactionResult } from "../../core/compaction/index.js";
 import type {
 	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
 	AgentHeartbeatManagementAction,
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
-import type { RefinementResult } from "../../core/refinement/index.js";
-import type { SessionActionSnapshot } from "../../core/session-action-store.js";
-import type { SessionStats } from "../../core/session-stats.js";
+import type { CompactionResult } from "../../session/compaction/types.js";
+import type { SessionStats } from "../../session/context/session-stats.js";
 import type { GoalState } from "../../session/goals/contracts.js";
+import type { SessionActionSnapshot } from "../../session/input/action-store.js";
+import type { RefinementResult } from "../../session/refinement/types.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSourceInfo } from "../agent-connection/types.js";
 
 // ============================================================================

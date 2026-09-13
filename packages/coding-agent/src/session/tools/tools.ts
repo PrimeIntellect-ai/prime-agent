@@ -10,10 +10,10 @@ import type { McpManager } from "../../core/mcp/mcp-manager.js";
 import type { ResourceLoader } from "../../core/resource-loader.js";
 import type { Skill } from "../../core/skills.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "../../core/source-info.js";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "../../core/system-prompt.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "../../core/tools/acp-mcp.js";
 import type { IpythonKernelProvisioner } from "../../core/tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "../../core/tools/tool-definition-wrapper.js";
+import { type BuildSystemPromptOptions, buildSystemPrompt } from "../context/system-prompt.js";
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;

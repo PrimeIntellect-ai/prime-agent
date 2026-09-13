@@ -18,16 +18,13 @@ import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
-import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
-import { readBytesSync, readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
-import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
-} from "./messages.js";
+} from "../session/context/messages.js";
 import {
 	addAssistantUsage,
 	cloneUsage,
@@ -35,7 +32,10 @@ import {
 	type SessionUsageSummary,
 	sessionUsageSummaryFrom,
 	subtractAssistantUsage,
-} from "./usage.js";
+} from "../session/context/usage.js";
+import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
+import { readBytesSync, readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
+import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 
 export const CURRENT_SESSION_VERSION = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;

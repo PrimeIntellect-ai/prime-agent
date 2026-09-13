@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { AgentSession } from "../../core/agent-session.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import type { ResourceLoader } from "../../core/resource-loader.js";
-import type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime } from "../../core/rlm-runtime.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
+import { AgentSession } from "../agent-session.js";
+import type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime } from "./runtime-contracts.js";
 
 export interface InlineChildRuntimeHost {
 	cwd: string;

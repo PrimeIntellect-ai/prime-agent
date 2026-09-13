@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { HostRequestHandler } from "./kernel/index.js";
-import type { CustomMessage } from "./messages.js";
+import type { CustomMessage } from "../session/context/messages.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	sanitizeMessageHeaderValue,
-} from "./messages.js";
+} from "../session/context/messages.js";
+import type { HostRequestHandler } from "./kernel/index.js";
 import { canonicalSessionPath } from "./session-lease.js";
 
 export const AGENT_MESSAGE_CUSTOM_TYPE = "agent_message";

@@ -1,6 +1,11 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import type { AgentSession } from "./agent-session.js";
+import type { AgentSession } from "../session/agent-session.js";
+import type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "../session/children/runtime-contracts.js";
 import type { AgentSessionRuntimeConfig } from "./agent-session-config.js";
 import type {
 	AgentSessionCreationOptions,
@@ -10,7 +15,6 @@ import type {
 import { isNoModelsAvailableMessage } from "./auth-guidance.js";
 import type { ReplacedSessionContext, SessionShutdownEvent, SessionStartEvent } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
-import type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
 import type { CreateAgentSessionResult } from "./sdk.js";
 import { assertSessionCwdExists } from "./session-cwd.js";
 import { SessionImportFileNotFoundError } from "./session-import-errors.js";

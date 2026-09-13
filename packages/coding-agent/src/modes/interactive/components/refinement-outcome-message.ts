@@ -1,7 +1,7 @@
 import { type Component, Spacer, Text } from "@earendil-works/pi-tui";
-import type { RefinementOutcomeMessage } from "../../../core/messages.js";
-import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
+import type { RefinementOutcomeMessage } from "../../../session/context/messages.js";
+import type { AppliedRefinementEdit, HarnessEntry } from "../../../session/refinement/types.js";
 import { theme } from "../theme/theme.js";
 import { renderRichDiff } from "./diff.js";
 import { ExpandableEventMessage } from "./expandable-event-message.js";

@@ -1,13 +1,13 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { turnExecutionPoliciesEqual } from "../turns/turn-preparation.js";
 import {
 	type ActionStore,
 	canSelectSessionAction,
 	type DeliveryPolicy,
 	type RuntimeActivity,
 	transitionSessionAction,
-} from "../../core/session-action-store.js";
-import { DeferredSessionInputError, primaryDeliveryRecord, type QueuedSessionAction } from "../prepared-actions.js";
-import { turnExecutionPoliciesEqual } from "../turns/turn-preparation.js";
+} from "./action-store.js";
+import { DeferredSessionInputError, primaryDeliveryRecord, type QueuedSessionAction } from "./prepared-actions.js";
 
 export interface SessionInputDispatcherHost {
 	isDisposed(): boolean;

@@ -2,7 +2,6 @@ import { basename, dirname } from "node:path";
 import type { Agent, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type Api, type Model, resetApiProviders } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageController } from "../../core/agent-messages.js";
-import type { CompactionResult } from "../../core/compaction/index.js";
 import {
 	type ContextUsage,
 	type ExtensionActions,
@@ -21,6 +20,7 @@ import type { PromptTemplate } from "../../core/prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "../../core/resource-loader.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { SlashCommandInfo } from "../../core/slash-commands.js";
+import type { CompactionResult } from "../compaction/types.js";
 
 export interface ExtensionBindings {
 	uiContext?: ExtensionUIContext;
