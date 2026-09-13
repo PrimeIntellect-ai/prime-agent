@@ -1,0 +1,1 @@
+- Changed the live provider tests to require the `PI_LIVE_TESTS=1` opt-in and a dedicated `PI_TEST_AUTH_FILE`, so running the test suite no longer reads, refreshes, or rewrites credentials in `~/.prime/agent` or `~/.pi/agent`.

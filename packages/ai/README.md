@@ -1249,6 +1249,29 @@ const response = await complete(model, {
 
 ## Development
 
+### Running tests
+
+Run focused tests from the package root:
+
+```bash
+cd packages/ai
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
+```
+
+Tests that talk to live providers are opt-in and skip by default. Without the opt-in the suite never reads, refreshes, or rewrites the credentials in `~/.prime/agent/auth.json` or the legacy `~/.pi/agent/auth.json`.
+
+To run the live suites against OAuth-backed providers (Anthropic Claude Pro/Max, GitHub Copilot, OpenAI Codex), copy the entries you want to test into a dedicated file and point the tests at it:
+
+```bash
+# Same JSON shape as the agent's auth.json:
+# { "anthropic": { "type": "oauth", "access": "...", "refresh": "...", "expires": 0 },
+#   "openai": { "type": "api_key", "key": "sk-..." } }
+export PI_LIVE_TESTS=1
+export PI_TEST_AUTH_FILE=/path/to/test-auth.json
+```
+
+`PI_TEST_AUTH_FILE` must be a separate copy: the helper refuses to use the real credential stores. Refreshed OAuth tokens are written back to that test file only, so keep it if a provider rotates refresh tokens. Suites gated on provider environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) run whenever the variable is set; the root `test.sh` unsets them, moves both credential stores aside, and clears the live-test opt-in before running the full suite.
+
 ### Adding a New Provider
 
 Adding a new LLM provider requires changes across multiple files. This checklist covers all necessary steps:
