@@ -2,6 +2,7 @@ import { AgentContinueError, type AgentEvent, type AgentTool } from "@earendil-w
 import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SessionRetry } from "../../src/session/retry.js";
 import { createHarness, type Harness } from "./harness.js";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
@@ -51,9 +52,7 @@ function rateLimitedFailure(retryAfterMs: number): AssistantMessage {
 }
 
 type SessionRetryCompactionInternals = {
-	_retryAttempt: number;
-	_retryPromise: Promise<void> | undefined;
-	_retryResolve: (() => void) | undefined;
+	_retry: SessionRetry;
 	_autoCompactionAbortController: AbortController | undefined;
 	_postCompactionContinuationScheduled: boolean;
 	_processAgentEvent: (event: AgentEvent) => Promise<void>;
@@ -66,6 +65,7 @@ describe("AgentSession retry and event characterization", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -100,15 +100,12 @@ describe("AgentSession retry and event characterization", () => {
 			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
 			if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}:${event.finalError}`);
 		});
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		harness.setResponses([structuredProviderFailure("auth")]);
 		vi.spyOn(harness.session.agent, "continue").mockRejectedValue(
 			new AgentContinueError("nothing-to-continue", "Nothing to continue"),
 		);
 
-		const markStale = vi.spyOn(
-			harness.session as unknown as { _markProviderAuthStaleForRetryFailure: () => void },
-			"_markProviderAuthStaleForRetryFailure",
-		);
+		const markStale = vi.spyOn(harness.session.modelRegistry, "markProviderAuthSourceStale");
 
 		// Pre-fix this hangs: the swallowed rejection leaves the retry unresolved forever.
 		await harness.session.prompt("test");
@@ -409,16 +406,15 @@ describe("AgentSession retry and event characterization", () => {
 			stopReason: "error",
 			errorMessage: "prompt is too long",
 		});
-		internals._retryAttempt = 1;
-		internals._retryPromise = new Promise<void>((resolve) => {
-			internals._retryResolve = resolve;
-		});
+		const continuation = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		await internals._retry.retryError(fauxAssistantMessage("", { stopReason: "error", errorMessage: "transient" }));
+		await vi.waitFor(() => expect(continuation).toHaveBeenCalledOnce());
 		internals._checkCompaction = async () => true;
 
 		try {
 			await internals._processAgentEvent({ type: "agent_end", messages: [overflowMessage] } as AgentEvent);
 
-			expect(internals._retryAttempt).toBe(1);
+			expect(harness.session.retryAttempt).toBe(1);
 			expect(harness.session.isRetrying).toBe(true);
 			expect(harness.eventsOfType("auto_retry_end")).toEqual([]);
 		} finally {
@@ -432,10 +428,9 @@ describe("AgentSession retry and event characterization", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SessionRetryCompactionInternals;
 		const compactionAbortController = new AbortController();
-		internals._retryAttempt = 1;
-		internals._retryPromise = new Promise<void>((resolve) => {
-			internals._retryResolve = resolve;
-		});
+		const continuation = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		await internals._retry.retryError(fauxAssistantMessage("", { stopReason: "error", errorMessage: "transient" }));
+		await vi.waitFor(() => expect(continuation).toHaveBeenCalledOnce());
 		internals._autoCompactionAbortController = compactionAbortController;
 		internals._schedulePostCompactionContinue();
 
@@ -446,7 +441,7 @@ describe("AgentSession retry and event characterization", () => {
 
 			expect(compactionAbortController.signal.aborted).toBe(true);
 			expect(internals._postCompactionContinuationScheduled).toBe(false);
-			expect(internals._retryAttempt).toBe(0);
+			expect(harness.session.retryAttempt).toBe(0);
 			expect(harness.session.isRetrying).toBe(false);
 			expect(harness.eventsOfType("auto_retry_end").at(-1)).toMatchObject({
 				success: false,

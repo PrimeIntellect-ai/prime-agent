@@ -3,6 +3,7 @@ import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
+import type { SessionRetry } from "../../../src/session/retry.js";
 import { createHarness, type Harness } from "../harness.js";
 
 function structuredFailureMessage(kind: string, status: number, errorMessage: string): AssistantMessage {
@@ -160,12 +161,16 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		harnesses.push(harness);
 		const event = { type: "agent_end", messages: [provider401Message()] } as AgentEvent;
 		const session = harness.session as unknown as {
-			_retryAttempt: number;
-			_createRetryPromiseForAgentEnd(event: AgentEvent): void;
+			_retry: SessionRetry;
 		};
-		session._retryAttempt = 1;
+		const continuation = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		await session._retry.retryError(provider401Message());
+		await vi.waitFor(() => expect(continuation).toHaveBeenCalledOnce());
+		session._retry.resolve();
+		expect(harness.session.retryAttempt).toBe(1);
+		expect(harness.session.isRetrying).toBe(false);
 
-		session._createRetryPromiseForAgentEnd(event);
+		session._retry.observeAgentEnd(event);
 
 		expect(harness.session.isRetrying).toBe(true);
 		harness.session.abortRetry();
@@ -329,11 +334,11 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		const message = provider401Message();
 		const event = { type: "agent_end", messages: [message] } as AgentEvent;
 		const session = harness.session as unknown as {
-			_createRetryPromiseForAgentEnd(event: AgentEvent): void;
+			_retry: SessionRetry;
 			_processAgentEvent(event: AgentEvent): Promise<void>;
 		};
 
-		session._createRetryPromiseForAgentEnd(event);
+		session._retry.observeAgentEnd(event);
 		await session._processAgentEvent(event);
 
 		expect(harness.session.isRetrying).toBe(false);
