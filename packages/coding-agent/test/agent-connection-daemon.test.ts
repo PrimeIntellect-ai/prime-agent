@@ -4666,6 +4666,94 @@ describe("DaemonAgentConnection deferred session events", () => {
 		},
 	);
 
+	it.each(["notify", "setStatus", "setWidget"])(
+		"bounds attach-time %s updates without dropping queued dialogs",
+		async (method) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+			try {
+				await connection.attach();
+				fakeClient.emitMessage({
+					type: "extension_ui_request",
+					activeSessionId: "active-1",
+					id: "dialog",
+					method: "editor",
+					payload: { title: "Edit" },
+				});
+				for (let index = 0; index < 2000; index++) {
+					fakeClient.emitMessage({
+						type: "extension_ui_request",
+						activeSessionId: "active-1",
+						id: String(index),
+						method,
+						payload: {
+							message: String(index),
+							statusKey: "progress",
+							statusText: String(index),
+							widgetKey: "progress",
+							widgetLines: [String(index)],
+						},
+					});
+				}
+				const listener = vi.fn();
+				connection.subscribe(listener);
+				expect(listener).toHaveBeenCalledTimes(128);
+				expect(listener).toHaveBeenNthCalledWith(1, {
+					type: "extension_ui_request",
+					request: { id: "dialog", method: "editor", payload: { title: "Edit" } },
+				});
+				expect(listener).toHaveBeenLastCalledWith({
+					type: "extension_ui_request",
+					request: expect.objectContaining({ id: "1999", method }),
+				});
+				expect(fakeClient.requests.filter((request) => request.type === "extension_ui_response")).toEqual([]);
+			} finally {
+				await connection.dispose();
+			}
+		},
+	);
+
+	it("cancels excess attach-time dialogs when the backlog contains only dialogs", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		try {
+			await connection.attach();
+			for (let index = 0; index < 129; index++) {
+				fakeClient.emitMessage({
+					type: "extension_ui_request",
+					activeSessionId: "active-1",
+					id: String(index),
+					method: "editor",
+					payload: { title: "Edit" },
+				});
+			}
+			fakeClient.emitMessage({
+				type: "extension_ui_request",
+				activeSessionId: "active-1",
+				id: "notification",
+				method: "notify",
+				payload: { message: "Update" },
+			});
+			expect(fakeClient.requests.filter((request) => request.type === "extension_ui_response")).toEqual([
+				{
+					type: "extension_ui_response",
+					activeSessionId: "active-1",
+					requestId: "128",
+					response: { cancelled: true },
+				},
+			]);
+			const listener = vi.fn();
+			connection.subscribe(listener);
+			expect(listener).toHaveBeenCalledTimes(128);
+			expect(listener).toHaveBeenLastCalledWith({
+				type: "extension_ui_request",
+				request: { id: "127", method: "editor", payload: { title: "Edit" } },
+			});
+		} finally {
+			await connection.dispose();
+		}
+	});
+
 	it.each(["disposed", "replaced", "restarted", "update-session", "update-transport"])(
 		"discards queued extension prompts when %s before subscription",
 		async (boundary) => {

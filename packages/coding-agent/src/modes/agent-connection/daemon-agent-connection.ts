@@ -37,6 +37,7 @@ import {
 	type DaemonReplayInfo,
 	type DaemonSessionClosedReason,
 	type DaemonSessionSnapshot,
+	isDaemonDialogExtensionUiRequest,
 	isUnknownDaemonCommandError,
 } from "../daemon/daemon-protocol.js";
 import {
@@ -118,6 +119,7 @@ export const DAEMON_SNAPSHOT_TIMEOUT_MS = 30_000;
 const MAX_IGNORED_SNAPSHOT_IDS = 128;
 // Overflow replaces the initial render with a fresh attach snapshot.
 const MAX_DEFERRED_SESSION_EVENTS = 1000;
+const MAX_PENDING_EXTENSION_UI_REQUESTS = 128;
 const UPDATE_RECONNECT_TIMEOUT_MS = 120000;
 const UPDATE_RECONNECT_RETRY_MS = 100;
 const MAX_COMPLETED_SNAPSHOTS = 128;
@@ -1850,6 +1852,19 @@ export class DaemonAgentConnection implements AgentConnection {
 			if (cursor && this.retiredEventGenerations.has(cursor.generation)) return;
 			// Retain attach-time requests until the UI subscribes; snapshots cannot restore them.
 			if (this.listeners.size === 0) {
+				if (this.pendingExtensionUiRequests.length >= MAX_PENDING_EXTENSION_UI_REQUESTS) {
+					// Discard older non-dialog updates before cancelling a dialog that cannot be queued.
+					const disposable = this.pendingExtensionUiRequests.findIndex(
+						(request) => !isDaemonDialogExtensionUiRequest(request.method),
+					);
+					if (disposable === -1) {
+						if (isDaemonDialogExtensionUiRequest(message.method)) {
+							await this.respondToExtensionUiRequest(message.id, { cancelled: true });
+						}
+						return;
+					}
+					this.pendingExtensionUiRequests.splice(disposable, 1);
+				}
 				this.pendingExtensionUiRequests.push(message);
 				return;
 			}
