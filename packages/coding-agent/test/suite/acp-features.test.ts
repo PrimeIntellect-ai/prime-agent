@@ -426,9 +426,13 @@ describe("ACP mode preserves prime-agent features", () => {
 			// then runs for real: it applies the proposal, persists harness state, and
 			// emits the genuine refine_complete event this test is about.
 			const internals = harness.session as unknown as {
-				_planRefine: (...args: unknown[]) => Promise<unknown>;
+				_refinement: {
+					_execution: {
+						_planRefine: (...args: unknown[]) => Promise<unknown>;
+					};
+				};
 			};
-			vi.spyOn(internals, "_planRefine").mockResolvedValue({
+			vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({
 				id: "acp_refine_plan",
 				proposal: {
 					summary: "refined for ACP",

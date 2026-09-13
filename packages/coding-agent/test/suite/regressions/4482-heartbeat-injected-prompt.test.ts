@@ -17,6 +17,7 @@ import {
 } from "../../../src/modes/interactive/components/injected-prompt-message.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../../../src/modes/interactive/theme/theme.js";
+import type { SessionCompaction } from "../../../src/session/compaction.js";
 import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type AddMessageToChatHost = {
@@ -188,14 +189,14 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 	it("resets overflow recovery state when heartbeat prompt turns start", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as { _overflowRecovery: string };
-		sessionInternals._overflowRecovery = "attempted";
+		const sessionInternals = harness.session as unknown as { _compaction: SessionCompaction };
+		sessionInternals._compaction.markOverflowAttempted();
 		harness.setResponses([fauxAssistantMessage("heartbeat handled")]);
 
 		await harness.session.promptHeartbeat(createHeartbeat());
 		await harness.session.agent.waitForIdle();
 
-		expect(sessionInternals._overflowRecovery).toBe("idle");
+		expect(sessionInternals._compaction.overflowRecovery).toBe("idle");
 	});
 
 	it("keeps pending nextTurn context separate from queued heartbeat prompts", async () => {

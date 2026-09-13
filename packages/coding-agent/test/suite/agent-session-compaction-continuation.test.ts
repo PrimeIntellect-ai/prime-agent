@@ -15,6 +15,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.js";
+import type { SessionCompaction } from "../../src/session/compaction.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionInternals = {
@@ -27,7 +28,7 @@ type SessionInternals = {
 		customInstructions?: string;
 		signal: AbortSignal;
 	}) => Promise<unknown>;
-	_continueAfterThresholdCompaction: boolean;
+	_compaction: Pick<SessionCompaction, "requestContinuation"> & { readonly continueAfterThreshold: boolean };
 };
 
 function createUsage(totalTokens: number): Usage {
@@ -128,7 +129,7 @@ describe("compaction continuation", () => {
 		// toolResult-last makes the session stop the loop for compaction AND continue afterwards.
 		const shouldStop = await internals._shouldStopAfterTurn(context);
 		expect(shouldStop).toBe(true);
-		expect(internals._continueAfterThresholdCompaction).toBe(true);
+		expect(internals._compaction.continueAfterThreshold).toBe(true);
 
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
@@ -152,7 +153,7 @@ describe("compaction continuation", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SessionInternals;
 		midToolLoopContext(harness);
-		internals._continueAfterThresholdCompaction = true;
+		internals._compaction.requestContinuation();
 
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
@@ -335,7 +336,7 @@ describe("compaction continuation", () => {
 
 		const shouldStop = await internals._shouldStopAfterTurn(context);
 		expect(shouldStop).toBe(true);
-		expect(internals._continueAfterThresholdCompaction).toBe(true);
+		expect(internals._compaction.continueAfterThreshold).toBe(true);
 
 		expect(harness.session.queuedActionCount).toBe(1);
 		expect(harness.session.goalState.continuationsUsed).toBe(1);

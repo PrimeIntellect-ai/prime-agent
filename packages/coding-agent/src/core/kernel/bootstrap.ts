@@ -430,7 +430,9 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
 
 async function pythonImports(python: string, moduleName: string): Promise<boolean> {
 	try {
-		await run(python, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+		await run(python, ["-c", "import importlib, sys; importlib.import_module(sys.argv[1])", moduleName], {
+			stdio: "ignore",
+		});
 		return true;
 	} catch {
 		return false;

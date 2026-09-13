@@ -495,10 +495,7 @@ describe("AgentSession autonomous mode", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("Still failing.")]);
-		const sessionInternals = harness.session as unknown as {
-			_compactionAbortController?: AbortController;
-		};
-		sessionInternals._compactionAbortController = new AbortController();
+		const compacting = vi.spyOn(harness.session, "isCompacting", "get").mockReturnValue(true);
 		const heartbeatJob = {
 			id: "heartbeat-test",
 			status: "active",
@@ -518,7 +515,7 @@ describe("AgentSession autonomous mode", () => {
 			streamingBehavior: "followUp",
 			suppressAutonomousContinuation: true,
 		});
-		sessionInternals._compactionAbortController = undefined;
+		compacting.mockRestore();
 		expect(harness.session.resumeQueuedWork()).toBe(true);
 		await vi.waitFor(() => expect(harness.session.queuedActionCount).toBe(0));
 		await harness.session.waitForSessionInputIdle();
