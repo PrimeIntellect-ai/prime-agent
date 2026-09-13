@@ -7538,7 +7538,8 @@ export class AgentDaemon {
 			return false;
 		}
 		const deferred = client.deferredSessionOutbounds?.get(activeSessionId) ?? { frames: [], bytes: 0 };
-		const bytes = Buffer.byteLength(serializeJsonLine(message));
+		const serialized = serializeJsonLine(message);
+		const bytes = Buffer.byteLength(serialized);
 		if (
 			deferred.frames.length >= MAX_DEFERRED_SESSION_FRAMES ||
 			deferred.bytes + bytes > MAX_DEFERRED_SESSION_BYTES
@@ -7549,7 +7550,8 @@ export class AgentDaemon {
 			this.discardDeferredSessionFrames(client, activeSessionId);
 			return false;
 		}
-		deferred.frames.push(message);
+		// Providers mutate nested streaming content after each event is emitted.
+		deferred.frames.push(JSON.parse(serialized) as DaemonOutbound);
 		deferred.bytes += bytes;
 		client.deferredSessionOutbounds ??= new Map();
 		client.deferredSessionOutbounds.set(activeSessionId, deferred);

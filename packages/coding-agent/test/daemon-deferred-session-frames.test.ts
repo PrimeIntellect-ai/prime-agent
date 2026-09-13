@@ -356,6 +356,92 @@ describe("deferred session frames during snapshot streams", () => {
 		socket.destroy();
 	});
 
+	it.each(["jsonl", "private-framed"] as const)(
+		"worker: freezes mutable streaming frames for %s replay",
+		(transport) => {
+			const daemon = new AgentDaemon(join(tmpdir(), "deferred-mutable-frames.sock"), {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const socket = new PassThrough();
+			const written: Buffer[] = [];
+			socket.on("data", (chunk: Buffer) => written.push(Buffer.from(chunk)));
+			const client = socketClient(socket, { transport, snapshotActiveSessionIds: new Set([activeSessionId]) });
+			const state = {
+				activeSessionId,
+				clients: new Set([client]),
+				eventGeneration: "generation-deferred",
+				lastEventSequence: 1,
+			} as ActiveSessionState;
+			const internals = daemon as unknown as {
+				broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
+				flushDeferredSessionFrames(client: DaemonSocketClient, activeSessionId: string): void;
+			};
+			try {
+				const message = fauxAssistantMessage("first");
+				const text = message.content[0];
+				if (text?.type !== "text") throw new Error("Expected a text block");
+				internals.broadcastToSession(state, {
+					type: "session_event",
+					activeSessionId,
+					event: { type: "message_start", message: { ...message } },
+				});
+				const toolCall = { type: "toolCall" as const, id: "tool", name: "lookup", arguments: { query: "first" } };
+				message.content.push(toolCall);
+				for (const query of ["second", "third"]) {
+					text.text = query;
+					toolCall.arguments.query = query;
+					internals.broadcastToSession(state, {
+						type: "session_event",
+						activeSessionId,
+						event: {
+							type: "message_update",
+							message: { ...message },
+							assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: query, partial: message },
+						},
+					});
+				}
+				const bufferedBytes = client.deferredSessionOutbounds?.get(activeSessionId)?.bytes;
+				text.text = "future".repeat(1000);
+				toolCall.arguments.query = "future";
+				expect(written).toHaveLength(0);
+				internals.flushDeferredSessionFrames(client, activeSessionId);
+				const payloads =
+					transport === "private-framed"
+						? new PrivateFrameDecoder(isDaemonWorkerFrameHeader)
+								.push(Buffer.concat(written))
+								.map((frame) => frame.payload)
+						: written;
+				const replayed = payloads.map((payload) => JSON.parse(payload.toString()));
+				expect(replayed[0]).toMatchObject({ event: { message: { content: [{ type: "text", text: "first" }] } } });
+				if (transport === "private-framed") {
+					expect(replayed.slice(1)).toMatchObject([
+						{ type: "assistant_stream_delta", toolCallArguments: { query: "second" } },
+						{ type: "assistant_stream_delta", toolCallArguments: { query: "third" } },
+					]);
+				} else {
+					expect(Buffer.concat(written).length).toBe(bufferedBytes);
+					for (const [index, query] of ["second", "third"].entries()) {
+						expect(replayed[index + 1]).toMatchObject({
+							event: {
+								message: {
+									content: [
+										{ type: "text", text: query },
+										{ type: "toolCall", arguments: { query } },
+									],
+								},
+							},
+						});
+					}
+				}
+			} finally {
+				socket.destroy();
+			}
+		},
+	);
+
 	it.each([
 		["count", 257, 0],
 		["single payload", 1, 2 * 1024 * 1024],
