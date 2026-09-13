@@ -6175,12 +6175,12 @@ export class DaemonSupervisor {
 		}));
 		client.catchupActiveSessionIds?.clear();
 		client.catchupPurposes?.clear();
+		let retryError: Error | undefined;
 		for (let index = 0; index < pending.length; index++) {
 			const { activeSessionId, purpose } = pending[index]!;
 			let releaseTranscript: (() => void) | undefined;
 			const releaseSnapshotReservation = this.reserveSnapshotStream(client, activeSessionId);
 			const snapshotSignal = client.snapshotTransferAbortControllers?.get(activeSessionId)?.signal;
-			let inlineSnapshotDelivered = false;
 			try {
 				const attached = await this.attachClient(client, {
 					type: "attach",
@@ -6243,7 +6243,8 @@ export class DaemonSupervisor {
 								meta,
 							};
 				const accepted = this.write(client, catchup);
-				inlineSnapshotDelivered = true;
+				releaseSnapshotReservation();
+				this.releaseDeferredSessionPayloads(client, activeSessionId, true);
 				if (!accepted) {
 					for (const remaining of pending.slice(index + 1)) {
 						this.queueCatchup(client, remaining.activeSessionId, remaining.purpose);
@@ -6252,23 +6253,20 @@ export class DaemonSupervisor {
 				}
 			} catch (error) {
 				releaseTranscript?.();
-				for (const remaining of pending.slice(index)) {
-					if (
-						client.attachedActiveSessionIds.has(remaining.activeSessionId) &&
-						(remaining.activeSessionId !== activeSessionId || !snapshotSignal?.aborted)
-					) {
-						this.queueCatchup(client, remaining.activeSessionId, remaining.purpose);
-					}
+				if (client.attachedActiveSessionIds.has(activeSessionId) && !snapshotSignal?.aborted) {
+					this.queueCatchup(client, activeSessionId, purpose);
 				}
 				client.deferredSessionPayloadsDropped ??= new Set();
 				client.deferredSessionPayloadsDropped.add(activeSessionId);
 				this.discardDeferredSessionPayloads(client, activeSessionId);
-				throw error;
+				retryError ??= error instanceof Error ? error : new Error(String(error));
 			} finally {
 				releaseSnapshotReservation();
-				this.releaseDeferredSessionPayloads(client, activeSessionId, inlineSnapshotDelivered);
+				this.releaseDeferredSessionPayloads(client, activeSessionId, false);
 			}
 		}
+		// Retry failed sessions only after the rest of the batch has had a chance to recover.
+		if (retryError) throw retryError;
 	}
 
 	private async prepareUpdateRestart(): Promise<DaemonUpdateRestartManifest> {

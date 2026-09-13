@@ -384,6 +384,64 @@ describe("deferred session frames during snapshot streams", () => {
 		socket.destroy();
 	});
 
+	it.each(["resync", "replacement"] as const)(
+		"supervisor: failed %s does not block healthy sessions",
+		async (purpose) => {
+			const supervisor = new DaemonSupervisor(join(tmpdir(), "catchup-fairness.sock"), {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				descriptorDir: join(tmpdir(), "catchup-fairness-state"),
+			});
+			const socket = new PassThrough();
+			const written: DaemonOutbound[] = [];
+			socket.on("data", (chunk: Buffer) => written.push(JSON.parse(chunk.toString())));
+			const sessions = [activeSessionId, "also-failing", "healthy"];
+			const client = socketClient(socket, {
+				capabilities: new Set(),
+				attachedActiveSessionIds: new Set(sessions),
+				catchupActiveSessionIds: new Set(sessions),
+				catchupPurposes: new Map(sessions.map((id) => [id, purpose])),
+			});
+			const internals = supervisor as unknown as {
+				attachClient(
+					client: DaemonSocketClient,
+					command: { activeSessionId: string },
+				): Promise<{ result: DaemonAttachResult }>;
+				catchUpClient(client: DaemonSocketClient): Promise<void>;
+			};
+			const attach = vi.spyOn(internals, "attachClient").mockImplementation(async (_client, command) => {
+				if (command.activeSessionId !== "healthy") throw new Error("worker remains unavailable");
+				const result = streamedResult();
+				result.activeSessionId =
+					result.snapshot.activeSessionId =
+					result.snapshot.state.activeSessionId =
+						"healthy";
+				return { result };
+			});
+			try {
+				await internals.catchUpClient(client);
+				expect(attach.mock.calls.map(([, command]) => command.activeSessionId)).toEqual(sessions);
+				expect(written).toEqual([
+					expect.objectContaining({
+						type: purpose === "replacement" ? "session_replaced" : "session_resynced",
+						activeSessionId: "healthy",
+					}),
+				]);
+				expect(client.catchupActiveSessionIds).toEqual(new Set(sessions.slice(0, 2)));
+				expect(client.catchupRetryTimer).toBeDefined();
+				client.catchupActiveSessionIds?.add("healthy");
+				client.catchupPurposes?.set("healthy", purpose);
+				await vi.waitFor(() => expect(written).toHaveLength(2));
+				expect(attach.mock.calls.map(([, command]) => command.activeSessionId)).toEqual([...sessions, ...sessions]);
+				expect(written[1]).toMatchObject({ type: written[0]?.type, activeSessionId: "healthy" });
+				expect(client.catchupPurposes).toEqual(new Map(sessions.slice(0, 2).map((id) => [id, purpose])));
+				expect(client.snapshotActiveSessionCounts?.size ?? 0).toBe(0);
+			} finally {
+				clearTimeout(client.catchupRetryTimer);
+				socket.destroy();
+			}
+		},
+	);
+
 	const supervisorScenarios = [
 		"attached",
 		"catchup",
