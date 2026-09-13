@@ -1078,6 +1078,15 @@ class HarnessSearchTest(unittest.TestCase):
 
             self.assertEqual([entry.id for entry in results], ["login"])
 
+    def test_search_matches_combining_mark_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Book note", "किताब पढ़ रहा हूँ।", id="book")
+
+            results = state.search("किताब")
+
+            self.assertEqual([entry.id for entry in results], ["book"])
+
     def test_search_drops_single_character_non_cjk_terms(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")

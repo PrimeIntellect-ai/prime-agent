@@ -484,7 +484,7 @@ const CJK_TERM_PATTERN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\
 
 /**
  * Tokenize text into lowercase query terms for harness relevance ranking.
- * Letters and digits of any script form terms; punctuation and symbols only
+ * Letters, digits, and combining marks of any script form terms; punctuation only
  * separate them, so a query like `worktree?` never ranks entries by their
  * question marks. CJK runs carry no spaces between words, so each run
  * becomes overlapping bigrams: `修复登录` yields 修复/复登/登录 and still
@@ -492,7 +492,9 @@ const CJK_TERM_PATTERN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\
  */
 export function harnessQueryTerms(text: string): string[] {
 	const terms: string[] = [];
-	for (const run of text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+	// \p{M} keeps combining marks inside their run so mark-heavy scripts
+	// spell whole words (Devanagari किताब stays one run).
+	for (const run of text.toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? []) {
 		// Split mixed-script runs so ASCII words keep their own rules.
 		for (const segment of run.match(/[a-z0-9]+|[^a-z0-9]+/gu) ?? []) {
 			if (/^[a-z0-9]+$/.test(segment)) {

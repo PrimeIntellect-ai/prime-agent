@@ -1619,6 +1619,9 @@ describe("harness digest relevance ranking", () => {
 		// Short ASCII runs stay noise; other non-ASCII scripts stay whole.
 		expect(harnessQueryTerms("Fix the LOGIN bug")).toEqual(["login"]);
 		expect(harnessQueryTerms("Привет мир")).toEqual(["привет"]);
+		// Combining marks stay in their run: mark-heavy scripts spell
+		// whole words (Devanagari किताब), not dropped fragments.
+		expect(harnessQueryTerms("किताब notes")).toEqual(["किताब", "notes"]);
 		// CJK has no spaces between words: runs become overlapping bigrams,
 		// so partial matches stay findable and single characters count.
 		// Non-ASCII punctuation is a separator, not a term.
