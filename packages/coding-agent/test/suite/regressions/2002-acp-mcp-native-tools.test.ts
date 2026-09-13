@@ -106,11 +106,9 @@ describe("PR 2002 ACP MCP native tools", () => {
 			expect(harness.session.getActiveToolNames()).toContain("mcp_call_task");
 			expect(harness.session.systemPrompt).not.toContain('await mcp.list_tools("task")');
 
-			const beforeReload = Reflect.get(harness.session, "_toolDefinitions") as Map<string, ToolDefinition>;
-			const originalCallTool = beforeReload.get("mcp_call_task");
+			const originalCallTool = harness.session.getToolDefinition("mcp_call_task");
 			await harness.session.reload();
-			const afterReload = Reflect.get(harness.session, "_toolDefinitions") as Map<string, ToolDefinition>;
-			expect(afterReload.get("mcp_call_task")).not.toBe(originalCallTool);
+			expect(harness.session.getToolDefinition("mcp_call_task")).not.toBe(originalCallTool);
 
 			await harness.session.releaseAcpMcpServers("owner-a", ["task"]);
 			expect(harness.session.getAllTools().map((tool) => tool.name)).not.toContain("mcp_call_task");

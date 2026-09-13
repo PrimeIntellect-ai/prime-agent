@@ -2,7 +2,6 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { RestoreResult } from "../../../src/core/kernel/state-snapshot.js";
 import {
 	type CustomMessage,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
@@ -13,10 +12,11 @@ import {
 	isInjectedPromptMessage,
 } from "../../../src/modes/interactive/components/injected-prompt-message.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
+import type { SessionKernel } from "../../../src/session/kernel.js";
 import { conversationMessages, createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type StateRestoreHost = {
-	_onIpythonStateRestored(result: RestoreResult): void;
+	_kernel: SessionKernel;
 };
 
 function stripAnsi(text: string): string {
@@ -79,7 +79,7 @@ describe("ENG-4530 IPython state restore message", () => {
 
 		const firstPrompt = harness.session.prompt("start");
 		await toolStarted;
-		(harness.session as unknown as StateRestoreHost)._onIpythonStateRestored({
+		(harness.session as unknown as StateRestoreHost)._kernel.onStateRestored({
 			restored: ["alpha", "beta"],
 			failed: [],
 			path: "/tmp/kernel-state.dill",
