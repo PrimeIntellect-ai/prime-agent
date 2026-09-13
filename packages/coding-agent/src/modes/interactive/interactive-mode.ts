@@ -1420,9 +1420,6 @@ export class InteractiveMode {
 		// fd powers autocomplete, and rg is available for shell commands.
 		const [fdPath, rgResult] = await Promise.all([ensureTool("fd"), ensureToolWithStatus("rg")]);
 		this.fdPath = fdPath;
-		if (rgResult.status === "unavailable") {
-			this.showWarning(formatMissingRipgrepMessage(rgResult));
-		}
 
 		this.ui.addChild(this.headerContainer);
 
@@ -1500,6 +1497,9 @@ export class InteractiveMode {
 		await this.rebindCurrentSession();
 
 		await this.renderInitialMessages();
+		if (rgResult.status === "unavailable") {
+			this.showWarning(formatMissingRipgrepMessage(rgResult));
+		}
 
 		onThemeChange(() => {
 			this.ui.invalidate();

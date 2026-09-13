@@ -4053,6 +4053,7 @@ describe("daemon mode helpers", () => {
 				sessions: Map<string, ActiveSessionState>;
 				createAttachResult: ReturnType<typeof vi.fn>;
 				drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<void>;
+				broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
 			};
 			internals.sessions.set(state.activeSessionId, state);
 			internals.createAttachResult = vi.fn(async () => {
@@ -4063,7 +4064,7 @@ describe("daemon mode helpers", () => {
 
 			const catchup = internals.drainBackpressuredClientCatchups(client);
 			await vi.waitFor(() => expect(internals.createAttachResult).toHaveBeenCalledOnce());
-			expect(client.snapshotStreaming === true).toBe(outcome.startsWith("chunked"));
+			expect(client.snapshotStreaming).toBe(true);
 			if (outcome.endsWith("detached")) {
 				state.clients.delete(client);
 				client.attachedActiveSessionIds.delete(state.activeSessionId);
@@ -4071,6 +4072,14 @@ describe("daemon mode helpers", () => {
 			releaseSnapshot();
 			await catchup;
 			clearTimeout(client.catchupRetryTimer);
+			if (outcome === "chunked-failed") {
+				internals.broadcastToSession(state, {
+					type: "session_event",
+					activeSessionId: state.activeSessionId,
+					event: { type: "session_info_changed", name: "during retry" },
+				});
+				expect(client.deferredSessionFramesDropped?.has(state.activeSessionId)).toBe(true);
+			}
 			expect(write).not.toHaveBeenCalled();
 			expect(client.snapshotStreaming).not.toBe(true);
 			expect(client.snapshotActiveSessionCounts?.size ?? 0).toBe(0);

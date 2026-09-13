@@ -7005,8 +7005,16 @@ export class AgentDaemon {
 				client.attachedActiveSessionIds.has(state.activeSessionId) &&
 				this.sessions.get(state.activeSessionId) === state
 			) {
-				this.write(client, message);
-				this.flushDeferredSessionFrames(client, state.activeSessionId);
+				try {
+					this.write(client, message);
+					this.flushDeferredSessionFrames(client, state.activeSessionId);
+				} catch (replayError) {
+					client.deferredSessionFramesDropped ??= new Set();
+					client.deferredSessionFramesDropped.add(state.activeSessionId);
+					this.discardDeferredSessionFrames(client, state.activeSessionId);
+					this.queueClientCatchup(client, state.activeSessionId, "replacement");
+					this.log(`could not replay replacement events: ${String(replayError)}`);
+				}
 			}
 			finishClientSnapshotStreaming(client, state.activeSessionId);
 			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
@@ -7403,21 +7411,20 @@ export class AgentDaemon {
 				continue;
 			}
 			// Buffer events before snapshot preparation can yield with a captured transcript.
-			const snapshotSignal =
-				client.transport === "private-framed" &&
-				daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot")
-					? markClientSnapshotStreaming(client, activeSessionId)
-					: undefined;
+			const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
 			let snapshotStarted = false;
 			try {
 				const result = await this.createAttachResult(client, state, {
 					type: "attach",
 					activeSessionId,
 				});
-				if (snapshotSignal?.aborted || this.sessions.get(activeSessionId) !== state || !state.clients.has(client)) {
+				if (snapshotSignal.aborted || this.sessions.get(activeSessionId) !== state || !state.clients.has(client)) {
 					continue;
 				}
-				if (snapshotSignal) {
+				if (
+					client.transport === "private-framed" &&
+					daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot")
+				) {
 					if (purpose === "replacement") {
 						this.write(client, {
 							type: "session_replaced",
@@ -7427,7 +7434,7 @@ export class AgentDaemon {
 							snapshotFollows: true,
 							meta: createDaemonEventMeta(
 								activeSessionId,
-								state.lastEventSequence,
+								result.lastEventSequence,
 								undefined,
 								state.eventGeneration,
 							),
@@ -7463,7 +7470,7 @@ export class AgentDaemon {
 				}
 				const meta = createDaemonEventMeta(
 					activeSessionId,
-					state.lastEventSequence,
+					result.lastEventSequence,
 					undefined,
 					state.eventGeneration,
 				);
@@ -7477,13 +7484,21 @@ export class AgentDaemon {
 								meta,
 							}
 						: { type: "session_resynced", activeSessionId, snapshot: result.snapshot, meta };
-				if (!this.write(client, catchup)) {
+				const accepted = this.write(client, catchup);
+				this.flushDeferredSessionFrames(client, activeSessionId);
+				if (!accepted) {
 					for (const remaining of pending.slice(index + 1)) {
 						this.queueClientCatchup(client, remaining.activeSessionId, remaining.purpose);
 					}
 					return "retry-later";
 				}
 			} catch (error) {
+				if (snapshotSignal.aborted || this.sessions.get(activeSessionId) !== state || !state.clients.has(client)) {
+					continue;
+				}
+				client.deferredSessionFramesDropped ??= new Set();
+				client.deferredSessionFramesDropped.add(activeSessionId);
+				this.discardDeferredSessionFrames(client, activeSessionId);
 				for (const remaining of pending.slice(index)) {
 					this.queueClientCatchup(client, remaining.activeSessionId, remaining.purpose);
 				}
@@ -7491,7 +7506,7 @@ export class AgentDaemon {
 				this.scheduleClientCatchupRetry(client);
 				return "retry-later";
 			} finally {
-				if (snapshotSignal && !snapshotStarted) finishClientSnapshotStreaming(client, activeSessionId);
+				if (!snapshotStarted) finishClientSnapshotStreaming(client, activeSessionId);
 			}
 		}
 		return "drained";

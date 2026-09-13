@@ -1485,6 +1485,8 @@ export class DaemonSupervisor {
 				return;
 			}
 			cleaned = true;
+			clearTimeout(client.catchupRetryTimer);
+			client.catchupRetryTimer = undefined;
 			client.detachInput();
 			this.sessionInputPauseEpochs.set(client, (this.sessionInputPauseEpochs.get(client) ?? 0) + 1);
 			const ownerClientId = this.protocolClientId(client);
@@ -6130,14 +6132,24 @@ export class DaemonSupervisor {
 		if (client.catchupPromise) {
 			return client.catchupPromise;
 		}
-		if (client.snapshotStreaming || client.backpressured) {
+		if (client.snapshotStreaming || client.backpressured || client.catchupRetryTimer) {
 			return Promise.resolve();
 		}
-		const catchup = this.drainClientCatchupQueue(client).finally(() => {
-			if (client.catchupPromise === catchup) {
-				client.catchupPromise = undefined;
-			}
-		});
+		const catchup = this.drainClientCatchupQueue(client)
+			.catch((error) => {
+				this.log(`Failed to catch up client ${client.id}: ${String(error)}`);
+				if (client.socket.destroyed || !client.catchupActiveSessionIds?.size) return;
+				client.catchupRetryTimer = setTimeout(() => {
+					client.catchupRetryTimer = undefined;
+					void this.catchUpClient(client);
+				}, 250);
+				client.catchupRetryTimer.unref();
+			})
+			.finally(() => {
+				if (client.catchupPromise === catchup) {
+					client.catchupPromise = undefined;
+				}
+			});
 		client.catchupPromise = catchup;
 		return catchup;
 	}
@@ -6167,6 +6179,8 @@ export class DaemonSupervisor {
 			const { activeSessionId, purpose } = pending[index]!;
 			let releaseTranscript: (() => void) | undefined;
 			const releaseSnapshotReservation = this.reserveSnapshotStream(client, activeSessionId);
+			const snapshotSignal = client.snapshotTransferAbortControllers?.get(activeSessionId)?.signal;
+			let inlineSnapshotDelivered = false;
 			try {
 				const attached = await this.attachClient(client, {
 					type: "attach",
@@ -6228,7 +6242,9 @@ export class DaemonSupervisor {
 								snapshot: attached.result.snapshot,
 								meta,
 							};
-				if (!this.write(client, catchup)) {
+				const accepted = this.write(client, catchup);
+				inlineSnapshotDelivered = true;
+				if (!accepted) {
 					for (const remaining of pending.slice(index + 1)) {
 						this.queueCatchup(client, remaining.activeSessionId, remaining.purpose);
 					}
@@ -6236,10 +6252,21 @@ export class DaemonSupervisor {
 				}
 			} catch (error) {
 				releaseTranscript?.();
-				this.log(`Failed to catch up client ${client.id} for ${activeSessionId}: ${String(error)}`);
+				for (const remaining of pending.slice(index)) {
+					if (
+						client.attachedActiveSessionIds.has(remaining.activeSessionId) &&
+						(remaining.activeSessionId !== activeSessionId || !snapshotSignal?.aborted)
+					) {
+						this.queueCatchup(client, remaining.activeSessionId, remaining.purpose);
+					}
+				}
+				client.deferredSessionPayloadsDropped ??= new Set();
+				client.deferredSessionPayloadsDropped.add(activeSessionId);
+				this.discardDeferredSessionPayloads(client, activeSessionId);
+				throw error;
 			} finally {
 				releaseSnapshotReservation();
-				this.releaseDeferredSessionPayloads(client, activeSessionId, true);
+				this.releaseDeferredSessionPayloads(client, activeSessionId, inlineSnapshotDelivered);
 			}
 		}
 	}

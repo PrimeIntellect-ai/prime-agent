@@ -112,8 +112,12 @@ describe("deferred session frames during snapshot streams", () => {
 		[2, false, "stream"],
 		[2, true, "stream"],
 		[1, false, "replacement-failure"],
+		[1, false, "replacement-replay-failure"],
+		[1, false, "replacement-write-failure"],
 		[1, false, "catchup"],
+		[1, false, "inline-catchup"],
 	] as const)("worker: replay (%i, fail=%s, %s)", async (streamCount, failFinal, preparation) => {
+		const replayFailed = preparation === "replacement-replay-failure" || preparation === "replacement-write-failure";
 		const daemon = new AgentDaemon(join(tmpdir(), "deferred-frames-worker.sock"), {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -125,6 +129,7 @@ describe("deferred session frames during snapshot streams", () => {
 		const written: Buffer[] = [];
 		socket.on("data", (chunk: Buffer) => written.push(Buffer.from(chunk)));
 		const client = socketClient(socket, { transport: "private-framed" });
+		if (preparation === "inline-catchup") client.capabilities.clear();
 		const state = {
 			activeSessionId,
 			clients: new Set([client]),
@@ -135,6 +140,8 @@ describe("deferred session frames during snapshot streams", () => {
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			createAttachResult(): Promise<DaemonAttachResult>;
+			flushDeferredSessionFrames(client: DaemonSocketClient, activeSessionId: string): void;
+			write(client: DaemonSocketClient, message: DaemonOutbound): boolean;
 			drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<"drained" | "retry-later">;
 			catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void>;
 			broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
@@ -149,6 +156,14 @@ describe("deferred session frames during snapshot streams", () => {
 		};
 		vi.spyOn(internals, "catchUpBackpressuredClient").mockResolvedValue();
 		internals.sessions.set(activeSessionId, state);
+		if (replayFailed) {
+			vi.spyOn(
+				internals,
+				preparation === "replacement-replay-failure" ? "flushDeferredSessionFrames" : "write",
+			).mockImplementationOnce(() => {
+				throw new Error("replacement delivery failed");
+			});
+		}
 
 		let releaseChunk: () => void = () => {};
 		const chunkGate = new Promise<void>((resolve) => {
@@ -167,12 +182,13 @@ describe("deferred session frames during snapshot streams", () => {
 			vi.spyOn(internals, "createAttachResult").mockImplementation(async () => {
 				const result = streamedResult();
 				await chunkGate;
-				if (preparation === "replacement-failure") throw new Error("snapshot preparation failed");
+				if (preparation.startsWith("replacement")) throw new Error("snapshot preparation failed");
 				return result;
 			});
-			if (preparation === "catchup") {
+			if (preparation.endsWith("catchup")) {
 				client.deferredSessionFramesDropped = new Set([activeSessionId]);
 				client.catchupActiveSessionIds?.add(activeSessionId);
+				if (preparation === "inline-catchup") client.catchupPurposes = new Map([[activeSessionId, "replacement"]]);
 				stream = internals.drainBackpressuredClientCatchups(client);
 			} else {
 				internals.broadcastToSession(state, {
@@ -210,6 +226,7 @@ describe("deferred session frames during snapshot streams", () => {
 		// The stream is parked between chunks; events broadcast now are withheld.
 		internals.broadcastToSession(state, sessionEventMessage(2));
 		internals.broadcastToSession(state, sessionEventMessage(3));
+		if (preparation === "inline-catchup") state.lastEventSequence = 3;
 		if (preparation !== "stream") {
 			expect(written).toHaveLength(0);
 			expect(client.deferredSessionOutbounds?.get(activeSessionId)?.frames).toHaveLength(2);
@@ -221,36 +238,48 @@ describe("deferred session frames during snapshot streams", () => {
 
 		const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
 		const frames = decoder.push(Buffer.concat(written));
+		if (preparation === "inline-catchup") expect(JSON.parse(frames[0]!.payload.toString()).meta.sequence).toBe(1);
 		const outboundTypes = frames.map((frame) => (frame.header.kind === "outbound" ? frame.header.outboundType : ""));
 		expect(outboundTypes).toEqual([
-			...(preparation === "replacement-failure"
-				? ["session_replaced"]
+			...(preparation.startsWith("replacement")
+				? preparation === "replacement-write-failure"
+					? []
+					: ["session_replaced"]
 				: preparation === "catchup"
 					? ["session_snapshot_begin", "session_snapshot_end"]
-					: Array.from({ length: streamCount }, (_, index) =>
-							failFinal && index === streamCount - 1
-								? ["session_snapshot_begin", "session_snapshot_chunk", "session_snapshot_failed"]
-								: [
-										"session_snapshot_begin",
-										"session_snapshot_chunk",
-										"session_snapshot_chunk",
-										"session_snapshot_end",
-									],
-						).flat()),
-			...(failFinal ? [] : ["session_event", "session_event"]),
+					: preparation === "inline-catchup"
+						? ["session_replaced"]
+						: Array.from({ length: streamCount }, (_, index) =>
+								failFinal && index === streamCount - 1
+									? ["session_snapshot_begin", "session_snapshot_chunk", "session_snapshot_failed"]
+									: [
+											"session_snapshot_begin",
+											"session_snapshot_chunk",
+											"session_snapshot_chunk",
+											"session_snapshot_end",
+										],
+							).flat()),
+			...(failFinal || replayFailed ? [] : ["session_event", "session_event"]),
 		]);
 		const replayed = frames
 			.filter((frame) => frame.header.kind === "outbound" && frame.header.outboundType === "session_event")
 			.map((frame) => JSON.parse(frame.payload.toString("utf8")));
 		expect(replayed).toEqual(
-			failFinal
+			failFinal || replayFailed
 				? []
 				: [
 						expect.objectContaining({ event: { type: "session_info_changed", name: "change-2" } }),
 						expect.objectContaining({ event: { type: "session_info_changed", name: "change-3" } }),
 					],
 		);
-		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(failFinal ? 1 : 0);
+		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(failFinal || replayFailed ? 1 : 0);
+		if (replayFailed) {
+			const before = written.length;
+			internals.broadcastToSession(state, sessionEventMessage(4));
+			expect(written).toHaveLength(before);
+			expect(client.catchupPurposes?.get(activeSessionId)).toBe("replacement");
+			expect(internals.catchUpBackpressuredClient).toHaveBeenCalledOnce();
+		}
 		expect(client.snapshotActiveSessionCounts?.size ?? 0).toBe(0);
 		expect(client.deferredSessionOutbounds?.size ?? 0).toBe(0);
 		socket.destroy();
@@ -360,6 +389,8 @@ describe("deferred session frames during snapshot streams", () => {
 		"catchup",
 		"inline-catchup",
 		"failed-catchup",
+		"failed-replacement-catchup",
+		"failed-inline-catchup",
 		"inline-reattach",
 		"failed-reattach",
 		"failed-new-reattach",
@@ -381,6 +412,8 @@ describe("deferred session frames during snapshot streams", () => {
 		const closed = scenario.endsWith("closed");
 		const reattach = scenario.endsWith("reattach");
 		const catchup = scenario.endsWith("catchup");
+		const failedCatchup = catchup && scenario.startsWith("failed");
+		const purpose = scenario.includes("replacement") ? "replacement" : "resync";
 		const supervisor = new DaemonSupervisor(join(tmpdir(), "deferred-frames-supervisor.sock"), {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			descriptorDir: join(tmpdir(), "deferred-frames-supervisor-state"),
@@ -425,7 +458,7 @@ describe("deferred session frames during snapshot streams", () => {
 			): Promise<void>;
 			handleWorkerFrame(worker: SupervisorWorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
-		vi.spyOn(internals, "catchUpClient").mockResolvedValue();
+		if (!failedCatchup) vi.spyOn(internals, "catchUpClient").mockResolvedValue();
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
 
@@ -457,7 +490,7 @@ describe("deferred session frames during snapshot streams", () => {
 
 		let stream: Promise<unknown>;
 		if (reattach || catchup) {
-			if (reattach || scenario === "inline-catchup") client.capabilities.clear();
+			if (reattach || scenario.includes("inline")) client.capabilities.clear();
 			if (scenario === "failed-new-reattach") client.attachedActiveSessionIds.delete(activeSessionId);
 			vi.spyOn(internals, "findWorkerForClient").mockResolvedValue({ worker, summary: summary() });
 			vi.spyOn(internals, "attachClient").mockImplementation(async () => {
@@ -469,7 +502,8 @@ describe("deferred session frames during snapshot streams", () => {
 			if (catchup) {
 				client.deferredSessionPayloadsDropped = new Set([activeSessionId]);
 				client.catchupActiveSessionIds?.add(activeSessionId);
-				stream = internals.drainClientCatchups(client);
+				client.catchupPurposes = new Map([[activeSessionId, purpose]]);
+				stream = failedCatchup ? internals.catchUpClient(client) : internals.drainClientCatchups(client);
 			} else {
 				client.attachedActiveSessionIds.add("old-session");
 				stream = internals.handleCommand(client, {
@@ -554,32 +588,66 @@ describe("deferred session frames during snapshot streams", () => {
 		const lines = written.join("").split("\n").filter(Boolean);
 		const parsed = lines.map((line) => JSON.parse(line) as { type: string });
 		expect(parsed.map((entry) => entry.type)).toEqual(
-			scenario === "inline-catchup" || scenario === "failed-catchup"
-				? [...(scenario === "inline-catchup" ? ["session_resynced"] : []), "session_event", "session_event"]
-				: reattach
-					? [
-							...(scenario === "inline-reattach" ? ["response", "session_detached"] : []),
-							...(scenario === "failed-new-reattach"
-								? ["session_detached"]
-								: ["session_event", "session_event"]),
-						]
-					: [
-							"session_snapshot_begin",
-							...(scenario === "pending-closed" ? [] : ["session_snapshot_chunk"]),
-							...(closed && !overflow ? ["session_closed"] : []),
-							...(closed && !overflow
-								? []
-								: [scenario.startsWith("failed") ? "session_snapshot_failed" : "session_snapshot_end"]),
-							...(closed && overflow ? ["session_closed"] : []),
-							...(scenario === "attached" || scenario === "catchup" ? ["session_event", "session_event"] : []),
-						],
+			failedCatchup
+				? []
+				: scenario === "inline-catchup"
+					? ["session_resynced", "session_event", "session_event"]
+					: reattach
+						? [
+								...(scenario === "inline-reattach" ? ["response", "session_detached"] : []),
+								...(scenario === "failed-new-reattach"
+									? ["session_detached"]
+									: ["session_event", "session_event"]),
+							]
+						: [
+								"session_snapshot_begin",
+								...(scenario === "pending-closed" ? [] : ["session_snapshot_chunk"]),
+								...(closed && !overflow ? ["session_closed"] : []),
+								...(closed && !overflow
+									? []
+									: [scenario.startsWith("failed") ? "session_snapshot_failed" : "session_snapshot_end"]),
+								...(closed && overflow ? ["session_closed"] : []),
+								...(scenario === "attached" || scenario === "catchup"
+									? ["session_event", "session_event"]
+									: []),
+							],
 		);
 		expect(client.deferredSessionPayloads?.size ?? 0).toBe(0);
 		expect(client.snapshotActiveSessionCounts?.size ?? 0).toBe(0);
 		expect(client.snapshotTransferAbortControllers?.size ?? 0).toBe(0);
 		expect(client.catchupActiveSessionIds?.size ?? 0).toBe(
-			!closed && (scenario === "replaced" || scenario === "failed" || overflow) ? 1 : 0,
+			!closed && (scenario === "replaced" || scenario === "failed" || failedCatchup || overflow) ? 1 : 0,
 		);
+		if (failedCatchup) {
+			expect(client.catchupPurposes?.get(activeSessionId)).toBe(purpose);
+			expect(client.catchupRetryTimer).toBeDefined();
+			internals.handleWorkerFrame(worker, eventFrame);
+			await internals.catchUpClient(client);
+			expect(written).toHaveLength(0);
+			expect(internals.attachClient).toHaveBeenCalledOnce();
+			transcript.waitForChunk = waitForChunk;
+			const result = streamedResult();
+			result.lastEventSequence = result.snapshot.lastEventSequence = 3;
+			result.lastEventCursor = result.snapshot.lastEventCursor = { generation: "generation-deferred", sequence: 3 };
+			vi.mocked(internals.attachClient).mockResolvedValue({ worker, result, transcript });
+			const expected = client.capabilities.has("chunked_snapshot")
+				? [
+						...(purpose === "replacement" ? ["session_replaced"] : []),
+						"session_snapshot_begin",
+						"session_snapshot_chunk",
+						"session_snapshot_end",
+					]
+				: ["session_resynced"];
+			await vi.waitFor(() => expect(written.map((line) => JSON.parse(line).type)).toEqual(expected));
+			expect(client.catchupActiveSessionIds?.size).toBe(0);
+			expect(client.catchupRetryTimer).toBeUndefined();
+			expect(client.snapshotActiveSessionCounts?.size ?? 0).toBe(0);
+			internals.handleWorkerFrame(worker, {
+				...eventFrame,
+				payload: Buffer.from(`${JSON.stringify(sessionEventMessage(4))}\n`),
+			});
+			expect(JSON.parse(written.at(-1)!).type).toBe("session_event");
+		}
 		if (!closed && (scenario === "replaced" || overflow)) {
 			const before = written.length;
 			const frame: PrivateFrame<DaemonWorkerFrameHeader> = {
