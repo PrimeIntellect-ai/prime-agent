@@ -128,9 +128,11 @@ class Terminal:
 
     def until(self, predicate: Callable[[Display], bool], seconds: float) -> None:
         deadline = time.perf_counter() + seconds
-        while not predicate(self.display):
+        while (2026 << 5) in self.display.screen.mode or not predicate(self.display):
             if time.perf_counter() >= deadline:
-                raise TimeoutError("Timed out waiting for terminal display")
+                raise TimeoutError(
+                    "Timed out waiting for terminal display to reach the expected terminal state"
+                )
             self.pump()
 
     def until_output(self, predicate: Callable[[str], bool], seconds: float) -> None:

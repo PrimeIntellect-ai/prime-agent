@@ -34,7 +34,6 @@ TOOL_OUTPUT_LINES = 60
 SEARCH_PLACEHOLDER = "Search sessions"
 AGENTS_VIEW_FOOTER = "Ctrl+N new"
 ROSTER_COUNT = re.compile(r"agents\s+(\d+) running, (\d+) idle, (\d+) inactive")
-READY_MARKER = "benchready"
 LEFT_ARROW = "\x1b[D"
 RIGHT_ARROW = "\x1b[C"
 DOWN_ARROW = "\x1b[B"
@@ -342,36 +341,10 @@ def total_cpu(stats: list[ProcessMemory]) -> float:
     return sum(process.cpu or 0.0 for process in stats)
 
 
-def quiet(terminal: Terminal, seconds: float = 0.6, cap: float = 8.0) -> None:
-    """Pump output until the terminal stays silent, so the editor can accept input again."""
-    started = time.perf_counter()
-    last_output = time.perf_counter()
-    while time.perf_counter() - started < cap:
-        if terminal.pump():
-            last_output = time.perf_counter()
-        elif time.perf_counter() - last_output >= seconds:
-            return
-
-
-def input_ready(terminal: Terminal, marker: str, *, timeout: float = 120) -> None:
-    """Wait for a rendered marker, then confirm the editor echoes, retrying past input loss.
-
-    Keystrokes sent while a freshly opened session is still mounting can be dropped,
-    so the echo is retried with a quiet window instead of failing the trial.
-    """
+def input_ready(terminal: Terminal, marker: str, *, timeout: float = 120) -> float:
+    """Require the transcript tail, then reuse the retrying editor probe without a fixed sleep."""
     terminal.until(lambda display: marker in display.text(), timeout)
-    for _ in range(5):
-        quiet(terminal, 0.8)
-        terminal.child.send(READY_MARKER)
-        try:
-            terminal.until(lambda display: READY_MARKER in display.text(), 6)
-        except TimeoutError:
-            terminal.child.send(BACKSPACE * (len(READY_MARKER) + 2))
-            continue
-        terminal.child.send(BACKSPACE * len(READY_MARKER))
-        terminal.until(lambda display: READY_MARKER not in display.text(), 10)
-        return
-    raise TimeoutError("Editor did not echo the readiness marker")
+    return terminal.started + terminal.ready(timeout)
 
 
 def clear_search(terminal: Terminal, *, attempts: int = 5) -> None:
@@ -572,6 +545,24 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             record(side, "agents_open", trial, elapsed)  # type: ignore[arg-type]
             record(side, "agents_open_cpu", trial, cpu)  # type: ignore[arg-type]
             note("agents_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Reattach to the worker just opened, excluding search/navigation setup from timing.
+            metric = "agents_reopen"
+            terminal.child.send(LEFT_ARROW)
+            terminal.until(lambda display: AGENTS_VIEW_HINT in display.text(), 60)
+            type_query(terminal, spec.open_id[:8])
+            terminal.until(lambda display: session_name("large", 1) in display.text(), 60)
+            terminal.settle(0.8)
+            started = time.perf_counter()
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            terminal.child.send(RIGHT_ARROW)
+            ready_at = input_ready(terminal, tail_marker("large", 1))
+            elapsed = ready_at - started
+            cpu = cpu_total() - cpu_start
+            record(side, "agents_reopen", trial, elapsed)
+            record(side, "agents_reopen_cpu", trial, cpu)
+            note("agents_reopen", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
 
             # Chain parent: open the root so the deepest subagent opens against a live parent.
             metric = "parent_open"

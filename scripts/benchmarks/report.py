@@ -122,6 +122,10 @@ UI_METRICS = (
         "agents_open", "Open another session from agents view", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR
     ),
     Definition("agents_open_cpu", "CPU, open from agents view", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_reopen", "Reopen resident large session", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "agents_reopen_cpu", "CPU, reopen resident session", 1000, "ms", 0.01, PERFORMANCE_NOISE_FLOOR
+    ),
     Definition(
         "subagent_open",
         "Open subagent session at depth 6",
@@ -372,8 +376,8 @@ def render(report: Report) -> str:
             "40 ledger fan-out children, and a 6-deep subagent chain (~46 spawn edges).",
             "Large fixtures hold 1,999 complete triples (~5 MB JSONL); medium 119; subagents 399 each.",
             "Interactions: cold --resume of a large session, warm /resume switch, left-arrow to agents view,",
-            "roster settle with many saved sessions, search-and-open of another large session, and opening",
-            "the chain parent, then a clear-expand-step drill into the live chain to depth 6.",
+            "roster settle with many saved sessions, search-and-open of another large session,",
+            "reattaching to that resident session, opening the chain parent, and drilling to depth 6.",
             "Readiness is the rendered transcript tail plus a confirmed editor echo.",
             "CPU metrics sum utime+stime across the whole benchmark-user process tree per interaction.",
             "UI memory sums RSS after the interactions; PTY byte counts are in the raw results.",

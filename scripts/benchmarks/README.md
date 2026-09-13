@@ -163,6 +163,10 @@ Each trial stops all benchmark-user processes first, then measures:
 - **Open another session from agents view:** typing the target's unique session-id prefix,
   right-arrow to open, until the target transcript renders and echoes. This is the full
   "session → agents view → another session" round trip with many sessions on disk.
+- **Reopen resident large session:** return to agents view and select the large session just opened.
+  Time right-arrow through transcript tail and editor echo, excluding search setup and probe cleanup.
+  This exercises attach-snapshot reuse after model-catalog refresh (#2296), separately from cold
+  worker creation. Readiness uses the existing 20 ms retrying editor probe without an 800 ms sleep.
 - **Open chain parent from agents view:** back to the agents view, search the subagent chain's
   root session by id prefix, right-arrow to open. The parent becomes live.
 - **Open subagent session at depth 6:** back to the agents view, then drill into the live chain:

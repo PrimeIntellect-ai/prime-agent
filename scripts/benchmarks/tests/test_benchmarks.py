@@ -187,7 +187,8 @@ class ReportTests(unittest.TestCase):
         report.pr_head.metrics["bundle"] = []
         text = render(report)
         self.assertIn(
-            "**Overall: 1 regressed · 1 improved · 13 no clear change · 1 incomplete · 16 unavailable.**",
+            "**Overall: 1 regressed · 1 improved · 13 no clear change · 1 incomplete · "
+            f"{len(UI_METRICS) + 1} unavailable.**",
             text,
         )
         tables = text.split("<details>")[0]
