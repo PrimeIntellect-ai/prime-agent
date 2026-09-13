@@ -150,6 +150,7 @@ interface SupervisorMonitorHarness {
 	clients: Set<{ authenticated: boolean }>;
 	supervisorClaims: Map<object, object>;
 	shuttingDown: boolean;
+	supervisorAbsentSince?: number;
 	supervisorMonitorTimer?: ReturnType<typeof setTimeout>;
 	canConnectToSupervisor: (socketPath: string) => Promise<boolean>;
 	launchReplacementSupervisor: (socketPath: string) => Promise<void>;
@@ -1221,6 +1222,41 @@ describe("daemon worker supervisor monitoring", () => {
 		await vi.runAllTimersAsync();
 
 		expect(daemon.canConnectToSupervisor).not.toHaveBeenCalled();
+	});
+
+	it("keeps the supervisor monitor armed after a replacement binds but exits before claiming", async () => {
+		vi.useFakeTimers();
+		// The supervisor socket is dead, comes up with the replacement launch,
+		// then dies again before the replacement ever claims the worker.
+		const probeResults = [false, true, false, false];
+		let probeCount = 0;
+		const daemon = createHarness(async () => {
+			const result = probeResults[Math.min(probeCount, probeResults.length - 1)];
+			probeCount += 1;
+			return result ?? false;
+		});
+		// Drive the fake clock until the expected number of probes have run;
+		// one advance alone does not flush the availability check chain.
+		const advanceUntilProbes = async (expected: number) => {
+			for (let step = 0; probeCount < expected && step < 200; step++) {
+				await vi.advanceTimersByTimeAsync(100);
+			}
+			expect(probeCount).toBe(expected);
+		};
+
+		daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 1500);
+		await advanceUntilProbes(2);
+		expect(daemon.launchReplacementSupervisor).toHaveBeenCalledOnce();
+		// The replacement binding mid-launch restarts the orphan window...
+		expect(daemon.supervisorAbsentSince).toBeUndefined();
+		// ...but a bind is not an authenticated claim: the monitor must stay armed
+		// instead of orphaning the worker if the replacement exits unclaimed.
+		expect(daemon.supervisorMonitorTimer).toBeDefined();
+
+		await advanceUntilProbes(4);
+		expect(daemon.launchReplacementSupervisor).toHaveBeenCalledTimes(2);
+		expect(daemon.canConnectToSupervisor).toHaveBeenCalledTimes(4);
+		expect(daemon.supervisorMonitorTimer).toBeDefined();
 	});
 
 	it("retries when shutdown admission lookup fails", async () => {
