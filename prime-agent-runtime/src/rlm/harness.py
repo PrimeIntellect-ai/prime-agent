@@ -12,23 +12,122 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
+from functools import wraps
+from math import copysign, isfinite
 from pathlib import Path
+from threading import RLock
 from uuid import uuid4
-from typing import Any, Literal
+from typing import Any, Callable, Concatenate, Iterator, Literal, ParamSpec, TypeVar
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
 HarnessScope = Literal["local", "global"]
 
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
+_HARNESS_SCHEMA_VERSION = 1
+_MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 
 
+@contextmanager
+def _harness_file_lock(state_path: Path) -> Iterator[None]:
+    # Shared with core/refinement/harness-persistence.ts. Never steal a live lock.
+    lock_path = state_path.with_name(f"{state_path.name}.lock")
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            lock_path.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Harness state is locked: {lock_path}. Retry; if a writer crashed, "
+                    "stop all writers before removing the lock directory."
+                )
+            time.sleep(0.01)
+    try:
+        yield
+    finally:
+        lock_path.rmdir()
+
+
+def _merge_harness_changes(baseline: dict, proposed: dict, latest: dict) -> dict:
+    merged = deepcopy(latest)
+    for kind in _KINDS:
+        before, after = baseline["entries"][kind], proposed["entries"][kind]
+        for entry_id in before.keys() | after.keys():
+            if before.get(entry_id) == after.get(entry_id):
+                continue
+            if before.get(entry_id) != latest["entries"][kind].get(entry_id):
+                raise RuntimeError(
+                    f"Harness entry changed before save: {kind}:{entry_id}. Reload and retry."
+                )
+            if entry_id in after:
+                merged["entries"][kind][entry_id] = deepcopy(after[entry_id])
+            else:
+                del merged["entries"][kind][entry_id]
+    events = proposed["refinements"]
+    baseline_events = baseline["refinements"]
+    if events[:len(baseline_events)] == baseline_events:
+        if len(events) > len(baseline_events) and latest["refinements"][:len(baseline_events)] != baseline_events:
+            raise RuntimeError("Harness refinement history changed before save. Reload and retry.")
+        merged["refinements"].extend(deepcopy(events[len(baseline_events):]))
+    else:
+        if baseline_events != latest["refinements"]:
+            raise RuntimeError("Harness refinement history changed before save. Reload and retry.")
+        merged["refinements"] = deepcopy(events)
+    if proposed["schema"] != baseline["schema"]:
+        if latest["schema"] != baseline["schema"]:
+            raise RuntimeError("Harness schema changed before save. Reload and retry.")
+        merged["schema"] = proposed["schema"]
+    return merged
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not isfinite(number) or (number == 0 and value.startswith("-")):
+        raise ValueError("unrepresentable JSON number")
+    try:
+        if Decimal(value) != Decimal(repr(number)):
+            raise ValueError("unrepresentable JSON number")
+    except InvalidOperation as error:
+        raise ValueError("unrepresentable JSON number") from error
+    return number
+
+
+def _lossless_json_int(value: str) -> int:
+    if value == "-0":
+        raise ValueError("unrepresentable JSON number")
+    return int(value)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-JSON numeric constant {value}")
+
+
+def _invalid_harness_state_error() -> str:
+    return (
+        "Harness state is invalid or unreadable and was not overwritten. "
+        "Repair or remove the file before saving."
+    )
+
+
+def _unsupported_harness_schema_error(schema: object) -> str:
+    return (
+        f"Unsupported harness schema {schema}; this version supports schema "
+        f"{_HARNESS_SCHEMA_VERSION}. The file was not overwritten."
+    )
 
 
 def _slug(raw: str, fallback: str) -> str:
@@ -126,6 +225,96 @@ class RefinementEvent:
 
 _ENTRY_FIELDS = {field.name for field in fields(HarnessEntry)}
 _REFINEMENT_FIELDS = {field.name for field in fields(RefinementEvent)}
+_STATE_FIELDS = {"schema", "entries", "refinements"}
+
+
+def _contains_unsafe_json_number(value: object) -> bool:
+    if type(value) is int:
+        return abs(value) > _MAX_SAFE_JSON_INTEGER
+    if type(value) is float:
+        return (
+            not isfinite(value)
+            or (value == 0 and copysign(1, value) < 0)
+            or (value.is_integer() and abs(value) > _MAX_SAFE_JSON_INTEGER)
+        )
+    if isinstance(value, list):
+        return any(_contains_unsafe_json_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_unsafe_json_number(item) for item in value.values())
+    return False
+
+
+def _is_writable_harness_entry(value: object, entry_id: str, kind: HarnessKind) -> bool:
+    if not isinstance(value, dict) or not set(value).issubset(_ENTRY_FIELDS):
+        return False
+    if value.get("id") != entry_id or value.get("kind") != kind:
+        return False
+    if not isinstance(value.get("title"), str) or not isinstance(value.get("content"), str):
+        return False
+    if "path" in value and not isinstance(value["path"], str):
+        return False
+    if "scope" in value and value["scope"] not in ("local", "global"):
+        return False
+    for name in ("source", "created_at", "updated_at"):
+        if name in value and not isinstance(value[name], str):
+            return False
+    if "version" in value and type(value["version"]) is not int:
+        return False
+    for name in ("reference", "arguments", "metadata"):
+        if name in value and not isinstance(value[name], dict):
+            return False
+    return True
+
+
+def _is_writable_harness_refinement(value: object) -> bool:
+    if not isinstance(value, dict) or not set(value).issubset(_REFINEMENT_FIELDS):
+        return False
+    if not isinstance(value.get("id"), str) or not isinstance(value.get("trigger"), str):
+        return False
+    changes = value.get("changes")
+    if not isinstance(changes, list) or not all(isinstance(change, str) for change in changes):
+        return False
+    for name in ("evidence", "outcome", "created_at"):
+        if name in value and not isinstance(value[name], str):
+            return False
+    return True
+
+
+def _is_writable_harness_data(value: object) -> bool:
+    if not isinstance(value, dict) or not set(value).issubset(_STATE_FIELDS):
+        return False
+    if _contains_unsafe_json_number(value):
+        return False
+    raw_entries = value.get("entries", {})
+    if not isinstance(raw_entries, dict) or not set(raw_entries).issubset(_KINDS):
+        return False
+    for kind in _KINDS:
+        records = raw_entries.get(kind, {})
+        if not isinstance(records, dict):
+            return False
+        if not all(_is_writable_harness_entry(entry, str(entry_id), kind) for entry_id, entry in records.items()):
+            return False
+    raw_refinements = value.get("refinements", [])
+    return isinstance(raw_refinements, list) and all(
+        _is_writable_harness_refinement(event) for event in raw_refinements
+    )
+
+
+_StateMethodParams = ParamSpec("_StateMethodParams")
+_StateMethodResult = TypeVar("_StateMethodResult")
+
+
+def _with_state_lock(
+    method: Callable[Concatenate["HarnessState", _StateMethodParams], _StateMethodResult],
+) -> Callable[Concatenate["HarnessState", _StateMethodParams], _StateMethodResult]:
+    @wraps(method)
+    def locked(
+        self: "HarnessState", *args: _StateMethodParams.args, **kwargs: _StateMethodParams.kwargs
+    ) -> _StateMethodResult:
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
 
 
 def _validate_python_skill_reference(reference: dict[str, Any] | None) -> dict[str, Any]:
@@ -152,6 +341,7 @@ class HarnessState:
         scope: HarnessScope = "local",
         local_write_error: str | None = None,
     ):
+        self._state_lock = RLock()
         # in_memory mode never resolves or touches a path. It is the safe fallback when
         # path resolution itself fails, so constructing it cannot re-raise that error.
         if in_memory:
@@ -166,17 +356,22 @@ class HarnessState:
         # When set, local mutations raise instead of vanishing into a volatile
         # store; reads and global_=True delegation keep working.
         self._local_write_error = local_write_error
+        self._load_error: str | None = None
+        self.schema: int | float = 1
         self.entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         self.refinements: list[RefinementEvent] = []
+        self._loaded_data = self._serialize()
         self._global_target_state_dir: Path | None = None
         # mtime of the file as of the last load/save, used to detect out-of-process
-        # writes (e.g. the host `/refine` command) and avoid clobbering them.
+        # writes for reads. save() separately merges mutations under a shared lock.
         self._loaded_mtime: int | None = None
         self.load()
 
     def _ensure_local_writable(self) -> None:
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
+        if self._load_error is not None:
+            raise RuntimeError(self._load_error)
 
     def _disk_mtime(self) -> int | None:
         if self.file_path is None:
@@ -198,22 +393,51 @@ class HarnessState:
         if self._disk_mtime() != self._loaded_mtime:
             self.load()
 
+    @_with_state_lock
     def load(self) -> "HarnessState":
-        if self.file_path is None or not self.file_path.exists():
+        if self.file_path is None:
+            return self
+        if not self.file_path.exists():
+            self.schema = 1
+            self.entries = {kind: {} for kind in _KINDS}
+            self.refinements = []
+            self._loaded_data = self._serialize()
             self._loaded_mtime = None
+            self._load_error = None
             return self
         mtime = self._disk_mtime()
+        self._load_error = None
         try:
             with self.file_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = json.load(
+                    f,
+                    parse_constant=_reject_json_constant,
+                    parse_float=_finite_json_float,
+                    parse_int=_lossless_json_int,
+                )
         except (OSError, ValueError):
-            # A corrupt or unreadable state file must not crash the kernel or block
-            # refinement. Treat it as empty; the next save() rewrites it cleanly.
+            # Reads remain available, but writes must not replace data this runtime
+            # could not parse.
             data = {}
+            self._load_error = _invalid_harness_state_error()
         # json.load returns non-dict types for valid JSON like `null`, `[]`, or a bare
         # string; coerce those to an empty object before attribute access.
         if not isinstance(data, dict):
             data = {}
+            self._load_error = _invalid_harness_state_error()
+
+        if "schema" not in data:
+            schema = _HARNESS_SCHEMA_VERSION
+        else:
+            schema = data["schema"]
+            if type(schema) not in (int, float) or (isinstance(schema, float) and not isfinite(schema)):
+                self._load_error = _invalid_harness_state_error()
+                schema = _HARNESS_SCHEMA_VERSION
+        self.schema = schema
+        if self._load_error is None and schema != _HARNESS_SCHEMA_VERSION:
+            self._load_error = _unsupported_harness_schema_error(schema)
+        if self._load_error is None and not _is_writable_harness_data(data):
+            self._load_error = _invalid_harness_state_error()
 
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         raw_entries = data.get("entries", {})
@@ -237,6 +461,10 @@ class HarnessState:
                             entry_data["scope"] = self.scope
                         if not isinstance(entry_data.get("source"), str):
                             entry_data["source"] = "agent"
+                        # Missing persisted timestamps must normalize identically on every read.
+                        for timestamp in ("created_at", "updated_at"):
+                            if not isinstance(entry_data.get(timestamp), str):
+                                entry_data[timestamp] = ""
                         version = entry_data.get("version", 1)
                         if isinstance(version, str):
                             try:
@@ -272,8 +500,11 @@ class HarnessState:
                         event_data["changes"] = [str(change) for change in changes]
                     elif not isinstance(changes, list):
                         continue
+                    if not isinstance(event_data.get("created_at"), str):
+                        event_data["created_at"] = ""
                     self.refinements.append(RefinementEvent(**event_data))
         self._loaded_mtime = mtime
+        self._loaded_data = self._serialize()
         return self
 
     def _global_target(self, global_: bool, extra: dict[str, Any] | None = None) -> "HarnessState | None":
@@ -284,21 +515,47 @@ class HarnessState:
             return None
         return target
 
+    @_with_state_lock
     def save(self) -> "HarnessState":
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
             return self
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "schema": 1,
+        target_path = Path(os.path.realpath(self.file_path))
+        try:
+            self._ensure_local_writable()
+            if type(self.schema) not in (int, float) or (
+                isinstance(self.schema, float) and not isfinite(self.schema)
+            ):
+                raise RuntimeError(_invalid_harness_state_error())
+            if self.schema != _HARNESS_SCHEMA_VERSION:
+                raise RuntimeError(_unsupported_harness_schema_error(self.schema))
+            if not _is_writable_harness_data(self._serialize()):
+                raise RuntimeError(_invalid_harness_state_error())
+            with _harness_file_lock(target_path):
+                latest = HarnessState(target_path, scope=self.scope)
+                latest._ensure_local_writable()
+                data = _merge_harness_changes(self._loaded_data, self._serialize(), latest._loaded_data)
+                self._write_state(target_path, data)
+                self.load()
+        except Exception:
+            # A rejected mutation must not leak into a later successful save.
+            self.load()
+            raise
+        return self
+
+    def _serialize(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
             "entries": {
                 kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
                 for kind, records in self.entries.items()
             },
             "refinements": [asdict(event) for event in self.refinements],
         }
+
+    def _write_state(self, target_path: Path, data: dict[str, Any]) -> None:
         # Atomic replace on the real file: aliases survive, readers never see a torn file.
-        target_path = Path(os.path.realpath(self.file_path))
         temp_path = target_path.with_name(f"{target_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
             existing_mode = stat.S_IMODE(os.stat(target_path).st_mode)
@@ -309,15 +566,14 @@ class HarnessState:
             # Create no looser than the destination; retain the umask for new files.
             descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             with os.fdopen(descriptor, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                json.dump(data, f, indent=2, ensure_ascii=False, allow_nan=False)
             if existing_mode is not None:
                 os.chmod(temp_path, existing_mode)
             os.replace(temp_path, target_path)
         finally:
             temp_path.unlink(missing_ok=True)
-        self._loaded_mtime = self._disk_mtime()
-        return self
 
+    @_with_state_lock
     def upsert(
         self,
         kind: HarnessKind,
@@ -346,8 +602,8 @@ class HarnessState:
                 metadata=metadata,
                 source=source,
             )
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         return self._upsert(
             kind,
             title,
@@ -418,6 +674,7 @@ class HarnessState:
         self.save()
         return entry
 
+    @_with_state_lock
     def get(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> HarnessEntry | None:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
@@ -427,12 +684,13 @@ class HarnessState:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         return self.entries[kind].get(id)
 
+    @_with_state_lock
     def delete(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
             return target.delete(kind, id)
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
@@ -441,6 +699,7 @@ class HarnessState:
         self.save()
         return True
 
+    @_with_state_lock
     def list(self, kind: HarnessKind | None = None, *, global_: bool = False, **kwargs: Any) -> list[HarnessEntry]:
         if target := self._global_target(global_, kwargs):
             return target.list(kind)
@@ -453,6 +712,7 @@ class HarnessState:
             records.extend(self.entries[current_kind].values())
         return sorted(records, key=lambda entry: (entry.kind, entry.path, entry.title, entry.id))
 
+    @_with_state_lock
     def create(
         self,
         kind: HarnessKind,
@@ -481,8 +741,8 @@ class HarnessState:
                 metadata=metadata,
                 source=source,
             )
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         entry_id = id or _slug(title, kind)
@@ -500,6 +760,7 @@ class HarnessState:
             source=source,
         )
 
+    @_with_state_lock
     def update(
         self,
         kind: HarnessKind,
@@ -528,8 +789,8 @@ class HarnessState:
                 metadata=metadata,
                 source=source,
             )
-        self._ensure_local_writable()
         self._sync_from_disk()
+        self._ensure_local_writable()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
@@ -692,6 +953,7 @@ class HarnessState:
     def delete_subagent(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         return self.delete("subagent", id, global_=global_, **kwargs)
 
+    @_with_state_lock
     def record_refinement(
         self,
         trigger: str,
@@ -705,9 +967,9 @@ class HarnessState:
     ) -> RefinementEvent:
         if target := self._global_target(global_, kwargs):
             return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
-        self._ensure_local_writable()
         self._sync_from_disk()
-        event_id = id or f"refine_{len(self.refinements) + 1:04d}"
+        self._ensure_local_writable()
+        event_id = id or f"refine_{uuid4().hex}"
         normalized_changes = [changes] if isinstance(changes, str) else list(changes)
         event = RefinementEvent(
             id=event_id,
@@ -737,6 +999,7 @@ class HarnessState:
             plan.append(f"Immediate validation step: {next_step}")
         return plan
 
+    @_with_state_lock
     def overview(self, *, max_entries_per_kind: int = 20, global_: bool = False, **kwargs: Any) -> str:
         if target := self._global_target(global_, kwargs):
             return target.overview(max_entries_per_kind=max_entries_per_kind)
@@ -786,6 +1049,7 @@ class HarnessState:
             lines.append("refinements: 0")
         return "\n".join(lines)
 
+    @_with_state_lock
     def snapshot(self, *, global_: bool = False, **kwargs: Any) -> dict[str, Any]:
         if target := self._global_target(global_, kwargs):
             return target.snapshot()

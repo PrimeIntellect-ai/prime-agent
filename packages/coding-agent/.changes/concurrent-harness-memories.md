@@ -1,0 +1,5 @@
+- Fixed concurrent Python and refinement saves discarding unrelated accepted harness memories, and reported conflicting entry changes instead of overwriting them.
+- Fixed concurrent mutations sharing one Python harness state instance discarding an accepted entry.
+- Fixed Python harness saves resetting the stored schema version, and rejected conflicting schema changes.
+- Prevented TypeScript and Python writers from overwriting malformed or unsupported harness state.
+- Fixed concurrent Python refinements receiving duplicate IDs, and rejected appends to concurrently replaced refinement history.
