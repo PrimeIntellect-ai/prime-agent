@@ -19,6 +19,41 @@ function model(provider: string, id: string, api: Api): Model<Api> {
 }
 
 describe("Fast mode", () => {
+	it.each([
+		["openai-codex", "openai-codex-responses"],
+		["openai", "openai-responses"],
+	])("supports newly cataloged models without a model-name allowlist: %s", (provider, api) => {
+		expect(supportsFastMode(model(provider, "gpt-6-astra", api))).toBe(true);
+	});
+
+	it("does not infer ChatGPT capabilities from model-name prefixes", () => {
+		expect(supportsFastMode(model("openai-codex", "gpt-5.6-unknown", "openai-codex-responses"))).toBe(false);
+	});
+
+	it.each(["openai-codex", "openai"])("honors explicit priority capability for %s", (provider) => {
+		const api = provider === "openai-codex" ? "openai-codex-responses" : "openai-responses";
+		const testModel = model(provider, "future-model", api);
+		expect(supportsFastMode({ ...testModel, supportedServiceTiers: ["priority"] })).toBe(true);
+		expect(supportsFastMode({ ...testModel, supportedServiceTiers: ["ultrafast"] })).toBe(false);
+	});
+
+	it.each([{ tiers: [] }, { tiers: ["default"] }, { tiers: ["ultrafast"] }])(
+		"honors an explicit tier list without priority: $tiers",
+		({ tiers }) => {
+			const testModel = model("openai-codex", "gpt-5.5", "openai-codex-responses");
+			expect(supportsFastMode({ ...testModel, supportedServiceTiers: tiers })).toBe(false);
+		},
+	);
+
+	it.each([
+		["github-copilot", "openai-responses"],
+		["openrouter", "openai-responses"],
+		["openai", "openai-completions"],
+		["openai-codex", "openai-responses"],
+	])("does not let metadata bypass provider/API restrictions: %s/%s", (provider, api) => {
+		expect(supportsFastMode({ ...model(provider, "gpt-5.5", api), supportedServiceTiers: ["priority"] })).toBe(false);
+	});
+
 	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-luna"])("supports %s through ChatGPT auth", (id) => {
 		expect(supportsFastMode(model("openai-codex", id, "openai-codex-responses"))).toBe(true);
 	});

@@ -11,6 +11,7 @@ Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.prime
 - [Model Configuration](#model-configuration)
 - [Overriding Built-in Providers](#overriding-built-in-providers)
 - [Per-model Overrides](#per-model-overrides)
+- [Fast Mode](#fast-mode)
 - [Anthropic Messages Compatibility](#anthropic-messages-compatibility)
 - [OpenAI Compatibility](#openai-compatibility)
 
@@ -193,6 +194,7 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `api` | No | provider's `api` | Override provider's API for this model |
 | `reasoning` | No | `false` | Supports extended thinking |
 | `thinkingLevelMap` | No | omitted | Maps Prime Agent thinking levels to provider values and marks unsupported levels (see below) |
+| `supportedServiceTiers` | No | bundled capability | Provider-supported service tier IDs. `["priority"]` enables Fast eligibility; `[]` disables it. Only supported OpenAI/ChatGPT Responses routes use this field. |
 | `input` | No | `["text"]` | Input types: `["text"]` or `["text", "image"]` |
 | `contextWindow` | No | `128000` | Context window size in tokens |
 | `maxTokens` | No | `16384` | Maximum output tokens |
@@ -305,13 +307,35 @@ Use `modelOverrides` to customize specific built-in models without replacing the
 }
 ```
 
-`modelOverrides` supports these fields per model: `name`, `reasoning`, `input`, `cost` (partial), `contextWindow`, `maxTokens`, `headers`, `compat`.
+`modelOverrides` supports these fields per model: `name`, `reasoning`, `thinkingLevelMap`, `supportedServiceTiers`, `input`, `cost` (partial), `contextWindow`, `maxTokens`, `headers`, `compat`.
 
 Behavior notes:
 - `modelOverrides` are applied to built-in provider models.
 - Unknown model IDs are ignored.
 - You can combine provider-level `baseUrl`/`headers` with `modelOverrides`.
 - If `models` is also defined for a provider, custom models are merged after built-in overrides. A custom model with the same `id` replaces the overridden built-in model entry.
+
+### Fast Mode
+
+Use `/fast` to toggle the `priority` service tier. ChatGPT models use capabilities from the bundled Codex catalog, not model-name prefixes. OpenAI API-key models use a separate eligibility policy. An advertised tier makes the toggle available; it does not guarantee account entitlement or faster service on every request.
+
+For a model whose priority support you have verified with the provider, set an explicit capability override:
+
+```json
+{
+  "providers": {
+    "openai-codex": {
+      "modelOverrides": {
+        "gpt-6-astra": { "supportedServiceTiers": ["priority"] }
+      }
+    }
+  }
+}
+```
+
+An explicit `[]` disables Fast mode even if the bundled catalog supports it. The override also works in model definitions and extension-registered models. It does not enable unsupported routes such as GitHub Copilot. Open `/model` and reselect the model after changing its configuration.
+
+Fast mode can consume additional subscription usage or incur higher API charges. It is separate from `/effort`, which changes reasoning effort. Cost displays are estimates; capability overrides do not set priority pricing.
 
 ## Anthropic Messages Compatibility
 

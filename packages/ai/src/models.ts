@@ -36,13 +36,16 @@ export function getModels<TProvider extends KnownProvider>(
 }
 
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
-	const eligibleId =
-		model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-");
-	return (
-		eligibleId &&
-		((model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
-			(model.provider === "openai" && model.api === "openai-responses"))
-	);
+	const isCodex = model.provider === "openai-codex" && model.api === "openai-codex-responses";
+	const isOpenAI = model.provider === "openai" && model.api === "openai-responses";
+	if (!isCodex && !isOpenAI) return false;
+
+	const tiers = model.supportedServiceTiers ?? modelRegistry.get(model.provider)?.get(model.id)?.supportedServiceTiers;
+	if (tiers !== undefined) return tiers.includes("priority");
+
+	// ChatGPT capabilities come from its catalog, not from model-name prefixes.
+	if (isCodex) return false;
+	return model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-");
 }
 
 export interface CostOverrides {

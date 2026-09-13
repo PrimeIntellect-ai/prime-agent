@@ -74,8 +74,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
 // Revision 28 publishes the last recorded model on saved-session rows.
-export const DAEMON_SCHEMA_REVISION = 28;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-92bc5368a082";
+// Revision 29 adds optional Model.supportedServiceTiers metadata to state and model catalogs.
+// Backward-compatible: missing metadata degrades locally; old clients ignore the new field.
+export const DAEMON_SCHEMA_REVISION = 29;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-29-92bc5368a082";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -783,6 +785,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	wait_for_idle: LEGACY_DAEMON_COMMAND,
 	wait_for_headless_completion: CURRENT_DAEMON_COMMAND,
 	get_session_header: CURRENT_DAEMON_COMMAND,
+	// Optional supportedServiceTiers metadata does not raise state or attach requirements.
 	get_state: LEGACY_DAEMON_COMMAND,
 	get_connection_state: LEGACY_DAEMON_COMMAND,
 	get_messages: LEGACY_DAEMON_COMMAND,
@@ -792,6 +795,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_commands: LEGACY_DAEMON_COMMAND,
 	get_resource_snapshot: LEGACY_DAEMON_COMMAND,
 	replace_acp_mcp_servers: { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" },
+	// Revision 29 metadata needs no new capability; legacy model queries remain usable.
 	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,
@@ -1201,6 +1205,7 @@ export type DaemonOutbound =
 	  };
 
 export const DAEMON_OUTBOUND_COMPATIBILITY = {
+	// Optional Model metadata in responses and state snapshots remains backward-compatible.
 	response: LEGACY_DAEMON_COMMAND,
 	session_list_progress: LEGACY_DAEMON_COMMAND,
 	session_list_item: LEGACY_DAEMON_COMMAND,

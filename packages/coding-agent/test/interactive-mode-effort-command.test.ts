@@ -131,6 +131,36 @@ describe("InteractiveMode /effort", () => {
 	});
 
 	describe("argument autocomplete", () => {
+		it.each([true, false])("keeps /fast discoverable when Fast support is %s", async (supportsFast) => {
+			const mode = Object.create(InteractiveMode.prototype) as InteractiveMode;
+			Object.assign(mode, {
+				currentModelSupportsFastMode: () => supportsFast,
+				getAvailableThinkingLevels: () => [],
+				connectionCommands: [],
+				skillCommands: new Map(),
+				uiServices: { settingsManager: { getEnableSkillCommands: () => false } },
+				getCurrentCwd: () => process.cwd(),
+				fdPath: null,
+			});
+			const create = Reflect.get(InteractiveMode.prototype, "createBaseAutocompleteProvider") as (
+				this: InteractiveMode,
+			) => AutocompleteProvider;
+			const provider = create.call(mode);
+			const options = { signal: new AbortController().signal };
+
+			for (const text of ["/", "/fa"]) {
+				const result = await provider.getSuggestions([text], 0, text.length, options);
+				const item = result?.items.find((candidate) => candidate.value === "fast");
+				expect(item).toBeDefined();
+				expect(item?.takesArgument).not.toBe(true);
+				expect(provider.applyCompletion([text], 0, text.length, item!, result!.prefix)).toEqual({
+					lines: ["/fast"],
+					cursorLine: 0,
+					cursorCol: 5,
+				});
+			}
+		});
+
 		it("completes built-in picker commands bare while retaining their optional argument suggestions", async () => {
 			const mode = Object.create(InteractiveMode.prototype) as InteractiveMode;
 			Object.assign(mode, {
@@ -432,14 +462,48 @@ describe("InteractiveMode /effort", () => {
 			expect(context.showStatus).not.toHaveBeenCalled();
 		});
 
-		it("reports unsupported models without changing the service tier", () => {
-			const context = makeFastContext(testModel("anthropic", "claude-opus", "anthropic-messages"));
+		it.each([
+			testModel("anthropic", "claude-opus", "anthropic-messages"),
+			testModel("openai", "gpt-4.1", "openai-responses"),
+			testModel("custom-provider", "custom-model", "openai-completions"),
+		])("reports unsupported $provider/$id without changing the service tier", (model) => {
+			const context = makeFastContext(model);
 
 			fastInteractiveModePrototype.handleFastCommand.call(context);
 
 			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
 			expect(context.showStatus).toHaveBeenCalledWith(
-				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication",
+				`Fast mode is unavailable for ${model.provider}/${model.id}. Select a model with provider-advertised Fast/priority support.`,
+			);
+		});
+
+		it("explains the requirement when no model is selected", () => {
+			const context = makeFastContext();
+			context.getCurrentModel = () => undefined;
+
+			fastInteractiveModePrototype.handleFastCommand.call(context);
+
+			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
+			expect(context.showStatus).toHaveBeenCalledWith(
+				"Fast mode is unavailable for the current selection (no model selected). Select a model with provider-advertised Fast/priority support.",
+			);
+		});
+
+		it("reports the newly selected unsupported model when a queued toggle runs", async () => {
+			let releaseQueue!: () => void;
+			const context = makeFastContext();
+			context.fastModeToggleQueue = new Promise<void>((resolve) => {
+				releaseQueue = resolve;
+			});
+
+			fastInteractiveModePrototype.handleFastCommand.call(context);
+			context.getCurrentModel = () => testModel("custom-provider", "custom-model", "openai-completions");
+			releaseQueue();
+			await context.fastModeToggleQueue;
+
+			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
+			expect(context.showStatus).toHaveBeenCalledWith(
+				"Fast mode is unavailable for custom-provider/custom-model. Select a model with provider-advertised Fast/priority support.",
 			);
 		});
 

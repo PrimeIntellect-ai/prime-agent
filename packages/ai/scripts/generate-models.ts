@@ -69,6 +69,32 @@ interface AiGatewayModel {
 	};
 }
 
+// Pinned Codex backend service_tiers, not API-key OpenAI availability or pricing.
+// https://github.com/openai/codex/blob/dfaf451426868c22e6859f5494150fd6338c3257/codex-rs/models-manager/models.json
+const CODEX_SERVICE_TIERS: Readonly<Record<string, readonly string[]>> = {
+	"gpt-5.4": ["priority"],
+	"gpt-5.5": ["priority"],
+	"gpt-5.6-sol": ["priority", "ultrafast"],
+	"gpt-5.6-terra": ["priority"],
+	"gpt-5.6-luna": ["priority"],
+	"gpt-6-astra": ["priority"],
+	"gpt-daybreak-blue-latest": [],
+	"gpt-daybreak-red-latest": [],
+	"codex-auto-review": ["priority"],
+};
+
+function applyServiceTierMetadata(model: Model<Api>): void {
+	if (model.provider === "openai-codex" && model.api === "openai-codex-responses") {
+		const tiers = CODEX_SERVICE_TIERS[model.id];
+		if (tiers !== undefined) model.supportedServiceTiers = [...tiers];
+	}
+	// Verified 2026-09-13: https://developers.openai.com/api/docs/pricing/
+	// GPT-6 Astra advertises Fast mode; EU data residency is excluded.
+	if (model.provider === "openai" && model.api === "openai-responses" && model.id === "gpt-6-astra") {
+		model.supportedServiceTiers = ["priority"];
+	}
+}
+
 const COPILOT_STATIC_HEADERS = COPILOT_CLIENT_HEADERS;
 
 const KIMI_STATIC_HEADERS = {
@@ -1465,6 +1491,17 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 }
 
 async function generateModels() {
+	// Refresh only pinned capability metadata without network requests or catalog drift.
+	if (process.argv.includes("--service-tiers-only")) {
+		const providers: Record<string, Record<string, Model<Api>>> = structuredClone(EXISTING_MODELS);
+		for (const models of Object.values(providers)) {
+			for (const model of Object.values(models)) applyServiceTierMetadata(model);
+		}
+		writeFileSync(join(packageRoot, "src/models.generated.ts"), renderModelsFile(providers));
+		console.log("Updated service tiers in src/models.generated.ts (offline)");
+		return;
+	}
+
 	// Fetch models from both sources
 	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
 	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
@@ -2257,6 +2294,7 @@ async function generateModels() {
 
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
+		applyServiceTierMetadata(model);
 	}
 
 	// Group by provider and deduplicate by model ID

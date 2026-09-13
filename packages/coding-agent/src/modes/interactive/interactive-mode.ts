@@ -1315,9 +1315,7 @@ export class InteractiveMode {
 	}
 
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
-		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.filter(
-			(command) => command.name !== "fast" || this.currentModelSupportsFastMode(),
-		).map((command) => ({
+		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
 			name: command.name,
 			aliases: command.aliases,
 			description: command.description,
@@ -7858,10 +7856,15 @@ export class InteractiveMode {
 	}
 
 	private handleFastCommand(): void {
-		const unavailableMessage =
-			"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
+		const showUnavailable = () => {
+			const model = this.getCurrentModel();
+			const selection = model ? `${model.provider}/${model.id}` : "the current selection (no model selected)";
+			this.showStatus(
+				`Fast mode is unavailable for ${selection}. Select a model with provider-advertised Fast/priority support.`,
+			);
+		};
 		if (!this.currentModelSupportsFastMode()) {
-			this.showStatus(unavailableMessage);
+			showUnavailable();
 			return;
 		}
 		const connection = this.agentConnection;
@@ -7872,7 +7875,7 @@ export class InteractiveMode {
 					return;
 				}
 				if (!this.currentModelSupportsFastMode()) {
-					this.showStatus(unavailableMessage);
+					showUnavailable();
 					return;
 				}
 				const enabled = this.connectionState?.serviceTier === "priority";

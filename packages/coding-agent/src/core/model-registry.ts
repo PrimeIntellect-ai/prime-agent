@@ -156,6 +156,7 @@ const ModelDefinitionSchema = Type.Object({
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
+	supportedServiceTiers: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	cost: Type.Optional(
 		Type.Object({
@@ -175,6 +176,7 @@ const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
+	supportedServiceTiers: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	cost: Type.Optional(
 		Type.Object({
@@ -336,6 +338,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 
 	if (override.name !== undefined) result.name = override.name;
 	if (override.reasoning !== undefined) result.reasoning = override.reasoning;
+	if (override.supportedServiceTiers !== undefined) result.supportedServiceTiers = override.supportedServiceTiers;
 	if (override.thinkingLevelMap !== undefined) {
 		result.thinkingLevelMap = { ...model.thinkingLevelMap, ...override.thinkingLevelMap };
 	}
@@ -782,6 +785,7 @@ export class ModelRegistry {
 					baseUrl,
 					reasoning: modelDef.reasoning ?? false,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
+					supportedServiceTiers: modelDef.supportedServiceTiers,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
 					contextWindow: modelDef.contextWindow ?? 128000,
@@ -1744,6 +1748,7 @@ export class ModelRegistry {
 					baseUrl: modelDef.baseUrl ?? config.baseUrl!,
 					reasoning: modelDef.reasoning,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
+					supportedServiceTiers: modelDef.supportedServiceTiers,
 					input: modelDef.input as ("text" | "image")[],
 					cost: modelDef.cost,
 					contextWindow: modelDef.contextWindow,
@@ -1790,6 +1795,7 @@ export interface ProviderConfigInput {
 		baseUrl?: string;
 		reasoning: boolean;
 		thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
+		supportedServiceTiers?: Model<Api>["supportedServiceTiers"];
 		input: ("text" | "image")[];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;

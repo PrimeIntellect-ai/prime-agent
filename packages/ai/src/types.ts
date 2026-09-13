@@ -436,6 +436,8 @@ export interface Model<TApi extends Api> {
 	 * Missing keys use provider defaults. null marks a level as unsupported.
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
+	/** Provider-advertised service tiers. An empty list explicitly disables Fast mode. */
+	supportedServiceTiers?: string[];
 	input: ("text" | "image")[];
 	cost: {
 		input: number; // $/million tokens

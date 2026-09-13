@@ -1,0 +1,2 @@
+- Fixed `/fast` discoverability for unsupported models and explained the selected provider/model’s need for provider-advertised Fast/priority support.
+- Added Fast/priority capability metadata to custom model definitions, model overrides, and extension provider registrations.

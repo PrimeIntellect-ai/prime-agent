@@ -1230,6 +1230,8 @@ export interface ProviderModelConfig {
 	reasoning: boolean;
 	/** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
 	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
+	/** Provider-supported service tier IDs; an empty list disables Fast mode. */
+	supportedServiceTiers?: Model<Api>["supportedServiceTiers"];
 	/** Supported input types. */
 	input: ("text" | "image")[];
 	/** Cost per token (for tracking, can be 0). */

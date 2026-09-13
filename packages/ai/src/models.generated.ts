@@ -8571,6 +8571,7 @@ export const MODELS = {
 			baseUrl: "https://api.openai.com/v1",
 			reasoning: true,
 			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max","off":null},
+			supportedServiceTiers: ["priority"],
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -8834,6 +8835,7 @@ export const MODELS = {
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh","minimal":"low"},
+			supportedServiceTiers: ["priority"],
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -8870,6 +8872,7 @@ export const MODELS = {
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh","minimal":"low"},
+			supportedServiceTiers: ["priority"],
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -8888,6 +8891,7 @@ export const MODELS = {
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			supportedServiceTiers: ["priority"],
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -8906,6 +8910,7 @@ export const MODELS = {
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			supportedServiceTiers: ["priority","ultrafast"],
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -8924,6 +8929,7 @@ export const MODELS = {
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
 			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			supportedServiceTiers: ["priority"],
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -8942,6 +8948,7 @@ export const MODELS = {
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
 			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max","off":null},
+			supportedServiceTiers: ["priority"],
 			input: ["text", "image"],
 			cost: {
 				input: 10,

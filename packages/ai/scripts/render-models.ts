@@ -29,6 +29,9 @@ export const MODELS = {
 			if (model.thinkingLevelMap) {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
 			}
+			if (model.supportedServiceTiers !== undefined) {
+				output += `\t\t\tsupportedServiceTiers: ${JSON.stringify(model.supportedServiceTiers)},\n`;
+			}
 			output += `\t\t\tinput: [${model.input.map((input) => JSON.stringify(input)).join(", ")}],\n`;
 			output += `\t\t\tcost: {\n`;
 			output += `\t\t\t\tinput: ${model.cost.input},\n`;

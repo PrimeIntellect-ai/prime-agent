@@ -1,0 +1,1 @@
+- Fixed ChatGPT Fast mode eligibility to use explicit model service-tier capabilities instead of model-name prefixes, including GPT-6 Astra.
