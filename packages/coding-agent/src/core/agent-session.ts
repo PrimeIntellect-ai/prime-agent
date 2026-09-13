@@ -1488,6 +1488,7 @@ export class AgentSession {
 		this._subagentRuntimeHost = config.subagentRuntimeHost;
 		this._autonomousState = createAutonomousRuntimeState(config.autonomous, {
 			cwd: this._cwd,
+			defaultLimits: this.settingsManager.getAutonomousLimits(),
 		});
 		this._goalState = this._loadPersistedGoalState();
 		// Seed initial goal from CLI --goal flag, but only for top-level sessions
@@ -11000,7 +11001,12 @@ export class AgentSession {
 		let modelSelection: RlmSubagentModelSelection;
 		try {
 			if (requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(requestedSessionName, true);
-			modelSelection = await this._resolveRlmSubagentModel(requestedModel);
+			// An unpinned spawn model resolves against the persisted subagent
+			// default; an unavailable default fails the spawn instead of silently
+			// inheriting the parent model.
+			modelSelection = await this._resolveRlmSubagentModel(
+				requestedModel ?? this.settingsManager.getSubagentDefaultModel(),
+			);
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}

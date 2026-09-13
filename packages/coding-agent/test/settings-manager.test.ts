@@ -568,4 +568,70 @@ describe("SettingsManager", () => {
 			expect(manager.getTelemetryEnabled()).toBe(false);
 		});
 	});
+
+	describe("autonomous limits and subagent default model", () => {
+		it("resolves persisted autonomous limits and maps unlimited to the runtime sentinel", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					autonomous: {
+						maxContinuations: 25,
+						maxTurns: "unlimited",
+						maxTokens: 1_000_000,
+						timeoutMs: 3_600_000,
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({
+				maxContinuations: 25,
+				maxTurns: Number.MAX_SAFE_INTEGER,
+				maxTokens: 1_000_000,
+				timeoutMs: 3_600_000,
+			});
+		});
+
+		it("merges project autonomous settings over global ones and drops invalid entries", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ autonomous: { maxContinuations: 10, maxTurns: 40 } }),
+			);
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({
+					autonomous: { maxContinuations: "unlimited", maxTokens: "one million" },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({
+				maxContinuations: Number.MAX_SAFE_INTEGER,
+				maxTurns: 40,
+				maxTokens: undefined,
+				timeoutMs: undefined,
+			});
+		});
+
+		it("returns empty autonomous limits when unset", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({});
+		});
+
+		it("trims the subagent default model and treats blank as unset", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ subagentDefaultModel: "  prime-inference/internal/glm-5.2-fast  " }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getSubagentDefaultModel()).toBe("prime-inference/internal/glm-5.2-fast");
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ subagentDefaultModel: "   " }));
+			const blank = SettingsManager.create(projectDir, agentDir);
+			expect(blank.getSubagentDefaultModel()).toBeUndefined();
+		});
+	});
 });
