@@ -1704,14 +1704,16 @@ export class InteractiveMode {
 			}
 		};
 
-		await this.runStartupOnboarding();
-		showDeferredStartupNotifications();
-		showModelFallbackWarning();
-		void this.maybeWarnAboutAnthropicSubscriptionAuth();
-		void deliverStartupPrompts().then(
-			() => settleStartupPrompts("admitted"),
-			() => settleStartupPrompts("admitted"),
-		);
+		if (!this.isShuttingDown) {
+			await this.runStartupOnboarding();
+			showDeferredStartupNotifications();
+			showModelFallbackWarning();
+			void this.maybeWarnAboutAnthropicSubscriptionAuth();
+			void deliverStartupPrompts().then(
+				() => settleStartupPrompts("admitted"),
+				() => settleStartupPrompts("admitted"),
+			);
+		}
 
 		// Enter/Alt+Enter submit directly through AgentConnection. Wait for the
 		// lifecycle signal exactly once; a returned editor value has already been
@@ -2592,7 +2594,7 @@ export class InteractiveMode {
 			for (let drain = 0; drain <= HEARTBEAT_REFRESH_DRAIN_LIMIT; drain++) {
 				this.heartbeatRefreshRequested = false;
 				const heartbeats = await connection.listHeartbeats();
-				if (this.agentConnection !== connection) return;
+				if (this.isShuttingDown || this.agentConnection !== connection) return;
 				this.applyHeartbeatCatalog(heartbeats);
 				if (!this.heartbeatRefreshRequested) return;
 			}
@@ -2879,7 +2881,8 @@ export class InteractiveMode {
 		}
 		this.refreshQueueSelectionFromState();
 		this.updatePendingMessagesDisplay();
-		await this.refreshHeartbeatCatalog().catch(() => undefined);
+		// Optional tray metadata must not delay opening or leaving a chat.
+		void this.refreshHeartbeatCatalog().catch(() => undefined);
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
@@ -6864,12 +6867,11 @@ export class InteractiveMode {
 	}
 
 	private async returnToAgentsView(request: InteractiveModeRunResult["type"] = "agents_view"): Promise<void> {
+		if (this.isShuttingDown || this.agentsViewRequest) return;
+		this.isShuttingDown = true;
 		// Startup still uses the connection after input handlers become active.
 		await this.initializationPromise?.catch(() => undefined);
-		if (this.isShuttingDown || this.agentsViewRequest) return;
 		this.stashDraftForAgentsView();
-		this.agentsViewRequest = request;
-		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
 
 		await this.teardownSessionUi({ preserveAltScreen: true });
@@ -6879,6 +6881,7 @@ export class InteractiveMode {
 				await this.agentConnection.dispose();
 			} finally {
 				await this.options.onShutdown?.();
+				this.agentsViewRequest = request;
 				this.onInputCallback?.(undefined);
 				handoffComplete = true;
 			}
