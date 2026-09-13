@@ -4,11 +4,17 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { type DaemonCommand, type DaemonResponse, failure, success } from "../src/modes/daemon/daemon-protocol.js";
-import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import {
+	DaemonSupervisor,
+	HEARTBEAT_LIST_FORWARD_TIMEOUT_MS,
+	HEARTBEAT_LIST_LAUNCH_WAIT_MS,
+} from "../src/modes/daemon/daemon-supervisor.js";
 
 interface SupervisorHarness {
 	workers: Map<string, unknown>;
 	openingWorkers: Map<string, Promise<unknown>>;
+	catalogOpeningWorkers: Map<string, Promise<unknown>>;
+	findWorkerForClient(client: DaemonSocketClient, selector: string): Promise<{ worker: unknown }>;
 	forwardToWorker(worker: unknown, command: DaemonCommand, timeoutMs?: number): Promise<DaemonResponse>;
 	handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonResponse | undefined>;
 	handleWorkerFrame(worker: unknown, frame: unknown): void;
@@ -44,12 +50,11 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		const target = worker("starting");
 		if (registered) supervisor.workers.set("target", target);
 		let finishStartup = () => {};
-		supervisor.openingWorkers.set(
-			"target",
-			new Promise<unknown>((resolve) => {
-				finishStartup = () => resolve(target);
-			}),
-		);
+		const opening = new Promise<unknown>((resolve) => {
+			finishStartup = () => resolve(target);
+		});
+		supervisor.openingWorkers.set("target", opening);
+		supervisor.catalogOpeningWorkers.set("target", opening);
 		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
 			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
 		);
@@ -65,6 +70,137 @@ describe("daemon supervisor heartbeat aggregation", () => {
 			data: { heartbeats: [{ job: { id: "heartbeat-1" } }] },
 		});
 		expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
+	});
+
+	it("skips client-owned launches without waiting on them", async () => {
+		const supervisor = createSupervisorHarness();
+		supervisor.workers.set("public", worker("ready"));
+		// A client-owned create can never join the public catalog (isVisibleWorker),
+		// so a launch that never settles must not gate the global list.
+		supervisor.openingWorkers.set("private", new Promise<unknown>(() => {}));
+		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
+		);
+
+		const watchdog = new Promise<never>((_, reject) => {
+			const timer = globalThis.setTimeout(
+				() => reject(new Error("heartbeats_list waited on a client-owned launch")),
+				1_000,
+			);
+			timer.unref?.();
+		});
+		const response = await Promise.race([
+			supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" }),
+			watchdog,
+		]);
+
+		expect(response).toMatchObject({
+			success: true,
+			data: { heartbeats: [{ job: { id: "heartbeat-1" } }] },
+		});
+		expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
+	});
+
+	it("stops waiting on slow catalog launches after the launch wait budget", async () => {
+		vi.useFakeTimers();
+		try {
+			const supervisor = createSupervisorHarness();
+			supervisor.workers.set("public", worker("ready"));
+			supervisor.openingWorkers.set("slow", new Promise<unknown>(() => {}));
+			supervisor.catalogOpeningWorkers.set("slow", new Promise<unknown>(() => {}));
+			supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+				success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
+			);
+
+			const pending = supervisor.handleCommand({} as DaemonSocketClient, {
+				id: "list-1",
+				type: "heartbeats_list",
+			});
+			await vi.advanceTimersByTimeAsync(0);
+			expect(supervisor.forwardToWorker).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_LIST_LAUNCH_WAIT_MS);
+			await expect(pending).resolves.toMatchObject({
+				success: true,
+				data: { heartbeats: [{ job: { id: "heartbeat-1" } }] },
+			});
+			expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("reports a still-starting worker after the launch wait instead of omitting it", async () => {
+		vi.useFakeTimers();
+		try {
+			const supervisor = createSupervisorHarness();
+			supervisor.workers.set("public", worker("ready"));
+			supervisor.openingWorkers.set("slow", new Promise<unknown>(() => {}));
+			supervisor.catalogOpeningWorkers.set("slow", new Promise<unknown>(() => {}));
+			supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+				success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
+			);
+
+			const pending = supervisor.handleCommand({} as DaemonSocketClient, {
+				id: "list-1",
+				type: "heartbeats_list",
+			});
+			await vi.advanceTimersByTimeAsync(0);
+			// The slow launch registers mid-wait but never becomes ready.
+			supervisor.workers.set("slow", worker("starting"));
+
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_LIST_LAUNCH_WAIT_MS);
+			await expect(pending).resolves.toMatchObject({
+				success: false,
+				error: "Cannot list heartbeats while session worker is starting",
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("fails the session-scoped list when the forward outlives its budget", async () => {
+		vi.useFakeTimers();
+		try {
+			const supervisor = createSupervisorHarness();
+			supervisor.findWorkerForClient = vi.fn(async () => ({ worker: worker("ready") }));
+			supervisor.forwardToWorker = vi.fn(() => new Promise<DaemonResponse>(() => {}));
+
+			const pending = supervisor.handleCommand({} as DaemonSocketClient, {
+				id: "list-1",
+				type: "heartbeats_list",
+				activeSessionId: "session-1",
+			});
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_LIST_FORWARD_TIMEOUT_MS);
+			await expect(pending).resolves.toMatchObject({
+				success: false,
+				error: expect.stringContaining("Timed out waiting for session worker to list heartbeats"),
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("bounds the session-scoped list forward inside the client request budget", async () => {
+		const supervisor = createSupervisorHarness();
+		const target = worker("ready");
+		supervisor.findWorkerForClient = vi.fn(async () => ({ worker: target }));
+		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
+		);
+
+		const response = await supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "list-1",
+			type: "heartbeats_list",
+			activeSessionId: "session-1",
+		});
+
+		expect(response).toMatchObject({ success: true });
+		expect(supervisor.forwardToWorker).toHaveBeenCalledWith(
+			target,
+			expect.objectContaining({ type: "heartbeats_list" }),
+			HEARTBEAT_LIST_FORWARD_TIMEOUT_MS,
+		);
 	});
 
 	it("uses the last complete worker snapshot during recovery", async () => {

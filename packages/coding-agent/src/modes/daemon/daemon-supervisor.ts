@@ -194,6 +194,14 @@ const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 ];
 const PEER_TRANSPORT_GRANT_TTL_MS = 10_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+// The daemon client's default request budget is 30s and each ready-worker heartbeat
+// forward gets 5s, so waiting longer than this on in-flight launches would only
+// surface as a client transport timeout instead of a bounded per-worker state error.
+export const HEARTBEAT_LIST_LAUNCH_WAIT_MS = 15_000;
+// Session-scoped listing must fail inside the client's request budget too; the
+// worker request default (24h) would turn a stuck worker into a client transport
+// timeout instead of a daemon-side failure.
+export const HEARTBEAT_LIST_FORWARD_TIMEOUT_MS = 25_000;
 const INPUT_PAUSE_CLEANUP_TIMEOUT_MS = 5_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
 const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
@@ -714,6 +722,13 @@ export class DaemonSupervisor {
 	private readonly workers = new Map<string, ResidentWorker>();
 	private workerStopCounts?: Map<ResidentWorker, number>;
 	private readonly openingWorkers = new Map<string, Promise<ResidentWorker>>();
+	/**
+	 * Openings that can register catalog-visible workers (`ownerClientId === undefined`).
+	 * Client-owned launches stay in `openingWorkers` for create dedupe but can never
+	 * join the public heartbeat catalog (`isVisibleWorker`), so catalog listing
+	 * never waits on them.
+	 */
+	private readonly catalogOpeningWorkers = new Map<string, Promise<ResidentWorker>>();
 	/** Public admission ids are scoped to the socket that registered them. */
 	private readonly promptAdmissions = new Map<DaemonSocketClient, Map<string, SupervisorPromptAdmission>>();
 	private readonly sessionInputPauses = new Map<string, SupervisorSessionInputPause>();
@@ -2287,12 +2302,35 @@ export class DaemonSupervisor {
 			case "heartbeats_list": {
 				if (command.activeSessionId) {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
-					return this.forwardToWorker(match.worker, command);
+					// The forward may first join an in-flight recovery whose budget far exceeds
+					// the client's request timeout, so bound the whole operation: a stuck or
+					// still-recovering worker fails daemon-side inside the caller's budget
+					// instead of surfacing as a client transport timeout.
+					const forward = this.forwardToWorker(match.worker, command, HEARTBEAT_LIST_FORWARD_TIMEOUT_MS);
+					const forwardDeadline = unrefDelay(HEARTBEAT_LIST_FORWARD_TIMEOUT_MS).then(() => {
+						throw new Error(
+							`Timed out waiting for session worker to list heartbeats within ${HEARTBEAT_LIST_FORWARD_TIMEOUT_MS}ms`,
+						);
+					});
+					return Promise.race([forward, forwardDeadline]).catch((error: unknown) =>
+						failure(command.id, command.type, error, serializeDaemonError(error)),
+					);
 				}
-				const openings = [...this.openingWorkers.values()];
+				const openings = [...this.catalogOpeningWorkers.values()];
 				const selectedWorkers = new Set(this.workers.values());
-				for (const result of await Promise.allSettled(openings)) {
-					if (result.status === "fulfilled") selectedWorkers.add(result.value);
+				for (const opening of openings) {
+					opening.then(
+						(worker) => selectedWorkers.add(worker),
+						() => undefined,
+					);
+				}
+				// Slow launches must not outrun the caller's request budget: after
+				// HEARTBEAT_LIST_LAUNCH_WAIT_MS the catalog proceeds with whatever
+				// registered, and workers that are still starting surface through the
+				// per-worker state error below instead of being omitted.
+				await Promise.race([Promise.allSettled(openings), unrefDelay(HEARTBEAT_LIST_LAUNCH_WAIT_MS)]);
+				for (const worker of this.workers.values()) {
+					selectedWorkers.add(worker);
 				}
 				const workers = [...this.workers.values()].filter(
 					(worker) =>
@@ -2911,11 +2949,17 @@ export class DaemonSupervisor {
 			});
 		})();
 		this.openingWorkers.set(key, opening);
+		if (ownerClientId === undefined) {
+			this.catalogOpeningWorkers.set(key, opening);
+		}
 		try {
 			return await opening;
 		} finally {
 			if (this.openingWorkers.get(key) === opening) {
 				this.openingWorkers.delete(key);
+			}
+			if (this.catalogOpeningWorkers.get(key) === opening) {
+				this.catalogOpeningWorkers.delete(key);
 			}
 		}
 	}
@@ -6893,6 +6937,7 @@ export class DaemonSupervisor {
 		}
 		this.workers.clear();
 		this.openingWorkers.clear();
+		this.catalogOpeningWorkers.clear();
 		await this.runCleanupStep("daemon catalog", () => this.catalog.stop());
 		await this.runCleanupStep("daemon server", () => serverClosed);
 		await this.runCleanupStep("daemon socket", () => this.cleanupSocket());
