@@ -6939,6 +6939,11 @@ export class AgentDaemon {
 			if (!shouldSendDaemonOutboundToClient(client, sequencedMessage)) {
 				continue;
 			}
+			// Snapshots cannot recover extension requests, so never defer or drop them.
+			if (sequencedMessage.type === "extension_ui_request") {
+				this.write(client, sequencedMessage);
+				continue;
+			}
 			if (sequencedMessage.type === "session_closed") {
 				this.discardDeferredSessionFrames(client, state.activeSessionId);
 				client.catchupActiveSessionIds?.delete(state.activeSessionId);

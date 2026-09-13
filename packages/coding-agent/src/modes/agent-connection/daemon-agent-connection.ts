@@ -648,10 +648,10 @@ export class DaemonAgentConnection implements AgentConnection {
 		snapshotCursor: DaemonEventCursor | undefined,
 	): void {
 		if (
-			snapshotSequence !== undefined &&
-			this.lastEventSequence !== undefined &&
-			snapshotCursor?.generation === this.lastEventCursor?.generation &&
-			snapshotSequence >= this.lastEventSequence
+			snapshotCursor?.generation !== this.lastEventCursor?.generation ||
+			(snapshotSequence !== undefined &&
+				this.lastEventSequence !== undefined &&
+				snapshotSequence >= this.lastEventSequence)
 		) {
 			this.deferredSessionEventsOverflowed = false;
 		}
@@ -1841,6 +1841,14 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (!this.isMessageForActiveSession(message)) {
 			return;
 		}
+		// Requests bypass snapshot deferral and must not advance the replay cursor.
+		if (message.type === "extension_ui_request") {
+			await this.emit({
+				type: "extension_ui_request",
+				request: { id: message.id, method: message.method, payload: message.payload },
+			});
+			return;
+		}
 		if ("snapshotId" in message && this.ignoredSnapshotIds.has(message.snapshotId)) {
 			if (message.type === "session_snapshot_end" || message.type === "session_snapshot_failed") {
 				this.ignoredSnapshotIds.delete(message.snapshotId);
@@ -1960,17 +1968,6 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.childRosterSequence = undefined;
 			this.latestSnapshotIsFresh = true;
 			await this.emit({ type: "session_replaced", state: message.state, messages: message.messages });
-			return;
-		}
-		if (message.type === "extension_ui_request") {
-			await this.emit({
-				type: "extension_ui_request",
-				request: {
-					id: message.id,
-					method: message.method,
-					payload: message.payload,
-				},
-			});
 			return;
 		}
 		if (message.type === "extension_error") {
@@ -2406,6 +2403,7 @@ export class DaemonAgentConnection implements AgentConnection {
 
 	private observeEventCursor(cursor: DaemonEventCursor): void {
 		const current = this.lastEventCursor;
+		if (current?.generation !== cursor.generation) this.lastEventSequence = cursor.sequence;
 		if (current && current.generation !== cursor.generation) {
 			this.retiredEventGenerations.add(current.generation);
 		}

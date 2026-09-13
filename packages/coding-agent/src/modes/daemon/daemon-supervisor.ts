@@ -5965,6 +5965,11 @@ export class DaemonSupervisor {
 			if (outboundType === "extension_ui_request" && !client.supportsExtensionUi) {
 				continue;
 			}
+			// Snapshots cannot recover extension requests, so never defer or drop them.
+			if (outboundType === "extension_ui_request") {
+				this.writeSerialized(client, publicPayload);
+				continue;
+			}
 			if (outboundType === "session_closed") {
 				client.snapshotTransferAbortControllers?.get(activeSessionId)?.abort();
 				this.discardDeferredSessionPayloads(client, activeSessionId);

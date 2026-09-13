@@ -719,6 +719,7 @@ describe("InteractiveMode working timer", () => {
 			updateWorkingLoaderMessage: vi.fn(),
 			renderSessionContext: vi.fn(async () => {}),
 			restoreStreamingMessageFromSnapshot: vi.fn(async () => {}),
+			showLoadedResources: vi.fn(),
 			showStatus: vi.fn(),
 			stopWorkingLoader: vi.fn(),
 			createWorkingLoader: vi.fn(() => ({})),
@@ -783,6 +784,32 @@ describe("InteractiveMode working timer", () => {
 			}
 		},
 	);
+
+	test("preserves resource diagnostics through initial and repeated transcript renders", async () => {
+		const snapshot = { state: createConnectionState(), messages: [userMessage("Hello.", 100)] };
+		const harness = Object.assign(
+			{},
+			createInitialTimerHarness(snapshot),
+			createRenderSessionContextHarness().harness,
+			{
+				options: { verbose: false },
+				connectionCommands: [],
+				connectionResourceSnapshot: {
+					diagnostics: { skills: [{ type: "warning", message: "Resource warning" }] },
+				},
+				formatDiagnostics: () => "Resource warning",
+				showLoadedResources: (InteractiveMode.prototype as unknown as { showLoadedResources(): void })
+					.showLoadedResources,
+				renderSessionContext,
+			},
+		);
+		Object.setPrototypeOf(harness, InteractiveMode.prototype);
+		for (let render = 0; render < 2; render++) {
+			await harness.renderInitialMessages();
+			const text = harness.chatContainer.render(80).join("\n");
+			expect(text.match(/Resource warning/g)).toHaveLength(1);
+		}
+	});
 
 	test("restores the first active-run starter instead of a steering message", async () => {
 		const harness = createInitialTimerHarness({
@@ -1555,6 +1582,7 @@ describe("InteractiveMode connection events", () => {
 			renderSessionContext: renderSessionContextMock,
 			restoreStreamingMessageFromSnapshot,
 			restoreTurnStartFromMessages: vi.fn(),
+			showLoadedResources: vi.fn(),
 			showStatus: vi.fn(),
 		} as unknown as InteractiveMode;
 

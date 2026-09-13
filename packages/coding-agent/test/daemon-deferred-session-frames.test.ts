@@ -107,6 +107,77 @@ interface SupervisorWorkerHarness {
 }
 
 describe("deferred session frames during snapshot streams", () => {
+	it.each(["snapshot", "dropped", "backpressure"])(
+		"delivers extension prompts through worker and supervisor during %s",
+		(phase) => {
+			const daemon = new AgentDaemon(join(tmpdir(), "extension-frames-worker.sock"), {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const supervisor = new DaemonSupervisor(join(tmpdir(), "extension-frames-supervisor.sock"), {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				descriptorDir: join(tmpdir(), "extension-frames-supervisor-state"),
+			});
+			const workerSocket = new PassThrough();
+			const supervisorSocket = new PassThrough();
+			const workerClient = socketClient(workerSocket, { supportsExtensionUi: true, transport: "private-framed" });
+			const supervisorClient = socketClient(supervisorSocket, { supportsExtensionUi: true });
+			for (const client of [workerClient, supervisorClient]) {
+				if (phase === "snapshot") client.snapshotActiveSessionIds = new Set([activeSessionId]);
+				if (phase === "backpressure") client.backpressured = true;
+				if (phase === "dropped") {
+					client.deferredSessionFramesDropped = new Set([activeSessionId]);
+					client.deferredSessionPayloadsDropped = new Set([activeSessionId]);
+				}
+			}
+			const worker = {
+				snapshotCache: new Map(),
+				snapshotLoads: new Map(),
+				transcriptCaches: new Map(),
+			} as unknown as SupervisorWorkerHarness;
+			const routing = supervisor as unknown as {
+				clients: Set<DaemonSocketClient>;
+				handleWorkerFrame(worker: SupervisorWorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
+			};
+			routing.clients.add(supervisorClient);
+			const written: DaemonOutbound[] = [];
+			supervisorSocket.on("data", (payload: Buffer) => written.push(JSON.parse(payload.toString())));
+			const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
+			workerSocket.on("data", (payload: Buffer) => {
+				for (const frame of decoder.push(payload)) routing.handleWorkerFrame(worker, frame);
+			});
+			try {
+				(
+					daemon as unknown as { broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void }
+				).broadcastToSession(
+					{
+						activeSessionId,
+						clients: new Set([workerClient]),
+						lastEventSequence: 1,
+						eventGeneration: "generation-deferred",
+					} as ActiveSessionState,
+					{
+						type: "extension_ui_request",
+						activeSessionId,
+						id: "editor-request",
+						method: "editor",
+						payload: { title: "Edit" },
+					},
+				);
+				expect(written).toEqual([
+					expect.objectContaining({ type: "extension_ui_request", id: "editor-request", method: "editor" }),
+				]);
+				expect(workerClient.deferredSessionOutbounds?.size ?? 0).toBe(0);
+				expect(supervisorClient.deferredSessionPayloads?.size ?? 0).toBe(0);
+			} finally {
+				workerSocket.destroy();
+				supervisorSocket.destroy();
+			}
+		},
+	);
+
 	it.each([
 		[1, false, "stream"],
 		[2, false, "stream"],

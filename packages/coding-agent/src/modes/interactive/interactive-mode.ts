@@ -2534,7 +2534,6 @@ export class InteractiveMode {
 
 		const extensionRunner = localSessionHost.getExtensionRunner();
 		this.setupExtensionShortcuts(extensionRunner);
-		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 	}
 
 	private applyRuntimeSettings(): void {
@@ -2845,7 +2844,6 @@ export class InteractiveMode {
 			setRegisteredThemes(this.uiServices.getThemes());
 			await this.refreshConnectionCatalog();
 			this.setupAutocompleteProvider();
-			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
 		await this.subscribeToRosterBar();
@@ -6541,6 +6539,7 @@ export class InteractiveMode {
 				limitTranscript: true,
 			});
 			await this.restoreStreamingMessageFromSnapshot(streamingMessage);
+			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 
 			// Show compaction info if session was compacted
 			const compactionCount = state.compactionCount;
