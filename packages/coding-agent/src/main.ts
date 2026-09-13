@@ -34,23 +34,6 @@ import {
 	SessionSelectorNotFoundError,
 } from "./cli/session-resolver.js";
 import { APP_NAME, expandTildePath, getAgentDir, getSessionDirEnvOverride, VERSION } from "./config.js";
-import {
-	type AgentExecutionMode,
-	type AgentSessionRuntimeConfig,
-	mergeAgentSessionRuntimeConfig,
-	mergeAutonomousConfig,
-} from "./core/agent-session-config.js";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "./core/agent-session-runtime.js";
-import {
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionServices,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "./core/agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { exportFromFile } from "./core/export-html/index.js";
@@ -60,7 +43,6 @@ import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
-import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
@@ -121,6 +103,24 @@ import { ExtensionSelectorComponent } from "./modes/interactive/components/exten
 import { shouldRunOnboarding } from "./modes/interactive/onboarding.js";
 import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
+import type { CreateAgentSessionOptions } from "./sdk/create-session.js";
+import {
+	type AgentSessionRuntimeDiagnostic,
+	type AgentSessionServices,
+	createAgentSessionFromServices,
+	createAgentSessionServices,
+} from "./sdk/services.js";
+import {
+	type AgentExecutionMode,
+	type AgentSessionRuntimeConfig,
+	mergeAgentSessionRuntimeConfig,
+	mergeAutonomousConfig,
+} from "./session/runtime/config.js";
+import {
+	type AgentSessionRuntime,
+	type CreateAgentSessionRuntimeFactory,
+	createAgentSessionRuntime,
+} from "./session/runtime/runtime.js";
 import { isLocalPath } from "./utils/paths.js";
 
 /**

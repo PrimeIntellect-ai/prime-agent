@@ -1,0 +1,1 @@
+- Fixed Git package installation treating option-shaped project directories as clone options.

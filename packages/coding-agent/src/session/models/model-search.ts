@@ -1,5 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { HostRequestHandler } from "../../core/kernel/index.js";
+import type { HostRequestHandler } from "../../kernel/contracts.js";
 
 export interface RlmModelMatch {
 	provider: string;

@@ -1,3 +1,4 @@
+export { IpythonKernelProvisioner } from "../../kernel/provisioner.js";
 export { acpMcpToolNames, createAcpMcpToolDefinitions } from "./acp-mcp.js";
 export {
 	type BashOperations,
@@ -22,7 +23,6 @@ export { withFileMutationQueue } from "./file-mutation-queue.js";
 export {
 	createIpythonTool,
 	createIpythonToolDefinition,
-	IpythonKernelProvisioner,
 	type IpythonToolDetails,
 	type IpythonToolInput,
 	type IpythonToolOptions,

@@ -1,7 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	DEFAULT_RLM_EXTRA_IMPORT_NAMES,
@@ -173,6 +174,27 @@ describe("kernel bootstrap", () => {
 			tempDir = "";
 		}
 	});
+
+	it.each(["src/cli/bootstrap-kernel.ts", "src/core/kernel/bootstrap-cli.ts"])(
+		"preserves bootstrap command success and failure through %s",
+		(entryPoint) => {
+			const overridePython = join(tempDir, "override-python");
+			writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+			process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+			const command = ["--import", "tsx", resolve(entryPoint)];
+			const success = spawnSync(process.execPath, command, { env: process.env, encoding: "utf8", timeout: 10_000 });
+			expect(success.error).toBeUndefined();
+			expect(success.status).toBe(0);
+			expect(success.stdout.trim()).toBe(`kernel python: ${overridePython}`);
+
+			writeFakePython(overridePython, []);
+			const failure = spawnSync(process.execPath, command, { env: process.env, encoding: "utf8", timeout: 10_000 });
+			expect(failure.error).toBeUndefined();
+			expect(failure.status).toBe(1);
+			expect(failure.stdout).toBe("");
+			expect(failure.stderr).toContain("PRIME_AGENT_KERNEL_PYTHON points to a Python missing");
+		},
+	);
 
 	it("returns the configured kernel venv directory", () => {
 		const venv = join(tempDir, "custom-venv");

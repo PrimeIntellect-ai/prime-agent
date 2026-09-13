@@ -3,7 +3,6 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
 import { appendRotatingLog, getAgentLogPath, getDaemonLogPath } from "../../config.js";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
-import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type {
 	AgentCronJob,
@@ -20,6 +19,7 @@ import type { CompactionResult } from "../../session/compaction/types.js";
 import type { ContextTreeNode } from "../../session/context/context-tree.js";
 import type { SessionStats } from "../../session/context/session-stats.js";
 import type { RefinementResult } from "../../session/refinement/types.js";
+import type { AgentSessionRuntimeConfig } from "../../session/runtime/config.js";
 import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "../agents-view/roster-store.js";
 import {
 	DaemonCapabilityUnavailableError,

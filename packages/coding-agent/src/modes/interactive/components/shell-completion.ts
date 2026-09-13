@@ -4,7 +4,7 @@ import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	type AsyncBashCompletionDetails,
 	type CustomMessage,
-} from "../../../core/messages.js";
+} from "../../../session/context/messages.js";
 import { theme } from "../theme/theme.js";
 
 export interface ShellCompletion {

@@ -2,6 +2,14 @@
  * Core modules shared between all run modes.
  */
 
+export type {
+	AgentSessionCreationOptions,
+	AgentSessionRuntimeDiagnostic,
+	AgentSessionServices,
+	CreateAgentSessionFromServicesOptions,
+	CreateAgentSessionServicesOptions,
+} from "../sdk/contracts.js";
+export { createAgentSessionFromServices, createAgentSessionServices } from "../sdk/services.js";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -18,7 +26,7 @@ export type {
 export type { CompactionResult } from "../session/compaction/types.js";
 export type { SessionStats } from "../session/context/session-stats.js";
 export type { RefinementResult } from "../session/refinement/types.js";
-export type { AgentSessionRuntimeConfig } from "./agent-session-config.js";
+export type { AgentSessionRuntimeConfig } from "../session/runtime/config.js";
 export {
 	AgentSessionRuntime,
 	type AgentSessionRuntimeKind,
@@ -26,16 +34,7 @@ export {
 	type CreateAgentSessionRuntimeFactory,
 	type CreateAgentSessionRuntimeResult,
 	createAgentSessionRuntime,
-} from "./agent-session-runtime.js";
-export {
-	type AgentSessionCreationOptions,
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionServices,
-	type CreateAgentSessionFromServicesOptions,
-	type CreateAgentSessionServicesOptions,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "./agent-session-services.js";
+} from "../session/runtime/runtime.js";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.js";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.js";
 // Extensions system

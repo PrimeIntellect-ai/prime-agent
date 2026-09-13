@@ -23,12 +23,6 @@ import {
 	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
 import {
-	type AgentSessionRuntimeConfig,
-	type DurableAgentSessionRuntimeConfig,
-	durableAgentSessionRuntimeConfig,
-	mergeAgentSessionRuntimeConfig,
-} from "../../core/agent-session-config.js";
-import {
 	type AgentCronJob,
 	AgentCronJobStore,
 	isHeartbeatCronJob,
@@ -47,6 +41,12 @@ import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../session/input/prompt-admission.js";
+import {
+	type AgentSessionRuntimeConfig,
+	type DurableAgentSessionRuntimeConfig,
+	durableAgentSessionRuntimeConfig,
+	mergeAgentSessionRuntimeConfig,
+} from "../../session/runtime/config.js";
 import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import {
 	isProcessAlive,

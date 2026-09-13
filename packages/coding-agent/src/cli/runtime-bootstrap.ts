@@ -1,4 +1,4 @@
-import { ensureKernelPython } from "../core/kernel/bootstrap.js";
+import { ensureKernelPython } from "../kernel/bootstrap.js";
 import { ensureTool } from "../utils/tools-manager.js";
 
 export async function runRuntimeBootstrap(): Promise<void> {

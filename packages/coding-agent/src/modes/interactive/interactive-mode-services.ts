@@ -1,10 +1,10 @@
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
-import type { AgentSessionServices } from "../../core/agent-session-services.js";
 import type { ExtensionCommandContext, ExtensionRunner, ToolDefinition } from "../../core/extensions/index.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
+import type { AgentSessionServices } from "../../sdk/contracts.js";
 import type { AgentSession, ExtensionBindings } from "../../session/agent-session.js";
+import type { AgentSessionRuntime } from "../../session/runtime/runtime.js";
 import type { Theme } from "./theme/theme.js";
 
 /**

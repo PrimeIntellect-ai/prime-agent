@@ -11,9 +11,9 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { ReplayBuiltInToolName } from "../../core/extensions/index.js";
 import type { InputSource } from "../../core/extensions/types.js";
-import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import type { KernelSentAgentMessage } from "../../kernel/contracts.js";
 import type { AgentAutonomousStatus } from "../../session/autonomy/autonomous.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../session/children/max-depth.js";
 import type { CompactionResult } from "../../session/compaction/types.js";

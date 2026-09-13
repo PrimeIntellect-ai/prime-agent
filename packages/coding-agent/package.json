@@ -38,7 +38,7 @@
 		"copy-assets": "shx mkdir -p dist/modes/interactive/theme && shx cp src/modes/interactive/theme/*.json dist/modes/interactive/theme/ && shx mkdir -p dist/modes/interactive/assets && shx cp src/modes/interactive/assets/*.png dist/modes/interactive/assets/ && shx mkdir -p dist/core/export-html/vendor && shx cp src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/core/export-html/ && shx cp src/core/export-html/vendor/*.js dist/core/export-html/vendor/ && shx rm -rf dist/prime-agent-runtime && shx cp -r ../../prime-agent-runtime dist/prime-agent-runtime && shx rm -rf dist/skills && shx cp -r skills dist/skills",
 		"copy-binary-assets": "node scripts/copy-binary-assets.mjs",
 		"test": "vitest --run",
-		"test:ci": "tsx src/core/kernel/bootstrap-cli.ts && vitest --run --exclude test/daemon-supervisor-process.test.ts",
+		"test:ci": "tsx src/cli/bootstrap-kernel.ts && vitest --run --exclude test/daemon-supervisor-process.test.ts",
 		"test:process": "vitest --run test/daemon-supervisor-process.test.ts",
 		"test:process-stress": "vitest --run --tagsFilter process-stress test/daemon-supervisor-process.test.ts",
 		"postinstall": "node postinstall.cjs",

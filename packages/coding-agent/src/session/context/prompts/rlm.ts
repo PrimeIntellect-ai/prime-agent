@@ -1,4 +1,4 @@
-import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../../../core/kernel/bootstrap.js";
+import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../../../kernel/bootstrap.js";
 
 export interface RlmPromptOptions {
 	cwd: string;

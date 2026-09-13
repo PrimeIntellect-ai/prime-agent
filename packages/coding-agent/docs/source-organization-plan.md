@@ -1,6 +1,6 @@
 # Completing coding-agent source organization
 
-Status: Kevin approved implementation on September 11, 2026, with GPT-Astra delegation, full feature/backward compatibility and extensive Prime Sandbox validation. Audited stack base: `254666f2cfb70b4740ea5b5a67703a34ada44ffc`. Session and kernel ownership implementation is in progress; later package-wide assignments remain subject to detailed review. This supersedes the older flat, top-level goals/compaction/refinement proposal in ENG-5934; the architecture guide remains the placement rule. The repository-wide [refactoring guide](../../../docs/refactoring.md) records the reusable method.
+Status: Kevin approved implementation on September 11, 2026, with GPT-Astra delegation, full feature/backward compatibility and extensive Prime Sandbox validation. Audited stack base: `254666f2cfb70b4740ea5b5a67703a34ada44ffc`. The two ownership follow-ups implement the session and kernel/runtime tables below; combined validation is in progress. Later package-wide assignments remain subject to detailed review. This supersedes the older flat, top-level goals/compaction/refinement proposal in ENG-5934; the architecture guide remains the placement rule. The repository-wide [refactoring guide](../../../docs/refactoring.md) records the reusable method.
 
 ## What the first stack missed
 
@@ -108,7 +108,7 @@ Refinement now separates lightweight outcome formatting from planning. Message c
 
 ## Kernel and runtime completion
 
-This is the second consolidated follow-up PR. It completes kernel/runtime and SDK ownership together; it is pending integration and validation after the session feature PR.
+Implemented in the second consolidated follow-up PR. Kernel/runtime and SDK ownership move together. Historical module paths remain explicit compatibility exports, except the executable bootstrap wrapper and the legacy `SessionKernel.build()` adapter described below.
 
 | Current source | Destination/responsibility |
 | --- | --- |
@@ -122,7 +122,7 @@ This is the second consolidated follow-up PR. It completes kernel/runtime and SD
 | `session/kernel/kernel-host-handlers.ts` | `session/runtime/host-bridge.ts`; composition only. |
 | Session kernel message/observe/heartbeat request handlers | Respective coordination features' request adapters; host bridge supplies current session operations. |
 
-`SessionKernel.build()` currently constructs all built-in tools. Tool assembly belongs to the existing session tool owner; kernel lifecycle should expose its provisioner/client. Preserve readiness and event ordering while changing this dependency.
+The canonical kernel lifecycle exposes `prepare()` and its provisioner; `session/tools/` assembles built-in tools afterward. The historical `session/kernel/kernel.ts` adapter preserves `SessionKernel.build()` by calling these same owners in the original order. It shares one provisioner and inherited disposal, retaining late-message callbacks and options. No tool or lifecycle implementation is duplicated.
 
 Keep the independent kernel capability usable by postinstall/bootstrap without a session or terminal UI. Preserve process-wide startup limiting, error repair, old-snapshot flush before replacement restore, reinstalling live skill handles after restore, and final disposal. Do not fold input/turn/child policy into `session/runtime/` to empty other directories.
 
