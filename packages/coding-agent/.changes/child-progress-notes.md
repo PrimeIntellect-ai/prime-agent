@@ -1,0 +1,1 @@
+- Added `rlm.progress.note`, a throttled child-to-parent progress channel: children report short in-flight notes that surface as `progressNote`, `lastActivityAt`, and `activityStaleMs` on child snapshots and in `rlm.list_subagents()` roster entries, so the parent kernel sees child state without polling or interrupting.

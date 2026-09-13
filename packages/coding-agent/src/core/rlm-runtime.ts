@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import type { AgentSession } from "./agent-session.js";
+import type { AgentSession, RlmChildAgentActivity } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
@@ -41,6 +41,20 @@ export interface RlmSubagentRegistryEntry {
 	session_name: string;
 	session_dir: string;
 	status: RlmSubagentRegistryStatus;
+	/** Live-state extras, present when the run or retained session is locally available. */
+	activity?: RlmChildAgentActivity;
+	tool_use_count?: number;
+	duration_ms?: number;
+	/** Compacted answer preview, hard-capped for the kernel roster. */
+	answer_preview?: string;
+	replied_since_task?: boolean;
+	/** Latest child progress note (`rlm.progress.note`), newest wins. */
+	progress_note?: string;
+	/** One-line task label derived from the persisted prompt. */
+	label?: string;
+	last_activity_at?: number;
+	/** Set when a running child has had no tracked activity for the staleness threshold. */
+	activity_stale_ms?: number;
 }
 
 export interface RlmListSubagentsResult {
@@ -284,6 +298,37 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 		}
 		const { subagent, outcome } = await handler(payload.target.trim());
 		return outcome === undefined ? { subagent } : { subagent, outcome };
+	};
+}
+
+export interface RlmProgressNoteResult {
+	accepted: boolean;
+	/** Milliseconds until the next note can be accepted; absent when accepted. */
+	retry_after_ms: number | undefined;
+}
+
+export type RlmProgressNoteHandler = (message: string) => RlmProgressNoteResult;
+
+/** Hard bound for one progress note; the session handler owns the time throttle. */
+export const RLM_PROGRESS_NOTE_MAX_LENGTH = 512;
+
+/**
+ * Child progress notes: `rlm.progress.note` lets a child report short in-flight
+ * status that its parent reads from snapshots and roster entries. Pull-based
+ * only — notes never steer the parent or grow its message queue.
+ */
+export function createRlmProgressNoteHostHandler(handler: RlmProgressNoteHandler): HostRequestHandler {
+	return async (payload) => {
+		const raw = payload.message;
+		if (typeof raw !== "string" || !raw.trim()) {
+			throw new Error("rlm.progress.note message must be a non-empty string");
+		}
+		const message = raw.trim();
+		if (message.length > RLM_PROGRESS_NOTE_MAX_LENGTH) {
+			throw new Error(`rlm.progress.note message must be at most ${RLM_PROGRESS_NOTE_MAX_LENGTH} characters`);
+		}
+		const { accepted, retry_after_ms } = handler(message);
+		return retry_after_ms === undefined ? { accepted } : { accepted, retry_after_ms };
 	};
 }
 

@@ -41,6 +41,12 @@ class RLMModel:
 
 
 @dataclass(frozen=True)
+class RLMSubagentActivity:
+    kind: str
+    tool_name: str | None = None
+
+
+@dataclass(frozen=True)
 class RLMSubagent:
     rlm_child_id: str
     active_session_id: str | None
@@ -48,6 +54,21 @@ class RLMSubagent:
     session_name: str
     session_dir: Path
     status: str
+    activity: RLMSubagentActivity | None = None
+    tool_use_count: int | None = None
+    duration_ms: int | None = None
+    answer_preview: str | None = None
+    replied_since_task: bool | None = None
+    progress_note: str | None = None
+    label: str | None = None
+    last_activity_at: float | None = None
+    activity_stale_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class RLMProgressNoteResult:
+    accepted: bool
+    retry_after_ms: int | None = None
 
 
 def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
@@ -199,6 +220,48 @@ async def find_models(query: str = "", limit: int = 8) -> list[RLMModel]:
     return [_model_from_payload(model) for model in models]
 
 
+def _optional_str_field(payload: dict[str, Any], field: str, operation: str) -> str | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RuntimeError(f"{operation} entry has invalid {field}")
+    return value
+
+
+def _optional_int_field(payload: dict[str, Any], field: str, operation: str) -> int | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RuntimeError(f"{operation} entry has invalid {field}")
+    return value
+
+
+def _optional_bool_field(payload: dict[str, Any], field: str, operation: str) -> bool | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise RuntimeError(f"{operation} entry has invalid {field}")
+    return value
+
+
+def _optional_activity_field(payload: dict[str, Any], operation: str) -> RLMSubagentActivity | None:
+    value = payload.get("activity")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{operation} entry has invalid activity")
+    kind = value.get("kind")
+    if kind not in {"waiting", "writing", "executing"}:
+        raise RuntimeError(f"{operation} entry has invalid activity kind")
+    tool_name = value.get("tool_name")
+    if tool_name is not None and not isinstance(tool_name, str):
+        raise RuntimeError(f"{operation} entry has invalid activity tool_name")
+    return RLMSubagentActivity(kind=kind, tool_name=tool_name)
+
+
 def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") -> RLMSubagent:
     if not isinstance(payload, dict):
         raise RuntimeError(f"{operation} returned an invalid subagent entry")
@@ -227,6 +290,15 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         session_name=session_name,
         session_dir=Path(session_dir),
         status=status,
+        activity=_optional_activity_field(payload, operation),
+        tool_use_count=_optional_int_field(payload, "tool_use_count", operation),
+        duration_ms=_optional_int_field(payload, "duration_ms", operation),
+        answer_preview=_optional_str_field(payload, "answer_preview", operation),
+        replied_since_task=_optional_bool_field(payload, "replied_since_task", operation),
+        progress_note=_optional_str_field(payload, "progress_note", operation),
+        label=_optional_str_field(payload, "label", operation),
+        last_activity_at=_optional_int_field(payload, "last_activity_at", operation),
+        activity_stale_ms=_optional_int_field(payload, "activity_stale_ms", operation),
     )
 
 
@@ -237,6 +309,33 @@ async def list_subagents() -> list[RLMSubagent]:
     if not isinstance(entries, list):
         raise RuntimeError("rlm.list_subagents returned an invalid subagents registry")
     return [_subagent_from_payload(entry) for entry in entries]
+
+
+RLM_PROGRESS_NOTE_MAX_LENGTH = 512
+
+
+async def progress_note(message: str) -> RLMProgressNoteResult:
+    """Report brief in-flight progress to the parent orchestrator.
+
+    The note (at most 512 characters, about one per 10 seconds) reaches the
+    parent's child snapshots and roster entries without steering the parent
+    or requiring an explicit reply. A throttled note returns
+    ``accepted=False`` with a ``retry_after_ms`` hint instead of raising.
+    """
+    if not isinstance(message, str):
+        raise TypeError(f"message must be str, got {type(message).__name__}")
+    if not message.strip():
+        raise ValueError("message must not be empty")
+    if len(message.strip()) > RLM_PROGRESS_NOTE_MAX_LENGTH:
+        raise ValueError(f"message must be at most {RLM_PROGRESS_NOTE_MAX_LENGTH} characters")
+    payload = await host_request("rlm.progress.note", {"message": message.strip()})
+    accepted = payload.get("accepted")
+    if not isinstance(accepted, bool):
+        raise RuntimeError("rlm.progress.note returned an invalid accepted flag")
+    retry_after_ms = payload.get("retry_after_ms")
+    if retry_after_ms is not None and (not isinstance(retry_after_ms, int) or isinstance(retry_after_ms, bool)):
+        raise RuntimeError("rlm.progress.note returned an invalid retry_after_ms")
+    return RLMProgressNoteResult(accepted=accepted, retry_after_ms=retry_after_ms)
 
 
 async def delete_subagent(target: str | RLMSubagent) -> RLMSubagent:
@@ -332,6 +431,9 @@ class _RLMNamespace:
     async def list_subagents(self) -> list[RLMSubagent]:
         return await list_subagents()
 
+    async def progress_note(self, message: str) -> RLMProgressNoteResult:
+        return await progress_note(message)
+
     async def delete_subagent(self, target: str | RLMSubagent) -> RLMSubagent:
         return await delete_subagent(target)
 
@@ -367,8 +469,10 @@ __all__ = [
     "NotEnabled",
     "RLMCreateSessionHandle",
     "RLMModel",
+    "RLMProgressNoteResult",
     "RLMSpawnHandle",
     "RLMSubagent",
+    "RLMSubagentActivity",
     "create_session",
     "RefinementEvent",
     "bash",
@@ -379,6 +483,7 @@ __all__ = [
     "harness",
     "host_request",
     "list_subagents",
+    "progress_note",
     "rlm",
     "spawn",
 ]

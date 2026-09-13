@@ -237,5 +237,146 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                 asyncio.run(rlm_module.list_subagents())
 
 
+class RlmProgressNoteTest(unittest.TestCase):
+    def test_progress_note_round_trips_an_accepted_note(self) -> None:
+        host_request = AsyncMock(return_value={"accepted": True})
+
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(rlm_module.rlm.progress_note("building tests"))
+
+        self.assertTrue(result.accepted)
+        self.assertIsNone(result.retry_after_ms)
+        host_request.assert_awaited_once_with("rlm.progress.note", {"message": "building tests"})
+
+    def test_progress_note_returns_the_throttle_hint(self) -> None:
+        host_request = AsyncMock(return_value={"accepted": False, "retry_after_ms": 7000})
+
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(rlm_module.rlm.progress_note("second note"))
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.retry_after_ms, 7000)
+
+    def test_progress_note_validates_the_message(self) -> None:
+        with self.assertRaisesRegex(TypeError, "message must be str"):
+            asyncio.run(rlm_module.rlm.progress_note(42))
+        with self.assertRaisesRegex(ValueError, "empty"):
+            asyncio.run(rlm_module.rlm.progress_note("   "))
+        with self.assertRaisesRegex(ValueError, "at most 512"):
+            asyncio.run(rlm_module.rlm.progress_note("x" * 513))
+        # At the bound the message is accepted.
+        host_request = AsyncMock(return_value={"accepted": True})
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(rlm_module.rlm.progress_note("x" * 512))
+        self.assertTrue(result.accepted)
+
+    def test_progress_note_rejects_invalid_payloads(self) -> None:
+        host_request = AsyncMock(return_value={"retry_after_ms": 1000})
+        with patch.object(rlm_module, "host_request", host_request):
+            with self.assertRaisesRegex(RuntimeError, "accepted"):
+                asyncio.run(rlm_module.rlm.progress_note("note"))
+
+        host_request = AsyncMock(return_value={"accepted": True, "retry_after_ms": "soon"})
+        with patch.object(rlm_module, "host_request", host_request):
+            with self.assertRaisesRegex(RuntimeError, "retry_after_ms"):
+                asyncio.run(rlm_module.rlm.progress_note("note"))
+
+
+class RlmSubagentExtrasTest(unittest.TestCase):
+    def test_lists_live_state_extras_from_host(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "subagents": [
+                    {
+                        "rlm_child_id": "sub-a1b2c3d4",
+                        "active_session_id": None,
+                        "session_id": "session-child",
+                        "session_name": "worker-a",
+                        "session_dir": "/tmp/parent/sub-a1b2c3d4",
+                        "status": "running",
+                        "activity": {"kind": "executing", "tool_name": "ipython"},
+                        "tool_use_count": 3,
+                        "duration_ms": 4321,
+                        "answer_preview": "task finished cleanly",
+                        "replied_since_task": False,
+                        "progress_note": "halfway done",
+                        "label": "slow task",
+                        "last_activity_at": 1757700000000,
+                        "activity_stale_ms": None,
+                    }
+                ]
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            subagents = asyncio.run(rlm_module.list_subagents())
+
+        self.assertEqual(len(subagents), 1)
+        entry = subagents[0]
+        self.assertEqual(entry.activity.kind, "executing")
+        self.assertEqual(entry.activity.tool_name, "ipython")
+        self.assertEqual(entry.tool_use_count, 3)
+        self.assertEqual(entry.duration_ms, 4321)
+        self.assertEqual(entry.answer_preview, "task finished cleanly")
+        self.assertFalse(entry.replied_since_task)
+        self.assertEqual(entry.progress_note, "halfway done")
+        self.assertEqual(entry.label, "slow task")
+        self.assertEqual(entry.last_activity_at, 1757700000000)
+        self.assertIsNone(entry.activity_stale_ms)
+
+    def test_accepts_legacy_entries_without_extras(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "subagents": [
+                    {
+                        "rlm_child_id": "sub-old",
+                        "active_session_id": None,
+                        "session_id": None,
+                        "session_name": "worker-old",
+                        "session_dir": "/tmp/parent/sub-old",
+                        "status": "completed",
+                    }
+                ]
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            subagents = asyncio.run(rlm_module.list_subagents())
+
+        entry = subagents[0]
+        self.assertIsNone(entry.activity)
+        self.assertIsNone(entry.tool_use_count)
+        self.assertIsNone(entry.duration_ms)
+        self.assertIsNone(entry.answer_preview)
+        self.assertIsNone(entry.replied_since_task)
+        self.assertIsNone(entry.progress_note)
+        self.assertIsNone(entry.label)
+        self.assertIsNone(entry.last_activity_at)
+        self.assertIsNone(entry.activity_stale_ms)
+
+    def test_rejects_invalid_extras(self) -> None:
+        base_entry = {
+            "rlm_child_id": "sub-x",
+            "active_session_id": None,
+            "session_id": None,
+            "session_name": "worker-x",
+            "session_dir": "/tmp/parent/sub-x",
+            "status": "running",
+        }
+        for extras, pattern in (
+            ({"activity": {"kind": "nonsense"}}, "invalid activity kind"),
+            ({"activity": {"kind": "executing", "tool_name": 7}}, "invalid activity tool_name"),
+            ({"tool_use_count": "three"}, "invalid tool_use_count"),
+            ({"replied_since_task": "no"}, "invalid replied_since_task"),
+            ({"progress_note": 42}, "invalid progress_note"),
+            ({"last_activity_at": "soon"}, "invalid last_activity_at"),
+        ):
+            with self.subTest(extras=extras):
+                host_request = AsyncMock(return_value={"subagents": [{**base_entry, **extras}]})
+                with patch.object(rlm_module, "host_request", host_request):
+                    with self.assertRaisesRegex(RuntimeError, pattern):
+                        asyncio.run(rlm_module.list_subagents())
+
+
 if __name__ == "__main__":
     unittest.main()
