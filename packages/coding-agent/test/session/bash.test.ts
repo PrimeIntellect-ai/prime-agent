@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
 import type { BashExecutionMessage } from "../../src/core/messages.js";
-import { SessionBash, type SessionBashEvent, type SessionBashHost } from "../../src/session/bash.js";
+import { SessionBash, type SessionBashEvent, type SessionBashHost } from "../../src/session/tools/bash.js";
 
 function deferred() {
 	let resolve = () => {};

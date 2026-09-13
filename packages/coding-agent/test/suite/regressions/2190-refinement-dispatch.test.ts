@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AutoRefinement } from "../../../src/session/auto-refinement.js";
-import type { SessionRefinement, SessionRefinementHost } from "../../../src/session/refinement.js";
+import type { AutoRefinement } from "../../../src/session/refinement/auto-refinement.js";
+import type { SessionRefinement, SessionRefinementHost } from "../../../src/session/refinement/refinement.js";
 import { createHarness, type Harness } from "../harness.js";
 import { withStreaming } from "../scheduling.js";
 

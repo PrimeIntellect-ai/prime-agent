@@ -3,7 +3,7 @@ import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
-import type { SessionRetry } from "../../../src/session/retry.js";
+import type { SessionRetry } from "../../../src/session/turns/retry.js";
 import { createHarness, type Harness } from "../harness.js";
 
 function structuredFailureMessage(kind: string, status: number, errorMessage: string): AssistantMessage {
@@ -335,11 +335,11 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		const event = { type: "agent_end", messages: [message] } as AgentEvent;
 		const session = harness.session as unknown as {
 			_retry: SessionRetry;
-			_processAgentEvent(event: AgentEvent): Promise<void>;
+			_events: { processAgentEvent(event: AgentEvent): Promise<void> };
 		};
 
 		session._retry.observeAgentEnd(event);
-		await session._processAgentEvent(event);
+		await session._events.processAgentEvent(event);
 
 		expect(harness.session.isRetrying).toBe(false);
 		expect(harness.eventsOfType("auto_retry_end").map((retryEvent) => retryEvent.success)).toEqual([false]);

@@ -3,7 +3,7 @@ import {
 	createTurnExecutionPolicy,
 	type TurnPreparationHost,
 	TurnPreparer,
-} from "../../src/session/turn-preparation.js";
+} from "../../src/session/turns/turn-preparation.js";
 
 function createPreparation(overrides: Partial<TurnPreparationHost> = {}) {
 	const order: string[] = [];

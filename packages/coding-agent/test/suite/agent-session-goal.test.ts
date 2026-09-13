@@ -7,10 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
-import type { GoalHostResponse } from "../../src/core/goals.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
+import { GOAL_STATE_CUSTOM_TYPE, type GoalHostResponse } from "../../src/session/goals/contracts.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { conversationMessages, createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 
@@ -919,7 +919,6 @@ describe("initial goal seeding from config", () => {
 		});
 
 		// Goal is persisted before first prompt
-		const { GOAL_STATE_CUSTOM_TYPE } = await import("../../src/core/goals.js");
 		const branch = harness.sessionManager.getBranch();
 		const goalEntry = branch.find((e) => e.type === "custom" && e.customType === GOAL_STATE_CUSTOM_TYPE);
 		expect(goalEntry).toBeDefined();

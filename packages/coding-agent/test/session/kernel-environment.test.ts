@@ -6,7 +6,7 @@ import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { Skill } from "../../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "../../src/core/websearch-credential.js";
-import { KernelEnvironment, type KernelEnvironmentHost } from "../../src/session/kernel-environment.js";
+import { KernelEnvironment, type KernelEnvironmentHost } from "../../src/session/kernel/kernel-environment.js";
 
 function createEnvironment(overrides: Partial<KernelEnvironmentHost> = {}, sessionDir?: string) {
 	return new KernelEnvironment(

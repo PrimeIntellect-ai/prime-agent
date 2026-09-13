@@ -167,10 +167,12 @@ describe.each(["opencode", "opencode-go"])("ENG-6009 %s maintenance identity", (
 		const target = harness.sessionManager.getLeafId()!;
 		await ordinary(harness, "explore a branch");
 		operation = "branch-summary";
+		const sessionIdentity = vi.spyOn(harness.session, "sessionId", "get");
 		await expect(harness.session.navigateTree(target, { summarize: true })).resolves.toMatchObject({
 			cancelled: false,
 			summaryEntry: { summary: expect.stringContaining("OK") },
 		});
+		expect(sessionIdentity).toHaveBeenCalled();
 		expectIdentity(harness, 1);
 	});
 	it("keeps the owning session identity across a resume", async () => {

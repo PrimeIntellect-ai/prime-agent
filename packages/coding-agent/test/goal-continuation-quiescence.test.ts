@@ -1,125 +1,127 @@
+import type { GetContinuationMessagesContext } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { AgentSession } from "../src/core/agent-session.js";
-import { emptyGoalState } from "../src/core/goals.js";
-import { GoalController } from "../src/goals/controller.js";
-import { SessionInputScheduler } from "../src/session/input-scheduler.js";
+import { ActionStore } from "../src/core/session-action-store.js";
+import { SessionGoalContinuation, type SessionGoalContinuationHost } from "../src/session/goals/continuation.js";
+import { emptyGoalState } from "../src/session/goals/contracts.js";
+import { GoalController } from "../src/session/goals/controller.js";
+import { SessionInputScheduler } from "../src/session/input/input-scheduler.js";
+import type { QueuedSessionAction } from "../src/session/prepared-actions.js";
 
-type Harness = {
-	_goals: GoalController;
-	_goalContinuationAwaitsRlmWork: boolean;
-	_disposed: boolean;
-	_disposing: boolean;
-	_inputScheduler: SessionInputScheduler;
-	_hasUnsettledRlmQuiescenceWork: () => boolean;
-	_stopGoalContinuationForTerminalMessage: () => boolean;
-	_ensureGoalRuntimeActive: () => void;
-	_createPreparedTurnAction: ReturnType<typeof vi.fn>;
-	_admitSessionInput: ReturnType<typeof vi.fn>;
-};
-
-const getGoalContinuation = Reflect.get(AgentSession.prototype, "_getGoalContinuationMessages") as (
-	this: Harness,
-	context: { message: unknown; context: unknown },
-) => Promise<unknown[]>;
-const maybeResume = Reflect.get(AgentSession.prototype, "_maybeResumeGoalContinuationAfterRlmWork") as (
-	this: Harness,
-) => void;
-
-function harness(overrides: Partial<Harness> = {}): Harness {
+function harness(overrides: { awaitsChildWork?: boolean } & Partial<SessionGoalContinuationHost> = {}) {
 	const goals = new GoalController({ load: emptyGoalState, save: () => {} }, () => {});
 	goals.start("ship it", undefined);
-	return {
-		_goals: goals,
-		_goalContinuationAwaitsRlmWork: false,
-		_disposed: false,
-		_disposing: false,
-		_inputScheduler: new SessionInputScheduler({ canSchedule: () => false, run: async () => {} }),
-		_hasUnsettledRlmQuiescenceWork: () => false,
-		_stopGoalContinuationForTerminalMessage: () => false,
-		_ensureGoalRuntimeActive: () => {},
-		_createPreparedTurnAction: vi.fn((schedule: string, _text: string, _images: unknown, options: unknown) => ({
-			schedule,
-			options,
-		})),
-		_admitSessionInput: vi.fn(),
+	const actions = new ActionStore<QueuedSessionAction>();
+	const scheduler = new SessionInputScheduler({ canSchedule: () => false, run: async () => {} });
+	const admit = vi.fn<SessionGoalContinuationHost["admit"]>(
+		overrides.admit ??
+			((action) => {
+				actions.enqueue(action);
+				return { accepted: true, disposition: "queued" };
+			}),
+	);
+	const owner = new SessionGoalContinuation(goals, actions, {
+		getGoalState: () => goals.current,
+		queuePrompt: async () => false,
+		getScheduler: () => scheduler,
+		isDisposed: () => false,
+		isDisposing: () => false,
+		hasUnsettledChildWork: () => false,
+		ensureRuntimeActive: () => {},
+		cancelActions: (predicate) => actions.remove(predicate),
+		clearPendingGoalContexts: () => {},
+		emitQueueUpdate: () => {},
+		emitGoalUpdate: () => {},
+		validate: async () => {},
+		isStreaming: () => false,
+		includesGoals: () => true,
+		getAgent: () => ({ removeQueuedMessages: () => [] }),
 		...overrides,
-	};
+		admit,
+	});
+	if (overrides.awaitsChildWork) owner.deferUntilChildSettlement();
+	return { owner, goals, scheduler, actions, admit };
 }
 
-const context = { message: { role: "assistant", stopReason: "stop" }, context: {} };
+const context: GetContinuationMessagesContext = {
+	message: fauxAssistantMessage("done"),
+	toolResults: [],
+	context: { systemPrompt: "", messages: [], tools: [] },
+	newMessages: [],
+};
 
 describe("goal continuation vs unsettled subagent work", () => {
 	it("defers the continuation while descendant work is unsettled", async () => {
-		const mode = harness({ _hasUnsettledRlmQuiescenceWork: () => true });
-		await expect(getGoalContinuation.call(mode, context)).resolves.toEqual([]);
-		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
-		expect(mode._goals.state.continuationsUsed).toBe(0);
+		const mode = harness({ hasUnsettledChildWork: () => true });
+		await expect(mode.owner.getGoalContinuationMessages(context)).resolves.toEqual([]);
+		expect(mode.owner.awaitsChildWork).toBe(true);
+		expect(mode.goals.state.continuationsUsed).toBe(0);
 	});
 
 	it("continues normally when no descendant work is pending", async () => {
 		const mode = harness();
-		const messages = await getGoalContinuation.call(mode, context);
+		const messages = await mode.owner.getGoalContinuationMessages(context);
 		expect(messages).toHaveLength(1);
-		expect(mode._goalContinuationAwaitsRlmWork).toBe(false);
-		expect(mode._goals.state.continuationsUsed).toBe(1);
+		expect(mode.owner.awaitsChildWork).toBe(false);
+		expect(mode.goals.state.continuationsUsed).toBe(1);
 	});
 
 	it("resumes a deferred continuation exactly once, unqueued, idle-waking, and counted", () => {
-		const mode = harness({ _goalContinuationAwaitsRlmWork: true });
-		maybeResume.call(mode);
-		maybeResume.call(mode);
-		expect(mode._admitSessionInput).toHaveBeenCalledTimes(1);
-		const [action, options] = mode._admitSessionInput.mock.calls[0]!;
-		expect((action as { options: { resumeIfIdle: boolean } }).options.resumeIfIdle).toBe(true);
+		const mode = harness({ awaitsChildWork: true });
+		mode.owner.maybeResumeGoalContinuationAfterRlmWork();
+		mode.owner.maybeResumeGoalContinuationAfterRlmWork();
+		expect(mode.admit).toHaveBeenCalledTimes(1);
+		const [action, options] = mode.admit.mock.calls[0]!;
+		expect(action?.wake).toBe("immediate");
 		expect(options).toBeUndefined();
-		expect(mode._goals.state.continuationsUsed).toBe(1);
+		expect(mode.goals.state.continuationsUsed).toBe(1);
 	});
 
 	it("keeps the deferral while admission is paused and retries after release", () => {
 		const paused = harness({
-			_goalContinuationAwaitsRlmWork: true,
+			awaitsChildWork: true,
 		});
-		const pause = paused._inputScheduler.acquireAdmissionPause(() => {});
-		maybeResume.call(paused);
-		expect(paused._admitSessionInput).not.toHaveBeenCalled();
-		expect(paused._goalContinuationAwaitsRlmWork).toBe(true);
+		const pause = paused.scheduler.acquireAdmissionPause(() => {});
+		paused.owner.maybeResumeGoalContinuationAfterRlmWork();
+		expect(paused.admit).not.toHaveBeenCalled();
+		expect(paused.owner.awaitsChildWork).toBe(true);
 
 		pause.release();
-		maybeResume.call(paused);
-		expect(paused._admitSessionInput).toHaveBeenCalledTimes(1);
-		expect(paused._goalContinuationAwaitsRlmWork).toBe(false);
+		paused.owner.maybeResumeGoalContinuationAfterRlmWork();
+		expect(paused.admit).toHaveBeenCalledTimes(1);
+		expect(paused.owner.awaitsChildWork).toBe(false);
 	});
 
 	it("keeps the deferral while the pump is suspended after an abort", () => {
-		const mode = harness({ _goalContinuationAwaitsRlmWork: true });
-		mode._inputScheduler.suspend("abort");
-		maybeResume.call(mode);
-		expect(mode._admitSessionInput).not.toHaveBeenCalled();
-		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
+		const mode = harness({ awaitsChildWork: true });
+		mode.scheduler.suspend("abort");
+		mode.owner.maybeResumeGoalContinuationAfterRlmWork();
+		expect(mode.admit).not.toHaveBeenCalled();
+		expect(mode.owner.awaitsChildWork).toBe(true);
 	});
 
 	it("keeps the deferral and rolls back the count when admission throws", () => {
 		const mode = harness({
-			_goalContinuationAwaitsRlmWork: true,
-			_admitSessionInput: vi.fn(() => {
+			awaitsChildWork: true,
+			admit: vi.fn(() => {
 				throw new Error("admission race");
 			}),
 		});
-		maybeResume.call(mode);
-		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
-		expect(mode._goals.state.continuationsUsed).toBe(0);
+		mode.owner.maybeResumeGoalContinuationAfterRlmWork();
+		expect(mode.owner.awaitsChildWork).toBe(true);
+		expect(mode.goals.state.continuationsUsed).toBe(0);
 	});
 
 	it("stays deferred while work remains and drops the deferral for inactive goals", () => {
-		const busy = harness({ _goalContinuationAwaitsRlmWork: true, _hasUnsettledRlmQuiescenceWork: () => true });
-		maybeResume.call(busy);
-		expect(busy._admitSessionInput).not.toHaveBeenCalled();
-		expect(busy._goalContinuationAwaitsRlmWork).toBe(true);
+		const busy = harness({ awaitsChildWork: true, hasUnsettledChildWork: () => true });
+		busy.owner.maybeResumeGoalContinuationAfterRlmWork();
+		expect(busy.admit).not.toHaveBeenCalled();
+		expect(busy.owner.awaitsChildWork).toBe(true);
 
-		const inactive = harness({ _goalContinuationAwaitsRlmWork: true });
-		inactive._goals.pause();
-		maybeResume.call(inactive);
-		expect(inactive._admitSessionInput).not.toHaveBeenCalled();
-		expect(inactive._goalContinuationAwaitsRlmWork).toBe(false);
+		const inactive = harness({ awaitsChildWork: true });
+		inactive.goals.pause();
+		inactive.owner.maybeResumeGoalContinuationAfterRlmWork();
+		expect(inactive.admit).not.toHaveBeenCalled();
+		expect(inactive.owner.awaitsChildWork).toBe(false);
 	});
 });
