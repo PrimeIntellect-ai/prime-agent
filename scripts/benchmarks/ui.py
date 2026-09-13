@@ -31,6 +31,7 @@ SUBAGENT_MESSAGES = 400
 BASE_TIMESTAMP_MS = 946684800000  # 2000-01-01T00:00:00Z; fixed so fixtures are deterministic
 TOOL_OUTPUT_LINES = 60
 
+AGENTS_VIEW_HINT = "Search sessions"
 SEARCH_PLACEHOLDER = "Search sessions"
 AGENTS_VIEW_FOOTER = "Ctrl+N new"
 ROSTER_COUNT = re.compile(r"agents\s+(\d+) running, (\d+) idle, (\d+) inactive")
