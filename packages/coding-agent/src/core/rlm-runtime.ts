@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import type { AgentSession, RlmChildAgentActivity } from "./agent-session.js";
+import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
@@ -34,6 +34,15 @@ export interface RlmSpawnHandle {
 
 export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
 
+/**
+ * Kernel-wire shape of a child activity snapshot: snake_case like the rest of
+ * the registry, so `JSON.stringify` needs no key rewrite on the Python side.
+ */
+export interface RlmSubagentRegistryActivity {
+	kind: "waiting" | "writing" | "executing";
+	tool_name?: string;
+}
+
 export interface RlmSubagentRegistryEntry {
 	rlm_child_id: string;
 	active_session_id: string | null;
@@ -42,7 +51,7 @@ export interface RlmSubagentRegistryEntry {
 	session_dir: string;
 	status: RlmSubagentRegistryStatus;
 	/** Live-state extras, present when the run or retained session is locally available. */
-	activity?: RlmChildAgentActivity;
+	activity?: RlmSubagentRegistryActivity;
 	tool_use_count?: number;
 	duration_ms?: number;
 	/** Compacted answer preview, hard-capped for the kernel roster. */

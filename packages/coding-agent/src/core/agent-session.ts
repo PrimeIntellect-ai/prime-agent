@@ -10249,7 +10249,14 @@ export class AgentSession {
 		| "activity_stale_ms"
 	> {
 		return {
-			activity: snapshot.activity,
+			// Project to the registry's snake_case wire shape; the Python kernel
+			// reads activity.tool_name directly from the JSON payload.
+			activity: snapshot.activity
+				? {
+						kind: snapshot.activity.kind,
+						...(snapshot.activity.toolName ? { tool_name: snapshot.activity.toolName } : {}),
+					}
+				: undefined,
 			tool_use_count: snapshot.toolUseCount,
 			duration_ms: snapshot.durationMs,
 			answer_preview: snapshot.answerPreview?.slice(0, RLM_REGISTRY_ANSWER_PREVIEW_MAX_LENGTH),

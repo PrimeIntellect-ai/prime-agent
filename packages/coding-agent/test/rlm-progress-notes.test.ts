@@ -241,6 +241,19 @@ describe("rlm.progress.note child progress channel", () => {
 			expect(entry?.tool_use_count).toBeUndefined();
 			expect(entry?.last_activity_at).toBeGreaterThan(0);
 			expect(entry?.activity_stale_ms).toBeUndefined();
+
+			// A tool execution must reach the roster in the registry's snake_case
+			// activity shape (regression: toolName previously never reached the kernel).
+			(child as unknown as { _emit: (event: unknown) => void })._emit({
+				type: "tool_execution_start",
+				toolCallId: "tool-1",
+				toolName: "ipython",
+				args: {},
+			});
+			const toolRoster = await session.listRlmSubagents();
+			const toolEntry = toolRoster.subagents.find((candidate) => candidate.rlm_child_id === handle.rlm_child_id);
+			expect(toolEntry?.activity).toEqual({ kind: "executing", tool_name: "ipython" });
+			expect(toolEntry?.tool_use_count).toBe(1);
 		} finally {
 			held.complete("child answer");
 			await waitFor(
