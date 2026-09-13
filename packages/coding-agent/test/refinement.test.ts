@@ -1625,8 +1625,11 @@ describe("harness digest relevance ranking", () => {
 		// Accented Latin stays whole; CJK is still cut from adjacent words.
 		expect(harnessQueryTerms("naïve approach")).toEqual(["naïve", "approach"]);
 		expect(harnessQueryTerms("修复login")).toEqual(["修复", "login"]);
-		// Supplementary-plane ideographs count as CJK, whole and in bigrams.
-		expect(harnessQueryTerms("𠀀𠀁")).toEqual(["𠀀𠀁"]);
+		// Supplementary-plane ideographs count as CJK: lone chars become
+		// terms and runs take bigrams; the pre-fix non-CJK path dropped
+		// the lone char and kept whole runs instead.
+		expect(harnessQueryTerms("𠀀")).toEqual(["𠀀"]);
+		expect(harnessQueryTerms("𠀀𠀁𠀂")).toEqual(["𠀀𠀁", "𠀁𠀂"]);
 		// CJK has no spaces between words: runs become overlapping bigrams,
 		// so partial matches stay findable and single characters count.
 		// Non-ASCII punctuation is a separator, not a term.
