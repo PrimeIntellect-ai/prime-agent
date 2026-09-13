@@ -480,7 +480,11 @@ function searchableField(value: unknown): string {
 
 /** CJK ideographs, kana, and Hangul: scripts that do not mark word
  * boundaries with spaces. */
-const CJK_TERM_RANGES = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af";
+const CJK_TERM_RANGES =
+	"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af" +
+	"\u{20000}-\u{2a6df}\u{2a700}-\u{2b73f}\u{2b740}-\u{2b81f}" +
+	"\u{2b820}-\u{2ceaf}\u{2ceb0}-\u{2ebef}\u{2ebf0}-\u{2ee5f}" +
+	"\u{2f800}-\u{2fa1f}\u{30000}-\u{3134f}\u{31350}-\u{323af}\u{323b0}-\u{3347f}";
 const CJK_TERM_PATTERN = new RegExp(`[${CJK_TERM_RANGES}]`, "u");
 const CJK_TERM_SPLIT = new RegExp(`[${CJK_TERM_RANGES}]+|[^${CJK_TERM_RANGES}]+`, "gu");
 

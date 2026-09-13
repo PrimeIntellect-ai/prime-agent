@@ -39,7 +39,13 @@ def _slug(raw: str, fallback: str) -> str:
     return (normalized or fallback)[:80]
 
 
-_CJK_TERM_CHARS = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+_CJK_TERM_CHARS = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af"
+    r"\U00020000-\U0002a6df\U0002a700-\U0002b73f\U0002b740-\U0002b81f"
+    r"\U0002b820-\U0002ceaf\U0002ceb0-\U0002ebef\U0002ebf0-\U0002ee5f"
+    r"\U0002f800-\U0002fa1f\U00030000-\U0003134f\U00031350-\U000323af"
+    r"\U000323b0-\U0003347f]"
+)
 
 
 def _harness_query_runs(text: str) -> list[str]:

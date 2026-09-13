@@ -1078,6 +1078,14 @@ class HarnessSearchTest(unittest.TestCase):
 
             self.assertEqual([entry.id for entry in results], ["login"])
 
+    def test_search_matches_supplementary_cjk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Ext B note", "𠀀𠀁 ideographs recorded.", id="extb")
+
+            self.assertEqual([entry.id for entry in state.search("𠀀")], ["extb"])
+            self.assertEqual([entry.id for entry in state.search("𠀀𠀁")], ["extb"])
+
     def test_search_keeps_accented_latin_words_whole(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
