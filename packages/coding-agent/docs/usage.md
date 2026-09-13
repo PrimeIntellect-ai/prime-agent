@@ -228,6 +228,7 @@ Use `prime-agent model list [search]` to list available models.
 | `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode; do not save |
+| `--no-kernel-snapshots` | Do not persist or revive Python kernel state (`kernel-state.dill`) for this session; see [Sessions](sessions.md#kernel-state-snapshots) |
 
 Use `prime-agent session export <file> [output]` to export a session to HTML.
 
@@ -375,6 +376,8 @@ prime-agent --tools ipython -p "Review the code"
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of bootstrapping `~/.prime/agent/kernel-venv` |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
+
+Provider credentials in the environment are read by the TypeScript host only. The Python kernel receives an allowlisted environment without them; see [Kernel settings](settings.md#kernel) for the allowlist and `kernel.envPassthrough`.
 
 The remaining `PI_*` variables are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.prime/agent` configuration path.
 

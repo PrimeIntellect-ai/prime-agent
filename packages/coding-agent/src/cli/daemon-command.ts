@@ -318,6 +318,7 @@ const SESSION_BOOLEAN_FLAGS = new Set([
 	"--continue",
 	"-c",
 	"--no-session",
+	"--no-kernel-snapshots",
 	"--no-tools",
 	"-nt",
 	"--no-builtin-tools",
@@ -546,6 +547,9 @@ function parseSessionOption(
 		case "--no-context-files":
 		case "-nc":
 			config.noContextFiles = true;
+			return boolean(arg);
+		case "--no-kernel-snapshots":
+			config.noKernelSnapshots = true;
 			return boolean(arg);
 		case "--goal": {
 			const value = readValue(arg);

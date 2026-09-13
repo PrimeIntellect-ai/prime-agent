@@ -30,7 +30,7 @@ event.
 | `execute` | `{"type":"execute","id":str,"code":str}` |
 | `interrupt` | `{"type":"interrupt","id"?:str}` — no reply |
 | `host_reply` | `{"type":"host_reply","id":str,"data":{"status":"ok","result":{...}}}` or an error envelope — no reply |
-| `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool}` |
+| `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool,"redact_sha256"?:[str]}` |
 | `restore` | `{"type":"restore","id":str,"path":str}` |
 | `list_names` | `{"type":"list_names","id":str}` |
 | `shutdown` | `{"type":"shutdown","id"?:str}` |
@@ -151,7 +151,11 @@ from the namespace and listed in `pruned`; names skipped for the aggregate
 payload is written atomically (tmp file + `os.replace`) and a JSON manifest
 (`version`, `savedNames`, `skipped`, `pruned`, `bytes`, `pythonVersion`,
 `timestamp`) is written to `manifest_path`. A manifest write failure fails the
-snapshot (and nothing is pruned).
+snapshot (and nothing is pruned). `redact_sha256` (optional, a list of lowercase
+SHA-256 hex digests) names credential values the host saw in its environment at
+spawn: a top-level `str`/`bytes` value whose digest (or its stripped form's)
+matches is skipped with reason `matches a credential from the host environment`
+and never written to the payload. The host sends digests only, never the values.
 
 `restore` loads the payload and revives each name independently; a missing
 file yields an ok empty restore with `reason:"snapshot not found"`, a corrupt

@@ -616,6 +616,75 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "result")["text"], "42")
             self.assertEqual(fresh.shutdown(), 0)
 
+    def test_snapshot_skips_names_matching_host_credential_digests(self):
+        # ENG-5342: the host shares digests of the credentials it saw at spawn; a
+        # top-level str/bytes holding one of those values is never persisted.
+        import hashlib
+
+        secret = "sk-synthetic-prime-5342-do-not-use"
+        digest = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            setup = "\n".join(
+                [
+                    f"launcher_key = {secret!r}",
+                    f"padded_key = {'  ' + secret + chr(10)!r}",
+                    f"key_bytes = {secret!r}.encode()",
+                    "plain = 'not a secret'",
+                    "number = 42",
+                ]
+            )
+            self.assertEqual(one(self.repl.execute("c1", setup), "done")["status"], "ok")
+            self.repl.send(
+                {
+                    "type": "snapshot",
+                    "id": "c2",
+                    "path": path,
+                    "manifest_path": manifest_path,
+                    "redact_sha256": [digest],
+                }
+            )
+            done = one(self.repl.until_done("c2"), "done")
+            self.assertEqual(done["status"], "ok")
+            self.assertEqual(sorted(done["saved"]), ["number", "plain"])
+            self.assertEqual(
+                sorted((s["name"], s["reason"]) for s in done["skipped"]),
+                [
+                    (name, "matches a credential from the host environment")
+                    for name in ("key_bytes", "launcher_key", "padded_key")
+                ],
+            )
+            with open(path, "rb") as fh:
+                payload = fh.read()
+            self.assertNotIn(secret.encode(), payload)
+            with open(manifest_path) as fh:
+                manifest = json.load(fh)
+            self.assertEqual(manifest["savedNames"], ["number", "plain"])
+            self.assertIn({"name": "launcher_key", "reason": "matches a credential from the host environment"}, manifest["skipped"])
+            # The variables stay live in the namespace; only persistence is refused.
+            self.assertEqual(one(self.repl.execute("c3", "launcher_key == %r" % secret), "result")["text"], "True")
+
+    def test_snapshot_rejects_malformed_redact_digests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            self.repl.execute("m1", "x = 1")
+            for bad in ("not-a-list", ["short"], [123]):
+                self.repl.send(
+                    {
+                        "type": "snapshot",
+                        "id": f"m2-{len(str(bad))}",
+                        "path": path,
+                        "manifest_path": manifest_path,
+                        "redact_sha256": bad,
+                    }
+                )
+                done = one(self.repl.until_done(f"m2-{len(str(bad))}"), "done")
+                self.assertEqual(done["status"], "error")
+                self.assertIn("redact_sha256", done["reason"])
+            self.assertFalse(os.path.exists(path))
+
     def test_restore_skips_ipython_injected_names(self):
         import dill
 

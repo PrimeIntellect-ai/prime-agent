@@ -26,6 +26,8 @@ export interface AgentSessionRuntimeConfig {
 	themes?: string[];
 	noThemes?: boolean;
 	noContextFiles?: boolean;
+	/** Disable persisting/reviving the Python kernel namespace (kernel-state.dill) for the session. */
+	noKernelSnapshots?: boolean;
 	autonomous?: AgentAutonomousConfig;
 	extensionFlagValues?: Record<string, boolean | string>;
 	/**
@@ -90,6 +92,7 @@ export function mergeAgentSessionRuntimeConfig(
 		themes: cloneArray(override.themes ?? base.themes),
 		noThemes: override.noThemes ?? base.noThemes,
 		noContextFiles: override.noContextFiles ?? base.noContextFiles,
+		noKernelSnapshots: override.noKernelSnapshots ?? base.noKernelSnapshots,
 		autonomous: mergeAutonomousConfig(base.autonomous, override.autonomous),
 		extensionFlagValues:
 			base.extensionFlagValues || override.extensionFlagValues

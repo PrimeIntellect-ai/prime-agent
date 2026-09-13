@@ -68,6 +68,8 @@ export interface AgentSessionCreationOptions {
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	rlmHeartbeatController?: AgentRlmHeartbeatController;
 	prewarmIpythonKernel?: boolean;
+	/** Override for the kernel.stateSnapshots setting; false disables kernel-state.dill for this session. */
+	kernelStateSnapshots?: boolean;
 	autonomous?: AgentAutonomousConfig;
 	serializedRefine?: boolean;
 	executionMode?: AgentExecutionMode;

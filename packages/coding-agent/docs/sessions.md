@@ -17,6 +17,16 @@ Use `/session` in interactive mode to see the current session file, session ID, 
 
 For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
 
+Transcripts contain tool output and anything the model echoed, so new session files are created owner-only (`0600`). Existing files keep the mode they already have.
+
+## Kernel State Snapshots
+
+Persisted sessions also save the Python kernel namespace to `~/.prime/agent/session-artifacts/<session-id>/kernel-state.dill` (owner-only), with the saved and skipped names listed in `kernel-state.json`. Resuming the session revives those variables. Anything assigned in the kernel is persisted this way, so removing a value from the transcript does not remove it from the snapshot.
+
+Two safeguards apply automatically: the kernel never inherits provider credentials from the host environment (see [Kernel settings](settings.md#kernel)), and a top-level variable whose value equals a credential the host saw in its environment is skipped and reported instead of being written.
+
+To keep no kernel state on disk for a session, start it with `--no-kernel-snapshots`, or set `kernel.stateSnapshots` to `false` in [Settings](settings.md#kernel). The kernel stderr log is still written to the artifact directory. Deleting a session with `/resume` removes its artifact directory as well; to scrub a single snapshot by hand, delete `kernel-state.dill` and `kernel-state.json`.
+
 ## Session Commands
 
 | Command | Description |

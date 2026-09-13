@@ -681,6 +681,27 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"creates new transcripts owner-only and keeps an existing file's mode (ENG-5342)",
+		() => {
+			const sessionsDir = join(tempDir, "sessions");
+			const sm = SessionManager.create(tempDir, sessionsDir);
+			sm.appendMessage({ role: "user", content: "tool output lands here", timestamp: Date.now() });
+			sm.flushNow();
+			const file = sm.getSessionFile()!;
+			expect(statSync(file).mode & 0o777).toBe(0o600);
+
+			// Appends and rewrites of an existing transcript never widen or tighten it.
+			chmodSync(file, 0o640);
+			sm.appendMessage({ role: "user", content: "second", timestamp: Date.now() });
+			sm.flushNow();
+			expect(statSync(file).mode & 0o777).toBe(0o640);
+
+			const forked = SessionManager.forkFrom(file, tempDir, sessionsDir);
+			expect(statSync(forked.getSessionFile()!).mode & 0o777).toBe(0o600);
+		},
+	);
+
 	it("truncates and rewrites empty file with valid header", () => {
 		const emptyFile = join(tempDir, "empty.jsonl");
 		writeFileSync(emptyFile, "");

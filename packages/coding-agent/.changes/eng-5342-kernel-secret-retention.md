@@ -1,0 +1,4 @@
+- Changed the Python kernel to receive an allowlisted environment instead of the full host environment, so provider credentials such as `PRIME_API_KEY` are no longer visible to kernel or `bash()` cells; `kernel.envPassthrough` admits extra variables.
+- Added `--no-kernel-snapshots` and the `kernel.stateSnapshots` setting to disable persisting and reviving Python kernel state for a session.
+- Fixed kernel state snapshots persisting variables equal to a credential from the host environment; such names are now skipped and reported.
+- Changed new session transcripts to be created owner-only (0600), matching the kernel snapshot files.
