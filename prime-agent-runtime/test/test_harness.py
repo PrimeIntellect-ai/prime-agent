@@ -1078,6 +1078,15 @@ class HarnessSearchTest(unittest.TestCase):
 
             self.assertEqual([entry.id for entry in results], ["login"])
 
+    def test_search_keeps_accented_latin_words_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Review notes", "The naïve approach failed.", id="naive")
+
+            results = state.search("naïve")
+
+            self.assertEqual([entry.id for entry in results], ["naive"])
+
     def test_search_matches_combining_mark_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")

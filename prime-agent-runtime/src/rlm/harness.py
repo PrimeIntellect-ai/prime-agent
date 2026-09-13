@@ -45,25 +45,21 @@ _CJK_TERM_CHARS = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\u
 def _harness_query_runs(text: str) -> list[str]:
     """Split lowercase text into word runs.
 
-    ASCII alphanumerics and non-ASCII letters/digits form runs; combining
-    marks stay inside their run so mark-heavy scripts spell whole words
-    (Devanagari किताब is one run, not dropped fragments).
+    Letters, digits, and combining marks of any script share a run;
+    punctuation and symbols end it. Runs break only at CJK boundaries:
+    accented Latin stays whole (naïve) while spacing-free CJK is cut
+    apart from adjacent words it would otherwise swallow (修复login).
     """
     runs: list[str] = []
     run: list[str] = []
-    run_is_ascii = False
+    run_is_cjk = False
     for ch in text:
-        if "a" <= ch <= "z" or "0" <= ch <= "9":
-            if run and not run_is_ascii:
+        if unicodedata.category(ch).startswith("M") or ch.isalnum():
+            ch_is_cjk = bool(_CJK_TERM_CHARS.match(ch))
+            if run and ch_is_cjk != run_is_cjk:
                 runs.append("".join(run))
                 run = []
-            run_is_ascii = True
-            run.append(ch)
-        elif unicodedata.category(ch).startswith("M") or ch.isalnum():
-            if run and run_is_ascii:
-                runs.append("".join(run))
-                run = []
-            run_is_ascii = False
+            run_is_cjk = ch_is_cjk
             run.append(ch)
         elif run:
             runs.append("".join(run))
@@ -90,12 +86,12 @@ def _harness_query_terms(query: str) -> list[str]:
     terms: list[str] = []
     seen: set[str] = set()
     for run in _harness_query_runs(query.lower()):
-        if run.isascii():
-            candidates = [run] if len(run) >= 3 else []
-        elif _CJK_TERM_CHARS.search(run):
+        if _CJK_TERM_CHARS.search(run):
             # Bigrams keep whitespace-free CJK findable without single
             # characters matching too loosely.
             candidates = [run[i : i + 2] for i in range(len(run) - 1)] or [run]
+        elif run.isascii():
+            candidates = [run] if len(run) >= 3 else []
         else:
             # Other scripts space out words: lone characters match too
             # broadly, so two characters is the floor.

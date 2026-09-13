@@ -480,7 +480,9 @@ function searchableField(value: unknown): string {
 
 /** CJK ideographs, kana, and Hangul: scripts that do not mark word
  * boundaries with spaces. */
-const CJK_TERM_PATTERN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/u;
+const CJK_TERM_RANGES = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af";
+const CJK_TERM_PATTERN = new RegExp(`[${CJK_TERM_RANGES}]`, "u");
+const CJK_TERM_SPLIT = new RegExp(`[${CJK_TERM_RANGES}]+|[^${CJK_TERM_RANGES}]+`, "gu");
 
 /**
  * Tokenize text into lowercase query terms for harness relevance ranking.
@@ -495,18 +497,16 @@ export function harnessQueryTerms(text: string): string[] {
 	// \p{M} keeps combining marks inside their run so mark-heavy scripts
 	// spell whole words (Devanagari किताब stays one run).
 	for (const run of text.toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? []) {
-		// Split mixed-script runs so ASCII words keep their own rules.
-		for (const segment of run.match(/[a-z0-9]+|[^a-z0-9]+/gu) ?? []) {
-			if (/^[a-z0-9]+$/.test(segment)) {
-				// Short ASCII runs are noise (the, and, ids) and are dropped.
-				if (segment.length >= 4) terms.push(segment);
-			} else if (CJK_TERM_PATTERN.test(segment)) {
+		// Runs break only at CJK boundaries: accented Latin stays whole
+		// (naïve) while spacing-free CJK is cut from adjacent words.
+		for (const segment of run.match(CJK_TERM_SPLIT) ?? []) {
+			if (CJK_TERM_PATTERN.test(segment)) {
 				// Code points, not UTF-16 units, keep astral ideographs whole.
 				const chars = Array.from(segment);
 				if (chars.length === 1) terms.push(segment);
 				else for (let i = 0; i < chars.length - 1; i += 1) terms.push(chars[i] + chars[i + 1]);
 			} else if (segment.length >= 4) {
-				// Other non-ASCII scripts space out words, so runs stay whole.
+				// Short runs are noise (the, and, ids) and are dropped.
 				terms.push(segment);
 			}
 		}

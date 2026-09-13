@@ -1622,6 +1622,9 @@ describe("harness digest relevance ranking", () => {
 		// Combining marks stay in their run: mark-heavy scripts spell
 		// whole words (Devanagari किताब), not dropped fragments.
 		expect(harnessQueryTerms("किताब notes")).toEqual(["किताब", "notes"]);
+		// Accented Latin stays whole; CJK is still cut from adjacent words.
+		expect(harnessQueryTerms("naïve approach")).toEqual(["naïve", "approach"]);
+		expect(harnessQueryTerms("修复login")).toEqual(["修复", "login"]);
 		// CJK has no spaces between words: runs become overlapping bigrams,
 		// so partial matches stay findable and single characters count.
 		// Non-ASCII punctuation is a separator, not a term.
