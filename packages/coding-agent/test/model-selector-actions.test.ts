@@ -78,6 +78,7 @@ describe("ModelSelectorComponent", () => {
 				configuredProviders: new Set(["prime-inference"]),
 			},
 		);
+		selector.handleInput("\r");
 		tui.addChild(selector);
 		tui.start();
 		try {
@@ -91,7 +92,7 @@ describe("ModelSelectorComponent", () => {
 		}
 	});
 
-	it("explains model authentication without a provider shortcut", async () => {
+	it("opens the current provider before confirming its model", async () => {
 		const harness = await createHarness({
 			models: [{ id: "faux-1", name: "One", reasoning: true }],
 		});
@@ -121,6 +122,8 @@ describe("ModelSelectorComponent", () => {
 		expect(output).not.toContain("opens providers");
 
 		selector.handleInput("\r");
+		expect(selectedModel).toBeUndefined();
+		selector.handleInput("\r");
 		expect(selectedModel).toBe("faux-1");
 	});
 
@@ -146,6 +149,7 @@ describe("ModelSelectorComponent", () => {
 			},
 		);
 
+		selector.handleInput("\r");
 		const output = stripAnsi(selector.render(120).join("\n"));
 		expect(output).toContain("Connection One");
 		expect(output).not.toContain("Local One");
@@ -205,7 +209,7 @@ describe("ModelSelectorComponent", () => {
 			[],
 			() => {},
 			() => {},
-			undefined,
+			"alpha",
 			{
 				availableModels: [alpha],
 			},
@@ -243,6 +247,7 @@ describe("ModelSelectorComponent", () => {
 		);
 
 		await waitForAsyncRender();
+		selector.handleInput("\r");
 
 		expect(selector.render(120).length).toBeLessThanOrEqual(12);
 
@@ -395,7 +400,7 @@ describe("ModelSelectorComponent", () => {
 			[],
 			() => {},
 			() => {},
-			undefined,
+			"one",
 			{
 				availableModels: [configured, unconfigured],
 				configuredProviders: new Set([configured.provider]),
@@ -416,7 +421,7 @@ describe("ModelSelectorComponent", () => {
 		expect(configuredRow).not.toContain("require sign in");
 	});
 
-	it("pins signed-in Prime Inference models above other signed-in providers", async () => {
+	it("pins signed-in Prime Inference above other signed-in providers", async () => {
 		const harness = await createHarness({
 			models: [{ id: "base", name: "Base", reasoning: true }],
 		});
@@ -444,15 +449,15 @@ describe("ModelSelectorComponent", () => {
 		await waitForAsyncRender();
 
 		const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
-		const primeRow = lines.findIndex((line) => line.includes("GLM 5.3"));
-		const signedInRow = lines.findIndex((line) => line.includes("Beta One"));
-		const unsignedRow = lines.findIndex((line) => line.includes("Zeta One"));
+		const primeRow = lines.findIndex((line) => line.includes("Prime Inference"));
+		const signedInRow = lines.findIndex((line) => line.includes("signed-in-beta"));
+		const unsignedRow = lines.findIndex((line) => line.includes("unsigned-zeta"));
 		expect(primeRow).toBeGreaterThanOrEqual(0);
 		expect(primeRow).toBeLessThan(signedInRow);
 		expect(signedInRow).toBeLessThan(unsignedRow);
 	});
 
-	it("keeps Prime Inference models ordered with the rest when it is not signed in", async () => {
+	it("keeps Prime Inference ordered with the rest when it is not signed in", async () => {
 		const previousPrimeKey = process.env.PRIME_API_KEY;
 		delete process.env.PRIME_API_KEY;
 		try {
@@ -483,13 +488,13 @@ describe("ModelSelectorComponent", () => {
 			await waitForAsyncRender();
 
 			const lines = stripAnsi(selector.render(80).join("\n")).split("\n");
-			const primeRow = lines.findIndex((line) => line.includes("GLM 5.3"));
-			const signedInRow = lines.findIndex((line) => line.includes("Beta One"));
-			const unsignedRow = lines.findIndex((line) => line.includes("Alpha One"));
+			const primeRow = lines.findIndex((line) => line.includes("Prime Inference"));
+			const signedInRow = lines.findIndex((line) => line.includes("signed-in-beta"));
+			const unsignedRow = lines.findIndex((line) => line.includes("a-unsigned"));
 			expect(signedInRow).toBeGreaterThanOrEqual(0);
 			expect(signedInRow).toBeLessThan(unsignedRow);
 			expect(unsignedRow).toBeLessThan(primeRow);
-			expect(lines.findIndex((line) => line.includes("require sign in · prime-inference"))).toBe(primeRow);
+			expect(lines[primeRow]).toContain("require sign in");
 		} finally {
 			if (previousPrimeKey === undefined) {
 				delete process.env.PRIME_API_KEY;
@@ -524,6 +529,7 @@ describe("ModelSelectorComponent", () => {
 		);
 
 		await waitForAsyncRender();
+		selector.handleInput("\r");
 
 		const row = () =>
 			stripAnsi(selector.render(80).join("\n"))
@@ -574,6 +580,7 @@ describe("ModelSelectorComponent", () => {
 		);
 
 		await waitForAsyncRender();
+		selector.handleInput("\r");
 
 		const renderRow = () =>
 			stripAnsi(selector.render(80).join("\n"))
@@ -619,6 +626,7 @@ describe("ModelSelectorComponent", () => {
 		);
 
 		await waitForAsyncRender();
+		selector.handleInput("\r");
 
 		const row = () =>
 			stripAnsi(selector.render(80).join("\n"))
@@ -651,7 +659,7 @@ describe("ModelSelectorComponent", () => {
 			[],
 			() => {},
 			() => {},
-			undefined,
+			"one",
 			{
 				availableModels: [short, long],
 				configuredProviders: new Set([short.provider]),
@@ -711,6 +719,7 @@ describe("ModelSelectorComponent", () => {
 		);
 
 		await waitForAsyncRender();
+		selector.handleInput("\r");
 
 		const row = () =>
 			stripAnsi(selector.render(80).join("\n"))
@@ -835,6 +844,7 @@ describe("ModelSelectorComponent", () => {
 		);
 
 		await waitForAsyncRender();
+		selector.handleInput("\r");
 
 		let lines = selector.render(120);
 		let output = stripAnsi(lines.join("\n"));
@@ -851,5 +861,289 @@ describe("ModelSelectorComponent", () => {
 
 		expect(lines.length).toBeLessThanOrEqual(16);
 		expect(output).toContain("(1/12)");
+	});
+	it("lists each provider once without showing its models", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [
+					{ ...base, provider: "google", id: "first", name: "First Model" },
+					{ ...base, provider: "google", id: "second", name: "Second Model" },
+					{ ...base, provider: "openai", id: "third", name: "Third Model" },
+				],
+				inline: true,
+			},
+		);
+
+		const output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Search providers");
+		expect(output.match(/Google Gemini/g)).toHaveLength(1);
+		expect(output.match(/OpenAI/g)).toHaveLength(1);
+		expect(output).not.toContain("First Model");
+		expect(output).not.toContain("Second Model");
+		expect(output).not.toContain("Third Model");
+	});
+
+	it.each(["google", "Gemini"])("filters providers by ID or display name: %s", async (query) => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{
+				availableModels: [
+					{ ...base, provider: "google", id: "first", name: "First Model" },
+					{ ...base, provider: "openai", id: "second", name: "Second Model" },
+				],
+				inline: true,
+			},
+		);
+
+		selector.handleInput(query);
+		const output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Google Gemini");
+		expect(output).not.toContain("OpenAI");
+		selector.handleInput("\r");
+		expect(selector.getSearchInput().getValue()).toBe("");
+		const models = stripAnsi(selector.render(100).join("\n"));
+		expect(models).toContain("First Model");
+		expect(models).not.toContain("Second Model");
+	});
+
+	it("returns from a provider's models before canceling the selector", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const onSelect = vi.fn();
+		const onCancel = vi.fn();
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			onSelect,
+			onCancel,
+			undefined,
+			{
+				availableModels: [
+					{ ...base, provider: "google", id: "first", name: "First Model" },
+					{ ...base, provider: "openai", id: "second", name: "Second Model" },
+				],
+				inline: true,
+			},
+		);
+
+		selector.handleInput("Gemini");
+		selector.handleInput("\r");
+		selector.handleInput("First");
+		expect(onSelect).not.toHaveBeenCalled();
+		selector.handleInput("\x1b");
+		expect(onCancel).not.toHaveBeenCalled();
+		expect(selector.getSearchInput().getValue()).toBe("Gemini");
+		const output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Choose provider");
+		expect(output).toContain("Google Gemini");
+		expect(output).not.toContain("First Model");
+		selector.handleInput("\x1b");
+		expect(onCancel).toHaveBeenCalledOnce();
+		expect(onSelect).not.toHaveBeenCalled();
+	});
+
+	it("preselects the current provider and its current model", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const current = { ...base, provider: "openai", id: "current", name: "Current Model" };
+		const onSelect = vi.fn();
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			current,
+			harness.session.modelRegistry,
+			[],
+			onSelect,
+			() => {},
+			undefined,
+			{
+				availableModels: [
+					{ ...base, provider: "google", id: "first", name: "First Model" },
+					{ ...base, provider: "openai", id: "another", name: "Another Model" },
+					current,
+				],
+				configuredProviders: new Set(["google", "openai"]),
+				inline: true,
+			},
+		);
+
+		expect(stripAnsi(selector.render(100).join("\n"))).toMatch(/OpenAI.*current/);
+		selector.handleInput("\r");
+		expect(onSelect).not.toHaveBeenCalled();
+		const output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Current Model");
+		expect(output).toContain("Another Model");
+		expect(output).not.toContain("First Model");
+		selector.handleInput("\r");
+		expect(onSelect).toHaveBeenCalledWith(current, undefined);
+	});
+
+	it("refreshes provider results without clearing the provider search", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const google = { ...base, provider: "google", id: "first", name: "First Model" };
+		const openai = { ...base, provider: "openai", id: "second", name: "Second Model" };
+		const refresh = vi.spyOn(harness.session.modelRegistry, "refresh");
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{ availableModels: [openai], inline: true },
+		);
+
+		selector.handleInput("Gemini");
+		expect(stripAnsi(selector.render(100).join("\n"))).not.toContain("Google Gemini");
+		selector.updateAvailableModels([google, openai]);
+		expect(selector.getSearchInput().getValue()).toBe("Gemini");
+		const output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Google Gemini");
+		expect(output).not.toContain("OpenAI");
+		expect(refresh).not.toHaveBeenCalled();
+		selector.updateAvailableModels([]);
+		expect(stripAnsi(selector.render(100).join("\n"))).toContain("No matching providers");
+	});
+
+	it("limits providers to the selected model scope", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const google = { ...base, provider: "google", id: "first", name: "First Model" };
+		const openai = { ...base, provider: "openai", id: "second", name: "Second Model" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[{ model: google }],
+			() => {},
+			() => {},
+			undefined,
+			{ availableModels: [google, openai], inline: true },
+		);
+
+		let output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Google Gemini");
+		expect(output).not.toContain("OpenAI");
+		selector.handleInput("\x1bs");
+		output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Google Gemini");
+		expect(output).toContain("OpenAI");
+		selector.handleInput("\x1bs");
+		expect(stripAnsi(selector.render(100).join("\n"))).not.toContain("OpenAI");
+	});
+
+	it("keeps provider and model stages within a short inline viewport", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const availableModels = Array.from({ length: 12 }, (_, provider) =>
+			Array.from({ length: 12 }, (_, model) => ({
+				...base,
+				provider: `provider-${provider + 1}`,
+				id: `model-${model + 1}`,
+				name: `Model ${model + 1}`,
+			})),
+		).flat();
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			{ availableModels, inline: true, getRows: () => 8 },
+		);
+
+		expect(selector.render(80).length).toBeLessThanOrEqual(8);
+		selector.handleInput("\x1b[B");
+		expect(selector.render(80).length).toBeLessThanOrEqual(8);
+		expect(stripAnsi(selector.render(80).join("\n"))).toContain("(2/12)");
+		selector.handleInput("\r");
+		expect(selector.render(80).length).toBeLessThanOrEqual(8);
+		selector.handleInput("\x1b[B");
+		expect(selector.render(80).length).toBeLessThanOrEqual(8);
+		expect(stripAnsi(selector.render(80).join("\n"))).toContain("(2/12)");
+		selector.handleInput("\x1b");
+		expect(selector.render(80).length).toBeLessThanOrEqual(8);
+	});
+	it("preserves the selected provider's model search during refresh", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const base = harness.getModel("base")!;
+		const first = { ...base, provider: "google", id: "first", name: "First Model" };
+		const second = { ...base, provider: "google", id: "second", name: "Second Model" };
+		const other = { ...base, provider: "openai", id: "second", name: "Other Provider Model" };
+		const onSelect = vi.fn();
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			onSelect,
+			() => {},
+			undefined,
+			{ availableModels: [first, other], inline: true },
+		);
+
+		selector.handleInput("Gemini");
+		selector.handleInput("\r");
+		selector.handleInput("second");
+		expect(stripAnsi(selector.render(100).join("\n"))).toContain("No matching models");
+		selector.updateAvailableModels([first, second, other]);
+		expect(selector.getSearchInput().getValue()).toBe("second");
+		const output = stripAnsi(selector.render(100).join("\n"));
+		expect(output).toContain("Second Model");
+		expect(output).not.toContain("Other Provider Model");
+		selector.handleInput("\r");
+		expect(onSelect).toHaveBeenCalledWith(second, undefined);
+	});
+
+	it("returns from a direct model search to providers before canceling", async () => {
+		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
+		harnesses.push(harness);
+		const onCancel = vi.fn();
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			onCancel,
+			"base",
+			{ availableModels: [harness.getModel("base")!] },
+		);
+
+		selector.handleInput("\x1b");
+		expect(onCancel).not.toHaveBeenCalled();
+		expect(stripAnsi(selector.render(100).join("\n"))).toContain("Choose provider");
+		selector.handleInput("\x1b");
+		expect(onCancel).toHaveBeenCalledOnce();
 	});
 });

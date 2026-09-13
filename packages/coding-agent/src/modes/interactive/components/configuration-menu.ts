@@ -127,12 +127,14 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		const closeKey = keyText("tui.select.cancel", { primaryOnly: true });
 		const navigate = `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })}`;
 		const effort = `${keyText("tui.editor.cursorLeft", { primaryOnly: true })}/${keyText("tui.editor.cursorRight", { primaryOnly: true })}`;
+		const selectingModel = this.activeTab === "models" && !this.bodies.models.isSelectingProvider();
+		const closeAction = selectingModel ? "back" : "close";
 		const hint =
 			width >= 70
-				? this.activeTab === "models"
-					? `${navigate} model · ${effort} effort · ${selectKey} select · ${closeKey} close`
-					: `${navigate} navigate · ${selectKey} select · ${closeKey} close`
-				: `${selectKey} select · ${closeKey} close`;
+				? selectingModel
+					? `${navigate} model · ${effort} effort · ${selectKey} select · ${closeKey} ${closeAction}`
+					: `${navigate} navigate · ${selectKey} select · ${closeKey} ${closeAction}`
+				: `${selectKey} select · ${closeKey} ${closeAction}`;
 		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${hint}`), width, "", true)];
 	}
 

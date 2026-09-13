@@ -1,0 +1,2 @@
+- Changed the model picker to choose a provider before browsing its models, with provider search and back navigation.
+- Preserved direct model search across providers with `/model <query>`.

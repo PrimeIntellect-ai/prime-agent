@@ -63,7 +63,7 @@ describe("ENG-4575 model authentication", () => {
 		}
 	});
 
-	test("shows unauthenticated public models after authenticated providers", async () => {
+	test.each([false, true])("shows authenticated providers first with direct model search=%s", async (directSearch) => {
 		const harness = await createHarness({
 			models: [{ id: "base", name: "Base", reasoning: true }],
 		});
@@ -82,7 +82,7 @@ describe("ENG-4575 model authentication", () => {
 				selectedProvider = model.provider;
 			},
 			() => {},
-			undefined,
+			directSearch ? "Base" : undefined,
 			{
 				availableModels: [unauthenticated, authenticated],
 				configuredProviders: new Set([authenticated.provider]),
@@ -91,12 +91,23 @@ describe("ENG-4575 model authentication", () => {
 		);
 
 		const lines = stripAnsi(selector.render(120).join("\n")).split("\n");
-		const authenticatedRow = lines.findIndex((line) => line.includes("available"));
-		const unauthenticatedRow = lines.findIndex((line) => line.includes("requires-auth"));
+		const authenticatedRow = lines.findIndex((line) =>
+			line.includes(directSearch ? "available" : authenticated.provider),
+		);
+		const unauthenticatedRow = lines.findIndex((line) =>
+			line.includes(directSearch ? "requires-auth" : unauthenticated.provider),
+		);
 		expect(authenticatedRow).toBeGreaterThanOrEqual(0);
 		expect(authenticatedRow).toBeLessThan(unauthenticatedRow);
-		expect(lines[unauthenticatedRow]).toContain("current · require sign in");
+		expect(lines[unauthenticatedRow]).toContain("require sign in");
 
+		if (directSearch) {
+			selector.handleInput("\x1b[B");
+		} else {
+			selector.handleInput("\r");
+			expect(selectedProvider).toBeUndefined();
+		}
+		expect(stripAnsi(selector.render(120).join("\n"))).toContain("current · require sign in");
 		selector.handleInput("\r");
 		expect(selectedProvider).toBe(unauthenticated.provider);
 	});
@@ -121,6 +132,7 @@ describe("ENG-4575 model authentication", () => {
 			},
 		);
 
+		selector.handleInput("\r");
 		const row = stripAnsi(selector.render(120).join("\n"))
 			.split("\n")
 			.find((line) => line.includes("base"));

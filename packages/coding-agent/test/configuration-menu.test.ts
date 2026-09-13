@@ -121,7 +121,11 @@ describe("ConfigurationMenuComponent", () => {
 
 		const models = await createMenu({ initialTab: "models" });
 		output = stripAnsi(models.render(120).join("\n"));
-		expect(output).toContain("Search models");
+		expect(output).toContain("Search providers");
+		expect(output).not.toContain("Faux One");
+		models.handleInput("\r");
+		output = stripAnsi(models.render(120).join("\n"));
+		expect(output).toContain("Search faux models");
 		expect(output).toContain("Faux One");
 		expect(output).not.toContain("Anthropic");
 		expect(output).not.toContain("Serper (web search)");
@@ -141,7 +145,7 @@ describe("ConfigurationMenuComponent", () => {
 		expect(selectProvider).toHaveBeenCalledWith(expect.objectContaining({ id: "anthropic" }));
 	});
 
-	it("renders no explanatory header above the picker search rows", async () => {
+	it("shows only the model flow step above search, without explanatory command headers", async () => {
 		const menu = await createMenu({ initialTab: "models" });
 		const lines = stripAnsi(menu.render(120).join("\n")).split("\n");
 		const output = lines.join("\n");
@@ -151,9 +155,14 @@ describe("ConfigurationMenuComponent", () => {
 		expect(output).not.toContain("Connect with a subscription or API key.");
 		expect(output).not.toContain("MCP Connections");
 		expect(output).not.toContain("Connect MCP integrations and service credentials.");
-		// The search row is the first content; nothing renders above it.
-		expect(lines[0]).toContain("─");
-		expect(output).toContain("Search models");
+		expect(lines[0]?.trim()).toBe("Choose provider");
+		expect(lines[1]).toContain("─");
+		expect(output).toContain("Search providers");
+		menu.handleInput("\r");
+		const modelLines = stripAnsi(menu.render(120).join("\n")).split("\n");
+		expect(modelLines[0]?.trim()).toBe("faux models");
+		expect(modelLines[1]).toContain("─");
+		expect(modelLines.join("\n")).toContain("Search faux models");
 
 		const providers = await createMenu({ initialTab: "providers" });
 		const providerLines = stripAnsi(providers.render(120).join("\n")).split("\n");
@@ -169,10 +178,15 @@ describe("ConfigurationMenuComponent", () => {
 	it("keeps Tab and Shift+Tab inside the picker without switching bodies", async () => {
 		const menu = await createMenu({ initialTab: "models" });
 		menu.focused = true;
+		const providerOutput = stripAnsi(menu.render(120).join("\n"));
+		expect(providerOutput).toContain("↑/↓ navigate");
+		expect(providerOutput).toContain("Esc close");
+		expect(providerOutput).not.toContain("←/→ effort");
+		menu.handleInput("\r");
 		const lines = stripAnsi(menu.render(120).join("\n")).split("\n");
 		expect(lines.some((line) => line.includes("↑/↓ model"))).toBe(true);
 		expect(lines.some((line) => line.includes("←/→ effort"))).toBe(true);
-		expect(lines.some((line) => line.includes("Esc close"))).toBe(true);
+		expect(lines.some((line) => line.includes("Esc back"))).toBe(true);
 		expect(lines.some((line) => line.includes("tabs"))).toBe(false);
 
 		menu.handleInput("f");
@@ -225,9 +239,10 @@ describe("ConfigurationMenuComponent", () => {
 		expect(postLoginRow).toContain("current");
 	});
 
-	it("keeps arrow keys in the active search field and uses Escape to close", async () => {
+	it("keeps arrow keys in the active search field and uses Escape to go back, then close", async () => {
 		const onCancel = vi.fn();
 		const menu = await createMenu({ initialTab: "models", onCancel });
+		menu.handleInput("\r");
 
 		menu.handleInput("\x1b[D");
 		expect(menu.getActiveTab()).toBe("models");
@@ -241,6 +256,9 @@ describe("ConfigurationMenuComponent", () => {
 		expect(menu.getActiveTab()).toBe("models");
 		expect(menu.getSearchValue()).toBe("an");
 
+		menu.handleInput("\x1b");
+		expect(onCancel).not.toHaveBeenCalled();
+		expect(stripAnsi(menu.render(120).join("\n"))).toContain("Search providers");
 		menu.handleInput("\x1b");
 		expect(onCancel).toHaveBeenCalledOnce();
 	});
@@ -272,6 +290,7 @@ describe("ConfigurationMenuComponent", () => {
 			initialTab: "models",
 			cost: { input: 1.1525, cacheRead: 0.0000015, output: 2.75, cacheWrite: 3 },
 		});
+		menu.handleInput("\r");
 		for (const width of [120, 48]) {
 			const lines = stripAnsi(menu.render(width).join("\n")).split("\n");
 			const output = lines.join("\n");
@@ -301,6 +320,7 @@ describe("ConfigurationMenuComponent", () => {
 			initialTab: "models",
 			cost: { input: 0, cacheRead: Number.NaN, output: Number.POSITIVE_INFINITY, cacheWrite: 0 },
 		});
+		menu.handleInput("\r");
 		const output = stripAnsi(menu.render(48).join("\n"));
 		expect(output).toContain("Input: $0");
 		expect(output).toContain("Cached input: —");
@@ -308,6 +328,7 @@ describe("ConfigurationMenuComponent", () => {
 		expect(output).not.toMatch(/NaN|Infinity/);
 
 		const missingCostMenu = await createMenu({ initialTab: "models", noCost: true });
+		missingCostMenu.handleInput("\r");
 		const missingCostOutput = stripAnsi(missingCostMenu.render(48).join("\n"));
 		expect(missingCostOutput).toContain("Input: —");
 		expect(missingCostOutput).toContain("Cached input: —");
@@ -318,6 +339,7 @@ describe("ConfigurationMenuComponent", () => {
 		let rows = 20;
 		const onSelectModel = vi.fn();
 		const menu = await createMenu({ initialTab: "models", modelCount: 18, getRows: () => rows, onSelectModel });
+		menu.handleInput("\r");
 		menu.render(120);
 		menu.handleInput("\x1b[6~");
 		for (const width of [120, 60, 24]) {

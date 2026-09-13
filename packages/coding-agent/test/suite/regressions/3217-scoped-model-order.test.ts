@@ -89,6 +89,7 @@ describe("issue #3217 scoped model ordering", () => {
 		);
 
 		await waitForAsyncRender();
+		selector.handleInput("\r");
 
 		const renderedLines = stripAnsi(selector.render(120).join("\n")).split("\n");
 		const orderedIds = renderedLines

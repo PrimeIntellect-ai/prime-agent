@@ -61,6 +61,7 @@ describe("searchable selector navigation", () => {
 			{ availableModels: harness.models },
 		);
 
+		selector.handleInput("\r");
 		moveDown(selector, 8);
 		selector.handleInput("f");
 		selector.handleInput("\r");

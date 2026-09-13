@@ -88,6 +88,7 @@ it("retains picker focus and draft until model and explicit effort both complete
 	f.setThinkingLevel.mockImplementation(() => effortApplied.promise);
 	const done = f.mode.showConfigurationMenu("models");
 	const menu = f.menu();
+	menu.handleInput("\r");
 	expect(stripAnsi(menu.render(100).join("\n"))).toContain("medium");
 	menu.handleInput("\x1b[C");
 	menu.handleInput("\r");
@@ -121,6 +122,7 @@ it("leaves untouched effort to the normal model-switch default restoration", asy
 	});
 	const done = f.mode.showConfigurationMenu("models");
 	f.menu().handleInput("\r");
+	f.menu().handleInput("\r");
 	await done;
 	expect(f.setThinkingLevel).not.toHaveBeenCalled();
 	expect(f.harness.session.thinkingLevel).toBe("high");
@@ -131,6 +133,7 @@ it("keeps a failed effort selection open and allows retry", async () => {
 	f.setThinkingLevel.mockRejectedValueOnce(new Error("effort update failed"));
 	const done = f.mode.showConfigurationMenu("models");
 	const menu = f.menu();
+	menu.handleInput("\r");
 	menu.handleInput("\x1b[C");
 	menu.handleInput("\r");
 	await vi.waitFor(() => expect(f.mode.showError).toHaveBeenCalledWith("effort update failed"));
@@ -156,6 +159,7 @@ it.each([false, true])("edits search text with arrows for reasoning=%s", async (
 		undefined,
 		{ availableModels: [model], thinkingLevel: "medium", inline: true },
 	);
+	selector.handleInput("\r");
 	selector.handleInput("re");
 	selector.handleInput("\x1b[D");
 	selector.handleInput("a");
@@ -165,15 +169,22 @@ it.each([false, true])("edits search text with arrows for reasoning=%s", async (
 	expect(selector.getSearchInput().getValue()).toBe("raeb");
 	selector.handleInput("\x01");
 	selector.handleInput("\x1b[D");
+	expect(cancel).not.toHaveBeenCalled();
+	expect(selector.isSelectingProvider()).toBe(true);
+	selector.handleInput("\x1b");
 	expect(cancel).toHaveBeenCalledOnce();
 	selector.getSearchInput().setValue("");
 	selector.updateState(model, [model]);
+	selector.handleInput("\r");
 	if (reasoning) {
 		selector.handleInput("\x1b[C");
 		selector.handleInput("\r");
 		expect(selected).toHaveBeenLastCalledWith(model, "high");
 	} else {
 		selector.handleInput("\x1b[D");
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(selector.isSelectingProvider()).toBe(true);
+		selector.handleInput("\x1b");
 		expect(cancel).toHaveBeenCalledTimes(2);
 	}
 });

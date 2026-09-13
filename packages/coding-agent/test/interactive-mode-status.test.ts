@@ -2682,6 +2682,7 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(getSelector().render(120).join("\n")).toContain("Beta");
 
 		getSelector().handleInput("\x1b");
+		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
 	});
 
@@ -2763,16 +2764,21 @@ describe("InteractiveMode model selection persistence", () => {
 		const result = fakeThis.showConfigurationMenu("models");
 
 		expect(getAvailableModels).not.toHaveBeenCalled();
+		getSelector().handleInput("\r");
 		expect(getSelector().render(120).join("\n")).toContain("scoped");
 		expect(fakeThis.getCachedModelCandidates()).toEqual([scopedModel, catalogModel]);
 		await expect(fakeThis.findExactModelMatch("catalog")).resolves.toEqual(catalogModel);
 
+		getSelector().handleInput("\x1b");
 		getSelector().handleInput("\x1bs");
+		getSelector().handleInput("anthropic");
+		getSelector().handleInput("\r");
 		expect(getSelector().render(120).join("\n")).toContain("catalog");
 		expect(getAvailableModels).not.toHaveBeenCalled();
 		getSelector().handleInput("\t");
 		expect(getSelector().getActiveTab()).toBe("models");
 
+		getSelector().handleInput("\x1b");
 		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
 		setKeybindings(previousKeybindings);
@@ -2814,6 +2820,7 @@ describe("InteractiveMode model selection persistence", () => {
 		});
 
 		getSelector().handleInput("\r");
+		getSelector().handleInput("\r");
 		await flushAsyncWork();
 
 		expect(fakeThis.editorContainer.children).toEqual([getSelector()]);
@@ -2843,6 +2850,7 @@ describe("InteractiveMode model selection persistence", () => {
 		const result = fakeThis.showConfigurationMenu("models");
 		await flushAsyncWork();
 		getSelector().handleInput("\r");
+		getSelector().handleInput("\r");
 		await flushAsyncWork();
 
 		expect(fakeThis.closeConfigurationMenu).toBeDefined();
@@ -2850,6 +2858,8 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(fakeThis.ui.setFocus).toHaveBeenLastCalledWith(getSelector());
 		expect(fakeThis.showError).toHaveBeenCalledWith("model switch failed");
 
+		getSelector().handleInput("\x1b");
+		expect(fakeThis.closeConfigurationMenu).toBeDefined();
 		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
 		expect(fakeThis.closeConfigurationMenu).toBeUndefined();
@@ -2889,6 +2899,7 @@ describe("InteractiveMode model selection persistence", () => {
 
 		const result = fakeThis.showConfigurationMenu("models");
 		getSelector().handleInput("\r");
+		getSelector().handleInput("\r");
 		await flushAsyncWork();
 
 		expect(loginProvider).toHaveBeenCalledWith(provider);
@@ -2917,6 +2928,7 @@ describe("InteractiveMode model selection persistence", () => {
 
 		const result = fakeThis.showConfigurationMenu("models");
 		getSelector().handleInput("\r");
+		getSelector().handleInput("\r");
 		await flushAsyncWork();
 
 		expect(loginProvider).toHaveBeenCalledWith(provider);
@@ -2924,6 +2936,8 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(applySelectedModel).not.toHaveBeenCalled();
 		expect(fakeThis.closeConfigurationMenu).toBeDefined();
 
+		getSelector().handleInput("\x1b");
+		expect(fakeThis.closeConfigurationMenu).toBeDefined();
 		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
 	});
@@ -2951,6 +2965,7 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(selector.render(120).join("\n")).toContain("Beta");
 
 		selector.handleInput("\x1b");
+		selector.handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
 	});
 
@@ -2972,8 +2987,12 @@ describe("InteractiveMode model selection persistence", () => {
 		const result = fakeThis.showConfigurationMenu("models");
 		const selector = getSelector();
 		selector.handleInput("\r");
+		expect(loginProvider).not.toHaveBeenCalled();
+		selector.handleInput("\r");
 		selector.handleInput("\r");
 		expect(loginProvider).toHaveBeenCalledOnce();
+		selector.handleInput("\x1b");
+		expect(fakeThis.closeConfigurationMenu).toBeDefined();
 		selector.handleInput("\x1b");
 		await result;
 		authentication.resolve({ status: "cancelled" });
@@ -3000,6 +3019,7 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(getAvailableModels).toHaveBeenCalledTimes(1);
 		expect(getSelector().render(120).join("\n")).toContain("Beta");
 
+		getSelector().handleInput("\x1b");
 		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
 	});
