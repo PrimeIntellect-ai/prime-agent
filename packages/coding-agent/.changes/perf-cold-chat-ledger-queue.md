@@ -1,0 +1,1 @@
+- Fixed cold chat openings waiting behind saved-session catalog scans.

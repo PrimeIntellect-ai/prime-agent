@@ -291,8 +291,8 @@ function edgeKey(childId: string, child: string): string {
 }
 
 /**
- * Per-sessions-dir spawn ledger. All operations are serialized on an internal
- * queue; the first operation lazily seeds a missing ledger from the existing
+ * Per-sessions-dir spawn ledger. Topology reads and writes are serialized on an
+ * internal queue; the first operation lazily seeds a missing ledger from the existing
  * per-parent registries (memoized; a seeding failure degrades to an empty
  * ledger and is never fail-closed).
  */
@@ -394,14 +394,15 @@ export class RlmSpawnLedger {
 	 * dropped and logged, never fails the whole family.
 	 */
 	family(): Promise<SessionInfo[]> {
-		return this.enqueue(() => this.familyUnlocked());
+		// Capture ordered topology first; transcript metadata must not block worker roster reads or appends.
+		return this.enqueue(() => this.liveEdgesUnlocked()).then((alive) => this.familyUnlocked(alive));
 	}
 
 	/** Same-parent rows for a child session path, including the child itself. */
 	siblings(sessionPath: string): Promise<SessionInfo[]> {
 		return this.enqueue(async () => {
 			const target = canonicalSessionPath(sessionPath);
-			const family = await this.familyUnlocked();
+			const family = await this.familyUnlocked(await this.liveEdgesUnlocked());
 			const edges = [...this.replaySyncCached().values()].filter((edge) => !edge.deleted);
 			const parentByChild = new Map(
 				edges.map((edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)]),
@@ -521,12 +522,9 @@ export class RlmSpawnLedger {
 		return alive;
 	}
 
-	private async familyUnlocked(): Promise<SessionInfo[]> {
+	private async familyUnlocked(alive: RlmLedgerEdge[]): Promise<SessionInfo[]> {
 		// One replay, one stat snapshot: byChild comes from the same alive set that emits child rows,
 		// so a child whose dead edge was reconciled away degrades to a root row instead of vanishing.
-		let alive: RlmLedgerEdge[] = await this.liveEdgesUnlocked(
-			[...this.replaySyncCached().values()].filter((candidate) => !candidate.deleted),
-		);
 		const byChild = new Map<string, RlmLedgerEdge>();
 		for (const edge of alive) {
 			byChild.set(canonicalSessionPath(edge.child), edge);
