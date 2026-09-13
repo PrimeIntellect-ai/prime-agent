@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import ui
-from schema import PHASE_METRICS, UI_METRIC_KEYS, ProcessMemory, Side
+from schema import PHASE_METRICS, UI_METRIC_KEYS, Observation, ProcessMemory, Side
 from ui import CatalogClient, check_scheduled_jobs, session_id, spawn_ledger_path, write_catalog_fixtures
 
 HELLO = {
@@ -201,7 +201,7 @@ class CatalogTrialTests(unittest.TestCase):
                 for incomplete in (False, True):
                     with self.subTest(incomplete=incomplete):
                         jobs["heartbeats"][0]["firstMessage"] = "" if incomplete else "task"
-                        side = Side(sha="a" * 40)
+                        side = Side(sha="a" * 40, metrics={"install": [Observation(trial=0, value=1.0)]})
                         ui.ui_measure(Mock(), side, 2, results=root, homes=root, user="benchmark1")
                         if incomplete:
                             self.assertIsNotNone(side.metrics["scheduled_catalog"][0].error)
