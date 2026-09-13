@@ -16,7 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { EventLog } from "../../core/event-log.js";
 import { canonicalSessionPath } from "../../core/session-lease.js";
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
-import { readFirstLineSync } from "../../utils/file-lines.js";
+import { readFirstLineSync, readLinesAsBuffers } from "../../utils/file-lines.js";
 
 /**
  * Daemon-owned RLM spawn ledger.
@@ -40,6 +40,7 @@ export const RLM_LEDGER_DIR = "rlm-ledger";
 /** Bounded read: a ledger beyond these limits fails closed loudly. */
 export const RLM_LEDGER_MAX_BYTES = 32 * 1024 * 1024;
 export const RLM_LEDGER_MAX_RECORDS = 100_000;
+const SESSION_HEADER_PROBE_MAX_BYTES = 1024 * 1024;
 
 export type RlmLedgerDeleteReason = "user" | "parent-teardown" | "revoked" | "gc";
 
@@ -391,11 +392,12 @@ export class RlmSpawnLedger {
 	 * readdir of *.jsonl roots as depth-0 rows plus live ledger edges, both
 	 * reconciled by stat (a dead parent or child drops the edge). Depths are
 	 * verified parent+1 between ledger-known depths; a contradictory edge is
-	 * dropped and logged, never fails the whole family.
+	 * dropped and logged, never fails the whole family. With metadataArtifact,
+	 * rows without that artifact retain topology but omit transcript display fields.
 	 */
-	family(): Promise<SessionInfo[]> {
+	family(metadataArtifact?: string): Promise<SessionInfo[]> {
 		// Capture ordered topology first; transcript metadata must not block worker roster reads or appends.
-		return this.enqueue(() => this.liveEdgesUnlocked()).then((alive) => this.familyUnlocked(alive));
+		return this.enqueue(() => this.liveEdgesUnlocked()).then((alive) => this.familyUnlocked(alive, metadataArtifact));
 	}
 
 	/** Same-parent rows for a child session path, including the child itself. */
@@ -522,7 +524,7 @@ export class RlmSpawnLedger {
 		return alive;
 	}
 
-	private async familyUnlocked(alive: RlmLedgerEdge[]): Promise<SessionInfo[]> {
+	private async familyUnlocked(alive: RlmLedgerEdge[], metadataArtifact?: string): Promise<SessionInfo[]> {
 		// One replay, one stat snapshot: byChild comes from the same alive set that emits child rows,
 		// so a child whose dead edge was reconciled away degrades to a root row instead of vanishing.
 		const byChild = new Map<string, RlmLedgerEdge>();
@@ -563,7 +565,7 @@ export class RlmSpawnLedger {
 		});
 		const rows: SessionInfo[] = [];
 		for (const rootPath of rootPaths) {
-			rows.push(await this.sessionRow(rootPath, 0, undefined, undefined));
+			rows.push(await this.sessionRow(rootPath, 0, undefined, undefined, metadataArtifact));
 		}
 		for (const edge of alive) {
 			rows.push(
@@ -572,6 +574,7 @@ export class RlmSpawnLedger {
 					edge.depth,
 					canonicalSessionPath(edge.parent),
 					edge.name,
+					metadataArtifact,
 				),
 			);
 		}
@@ -583,14 +586,45 @@ export class RlmSpawnLedger {
 		depth: number,
 		parentPath: string | undefined,
 		name: string | undefined,
+		metadataArtifact?: string,
 	): Promise<SessionInfo> {
+		let id = basename(path, ".jsonl");
+		let loadMetadata = true;
+		if (metadataArtifact !== undefined) {
+			// Imported filenames need not match the session id. If the bounded header
+			// probe is inconclusive, keep the ordinary read so schedules are not hidden.
+			let bytesRead = 0;
+			try {
+				for await (const line of readLinesAsBuffers(path, { end: SESSION_HEADER_PROBE_MAX_BYTES - 1 })) {
+					bytesRead += line.length + 1;
+					if (bytesRead >= SESSION_HEADER_PROBE_MAX_BYTES) break;
+					const text = line.toString("utf8").trim();
+					if (!text) continue;
+					let header: { type?: unknown; id?: unknown } | null;
+					try {
+						header = JSON.parse(text);
+					} catch {
+						continue;
+					}
+					if (header?.type === "session" && typeof header.id === "string") id = header.id;
+					loadMetadata = await stat(join(getSessionArtifactPathForFile(path, id), metadataArtifact)).then(
+						() => true,
+						() => false,
+					);
+					break;
+				}
+			} catch {
+				// Unreadable probes use the ordinary best-effort metadata read.
+			}
+		}
+
 		// Display-grade fields are best-effort from the ordinary session-info
 		// read; topology (path, depth, parent) comes EXCLUSIVELY from the
 		// ledger: header-claimed parentSessionPath/rlmDepth (e.g. fork headers)
 		// are stripped, never passed through. For roots the ledger carries no
 		// name, so the name comes from this read — writer-owned display data,
 		// not authority.
-		const info = await readSessionInfo(path).catch(() => null);
+		const info = loadMetadata ? await readSessionInfo(path).catch(() => null) : null;
 		if (info) {
 			const { parentSessionPath: _headerParent, rlmDepth: _headerDepth, ...display } = info;
 			return {
@@ -602,7 +636,7 @@ export class RlmSpawnLedger {
 		}
 		return {
 			path,
-			id: basename(path, ".jsonl"),
+			id,
 			cwd: "",
 			...(name ? { name } : {}),
 			...(parentPath ? { parentSessionPath: parentPath } : {}),
