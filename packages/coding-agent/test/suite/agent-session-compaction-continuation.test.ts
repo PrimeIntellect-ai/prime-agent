@@ -15,7 +15,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.js";
-import type { SessionCompaction } from "../../src/session/compaction.js";
+import type { SessionCompaction } from "../../src/session/compaction/compaction.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionInternals = {

@@ -3,9 +3,9 @@ import { getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener, PromptOptions } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
-import { emptyGoalState } from "../src/core/goals.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type { AgentConnectionEvent, AgentConnectionState } from "../src/modes/agent-connection/types.js";
+import { emptyGoalState } from "../src/session/goals/contracts.js";
 
 type RuntimeSession = AgentSessionRuntime["session"];
 type RuntimeRebindCallback = Parameters<AgentSessionRuntime["setRebindSession"]>[0];

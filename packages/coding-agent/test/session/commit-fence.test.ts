@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SessionCommitFence } from "../../src/session/commit-fence.js";
+import { SessionCommitFence } from "../../src/session/input/commit-fence.js";
 
 function deferred() {
 	let resolve = () => {};

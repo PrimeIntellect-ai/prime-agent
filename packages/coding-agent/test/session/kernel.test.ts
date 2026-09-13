@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { snapshotPathIn } from "../../src/core/kernel/state-snapshot.js";
 import type { IpythonToolOptions } from "../../src/core/tools/ipython.js";
-import { SessionKernel, type SessionKernelHost } from "../../src/session/kernel.js";
+import { SessionKernel, type SessionKernelHost } from "../../src/session/kernel/kernel.js";
 
 const mocks = vi.hoisted(() => ({
 	instances: [] as Array<{

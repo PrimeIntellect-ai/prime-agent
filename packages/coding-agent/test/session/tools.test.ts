@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred, type KernelClient } from "../../src/core/kernel/index.js";
 import { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
-import { SessionTools, type SessionToolsHost } from "../../src/session/tools.js";
+import { SessionTools, type SessionToolsHost } from "../../src/session/tools/tools.js";
 
 describe("SessionTools ACP release", () => {
 	afterEach(() => vi.restoreAllMocks());

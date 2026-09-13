@@ -3,7 +3,6 @@ import type { TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../src/core/agent-messages.js";
-import { createGoalContextMessage, type GoalState } from "../src/core/goals.js";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CustomMessage,
@@ -30,6 +29,7 @@ import { buildConversationComponents } from "../src/modes/interactive/components
 import { SlashCommandMessageComponent } from "../src/modes/interactive/components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "../src/modes/interactive/components/slash-command-result-message.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { createGoalContextMessage, type GoalState } from "../src/session/goals/contracts.js";
 
 const componentOptions = {
 	ui: { requestRender: vi.fn() } as unknown as TUI,

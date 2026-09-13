@@ -29,7 +29,7 @@ import {
 	saveHarnessState,
 } from "../../src/core/refinement/index.js";
 import { parseSessionSlashCommand } from "../../src/core/slash-commands.js";
-import type { SessionContinuation } from "../../src/session/continuation.js";
+import type { SessionContinuation } from "../../src/session/turns/continuation.js";
 import {
 	conversationMessages,
 	createHarness,
@@ -69,7 +69,7 @@ type AutoRefineInternals = {
 
 type SteeringStopInternals = {
 	_steeringStopPending: boolean;
-	_clearQueuedGoalContexts(): void;
+	_goalContinuation: { clearQueuedGoalContexts(): void };
 };
 
 function emptyRefinementResult(): RefinementResult {
@@ -1502,7 +1502,7 @@ describe("AgentSession queue characterization", () => {
 		pause.release();
 		await hook.reached;
 
-		(harness.session as unknown as SteeringStopInternals)._clearQueuedGoalContexts();
+		(harness.session as unknown as SteeringStopInternals)._goalContinuation.clearQueuedGoalContexts();
 		hook.release();
 		await harness.session.waitForIdle();
 
@@ -3014,12 +3014,15 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		const initialEvent = createDeferred();
 		const chainedOperation = createDeferred();
-		const internals = harness.session as unknown as { _agentEventQueue: Promise<void> };
-		let eventQueue: Promise<void>;
-		eventQueue = initialEvent.promise.then(() => {
-			internals._agentEventQueue = eventQueue.then(() => chainedOperation.promise);
-		});
-		internals._agentEventQueue = eventQueue;
+		const internals = harness.session as unknown as {
+			_events: { readonly queue: Promise<void>; enqueue(work: () => void): void };
+		};
+		internals._events.enqueue(() =>
+			initialEvent.promise.then(() => {
+				internals._events.enqueue(() => chainedOperation.promise);
+			}),
+		);
+		const eventQueue = internals._events.queue;
 		let idle = false;
 		const waiting = harness.session.waitForIdle().then(() => {
 			idle = true;
