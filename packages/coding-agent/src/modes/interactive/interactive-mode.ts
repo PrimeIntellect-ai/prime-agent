@@ -956,6 +956,7 @@ export class InteractiveMode {
 	private readonly retainedSubmissionGenerations = new WeakMap<PromptStash, number>();
 	private admitPendingStartupPrompts: (() => Promise<StartupPromptBarrierOutcome>) | undefined;
 	private agentsViewRequest: InteractiveModeRunResult["type"] | undefined;
+	private isReturningToAgentsView = false;
 	private loadingAnimation: Loader | undefined = undefined;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
@@ -1704,7 +1705,7 @@ export class InteractiveMode {
 			}
 		};
 
-		if (!this.isShuttingDown) {
+		if (!this.isShuttingDown && !this.isReturningToAgentsView) {
 			await this.runStartupOnboarding();
 			showDeferredStartupNotifications();
 			showModelFallbackWarning();
@@ -2594,7 +2595,7 @@ export class InteractiveMode {
 			for (let drain = 0; drain <= HEARTBEAT_REFRESH_DRAIN_LIMIT; drain++) {
 				this.heartbeatRefreshRequested = false;
 				const heartbeats = await connection.listHeartbeats();
-				if (this.isShuttingDown || this.agentConnection !== connection) return;
+				if (this.isShuttingDown || this.isReturningToAgentsView || this.agentConnection !== connection) return;
 				this.applyHeartbeatCatalog(heartbeats);
 				if (!this.heartbeatRefreshRequested) return;
 			}
@@ -4970,6 +4971,7 @@ export class InteractiveMode {
 				if (
 					submissionOutcome === "lifecycle-cancelled" ||
 					this.isShuttingDown ||
+					this.isReturningToAgentsView ||
 					this.agentsViewRequest ||
 					this.promptStashSessionId !== submissionSessionId
 				) {
@@ -4992,6 +4994,7 @@ export class InteractiveMode {
 					const rejectedDraft = submittedDraft ?? { text };
 					const canRestore =
 						!this.isShuttingDown &&
+						!this.isReturningToAgentsView &&
 						!this.agentsViewRequest &&
 						submissionGeneration === this.inputSubmissionGeneration &&
 						this.editor.getText().length === 0;
@@ -5015,7 +5018,7 @@ export class InteractiveMode {
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 			} finally {
-				if (this.isShuttingDown || this.agentsViewRequest) {
+				if (this.isShuttingDown || this.isReturningToAgentsView || this.agentsViewRequest) {
 					submissionOutcome = "lifecycle-cancelled";
 				}
 				if (
@@ -6867,10 +6870,12 @@ export class InteractiveMode {
 	}
 
 	private async returnToAgentsView(request: InteractiveModeRunResult["type"] = "agents_view"): Promise<void> {
-		if (this.isShuttingDown || this.agentsViewRequest) return;
-		this.isShuttingDown = true;
-		// Startup still uses the connection after input handlers become active.
+		if (this.isShuttingDown || this.isReturningToAgentsView) return;
+		this.isReturningToAgentsView = true;
+		// Keep startup's connection alive without blocking an explicit shutdown.
 		await this.initializationPromise?.catch(() => undefined);
+		if (this.isShuttingDown) return;
+		this.isShuttingDown = true;
 		this.stashDraftForAgentsView();
 		this.unregisterSignalHandlers();
 
