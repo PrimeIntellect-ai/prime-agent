@@ -88,7 +88,13 @@ function resolveAutonomousLimit(value: AutonomousLimitSetting | undefined): numb
 		// Matches the runtime's UNLIMITED_AUTONOMOUS_LIMIT sentinel.
 		return Number.MAX_SAFE_INTEGER;
 	}
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined;
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		return undefined;
+	}
+	// Truncate before validating so a positive fraction (e.g. 0.5) drops to
+	// undefined instead of becoming a zero limit that stops the run immediately.
+	const truncated = Math.trunc(value);
+	return truncated > 0 ? truncated : undefined;
 }
 
 export type MermaidRenderingMode = "off" | "final" | "streaming";

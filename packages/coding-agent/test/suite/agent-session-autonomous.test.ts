@@ -280,13 +280,14 @@ describe("AgentSession autonomous mode", () => {
 
 	it("drops invalid persisted autonomous limits back to the built-in defaults", async () => {
 		const harness = await createHarness({
-			settings: { autonomous: { maxContinuations: -3, maxTurns: 0 } },
+			settings: { autonomous: { maxContinuations: -3, maxTurns: 0.5, maxTokens: 0.5 } },
 		});
 		harnesses.push(harness);
 
 		expect(harness.session.getAutonomousStatus().limits).toMatchObject({
 			maxContinuations: 3,
 			maxTurns: 12,
+			maxTokens: 80_000,
 		});
 	});
 

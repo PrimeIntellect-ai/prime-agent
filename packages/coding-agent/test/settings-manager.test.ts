@@ -615,6 +615,24 @@ describe("SettingsManager", () => {
 			});
 		});
 
+		it("drops fractional limits that truncate to zero instead of returning zero budgets", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					autonomous: { maxTurns: 0.5, maxTokens: 1_000.75, maxContinuations: 2.5 },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({
+				maxContinuations: 2,
+				maxTokens: 1_000,
+				maxTurns: undefined,
+				timeoutMs: undefined,
+			});
+		});
+
 		it("returns empty autonomous limits when unset", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
