@@ -142,6 +142,27 @@ UI_METRICS = (
         PERFORMANCE_NOISE_FLOOR,
     ),
     Definition("parent_open_cpu", "CPU, open chain parent", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "scheduled_catalog", "Scheduled catalog, first request", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition("scheduled_catalog_cpu", "CPU, scheduled catalog", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "scheduled_catalog_warm",
+        "Scheduled catalog, repeated request",
+        1000,
+        "ms",
+        0.05,
+        PERFORMANCE_NOISE_FLOOR,
+    ),
+    Definition(
+        "scheduled_catalog_warm_cpu", "CPU, repeated catalog", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition(
+        "cold_open_catalog", "Cold worker with three catalog scans", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition(
+        "cold_open_catalog_cpu", "CPU, cold worker and scans", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR
+    ),
     Definition("ui_rss", "UI memory after interactions", 1e-6, "MB", 10485760, PERFORMANCE_NOISE_FLOOR),
 )
 
@@ -377,6 +398,9 @@ def render(report: Report) -> str:
             "Readiness is the rendered transcript tail plus a confirmed editor echo.",
             "CPU metrics sum utime+stime across the whole benchmark-user process tree per interaction.",
             "UI memory sums RSS after the interactions; PTY byte counts are in the raw results.",
+            "A separate catalog fixture has 2,300 sessions, 2,298 edges, and 13 paused scheduled-job owners.",
+            "Catalog timings cover first/repeated reads and cold worker creation under three pending scans.",
+            "All expected jobs and owner metadata are checked; worker readiness excludes TUI rendering.",
             "Costs estimate full sandbox lifetimes at configured rates, including setup and build.",
             f"Budget target: ${report.config.budget_usd:g}; not a billing cap. "
             "Performance changes are informational.",

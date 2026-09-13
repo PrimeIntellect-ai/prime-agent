@@ -6,6 +6,8 @@ import os
 import pwd
 import re
 import shutil
+import socket
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -469,6 +471,160 @@ def wait_for_roster(terminal: Terminal, *, minimum: int, settle: float = 3.0, ti
     raise TimeoutError("Agents-view roster did not settle")
 
 
+CATALOG_COUNT = 2300
+CATALOG_MESSAGES = 64
+SCHEDULED_OWNERS = 13
+
+
+def write_catalog_fixtures(
+    agent_dir: Path, workspace: Path, *, uid: int | None = None
+) -> tuple[Path, set[str]]:
+    """A large ledger with sparse paused schedules and an unrelated two-message cold target."""
+    sessions = agent_dir / "sessions"
+    artifacts = agent_dir / "session-artifacts"
+    for directory in (sessions, artifacts, agent_dir / "session-leases"):
+        shutil.rmtree(directory, ignore_errors=True)
+    sessions.mkdir(parents=True)
+    parent_id = session_id("catalog", 0)
+    parent = sessions / f"{parent_id}.jsonl"
+    children = artifacts / parent_id / "children"
+    children.mkdir(parents=True)
+    records = [{"v": 1, "op": "meta", "at": _iso(BASE_TIMESTAMP_MS), "sessionsDir": str(sessions.resolve())}]
+    jobs = set()
+    for index in range(CATALOG_COUNT):
+        cold = index == CATALOG_COUNT - 1
+        identifier = session_id("catalog", index)
+        path = (sessions if index == 0 or cold else children) / f"{identifier}.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps(entry, separators=(",", ":")) + "\n"
+                for entry in _session_lines(
+                    session_name("catalog", index),
+                    identifier,
+                    1 if cold else CATALOG_MESSAGES,
+                    workspace,
+                    depth=0 if index == 0 or cold else 1,
+                    tail=None,
+                )
+            )
+        )
+        if index != 0 and not cold:
+            records.append(
+                {
+                    "v": 1,
+                    "op": "spawn",
+                    "at": _iso(BASE_TIMESTAMP_MS),
+                    "childId": identifier,
+                    "parent": str(parent.resolve()),
+                    "child": str(path.resolve()),
+                    "depth": 1,
+                    "name": session_name("catalog", index),
+                }
+            )
+        if 1 <= index <= SCHEDULED_OWNERS:
+            job_id = f"catalog-job-{index}"
+            jobs.add(job_id)
+            artifact = path.parent.parent / "session-artifacts" / identifier
+            artifact.mkdir(parents=True)
+            job = {
+                "id": job_id,
+                "status": "paused",
+                "source": "heartbeat",
+                "runtimeKind": "subagent",
+                "activeSessionId": identifier,
+                "sessionId": identifier,
+                "sessionFile": str(path.resolve()),
+                "cwd": str(workspace),
+                "prompt": "benchmark fixture; must remain paused",
+                "runCount": 0,
+                "schedule": {"kind": "interval", "expression": "every 1h", "intervalMs": 3600000},
+                "createdAt": _iso(BASE_TIMESTAMP_MS),
+                "updatedAt": _iso(BASE_TIMESTAMP_MS),
+            }
+            (artifact / "scheduled-jobs.json").write_text(
+                json.dumps({"jobs": [job], "dispatches": []}) + "\n"
+            )
+    ledger = spawn_ledger_path(agent_dir, sessions)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("".join(json.dumps(record) + "\n" for record in records))
+    if uid is not None:
+        gid = pwd.getpwuid(uid).pw_gid
+        for directory in (sessions, artifacts, ledger.parent):
+            os.chown(directory, uid, gid)
+            for path in directory.rglob("*"):
+                os.chown(path, uid, gid)
+    return sessions / f"{session_id('catalog', CATALOG_COUNT - 1)}.jsonl", jobs
+
+
+class CatalogClient:
+    """Small bounded JSONL client; retains out-of-order replies for concurrent scans and create."""
+
+    def __init__(self, channel: socket.socket, stream):
+        self.channel = channel
+        self.stream = stream
+        self.responses: dict[str, tuple[dict, float]] = {}
+        hello = self.receive()
+        if (
+            hello.get("type") != "daemon_hello"
+            or hello.get("protocol", {}).get("name") != "prime-agent.daemon"
+            or hello["protocol"]["version"] != 7
+            or "heartbeat_catalog" not in hello.get("serverCapabilities", [])
+        ):
+            raise RuntimeError("Catalog benchmark requires daemon protocol 7 and heartbeat_catalog")
+        self.protocol = hello["protocol"]
+
+    def receive(self) -> dict:
+        line = self.stream.readline(2_000_001)
+        if not line or len(line) > 2_000_000 or not line.endswith(b"\n"):
+            raise RuntimeError("Daemon closed or exceeded the catalog response limit")
+        message = json.loads(line)
+        return message["event"] if message.get("type") == "event" else message
+
+    def send(self, identifier: str, command: dict) -> float:
+        started = time.perf_counter()
+        self.channel.sendall(
+            (
+                json.dumps(
+                    {
+                        "type": "command",
+                        "id": identifier,
+                        "protocol": self.protocol,
+                        "clientId": "catalog-benchmark",
+                        "command": {**command, "id": identifier},
+                    }
+                )
+                + "\n"
+            ).encode()
+        )
+        return started
+
+    def wait(self, identifier: str) -> tuple[dict, float]:
+        deadline = time.perf_counter() + 120
+        while identifier not in self.responses:
+            self.channel.settimeout(max(0.001, deadline - time.perf_counter()))
+            message = self.receive()
+            if message.get("type") == "response":
+                self.responses[message["id"]] = (message, time.perf_counter())
+            if time.perf_counter() >= deadline:
+                raise TimeoutError(f"Timed out waiting for {identifier}")
+        message, finished = self.responses.pop(identifier)
+        if not message.get("success"):
+            raise RuntimeError(f"{identifier}: {message.get('error', 'daemon command failed')}")
+        return message["data"], finished
+
+
+def check_scheduled_jobs(data: dict, expected: set[str]) -> None:
+    jobs = [item["job"] for item in data["heartbeats"]]
+    if len(jobs) != len(expected) or {job["id"] for job in jobs} != expected:
+        raise RuntimeError("Scheduled catalog omitted or duplicated fixture jobs")
+    if any(job["status"] != "paused" or job["runCount"] != 0 for job in jobs):
+        raise RuntimeError("Benchmark schedules must stay paused and never execute")
+    for item in data["heartbeats"]:
+        index = int(item["job"]["id"].removeprefix("catalog-job-"))
+        if item.get("sessionName") != session_name("catalog", index) or not item.get("firstMessage"):
+            raise RuntimeError("Scheduled catalog omitted owner display metadata")
+
+
 def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes: Path, user: str) -> None:
     """One UI-interaction trial: fresh fixtures, a cold resume, then the warm navigation scenario."""
     from worker import clean_error, environment, record, stop_processes
@@ -482,6 +638,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
     spec = fixture_spec()
     details: dict[str, dict] = {}
     metric = "resume_large"
+    catalog_daemon = None
 
     def note(name: str, *, seconds: float, cpu: float, pty_bytes: int) -> None:
         details[name] = {"seconds": round(seconds, 4), "cpu": round(cpu, 4), "pty_bytes": pty_bytes}
@@ -634,8 +791,97 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             )
         finally:
             terminal.close()
+        # A separate stopped-process workload isolates sparse schedule scans and cold-worker queueing.
+        metric = "scheduled_catalog"
+        stop_processes(user)
+        cold_path, expected_jobs = write_catalog_fixtures(agent_dir, workspace, uid=uid)
+        socket_path = Path(f"/tmp/prime-catalog-{uid}-{trial}.sock")
+        with (results / f"catalog-daemon-{trial}.log").open("w") as log:
+            catalog_daemon = subprocess.Popen(
+                [
+                    runuser,
+                    "-u",
+                    user,
+                    "--",
+                    "prime-agent",
+                    "--mode",
+                    "daemon",
+                    "--daemon-socket",
+                    str(socket_path),
+                ],
+                cwd=workspace,
+                env=env,
+                stdout=log,
+                stderr=log,
+            )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.settimeout(120)
+            deadline = time.perf_counter() + 120
+            while True:
+                try:
+                    channel.connect(str(socket_path))
+                    break
+                except (FileNotFoundError, ConnectionRefusedError):
+                    if catalog_daemon.poll() is not None:
+                        raise RuntimeError("Catalog daemon exited during startup") from None
+                    if time.perf_counter() >= deadline:
+                        raise TimeoutError("Catalog daemon did not start") from None
+                    time.sleep(0.02)
+            with channel.makefile("rb") as stream:
+                client = CatalogClient(channel, stream)
+                for metric in ("scheduled_catalog", "scheduled_catalog_warm"):
+                    cpu_start = cpu_total()
+                    started = client.send(metric, {"type": "heartbeats_list"})
+                    data, finished = client.wait(metric)
+                    cpu = cpu_total() - cpu_start
+                    check_scheduled_jobs(data, expected_jobs)
+                    record(side, metric, trial, finished - started)
+                    record(side, metric + "_cpu", trial, cpu)
+                    details[metric] = {"seconds": finished - started, "cpu": cpu, "jobs": len(expected_jobs)}
+
+                metric = "cold_open_catalog"
+                client.send("residents", {"type": "list"})
+                residents, _ = client.wait("residents")
+                cold_id = cold_path.stem
+                if any(item["sessionId"] == cold_id for item in residents["sessions"]):
+                    raise RuntimeError("Catalog cold target already has a resident worker")
+                cpu_start = cpu_total()
+                for index in range(3):
+                    client.send(f"scan-{index}", {"type": "heartbeats_list"})
+                # Let read-only handlers enter their scans before registering a new worker.
+                time.sleep(0.02)
+                started = client.send(
+                    "cold-open",
+                    {
+                        "type": "create",
+                        "sessionPath": str(cold_path),
+                        "config": {"cwd": str(workspace), "agentDir": str(agent_dir)},
+                        "launchEnv": env,
+                    },
+                )
+                summary, finished = client.wait("cold-open")
+                cpu = cpu_total() - cpu_start
+                if summary.get("sessionId") != cold_id or summary.get("workerState") != "ready":
+                    raise RuntimeError("Cold worker did not return the expected ready session")
+                replies_before_open = len(client.responses)
+                # A failed competing scan is a failed sample, even when the worker opens quickly.
+                for index in range(3):
+                    data, _ = client.wait(f"scan-{index}")
+                    check_scheduled_jobs(data, expected_jobs)
+                record(side, metric, trial, finished - started)
+                record(side, metric + "_cpu", trial, cpu)
+                details[metric] = {
+                    "seconds": finished - started,
+                    "cpu": cpu,
+                    "scan_replies_before_open": replies_before_open,
+                    "concurrent_scans": 3,
+                    "worker_pid": summary.get("workerPid"),
+                    "sessions": CATALOG_COUNT,
+                }
     except Exception as error:
         record(side, metric, trial, error=clean_error(error))  # type: ignore[arg-type]
     finally:
         stop_processes(user)
+        if catalog_daemon is not None:
+            catalog_daemon.wait(timeout=10)
         (results / f"ui-{trial}.json").write_text(json.dumps(details, indent=2, sort_keys=True) + "\n")

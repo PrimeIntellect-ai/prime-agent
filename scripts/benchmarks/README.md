@@ -183,6 +183,34 @@ fast sample. Raw results also record PTY bytes per interaction, a proxy for
 how much the renderer redraws. UI trials default to 3 per revision (`ui_trials` in `config.json`)
 to bound sandbox cost; the scenario takes roughly 60–90 s per trial.
 
+### Scheduled catalog and cold workers
+
+After the navigation scenario, the UI trial stops its benchmark-user processes and regenerates
+an independent 2,300-session fixture: 2,298 children linked through real ledger edges, their root,
+and an unrelated two-message cold target. Each non-target transcript contains 64 assistant usage
+entries (147,136 in total), exceeding the 100,000-entry metadata-cache budget. Thirteen children
+own scheduled-job artifacts. All schedules are paused, have no next run, and must retain runCount=0.
+
+The installed daemon runs on a dedicated socket. The probe requires protocol 7 and the negotiated
+heartbeat_catalog capability; unsupported revisions fail visibly. It records:
+
+- **Scheduled catalog, first request** and **repeated request:** complete global heartbeats_list
+  round trips, with process-tree CPU. The daemon may already have scanned schedules during startup;
+  the first request does not claim a cold filesystem or empty metadata cache.
+- **Cold worker with three catalog scans:** pipeline three global catalog requests, allow 20 ms
+  for their handlers to enter, then create the unrelated saved session. Time the create request
+  through a matching ready worker summary. The target must not already be resident. This isolates
+  worker readiness under scan traffic (#2299), without transcript rendering or PTY delays.
+
+Every catalog reply must contain exactly the expected 13 jobs, with owner names and first-message
+metadata. Competing scans must also complete successfully. Missing jobs, dropped metadata, failed
+scans, and wrong/not-ready workers cannot count as improvements. Raw results record how many scan
+replies arrived before worker readiness; this is an observed response order, not proof of which
+internal scan was executing at each instant. CPU for the cold-worker interval includes scan work.
+No schedules execute and no prompts are submitted. Scans remain independent of the ordinary UI
+fixture so the added history cannot change the original navigation measurements. Allow additional
+fixture-generation and five scan round trips per UI trial; full Linux calibration is still required.
+
 ## Lifecycle and costs
 
 The main workflow posts a single marked comment and updates it in place. A new push replaces the

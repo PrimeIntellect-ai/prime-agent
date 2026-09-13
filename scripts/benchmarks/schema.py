@@ -42,6 +42,12 @@ Metric = Literal[
     "parent_open",
     "parent_open_cpu",
     "ui_rss",
+    "scheduled_catalog",
+    "scheduled_catalog_cpu",
+    "scheduled_catalog_warm",
+    "scheduled_catalog_warm_cpu",
+    "cold_open_catalog",
+    "cold_open_catalog_cpu",
 ]
 UI_METRIC_KEYS = frozenset(
     {
@@ -60,6 +66,12 @@ UI_METRIC_KEYS = frozenset(
         "parent_open",
         "parent_open_cpu",
         "ui_rss",
+        "scheduled_catalog",
+        "scheduled_catalog_cpu",
+        "scheduled_catalog_warm",
+        "scheduled_catalog_warm_cpu",
+        "cold_open_catalog",
+        "cold_open_catalog_cpu",
     }
 )
 NonNegative = Annotated[float, Field(ge=0, le=1e15, allow_inf_nan=False)]
@@ -235,6 +247,12 @@ PHASE_METRICS: dict[str, tuple[Metric, ...]] = {
         "parent_open",
         "parent_open_cpu",
         "ui_rss",
+        "scheduled_catalog",
+        "scheduled_catalog_cpu",
+        "scheduled_catalog_warm",
+        "scheduled_catalog_warm_cpu",
+        "cold_open_catalog",
+        "cold_open_catalog_cpu",
     ),
 }
 
