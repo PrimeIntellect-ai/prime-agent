@@ -20,7 +20,7 @@ import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import type { BuildSystemPromptOptions } from "../src/core/system-prompt.js";
+import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import type { SessionRefinement } from "../src/session/refinement.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
@@ -67,6 +67,7 @@ describe("AgentSession concurrent prompt guard", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		delete (globalThis as typeof globalThis & { testExtensionApi?: unknown }).testExtensionApi;
 		delete (globalThis as typeof globalThis & { testCommandRuns?: unknown }).testCommandRuns;
 		if (session) {
@@ -191,11 +192,11 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	it("forwards kernelSnapshot: false to the kernel provisioner during disposal", async () => {
 		createSession();
-		const dispose = vi.fn(async () => {});
-		Reflect.set(session, "_ipythonKernelProvisioner", { dispose });
+		const dispose = vi.spyOn(IpythonKernelProvisioner.prototype, "dispose").mockResolvedValue();
 
 		await session.disposeAsync({ kernelSnapshot: false });
 		expect(dispose).toHaveBeenCalledWith({ snapshot: false });
+		dispose.mockRestore();
 	});
 
 	it("should throw when prompt() called while streaming", async () => {
@@ -919,43 +920,16 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 
 		const snapshots: string[][] = [];
-		const sessionWithRunner = session as unknown as {
-			_extensionRunner?: {
-				hasHandlers: (eventType: string) => boolean;
-				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
-				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
-				emitToolCall: (event: { type: string; toolCallId: string }) => Promise<undefined>;
-				emitInput: (
-					text: string,
-					images: unknown,
-					source: "interactive" | "rpc" | "extension",
-				) => Promise<{ action: "continue" }>;
-				emitBeforeAgentStart: (
-					prompt: string,
-					images: unknown,
-					systemPrompt: string,
-					systemPromptOptions: BuildSystemPromptOptions,
-				) => Promise<undefined>;
-				invalidate: (message?: string) => void;
-			};
-		};
-		sessionWithRunner._extensionRunner = {
-			hasHandlers: (eventType) => eventType === "tool_call",
-			emit: async () => {},
-			emitMessageEnd: async () => undefined,
-			emitToolCall: async () => {
-				snapshots.push(
-					sessionManager
-						.getEntries()
-						.filter((entry) => entry.type === "message")
-						.map((entry) => entry.message.role),
-				);
-				return undefined;
-			},
-			emitInput: async () => ({ action: "continue" }),
-			emitBeforeAgentStart: async () => undefined,
-			invalidate: () => {},
-		};
+		vi.spyOn(session.extensionRunner, "hasHandlers").mockImplementation((eventType) => eventType === "tool_call");
+		vi.spyOn(session.extensionRunner, "emitToolCall").mockImplementation(async () => {
+			snapshots.push(
+				sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "message")
+					.map((entry) => entry.message.role),
+			);
+			return undefined;
+		});
 
 		await session.prompt("hi");
 		await session.agent.waitForIdle();
@@ -1064,38 +1038,10 @@ describe("AgentSession concurrent prompt guard", () => {
 			baseToolsOverride: { dummy: tool },
 		});
 
-		const sessionWithRunner = session as unknown as {
-			_extensionRunner?: {
-				hasHandlers: (eventType: string) => boolean;
-				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
-				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
-				emitInput: (
-					text: string,
-					images: unknown,
-					source: "interactive" | "rpc" | "extension",
-				) => Promise<{ action: "continue" }>;
-				emitBeforeAgentStart: (
-					prompt: string,
-					images: unknown,
-					systemPrompt: string,
-					systemPromptOptions: BuildSystemPromptOptions,
-				) => Promise<undefined>;
-				invalidate: (message?: string) => void;
-			};
-		};
-		sessionWithRunner._extensionRunner = {
-			hasHandlers: () => false,
-			emit: async () => {},
-			emitMessageEnd: async (event) => {
-				if (event.type === "message_end" && event.message?.role === "assistant") {
-					await new Promise((resolve) => setTimeout(resolve, 40));
-				}
-				return undefined;
-			},
-			emitInput: async () => ({ action: "continue" }),
-			emitBeforeAgentStart: async () => undefined,
-			invalidate: () => {},
-		};
+		vi.spyOn(session.extensionRunner, "emitMessageEnd").mockImplementation(async (event) => {
+			if (event.message.role === "assistant") await new Promise((resolve) => setTimeout(resolve, 40));
+			return undefined;
+		});
 
 		await session.prompt("hi");
 		await session.agent.waitForIdle();
