@@ -1,0 +1,1 @@
+- Fixed a crash when returning to the agents view while a chat is still loading.

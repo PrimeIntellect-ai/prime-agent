@@ -945,6 +945,7 @@ export class InteractiveMode {
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
+	private initializationPromise: Promise<void> | undefined;
 	private onInputCallback?: (text: string | undefined) => void;
 	private submittedInputBehavior: "steer" | "followUp" = "steer";
 	private latestEditorPromptStash: PromptStash | undefined;
@@ -1528,7 +1529,8 @@ export class InteractiveMode {
 	}
 
 	async run(): Promise<InteractiveModeRunResult> {
-		await this.init();
+		this.initializationPromise = this.init();
+		await this.initializationPromise;
 		this.restorePromptStashOnOpen();
 
 		// Global, environment-scoped notices (app update, extension updates, tmux setup)
@@ -6862,6 +6864,8 @@ export class InteractiveMode {
 	}
 
 	private async returnToAgentsView(request: InteractiveModeRunResult["type"] = "agents_view"): Promise<void> {
+		// Startup still uses the connection after input handlers become active.
+		await this.initializationPromise?.catch(() => undefined);
 		if (this.isShuttingDown || this.agentsViewRequest) return;
 		this.stashDraftForAgentsView();
 		this.agentsViewRequest = request;
