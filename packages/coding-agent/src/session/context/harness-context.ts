@@ -1,13 +1,14 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { SessionContext, SessionManager } from "../../core/session-manager.js";
+import type { Skill } from "../../core/skills.js";
+import { formatHarnessStateForPrompt } from "../refinement/format.js";
+import { type HarnessState, REFINE_SKILL_NAME } from "../refinement/types.js";
 import {
 	type CustomMessage,
 	createHarnessDigestMessage,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 	type HarnessDigestDetails,
-} from "../../core/messages.js";
-import { formatHarnessStateForPrompt, type HarnessState, REFINE_SKILL_NAME } from "../../core/refinement/index.js";
-import type { SessionContext, SessionManager } from "../../core/session-manager.js";
-import type { Skill } from "../../core/skills.js";
+} from "./messages.js";
 export interface HarnessContextHost {
 	sessionManager: Pick<SessionManager, "appendCustomMessageEntryWithRollback" | "buildSessionContext">;
 	getMessages(): AgentMessage[];

@@ -6,8 +6,9 @@ import {
 	isAgentSessionMessage,
 } from "../../core/agent-messages.js";
 import type { InputSource } from "../../core/extensions/index.js";
-import type { CustomMessage } from "../../core/messages.js";
-import type { ActionStore, ActionTicket } from "../../core/session-action-store.js";
+import type { CustomMessage } from "../context/messages.js";
+import type { ActionStore, ActionTicket } from "./action-store.js";
+import type { SessionInputScheduler } from "./input-scheduler.js";
 import {
 	createPreparedTurnAction,
 	primaryDeliveryRecord,
@@ -15,8 +16,7 @@ import {
 	type QueuedSessionAction,
 	SessionInputAdmissionPausedError,
 	type SessionInputSchedule,
-} from "../prepared-actions.js";
-import type { SessionInputScheduler } from "./input-scheduler.js";
+} from "./prepared-actions.js";
 
 export interface SessionInputAdmissionHost {
 	getScheduler(): Pick<SessionInputScheduler, "admissionPaused" | "suspended">;

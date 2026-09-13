@@ -1,6 +1,5 @@
 import type { AgentSessionMessageAgentSummary, AgentSessionMessageListResult } from "../../core/agent-messages.js";
-import type { AgentSession } from "../../core/agent-session.js";
-import { createDefaultRlmSubagentSessionName, type RlmListSubagentsResult } from "../../core/rlm-runtime.js";
+import type { AgentSession } from "../agent-session.js";
 import {
 	compactRlmText,
 	type RetainedRlmChild,
@@ -9,6 +8,8 @@ import {
 	readAssistantText,
 	rlmChildLabel,
 } from "./child-types.js";
+import type { RlmListSubagentsResult } from "./runtime-contracts.js";
+import { createDefaultRlmSubagentSessionName } from "./spawn-options.js";
 
 interface ChildVisibility {
 	isDeleting(id: string): boolean;

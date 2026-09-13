@@ -1,6 +1,6 @@
 import type { Agent, AgentContext, AgentMessage, GetContinuationMessagesContext } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
-import type { ActionStore } from "../../core/session-action-store.js";
+import type { ActionStore } from "../input/action-store.js";
 import type { SessionInputAdmission } from "../input/input-admission.js";
 import type { SessionInputScheduler } from "../input/input-scheduler.js";
 import {
@@ -8,7 +8,7 @@ import {
 	normalizeMessageContent,
 	primaryDeliveryRecord,
 	type QueuedSessionAction,
-} from "../prepared-actions.js";
+} from "../input/prepared-actions.js";
 import { parseGoalSlashCommand } from "./commands.js";
 import {
 	createGoalContextMessage,
