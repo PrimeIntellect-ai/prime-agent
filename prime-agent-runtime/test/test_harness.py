@@ -1078,6 +1078,14 @@ class HarnessSearchTest(unittest.TestCase):
 
             self.assertEqual([entry.id for entry in results], ["login"])
 
+    def test_search_drops_single_character_non_cjk_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Russian note", "мир и согласие в команде.", id="mir")
+
+            self.assertEqual(state.search("и"), [])
+            self.assertEqual([entry.id for entry in state.search("мир")], ["mir"])
+
     def test_search_treats_punctuation_as_separators(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")

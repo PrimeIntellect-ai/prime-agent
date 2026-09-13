@@ -49,19 +49,25 @@ def _harness_query_terms(query: str) -> list[str]:
     marks. CJK runs carry no spaces between words, so each run becomes
     overlapping bigrams: ``修复登录`` yields ``修复``/``复登``/``登录`` and
     still matches an entry containing ``登录故障``. Each term counts once.
+    Minimum lengths stay below the digest builder's four-character cut
+    because ``search`` tokenizes explicit queries, not mined conversation:
+    three ASCII characters keep real terms (rlm, api, cli), two characters
+    keep short words of other scripts (мир), and single characters are
+    terms only for CJK, where one character is a word.
     """
     terms: list[str] = []
     seen: set[str] = set()
     for run in re.findall(r"[a-z0-9]+|[^\W_a-z0-9]+", query.lower()):
         if run.isascii():
-            # Short ASCII runs are noise (the, and, ids) and are dropped.
             candidates = [run] if len(run) >= 3 else []
         elif _CJK_TERM_CHARS.search(run):
             # Bigrams keep whitespace-free CJK findable without single
             # characters matching too loosely.
             candidates = [run[i : i + 2] for i in range(len(run) - 1)] or [run]
         else:
-            candidates = [run]
+            # Other scripts space out words: lone characters match too
+            # broadly, so two characters is the floor.
+            candidates = [run] if len(run) >= 2 else []
         for term in candidates:
             if term not in seen:
                 seen.add(term)
