@@ -234,6 +234,7 @@ export function buildSessionTreeFromFlatNodes(
 
 export class DaemonAgentConnection implements AgentConnection {
 	private readonly listeners = new Set<AgentConnectionEventListener>();
+	private readonly pendingExtensionUiRequests: Extract<DaemonOutbound, { type: "extension_ui_request" }>[] = [];
 	private readonly unsubscribeDaemonMessages: () => void;
 	private readonly unsubscribeDaemonClose: () => void;
 	private readonly clientId = `daemon-agent-connection:${randomUUID()}`;
@@ -508,6 +509,7 @@ export class DaemonAgentConnection implements AgentConnection {
 
 	subscribe(listener: AgentConnectionEventListener): () => void {
 		this.listeners.add(listener);
+		for (const request of this.pendingExtensionUiRequests.splice(0)) void this.handleDaemonMessage(request);
 		return () => {
 			this.listeners.delete(listener);
 		};
@@ -1679,6 +1681,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			);
 		}
 		this.disposed = true;
+		this.pendingExtensionUiRequests.length = 0;
 		this.updateRestartPending = false;
 		await Promise.allSettled([...this.activeSideQuestionIds].map((id) => this.abortSideQuestion(id)));
 		await this.rosterStore?.dispose().catch(() => undefined);
@@ -1843,6 +1846,13 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 		// Requests bypass snapshot deferral and must not advance the replay cursor.
 		if (message.type === "extension_ui_request") {
+			const cursor = getDaemonMessageCursor(message);
+			if (cursor && this.retiredEventGenerations.has(cursor.generation)) return;
+			// Retain attach-time requests until the UI subscribes; snapshots cannot restore them.
+			if (this.listeners.size === 0) {
+				this.pendingExtensionUiRequests.push(message);
+				return;
+			}
 			await this.emit({
 				type: "extension_ui_request",
 				request: { id: message.id, method: message.method, payload: message.payload },
@@ -1944,6 +1954,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 		if (message.type === "session_replaced") {
 			this.sessionRevision++;
+			this.pendingExtensionUiRequests.length = 0;
 			this.attachedSessionId = message.state.sessionId;
 			this.attachedSessionFile = message.state.sessionFile;
 			// Buffered events belong to the replaced session; they must never

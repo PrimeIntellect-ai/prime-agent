@@ -4608,49 +4608,107 @@ describe("DaemonAgentConnection deferred session events", () => {
 		}
 	});
 
-	it("delivers extension prompts without skipping earlier deferred transcript events", async () => {
-		const fakeClient = new FakeDaemonClient();
-		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
-			deferSessionEvents: true,
-		});
-		try {
-			await connection.attach();
-			const delivered: AgentConnectionEvent[] = [];
-			connection.subscribe((event) => {
-				delivered.push(event);
+	it.each([true, false])(
+		"delivers attach-time extension prompts without skipping transcript events (subscribed=%s)",
+		async (subscribed) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+				deferSessionEvents: true,
 			});
-			fakeClient.emitMessage({
-				type: "extension_ui_request",
-				activeSessionId: "active-1",
-				id: "editor-request",
-				method: "editor",
-				payload: { title: "Edit" },
-				meta: {
-					id: "active-1:14",
-					protocol: DAEMON_PROTOCOL_INFO,
-					activeSessionId: "active-1",
-					sequence: 14,
-					cursor: { generation: "generation-active-1", sequence: 14 },
-					emittedAt: "2026-01-01T00:00:00.000Z",
-				},
-			});
-			// The transport releases earlier transcript events only after the snapshot.
-			emitSequencedSessionEvent(fakeClient, "active-1", 13);
-			expect(delivered).toEqual([
-				{
+			try {
+				const delivered: AgentConnectionEvent[] = [];
+				const listener = (event: AgentConnectionEvent) => {
+					delivered.push(event);
+				};
+				if (subscribed) connection.subscribe(listener);
+				fakeClient.attachResultFactory = (command) => {
+					fakeClient.emitMessage({
+						type: "extension_ui_request",
+						activeSessionId: "active-1",
+						id: "editor-request",
+						method: "editor",
+						payload: { title: "Edit" },
+						meta: {
+							id: "active-1:14",
+							protocol: DAEMON_PROTOCOL_INFO,
+							activeSessionId: "active-1",
+							sequence: 14,
+							cursor: { generation: "generation-active-1", sequence: 14 },
+							emittedAt: "2026-01-01T00:00:00.000Z",
+						},
+					});
+					return createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12);
+				};
+				await connection.attach();
+				// The transport releases earlier transcript events only after the snapshot.
+				emitSequencedSessionEvent(fakeClient, "active-1", 13);
+				if (!subscribed) {
+					expect(delivered).toEqual([]);
+					connection.subscribe(listener);
+				}
+				expect(delivered).toEqual([
+					{
+						type: "extension_ui_request",
+						request: { id: "editor-request", method: "editor", payload: { title: "Edit" } },
+					},
+				]);
+				await connection.flushBufferedSessionEvents();
+				expect(delivered.at(-1)).toEqual({
+					type: "session_event",
+					event: { type: "session_info_changed", name: "13" },
+				});
+				const additionalListener = vi.fn();
+				connection.subscribe(additionalListener);
+				expect(additionalListener).not.toHaveBeenCalled();
+			} finally {
+				await connection.dispose();
+			}
+		},
+	);
+
+	it.each(["disposed", "replaced", "restarted"])(
+		"discards queued extension prompts when %s before subscription",
+		async (boundary) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+			try {
+				await connection.attach();
+				fakeClient.emitMessage({
 					type: "extension_ui_request",
-					request: { id: "editor-request", method: "editor", payload: { title: "Edit" } },
-				},
-			]);
-			await connection.flushBufferedSessionEvents();
-			expect(delivered.at(-1)).toEqual({
-				type: "session_event",
-				event: { type: "session_info_changed", name: "13" },
-			});
-		} finally {
-			await connection.dispose();
-		}
-	});
+					activeSessionId: "active-1",
+					id: "old",
+					method: "editor",
+					payload: { title: "Old" },
+					meta: {
+						id: "old:13",
+						protocol: DAEMON_PROTOCOL_INFO,
+						activeSessionId: "active-1",
+						sequence: 13,
+						cursor: { generation: "generation-active-1", sequence: 13 },
+						emittedAt: "2026-01-01T00:00:00.000Z",
+					},
+				});
+				if (boundary === "disposed") await connection.dispose();
+				else if (boundary === "replaced")
+					fakeClient.emitMessage({
+						type: "session_replaced",
+						activeSessionId: "active-1",
+						state: createConnectionState("active-1", "replacement"),
+						messages: [],
+					});
+				else {
+					const snapshot = createAttachResult("active-1", undefined, undefined, 1).snapshot;
+					snapshot.lastEventCursor = { generation: "restarted", sequence: 1 };
+					fakeClient.emitMessage({ type: "session_resynced", activeSessionId: "active-1", snapshot });
+				}
+				const listener = vi.fn();
+				connection.subscribe(listener);
+				expect(listener).not.toHaveBeenCalled();
+			} finally {
+				await connection.dispose();
+			}
+		},
+	);
 
 	it.each([1, 1001])(
 		"drops %i buffered events and overflow superseded by a restarted worker snapshot",

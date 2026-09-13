@@ -440,6 +440,8 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "attach" }));
+		clearTimeout(client.catchupRetryTimer);
+		client.socket.destroy();
 	});
 
 	it("holds catch-up behind duplicate validation and rejects it on mismatch", async () => {
@@ -499,8 +501,15 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		);
 		await failedCatchup;
 
-		// The published-cache drop requeued the rejected waiter: it retries with a fresh snapshot request.
-		expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "attach", activeSessionId }));
+		// The rejected waiter requests a fresh snapshot after the catch-up retry delay.
+		try {
+			await vi.waitFor(() =>
+				expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "attach", activeSessionId })),
+			);
+		} finally {
+			clearTimeout(client.catchupRetryTimer);
+			client.socket.destroy();
+		}
 		expect(streamSnapshot).not.toHaveBeenCalled();
 		expect(worker.snapshotCache.has(activeSessionId)).toBe(false);
 		expect(worker.transcriptCaches.has(activeSessionId)).toBe(false);
