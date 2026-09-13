@@ -20,15 +20,25 @@ import type { DaemonCommand } from "../../src/modes/daemon/daemon-protocol.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SerializedInternals = {
-	_serializedRefine: boolean;
+	_refinement: {
+		_serializedRefine: boolean;
+		_auto: {
+			_assistantTurnsSinceAutoRefine: number;
+			_lastAutoRefineReviewAt: number;
+			_reviewAutoRefine: (
+				ctx: { reason: string; turnsSinceLastReview: number },
+				signal?: AbortSignal,
+			) => Promise<unknown>;
+		};
+		_execution: {
+			_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
+			_applyRefine: (plan: unknown, opts: unknown, abort: AbortController) => Promise<unknown>;
+		};
+	};
+
 	_rlmHeartbeatController?: unknown;
 	_agentMessageController?: unknown;
 	_agentObserveController?: unknown;
-	_assistantTurnsSinceAutoRefine: number;
-	_lastAutoRefineReviewAt: number;
-	_planRefine: (opts: { instructions?: string }, signal: AbortSignal) => Promise<unknown>;
-	_applyRefine: (plan: unknown, opts: unknown, abort: AbortController) => Promise<unknown>;
-	_reviewAutoRefine: (ctx: { reason: string; turnsSinceLastReview: number }, signal?: AbortSignal) => Promise<unknown>;
 };
 
 describe("Daemon-backed serializedRefine propagation", () => {
@@ -81,7 +91,7 @@ describe("Daemon-backed serializedRefine propagation", () => {
 
 		// The session created by the daemon has _serializedRefine=true.
 		const sessionInternals = state.runtime.session as unknown as SerializedInternals;
-		expect(sessionInternals._serializedRefine).toBe(true);
+		expect(sessionInternals._refinement._serializedRefine).toBe(true);
 
 		state.runtime.session.dispose();
 	});
@@ -120,7 +130,7 @@ describe("Daemon-backed serializedRefine propagation", () => {
 		const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
 
 		const sessionInternals = state.runtime.session as unknown as SerializedInternals;
-		expect(sessionInternals._serializedRefine).toBe(false);
+		expect(sessionInternals._refinement._serializedRefine).toBe(false);
 
 		state.runtime.session.dispose();
 	});
@@ -148,8 +158,11 @@ describe("Daemon-backed serializedRefine propagation", () => {
 			stashedHarness = harness;
 			const session = harness.session;
 			const internals = session as unknown as SerializedInternals;
-			vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "p", proposal: { edits: [] } });
-			vi.spyOn(internals, "_applyRefine").mockResolvedValue({
+			vi.spyOn(internals._refinement._execution, "_planRefine").mockResolvedValue({
+				id: "p",
+				proposal: { edits: [] },
+			});
+			vi.spyOn(internals._refinement._execution, "_applyRefine").mockResolvedValue({
 				id: "refine_test",
 				summary: "test",
 				rationale: "test",
@@ -186,14 +199,14 @@ describe("Daemon-backed serializedRefine propagation", () => {
 		// Turn 1: counter goes to 1 (< threshold 2)
 		harness.setResponses([fauxAssistantMessage("response 1")]);
 		await session.prompt("prompt 1");
-		expect(sessionInternals._assistantTurnsSinceAutoRefine).toBe(1);
+		expect(sessionInternals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(1);
 
 		// Turn 2: counter goes to 2 (>= threshold), checkpoint fires
 		harness.setResponses([fauxAssistantMessage("response 2")]);
 		await session.prompt("prompt 2");
 
 		// After checkpoint, counter reset to 0
-		expect(sessionInternals._assistantTurnsSinceAutoRefine).toBe(0);
+		expect(sessionInternals._refinement._auto._assistantTurnsSinceAutoRefine).toBe(0);
 		// Reviewer called exactly once
 		expect(reviewer).toHaveBeenCalledTimes(1);
 

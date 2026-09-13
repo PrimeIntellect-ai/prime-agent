@@ -2,14 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionInternals = {
-	_consumePendingRequestedRefine: () => boolean;
-	_emitRefineFailed: (error: unknown) => void;
-	_pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
-	_serializedPlanInFlight?: Promise<unknown>;
-	_serializedExplicitRefineOptions?: { instructions?: string; global?: boolean };
-	_refineAbortController?: AbortController;
+	_refinement: {
+		_consumePendingRequestedRefine: () => boolean;
+		_emitRefineFailed: (error: unknown) => void;
+		_pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
+		_serializedPlanInFlight?: Promise<unknown>;
+		_serializedExplicitRefineOptions?: { instructions?: string; global?: boolean };
+		_refineAbortController?: AbortController;
+		refine: (options: { instructions?: string; global?: boolean }) => Promise<unknown>;
+	};
+
 	_createKernelHostHandlers: () => Record<string, unknown>;
-	refine: (options: { instructions?: string; global?: boolean }) => Promise<unknown>;
 };
 
 function setStreaming(harness: Harness, streaming: boolean) {
@@ -53,7 +56,7 @@ describe("AgentSession refine skill host requests", () => {
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
-		expect(internals._pendingRequestedRefine?.global).toBe(true);
+		expect(internals._refinement._pendingRequestedRefine?.global).toBe(true);
 	});
 
 	it("defaults to local scope when global is not provided", async () => {
@@ -67,8 +70,8 @@ describe("AgentSession refine skill host requests", () => {
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
-		expect(internals._pendingRequestedRefine?.global).toBeUndefined();
-		expect(internals._pendingRequestedRefine?.instructions).toBeUndefined();
+		expect(internals._refinement._pendingRequestedRefine?.global).toBeUndefined();
+		expect(internals._refinement._pendingRequestedRefine?.instructions).toBeUndefined();
 	});
 
 	it("updates pending request when called again", async () => {
@@ -83,8 +86,8 @@ describe("AgentSession refine skill host requests", () => {
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
-		expect(internals._pendingRequestedRefine?.instructions).toBe("second");
-		expect(internals._pendingRequestedRefine?.global).toBe(true);
+		expect(internals._refinement._pendingRequestedRefine?.instructions).toBe("second");
+		expect(internals._refinement._pendingRequestedRefine?.global).toBe(true);
 	});
 
 	it("replaces an in-flight serialized plan instead of applying both requests", async () => {
@@ -92,34 +95,34 @@ describe("AgentSession refine skill host requests", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SessionInternals;
 		const abort = new AbortController();
-		internals._serializedPlanInFlight = new Promise(() => {});
-		internals._serializedExplicitRefineOptions = { instructions: "first", global: true };
-		internals._refineAbortController = abort;
+		internals._refinement._serializedPlanInFlight = new Promise(() => {});
+		internals._refinement._serializedExplicitRefineOptions = { instructions: "first", global: true };
+		internals._refinement._refineAbortController = abort;
 
 		setStreaming(harness, true);
 		harness.session.handleRefineHostRequest("refine.run", { instructions: "replacement" });
 		setStreaming(harness, false);
 
 		expect(abort.signal.aborted).toBe(true);
-		expect(internals._pendingRequestedRefine).toEqual({ instructions: "replacement", global: true });
+		expect(internals._refinement._pendingRequestedRefine).toEqual({ instructions: "replacement", global: true });
 	});
 
 	it("discards a settled serialized plan when a replacement request arrives", async () => {
 		const harness = await createHarness({ persistSession: true, serializedRefine: true });
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SessionInternals;
-		internals._serializedPlanInFlight = Promise.resolve({ status: "plan" });
-		internals._serializedExplicitRefineOptions = { instructions: "first", global: true };
+		internals._refinement._serializedPlanInFlight = Promise.resolve({ status: "plan" });
+		internals._refinement._serializedExplicitRefineOptions = { instructions: "first", global: true };
 
 		setStreaming(harness, true);
 		harness.session.handleRefineHostRequest("refine.run", { instructions: "replacement" });
 		setStreaming(harness, false);
 
-		await expect(internals._serializedPlanInFlight).resolves.toEqual({
+		await expect(internals._refinement._serializedPlanInFlight).resolves.toEqual({
 			status: "invalidated",
 			branchVersion: expect.any(Number),
 		});
-		expect(internals._pendingRequestedRefine).toEqual({ instructions: "replacement", global: true });
+		expect(internals._refinement._pendingRequestedRefine).toEqual({ instructions: "replacement", global: true });
 	});
 
 	it("rejects refine.run while no turn is active", async () => {
@@ -179,10 +182,10 @@ describe("AgentSession refine skill host requests", () => {
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
-		const refineSpy = vi.spyOn(internals, "refine").mockResolvedValue({});
-		internals._consumePendingRequestedRefine();
+		const refineSpy = vi.spyOn(internals._refinement, "refine").mockResolvedValue({});
+		internals._refinement._consumePendingRequestedRefine();
 		expect(refineSpy).toHaveBeenCalledWith({ instructions: "test", global: undefined }, { source: "self" });
-		expect(internals._pendingRequestedRefine).toBeUndefined();
+		expect(internals._refinement._pendingRequestedRefine).toBeUndefined();
 	});
 
 	it("does nothing when no pending refine at turn boundary", async () => {
@@ -191,8 +194,8 @@ describe("AgentSession refine skill host requests", () => {
 		await harness.session.prompt("one");
 
 		const internals = harness.session as unknown as SessionInternals;
-		const refineSpy = vi.spyOn(internals, "refine").mockResolvedValue({});
-		expect(internals._consumePendingRequestedRefine()).toBe(false);
+		const refineSpy = vi.spyOn(internals._refinement, "refine").mockResolvedValue({});
+		expect(internals._refinement._consumePendingRequestedRefine()).toBe(false);
 		expect(refineSpy).not.toHaveBeenCalled();
 	});
 
@@ -207,7 +210,7 @@ describe("AgentSession refine skill host requests", () => {
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
-		vi.spyOn(internals, "refine").mockRejectedValue(new Error("refine failed"));
+		vi.spyOn(internals._refinement, "refine").mockRejectedValue(new Error("refine failed"));
 		const failed = new Promise<string>((resolve) => {
 			const unsubscribe = harness.session.subscribe((event) => {
 				if (event.type === "refine_failed") {
@@ -217,9 +220,9 @@ describe("AgentSession refine skill host requests", () => {
 			});
 		});
 
-		expect(internals._consumePendingRequestedRefine()).toBe(true);
+		expect(internals._refinement._consumePendingRequestedRefine()).toBe(true);
 		expect(await failed).toBe("refine failed");
-		expect(internals._pendingRequestedRefine).toBeUndefined();
+		expect(internals._refinement._pendingRequestedRefine).toBeUndefined();
 	});
 
 	it("continues notifying refine listeners after one throws", async () => {
@@ -236,7 +239,7 @@ describe("AgentSession refine skill host requests", () => {
 			}
 		});
 
-		expect(() => internals._emitRefineFailed(new Error("planning failed"))).not.toThrow();
+		expect(() => internals._refinement._emitRefineFailed(new Error("planning failed"))).not.toThrow();
 		expect(observed).toEqual(["planning failed"]);
 	});
 

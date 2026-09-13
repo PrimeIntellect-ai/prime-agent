@@ -150,13 +150,14 @@ describe.each(["opencode", "opencode-go"])("ENG-6009 %s maintenance identity", (
 		operation = "refinement-review";
 		responseText = JSON.stringify({ shouldRefine: false, rationale: "No lesson" });
 		const internal = harness.session as unknown as {
-			_reviewAutoRefine(context: {
-				reason: "turn_interval";
-				turnsSinceLastReview: number;
-			}): Promise<AutoRefineReview>;
+			_refinement: {
+				_execution: {
+					review(context: { reason: "turn_interval"; turnsSinceLastReview: number }): Promise<AutoRefineReview>;
+				};
+			};
 		};
 		await expect(
-			internal._reviewAutoRefine({ reason: "turn_interval", turnsSinceLastReview: 5 }),
+			internal._refinement._execution.review({ reason: "turn_interval", turnsSinceLastReview: 5 }),
 		).resolves.toMatchObject({ shouldRefine: false });
 		expectIdentity(harness, 1);
 	});
