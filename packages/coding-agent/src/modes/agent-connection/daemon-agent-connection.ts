@@ -2051,6 +2051,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (this.updateReconnectPromise) {
 			return this.updateReconnectPromise;
 		}
+		this.pendingExtensionUiRequests.length = 0;
 		void this.emit({
 			type: "connection_status",
 			status: "reconnecting",

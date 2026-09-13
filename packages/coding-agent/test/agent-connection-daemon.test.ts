@@ -4666,7 +4666,7 @@ describe("DaemonAgentConnection deferred session events", () => {
 		},
 	);
 
-	it.each(["disposed", "replaced", "restarted"])(
+	it.each(["disposed", "replaced", "restarted", "update-session", "update-transport"])(
 		"discards queued extension prompts when %s before subscription",
 		async (boundary) => {
 			const fakeClient = new FakeDaemonClient();
@@ -4696,7 +4696,14 @@ describe("DaemonAgentConnection deferred session events", () => {
 						state: createConnectionState("active-1", "replacement"),
 						messages: [],
 					});
-				else {
+				else if (boundary.startsWith("update-")) {
+					fakeClient.updateRestartSessions = [{ activeSessionId: "active-1", sessionId: "session-current" }];
+					if (boundary === "update-session") {
+						fakeClient.emitMessage({ type: "session_closed", activeSessionId: "active-1", reason: "update" });
+					} else {
+						fakeClient.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", "update"));
+					}
+				} else {
 					const snapshot = createAttachResult("active-1", undefined, undefined, 1).snapshot;
 					snapshot.lastEventCursor = { generation: "restarted", sequence: 1 };
 					fakeClient.emitMessage({ type: "session_resynced", activeSessionId: "active-1", snapshot });
@@ -4704,6 +4711,23 @@ describe("DaemonAgentConnection deferred session events", () => {
 				const listener = vi.fn();
 				connection.subscribe(listener);
 				expect(listener).not.toHaveBeenCalled();
+				if (boundary.startsWith("update-")) {
+					await vi.waitFor(() =>
+						expect(listener).toHaveBeenCalledWith({ type: "connection_status", status: "connected" }),
+					);
+					expect(listener).not.toHaveBeenCalledWith(expect.objectContaining({ type: "extension_ui_request" }));
+					fakeClient.emitMessage({
+						type: "extension_ui_request",
+						activeSessionId: "active-1",
+						id: "new",
+						method: "editor",
+						payload: { title: "New" },
+					});
+					expect(listener).toHaveBeenLastCalledWith({
+						type: "extension_ui_request",
+						request: { id: "new", method: "editor", payload: { title: "New" } },
+					});
+				}
 			} finally {
 				await connection.dispose();
 			}

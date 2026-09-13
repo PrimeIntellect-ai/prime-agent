@@ -1086,7 +1086,7 @@ printf '%s\\n' "$listeners" | awk -v pids="$ENG_4603_LSOF_PIDS" '
 		expect(listenersBeforeShutdown).toContain(`p${successor.child.pid}`);
 
 		const shutdown = await runCli(paths, ["shutdown", "--force", "--json"], 60_000, lsofEnvironment);
-		expect(shutdown.code).toBe(0);
+		expect(shutdown.code, `${shutdown.stdout}\n${shutdown.stderr}`).toBe(0);
 		const shutdownResult = JSON.parse(shutdown.stdout) as { stopped: unknown[]; failed: unknown[] };
 		expect(exactProcessIsAlive(unrelated.child.pid!, unrelated.identity?.processStartId)).toBe(true);
 		const unrelatedClient = await connectEventually(unrelatedPaths.socketPath);
