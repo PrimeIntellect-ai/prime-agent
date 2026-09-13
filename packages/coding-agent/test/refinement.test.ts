@@ -16,6 +16,7 @@ import {
 	getRefinementHistoryPath,
 	type HarnessEntry,
 	type HarnessState,
+	harnessQueryTerms,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
 	loadHarnessState,
@@ -1607,5 +1608,58 @@ describe("harness digest relevance ranking", () => {
 		const olderIndex = ranked.indexOf("[global:older]");
 		expect(newerIndex).toBeGreaterThanOrEqual(0);
 		expect(olderIndex).toBe(-1);
+	});
+
+	it("tokenizes queries without punctuation terms and with CJK bigrams", () => {
+		// Punctuation and symbols only separate terms, in any script.
+		expect(harnessQueryTerms("Worktree?")).toEqual(["worktree"]);
+		expect(harnessQueryTerms("path/to/skill")).toEqual(["path", "skill"]);
+		expect(harnessQueryTerms("harness_search")).toEqual(["harness", "search"]);
+		expect(harnessQueryTerms("??? / . ,")).toEqual([]);
+		// Short ASCII runs stay noise; other non-ASCII scripts stay whole.
+		expect(harnessQueryTerms("Fix the LOGIN bug")).toEqual(["login"]);
+		expect(harnessQueryTerms("Привет мир")).toEqual(["привет"]);
+		// CJK has no spaces between words: runs become overlapping bigrams,
+		// so partial matches stay findable and single characters count.
+		// Non-ASCII punctuation is a separator, not a term.
+		expect(harnessQueryTerms("修复登录")).toEqual(["修复", "复登", "登录"]);
+		expect(harnessQueryTerms("修复登录？")).toEqual(["修复", "复登", "登录"]);
+		expect(harnessQueryTerms("東京会議 login")).toEqual(["東京", "京会", "会議", "login"]);
+		expect(harnessQueryTerms("登")).toEqual(["登"]);
+	});
+
+	it("ranks whitespace-free CJK matches through bigram terms", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h4"), "local");
+		const login = makeEntry("login", "Login fix", "登录故障排查记录。", "2026-08-01T00:00:00.000Z");
+		const tea = makeEntry("tea", "Tea notes", "All about oolong brewing.", "2026-08-02T00:00:00.000Z");
+		state.entries.memory.login = login;
+		state.entries.memory.tea = tea;
+
+		const ranked = formatHarnessStateForPrompt(state, {
+			maxEntriesPerKind: 1,
+			queryTerms: new Map(harnessQueryTerms("修复登录").map((term) => [term, 1])),
+		});
+		expect(ranked).toContain("[global:login]");
+		expect(ranked).not.toContain("[global:tea]");
+	});
+
+	it("does not rank entries by incidental punctuation in queries", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h5"), "local");
+		const worktree = makeEntry(
+			"worktree",
+			"Branch hygiene",
+			"Use git worktrees for parallel branches.",
+			"2026-08-01T00:00:00.000Z",
+		);
+		const question = makeEntry("question", "Question", "Anything else left open?", "2026-08-02T00:00:00.000Z");
+		state.entries.memory.worktree = worktree;
+		state.entries.memory.question = question;
+
+		const ranked = formatHarnessStateForPrompt(state, {
+			maxEntriesPerKind: 1,
+			queryTerms: new Map(harnessQueryTerms("worktree?").map((term) => [term, 1])),
+		});
+		expect(ranked).toContain("[global:worktree]");
+		expect(ranked).not.toContain("[global:question]");
 	});
 });

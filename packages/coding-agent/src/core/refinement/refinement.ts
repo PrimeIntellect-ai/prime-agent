@@ -478,6 +478,40 @@ function searchableField(value: unknown): string {
 	return typeof value === "string" ? value.toLowerCase() : "";
 }
 
+/** CJK ideographs, kana, and Hangul: scripts that do not mark word
+ * boundaries with spaces. */
+const CJK_TERM_PATTERN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/u;
+
+/**
+ * Tokenize text into lowercase query terms for harness relevance ranking.
+ * Letters and digits of any script form terms; punctuation and symbols only
+ * separate them, so a query like `worktree?` never ranks entries by their
+ * question marks. CJK runs carry no spaces between words, so each run
+ * becomes overlapping bigrams: `修复登录` yields 修复/复登/登录 and still
+ * matches an entry containing 登录故障. Each distinct term is returned once.
+ */
+export function harnessQueryTerms(text: string): string[] {
+	const terms: string[] = [];
+	for (const run of text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+		// Split mixed-script runs so ASCII words keep their own rules.
+		for (const segment of run.match(/[a-z0-9]+|[^a-z0-9]+/gu) ?? []) {
+			if (/^[a-z0-9]+$/.test(segment)) {
+				// Short ASCII runs are noise (the, and, ids) and are dropped.
+				if (segment.length >= 4) terms.push(segment);
+			} else if (CJK_TERM_PATTERN.test(segment)) {
+				// Code points, not UTF-16 units, keep astral ideographs whole.
+				const chars = Array.from(segment);
+				if (chars.length === 1) terms.push(segment);
+				else for (let i = 0; i < chars.length - 1; i += 1) terms.push(chars[i] + chars[i + 1]);
+			} else if (segment.length >= 4) {
+				// Other non-ASCII scripts space out words, so runs stay whole.
+				terms.push(segment);
+			}
+		}
+	}
+	return [...new Set(terms)];
+}
+
 /** Score one harness entry against query terms: weighted term overlap. */
 export function scoreHarnessEntryForQuery(entry: HarnessEntry, terms: HarnessQueryTerms): number {
 	if (terms.size === 0) return 0;

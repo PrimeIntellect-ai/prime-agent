@@ -38,6 +38,37 @@ def _slug(raw: str, fallback: str) -> str:
     return (normalized or fallback)[:80]
 
 
+_CJK_TERM_CHARS = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+
+
+def _harness_query_terms(query: str) -> list[str]:
+    """Tokenize a search query into lowercase substring terms.
+
+    Letters and digits of every script form terms; punctuation and symbols
+    only separate them, so ``worktree?`` never ranks entries by question
+    marks. CJK runs carry no spaces between words, so each run becomes
+    overlapping bigrams: ``修复登录`` yields ``修复``/``复登``/``登录`` and
+    still matches an entry containing ``登录故障``. Each term counts once.
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for run in re.findall(r"[a-z0-9]+|[^\W_a-z0-9]+", query.lower()):
+        if run.isascii():
+            # Short ASCII runs are noise (the, and, ids) and are dropped.
+            candidates = [run] if len(run) >= 3 else []
+        elif _CJK_TERM_CHARS.search(run):
+            # Bigrams keep whitespace-free CJK findable without single
+            # characters matching too loosely.
+            candidates = [run[i : i + 2] for i in range(len(run) - 1)] or [run]
+        else:
+            candidates = [run]
+        for term in candidates:
+            if term not in seen:
+                seen.add(term)
+                terms.append(term)
+    return terms
+
+
 def _agent_dir() -> Path:
     raw = (
         os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
@@ -808,9 +839,7 @@ class HarnessState:
             raise TypeError(f"query must be str, got {type(query).__name__}")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise TypeError("limit must be a positive int")
-        # ASCII word runs and non-ASCII runs (CJK and other scripts) both
-        # become terms, so persisted non-Latin content stays searchable.
-        terms = re.findall(r"[a-z0-9]{3,}|[^\sa-z0-9]+", query.lower())
+        terms = _harness_query_terms(query)
         if not terms:
             return []
 
