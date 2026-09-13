@@ -6166,6 +6166,7 @@ export class DaemonSupervisor {
 		for (let index = 0; index < pending.length; index++) {
 			const { activeSessionId, purpose } = pending[index]!;
 			let releaseTranscript: (() => void) | undefined;
+			const releaseSnapshotReservation = this.reserveSnapshotStream(client, activeSessionId);
 			try {
 				const attached = await this.attachClient(client, {
 					type: "attach",
@@ -6201,6 +6202,7 @@ export class DaemonSupervisor {
 						transcript,
 						purpose,
 						releaseTranscript,
+						releaseSnapshotReservation,
 					);
 					releaseTranscript = undefined;
 					continue;
@@ -6235,6 +6237,9 @@ export class DaemonSupervisor {
 			} catch (error) {
 				releaseTranscript?.();
 				this.log(`Failed to catch up client ${client.id} for ${activeSessionId}: ${String(error)}`);
+			} finally {
+				releaseSnapshotReservation();
+				this.releaseDeferredSessionPayloads(client, activeSessionId, true);
 			}
 		}
 	}

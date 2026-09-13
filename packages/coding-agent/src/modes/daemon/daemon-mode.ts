@@ -7402,18 +7402,22 @@ export class AgentDaemon {
 			if (!state || !state.clients.has(client)) {
 				continue;
 			}
+			// Buffer events before snapshot preparation can yield with a captured transcript.
+			const snapshotSignal =
+				client.transport === "private-framed" &&
+				daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot")
+					? markClientSnapshotStreaming(client, activeSessionId)
+					: undefined;
+			let snapshotStarted = false;
 			try {
 				const result = await this.createAttachResult(client, state, {
 					type: "attach",
 					activeSessionId,
 				});
-				if (this.sessions.get(activeSessionId) !== state || !state.clients.has(client)) {
+				if (snapshotSignal?.aborted || this.sessions.get(activeSessionId) !== state || !state.clients.has(client)) {
 					continue;
 				}
-				if (
-					client.transport === "private-framed" &&
-					daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot")
-				) {
+				if (snapshotSignal) {
 					if (purpose === "replacement") {
 						this.write(client, {
 							type: "session_replaced",
@@ -7430,20 +7434,14 @@ export class AgentDaemon {
 						});
 					}
 					const snapshotId = snapshotTransferId(result.snapshot);
-					const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
-					let transcript: SnapshotTranscriptChunkSource;
-					try {
-						transcript = createSnapshotTranscriptChunks({
-							activeSessionId,
-							snapshotId,
-							messages: result.snapshot.messages,
-							targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-							signal: snapshotSignal,
-						});
-					} catch (error) {
-						finishClientSnapshotStreaming(client, activeSessionId);
-						throw error;
-					}
+					const transcript = createSnapshotTranscriptChunks({
+						activeSessionId,
+						snapshotId,
+						messages: result.snapshot.messages,
+						targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+						signal: snapshotSignal,
+					});
+					snapshotStarted = true;
 					await this.streamWorkerSnapshot(
 						client,
 						{
@@ -7492,6 +7490,8 @@ export class AgentDaemon {
 				this.log(`could not catch up client ${client.id} for ${activeSessionId}: ${String(error)}`);
 				this.scheduleClientCatchupRetry(client);
 				return "retry-later";
+			} finally {
+				if (snapshotSignal && !snapshotStarted) finishClientSnapshotStreaming(client, activeSessionId);
 			}
 		}
 		return "drained";

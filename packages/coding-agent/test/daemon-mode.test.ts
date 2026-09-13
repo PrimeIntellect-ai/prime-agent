@@ -4023,45 +4023,61 @@ describe("daemon mode helpers", () => {
 		expect(client.attachedActiveSessionIds).not.toContain(state.activeSessionId);
 	});
 
-	it("drops a backpressure catch-up when the client detaches during snapshot creation", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: vi.fn(),
-		});
-		const state = makeState("active");
-		const write = vi.fn(() => true);
-		const client = makeClient("client-1", state.activeSessionId);
-		client.socket = { destroyed: false, write } as unknown as Socket;
-		client.catchupActiveSessionIds = new Set([state.activeSessionId]);
-		state.clients.add(client);
-		let releaseSnapshot!: () => void;
-		const snapshotGate = new Promise<void>((resolve) => {
-			releaseSnapshot = resolve;
-		});
-		const result = {
-			activeSessionId: state.activeSessionId,
-			snapshot: { summary: {}, state: {}, messages: [], lastEventSequence: 0 },
-			lastEventSequence: 0,
-		} as unknown as DaemonAttachResult;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			createAttachResult: ReturnType<typeof vi.fn>;
-			drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<void>;
-		};
-		internals.sessions.set(state.activeSessionId, state);
-		internals.createAttachResult = vi.fn(async () => {
-			await snapshotGate;
-			return result;
-		});
+	it.each(["inline-detached", "chunked-detached", "chunked-failed"])(
+		"releases a catch-up reservation: %s",
+		async (outcome) => {
+			const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+				defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+				createRuntime: vi.fn(),
+			});
+			const state = makeState("active");
+			const write = vi.fn(() => true);
+			const client = makeClient("client-1", state.activeSessionId);
+			client.socket = { destroyed: false, write } as unknown as Socket;
+			if (outcome.startsWith("chunked")) {
+				client.transport = "private-framed";
+				client.capabilities = new Set(["chunked_snapshot"]);
+			}
+			client.catchupActiveSessionIds = new Set([state.activeSessionId]);
+			state.clients.add(client);
+			let releaseSnapshot!: () => void;
+			const snapshotGate = new Promise<void>((resolve) => {
+				releaseSnapshot = resolve;
+			});
+			const result = {
+				activeSessionId: state.activeSessionId,
+				snapshot: { summary: {}, state: {}, messages: [], lastEventSequence: 0 },
+				lastEventSequence: 0,
+			} as unknown as DaemonAttachResult;
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				createAttachResult: ReturnType<typeof vi.fn>;
+				drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<void>;
+			};
+			internals.sessions.set(state.activeSessionId, state);
+			internals.createAttachResult = vi.fn(async () => {
+				await snapshotGate;
+				if (outcome === "chunked-failed") throw new Error("snapshot preparation failed");
+				return result;
+			});
 
-		const catchup = internals.drainBackpressuredClientCatchups(client);
-		await vi.waitFor(() => expect(internals.createAttachResult).toHaveBeenCalledOnce());
-		state.clients.delete(client);
-		client.attachedActiveSessionIds.delete(state.activeSessionId);
-		releaseSnapshot();
-		await catchup;
-		expect(write).not.toHaveBeenCalled();
-	});
+			const catchup = internals.drainBackpressuredClientCatchups(client);
+			await vi.waitFor(() => expect(internals.createAttachResult).toHaveBeenCalledOnce());
+			expect(client.snapshotStreaming === true).toBe(outcome.startsWith("chunked"));
+			if (outcome.endsWith("detached")) {
+				state.clients.delete(client);
+				client.attachedActiveSessionIds.delete(state.activeSessionId);
+			}
+			releaseSnapshot();
+			await catchup;
+			clearTimeout(client.catchupRetryTimer);
+			expect(write).not.toHaveBeenCalled();
+			expect(client.snapshotStreaming).not.toBe(true);
+			expect(client.snapshotActiveSessionCounts?.size ?? 0).toBe(0);
+			expect(client.snapshotTransferAbortControllers?.size ?? 0).toBe(0);
+			expect(client.catchupActiveSessionIds?.has(state.activeSessionId)).toBe(outcome === "chunked-failed");
+		},
+	);
 
 	it("marks a chunked attach as snapshotting before deferred streaming", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-snapshot-order-"));
