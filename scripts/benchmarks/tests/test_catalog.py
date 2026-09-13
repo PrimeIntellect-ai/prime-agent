@@ -183,7 +183,7 @@ class CatalogTrialTests(unittest.TestCase):
             client.wait.side_effect = reply
             with (
                 patch("ui.Terminal", return_value=terminal),
-                patch("ui.input_ready"),
+                patch("ui.input_ready", side_effect=lambda *args: time.perf_counter()),
                 patch("ui.type_query"),
                 patch("ui.clear_search"),
                 patch("ui.expand_subagents"),
