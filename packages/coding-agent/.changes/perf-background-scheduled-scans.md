@@ -1,1 +1,0 @@
-- Fixed background scheduled-job scans slowing down agents with large saved chats ([#2259](https://github.com/PrimeIntellect-ai/prime-agent/pull/2259)).
