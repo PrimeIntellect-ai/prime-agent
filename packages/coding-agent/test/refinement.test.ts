@@ -1620,14 +1620,13 @@ describe("harness digest relevance ranking", () => {
 		expect(harnessQueryTerms("Fix the LOGIN bug")).toEqual(["login"]);
 		expect(harnessQueryTerms("Привет мир")).toEqual(["привет"]);
 		// Combining marks stay in their run: mark-heavy scripts spell
-		// whole words (Devanagari किताब), not dropped fragments.
+		// whole words (Devanagari किताब).
 		expect(harnessQueryTerms("किताब notes")).toEqual(["किताब", "notes"]);
-		// Accented Latin stays whole; CJK is still cut from adjacent words.
+		// Accented Latin stays whole; CJK is cut from adjacent words.
 		expect(harnessQueryTerms("naïve approach")).toEqual(["naïve", "approach"]);
 		expect(harnessQueryTerms("修复login")).toEqual(["修复", "login"]);
 		// Supplementary-plane ideographs count as CJK: lone chars become
-		// terms and runs take bigrams; the pre-fix non-CJK path dropped
-		// the lone char and kept whole runs instead.
+		// terms and multi-character runs take bigrams.
 		expect(harnessQueryTerms("𠀀")).toEqual(["𠀀"]);
 		expect(harnessQueryTerms("𠀀𠀁𠀂")).toEqual(["𠀀𠀁", "𠀁𠀂"]);
 		// CJK has no spaces between words: runs become overlapping bigrams,
