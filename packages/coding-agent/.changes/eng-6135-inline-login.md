@@ -1,0 +1,1 @@
+- Changed provider logins, including the in-flow team and account selectors, to render inline under the chat in the compact picker style instead of a centered full-pane modal.

@@ -15,6 +15,10 @@ type PrimeTeamOption = {
 	team: PrimeTeam | null;
 };
 
+interface PrimeTeamSelectorOptions extends MenuViewportProvider {
+	inline?: boolean;
+}
+
 const PREFERRED_VISIBLE_TEAMS = 8;
 const TEAM_LIST_RESERVED_ROWS = 7;
 const TEAM_SCROLL_INDICATOR_ROWS = 1;
@@ -27,6 +31,7 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 	private selectedIndex = 0;
 	private searchQuery = "";
 	private _focused = false;
+	private readonly inline: boolean;
 	private listLayout = getMenuListLayout({
 		preferredVisibleItems: PREFERRED_VISIBLE_TEAMS,
 		reservedRows: TEAM_LIST_RESERVED_ROWS,
@@ -39,20 +44,22 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 		private readonly currentTeamId: string | undefined,
 		private readonly onSelect: (team: PrimeTeam | null) => void,
 		private readonly onCancel: () => void,
-		private readonly viewport: MenuViewportProvider = {},
+		private readonly options: PrimeTeamSelectorOptions = {},
 	) {
 		super();
 
 		this.allOptions = [{ type: "personal", team: null }, ...teams.map((team) => ({ type: "team" as const, team }))];
 		this.filteredOptions = this.allOptions;
+		this.inline = options.inline === true;
 
 		const panel = new MenuPanel({
 			title: "Prime Team",
 			subtitle: "Choose which account pays for Prime Inference usage.",
+			inline: this.inline,
 		});
 		this.addChild(panel);
 
-		this.searchInput = new MenuSearchInput("Search teams");
+		this.searchInput = new MenuSearchInput("Search teams", this.inline);
 		this.searchInput.onSubmit = () => {
 			const selected = this.filteredOptions[this.selectedIndex];
 			if (selected) {
@@ -60,9 +67,9 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 			}
 		};
 		panel.addChild(this.searchInput);
-		panel.addChild(new Spacer(1));
+		if (!this.inline) panel.addChild(new Spacer(1));
 
-		this.listContainer = new MenuList({ compact: () => this.listLayout.compact });
+		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: this.inline });
 		panel.addChild(this.listContainer);
 		this.filterOptions("");
 	}
@@ -130,6 +137,7 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 					secondary: this.getSecondary(option),
 					meta: this.getMeta(option),
 					selected: i === this.selectedIndex,
+					inline: this.inline,
 				}),
 			);
 		}
@@ -191,7 +199,7 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 
 	private updateLayout(): void {
 		this.listLayout = getMenuListLayout({
-			getRows: this.viewport.getRows,
+			getRows: this.options.getRows,
 			preferredVisibleItems: PREFERRED_VISIBLE_TEAMS,
 			totalItems: this.filteredOptions.length,
 			reservedRows: TEAM_LIST_RESERVED_ROWS,

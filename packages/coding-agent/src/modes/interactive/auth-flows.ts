@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
-import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import {
@@ -19,7 +19,6 @@ import {
 } from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
-import { showFullPaneOverlay } from "./components/centered-overlay.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
 import {
@@ -97,6 +96,14 @@ export interface ProviderAuthFlowsHost {
 	readonly modelRegistry: ModelRegistry;
 	showStatus(message: string): void;
 	showError(message: string): void;
+	/**
+	 * Mount a provider-auth panel (login dialog or in-flow selector) in place of
+	 * the prompt area. Returns a callback that unmounts the panel and restores
+	 * the previous content and focus.
+	 */
+	showAuthPanel(component: Component): () => void;
+	/** Terminal rows available to auth panels; selectors size their lists to it. */
+	getAuthPanelRows(): number;
 	/** Models currently visible to the host; used to detect providers configured via external credentials. */
 	getAvailableModels(): Promise<ReadonlyArray<{ provider: string }>>;
 	/** Invoked after stored credentials change so the host can refresh dependent UI. */
@@ -146,27 +153,23 @@ export class ProviderAuthFlows {
 		}
 
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const selector = new OAuthSelectorComponent(
 				"login",
 				this.host.modelRegistry.authStorage,
 				providerOptions,
 				async (providerOption: AuthSelectorProvider) => {
-					close();
+					close?.();
 					resolve(await this.loginProvider(providerOption));
 				},
 				() => {
-					close();
+					close?.();
 					resolve({ status: "cancelled" });
 				},
 				(providerId) => this.host.modelRegistry.getProviderAuthStatus(providerId),
-				{ getRows: () => this.host.ui.terminal.rows, initialCategory },
+				{ getRows: () => this.host.getAuthPanelRows(), initialCategory, inline: true },
 			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
@@ -194,17 +197,13 @@ export class ProviderAuthFlows {
 		}
 
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const selector = new OAuthSelectorComponent(
 				"logout",
 				this.host.modelRegistry.authStorage,
 				providerOptions,
 				async (providerOption: AuthSelectorProvider) => {
-					close();
+					close?.();
 
 					try {
 						this.host.modelRegistry.authStorage.logout(providerOption.id);
@@ -222,13 +221,13 @@ export class ProviderAuthFlows {
 					}
 				},
 				() => {
-					close();
+					close?.();
 					resolve(null);
 				},
 				undefined,
-				{ getRows: () => this.host.ui.terminal.rows },
+				{ getRows: () => this.host.getAuthPanelRows(), inline: true },
 			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
@@ -343,11 +342,7 @@ export class ProviderAuthFlows {
 
 	private async showBedrockSetupDialog(providerId: string, providerName: string): Promise<AuthenticationResult> {
 		const dialog = new LoginDialogComponent(this.host.ui, providerId, () => {}, providerName, "Amazon Bedrock setup");
-		const handle = showFullPaneOverlay(this.host.ui, dialog, 88);
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		try {
 			await dialog.showContinueInfo([
@@ -378,25 +373,21 @@ export class ProviderAuthFlows {
 		currentTeamId: string | undefined,
 	): Promise<PrimeTeam | null | undefined> {
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const selector = new PrimeTeamSelectorComponent(
 				teams,
 				currentTeamId,
 				(team) => {
-					close();
+					close?.();
 					resolve(team);
 				},
 				() => {
-					close();
+					close?.();
 					resolve(undefined);
 				},
-				{ getRows: () => this.host.ui.terminal.rows },
+				{ getRows: () => this.host.getAuthPanelRows(), inline: true },
 			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
@@ -489,15 +480,7 @@ export class ProviderAuthFlows {
 			PRIME_INFERENCE_PROVIDER_NAME,
 		);
 
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		// The browser challenge gets its own controller so a manually pasted key
 		// can stop the polling without tearing down the dialog.
@@ -613,15 +596,7 @@ export class ProviderAuthFlows {
 			PRIME_AGENT_TRACES_PROVIDER_NAME,
 		);
 
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		const browserAbort = new AbortController();
 		const onDialogAbort = () => browserAbort.abort();
@@ -722,12 +697,7 @@ export class ProviderAuthFlows {
 	): Promise<AuthenticationResult> {
 		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
 
-		const handle = showFullPaneOverlay(this.host.ui, dialog, 88);
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		try {
 			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
@@ -750,31 +720,25 @@ export class ProviderAuthFlows {
 		}
 	}
 
-	private showOAuthLoginSelect(dialogHandle: OverlayHandle, prompt: OAuthSelectPrompt): Promise<string | undefined> {
+	private showOAuthLoginSelect(prompt: OAuthSelectPrompt): Promise<string | undefined> {
 		return new Promise((resolve) => {
-			dialogHandle.setHidden(true);
-			let selectorHandle: OverlayHandle | undefined;
-			const restoreDialog = () => {
-				selectorHandle?.hide();
-				dialogHandle.setHidden(false);
-				dialogHandle.focus();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const labels = prompt.options.map((option) => option.label);
 			const selector = new ExtensionSelectorComponent(
 				prompt.message,
 				labels,
 				(optionLabel) => {
-					restoreDialog();
+					// Unmounting the selector restores the login dialog underneath it.
+					close?.();
 					resolve(prompt.options.find((option) => option.label === optionLabel)?.id);
 				},
 				() => {
-					restoreDialog();
+					close?.();
 					resolve(undefined);
 				},
-				{ getRows: () => this.host.ui.terminal.rows },
+				{ getRows: () => this.host.getAuthPanelRows(), inline: true },
 			);
-			selectorHandle = showFullPaneOverlay(this.host.ui, selector, 76);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
@@ -791,10 +755,7 @@ export class ProviderAuthFlows {
 
 		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
 
-		const dialogHandle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		let manualCodeResolve: ((code: string) => void) | undefined;
 		let manualCodeReject: ((err: Error) => void) | undefined;
@@ -802,11 +763,6 @@ export class ProviderAuthFlows {
 			manualCodeResolve = resolve;
 			manualCodeReject = reject;
 		});
-
-		const closeDialog = () => {
-			dialogHandle.hide();
-			this.host.ui.requestRender();
-		};
 
 		try {
 			await this.host.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
@@ -841,7 +797,7 @@ export class ProviderAuthFlows {
 					dialog.showProgress(message);
 				},
 
-				onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(dialogHandle, prompt),
+				onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(prompt),
 
 				onManualCodeInput: () => manualCodePromise,
 

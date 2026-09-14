@@ -1,4 +1,4 @@
-import { Container, Input, setKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { type Component, Container, Input, setKeybindings, Text, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
 import type { ModelRegistry } from "../../../src/core/model-registry.js";
@@ -108,6 +108,10 @@ describe("ENG-4658 onboarding transitions", () => {
 		const onboarding = fakeThis.runOnboardingFlow(false);
 		await vi.waitFor(() => expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("models"));
 
+		// The splash covers the screen, so onboarding logins must mount above it
+		// as overlays instead of inline behind it.
+		expect(fakeThis.createAuthFlows).toHaveBeenCalledWith({ overlay: true });
+
 		expect(order.slice(-2)).toEqual(["dismiss", "configuration:models"]);
 		configuration.resolve();
 		await onboarding;
@@ -123,7 +127,7 @@ describe("ENG-4658 onboarding transitions", () => {
 		]);
 	});
 
-	test("keeps the inline picker mounted during authentication and restores the draft after closing", async () => {
+	test("swaps the inline picker for the login panel and restores the draft after closing", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const login = deferred<AuthenticationResult>();
@@ -146,9 +150,20 @@ describe("ENG-4658 onboarding transitions", () => {
 		fakeThis.getScopedModelState = () => [];
 		fakeThis.getCurrentModel = () => model;
 		fakeThis.getModelSelectorRefreshPromise = () => undefined;
+		const showInlineAuthPanel = (
+			InteractiveMode.prototype as unknown as {
+				showInlineAuthPanel(component: Component): () => void;
+			}
+		).showInlineAuthPanel;
+		const loginPanel = new Text("Login panel", 0, 0);
 		fakeThis.createAuthFlows = () => ({
 			getLoginProviderOptions: () => [{ id: model.provider, name: model.provider, authType: "api_key" }],
-			loginProvider: () => login.promise,
+			loginProvider: () => {
+				// The login panel replaces the inline picker for the duration.
+				const close = showInlineAuthPanel.call(fakeThis, loginPanel);
+				void login.promise.then(() => close());
+				return login.promise;
+			},
 		});
 		fakeThis.showError = vi.fn();
 		fakeThis.showStatus = vi.fn();
@@ -158,13 +173,12 @@ describe("ENG-4658 onboarding transitions", () => {
 		expect(menu).toBeInstanceOf(ConfigurationMenuComponent);
 		menu.handleInput("\r");
 
-		expect(fakeThis.editorContainer.children).toEqual([menu]);
+		expect(fakeThis.editorContainer.children).toEqual([loginPanel]);
 		expect(fakeThis.editor.getValue()).toBe("draft prompt");
 
 		login.resolve({ status: "cancelled" });
-		await vi.waitFor(() => expect(fakeThis.ui.setFocus).toHaveBeenCalledTimes(2));
+		await vi.waitFor(() => expect(fakeThis.editorContainer.children).toEqual([menu]));
 		expect(fakeThis.ui.setFocus).toHaveBeenLastCalledWith(menu);
-		expect(fakeThis.editorContainer.children).toEqual([menu]);
 		menu.handleInput("\x1b");
 		await expect(configuration).resolves.toBeUndefined();
 		expect(fakeThis.editorContainer.children).toEqual([fakeThis.editor]);

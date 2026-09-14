@@ -1,7 +1,6 @@
 import { win32 } from "node:path";
 import { getOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import {
-	type Component,
 	Container,
 	type Focusable,
 	getCapabilities,
@@ -9,28 +8,13 @@ import {
 	Spacer,
 	Text,
 	type TUI,
-	truncateToWidth,
-	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
 import { execFileHidden } from "../../../utils/child-process.js";
 import { copyToClipboard } from "../../../utils/clipboard.js";
 import { theme } from "../theme/theme.js";
 import { formatKeyText, keyHint } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
-
-const PRIME_INFERENCE_PROVIDER_ID = "prime-inference";
-const PRIME_LOGO_LINES = PRIME_BUTTERFLY_LOGO.split("\n");
-const PRIME_LOGO_WIDTH = PRIME_LOGO_LINES.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
-
-function centeredLine(text: string, width: number): string {
-	const safeWidth = Math.max(1, width);
-	const content = truncateToWidth(text, safeWidth, "");
-	const padding = Math.max(0, safeWidth - visibleWidth(content));
-	const left = Math.floor(padding / 2);
-	return " ".repeat(left) + content + " ".repeat(padding - left);
-}
 
 function isTextEntryKeybinding(key: string): boolean {
 	const parts = key.toLowerCase().split("+");
@@ -42,38 +26,13 @@ function isPrintableInput(data: string): boolean {
 	return data.length === 1 && data >= " " && data !== "\x7f";
 }
 
-class PrimeLoginHeader implements Component {
-	invalidate(): void {
-		// Header render is derived from the current theme.
-	}
-
-	render(width: number): string[] {
-		const safeWidth = Math.max(1, width);
-		const logoWidth = Math.min(PRIME_LOGO_WIDTH, safeWidth);
-		const logoLines = PRIME_LOGO_LINES.map((line) => {
-			const paddedLogoLine = line + " ".repeat(Math.max(0, PRIME_LOGO_WIDTH - visibleWidth(line)));
-			return centeredLine(theme.fg("text", truncateToWidth(paddedLogoLine, logoWidth, "")), safeWidth);
-		});
-		return [
-			...logoLines,
-			centeredLine("", safeWidth),
-			centeredLine(theme.fg("text", "Login to Prime Inference"), safeWidth),
-			centeredLine(
-				theme.fg("muted", "Connect your Prime Intellect account to enable Prime Inference models."),
-				safeWidth,
-			),
-		];
-	}
-}
-
 /**
- * Login dialog component - replaces editor during OAuth login flow
+ * Login dialog component - replaces the prompt area during provider login flows
  */
 export class LoginDialogComponent extends Container implements Focusable {
 	private contentContainer: Container;
 	private input: MenuSearchInput;
 	private tui: TUI;
-	private readonly isPrimeInference: boolean;
 	private abortController = new AbortController();
 	private inputResolver?: (value: string) => void;
 	private inputRejecter?: (error: Error) => void;
@@ -108,13 +67,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 		const providerInfo = getOAuthProviders().find((p) => p.id === providerId);
 		const providerName = providerNameOverride || providerInfo?.name || providerId;
-		this.isPrimeInference = providerId === PRIME_INFERENCE_PROVIDER_ID;
 		const title = titleOverride ?? `Login to ${providerName}`;
 
-		const panel = new MenuPanel({
-			title: this.isPrimeInference ? "" : title,
-			subtitle: this.isPrimeInference ? undefined : "Complete this step to continue setup.",
-		});
+		// Renders with the compact inline picker style; hosts mount it in place
+		// of the prompt area or as a centered overlay during onboarding.
+		const panel = new MenuPanel({ title, inline: true });
 		this.addChild(panel);
 
 		// Dynamic content area
@@ -122,7 +79,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		panel.addChild(this.contentContainer);
 
 		// Input (always present, used when needed)
-		this.input = new MenuSearchInput("Paste value");
+		this.input = new MenuSearchInput("Paste value", true);
 		this.input.onSubmit = () => {
 			if (this.inputResolver) {
 				this.inputResolver(this.input.getValue());
@@ -304,11 +261,6 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.authActions = undefined;
 		// The cleared panel no longer shows the paste field.
 		this.inputVisible = false;
-		if (this.isPrimeInference) {
-			this.contentContainer.addChild(new PrimeLoginHeader());
-			this.contentContainer.addChild(new Spacer(1));
-			return;
-		}
 		this.contentContainer.addChild(new Spacer(1));
 	}
 

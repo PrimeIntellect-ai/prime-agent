@@ -12,6 +12,9 @@ import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
+import { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.js";
+import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.js";
+import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
@@ -50,10 +53,12 @@ function createHost(authStorage: AuthStorage): {
 	statusMessages: string[];
 	errorMessages: string[];
 	overlays: Component[];
+	panels: Component[];
 } {
 	const statusMessages: string[] = [];
 	const errorMessages: string[] = [];
 	const overlays: Component[] = [];
+	const panels: Component[] = [];
 	const modelRegistry = {
 		authStorage,
 		refresh: vi.fn(),
@@ -68,11 +73,22 @@ function createHost(authStorage: AuthStorage): {
 			modelRegistry,
 			showStatus: (message) => statusMessages.push(message),
 			showError: (message) => errorMessages.push(message),
+			showAuthPanel: (component) => {
+				panels.push(component);
+				return () => {
+					const index = panels.lastIndexOf(component);
+					if (index !== -1) {
+						panels.splice(index, 1);
+					}
+				};
+			},
+			getAuthPanelRows: () => 24,
 			getAvailableModels: async () => [],
 		},
 		statusMessages,
 		errorMessages,
 		overlays,
+		panels,
 	};
 }
 
@@ -194,21 +210,24 @@ describe("ProviderAuthFlows", () => {
 		writeFileSync(join(defaultPrimeDir, "config.json"), JSON.stringify({ api_key: "prime-cli-key" }));
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-		const { host, overlays } = createHost(authStorage);
+		const { host, overlays, panels } = createHost(authStorage);
 		const result = new ProviderAuthFlows(host).runPrimeInferenceLogin();
 		await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
 		expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://api.primeintellect.ai/api/v1/auth_challenge/generate");
-		overlays[0]?.handleInput?.("\x1b");
+		panels[0]?.handleInput?.("\x1b");
 		await expect(result).resolves.toEqual({ status: "cancelled" });
 		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
+		// The login dialog mounts inline in the host, never as an overlay.
+		expect(overlays).toHaveLength(0);
 	});
 
 	it("does not offer logout for credentials owned only by the Prime CLI", async () => {
 		writeFileSync(primeConfigPath, JSON.stringify({ api_key: "prime-cli-key" }));
 		const authStorage = AuthStorage.create(authJsonPath, { primeCliConfigPath: primeConfigPath });
-		const { host, overlays } = createHost(authStorage);
+		const { host, overlays, panels } = createHost(authStorage);
 		await expect(new ProviderAuthFlows(host).runLogout()).resolves.toBeNull();
 		expect(overlays).toHaveLength(0);
+		expect(panels).toHaveLength(0);
 		expect(JSON.parse(readFileSync(primeConfigPath, "utf-8"))).toEqual({ api_key: "prime-cli-key" });
 	});
 
@@ -237,13 +256,14 @@ describe("ProviderAuthFlows", () => {
 					return jsonResponse({ data: [], total_count: 0 });
 				throw new Error(`Unexpected URL: ${url}`);
 			});
-			const { host, overlays, errorMessages } = createHost(authStorage);
+			const { host, overlays, panels, errorMessages } = createHost(authStorage);
 			const result = new ProviderAuthFlows(host).runPrimeInferenceLogin();
 			await vi.waitFor(() =>
-				expect(stripAnsi(overlays[0]?.render(80).join("\n") ?? "")).toContain("Paste a Prime API key below:"),
+				expect(stripAnsi(panels[0]?.render(80).join("\n") ?? "")).toContain("Paste a Prime API key below:"),
 			);
-			overlays[0]?.handleInput?.("manual-key");
-			overlays[0]?.handleInput?.("\r");
+			expect(overlays).toHaveLength(0);
+			panels[0]?.handleInput?.("manual-key");
+			panels[0]?.handleInput?.("\r");
 			await expect(result).resolves.toMatchObject({ status: "success" });
 			expect(errorMessages).toEqual([]);
 			expect(urls).toEqual([
@@ -275,15 +295,76 @@ describe("ProviderAuthFlows", () => {
 
 	it("opens login on the requested MCP Connections category", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
-		const { host, overlays } = createHost(authStorage);
+		const { host, overlays, panels } = createHost(authStorage);
 
 		const loginResult = new ProviderAuthFlows(host).runLogin({ initialCategory: "service" });
 
-		expect(overlays).toHaveLength(1);
-		const output = stripAnsi(overlays[0]?.render(80).join("\n") ?? "");
+		expect(overlays).toHaveLength(0);
+		expect(panels).toHaveLength(1);
+		expect(panels[0]).toBeInstanceOf(OAuthSelectorComponent);
+		const output = stripAnsi(panels[0]?.render(80).join("\n") ?? "");
 		expect(output).toContain("Serper (web search)");
 		expect(output).not.toContain("Anthropic");
-		overlays[0]?.handleInput?.("\x1b");
+		panels[0]?.handleInput?.("\x1b");
 		await expect(loginResult).resolves.toEqual({ status: "cancelled" });
+		expect(panels).toHaveLength(0);
+	});
+
+	it("mounts the API key login dialog inline and unmounts it after submitting", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host, overlays, panels, statusMessages } = createHost(authStorage);
+
+		const loginPromise = new ProviderAuthFlows(host).loginProvider({
+			id: "xai",
+			name: "xAI (Grok)",
+			authType: "api_key",
+		});
+
+		await vi.waitFor(() => expect(stripAnsi(panels[0]?.render(80).join("\n") ?? "")).toContain("Enter API key:"));
+		expect(panels[0]).toBeInstanceOf(LoginDialogComponent);
+		expect(overlays).toHaveLength(0);
+		panels[0]?.handleInput?.("test-key");
+		panels[0]?.handleInput?.("\r");
+
+		await expect(loginPromise).resolves.toMatchObject({ status: "success", providerId: "xai" });
+		expect(panels).toHaveLength(0);
+		expect(authStorage.get("xai")).toEqual({ type: "api_key", key: "test-key" });
+		expect(statusMessages.join("\n")).toContain("Saved API key for xAI (Grok)");
+	});
+
+	it("restores the login dialog after an in-flow account selection", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host, panels } = createHost(authStorage);
+		const loginSpy = vi.spyOn(authStorage, "login").mockImplementation(async (_providerId, handlers) => {
+			await handlers?.onSelect?.({
+				message: "Choose an account",
+				options: [
+					{ id: "personal", label: "Personal" },
+					{ id: "business", label: "Business" },
+				],
+			});
+		});
+
+		const loginPromise = new ProviderAuthFlows(host).loginProvider({
+			id: "anthropic",
+			name: "Anthropic",
+			authType: "oauth",
+		});
+
+		await vi.waitFor(() => expect(panels).toHaveLength(2));
+		expect(panels[0]).toBeInstanceOf(LoginDialogComponent);
+		expect(panels[1]).toBeInstanceOf(ExtensionSelectorComponent);
+		const selectorOutput = stripAnsi(panels[1]?.render(80).join("\n") ?? "");
+		expect(selectorOutput).toContain("Choose an account");
+		expect(selectorOutput).toContain("Personal");
+		expect(selectorOutput).toContain("Business");
+
+		panels[1]?.handleInput?.("\r");
+
+		await expect(loginPromise).resolves.toMatchObject({ status: "success", providerId: "anthropic" });
+		// Selecting an option unmounts the selector and restores the login dialog,
+		// which is then unmounted when the flow finishes.
+		expect(panels).toHaveLength(0);
+		expect(loginSpy).toHaveBeenCalledOnce();
 	});
 });

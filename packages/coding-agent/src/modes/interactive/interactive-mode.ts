@@ -29,6 +29,7 @@ import {
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
+	isFocusable,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -1842,7 +1843,9 @@ export class InteractiveMode {
 		}
 
 		splash.showProgress("Signing in to Prime Intellect...");
-		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
+		// The splash covers the whole screen, so the login panel must render as an
+		// overlay above it instead of inline behind it.
+		const authResult = await this.createAuthFlows({ overlay: true }).runPrimeInferenceLogin();
 		if (authResult.status !== "success") {
 			splash.dismiss();
 			return;
@@ -8754,12 +8757,26 @@ export class InteractiveMode {
 		});
 	}
 
-	private createAuthFlows(): ProviderAuthFlows {
+	private createAuthFlows(options: { overlay?: boolean } = {}): ProviderAuthFlows {
+		const showAuthPanel = options.overlay
+			? (component: Component) => {
+					const handle = this.showFullPaneOverlay(component, {
+						maxContentWidth: 88,
+						suspendFullscreenMouse: true,
+					});
+					return () => {
+						handle.hide();
+						this.ui.requestRender();
+					};
+				}
+			: (component: Component) => this.showInlineAuthPanel(component);
 		return new ProviderAuthFlows({
 			ui: this.ui,
 			modelRegistry: this.modelRegistry,
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
+			showAuthPanel,
+			getAuthPanelRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
@@ -8771,6 +8788,28 @@ export class InteractiveMode {
 				void this.maybeWarnAboutAnthropicSubscriptionAuth();
 			},
 		});
+	}
+
+	/**
+	 * Mount a provider-auth panel inline in place of the prompt area, matching
+	 * the inline pickers. Returns a callback that unmounts the panel and
+	 * restores the previous content and focus.
+	 */
+	private showInlineAuthPanel(component: Component): () => void {
+		const previousChildren = [...this.editorContainer.children];
+		const previousFocus = previousChildren.find((child) => isFocusable(child) && child.focused) ?? this.editor;
+		this.editorContainer.clear();
+		this.editorContainer.addChild(component);
+		this.ui.setFocus(component);
+		this.ui.requestRender();
+		return () => {
+			this.editorContainer.clear();
+			for (const child of previousChildren) {
+				this.editorContainer.addChild(child);
+			}
+			this.ui.setFocus(previousFocus);
+			this.ui.requestRender();
+		};
 	}
 
 	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {

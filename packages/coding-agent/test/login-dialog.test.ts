@@ -152,7 +152,9 @@ describe("LoginDialogComponent", () => {
 		const firstLogoLine = PRIME_BUTTERFLY_LOGO.split("\n")[0]?.trim() ?? "";
 
 		expect(output).toContain("Login to Prime Inference");
-		expect(output).toContain(firstLogoLine);
+		// The inline panel keeps the compact picker style: no centered logo header.
+		expect(firstLogoLine).not.toBe("");
+		expect(output).not.toContain(firstLogoLine);
 		expect(output).toContain("Verification code");
 		expect(output).toContain("abc-123");
 		expect(output).not.toContain("click to open");
@@ -170,7 +172,7 @@ describe("LoginDialogComponent", () => {
 		expect(output).not.toContain("Status");
 	});
 
-	it("keeps the Prime Inference brand header centered and within the panel", () => {
+	it("renders the Prime Inference login with the compact inline header", () => {
 		const dialog = new LoginDialogComponent(createFakeTui(), "prime-inference", () => {}, "Prime Inference");
 
 		dialog.showProgress("Checking existing Prime CLI credentials...");
@@ -179,11 +181,13 @@ describe("LoginDialogComponent", () => {
 		const titleLine = output.split("\n").find((line) => line.includes("Login to Prime Inference"));
 		const titleOffset = titleLine?.indexOf("Login to Prime Inference") ?? -1;
 
-		expect(titleOffset).toBeGreaterThan(20);
-		expect(output).toContain("Connect your Prime Intellect account to enable Prime Inference models.");
+		// The title leads the panel like the other inline pickers instead of a
+		// centered full-pane logo header.
+		expect(titleOffset).toBe(1);
+		expect(output).not.toContain("Connect your Prime Intellect account to enable Prime Inference models.");
 		expect(output).toContain("Preparing authentication");
 		for (const line of lines) {
-			expect(visibleWidth(line)).toBe(88);
+			expect(visibleWidth(line)).toBeLessThanOrEqual(88);
 		}
 	});
 
@@ -211,7 +215,7 @@ describe("LoginDialogComponent", () => {
 		await expect(second).resolves.toBe("pk");
 	});
 
-	it("renders API key prompts without shell input markers", () => {
+	it("renders API key prompts with the bordered inline input", () => {
 		const dialog = new LoginDialogComponent(createFakeTui(), "openai", () => {}, "OpenAI");
 
 		void dialog.showPrompt("Enter API key:");
@@ -219,7 +223,8 @@ describe("LoginDialogComponent", () => {
 
 		expect(output).toContain("Login to OpenAI");
 		expect(output).toContain("Enter API key:");
-		expect(output).not.toContain("─");
-		expect(output).not.toContain("> ");
+		// The paste field matches the inline picker search box.
+		expect(output).toContain("─");
+		expect(output).toContain("Paste value");
 	});
 });
