@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR, PACKAGE_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV, VERSION } from "../src/config.js";
 import { main } from "../src/main.js";
+import { handlePackageCommand } from "../src/package-manager-cli.js";
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -181,6 +182,20 @@ describe("package commands", () => {
 		} finally {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();
+		}
+	});
+
+	it("rejects --beta for extension-only updates instead of silently ignoring it", async () => {
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(handlePackageCommand(["update", "--extensions", "--beta"])).resolves.toBe(true);
+
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("--beta and --stable only apply to Prime Agent itself");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			errorSpy.mockRestore();
 		}
 	});
 

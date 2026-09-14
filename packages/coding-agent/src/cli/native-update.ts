@@ -9,6 +9,14 @@ import {
 } from "../utils/native-installation.js";
 import { getLatestPiRelease, isReleaseUpdateCandidate, type UpdateChannel } from "../utils/version-check.js";
 
+/** The release manifest for the requested channel could not be resolved; the installed version was kept. */
+export class NativeReleaseUnavailableError extends Error {
+	constructor() {
+		super("Could not resolve a compiled release. The installed version was kept.");
+		this.name = "NativeReleaseUnavailableError";
+	}
+}
+
 export interface NativeUpdatePlan {
 	command?: SelfUpdateCommand;
 	targetVersion: string;
@@ -67,7 +75,7 @@ export async function getNativeUpdatePlan(options: {
 	} else {
 		const release = await getLatestPiRelease(current.version, { baseUrl, channel: options.channel });
 		if (!release || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(release.version))
-			throw new Error("Could not resolve a compiled release. The installed version was kept.");
+			throw new NativeReleaseUnavailableError();
 		if (active && !options.force && !isReleaseUpdateCandidate(release.version, current.version, options.channel))
 			return { targetVersion: current.version };
 		const artifact = release.binaries?.find((entry) => entry.platform === current.platform);

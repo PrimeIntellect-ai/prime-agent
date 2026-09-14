@@ -33,7 +33,7 @@ import {
 	launchDaemonUpdateRestartCoordinator,
 	waitForActiveDaemonUpdateRestartCoordinator,
 } from "./cli/daemon-update-restart.js";
-import { getNativeUpdatePlan } from "./cli/native-update.js";
+import { getNativeUpdatePlan, NativeReleaseUnavailableError } from "./cli/native-update.js";
 import {
 	APP_NAME,
 	CONFIG_DIR_NAME,
@@ -401,6 +401,8 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 
 	if (rollback && (extensionsFlag || extensionFlagSource || (source && !isSelfUpdateSource(source))))
 		conflictingOptions = "--rollback only applies to Prime Agent itself";
+	if (channel && (extensionsFlag || extensionFlagSource || (source && !isSelfUpdateSource(source))))
+		conflictingOptions = conflictingOptions ?? "--beta and --stable only apply to Prime Agent itself";
 	return {
 		command,
 		source,
@@ -495,9 +497,14 @@ function setSelfUpdateNoChangeExitCode(): void {
 
 async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: UpdateChannel): Promise<SelfUpdatePlan> {
 	if (isBunBinary) {
-		const plan = await getNativeUpdatePlan({ force, rollback, channel });
-		if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
-		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
+		try {
+			const plan = await getNativeUpdatePlan({ force, rollback, channel });
+			if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
+			return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
+		} catch (error) {
+			if (channel === "beta" && error instanceof NativeReleaseUnavailableError) return betaReleaseUnavailablePlan();
+			throw error;
+		}
 	}
 	if (rollback) throw new Error("Rollback is only available for managed compiled installations.");
 	try {
