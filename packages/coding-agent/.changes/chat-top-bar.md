@@ -1,0 +1,1 @@
+- Fullscreen chats show a pinned top bar with the chat name centered in plain text and the session's total spend beside it; the bar stays visible in every scroll position and refreshes the spend after each turn.

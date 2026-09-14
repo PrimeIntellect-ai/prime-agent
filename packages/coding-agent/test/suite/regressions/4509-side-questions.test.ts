@@ -1060,6 +1060,7 @@ describe("ENG-4509 side questions", () => {
 			flushCompactionQueue: vi.fn(async () => {}),
 			flushPendingBashComponents: vi.fn(),
 			updateTerminalTitle: vi.fn(),
+			refreshTopBarCost: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
 			syncGoalTray: vi.fn(),
 			syncWorkingLoader: vi.fn(),

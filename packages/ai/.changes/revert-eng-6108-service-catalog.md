@@ -1,0 +1,1 @@
+- Removed the mcp service catalog, audit tooling, and generic oauth login engine (revert of #2256; the work will be relanded separately).

@@ -809,6 +809,57 @@ describe("ModelSelectorComponent", () => {
 		expect(/glm-5(?![.\d])/.test(lines[firstRow] ?? "")).toBe(true);
 	});
 
+	it("gives left and right to effort once a search moves the selection into the list", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "alpha", name: "Alpha", reasoning: true },
+				{ id: "beta", name: "Beta", reasoning: true },
+			],
+		});
+		harnesses.push(harness);
+
+		const alpha = harness.getModel("alpha")!;
+		const beta = harness.getModel("beta")!;
+		const selected = vi.fn();
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			selected,
+			() => {},
+			undefined,
+			{ availableModels: [alpha, beta], thinkingLevel: "medium", inline: true },
+		);
+
+		await waitForAsyncRender();
+
+		// With an active query but no list navigation, arrows edit the query.
+		selector.handleInput("a");
+		selector.handleInput("\x1b[D");
+		expect(selector.getSearchInput().getCursor()).toBe(0);
+		selector.handleInput("l");
+		expect(selector.getSearchInput().getValue()).toBe("la");
+		selector.handleInput("\x7f");
+		expect(selector.getSearchInput().getValue()).toBe("a");
+
+		// Moving into the list hands left and right to the highlighted model's effort.
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\x1b[C");
+		expect(selector.getSearchInput().getCursor()).toBe(0);
+		expect(selector.getSearchInput().getValue()).toBe("a");
+		selector.handleInput("\r");
+		expect(selected).toHaveBeenLastCalledWith(beta, "high");
+
+		// Editing the query again returns left and right to the search cursor.
+		selector.handleInput("l");
+		expect(selector.getSearchInput().getValue()).toBe("la");
+		selector.handleInput("\x1b[C");
+		expect(selector.getSearchInput().getCursor()).toBe(2);
+		selector.handleInput("\r");
+		expect(selected).toHaveBeenLastCalledWith(alpha, undefined);
+	});
+
 	it("keeps scoped model help within a short terminal viewport", async () => {
 		const harness = await createHarness({
 			models: Array.from({ length: 12 }, (_, index) => ({
