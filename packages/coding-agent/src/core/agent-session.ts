@@ -6963,7 +6963,10 @@ export class AgentSession {
 		}
 		if (options?.signal) {
 			const cancel = () => {
-				this.cancelExtensionFollowUp(owner, key);
+				if (!isNotStartedTurnAction(action)) return;
+				const error = new Error("Extension-owned follow-up was aborted before delivery.");
+				const removed = this._cancelSessionActions((candidate) => candidate === action, error, [action]);
+				if (removed.length > 0) this._emitQueueUpdate();
 			};
 			options.signal.addEventListener("abort", cancel, { once: true });
 			void result.ticket.completed.then(

@@ -164,6 +164,40 @@ describe("extension-owned keyed follow-ups", () => {
 		},
 	);
 
+	it("an old started action's signal cannot cancel its newer same-key successor", async () => {
+		const setup = setupApis();
+		const harness = await createHarness({ extensionFactories: setup.factories });
+		harnesses.push(harness);
+		const held = holdPump(harness);
+		const oldSignal = new AbortController();
+		await setup.apis[0]!.queueFollowUp("goal", "old", { signal: oldSignal.signal });
+		const oldAction = held.internals._actionStore.unfinishedActions()[0]!;
+		setActionState(oldAction, "committing");
+		if (oldAction.payload.kind === "turn") oldAction.payload.records[0]!.started = true;
+		transitionSessionAction(oldAction, { state: "running", execution: "agent_turn" });
+		await setup.apis[0]!.queueFollowUp("goal", "new");
+
+		const newAction = held.internals._actionStore
+			.unfinishedActions()
+			.find((action) => action.payload.text === "new")!;
+		const newCompletion = held.internals._actionStore.ticketFor(newAction).ticket.completed;
+		oldSignal.abort();
+		expect(held.internals._actionStore.unfinishedActions().map((action) => action.payload.text)).toEqual([
+			"old",
+			"new",
+		]);
+
+		transitionSessionAction(oldAction, { state: "completed" });
+		held.internals._actionStore.ticketFor(oldAction).settleCompleted();
+		held.internals._actionStore.releaseTerminal(oldAction);
+		harness.setResponses([fauxAssistantMessage("new done")]);
+		held.restore();
+		held.internals._scheduleSessionInputPump();
+		await expect(newCompletion).resolves.toBeUndefined();
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["new"]);
+	});
+
 	it("marks an entire handed-off batch started before publishing committing", async () => {
 		const setup = setupApis();
 		const harness = await createHarness({ extensionFactories: setup.factories });
