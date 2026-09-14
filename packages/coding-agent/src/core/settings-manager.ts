@@ -860,8 +860,10 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/** A per-user preference: read from global settings only, and ignore anything but the two known values. */
 	getUpdateChannel(): "stable" | "beta" | undefined {
-		return this.settings.updateChannel;
+		const channel = this.globalSettings.updateChannel;
+		return channel === "stable" || channel === "beta" ? channel : undefined;
 	}
 
 	setUpdateChannel(channel: "stable" | "beta"): void {

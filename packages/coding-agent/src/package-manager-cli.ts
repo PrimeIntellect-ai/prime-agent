@@ -75,7 +75,7 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
-import { getLatestPiRelease, isNewerPackageVersion, type UpdateChannel } from "./utils/version-check.js";
+import { getLatestPiRelease, isReleaseUpdateCandidate, type UpdateChannel } from "./utils/version-check.js";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -491,7 +491,7 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 			force ||
 			!latestRelease ||
 			packageRenameRequiresUpdate ||
-			isNewerPackageVersion(latestRelease.version, VERSION)
+			isReleaseUpdateCandidate(latestRelease.version, VERSION, channel)
 		) {
 			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}

@@ -112,6 +112,28 @@ export function resolveUpdateChannel(currentVersion: string, preferred?: UpdateC
 	return prerelease?.match(/^beta(?:\.|$)/) ? "beta" : "stable";
 }
 
+/**
+ * Whether `candidateVersion` should replace `currentVersion` on the effective channel.
+ * Same-channel updates must be strictly newer. An explicit switch to another channel
+ * accepts any different version whose base version is not older, so a stable 1.2.3
+ * can move onto 1.2.3-beta.5 even though prerelease ordering ranks that lower.
+ */
+export function isReleaseUpdateCandidate(
+	candidateVersion: string,
+	currentVersion: string,
+	channel?: UpdateChannel,
+): boolean {
+	if (isNewerPackageVersion(candidateVersion, currentVersion)) return true;
+	if (!channel || channel === resolveUpdateChannel(currentVersion)) return false;
+	if (normalizeReleaseVersion(candidateVersion) === normalizeReleaseVersion(currentVersion)) return false;
+	const candidate = parsePackageVersion(candidateVersion);
+	const current = parsePackageVersion(currentVersion);
+	if (!candidate || !current) return true;
+	if (candidate.major !== current.major) return candidate.major > current.major;
+	if (candidate.minor !== current.minor) return candidate.minor > current.minor;
+	return candidate.patch >= current.patch;
+}
+
 function getReleaseManifestPath(currentVersion: string, channel?: UpdateChannel): string {
 	return resolveUpdateChannel(currentVersion, channel) === "beta"
 		? BETA_VERSION_MANIFEST_PATH
@@ -206,7 +228,7 @@ export async function checkForNewPiVersion(
 ): Promise<string | undefined> {
 	try {
 		const latestVersion = await getLatestPiVersion(currentVersion, { channel });
-		if (latestVersion && isNewerPackageVersion(latestVersion, currentVersion)) {
+		if (latestVersion && isReleaseUpdateCandidate(latestVersion, currentVersion, channel)) {
 			return latestVersion;
 		}
 		return undefined;
