@@ -497,7 +497,7 @@ function behindChannelPlan(latestVersion: string, force: boolean, channel: Updat
 	if (force) {
 		console.error(
 			chalk.red(
-				`Refusing to move from v${VERSION} to v${latestVersion}: that is a downgrade, and --force does not override it. Nothing was installed and the update channel was not changed.${isBunBinary ? " Use --rollback to restore the previous compiled release." : ""}`,
+				`Refusing to move from v${VERSION} to v${latestVersion}: that is a downgrade, and --force does not override it. ${APP_NAME} was not updated and the update channel was not changed.${isBunBinary ? " Use --rollback to restore the previous compiled release." : ""}`,
 			),
 		);
 		return { ...plan, shouldRun: false, unavailable: true };
@@ -513,7 +513,7 @@ function behindChannelPlan(latestVersion: string, force: boolean, channel: Updat
 function nightlyReleaseUnavailablePlan(): SelfUpdatePlan {
 	console.error(
 		chalk.red(
-			"Could not resolve a nightly release from the release manifest. Nothing was installed and the update channel was not changed.",
+			`Could not resolve a nightly release from the release manifest. ${APP_NAME} was not updated and the update channel was not changed.`,
 		),
 	);
 	return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false, unavailable: true };
