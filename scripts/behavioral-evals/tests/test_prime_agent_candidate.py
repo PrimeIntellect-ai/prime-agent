@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -48,10 +48,7 @@ class CandidateConfigTests(unittest.TestCase):
             candidate.MAX_MODEL_REQUEST_BYTES,
         )
         manifest = json.loads((Path(candidate.__file__).parent / "short-swe.json").read_text())
-        self.assertEqual(
-            manifest["limits"]["max_inflight_model_calls"],
-            candidate.MAX_INFLIGHT_MODEL_CALLS,
-        )
+        self.assertNotIn("max_inflight_model_calls", manifest["limits"])
         self.assertEqual(
             manifest["limits"]["max_model_request_bytes"],
             candidate.MAX_MODEL_REQUEST_BYTES,
@@ -79,23 +76,6 @@ class CandidateConfigTests(unittest.TestCase):
                     candidate.PrimeAgentCandidateHarnessConfig(
                         artifact_dir=directory, commit=COMMIT, checksums=bad
                     )
-
-
-class InterceptionBudgetTests(unittest.IsolatedAsyncioTestCase):
-    async def test_concurrent_model_request_stops_rollout(self):
-        session = SimpleNamespace(trace=SimpleNamespace(stop=Mock()))
-        setattr(session, candidate._INFLIGHT_ATTRIBUTE, 1)
-        server = SimpleNamespace(sessions={"secret": session})
-        request = SimpleNamespace(headers={"x-api-key": "secret"})
-        dialect = SimpleNamespace(
-            secret=lambda headers: headers["x-api-key"],
-            error_body=lambda message: {"error": message},
-        )
-
-        response = await candidate.InterceptionServer.handle_request(server, request, dialect)
-
-        self.assertEqual(response.status, 400)
-        session.trace.stop.assert_called_once_with("max_inflight_model_calls")
 
 
 class CandidateSetupTests(unittest.IsolatedAsyncioTestCase):

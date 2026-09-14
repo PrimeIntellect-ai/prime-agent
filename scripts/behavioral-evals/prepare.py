@@ -89,7 +89,6 @@ def validate_manifest(manifest: dict) -> None:
         "max_output_tokens": 100_000,
         "max_total_tokens": 5_000_000,
         "rollout_timeout_seconds": 3_600,
-        "max_inflight_model_calls": 1,
         "max_model_request_bytes": 16_000_000,
     }
     if (

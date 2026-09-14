@@ -271,10 +271,10 @@ spend-capped `PRIME_BEHAVIORAL_API_KEY` to `PRIME_API_KEY` only in the trusted e
 Verifiers keeps that key behind the ACP interception server.
 `prime_agent_candidate.py` removes `PRIME_API_KEY` from both the
 install environment and candidate process environment. The candidate process receives
-the short-lived `PRIME_AGENT_INTERCEPT_KEY` instead. The trusted evaluator enforces one
-in-flight model request per rollout, a 16 MB request-body cap, 128 model turns, 100,000 output tokens, 5,000,000
-total tokens, and a 3,600-second rollout deadline. The dedicated provider key supplies a
-separate account-level spend ceiling.
+the short-lived `PRIME_AGENT_INTERCEPT_KEY` instead. The trusted evaluator allows
+independent model requests and enforces a 16 MB request-body cap, 128 model turns,
+100,000 output tokens, 5,000,000 total tokens, and a 3,600-second rollout deadline. The
+dedicated provider key supplies a separate account-level spend ceiling.
 
 The evaluator job has read-only repository and Actions permissions. PR write permission
 exists only in the separate completion workflow. That publisher validates the source

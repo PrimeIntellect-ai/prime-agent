@@ -7,7 +7,6 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from aiohttp import web
 from pydantic import Field, field_validator
 from verifiers.v1.acp import ACPHarness
 from verifiers.v1.configs.harness import HarnessConfig
@@ -16,7 +15,6 @@ from verifiers.v1.harnesses.prime_agent import PrimeAgentHarness
 from verifiers.v1.harnesses.prime_agent.harness import PRIME_AGENT_DIR, SKILLS_DIR
 from verifiers.v1.harnesses.utils.install import ensure_installed
 from verifiers.v1.interception import server as interception_server
-from verifiers.v1.interception.server import InterceptionServer
 from verifiers.v1.runtimes import Runtime
 from verifiers.v1.trace import Trace
 
@@ -28,40 +26,9 @@ TARBALLS = tuple(
     for name in ("prime-agent", "prime-agent-ai", "prime-agent-core", "prime-agent-tui")
 )
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-MAX_INFLIGHT_MODEL_CALLS = 1
 MAX_MODEL_REQUEST_BYTES = 16_000_000
-_INFLIGHT_ATTRIBUTE = "_prime_behavioral_inflight_model_calls"
-
-
-def _install_interception_budget() -> None:
-    """Stop a rollout that tries concurrent requests with one model capability."""
-    original = InterceptionServer.handle_request
-    if getattr(original, "_prime_behavioral_budget", False):
-        return
-
-    async def bounded(self, request, dialect):
-        session = self.sessions.get(dialect.secret(request.headers))
-        if session is None:
-            return await original(self, request, dialect)
-        active = getattr(session, _INFLIGHT_ATTRIBUTE, 0)
-        if active >= MAX_INFLIGHT_MODEL_CALLS:
-            session.trace.stop("max_inflight_model_calls")
-            return web.json_response(
-                dialect.error_body("rollout stopped: max_inflight_model_calls"),
-                status=400,
-            )
-        setattr(session, _INFLIGHT_ATTRIBUTE, active + 1)
-        try:
-            return await original(self, request, dialect)
-        finally:
-            setattr(session, _INFLIGHT_ATTRIBUTE, active)
-
-    bounded._prime_behavioral_budget = True
-    InterceptionServer.handle_request = bounded
-
 
 interception_server.MAX_REQUEST_BODY = MAX_MODEL_REQUEST_BYTES
-_install_interception_budget()
 
 
 INSTALL = r"""
