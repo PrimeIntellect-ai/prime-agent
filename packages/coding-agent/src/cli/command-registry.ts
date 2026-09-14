@@ -149,8 +149,14 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["update"],
-		usage: "update [--force] [--rollback]",
+		usage: "update [--force] [--rollback] [--beta|--stable]",
 		summary: "Update Prime Agent",
+		options: [
+			"--force     Reinstall even if the current version is the latest on the channel",
+			"--rollback  Restore the previous compiled release",
+			"--beta      Switch updates to the beta channel (unreleased builds, may be broken)",
+			"--stable    Return updates to the stable channel",
+		],
 	},
 	{
 		path: ["model"],
