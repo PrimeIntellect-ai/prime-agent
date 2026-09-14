@@ -1701,7 +1701,8 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						if (process.stdin.isTTY) {
 							console.log(chalk.dim("Update cancelled."));
 						}
-						setSelfUpdateAbortedExitCode();
+						// Existing contract: a declined session-loss prompt is a failed update, not the no-change sentinel.
+						process.exitCode = 1;
 						return true;
 					}
 					commitChannel();
