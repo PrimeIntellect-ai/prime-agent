@@ -525,6 +525,9 @@ function setSelfUpdateNoChangeExitCode(): void {
 }
 
 async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: UpdateChannel): Promise<SelfUpdatePlan> {
+	// A -beta install with no saved preference is on the nightly channel too; a missing manifest
+	// must never push it onto the stable registry package.
+	const effectiveChannel = resolveUpdateChannel(VERSION, channel);
 	if (isBunBinary) {
 		try {
 			const plan = await getNativeUpdatePlan({ force, rollback, channel });
@@ -532,7 +535,7 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 			if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
 			return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
 		} catch (error) {
-			if (channel === "nightly" && error instanceof NativeReleaseUnavailableError)
+			if (effectiveChannel === "nightly" && error instanceof NativeReleaseUnavailableError)
 				return nightlyReleaseUnavailablePlan();
 			throw error;
 		}
@@ -541,7 +544,7 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION, { channel });
 		// The registry default resolves to the stable package, so a missing nightly manifest must not fall through to it.
-		if (!latestRelease && channel === "nightly") return nightlyReleaseUnavailablePlan();
+		if (!latestRelease && effectiveChannel === "nightly") return nightlyReleaseUnavailablePlan();
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
 		const installSpec = latestRelease?.installSpec ?? packageName;
 		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
@@ -556,7 +559,7 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}
 	} catch {
-		if (channel === "nightly") return nightlyReleaseUnavailablePlan();
+		if (effectiveChannel === "nightly") return nightlyReleaseUnavailablePlan();
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
 	}
 
