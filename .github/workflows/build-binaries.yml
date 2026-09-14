@@ -6,8 +6,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -46,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       beta_version: ${{ steps.context.outputs.beta_version }}
       build_ref: ${{ steps.context.outputs.build_ref }}
@@ -68,6 +67,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_SHA_VALUE: ${{ github.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag || '' }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
@@ -127,9 +127,23 @@ jobs:
                 fi
                 echo "Retrying production v${production_version} for ${GITHUB_SHA_VALUE}."
               fi
-              # The merged pull request bumped the version, so its reviewer
-              # approved this exact release.
+              # A merged, human-approved pull request is what authorizes a
+              # release. A version bump that reached main any other way, such as
+              # a direct push by someone who can bypass branch rules, still needs
+              # a reviewer at publication time.
               publish_production=true
+              approving_pull_request=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA_VALUE}/pulls" \
+                --jq '[.[] | select(.merged_at != null)] | first | .number // empty')
+              if [ -z "$approving_pull_request" ]; then
+                echo "No merged pull request contains ${GITHUB_SHA_VALUE}; the release needs a reviewer."
+                requires_approval=true
+              elif [ "$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${approving_pull_request}/reviews" \
+                --jq '[.[] | select(.state == "APPROVED" and .user.type != "Bot")] | length')" -eq 0 ]; then
+                echo "Pull request #${approving_pull_request} has no human approval; the release needs a reviewer."
+                requires_approval=true
+              else
+                echo "Release approved in pull request #${approving_pull_request}."
+              fi
             elif ! git show-ref --verify --quiet "refs/tags/v${production_version}"; then
               echo "Production v${production_version} has no tag; retrying the failed release."
               publish_production=true
