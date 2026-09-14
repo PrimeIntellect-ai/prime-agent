@@ -232,6 +232,29 @@ describe("LoginDialogComponent", () => {
 		expect(output).toContain("Esc/Ctrl+C cancel");
 	});
 
+	it("keeps the key-hint row last while waiting and polling", () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "github-copilot", () => {}, "GitHub Copilot");
+
+		dialog.showAuth("https://example.com/device");
+		dialog.showWaiting("Waiting for browser authentication...");
+		let rows = stripAnsi(dialog.render(88).join("\n"))
+			.split("\n")
+			.filter((line) => line.trim().length > 0);
+
+		expect(rows.at(-1)).toContain("cancel");
+		expect(rows.at(-1)).toContain("copy");
+		expect(rows.at(-2)).toContain("Waiting for browser authentication...");
+
+		dialog.showProgress("Waiting for browser sign-in...");
+		rows = stripAnsi(dialog.render(88).join("\n"))
+			.split("\n")
+			.filter((line) => line.trim().length > 0);
+
+		expect(rows.at(-1)).toContain("cancel");
+		expect(rows.at(-2)).toContain("Waiting for browser sign-in...");
+		expect(rows.at(-3)).toContain("Waiting for browser authentication...");
+	});
+
 	it("wraps long sign-in URLs into per-line hyperlinks with the full url", () => {
 		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
 		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");

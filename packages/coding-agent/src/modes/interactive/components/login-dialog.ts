@@ -1,6 +1,7 @@
 import { win32 } from "node:path";
 import { getOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import {
+	type Component,
 	Container,
 	type Focusable,
 	getCapabilities,
@@ -155,6 +156,18 @@ export class LoginDialogComponent extends Container implements Focusable {
 		return this.waitForInput();
 	}
 
+	/** Append content while keeping the key-hint row as the panel's last row. */
+	private addChildAboveHints(component: Component): void {
+		if (!this.authActions) {
+			this.contentContainer.addChild(component);
+			return;
+		}
+		this.contentContainer.removeChild(this.authActions);
+		this.contentContainer.addChild(component);
+		this.contentContainer.addChild(this.authActions);
+		this.authActions.setText(this.getAuthActionsText());
+	}
+
 	/** Append the paste field plus the single key-hint line at the panel bottom. */
 	private addInputField(): void {
 		this.contentContainer.removeChild(this.input);
@@ -239,8 +252,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showWaiting(message: string): void {
 		this.addSectionSpacer();
-		this.contentContainer.addChild(new Text(theme.fg("accent", message), 0, 0));
-		// The key-hint line at the panel bottom already offers cancel.
+		this.addChildAboveHints(new Text(theme.fg("accent", message), 0, 0));
 		if (!this.authActions) {
 			this.authActions = new Text(this.getAuthActionsText(), 0, 0);
 			this.contentContainer.addChild(this.authActions);
@@ -256,7 +268,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.startContent();
 			this.addSectionTitle("Preparing authentication");
 		}
-		this.contentContainer.addChild(new Text(theme.fg("muted", message), 0, 0));
+		this.addChildAboveHints(new Text(theme.fg("muted", message), 0, 0));
 		this.tui.requestRender();
 	}
 
@@ -274,7 +286,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.startContent();
 			return;
 		}
-		this.contentContainer.addChild(new Spacer(1));
+		this.addChildAboveHints(new Spacer(1));
 	}
 
 	private addInstructions(instructions: string): void {
