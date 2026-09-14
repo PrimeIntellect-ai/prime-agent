@@ -118,6 +118,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	const runtime: ExtensionRuntime = {
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
+		queueExtensionFollowUp: notInitialized,
+		cancelExtensionFollowUp: notInitialized,
 		// Declaring scheduled work during load is legal but has no host to record
 		// it yet; bindCore() replaces these with the session-backed handlers.
 		setScheduledWork: () => {},
@@ -171,6 +173,14 @@ function createExtensionAPI(
 	cwd: string,
 	eventBus: EventBus,
 ): ExtensionAPI {
+	extensionDisposals.get(extension)?.add(() => {
+		try {
+			runtime.cancelExtensionFollowUp(extension);
+		} catch {
+			// The factory can fail before runtime actions are bound.
+		}
+	});
+
 	const api = {
 		on(event: string, handler: HandlerFn): void {
 			runtime.assertActive();
@@ -238,6 +248,16 @@ function createExtensionAPI(
 		sendUserMessage(content, options): void {
 			runtime.assertActive();
 			runtime.sendUserMessage(content, options);
+		},
+
+		queueFollowUp(key, content, options) {
+			runtime.assertActive();
+			return runtime.queueExtensionFollowUp(extension, key, content, options);
+		},
+
+		cancelFollowUp(key): boolean {
+			runtime.assertActive();
+			return runtime.cancelExtensionFollowUp(extension, key);
 		},
 
 		setScheduledWork(key: string, work?: ScheduledWorkInfo): void {

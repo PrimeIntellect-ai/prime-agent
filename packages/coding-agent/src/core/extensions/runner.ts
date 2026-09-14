@@ -400,6 +400,8 @@ export class ExtensionRunner {
 		const owner: object = this.runtime;
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
+		this.runtime.queueExtensionFollowUp = actions.queueExtensionFollowUp;
+		this.runtime.cancelExtensionFollowUp = actions.cancelExtensionFollowUp;
 		this.runtime.setScheduledWork = actions.setScheduledWork;
 		this.runtime.clearScheduledWork = actions.clearScheduledWork;
 		this.runtime.appendEntry = actions.appendEntry;

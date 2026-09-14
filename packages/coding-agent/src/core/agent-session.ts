@@ -5977,6 +5977,7 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			extensionOwner?: object;
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -6030,6 +6031,7 @@ export class AgentSession {
 			payload,
 			lifecycle: { state: "queued" },
 			queueKey: options.queueKey,
+			extensionOwner: options.extensionOwner,
 			agentMessageId: options.agentMessageId,
 			suppressAutonomousContinuation: options.suppressAutonomousContinuation,
 		};
@@ -6063,6 +6065,7 @@ export class AgentSession {
 			.find(
 				(candidate) =>
 					candidate.queueKey === action.queueKey &&
+					candidate.extensionOwner === action.extensionOwner &&
 					(candidate.lifecycle.state === "queued" ||
 						candidate.lifecycle.state === "selected" ||
 						candidate.lifecycle.state === "preparing"),
@@ -6903,6 +6906,77 @@ export class AgentSession {
 			source: "extension",
 			resumeIfIdle: true,
 		});
+	}
+
+	async queueExtensionFollowUp(
+		owner: object,
+		key: string,
+		content: string | (TextContent | ImageContent)[],
+		options?: { signal?: AbortSignal },
+	): Promise<{ actionId: string; disposition: "starts_when_admitted" | "queued" | "coalesced" }> {
+		if (!key) throw new Error("Extension follow-up key must not be empty.");
+		throwIfPromptAdmissionCancelled(options?.signal);
+		const normalized = normalizeMessageContent(content);
+		const existing = this._actionStore
+			.unfinishedActions()
+			.find(
+				(action) =>
+					action.extensionOwner === owner &&
+					action.queueKey === key &&
+					action.delivery === "when_run_idle" &&
+					(action.lifecycle.state === "queued" ||
+						action.lifecycle.state === "selected" ||
+						action.lifecycle.state === "preparing"),
+			);
+		if (existing) return { actionId: existing.id, disposition: "coalesced" };
+		throwIfPromptAdmissionCancelled(options?.signal);
+		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+			content: typeof content === "string" ? undefined : content,
+			queueKey: key,
+			extensionOwner: owner,
+			resumeIfIdle: true,
+			source: "extension",
+			queueVisible: true,
+		});
+		const result = this._admitSessionInput(action, {
+			immediatelyEligible: this._canStartSessionActionImmediately(),
+		});
+		if (!result.accepted || !result.ticket) {
+			const coalesced = this._coalescedFollowUpOwner(action);
+			if (!coalesced) throw new Error("Extension follow-up was not admitted.");
+			return { actionId: coalesced.id, disposition: "coalesced" };
+		}
+		if (options?.signal) {
+			const cancel = () => {
+				const error = new Error("Extension-owned follow-up was aborted before delivery.");
+				const removed = this._cancelSessionActions((candidate) => candidate === action, error, [action]);
+				if (removed.length > 0) this._emitQueueUpdate();
+			};
+			options.signal.addEventListener("abort", cancel, { once: true });
+			void result.ticket.completed.finally(() => options.signal?.removeEventListener("abort", cancel));
+			if (options.signal.aborted) cancel();
+		}
+		return { actionId: action.id, disposition: result.disposition };
+	}
+	cancelExtensionFollowUp(owner: object, key?: string): boolean {
+		const matching = this._actionStore
+			.clearableActions()
+			.filter(
+				(action) =>
+					action.payload.kind === "turn" &&
+					action.extensionOwner === owner &&
+					action.delivery === "when_run_idle" &&
+					(key === undefined || action.queueKey === key),
+			);
+		if (matching.length === 0) return false;
+		const ids = new Set(matching.map((action) => action.id));
+		this._cancelSessionActions(
+			(action) => ids.has(action.id),
+			new Error("Extension-owned follow-up was cancelled before delivery."),
+			matching,
+		);
+		this._emitQueueUpdate();
+		return true;
 	}
 
 	clearQueue(): { steering: string[]; followUp: string[] } {
@@ -9873,6 +9947,9 @@ export class AgentSession {
 						});
 					});
 				},
+				queueExtensionFollowUp: (owner, key, content, options) =>
+					this.queueExtensionFollowUp(owner, key, content, options),
+				cancelExtensionFollowUp: (owner, key) => this.cancelExtensionFollowUp(owner, key),
 				setScheduledWork: (key, work) => this.setScheduledWork(key, work),
 				clearScheduledWork: (key) => this.clearScheduledWork(key),
 				appendEntry: (customType, data) => {

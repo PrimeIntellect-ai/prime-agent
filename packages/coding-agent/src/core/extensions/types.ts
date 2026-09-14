@@ -1097,6 +1097,16 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
+	/** Queue one extension-owned follow-up under a key and await host admission. */
+	queueFollowUp(
+		key: string,
+		content: string | (TextContent | ImageContent)[],
+		options?: { signal?: AbortSignal },
+	): Promise<ExtensionFollowUpAdmission>;
+
+	/** Cancel this extension's queued, selected, or preparing follow-up under key. */
+	cancelFollowUp(key: string): boolean;
+
 	/**
 	 * Declare externally scheduled work for THIS session (timer, wakeup,
 	 * watcher); a session with declared work is waiting, not finished. Hosts
@@ -1305,6 +1315,20 @@ export type SendMessageHandler = <T = unknown>(
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 ) => void;
 
+export interface ExtensionFollowUpAdmission {
+	actionId: string;
+	disposition: "starts_when_admitted" | "queued" | "coalesced";
+}
+
+export type QueueExtensionFollowUpHandler = (
+	owner: object,
+	key: string,
+	content: string | (TextContent | ImageContent)[],
+	options?: { signal?: AbortSignal },
+) => Promise<ExtensionFollowUpAdmission>;
+
+export type CancelExtensionFollowUpHandler = (owner: object, key?: string) => boolean;
+
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: { deliverAs?: "steer" | "followUp" },
@@ -1391,6 +1415,8 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	queueExtensionFollowUp: QueueExtensionFollowUpHandler;
+	cancelExtensionFollowUp: CancelExtensionFollowUpHandler;
 	setScheduledWork: SetScheduledWorkHandler;
 	clearScheduledWork: ClearScheduledWorkHandler;
 	appendEntry: AppendEntryHandler;

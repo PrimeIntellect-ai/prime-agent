@@ -72,6 +72,8 @@ export interface SessionAction<TPayload extends SessionActionPayload = SessionAc
 	payload: TPayload;
 	lifecycle: ActionLifecycle;
 	queueKey?: string;
+	/** Ephemeral ownership token. Intentionally excluded from recovery snapshots. */
+	extensionOwner?: object;
 	agentMessageId?: string;
 	suppressAutonomousContinuation?: boolean;
 }
