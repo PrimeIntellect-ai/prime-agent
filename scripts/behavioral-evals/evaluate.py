@@ -261,6 +261,16 @@ def failure_stage(trace: dict) -> str | None:
     return None
 
 
+def rollout_deadline_timeout(trace: dict) -> bool:
+    for error in trace.get("errors") or []:
+        if not isinstance(error, dict) or error.get("type") != "HarnessError":
+            continue
+        message = error.get("message")
+        if isinstance(message, str) and message.startswith("agent timeout: rollout exceeded its "):
+            return message.endswith(" budget")
+    return False
+
+
 def error_flags(trace: dict) -> tuple[bool, bool]:
     errors = trace.get("errors") or []
     detail = " ".join(
@@ -308,7 +318,8 @@ def trace_record(episode: dict, taskset: str) -> dict:
     meta = facts.get("meta") if isinstance(facts.get("meta"), dict) else {}
     unanswered = int(meta.get("unanswered_calls") or 0)
     limit_stop = trace.get("stop_condition") in FRAMEWORK_LIMIT_STOPS
-    integrity_issues = analyzer_integrity_issues(facts, allow_unanswered=limit_stop)
+    deadline_timeout = rollout_deadline_timeout(trace)
+    integrity_issues = analyzer_integrity_issues(facts, allow_unanswered=limit_stop or deadline_timeout)
     fact_counts = {
         key: value["count"]
         for key, value in facts.items()
@@ -319,12 +330,13 @@ def trace_record(episode: dict, taskset: str) -> dict:
         fact_counts["no_test_after_final_edit"] = 1
     if limit_stop and unanswered:
         fact_counts["pending_calls_at_limit"] = unanswered
+    if deadline_timeout and unanswered:
+        fact_counts["pending_calls_at_timeout"] = unanswered
     if integrity_issues:
         fact_counts["trace_integrity_issues"] = integrity_issues
     trace_complete = (
-        bool(episode.get("ok"))
+        (bool(episode.get("ok")) and bool(trace.get("ok")) or deadline_timeout)
         and bool(trace.get("is_completed"))
-        and bool(trace.get("ok"))
         and integrity_issues == 0
     )
     if not trace_complete:

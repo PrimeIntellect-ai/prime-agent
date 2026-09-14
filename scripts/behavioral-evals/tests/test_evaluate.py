@@ -302,6 +302,45 @@ class TraceConversionTests(unittest.TestCase):
         self.assertEqual(record["trace_facts"]["pending_calls_at_limit"], 1)
         self.assertNotIn("trace_integrity_issues", record["trace_facts"])
 
+    def test_trace_record_preserves_model_induced_rollout_timeout(self):
+        trace = {
+            "task": {"data": {"name": "task-timeout"}},
+            "calls": [{}],
+            "nodes": [],
+            "errors": [
+                {
+                    "type": "HarnessError",
+                    "message": "agent timeout: rollout exceeded its 3600s budget",
+                }
+            ],
+            "is_completed": True,
+            "ok": False,
+            "stop_condition": "error",
+        }
+        facts = {
+            "tests_after_final_edit": {
+                "count": 0,
+                "ran_after_final_edit": None,
+            },
+            "meta": {
+                "dropped_events": {},
+                "truncated_input": False,
+                "truncated_strings": 0,
+                "unanswered_calls": 1,
+            },
+        }
+        with patch.object(evaluate, "analyze_trace", return_value=facts):
+            record = evaluate.trace_record(
+                {"task": trace["task"], "traces": [trace], "ok": False},
+                "taskset",
+            )
+
+        self.assertTrue(record["trace_complete"])
+        self.assertTrue(record["model_timeout"])
+        self.assertFalse(record["resolved"])
+        self.assertEqual(record["trace_facts"]["pending_calls_at_timeout"], 1)
+        self.assertNotIn("trace_integrity_issues", record["trace_facts"])
+
     def test_trace_record_marks_errors_before_any_model_call_as_infrastructure(self):
         episode = {
             "task": {"data": {"name": "task-two"}},
