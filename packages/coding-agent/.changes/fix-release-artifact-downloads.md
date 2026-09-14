@@ -1,1 +1,1 @@
-- Fixed beta-only and stable-only releases failing macOS validation because their artifacts were downloaded to the wrong directory.
+- Fixed beta-only and stable-only releases failing macOS validation because their artifacts were downloaded to the wrong directory ([#2265](https://github.com/PrimeIntellect-ai/prime-agent/issues/2265)).
