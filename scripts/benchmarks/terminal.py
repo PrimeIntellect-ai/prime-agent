@@ -133,6 +133,19 @@ class Terminal:
                 raise TimeoutError("Timed out waiting for terminal display")
             self.pump()
 
+    def until_output(self, predicate: Callable[[str], bool], seconds: float) -> None:
+        index = len(self.raw)
+        output = ""
+        deadline = time.perf_counter() + seconds
+        while True:
+            output += "".join(self.raw[index:])
+            index = len(self.raw)
+            if predicate(output):
+                return
+            if time.perf_counter() >= deadline:
+                raise TimeoutError("Timed out waiting for new terminal output")
+            self.pump()
+
     def ready(self, seconds: float = 30) -> float:
         deadline = time.perf_counter() + seconds
         probes: list[str] = []

@@ -17,6 +17,8 @@ from ui import (
     expand_subagents,
     expected_roster_inactive,
     fixture_spec,
+    move_down,
+    open_agents_view,
     session_id,
     session_name,
     spawn_ledger_path,
@@ -168,6 +170,19 @@ class ProbeLogicTests(unittest.TestCase):
         self.assertEqual(total_cpu(processes), 4.0)
         self.assertEqual(total_cpu([]), 0.0)
 
+    def test_open_agents_view_waits_for_fresh_output_before_clearing_search(self):
+        terminal = FakeTerminal(
+            [
+                "Ctrl+N new\n> old-query",
+                "session still rendering",
+                "Ctrl+N new\n> old-query",
+                "Search sessions",
+            ]
+        )
+        open_agents_view(terminal, clear=True)
+        self.assertEqual(terminal.sent, [ui.LEFT_ARROW, ui.BACKSPACE * 24])
+        self.assertEqual(terminal.display.text(), "Search sessions")
+
     def test_wait_for_roster_requires_a_settled_count(self):
         frames = [
             "agents   0 running, 1 idle, 5 inactive",
@@ -206,6 +221,11 @@ class ProbeLogicTests(unittest.TestCase):
         side = Side(sha="a" * 40)
         with self.assertRaisesRegex(RuntimeError, "first installation"):
             ui_measure(ui_request(), side, 0, results=Path("/unused"), homes=Path("/unused"), user="bench")
+
+    def test_move_down_sends_separate_keypresses(self):
+        terminal = FakeTerminal(["initial"])
+        move_down(terminal, 3)
+        self.assertEqual(terminal.sent, [ui.DOWN_ARROW] * 3)
 
     def test_expand_subagents_requires_a_newly_expanded_row(self):
         # An ancestor already shows "▾", so only a growing count proves the selected row expanded;
@@ -269,6 +289,14 @@ class FakeTerminal:
         while not predicate(self.display):
             if not self.pump():
                 raise TimeoutError("Timed out waiting for the expected terminal state")
+
+    def until_output(self, predicate, timeout: float) -> None:  # type: ignore[no-untyped-def]
+        output = ""
+        while not predicate(output):
+            if not self.frames:
+                raise TimeoutError("Timed out waiting for fresh terminal output")
+            self.pump()
+            output += self.display.text()
 
     def settle(self, seconds: float) -> None:
         self.pump()

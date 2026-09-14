@@ -32,7 +32,7 @@ BASE_TIMESTAMP_MS = 946684800000  # 2000-01-01T00:00:00Z; fixed so fixtures are 
 TOOL_OUTPUT_LINES = 60
 
 SEARCH_PLACEHOLDER = "Search sessions"
-AGENTS_VIEW_HINT = SEARCH_PLACEHOLDER
+AGENTS_VIEW_FOOTER = "Ctrl+N new"
 ROSTER_COUNT = re.compile(r"agents\s+(\d+) running, (\d+) idle, (\d+) inactive")
 READY_MARKER = "benchready"
 LEFT_ARROW = "\x1b[D"
@@ -386,6 +386,14 @@ def clear_search(terminal: Terminal, *, attempts: int = 5) -> None:
     raise TimeoutError("Agents-view search box did not clear")
 
 
+def open_agents_view(terminal: Terminal, *, clear: bool, timeout: float = 60) -> None:
+    """Open a freshly rendered agents view, then optionally clear its preserved search."""
+    terminal.child.send(LEFT_ARROW)
+    terminal.until_output(lambda output: AGENTS_VIEW_FOOTER in output, timeout)
+    if clear:
+        clear_search(terminal)
+
+
 def type_query(terminal: Terminal, query: str, *, attempts: int = 3) -> None:
     """Type a search query and verify it echoed before filtering on it."""
     for _ in range(attempts):
@@ -397,6 +405,13 @@ def type_query(terminal: Terminal, query: str, *, attempts: int = 3) -> None:
         except TimeoutError:
             continue
     raise TimeoutError("Agents-view search query did not echo")
+
+
+def move_down(terminal: Terminal, steps: int) -> None:
+    """Move through a deterministic fixture tree without coalescing keypresses."""
+    for _ in range(steps):
+        terminal.child.send(DOWN_ARROW)
+        terminal.settle(0.08)
 
 
 def expand_subagents(terminal: Terminal, *, attempts: int = 4) -> None:
@@ -525,8 +540,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             started = time.perf_counter()
             cpu_start = cpu_total()
             bytes_start = terminal.bytes
-            terminal.child.send(LEFT_ARROW)
-            terminal.until(lambda display: AGENTS_VIEW_HINT in display.text(), 60)
+            open_agents_view(terminal, clear=False)
             elapsed = time.perf_counter() - started
             cpu = cpu_total() - cpu_start
             record(side, "agents_view", trial, elapsed)  # type: ignore[arg-type]
@@ -564,8 +578,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             started = time.perf_counter()
             cpu_start = cpu_total()
             bytes_start = terminal.bytes
-            terminal.child.send(LEFT_ARROW)
-            terminal.until(lambda display: AGENTS_VIEW_HINT in display.text(), 60)
+            open_agents_view(terminal, clear=True)
             terminal.settle(1.0)
             type_query(terminal, spec.root[:8])
             terminal.until(lambda display: session_name("root", 0) in display.text(), 60)
@@ -578,33 +591,28 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             record(side, "parent_open_cpu", trial, cpu)  # type: ignore[arg-type]
             note("parent_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
 
-            # Deepest subagent session: search, drill in, open at depth SUBAGENT_DEPTH
-            # while its parent session is live, matching real subagent workflows.
+            # Deepest subagent session: expand the deterministic fixture tree and
+            # drill to depth SUBAGENT_DEPTH while its parent session is live.
             metric = "subagent_open"
             started = time.perf_counter()
             cpu_start = cpu_total()
             bytes_start = terminal.bytes
-            terminal.child.send(LEFT_ARROW)
-            terminal.until(lambda display: AGENTS_VIEW_HINT in display.text(), 60)
+            open_agents_view(terminal, clear=True)
             terminal.settle(1.0)
-            query = spec.subagents[-1][:8]
-            type_query(terminal, query)
+            type_query(terminal, spec.root[:8])
             terminal.until(lambda display: session_name("root", 0) in display.text(), 60)
             clear_search(terminal)
             expand_subagents(terminal)
-            # The search box must be empty to expand; refilter to the chain so the
-            # first fan-out sibling cannot steal the down-arrow, then drill a level
-            # at a time until the deepest subagent row is selected.
-            type_query(terminal, query)
-            terminal.settle(0.5)
-            terminal.child.send(DOWN_ARROW)
-            terminal.settle(0.8)
-            for _ in range(SUBAGENT_DEPTH - 1):
+            for depth in range(1, SUBAGENT_DEPTH + 1):
+                # Filtering keeps the selected parent visible and removes its
+                # unrelated siblings. Move across its summary row to the child,
+                # then clear search before the next expansion key.
+                type_query(terminal, spec.subagents[depth - 1][:8])
+                terminal.settle(0.5)
+                move_down(terminal, 2)
                 clear_search(terminal)
-                expand_subagents(terminal)
-                terminal.settle(0.8)
-                terminal.child.send(DOWN_ARROW)
-                terminal.settle(0.8)
+                if depth < SUBAGENT_DEPTH:
+                    expand_subagents(terminal)
             terminal.child.send(RIGHT_ARROW)
             input_ready(terminal, tail_marker("sub", SUBAGENT_DEPTH))
             elapsed = time.perf_counter() - started

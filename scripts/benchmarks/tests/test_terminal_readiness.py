@@ -139,6 +139,13 @@ class ReadinessTests(unittest.TestCase):
             terminal.until(lambda display: "missing" in display.text(), 0.1)
         self.assertLess(clock.now - 4.0, 0.11)
 
+    def test_until_output_ignores_matching_text_already_on_screen(self):
+        terminal, editor, clock = self.launch()
+        terminal.display.feed("agents view")
+        editor.schedule(clock.now + 0.03, "fresh agents view")
+        terminal.until_output(lambda output: "fresh agents view" in output, 0.1)
+        self.assertIn("fresh agents view", terminal.display.text())
+
     def test_changed_absent_and_stale_labels_do_not_gate_input(self):
         for label in ("agents/resume", "manage", "sessions / continue", "", "benchready"):
             with self.subTest(label=label):
