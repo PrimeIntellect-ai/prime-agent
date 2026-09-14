@@ -29,6 +29,15 @@ describe("TopBar", () => {
 		expect(stripAnsi(lines[0])).toContain("line1 line2");
 	});
 
+	it("strips terminal escape sequences from the chat name", () => {
+		const bar = new TopBar({ getChatName: () => "a\u001b[2Jb\u001b]0;title\u0007c" });
+		const [line] = bar.render(30);
+		const plain = stripAnsi(line);
+		expect(plain).not.toContain("\u001b");
+		expect(plain).not.toContain("\u0007");
+		expect(plain).toContain("a [2Jb ]0;title c");
+	});
+
 	it("returns a blank line when the chat name is empty", () => {
 		const bar = new TopBar({ getChatName: () => undefined });
 		expect(bar.render(21)).toEqual([""]);

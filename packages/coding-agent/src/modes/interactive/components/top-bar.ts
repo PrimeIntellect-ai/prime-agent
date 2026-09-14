@@ -26,9 +26,14 @@ export class TopBar implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		// Collapse all whitespace: an embedded newline in the name would emit
-		// multiple rows and break the fixed fullscreen frame.
-		const name = (this.options.getChatName() ?? "").replace(/\s+/g, " ").trim();
+		// Strip terminal control characters (C0, DEL, C1): a persisted session
+		// name could carry escape sequences that would execute on every bar
+		// repaint. Then collapse all whitespace: an embedded newline in the
+		// name would emit multiple rows and break the fixed fullscreen frame.
+		const name = (this.options.getChatName() ?? "")
+			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
 		if (!name) {
 			return [""];
 		}
