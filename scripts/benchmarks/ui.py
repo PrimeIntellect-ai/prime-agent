@@ -31,7 +31,6 @@ SUBAGENT_MESSAGES = 400
 BASE_TIMESTAMP_MS = 946684800000  # 2000-01-01T00:00:00Z; fixed so fixtures are deterministic
 TOOL_OUTPUT_LINES = 60
 
-AGENTS_VIEW_HINT = "Search sessions"
 SEARCH_PLACEHOLDER = "Search sessions"
 AGENTS_VIEW_FOOTER = "Ctrl+N new"
 ROSTER_COUNT = re.compile(r"agents\s+(\d+) running, (\d+) idle, (\d+) inactive")
@@ -343,7 +342,7 @@ def total_cpu(stats: list[ProcessMemory]) -> float:
 
 
 def input_ready(terminal: Terminal, marker: str, *, timeout: float = 120) -> float:
-    """Require the transcript tail, then reuse the retrying editor probe without a fixed sleep."""
+    """Return the first successful editor-echo timestamp after the transcript tail appears."""
     terminal.until(lambda display: marker in display.text(), timeout)
     return terminal.started + terminal.ready(timeout)
 
@@ -550,7 +549,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             # Reattach to the worker just opened, excluding search/navigation setup from timing.
             metric = "agents_reopen"
             terminal.child.send(LEFT_ARROW)
-            terminal.until(lambda display: AGENTS_VIEW_HINT in display.text(), 60)
+            terminal.until(lambda display: roster_inactive(display) is not None, 60)
             type_query(terminal, spec.open_id[:8])
             terminal.until(lambda display: session_name("large", 1) in display.text(), 60)
             terminal.settle(0.8)

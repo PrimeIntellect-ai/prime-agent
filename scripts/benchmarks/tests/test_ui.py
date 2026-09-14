@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_args
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import ui
 from report import UI_METRICS, render
@@ -226,6 +228,66 @@ class ProbeLogicTests(unittest.TestCase):
         terminal = FakeTerminal(["initial"])
         move_down(terminal, 3)
         self.assertEqual(terminal.sent, [ui.DOWN_ARROW] * 3)
+
+    def test_navigation_survives_persisted_agents_search(self):
+        terminal = FakeTerminal([""])
+        terminal.started = time.perf_counter()
+        terminal.ready = Mock()
+        terminal.close = Mock()
+        query = ""
+        returned_queries = []
+
+        def send(data):
+            nonlocal query
+            terminal.sent.append(data)
+            if data == ui.LEFT_ARROW:
+                returned_queries.append(query)
+                # The state-aware navigation consumes a fresh agents-view render on entry.
+                terminal.frames.append(
+                    "agents   0 running, 1 idle, 153 inactive\n"
+                    + (query or "Search sessions")
+                    + "\nCtrl+N new"
+                )
+            elif data == ui.RIGHT_ARROW or data.startswith("/resume"):
+                terminal.display.set("chat editor")
+                return
+            elif data.startswith(ui.BACKSPACE):
+                query = query[: -len(data)]
+            elif not data.startswith("\x1b"):
+                query += data
+            terminal.display.set(
+                "agents   0 running, 1 idle, 153 inactive\n"
+                + (query or "Search sessions")
+                + "\nui-bench-large-01\nui-bench-root-00"
+            )
+
+        def stats(_uid):
+            # End after navigation so this test cannot launch subsequent benchmark workloads.
+            if "subagent_open_cpu" in side.metrics:
+                raise RuntimeError("navigation test complete")
+            return [ProcessMemory(pid=1, name="daemon", rss=100)]
+
+        terminal.child.send = send
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("ui.Terminal", return_value=terminal),
+            patch("ui.input_ready", side_effect=lambda *args: time.perf_counter()),
+            patch("ui.expand_subagents"),
+            patch("ui.wait_for_roster", return_value=0.1),
+            patch("ui.write_fixtures"),
+            patch("ui.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=123)),
+            patch("ui.process_stats", side_effect=stats),
+            patch("worker.environment", return_value={}),
+            patch("worker.stop_processes"),
+        ):
+            side = Side(sha="a" * 40, metrics={"install": [Observation(trial=0, value=1)]})
+            root = Path(directory)
+            ui_measure(ui_request(), side, 0, results=root, homes=root, user="benchmark1")
+        for metric in ("agents_reopen", "parent_open", "subagent_open"):
+            self.assertIsNone(side.metrics[metric][0].error)
+        self.assertEqual(side.metrics["ui_rss"][0].error, "RuntimeError: navigation test complete")
+        spec = fixture_spec()
+        self.assertEqual(returned_queries, ["", spec.open_id[:8], spec.open_id[:8], spec.root[:8]])
 
     def test_expand_subagents_requires_a_newly_expanded_row(self):
         # An ancestor already shows "▾", so only a growing count proves the selected row expanded;
