@@ -1707,7 +1707,10 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 					};
 					const selfUpdatePlan = await getSelfUpdatePlan(options.force, options.rollback, updateChannel);
 					if (selfUpdatePlan.unavailable) {
-						setSelfUpdateAbortedExitCode();
+						// With an all target the extension half already succeeded; the message above
+						// says Prime Agent itself was not updated, so do not fail the whole run for it.
+						if (updateTargetIncludesExtensions(target)) setSelfUpdateNoChangeExitCode();
+						else setSelfUpdateAbortedExitCode();
 						return true;
 					}
 					if (!selfUpdatePlan.shouldRun) {

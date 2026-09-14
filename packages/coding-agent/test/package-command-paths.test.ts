@@ -192,6 +192,34 @@ describe("package commands", () => {
 		}
 	});
 
+	it("keeps a successful extension update when the nightly manifest is missing for an all target", async () => {
+		process.env.PRIME_AGENT_DOWNLOAD_BASE_URL = "https://downloads.example.test/prime-agent";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("", { status: 404 })),
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(handlePackageCommand(["update", "--nightly", "--force"])).resolves.toBe(true);
+
+			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stdout).toContain("Updated packages");
+			expect(stderr).toContain("Could not resolve a nightly release");
+			expect(stderr).toContain("was not updated and the update channel was not changed");
+			expect(process.exitCode).toBeUndefined();
+			const settingsPath = join(agentDir, "settings.json");
+			if (existsSync(settingsPath)) {
+				expect(JSON.parse(readFileSync(settingsPath, "utf-8")).updateChannel).toBeUndefined();
+			}
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("rejects --nightly for extension-only updates instead of silently ignoring it", async () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
