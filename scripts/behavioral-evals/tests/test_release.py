@@ -70,7 +70,7 @@ class ReleaseGenerationTests(unittest.TestCase):
             "repository": candidate.identity.repository,
             "pr": candidate.identity.pr,
             "head_sha": candidate.identity.head_sha,
-            "base_sha": candidate.identity.harness_sha,
+            "base_sha": "b" * 40,
             "harness_sha": candidate.identity.harness_sha,
             "source_run_id": 123,
             "source_run_attempt": 2,
@@ -172,7 +172,6 @@ class ReleaseGenerationTests(unittest.TestCase):
             "pr": 7,
             "head_sha": "0" * 40,
             "harness_sha": "1" * 40,
-            "base_sha": "2" * 40,
             "evaluator_contract_fingerprint": "3" * 64,
         }
         for field, value in cases.items():
@@ -193,6 +192,21 @@ class ReleaseGenerationTests(unittest.TestCase):
                         "behavioral-eval-reference-123-2",
                         Path(directory),
                     )
+
+    def test_fetch_rejects_a_malformed_base_revision(self):
+        payloads, selected = self._generation()
+        self._replace_provenance(payloads, selected, base_sha="not-a-sha")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(release, "release", return_value=selected),
+            patch.object(release, "request_json", side_effect=self._download(payloads)),
+            self.assertRaisesRegex(ValueError, "provenance schema"),
+        ):
+            release.fetch(
+                REPOSITORY,
+                "behavioral-eval-reference-123-2",
+                Path(directory),
+            )
 
     def test_fetch_rejects_missing_or_extra_generation_assets(self):
         _, selected = self._generation()

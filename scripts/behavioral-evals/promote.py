@@ -68,8 +68,6 @@ def main() -> None:
         raise ValueError("request/source run mismatch")
     if request.get("attempt") != args.source_attempt:
         raise ValueError("request/source attempt mismatch")
-    if request.get("base_sha") != request.get("harness_sha"):
-        raise ValueError("request base/evaluator revision mismatch")
     for field in (
         "repository",
         "pr",

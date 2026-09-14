@@ -18,6 +18,7 @@ from evaluation import BaselineResult
 STABLE_TAG = "behavioral-eval-baseline-v1"
 GENERATION_RE = re.compile(r"^behavioral-eval-reference-([0-9]+)-([0-9]+)$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION = "0.0.0-benchmark"
 TARBALLS = {
     f"prime-agent-{VERSION}.tgz",
@@ -127,6 +128,8 @@ def fetch(repository: str, tag: str, destination: Path) -> None:
         or provenance["schema_version"] != 1
         or type(provenance["source_run_id"]) is not int
         or type(provenance["source_run_attempt"]) is not int
+        or not isinstance(provenance["base_sha"], str)
+        or SHA_RE.fullmatch(provenance["base_sha"]) is None
     ):
         raise ValueError("baseline provenance schema mismatch")
     match = GENERATION_RE.fullmatch(tag)
@@ -147,8 +150,6 @@ def fetch(repository: str, tag: str, destination: Path) -> None:
     for field in ("repository", "pr", "head_sha", "harness_sha"):
         if provenance[field] != getattr(identity, field):
             raise ValueError(f"baseline provenance {field} mismatch")
-    if provenance["base_sha"] != identity.harness_sha:
-        raise ValueError("baseline provenance base revision mismatch")
     if provenance["evaluator_contract_fingerprint"] != identity.evaluator_contract_fingerprint:
         raise ValueError("baseline provenance evaluator contract mismatch")
     prior = provenance["baseline_generation"]

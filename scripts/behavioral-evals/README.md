@@ -149,8 +149,8 @@ fails the check. Seed mode still requires a valid 28-task candidate result.
 
 A PR run never writes the baseline. Promotion runs only after a labeled PR merges into
 `main`. The newest matching run must be complete and successful. Promotion verifies the
-request, tested head and base, evaluator contract, report, candidate fingerprint, and
-opaque packages. A comparison report must name the exact generation and candidate
+request, tested head, recorded base and evaluator revisions, evaluator contract, report,
+candidate fingerprint, and opaque packages. A comparison report must name the exact generation and candidate
 fingerprint that are still current. A seed report is accepted only while no reference
 exists. The promoter creates a run-attempt generation without clobbering existing
 assets, downloads it again, and advances the stable pointer in one update. Generation

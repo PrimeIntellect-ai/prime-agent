@@ -25,7 +25,7 @@ def write_output(values: dict[str, str]) -> None:
             print(f"{key}={value}")
 
 
-def resolve(output: Path) -> None:
+def resolve(output: Path, harness_sha: str) -> None:
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     pull = event.get("pull_request")
     if not isinstance(pull, dict) or event.get("action") not in {
@@ -53,7 +53,7 @@ def resolve(output: Path) -> None:
         "pr": int(pull["number"]),
         "run_id": int(os.environ["GITHUB_RUN_ID"]),
         "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-        "harness_sha": os.environ["GITHUB_SHA"],
+        "harness_sha": harness_sha,
         "base_sha": pull["base"]["sha"],
         "head_sha": pull["head"]["sha"],
         "manifest_fingerprint": hashlib.sha256(manifest.read_bytes()).hexdigest(),
@@ -80,8 +80,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("resolve",))
     parser.add_argument("--output", type=Path, default=Path("request"))
+    parser.add_argument("--harness-sha", required=True)
     args = parser.parse_args()
-    resolve(args.output)
+    resolve(args.output, args.harness_sha)
 
 
 if __name__ == "__main__":

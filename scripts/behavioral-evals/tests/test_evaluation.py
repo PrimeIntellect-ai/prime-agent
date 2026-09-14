@@ -305,7 +305,7 @@ class ConfirmationTests(unittest.TestCase):
                 FindingConfirmation(
                     code="resolved_losses",
                     confirmed=confirmed,
-                    task_ids=["task-00"],
+                    task_ids=[f"task-{index:02}" for index in range(5)],
                     note="Focused rerun reproduced the result.",
                 )
             ],
@@ -345,6 +345,10 @@ class ConfirmationTests(unittest.TestCase):
         unknown_task = self.confirmation(False).findings[0].model_copy(update={"task_ids": ["unknown-task"]})
         record = self.confirmation(False).model_copy(update={"findings": [unknown_task]})
         with self.assertRaisesRegex(ValueError, "unknown task_id"):
+            compare(self.candidate, self.baseline, record)
+        partial = self.confirmation(False).findings[0].model_copy(update={"task_ids": ["task-00"]})
+        record = self.confirmation(False).model_copy(update={"findings": [partial]})
+        with self.assertRaisesRegex(ValueError, "must match"):
             compare(self.candidate, self.baseline, record)
 
     def test_partial_clean_confirmation_keeps_other_finding_pending(self):

@@ -29,7 +29,9 @@ jobs:
 
       - name: Resolve exact revisions and label state
         id: resolve
-        run: python3 scripts/behavioral-evals/ci.py resolve --output request
+        run: >-
+          python3 scripts/behavioral-evals/ci.py resolve --output request
+          --harness-sha "$(git rev-parse HEAD)"
 
       - name: Check contributor trust
         id: vouch

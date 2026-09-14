@@ -347,8 +347,8 @@ def compare(
             raise ValueError("confirmation references a threshold that did not cross")
         for item in confirmation.findings:
             evidence_tasks = set(findings_by_code[item.code].task_ids)
-            if not set(item.task_ids) <= evidence_tasks:
-                raise ValueError("confirmation task_id is outside the threshold evidence")
+            if set(item.task_ids) != evidence_tasks:
+                raise ValueError("confirmation task_ids must match the threshold evidence")
         finding_codes = set(findings_by_code)
         confirmation_applied = True
         confirmed = {item.code for item in confirmation.findings if item.confirmed}

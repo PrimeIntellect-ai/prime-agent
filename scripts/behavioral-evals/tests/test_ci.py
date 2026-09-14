@@ -56,10 +56,12 @@ class ResolveTests(unittest.TestCase):
                     return_value=fingerprint,
                 ),
             ):
-                ci.resolve(output)
+                ci.resolve(output, "c" * 40)
 
             request = json.loads((output / "request.json").read_text())
             self.assertEqual(request["evaluator_contract_fingerprint"], fingerprint)
+            self.assertEqual(request["base_sha"], "a" * 40)
+            self.assertEqual(request["harness_sha"], "c" * 40)
             outputs = (root / "outputs").read_text()
             self.assertIn("needed=true\n", outputs)
             self.assertIn("approval_required=false\n", outputs)
@@ -100,7 +102,7 @@ class ResolveTests(unittest.TestCase):
                 "GITHUB_OUTPUT": str(outputs),
             }
             with patch.dict(os.environ, env, clear=False):
-                ci.resolve(root / "request")
+                ci.resolve(root / "request", "c" * 40)
             text = outputs.read_text()
             self.assertIn("needed=false\n", text)
             self.assertIn("approval_required=true\n", text)

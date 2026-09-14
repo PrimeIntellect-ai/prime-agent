@@ -115,7 +115,6 @@ jobs:
       - name: Verify merged request identity
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
-          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           EXPECTED_RUN_HEAD: ${{ steps.run.outputs.tested_head }}
           EXPECTED_PR: ${{ github.event.pull_request.number }}
@@ -130,9 +129,7 @@ jobs:
                 request.head_sha !== process.env.EXPECTED_HEAD ||
                 request.head_sha !== process.env.EXPECTED_RUN_HEAD ||
                 request.run_id !== Number(process.env.EXPECTED_RUN) ||
-                request.attempt !== Number(process.env.EXPECTED_ATTEMPT) ||
-                request.base_sha !== process.env.EXPECTED_BASE ||
-                request.base_sha !== request.harness_sha) {
+                request.attempt !== Number(process.env.EXPECTED_ATTEMPT)) {
               throw new Error('Passing evaluation does not match the merged PR revision');
             }
 

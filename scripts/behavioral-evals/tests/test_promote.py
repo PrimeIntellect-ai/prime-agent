@@ -239,22 +239,19 @@ class PromoteTests(unittest.TestCase):
                 promote.main()
             self.assertFalse(output.exists())
 
-    def test_main_rejects_a_stale_request_base(self):
+    def test_main_preserves_the_base_revision_independently_from_the_evaluator(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _, request, report, artifacts = self._write_inputs(root)
             value = json.loads(request.read_text())
             value["base_sha"] = "f" * 40
             request.write_text(json.dumps(value))
-            with (
-                patch.object(
-                    sys,
-                    "argv",
-                    self._argv(request, report, artifacts, root / "output"),
-                ),
-                self.assertRaisesRegex(ValueError, "base/evaluator"),
-            ):
+            output = root / "output"
+            with patch.object(sys, "argv", self._argv(request, report, artifacts, output)):
                 promote.main()
+            provenance = json.loads((output / "provenance.json").read_text())
+            self.assertEqual(provenance["base_sha"], "f" * 40)
+            self.assertEqual(provenance["harness_sha"], value["harness_sha"])
 
 
 if __name__ == "__main__":
