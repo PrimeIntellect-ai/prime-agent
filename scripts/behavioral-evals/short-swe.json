@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "model": "deepseek/deepseek-v4-flash",
+  "model": "internal/glm-5.3-fast",
   "autonomous": false,
   "max_concurrent": 10,
   "num_rollouts": 1,

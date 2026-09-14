@@ -14,9 +14,20 @@ class TraceConversionTests(unittest.TestCase):
         trace = {
             "task": {"data": {"name": "owner/project/task-one"}},
             "calls": [
-                {"usage": {"completion_tokens": 3}},
-                {"usage": {"output_tokens": 5}},
-                {"usage": {"completion_tokens": True}},
+                {
+                    "usage": {
+                        "prompt_tokens": 7,
+                        "cached_input_tokens": 2,
+                        "completion_tokens": 3,
+                    }
+                },
+                {
+                    "usage": {
+                        "input_tokens": 11,
+                        "cached_input_tokens": 4,
+                        "output_tokens": 5,
+                    }
+                },
             ],
             "timing": {
                 "start": 10,
@@ -105,9 +116,11 @@ class TraceConversionTests(unittest.TestCase):
         self.assertEqual(tools[-1], ("tool_call", "bash", "not-json-command"))
         self.assertEqual(record["task"], "task-one")
         self.assertTrue(record["resolved"])
+        self.assertEqual(record["input_tokens"], 18)
+        self.assertEqual(record["cached_input_tokens"], 6)
         self.assertEqual(record["output_tokens"], 8)
         self.assertEqual(record["e2e_seconds"], 11.0)
-        self.assertEqual(record["model_calls"], 3)
+        self.assertEqual(record["model_calls"], 2)
         self.assertEqual(record["tool_calls"], 2)
         self.assertTrue(record["model_timeout"])
         self.assertFalse(record["infrastructure_error"])
@@ -120,6 +133,10 @@ class TraceConversionTests(unittest.TestCase):
                 "no_test_after_final_edit": 1,
             },
         )
+
+    def test_usage_tokens_reject_malformed_counts(self):
+        with self.assertRaisesRegex(ValueError, "invalid provider input tokens"):
+            evaluate.usage_tokens({"calls": [{"usage": {"prompt_tokens": True}}]})
 
     def test_plain_cpython_result_sets_nested_bash_status(self):
         trace = {

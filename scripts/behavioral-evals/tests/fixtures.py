@@ -29,6 +29,8 @@ def make_candidate() -> CandidateResult:
             TaskResult(
                 task_id=f"suite/task-{index:02d}",
                 resolved=True,
+                provider_input_tokens=200 + index,
+                provider_cached_input_tokens=300 + index,
                 provider_output_tokens=100 + index,
                 e2e_seconds=10.0 + index,
                 model_calls=2,
@@ -66,6 +68,8 @@ def make_extracted(*, all_infrastructure_errors: bool = False) -> dict:
                 "taskset": "suite",
                 "task": f"task-{index:02d}",
                 "resolved": not all_infrastructure_errors,
+                "input_tokens": 200 + index,
+                "cached_input_tokens": 300 + index,
                 "output_tokens": 100 + index,
                 "e2e_seconds": 10.0 + index,
                 "model_calls": 2,

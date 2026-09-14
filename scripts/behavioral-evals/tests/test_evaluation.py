@@ -45,6 +45,8 @@ def task(index: int, **changes) -> TaskResult:
     values = {
         "task_id": f"task-{index:02d}",
         "resolved": True,
+        "provider_input_tokens": 200,
+        "provider_cached_input_tokens": 300,
         "provider_output_tokens": 100,
         "e2e_seconds": 10.0,
         "model_calls": 2,
@@ -354,12 +356,16 @@ class ConfirmationTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
     def test_report_is_compact_deterministic_and_uses_neutral_noise_language(self):
         current = candidate()
-        result = compare(current, make_baseline(current))
-        first = render_markdown(current, result, ARTIFACTS)
-        second = render_markdown(current, result, ARTIFACTS)
+        baseline = make_baseline(current)
+        result = compare(current, baseline)
+        first = render_markdown(current, result, ARTIFACTS, baseline_result=baseline)
+        second = render_markdown(current, result, ARTIFACTS, baseline_result=baseline)
         self.assertEqual(first, second)
-        self.assertIn("| Resolution | 28/28 | 28/28 | 0 |", first)
-        self.assertIn("| Provider output tokens | 2,800 | 2,800 | 0 |", first)
+        self.assertIn("| Resolution | 28/28 (100.0%) | 28/28 (100.0%) | 0 |", first)
+        self.assertIn("| Uncached input tokens | 5,600 | 5,600 | 0 |", first)
+        self.assertIn("| Cached input tokens | 8,400 | 8,400 | 0 |", first)
+        self.assertIn("| Output tokens | 2,800 | 2,800 | 0 |", first)
+        self.assertIn("| all | Candidate | 28/28 (100.0%) | 5,600 | 8,400 | 2,800 |", first)
         self.assertIn("| E2E | 280.0 s | 280.0 s | 0.0 s |", first)
         self.assertIn("| Model timeouts | 0 | 0 | 0 |", first)
         self.assertIn("| Trace findings | 0 | 0 | 0 |", first)
@@ -367,12 +373,31 @@ class ReportTests(unittest.TestCase):
         self.assertIn(f"[Artifacts]({ARTIFACTS})", first)
         self.assertNotIn("regressed", first.lower())
 
+    def test_report_groups_the_fixed_tasksets(self):
+        tasksets = ["swebench-verified"] * 15 + ["swebench-pro"] * 8 + ["scaleswe"] * 5
+        tasks = [
+            task(index, task_id=f"{taskset}/task-{index:02d}", resolved=index % 2 == 0)
+            for index, taskset in enumerate(tasksets)
+        ]
+        current = candidate(tasks)
+        baseline = make_baseline(current)
+        report = render_markdown(
+            current,
+            compare(current, baseline),
+            ARTIFACTS,
+            baseline_result=baseline,
+        )
+        self.assertIn("| SWE-bench Verified | Candidate | 8/15 (53.3%) |", report)
+        self.assertIn("| SWE-bench Pro | Candidate | 4/8 (50.0%) |", report)
+        self.assertIn("| ScaleSWE | Candidate | 2/5 (40.0%) |", report)
+
     def test_seed_report_explains_that_it_never_fails(self):
-        current = candidate()
+        current = candidate().model_copy(update={"identity": identity(model="internal/glm-5.3-fast")})
         report = render_markdown(current, compare(current), ARTIFACTS)
         self.assertIn("Status: **seed**", report)
+        self.assertIn("Inference cost: **$0**", report)
         self.assertIn("This run seeds it and does not fail", report)
-        self.assertIn("| Resolution | n/a | 28/28 | n/a |", report)
+        self.assertIn("| Resolution | n/a | 28/28 (100.0%) | n/a |", report)
 
     def test_report_escapes_identity_and_artifact_link_characters(self):
         current = candidate().model_copy(update={"identity": identity(model="model|`<tag>[x](y)\\*_!")})
@@ -386,7 +411,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("&#124;", report)
         self.assertIn("%28run%29%5Bone%5D", report)
         for row in [line for line in report.splitlines() if line.startswith("| ")]:
-            self.assertEqual(row.count("|"), 5)
+            self.assertIn(row.count("|"), (5, 7))
 
     def test_report_rejects_unsafe_or_multiline_artifact_urls(self):
         current = candidate()

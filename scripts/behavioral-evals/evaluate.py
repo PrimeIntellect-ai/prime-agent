@@ -24,14 +24,20 @@ EXIT_CODE_RE = re.compile(r"\bexit_code\s*[=:]\s*(-?\d+)\b")
 FRAMEWORK_LIMIT_STOPS = frozenset({"max_turns", "max_input_tokens", "max_output_tokens", "max_total_tokens"})
 
 
-def completion_tokens(trace: dict) -> int:
-    total = 0
+def usage_tokens(trace: dict) -> dict[str, int]:
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
     for call in trace.get("calls", []):
         usage = call.get("usage") or {}
-        value = usage.get("completion_tokens", usage.get("output_tokens", 0))
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            total += value
-    return total
+        values = {
+            "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+            "cached_input_tokens": usage.get("cached_input_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
+        }
+        for name, value in values.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"invalid provider {name.replace('_', ' ')}")
+            totals[name] += value
+    return totals
 
 
 def elapsed(trace: dict) -> float:
@@ -314,6 +320,7 @@ def trace_record(episode: dict, taskset: str) -> dict:
     timeout, infrastructure = error_flags(trace)
     if not traces and episode.get("errors"):
         infrastructure = True
+    usage = usage_tokens(trace)
     facts = analyze_trace(analyzer_input(trace), ANALYZER_LIMITS)
     meta = facts.get("meta") if isinstance(facts.get("meta"), dict) else {}
     unanswered = int(meta.get("unanswered_calls") or 0)
@@ -345,7 +352,7 @@ def trace_record(episode: dict, taskset: str) -> dict:
         "taskset": taskset,
         "task": task_name(episode),
         "resolved": reward(trace) > 0,
-        "output_tokens": completion_tokens(trace),
+        **usage,
         "e2e_seconds": elapsed(trace),
         "model_calls": len(trace.get("calls") or []),
         "tool_calls": tool_call_count(trace),

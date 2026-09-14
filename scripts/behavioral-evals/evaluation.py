@@ -59,6 +59,8 @@ class Identity(StrictModel):
 class TaskResult(StrictModel):
     task_id: TaskId
     resolved: bool
+    provider_input_tokens: Count
+    provider_cached_input_tokens: Count
     provider_output_tokens: Count
     e2e_seconds: Seconds
     model_calls: Count
@@ -128,6 +130,8 @@ class ConfirmationRecord(StrictModel):
 
 class Aggregate(StrictModel):
     resolved: Count
+    provider_input_tokens: Count
+    provider_cached_input_tokens: Count
     provider_output_tokens: Count
     e2e_seconds: Seconds
     model_calls: Count
@@ -180,6 +184,8 @@ def make_baseline(candidate: CandidateResult) -> BaselineResult:
 def aggregate(tasks: list[TaskResult], run_retries: int = 0) -> Aggregate:
     return Aggregate(
         resolved=sum(task.resolved for task in tasks),
+        provider_input_tokens=sum(task.provider_input_tokens for task in tasks),
+        provider_cached_input_tokens=sum(task.provider_cached_input_tokens for task in tasks),
         provider_output_tokens=sum(task.provider_output_tokens for task in tasks),
         e2e_seconds=sum(task.e2e_seconds for task in tasks),
         model_calls=sum(task.model_calls for task in tasks),
@@ -385,10 +391,35 @@ def _change(value: float | None, suffix: str = "") -> str:
     return f"{sign}{_number(value)}{suffix}"
 
 
+TASKSET_LABELS = {
+    "swebench-verified": "SWE-bench Verified",
+    "swebench-pro": "SWE-bench Pro",
+    "scaleswe": "ScaleSWE",
+}
+
+
+def _resolution(resolved: int, total: int) -> str:
+    return f"{resolved}/{total} ({resolved / total:.1%})"
+
+
+def _taskset_aggregates(tasks: list[TaskResult]) -> dict[str, tuple[int, Aggregate]]:
+    groups: dict[str, list[TaskResult]] = {}
+    for task in tasks:
+        taskset, separator, _ = task.task_id.partition("/")
+        groups.setdefault(taskset if separator else "all", []).append(task)
+    ordered = [*TASKSET_LABELS, *sorted(set(groups) - TASKSET_LABELS.keys())]
+    return {
+        taskset: (len(groups[taskset]), aggregate(groups[taskset]))
+        for taskset in ordered
+        if taskset in groups
+    }
+
+
 def render_markdown(
     candidate: CandidateResult,
     comparison: Comparison,
     artifacts_url: str,
+    baseline_result: BaselineResult | None = None,
 ) -> str:
     parsed_url = urlsplit(artifacts_url)
     if (
@@ -400,61 +431,110 @@ def render_markdown(
     safe_url = quote(artifacts_url, safe="https:/?&=#%")
     if comparison.candidate != aggregate(candidate.tasks, candidate.run_retries):
         raise ValueError("comparison does not match the candidate result")
+    if (comparison.baseline is None) != (baseline_result is None):
+        raise ValueError("baseline result does not match the comparison")
+    if baseline_result is not None and comparison.baseline != aggregate(
+        baseline_result.tasks, baseline_result.run_retries
+    ):
+        raise ValueError("baseline result does not match the comparison")
+
     baseline = comparison.baseline
     current = comparison.candidate
     baseline_values = {
-        "resolution": "n/a" if baseline is None else f"{baseline.resolved}/{TASK_COUNT}",
-        "tokens": "n/a" if baseline is None else _number(baseline.provider_output_tokens),
+        "resolution": "n/a" if baseline is None else _resolution(baseline.resolved, TASK_COUNT),
+        "input": "n/a" if baseline is None else _number(baseline.provider_input_tokens),
+        "cached": "n/a" if baseline is None else _number(baseline.provider_cached_input_tokens),
+        "output": "n/a" if baseline is None else _number(baseline.provider_output_tokens),
         "e2e": "n/a" if baseline is None else f"{_number(baseline.e2e_seconds)} s",
         "timeouts": "n/a" if baseline is None else _number(baseline.model_timeouts),
         "retries": "n/a" if baseline is None else _number(baseline.retries),
         "trace": "n/a" if baseline is None else _number(baseline.trace_findings),
     }
-    resolved_change = comparison.resolved_delta
-    token_change = (
-        None if baseline is None else current.provider_output_tokens - baseline.provider_output_tokens
-    )
-    e2e_change = None if baseline is None else current.e2e_seconds - baseline.e2e_seconds
-    timeout_change = None if baseline is None else current.model_timeouts - baseline.model_timeouts
-    retry_change = None if baseline is None else current.retries - baseline.retries
-    trace_change = None if baseline is None else current.trace_findings - baseline.trace_findings
+    changes = {
+        "resolved": comparison.resolved_delta,
+        "input": None if baseline is None else current.provider_input_tokens - baseline.provider_input_tokens,
+        "cached": None
+        if baseline is None
+        else current.provider_cached_input_tokens - baseline.provider_cached_input_tokens,
+        "output": None
+        if baseline is None
+        else current.provider_output_tokens - baseline.provider_output_tokens,
+        "e2e": None if baseline is None else current.e2e_seconds - baseline.e2e_seconds,
+        "timeouts": None if baseline is None else current.model_timeouts - baseline.model_timeouts,
+        "retries": None if baseline is None else current.retries - baseline.retries,
+        "trace": None if baseline is None else current.trace_findings - baseline.trace_findings,
+    }
+    cost_note = " Inference cost: **$0**." if candidate.identity.model.startswith("internal/") else ""
     lines = [
         "### Behavioral evaluation",
         "",
         f"Status: **{comparison.status.replace('_', ' ')}**",
         (
             f"{_escape(candidate.identity.repository)} PR #{candidate.identity.pr}, "
-            f"model {_escape(candidate.identity.model)}."
+            f"model {_escape(candidate.identity.model)}.{cost_note}"
         ),
         "",
         "| Metric | Baseline | Candidate | Change |",
         "| --- | ---: | ---: | ---: |",
         (
-            f"| Resolution | {baseline_values['resolution']} | {current.resolved}/{TASK_COUNT} | "
-            f"{_change(resolved_change)} |"
+            f"| Resolution | {baseline_values['resolution']} | "
+            f"{_resolution(current.resolved, TASK_COUNT)} | {_change(changes['resolved'])} |"
         ),
         (
-            f"| Provider output tokens | {baseline_values['tokens']} | "
-            f"{_number(current.provider_output_tokens)} | {_change(token_change)} |"
+            f"| Uncached input tokens | {baseline_values['input']} | "
+            f"{_number(current.provider_input_tokens)} | {_change(changes['input'])} |"
+        ),
+        (
+            f"| Cached input tokens | {baseline_values['cached']} | "
+            f"{_number(current.provider_cached_input_tokens)} | {_change(changes['cached'])} |"
+        ),
+        (
+            f"| Output tokens | {baseline_values['output']} | "
+            f"{_number(current.provider_output_tokens)} | {_change(changes['output'])} |"
         ),
         (
             f"| E2E | {baseline_values['e2e']} | {_number(current.e2e_seconds)} s | "
-            f"{_change(e2e_change, ' s')} |"
+            f"{_change(changes['e2e'], ' s')} |"
         ),
         (
             f"| Model timeouts | {baseline_values['timeouts']} | {_number(current.model_timeouts)} | "
-            f"{_change(timeout_change)} |"
+            f"{_change(changes['timeouts'])} |"
         ),
         (
             f"| Infrastructure retries | {baseline_values['retries']} | {_number(current.retries)} | "
-            f"{_change(retry_change)} |"
+            f"{_change(changes['retries'])} |"
         ),
         (
             f"| Trace findings | {baseline_values['trace']} | {_number(current.trace_findings)} | "
-            f"{_change(trace_change)} |"
+            f"{_change(changes['trace'])} |"
         ),
         "",
+        "#### Results by taskset",
+        "",
+        "| Taskset | Side | Pass rate | Uncached input | Cached input | Output |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
     ]
+    candidate_tasksets = _taskset_aggregates(candidate.tasks)
+    baseline_tasksets = _taskset_aggregates(baseline_result.tasks) if baseline_result else {}
+    for taskset, (total, candidate_values) in candidate_tasksets.items():
+        label = _escape(TASKSET_LABELS.get(taskset, taskset))
+        if baseline_result is not None:
+            baseline_total, baseline_taskset = baseline_tasksets[taskset]
+            if baseline_total != total:
+                raise ValueError("baseline taskset size does not match the candidate")
+            lines.append(
+                f"| {label} | Baseline | {_resolution(baseline_taskset.resolved, total)} | "
+                f"{_number(baseline_taskset.provider_input_tokens)} | "
+                f"{_number(baseline_taskset.provider_cached_input_tokens)} | "
+                f"{_number(baseline_taskset.provider_output_tokens)} |"
+            )
+        lines.append(
+            f"| {label} | Candidate | {_resolution(candidate_values.resolved, total)} | "
+            f"{_number(candidate_values.provider_input_tokens)} | "
+            f"{_number(candidate_values.provider_cached_input_tokens)} | "
+            f"{_number(candidate_values.provider_output_tokens)} |"
+        )
+    lines.append("")
     if comparison.mode == "seed":
         lines.append("No durable baseline exists. This run seeds it and does not fail the evaluation.")
     elif comparison.findings:

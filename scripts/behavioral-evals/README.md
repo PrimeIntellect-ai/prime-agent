@@ -56,7 +56,7 @@ task identities.
 The run settings are:
 
 ```text
-model: deepseek/deepseek-v4-flash
+model: internal/glm-5.3-fast
 num_rollouts: 1
 max_concurrent: 10 per taskset
 autonomous: false
@@ -178,16 +178,17 @@ contract.
 For each task, `evaluate.py` extracts:
 
 - resolution from positive weighted reward;
-- provider output tokens summed from completion or output token usage;
+- uncached input, cached-input, and output tokens summed from per-call usage;
 - end-to-end seconds from trace timing spans;
 - model-call and tool-call counts;
 - model-induced timeout and infrastructure-error flags;
 - deterministic trace fact counts and trace-completion state.
 
-The PR comment shows resolution, provider output tokens, end-to-end seconds,
-model-induced timeouts, infrastructure retries, and the aggregate number of counted
-trace findings. `report.json` also contains model calls, tool calls, infrastructure errors,
-and per-task comparison values. The extraction-only `trace_complete`
+The PR comment shows overall and per-taskset pass rates, uncached input, cached-input,
+and output tokens, end-to-end seconds, model-induced timeouts, infrastructure retries,
+and the aggregate number of counted trace findings. The pinned internal model has zero
+inference cost. `report.json` also contains model calls, tool calls, infrastructure
+errors, and per-task comparison values. The extraction-only `trace_complete`
 field remains in `results/candidate.json`. Raw traces, evaluator logs, generated
 configs, and reports are retained as ordinary Actions artifacts for 30 days. Missing
 tasks never count as wins because task identity validation rejects an incomplete

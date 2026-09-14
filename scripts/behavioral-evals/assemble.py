@@ -43,6 +43,8 @@ def convert(request: dict, extracted: dict) -> CandidateResult:
         TaskResult(
             task_id=f"{item['taskset']}/{item['task']}",
             resolved=item["resolved"],
+            provider_input_tokens=item["input_tokens"],
+            provider_cached_input_tokens=item["cached_input_tokens"],
             provider_output_tokens=item["output_tokens"],
             e2e_seconds=item["e2e_seconds"],
             model_calls=item["model_calls"],
@@ -137,7 +139,7 @@ def main() -> None:
     }
     (args.output / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     (args.output / "comment.md").write_text(
-        MARKER + "\n" + render_markdown(candidate, comparison, artifacts_url)
+        MARKER + "\n" + render_markdown(candidate, comparison, artifacts_url, baseline_result=baseline)
     )
     verdict = {
         "seed": "pass",
