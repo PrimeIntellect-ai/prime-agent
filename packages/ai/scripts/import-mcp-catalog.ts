@@ -232,6 +232,32 @@ export interface AuditAsEvidence {
 	tokenAuthMethods?: string[];
 }
 
+/**
+ * Live registration-attempt evidence recorded in the audit store from a real
+ * engine login attempt. The read-only audit itself never POSTs registration
+ * endpoints, so provenance is recorded on the block. It mirrors the engine's
+ * no-credentials flow exactly: an anonymous POST to the advertised
+ * registration_endpoint.
+ */
+export interface AuditRegistrationAttempt {
+	/** How the attempt was observed, quoted honestly (e.g. live dogfooding login). */
+	provenance: string;
+	/** ISO date of the attempt. */
+	date: string;
+	/** HTTP method of the attempt. */
+	method: string;
+	/** The registration endpoint the attempt targeted. */
+	url: string;
+	/** HTTP status the attempt received. */
+	httpStatus: number;
+	/** Engine error, quoted verbatim when available. */
+	error?: string;
+	/** What the attempt establishes. */
+	finding?: string;
+	/** Public corroboration (reports, metadata-only probes). */
+	corroboration?: string[];
+}
+
 export interface AuditResult {
 	server: string;
 	endpoint: string;
@@ -250,7 +276,14 @@ export interface AuditResult {
 		engineSelectedSourceUrl?: string;
 		selectionNote?: string;
 	};
-	authorizationServer: { issuer?: string; sourceUrls: string[]; status: "available" | "unavailable"; evidence?: AuditAsEvidence };
+	authorizationServer: {
+		issuer?: string;
+		sourceUrls: string[];
+		status: "available" | "unavailable";
+		evidence?: AuditAsEvidence;
+		/** Live (non-audit) registration-attempt evidence; the audit GETs never produce this. */
+		registrationAttempt?: AuditRegistrationAttempt;
+	};
 }
 
 export interface AuditFile {
@@ -630,6 +663,25 @@ function deriveRequirement(entry: CatalogEntry): CatalogSetupRequirement | undef
 	return undefined;
 }
 
+/**
+ * The advertised registration endpoint is gated when a live engine registration
+ * attempt — an anonymous POST to exactly the advertised registration_endpoint,
+ * the engine's own no-credentials flow (see oauth.ts registerClient) — was
+ * rejected with a client-forbidden status (401/403). Recorded live in the audit
+ * store (the read-only audit itself never POSTs registration endpoints); an
+ * advertisement alone is NOT usable-DCR evidence once the real flow is known
+ * to fail.
+ */
+function advertisedRegistrationGated(as: AuditResult["authorizationServer"]): boolean {
+	const attempt = as.registrationAttempt;
+	if (!attempt || !as.evidence?.registrationEndpoint) return false;
+	return (
+		attempt.method === "POST" &&
+		attempt.url === as.evidence.registrationEndpoint &&
+		(attempt.httpStatus === 401 || attempt.httpStatus === 403)
+	);
+}
+
 function evidenceSupportsStandardOauth(result: AuditResult): boolean {
 	// oauth-ready needs a coherent authorization server AND dynamic client
 	// registration. CIMD alone is NOT sufficient: no Prime-controlled identity
@@ -646,6 +698,11 @@ function evidenceSupportsStandardOauth(result: AuditResult): boolean {
 	) {
 		return false;
 	}
+	// The engine POSTs an anonymous registration to the advertised endpoint when
+	// no client credentials are configured; a live recorded rejection means the
+	// advertised DCR is gated and the standard flow fails — fail closed, the
+	// same honest class as DCR-less providers (Slack, HubSpot).
+	if (advertisedRegistrationGated(as)) return false;
 	// The engine's PRM validation uses the component comparison (root-approved
 	// audience policy): the document's resource must match the exact endpoint
 	// (canonical form) OR the exact origin, root-slash normalized. Anything
@@ -707,6 +764,10 @@ function engineFallsBackToOriginAs(result: AuditResult): boolean {
 function metadataNote(result: AuditResult, overrideNote?: string): string | undefined {
 	if (overrideNote) return overrideNote;
 	if (result.protectedResource.selectionNote) return result.protectedResource.selectionNote;
+	if (advertisedRegistrationGated(result.authorizationServer)) {
+		const status = result.authorizationServer.registrationAttempt?.httpStatus;
+		return `advertises a registration endpoint, but a live anonymous registration attempt was rejected there (HTTP ${status}): the advertised dynamic client registration is gated and the engine's standard flow fails without a pre-registered client`;
+	}
 	if (audienceMismatched(result)) {
 		return "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry";
 	}
@@ -742,7 +803,13 @@ function applyAuditEvidence(built: BuiltEntry[], audit: AuditFile | undefined, o
 			...(as.issuer ? { authorizationServer: as.issuer } : {}),
 			...(selectedPrm?.resource ? { resource: selectedPrm.resource } : {}),
 			...(as.evidence?.pkceS256 !== undefined ? { pkceS256: as.evidence.pkceS256 } : {}),
-			...(as.evidence?.registrationEndpoint !== undefined ? { dynamicClientRegistration: true } : {}),
+			// An advertisement alone is not usable-DCR evidence: when a live
+			// anonymous registration attempt at the advertised endpoint was
+			// rejected, the honest flag is explicit false (gated), not omitted
+			// (omitted means "not advertised").
+			...(as.evidence?.registrationEndpoint !== undefined
+				? { dynamicClientRegistration: !advertisedRegistrationGated(as) }
+				: {}),
 			...(as.evidence?.clientIdMetadataDocument ? { clientIdMetadataDocument: true } : {}),
 			...(selectedPrm?.protectedResourceScopes?.length ? { protectedResourceScopes: selectedPrm.protectedResourceScopes } : {}),
 			...(as.evidence?.authorizationServerScopes?.length

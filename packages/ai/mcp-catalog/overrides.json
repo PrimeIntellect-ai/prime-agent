@@ -43,6 +43,31 @@
 			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_post) observed",
 			"note": "branded OAuth client ids stripped from both upstream configs; see https://docs.slack.dev/ai/slack-mcp-server"
 		},
+		"openai-plugins/figma/figma": {
+			"clientRegistration": "pre-registered",
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setup": "requires-setup",
+			"setupReason": "Figma MCP requires a Figma-authorized pre-registered app client: it advertises a dynamic-client-registration endpoint but that endpoint returns HTTP 403 for anonymous registrations (live-verified 2026-09-13 during dogfooding; corroborated by public reports), and its authorization server accepts confidential client auth only (mcp:connect interop unverified)",
+			"setupFields": [
+				{
+					"id": "FIGMA_MCP_CLIENT_ID",
+					"label": "Figma app client ID",
+					"description": "Client ID of your own Figma-authorized app client (required because Figma's advertised dynamic client registration is 403-gated for anonymous registrations)",
+					"required": true,
+					"kind": "client-id"
+				},
+				{
+					"id": "FIGMA_MCP_CLIENT_SECRET",
+					"label": "Figma app client secret",
+					"description": "Client secret of your own Figma-authorized app client (Figma's authorization server accepts confidential client auth only)",
+					"required": true,
+					"kind": "client-secret"
+				}
+			],
+			"metadataNote": "advertises a registration endpoint but anonymous dynamic client registration is rejected (HTTP 403, live-verified 2026-09-13 during dogfooding); confidential-only client auth (client_secret_basic/client_secret_post) observed",
+			"note": "advertised dynamic client registration is 403-gated for anonymous registrations (live-verified 2026-09-13 during dogfooding); classified pre-registered like Slack — a Figma-authorized app client is required and mcp:connect interop is unverified"
+		},
 		"openai-plugins/zoom/zoom": {
 			"id": "zoom-meetings",
 			"label": "Zoom Meetings",

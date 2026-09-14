@@ -82,6 +82,12 @@ OAuth metadata for every remote endpoint (102 http + 1 sse), captured by
   failure: the engine falls back to origin-level authorization-server
   discovery there, so no note is recorded and the captured AS evidence
   (issuer = endpoint origin, mirroring the same fallback) decides readiness.
+- `authorizationServer.registrationAttempt` blocks are the one sanctioned
+  supplement to the GET-derived results: live registration evidence recorded
+  from real engine login attempts — the audit script itself never POSTs
+  registration endpoints — each carrying explicit provenance and preserved
+  verbatim across re-runs (Figma: its advertised DCR endpoint returned HTTP
+  403 to the engine's anonymous registration during dogfooding, 2026-09-13).
 
 The importer merges this evidence into `catalog.json` offline and
 deterministically:
@@ -89,7 +95,10 @@ deterministically:
 - `auth.metadata` is observational evidence only (status, issuer/resource,
   PKCE, DCR/CIMD flags, PRM and AS scope lists, token auth methods, source
   URLs, capture date). It is never a live credential authority and never a
-  Connect gate. Omitted fields mean "not advertised", never "unsupported".
+  Connect gate. Omitted fields mean "not advertised", never "unsupported";
+  an explicit `dynamicClientRegistration: false` means the endpoint IS
+  advertised but its live anonymous registration was rejected (gated), so the
+  engine's standard no-credentials flow fails.
 - `setup.readiness` (`oauth-ready` / `user-setup` / `prime-restricted` /
   `unknown`) is informational-only; `setup.status` stays the only hard lever.
   `oauth-ready` requires the engine's audience rule (component comparison:
@@ -100,7 +109,11 @@ deterministically:
   origin-AS fallback) and keeps the entry honestly `unknown` with the
   fail-closed reason in the metadata note; an endpoint with no valid
   protected-resource document anywhere follows the engine's origin-level
-  authorization-server fallback, so captured AS evidence still decides.
+  authorization-server fallback, so captured AS evidence still decides. An
+  advertised registration endpoint whose live anonymous registration was
+  rejected (gated DCR, e.g. Figma's HTTP 403) can never be `oauth-ready`: the
+  entry classifies like DCR-less providers (Slack, HubSpot) unless curation
+  says more (Figma is `prime-restricted`, `registered-client`).
 - Placeholder/branded-client-only blockers were cleared with evidence
   (Airtable and Shopify stay Connect-attemptable); genuine documented
   requirements stay hard — API keys/bearer tokens (GitHub PAT, Zoom, Render,

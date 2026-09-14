@@ -18,15 +18,15 @@
 		"httpTemplate": 5,
 		"sse": 1,
 		"stdio": 32,
-		"ready": 82,
-		"requiresSetup": 58,
+		"ready": 81,
+		"requiresSetup": 59,
 		"metadataReviewed": 2,
 		"oauthStrategy": 14,
 		"apiKeyStrategy": 32,
 		"mergedFromBothSources": 16,
-		"readinessOauthReady": 72,
+		"readinessOauthReady": 71,
 		"readinessUserSetup": 53,
-		"readinessPrimeRestricted": 5,
+		"readinessPrimeRestricted": 6,
 		"readinessUnknown": 10,
 		"metadataAvailable": 97,
 		"metadataUnavailable": 6
@@ -3909,13 +3909,13 @@
 			},
 			"auth": {
 				"strategy": "oauth",
-				"clientRegistration": "unknown",
+				"clientRegistration": "pre-registered",
 				"metadata": {
 					"status": "available",
 					"authorizationServer": "https://api.figma.com",
 					"resource": "https://mcp.figma.com/mcp",
 					"pkceS256": true,
-					"dynamicClientRegistration": true,
+					"dynamicClientRegistration": false,
 					"protectedResourceScopes": [
 						"mcp:connect"
 					],
@@ -3933,12 +3933,31 @@
 						"https://api.figma.com/.well-known/oauth-authorization-server",
 						"https://api.figma.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "advertises a registration endpoint but anonymous dynamic client registration is rejected (HTTP 403, live-verified 2026-09-13 during dogfooding); confidential-only client auth (client_secret_basic/client_secret_post) observed"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "Figma MCP requires a Figma-authorized pre-registered app client: it advertises a dynamic-client-registration endpoint but that endpoint returns HTTP 403 for anonymous registrations (live-verified 2026-09-13 during dogfooding; corroborated by public reports), and its authorization server accepts confidential client auth only (mcp:connect interop unverified)",
+				"fields": [
+					{
+						"id": "FIGMA_MCP_CLIENT_ID",
+						"label": "Figma app client ID",
+						"description": "Client ID of your own Figma-authorized app client (required because Figma's advertised dynamic client registration is 403-gated for anonymous registrations)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "FIGMA_MCP_CLIENT_SECRET",
+						"label": "Figma app client secret",
+						"description": "Client secret of your own Figma-authorized app client (Figma's authorization server accepts confidential client auth only)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"readiness": "prime-restricted",
+				"requirement": "registered-client"
 			},
 			"verification": {
 				"status": "unverified"
@@ -3958,6 +3977,10 @@
 					"repository": "https://github.com/figma/mcp-server-guide.git",
 					"commit": "f74a51c9aaec87a2e65c9121753b63fb42203d96",
 					"url": "https://raw.githubusercontent.com/figma/mcp-server-guide/f74a51c9aaec87a2e65c9121753b63fb42203d96/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "advertised dynamic client registration is 403-gated for anonymous registrations (live-verified 2026-09-13 during dogfooding); classified pre-registered like Slack — a Figma-authorized app client is required and mcp:connect interop is unverified"
 				}
 			],
 			"homepage": "https://www.figma.com",

@@ -168,6 +168,18 @@ describe("MCP service catalog", () => {
 		expect(slack?.auth).toMatchObject({ strategy: "oauth", clientRegistration: "pre-registered" });
 		expect(slack?.setup.status).toBe("requires-setup");
 		expect(slack?.setup.reason).toMatch(/dynamic client registration/i);
+		// Figma advertises a DCR endpoint, but it is 403-gated for anonymous
+		// registrations (live-verified during dogfooding, recorded in the audit
+		// store), so it classifies like Slack: pre-registered, registered-client.
+		const figma = getServiceCatalogEntry("figma");
+		expect(figma?.auth).toMatchObject({ strategy: "oauth", clientRegistration: "pre-registered" });
+		expect(figma?.setup.status).toBe("requires-setup");
+		expect(figma?.setup.requirement).toBe("registered-client");
+		expect(figma?.setup.reason).toMatch(/HTTP 403 for anonymous registrations/);
+		expect(figma?.setup.fields?.map((field) => field.id).sort()).toEqual([
+			"FIGMA_MCP_CLIENT_ID",
+			"FIGMA_MCP_CLIENT_SECRET",
+		]);
 		// Placeholder-only upstream blocks were cleared with evidence: Airtable
 		// now Connects with OAuth DCR, Shopify stays attemptable with honest unknowns.
 		for (const server of ["airtable", "shopify"]) {
@@ -253,12 +265,20 @@ describe("MCP service catalog", () => {
 			expect(entry?.auth.metadata?.note).toMatch(/fails the engine's audience\/structure validation/);
 		}
 		// Prime-restricted: registered-client requirements stay hard, research-anchored.
-		for (const server of ["gmail", "google-calendar", "google-drive", "slack", "mongodb-atlas"]) {
+		for (const server of ["gmail", "google-calendar", "google-drive", "slack", "figma", "mongodb-atlas"]) {
 			const entry = getServiceCatalogEntry(server);
 			expect(entry?.setup.status).toBe("requires-setup");
 			expect(entry?.setup.readiness).toBe("prime-restricted");
 			expect(entry?.setup.requirement).toBe("registered-client");
 		}
+		// The gated-DCR flip: Figma still advertises the endpoint (kept in the
+		// audit evidence), but the live anonymous registration attempt was
+		// rejected (HTTP 403), so the honest metadata flag is explicit false —
+		// gated, distinguishable from omitted (not advertised) — with the live
+		// finding in the note.
+		const figmaMetadata = getServiceCatalogEntry("figma");
+		expect(figmaMetadata?.auth.metadata?.dynamicClientRegistration).toBe(false);
+		expect(figmaMetadata?.auth.metadata?.note).toMatch(/rejected \(HTTP 403, live-verified/);
 		const mongo = getServiceCatalogEntry("mongodb-atlas");
 		expect(mongo?.auth.alternatives).toEqual([
 			expect.objectContaining({ kind: "service-account", readiness: "user-setup" }),
