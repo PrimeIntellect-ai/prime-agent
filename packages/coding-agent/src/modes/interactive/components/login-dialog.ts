@@ -115,19 +115,17 @@ export class LoginDialogComponent extends Container implements Focusable {
 	showAuth(url: string, instructions?: string): void {
 		this.startContent();
 		this.authUrl = url;
-		this.addSectionTitle("Browser sign-in");
-		this.addMutedText("The sign-in page should already be opening. If it did not open, use the link below.");
-		this.contentContainer.addChild(new Spacer(1));
-		this.addLabel("Sign-in link");
 		const linkedUrl = getCapabilities().hyperlinks ? `\x1b]8;;${url}\x07${url}\x1b]8;;\x07` : url;
 		this.contentContainer.addChild(new Text(theme.fg("text", linkedUrl), 0, 0));
+		// The provider instructions already describe the browser step; only add
+		// our own line when they do not.
+		if (instructions) {
+			this.addInstructions(instructions);
+		} else {
+			this.addMutedText("Complete the sign-in in your browser.");
+		}
 		this.authActions = new Text(this.getAuthActionsText(), 0, 0);
 		this.contentContainer.addChild(this.authActions);
-
-		if (instructions) {
-			this.contentContainer.addChild(new Spacer(1));
-			this.addInstructions(instructions);
-		}
 
 		// Try to open browser
 		const [command, ...args] =
@@ -150,15 +148,25 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showManualInput(prompt: string): Promise<string> {
 		this.addSectionSpacer();
-		this.addSectionTitle("Manual fallback");
 		this.addMutedText(prompt);
-		this.contentContainer.addChild(this.input);
-		this.inputVisible = true;
-		this.authActions?.setText(this.getAuthActionsText());
-		this.contentContainer.addChild(new Text(theme.fg("muted", keyHint("tui.select.cancel", "cancel")), 0, 0));
+		this.addInputField();
 		this.tui.requestRender();
 
 		return this.waitForInput();
+	}
+
+	/** Append the paste field plus the single key-hint line at the panel bottom. */
+	private addInputField(): void {
+		this.contentContainer.removeChild(this.input);
+		if (this.authActions) {
+			this.contentContainer.removeChild(this.authActions);
+		} else {
+			this.authActions = new Text(this.getAuthActionsText(), 0, 0);
+		}
+		this.contentContainer.addChild(this.input);
+		this.inputVisible = true;
+		this.contentContainer.addChild(this.authActions);
+		this.authActions.setText(this.getAuthActionsText());
 	}
 
 	/**
@@ -181,15 +189,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		if (placeholder) {
 			this.contentContainer.addChild(new Text(theme.fg("muted", `e.g., ${placeholder}`), 0, 0));
 		}
-		this.contentContainer.addChild(this.input);
-		this.inputVisible = true;
-		this.authActions?.setText(this.getAuthActionsText());
-		this.contentContainer.addChild(
-			new Text(
-				theme.fg("muted", `${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`),
-				0,
-			),
-		);
+		this.addInputField();
 
 		this.input.setValue("");
 		this.tui.requestRender();
@@ -240,7 +240,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 	showWaiting(message: string): void {
 		this.addSectionSpacer();
 		this.contentContainer.addChild(new Text(theme.fg("accent", message), 0, 0));
-		this.contentContainer.addChild(new Text(theme.fg("muted", keyHint("tui.select.cancel", "cancel")), 0, 0));
+		// The key-hint line at the panel bottom already offers cancel.
+		if (!this.authActions) {
+			this.authActions = new Text(this.getAuthActionsText(), 0, 0);
+			this.contentContainer.addChild(this.authActions);
+		}
 		this.tui.requestRender();
 	}
 
@@ -280,7 +284,6 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.contentContainer.addChild(new Text(theme.bold(theme.fg("text", codeMatch[1])), 0, 0));
 			return;
 		}
-		this.addLabel("Next step");
 		this.contentContainer.addChild(new Text(theme.fg("text", instructions), 0, 0));
 	}
 
@@ -312,7 +315,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 				: status === "failed"
 					? theme.fg("error", "Failed to copy sign-in link")
 					: undefined;
-		return [statusText, copyHint, keyHint("tui.select.cancel", "cancel")]
+		const submitHint = this.inputVisible ? keyHint("tui.select.confirm", "submit") : undefined;
+		return [submitHint, statusText, copyHint, keyHint("tui.select.cancel", "cancel")]
 			.filter((part): part is string => part !== undefined)
 			.join("  ");
 	}

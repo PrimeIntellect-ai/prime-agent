@@ -154,7 +154,7 @@ describe("LoginDialogComponent", () => {
 		const firstLogoLine = PRIME_BUTTERFLY_LOGO.split("\n")[0]?.trim() ?? "";
 
 		expect(output).toContain("Login to Prime Inference");
-		// The inline panel keeps the compact picker style: no centered logo header.
+		// The compact inline panel never renders the butterfly logo.
 		expect(firstLogoLine).not.toBe("");
 		expect(output).not.toContain(firstLogoLine);
 		expect(output).toContain("Verification code");
@@ -183,8 +183,7 @@ describe("LoginDialogComponent", () => {
 		const titleLine = output.split("\n").find((line) => line.includes("Login to Prime Inference"));
 		const titleOffset = titleLine?.indexOf("Login to Prime Inference") ?? -1;
 
-		// The title leads the panel like the other inline pickers instead of a
-		// centered full-pane logo header.
+		// The title leads the inline panel.
 		expect(titleOffset).toBe(1);
 		expect(output).not.toContain("Connect your Prime Intellect account to enable Prime Inference models.");
 		expect(output).toContain("Preparing authentication");
@@ -228,5 +227,29 @@ describe("LoginDialogComponent", () => {
 		// The paste field matches the inline picker search box.
 		expect(output).toContain("─");
 		expect(output).toContain("Paste value");
+		// One key-hint line carries submit and cancel.
+		expect(output).toContain("Enter submit");
+		expect(output).toContain("Esc/Ctrl+C cancel");
+	});
+
+	it("wraps long sign-in URLs into per-line hyperlinks with the full url", () => {
+		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");
+		const url = "https://example.com/oauth/authorize?client_id=test-client-123456&response_type=code&scope=openid";
+
+		dialog.showAuth(url);
+		const lines = dialog.render(40);
+		const urlLines = lines.filter((line) => line.includes("\x1b]8;;"));
+
+		// The wrapped URL keeps its hyperlink on every line: each segment re-opens
+		// with the full url and closes again, so any line opens the whole link.
+		expect(urlLines.length).toBeGreaterThan(1);
+		for (const line of urlLines) {
+			expect(line).toContain(`\x1b]8;;${url}\x07`);
+			expect(line).toContain("\x1b]8;;\x07");
+			expect(visibleWidth(line)).toBe(40);
+		}
+		const visibleUrl = urlLines.map((line) => stripAnsi(line).trim()).join("");
+		expect(visibleUrl).toContain(url);
 	});
 });
