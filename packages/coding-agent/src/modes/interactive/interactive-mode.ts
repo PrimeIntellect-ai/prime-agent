@@ -1590,7 +1590,12 @@ export class InteractiveMode {
 	 * refresh, are discarded — mirroring refreshConnectionContextUsage.
 	 */
 	private refreshTopBarCost(): void {
-		const generation = ++this.topBarCostRefresh.generation;
+		// Partial-mode test harnesses skip the constructor, so the field
+		// initializer may be absent there; the refresh is cosmetic and must
+		// never crash a real flow on any `this`.
+		this.topBarCostRefresh ??= { generation: 0, lastSuccessGeneration: 0 };
+		const refresh = this.topBarCostRefresh;
+		const generation = ++refresh.generation;
 		const connection = this.agentConnection;
 		const sessionId = this.connectionState?.sessionId;
 		void (async () => {
@@ -1600,13 +1605,13 @@ export class InteractiveMode {
 				if (
 					typeof total !== "number" ||
 					!Number.isFinite(total) ||
-					generation < this.topBarCostRefresh.lastSuccessGeneration ||
+					generation < refresh.lastSuccessGeneration ||
 					this.agentConnection !== connection ||
 					this.connectionState?.sessionId !== sessionId
 				) {
 					return;
 				}
-				this.topBarCostRefresh.lastSuccessGeneration = generation;
+				refresh.lastSuccessGeneration = generation;
 				this.topBarCost = { sessionId, total };
 				this.ui.requestRender();
 			} catch {
