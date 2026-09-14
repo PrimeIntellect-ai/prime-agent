@@ -47,6 +47,26 @@ describe("MenuPanel", () => {
 		}
 	});
 
+	it("renders an optional top rule above inline panels", () => {
+		const createPanel = (topRule: boolean): MenuPanel => {
+			const panel = new MenuPanel({ title: "Login to Provider", inline: true, topRule });
+			panel.addChild(new StaticComponent());
+			return panel;
+		};
+
+		const withRule = createPanel(true).render(24);
+		expect(withRule[0]).toContain(theme.getFgAnsi("borderMuted"));
+		expect(stripAnsi(withRule[0] ?? "")).toBe("─".repeat(24));
+		expect(stripAnsi(withRule[1] ?? "").trim()).toBe("Login to Provider");
+		for (const line of withRule) {
+			expect(visibleWidth(line)).toBe(24);
+		}
+
+		const withoutRule = createPanel(false).render(24);
+		expect(stripAnsi(withoutRule[0] ?? "").trim()).toBe("Login to Provider");
+		expect(withoutRule.join("")).not.toContain("─");
+	});
+
 	it("renders search fields without the shell prompt", () => {
 		const field = new MenuSearchInput("Search models");
 		const output = stripAnsi(field.render(24).join("\n"));

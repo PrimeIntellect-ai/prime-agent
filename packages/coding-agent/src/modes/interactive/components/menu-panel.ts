@@ -13,6 +13,8 @@ interface MenuPanelOptions {
 	title: string;
 	subtitle?: string;
 	inline?: boolean;
+	/** Inline only: prefix the panel with a full-width separator rule. */
+	topRule?: boolean;
 }
 
 export interface MenuViewportProvider {
@@ -259,6 +261,9 @@ export class MenuPanel extends Container {
 	override render(width: number): string[] {
 		if (this.options.inline) {
 			const lines: string[] = [];
+			if (this.options.topRule) {
+				lines.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
+			}
 			if (this.title) lines.push(theme.fg("muted", ` ${this.title}`));
 			for (const child of this.children) {
 				lines.push(

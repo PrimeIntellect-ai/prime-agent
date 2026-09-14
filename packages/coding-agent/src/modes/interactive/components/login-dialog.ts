@@ -70,8 +70,9 @@ export class LoginDialogComponent extends Container implements Focusable {
 		const title = titleOverride ?? `Login to ${providerName}`;
 
 		// Renders with the compact inline picker style; hosts mount it in place
-		// of the prompt area or as a centered overlay during onboarding.
-		const panel = new MenuPanel({ title, inline: true });
+		// of the prompt area or as a centered overlay during onboarding. The top
+		// rule separates the login section from the transcript above it.
+		const panel = new MenuPanel({ title, inline: true, topRule: true });
 		this.addChild(panel);
 
 		// Dynamic content area

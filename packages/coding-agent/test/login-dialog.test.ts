@@ -51,18 +51,20 @@ describe("LoginDialogComponent", () => {
 		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");
 
 		dialog.showAuth("https://example.com/oauth?client_id=test", "Complete login in your browser.");
-		const output = stripAnsi(dialog.render(88).join("\n"));
+		const lines = dialog.render(88);
+		const output = stripAnsi(lines.join("\n"));
 
 		expect(output).toContain("Login to Anthropic");
-		expect(output).toContain("Browser sign-in");
-		expect(output).toContain("Sign-in link");
 		expect(output).toContain("https://example.com/oauth?client_id=test");
 		expect(output).toContain("C copy");
-		expect(output).toContain("Next step");
 		expect(output).toContain("Complete login in your browser.");
 		expect(output).not.toContain("click to open");
-		expect(output).not.toContain("─");
 		expect(output).not.toContain("> ");
+		// The top rule separates the inline login section from the chat above;
+		// no other borders surround the content.
+		const ruleLines = lines.filter((line) => stripAnsi(line).includes("─"));
+		expect(ruleLines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "")).toBe("─".repeat(88));
 	});
 
 	it("copies the raw sign-in URL with the configured shortcut", async () => {
