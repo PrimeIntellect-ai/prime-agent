@@ -9098,6 +9098,10 @@ export class InteractiveMode {
 		}
 		this.ui.requestRender(true);
 
+		// The updater ran in a child process and may have persisted settings, for example the
+		// update channel, without installing anything. Pick those up before reporting.
+		await this.settingsManager.reload().catch(() => undefined);
+
 		if (selfUpdateNotAttempted) {
 			this.showStatus(`Update did not change ${APP_NAME}. Reloading resources...`);
 			await this.handleReloadCommand();
