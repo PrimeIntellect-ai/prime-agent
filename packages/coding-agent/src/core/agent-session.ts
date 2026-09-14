@@ -779,6 +779,17 @@ function primaryDeliveryRecord(action: QueuedSessionAction): DeliveryRecord {
 	return record;
 }
 
+function isNotStartedTurnAction(action: QueuedSessionAction): action is SessionAction<PreparedTurnPayload> {
+	return (
+		action.payload.kind === "turn" &&
+		(action.lifecycle.state === "queued" ||
+			action.lifecycle.state === "selected" ||
+			action.lifecycle.state === "preparing" ||
+			action.lifecycle.state === "committing") &&
+		!primaryDeliveryRecord(action).started
+	);
+}
+
 function normalizeMessageContent(content: string | (TextContent | ImageContent)[]): {
 	text: string;
 	images?: ImageContent[];
@@ -6587,6 +6598,10 @@ export class AgentSession {
 						this.agent.state.systemPrompt = this._baseSystemPrompt;
 					}
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
+					// `started` is the hand-off boundary, not an eventual UI-event acknowledgement.
+					// Mark every batched primary before publishing `committing`, so cancellation
+					// cannot remove one item after the complete batch has been handed to agent.prompt().
+					for (const action of turns) primaryDeliveryRecord(action).started = true;
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
 					// The public prompt() returns once the input is accepted, so the trace
@@ -6964,14 +6979,10 @@ export class AgentSession {
 			.ownedActions()
 			.filter(
 				(action) =>
-					action.payload.kind === "turn" &&
 					action.extensionOwner === owner &&
 					action.delivery === "when_run_idle" &&
 					(key === undefined || action.queueKey === key) &&
-					(action.lifecycle.state === "queued" ||
-						action.lifecycle.state === "selected" ||
-						action.lifecycle.state === "preparing" ||
-						(action.lifecycle.state === "committing" && !primaryDeliveryRecord(action).started)),
+					isNotStartedTurnAction(action),
 			);
 		if (matching.length === 0) return false;
 		const ids = new Set(matching.map((action) => action.id));

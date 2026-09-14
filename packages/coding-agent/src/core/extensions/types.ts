@@ -1097,7 +1097,12 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
-	/** Queue one extension-owned follow-up under a key and await host admission. */
+	/**
+	 * Queue one extension-owned follow-up under a key and await host admission.
+	 * A coalesced call returns the existing action and its signal does not gain
+	 * cancellation authority over that earlier admission. Ownership is runtime-only;
+	 * recovery keeps the queue key for ordering/coalescing evidence but drops ownership.
+	 */
 	queueFollowUp(
 		key: string,
 		content: string | (TextContent | ImageContent)[],
