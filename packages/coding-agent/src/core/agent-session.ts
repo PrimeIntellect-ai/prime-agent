@@ -295,6 +295,8 @@ import {
 	queuedMessageLaneDeliveryPolicy,
 	type RuntimeActivity,
 	type SessionAction,
+	type SessionActionPlacement,
+	type SessionActionPriority,
 	type SessionActionSnapshot,
 	type SessionCommandPayload,
 	type SessionTurnPayload,
@@ -595,6 +597,8 @@ export interface PromptOptions {
 	agentMessageId?: string;
 	content?: (TextContent | ImageContent)[];
 	customMessage?: CustomMessage;
+	/** Overrides the queue priority inferred from the source and message. */
+	priority?: SessionActionPriority;
 }
 
 interface InternalPromptOptions extends PromptOptions {
@@ -755,6 +759,7 @@ export interface SessionActionRecoveryAction {
 	source: InputSource | "internal";
 	delivery: DeliveryPolicy;
 	wake: WakePolicy;
+	priority?: SessionActionPriority;
 	payload: SessionActionRecoveryPayload;
 	queueKey?: string;
 	agentMessageId?: string;
@@ -779,6 +784,24 @@ function cloneQueuedAgentMessage(message: QueuedAgentMessage): QueuedAgentMessag
 		...message,
 		content: Array.isArray(message.content) ? message.content.map((block) => ({ ...block })) : message.content,
 	};
+}
+
+function isHumanInputSource(source: InputSource | "internal"): boolean {
+	return source === "interactive" || source === "rpc";
+}
+
+/**
+ * Only input a person submits outranks the rest of the queue. Agent-to-agent prompts carry an
+ * agent message id, and every machine-generated turn (bash completions, heartbeats, continuations,
+ * restored internal input) is either a custom message or admitted from a non-human source.
+ */
+function sessionActionPriorityFor(
+	humanSource: boolean,
+	message: QueuedAgentMessage | undefined,
+	agentMessageId: string | undefined,
+): SessionActionPriority {
+	if (!humanSource || agentMessageId !== undefined) return "background";
+	return message === undefined || message.role === "user" ? "user" : "background";
 }
 
 function primaryDeliveryRecord(action: QueuedSessionAction): DeliveryRecord {
@@ -2723,6 +2746,8 @@ export class AgentSession {
 		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
 			message,
 			resumeIfIdle: true,
+			// Front insertion only holds while nothing can be admitted ahead of it.
+			priority: "pinned",
 		});
 		this._admitSessionInput(action, { front: true, wake: false });
 	}
@@ -5501,6 +5526,7 @@ export class AgentSession {
 					options?.resumeIfIdle ||
 					(options?.queueIfBusy === true && canSelectSessionAction(this._runtimeActivity())),
 				source: options?.source ?? "internal",
+				priority: options?.priority,
 				executionPolicy:
 					options?.executionPolicy ??
 					(visibleQueued ? this._turnExecutionPolicy("queued") : this._turnExecutionPolicy("injected")),
@@ -5604,6 +5630,7 @@ export class AgentSession {
 						{
 							agentMessageId: options?.agentMessageId,
 							source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+							priority: options?.priority,
 						},
 					);
 					const result = this._admitSessionInput(action, {
@@ -5658,6 +5685,7 @@ export class AgentSession {
 						options?.resumeIfIdle ||
 						(options?.queueIfBusy === true && canSelectSessionAction(this._runtimeActivity())),
 					source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+					priority: options?.priority,
 					executionPolicy: visibleQueued
 						? this._turnExecutionPolicy("queued")
 						: this._turnExecutionPolicy("directPrompt", {
@@ -5805,6 +5833,7 @@ export class AgentSession {
 			queueKey?: string;
 			agentMessageId?: string;
 			resumeIfIdle?: boolean;
+			priority?: SessionActionPriority;
 		} = {},
 	): Promise<void> {
 		const normalized = this._normalizeSubmission(text, images, {
@@ -5821,6 +5850,7 @@ export class AgentSession {
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
+			priority: options.priority ?? sessionActionPriorityFor(true, undefined, options.agentMessageId),
 		});
 	}
 
@@ -5838,6 +5868,7 @@ export class AgentSession {
 			queueKey?: string;
 			agentMessageId?: string;
 			resumeIfIdle?: boolean;
+			priority?: SessionActionPriority;
 		} = {},
 	): Promise<boolean> {
 		const normalized = this._normalizeSubmission(text, images, {
@@ -5854,6 +5885,7 @@ export class AgentSession {
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
+			priority: options.priority ?? sessionActionPriorityFor(true, undefined, options.agentMessageId),
 		});
 	}
 
@@ -5926,10 +5958,15 @@ export class AgentSession {
 									}
 								: {}),
 						};
+			const primaryMessage =
+				payload.kind === "turn" ? payload.records.find((record) => record.role === "primary")?.message : undefined;
 			return {
 				id: recovered.id,
 				source: recovered.source,
 				delivery: recovered.delivery,
+				priority:
+					recovered.priority ??
+					sessionActionPriorityFor(isHumanInputSource(recovered.source), primaryMessage, recovered.agentMessageId),
 				wake: recovered.wake,
 				payload,
 				lifecycle: { state: "queued" },
@@ -5965,6 +6002,7 @@ export class AgentSession {
 			this._createSessionCommandAction(text, customMessage.details.command, images, schedule, {
 				agentMessageId,
 				source: "internal",
+				priority: sessionActionPriorityFor(true, undefined, agentMessageId),
 			}),
 			{ restore: true },
 		).accepted;
@@ -5978,6 +6016,9 @@ export class AgentSession {
 			message: snapshot.customMessage,
 			prefixMessages: snapshot.prefixMessages,
 			source: "internal",
+			priority: sessionActionPriorityFor(true, snapshot.customMessage, snapshot.agentMessageId),
+			// Restored input replays the order it was admitted in.
+			preserveOrder: true,
 		});
 	}
 
@@ -6156,6 +6197,7 @@ export class AgentSession {
 			suppressAutonomousContinuation?: boolean;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
+			priority?: SessionActionPriority;
 			executionPolicy?: TurnExecutionPolicy;
 			queueVisible?: boolean;
 			acceptedAgentMessage?: boolean;
@@ -6189,10 +6231,13 @@ export class AgentSession {
 			acceptedAgentMessage: options.acceptedAgentMessage ?? false,
 			acceptedBeforeCompletion: options.acceptedBeforeCompletion ?? false,
 		};
+		const source = options.source ?? "internal";
 		return {
 			id,
-			source: options.source ?? "internal",
+			source,
 			delivery: this._deliveryPolicy(schedule),
+			priority:
+				options.priority ?? sessionActionPriorityFor(isHumanInputSource(source), message, options.agentMessageId),
 			wake:
 				options.resumeIfIdle === true
 					? "immediate"
@@ -6215,12 +6260,16 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			source?: InputSource | "internal";
+			priority?: SessionActionPriority;
 		} = {},
 	): QueuedSessionAction {
+		const source = options.source ?? "internal";
 		return {
 			id: randomUUID(),
-			source: options.source ?? "internal",
+			source,
 			delivery: this._deliveryPolicy(schedule),
+			priority:
+				options.priority ?? sessionActionPriorityFor(isHumanInputSource(source), undefined, options.agentMessageId),
 			wake: "immediate",
 			payload: { kind: "session_command", text, command, images },
 			lifecycle: { state: "queued" },
@@ -6260,6 +6309,7 @@ export class AgentSession {
 		options: {
 			restore?: boolean;
 			front?: boolean;
+			preserveOrder?: boolean;
 			wake?: boolean;
 			immediatelyEligible?: boolean;
 		} = {},
@@ -6299,8 +6349,12 @@ export class AgentSession {
 		const canStartImmediately =
 			options.immediatelyEligible === true &&
 			(this._actionStore.unfinishedActions().length === 0 || options.front === true);
-		if (options.front) this._actionStore.enqueueFront(action);
-		else this._actionStore.enqueue(action);
+		const placement: SessionActionPlacement = options.front
+			? "front"
+			: options.restore || options.preserveOrder
+				? "tail"
+				: "priority";
+		this._actionStore.enqueue(action, placement);
 		let disposition: "starts_when_admitted" | "queued" = "queued";
 		if (canStartImmediately && this._actionStore.selectFirst() === action) disposition = "starts_when_admitted";
 		const controller = this._actionStore.ticketFor(action);
@@ -6341,13 +6395,15 @@ export class AgentSession {
 			suppressAutonomousContinuation?: boolean;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
+			priority?: SessionActionPriority;
+			preserveOrder?: boolean;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
 		if (action.suppressAutonomousContinuation) {
 			this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 		}
-		return this._admitSessionInput(action).accepted;
+		return this._admitSessionInput(action, { preserveOrder: options.preserveOrder }).accepted;
 	}
 
 	private _runtimeActivity(): RuntimeActivity {
@@ -7307,6 +7363,7 @@ export class AgentSession {
 				id: action.id,
 				source: action.source,
 				delivery: action.delivery,
+				priority: action.priority,
 				wake: action.wake,
 				...(action.queueKey ? { queueKey: action.queueKey } : {}),
 				...(action.agentMessageId ? { agentMessageId: action.agentMessageId } : {}),
