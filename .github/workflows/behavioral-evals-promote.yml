@@ -1,0 +1,254 @@
+name: Promote Behavioral Eval Reference
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [closed]
+
+concurrency:
+  group: prime-agent-behavioral-baseline
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  promote:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      contains(github.event.pull_request.labels.*.name, 'pre-release')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out trusted promoter
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Find the latest run for this PR
+        id: run
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          EXPECTED_PR: ${{ github.event.pull_request.number }}
+        with:
+          script: |
+            const expectedPr = Number(process.env.EXPECTED_PR);
+            const title = `Behavioral Eval · PR #${expectedPr}`;
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'behavioral-evals.yml',
+              event: 'pull_request_target',
+              per_page: 100,
+            });
+            const matching = runs
+              .filter(run => run.display_title === title &&
+                (!run.pull_requests?.length ||
+                 run.pull_requests.some(pull => pull.number === expectedPr)))
+              .sort((left, right) =>
+                new Date(right.created_at) - new Date(left.created_at) ||
+                right.run_number - left.run_number ||
+                right.run_attempt - left.run_attempt ||
+                right.id - left.id);
+            if (!matching.length) {
+              throw new Error('No Behavioral Eval run exists for the merged PR');
+            }
+            const selected = matching[0];
+            if (selected.status !== 'completed' || selected.conclusion !== 'success') {
+              throw new Error('The latest Behavioral Eval run is not a completed success');
+            }
+            core.setOutput('run_id', selected.id);
+            core.setOutput('attempt', selected.run_attempt);
+            core.setOutput('tested_head', selected.head_sha);
+            core.setOutput(
+              'generation',
+              `behavioral-eval-reference-${selected.id}-${selected.run_attempt}`,
+            );
+
+      - name: Download trusted request
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: behavioral-request-${{ steps.run.outputs.attempt }}
+          path: request
+          run-id: ${{ steps.run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download passing evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: behavioral-results-${{ steps.run.outputs.attempt }}
+          path: evidence
+          run-id: ${{ steps.run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download candidate packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: behavioral-candidate-${{ steps.run.outputs.attempt }}
+          path: candidate-artifacts
+          run-id: ${{ steps.run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: 0.12.9
+          enable-cache: false
+
+      - name: Install promoter tooling
+        run: uv sync --locked --project scripts/benchmarks
+
+      - name: Download and validate the current reference
+        id: current
+        run: |
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --output current
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Verify merged request identity
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_RUN_HEAD: ${{ steps.run.outputs.tested_head }}
+          EXPECTED_PR: ${{ github.event.pull_request.number }}
+          EXPECTED_RUN: ${{ steps.run.outputs.run_id }}
+          EXPECTED_ATTEMPT: ${{ steps.run.outputs.attempt }}
+        with:
+          script: |
+            const fs = require('fs');
+            const request = JSON.parse(fs.readFileSync('request/request.json', 'utf8'));
+            if (request.repository !== `${context.repo.owner}/${context.repo.repo}` ||
+                request.pr !== Number(process.env.EXPECTED_PR) ||
+                request.head_sha !== process.env.EXPECTED_HEAD ||
+                request.head_sha !== process.env.EXPECTED_RUN_HEAD ||
+                request.run_id !== Number(process.env.EXPECTED_RUN) ||
+                request.attempt !== Number(process.env.EXPECTED_ATTEMPT) ||
+                request.base_sha !== process.env.EXPECTED_BASE ||
+                request.base_sha !== request.harness_sha) {
+              throw new Error('Passing evaluation does not match the merged PR revision');
+            }
+
+      - name: Verify evaluator contract freshness
+        run: |
+          expected="$(
+            PYTHONPATH=scripts/behavioral-evals python3 -c \
+              'from evaluator_contract import evaluator_contract_fingerprint; print(evaluator_contract_fingerprint())'
+          )"
+          actual="$(
+            python3 -c \
+              'import json; print(json.load(open("request/request.json"))["evaluator_contract_fingerprint"])'
+          )"
+          test "$actual" = "$expected"
+
+      - name: Validate and prepare the new reference
+        if: steps.current.outputs.generation != steps.run.outputs.generation
+        run: |
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/promote.py \
+            --request request/request.json \
+            --report evidence/results/report.json \
+            --source-run "${{ steps.run.outputs.run_id }}" \
+            --source-attempt "${{ steps.run.outputs.attempt }}" \
+            --artifacts candidate-artifacts \
+            --current-provenance current/provenance.json \
+            --current-baseline current/baseline.json \
+            --output promotion
+
+      - name: Publish an immutable generation
+        if: steps.current.outputs.generation != steps.run.outputs.generation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GENERATION: ${{ steps.run.outputs.generation }}
+        run: |
+          if ! gh release view "$GENERATION" >/dev/null 2>&1; then
+            gh release create "$GENERATION" \
+              --draft \
+              --prerelease \
+              --title "Behavioral Eval reference $GENERATION" \
+              --notes 'Immutable behavioral reference generation.'
+            gh release upload "$GENERATION" promotion/*
+          fi
+          rm -rf published-generation
+          mkdir published-generation
+          gh release download "$GENERATION" --dir published-generation
+          diff --brief --recursive promotion published-generation
+          if test "$(gh release view "$GENERATION" --json isDraft --jq .isDraft)" = true; then
+            gh release edit "$GENERATION" --draft=false
+          fi
+          rm -rf verified-generation
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GENERATION" \
+            --output verified-generation
+
+      - name: Recheck and advance the stable pointer
+        if: steps.current.outputs.generation != steps.run.outputs.generation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GENERATION: ${{ steps.run.outputs.generation }}
+          EXPECTED_EXISTS: ${{ steps.current.outputs.exists }}
+          EXPECTED_GENERATION: ${{ steps.current.outputs.generation }}
+        run: |
+          state_file="$(mktemp)"
+          GITHUB_OUTPUT="$state_file" uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --output current-before-advance
+          actual_exists="$(awk -F= '$1 == "exists" { print $2 }' "$state_file")"
+          actual_generation="$(awk -F= '$1 == "generation" { print $2 }' "$state_file")"
+          test "$actual_exists" = "$EXPECTED_EXISTS"
+          test "$actual_generation" = "$EXPECTED_GENERATION"
+          pointer="$(printf '{"release_tag":"%s"}' "$GENERATION")"
+          if test "$actual_exists" = true; then
+            release_id="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/behavioral-eval-baseline-v1" --jq .id)"
+            gh api --method PATCH "/repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              --field body="$pointer" >/dev/null
+          else
+            gh release create behavioral-eval-baseline-v1 \
+              --prerelease \
+              --title 'Behavioral Eval reference' \
+              --notes "$pointer"
+          fi
+
+      - name: Delete expired immutable generations
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          CURRENT_GENERATION: ${{ steps.run.outputs.generation }}
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+            for (const release of releases) {
+              if (!release.tag_name.startsWith('behavioral-eval-reference-') ||
+                  release.tag_name === process.env.CURRENT_GENERATION ||
+                  new Date(release.created_at).getTime() >= cutoff) continue;
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+              });
+              try {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${release.tag_name}`,
+                });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+            }

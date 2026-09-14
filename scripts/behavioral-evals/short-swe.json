@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "model": "deepseek/deepseek-v4-flash",
+  "autonomous": false,
+  "max_concurrent": 10,
+  "num_rollouts": 1,
+  "verifiers_commit": "9df6a3c01bb640c34380f4f6dff63a1b168dee22",
+  "environments_commit": "a41660014674ba43d56ed054199dde25ddf69946",
+  "harbor_version": "0.21.0",
+  "scaleswe_dataset_revision": "8935f8e55244fd56080cdb8dcd0819a57e8a003c",
+  "tasksets": [
+    {
+      "id": "swebench-verified",
+      "dataset": "swe-bench/swe-bench-verified@sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
+      "package": "environments/swe/swebench_verified",
+      "tasks": [
+        "astropy__astropy-12907",
+        "astropy__astropy-13033",
+        "astropy__astropy-13236",
+        "astropy__astropy-13398",
+        "astropy__astropy-13453",
+        "astropy__astropy-13579",
+        "astropy__astropy-13977",
+        "astropy__astropy-14096",
+        "astropy__astropy-14182",
+        "astropy__astropy-14309",
+        "astropy__astropy-14365",
+        "astropy__astropy-14369",
+        "astropy__astropy-14508",
+        "astropy__astropy-14539",
+        "astropy__astropy-14598"
+      ]
+    },
+    {
+      "id": "swebench-pro",
+      "dataset": "scale-ai/swe-bench-pro@sha256:88411d32ff27e53a4c1a7e29f0c2aeba180c8e5d60f221cab5ed56325f33549d",
+      "package": "environments/swe/swebench_pro",
+      "tasks": [
+        "instance_ansible__ansible-0ea40e09d1b35bcb69ff4d9cecf3d0defa4b36e8-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+        "instance_ansible__ansible-0fd88717c953b92ed8a50495d55e630eb5d59166-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+        "instance_ansible__ansible-106909db8b730480615f4a33de0eb5b710944e78-v0f01c69f1e2528b935359cfe578530722bca2c59",
+        "instance_ansible__ansible-11c1777d56664b1acb56b387a1ad6aeadef1391d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+        "instance_ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
+        "instance_ansible__ansible-164881d871964aa64e0f911d03ae270acbad253c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+        "instance_ansible__ansible-185d41031660a676c43fbb781cd1335902024bfe-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+        "instance_ansible__ansible-189fcb37f973f0b1d52b555728208eeb9a6fce83-v906c969b551b346ef54a2c0b41e04f632b7b73c2"
+      ]
+    },
+    {
+      "id": "scaleswe",
+      "dataset": "PrimeIntellect/Scale-SWE-Verified",
+      "package": "environments/swe/scaleswe",
+      "tasks": [
+        "auth0_auth0-python_pr671",
+        "beetbox_beets_pr3661",
+        "adamtheturtle_doccmd_pr42",
+        "arviz-devs_preliz_pr249",
+        "beetbox_beets_pr4386"
+      ],
+      "filter_unavailable_images": false
+    }
+  ],
+  "network_policy": "framework-only",
+  "limits": {
+    "max_turns": 128,
+    "max_output_tokens": 100000,
+    "max_total_tokens": 5000000,
+    "rollout_timeout_seconds": 3600,
+    "max_inflight_model_calls": 1,
+    "max_model_request_bytes": 16000000
+  }
+}

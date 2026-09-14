@@ -1,0 +1,262 @@
+name: Behavioral Eval
+run-name: 'Behavioral Eval · PR #${{ github.event.pull_request.number }}'
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+
+concurrency:
+  group: prime-agent-behavioral-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  pre-release:
+    name: pre-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out trusted evaluator
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve exact revisions and label state
+        id: resolve
+        run: python3 scripts/behavioral-evals/ci.py resolve --output request
+
+      - name: Check contributor trust
+        id: vouch
+        if: steps.resolve.outputs.needed == 'true'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          user: ${{ steps.resolve.outputs.author }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Save trusted request
+        if: steps.resolve.outputs.needed == 'true' || steps.resolve.outputs.approval_required == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: behavioral-request-${{ github.run_attempt }}
+          path: request/request.json
+          retention-days: 30
+
+      - name: Require label approval for the exact revision
+        if: steps.resolve.outputs.approval_required == 'true'
+        run: |
+          mkdir -p results
+          cat > results/comment.md <<'EOF'
+          <!-- prime-agent-behavioral-eval:v1 -->
+          ## Behavioral Eval
+
+          Remove and reapply `pre-release` to approve the current head revision.
+          EOF
+          echo fail > results/verdict
+          exit 1
+
+      - name: Record pending trust
+        if: steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched != 'true'
+        run: |
+          mkdir -p results
+          cat > results/comment.md <<'EOF'
+          <!-- prime-agent-behavioral-eval:v1 -->
+          ## Behavioral Eval
+
+          The `pre-release` evaluation is waiting for contributor trust approval.
+          EOF
+
+      - name: Set up uv
+        if: steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true'
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: 0.12.9
+          enable-cache: false
+
+      - name: Install controller tooling
+        if: steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true'
+        run: uv sync --locked --project scripts/benchmarks
+
+      - name: Check out pinned Verifiers
+        if: steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: PrimeIntellect-ai/verifiers
+          ref: 9df6a3c01bb640c34380f4f6dff63a1b168dee22
+          path: vendor/verifiers
+          persist-credentials: false
+
+      - name: Check out pinned environments
+        if: steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: PrimeIntellect-ai/prime-envs
+          ref: a41660014674ba43d56ed054199dde25ddf69946
+          path: vendor/environments
+          persist-credentials: false
+
+      - name: Install pinned evaluator
+        id: evaluator
+        continue-on-error: true
+        if: steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true'
+        run: |
+          uv sync --locked --project vendor/verifiers --extra harbor
+          uv pip install --python vendor/verifiers/.venv/bin/python --no-deps \
+            -e vendor/environments/environments/swe/swebench_verified \
+            -e vendor/environments/environments/swe/swebench_pro \
+            -e vendor/environments/environments/swe/scaleswe
+
+      - name: Download current behavioral reference
+        id: baseline
+        if: steps.evaluator.outcome == 'success'
+        run: |
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --output baseline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Build candidate in an isolated sandbox
+        id: build
+        continue-on-error: true
+        if: steps.evaluator.outcome == 'success'
+        run: |
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/build_controller.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-repository "${{ steps.resolve.outputs.head_repository }}" \
+            --sha "${{ steps.resolve.outputs.head_sha }}" \
+            --run-id "$GITHUB_RUN_ID" \
+            --attempt "$GITHUB_RUN_ATTEMPT" \
+            --output candidate-artifacts
+        env:
+          PRIME_SANDBOX_API_KEY: ${{ secrets.PRIME_SANDBOX_API_KEY }}
+          PRIME_TEAM_ID: ${{ vars.PRIME_BENCHMARK_TEAM_ID }}
+
+      - name: Save opaque candidate packages
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: behavioral-candidate-${{ github.run_attempt }}
+          path: candidate-artifacts
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Generate immutable Short SWE configs
+        id: prepare
+        continue-on-error: true
+        if: steps.build.outcome == 'success'
+        run: |
+          python3 scripts/behavioral-evals/prepare.py \
+            --verifiers vendor/verifiers \
+            --environments vendor/environments \
+            --artifacts candidate-artifacts \
+            --commit "${{ steps.resolve.outputs.head_sha }}" \
+            --output generated-configs
+
+      - name: Run the candidate on all 28 tasks
+        id: evaluate
+        continue-on-error: true
+        if: steps.prepare.outcome == 'success'
+        run: |
+          python3 scripts/behavioral-evals/evaluate.py \
+            --eval vendor/verifiers/.venv/bin/eval \
+            --configs generated-configs \
+            --artifacts candidate-artifacts \
+            --commit "${{ steps.resolve.outputs.head_sha }}" \
+            --output raw-eval \
+            --result results/candidate.json
+        env:
+          PRIME_API_KEY: ${{ secrets.PRIME_BEHAVIORAL_API_KEY }}
+          PRIME_SANDBOX_API_KEY: ${{ secrets.PRIME_SANDBOX_API_KEY }}
+          PRIME_TEAM_ID: ${{ vars.PRIME_BENCHMARK_TEAM_ID }}
+
+      - name: Compare with the latest merged pre-release reference
+        id: compare
+        continue-on-error: true
+        if: steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true'
+        run: |
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/assemble.py \
+            --request request/request.json \
+            --candidate results/candidate.json \
+            --baseline baseline/baseline.json \
+            --baseline-generation "${{ steps.baseline.outputs.generation }}" \
+            --output results \
+            --evaluator-outcome "${{ steps.evaluator.outcome }}" \
+            --build-outcome "${{ steps.build.outcome }}" \
+            --evaluate-outcome "${{ steps.evaluate.outcome }}"
+
+      - name: Run focused paired confirmation
+        id: confirmation
+        continue-on-error: true
+        if: >-
+          steps.compare.outputs.needs_confirmation == 'true' &&
+          steps.baseline.outcome == 'success'
+        run: |
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/confirm.py \
+            --eval vendor/verifiers/.venv/bin/eval \
+            --confirmation-request results/confirmation-request.json \
+            --report results/report.json \
+            --baseline baseline/baseline.json \
+            --candidate-artifacts candidate-artifacts \
+            --baseline-artifacts baseline \
+            --output results/confirmation
+        env:
+          PRIME_API_KEY: ${{ secrets.PRIME_BEHAVIORAL_API_KEY }}
+          PRIME_SANDBOX_API_KEY: ${{ secrets.PRIME_SANDBOX_API_KEY }}
+          PRIME_TEAM_ID: ${{ vars.PRIME_BENCHMARK_TEAM_ID }}
+
+      - name: Apply focused confirmation
+        if: steps.compare.outcome == 'success'
+        run: |
+          uv run --locked --project scripts/benchmarks python \
+            scripts/behavioral-evals/assemble.py \
+            --request request/request.json \
+            --candidate results/candidate.json \
+            --baseline baseline/baseline.json \
+            --baseline-generation "${{ steps.baseline.outputs.generation }}" \
+            --confirmation results/confirmation/confirmation.json \
+            --output results
+
+      - name: Stage bounded behavioral evidence
+        id: evidence
+        if: >-
+          always() &&
+          (steps.resolve.outputs.needed == 'true' || steps.resolve.outputs.approval_required == 'true')
+        run: |
+          python3 scripts/behavioral-evals/stage_evidence.py \
+            --source results \
+            --source generated-configs \
+            --source raw-eval \
+            --output evidence-upload
+
+      - name: Save behavioral evidence
+        if: >-
+          always() && steps.evidence.outcome == 'success' &&
+          (steps.resolve.outputs.needed == 'true' || steps.resolve.outputs.approval_required == 'true')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: behavioral-results-${{ github.run_attempt }}
+          path: evidence-upload
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Require contributor trust
+        if: always() && steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched != 'true'
+        run: exit 1
+
+      - name: Enforce only confirmed drastic regressions
+        if: always() && steps.resolve.outputs.needed == 'true' && steps.vouch.outputs.vouched == 'true'
+        run: |
+          test -f results/verdict
+          test "$(cat results/verdict)" = pass
