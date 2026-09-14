@@ -52,6 +52,7 @@ jobs:
       production_version: ${{ steps.context.outputs.production_version }}
       publish_beta: ${{ steps.context.outputs.publish_beta }}
       publish_production: ${{ steps.context.outputs.publish_production }}
+      requires_approval: ${{ steps.context.outputs.requires_approval }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -78,6 +79,9 @@ jobs:
           production_version=
           publish_beta=false
           publish_production=false
+          # Production publication needs a reviewer unless a merged pull request
+          # already approved this exact release.
+          requires_approval=false
 
           if [ "$EVENT_NAME" = pull_request ]; then
             # Exercise both real packer paths without release credentials or publication.
@@ -94,10 +98,14 @@ jobs:
             production_version="${INPUT_RELEASE_TAG#v}"
             build_ref="$GITHUB_SHA_VALUE"
             publish_production=true
+            # No merged pull request approved this release.
+            requires_approval=true
           elif [ "$REF_TYPE" = tag ]; then
             production_version="${REF_NAME#v}"
             build_ref="$REF_NAME"
             publish_production=true
+            # A tag can be pushed without any review.
+            requires_approval=true
           else
             production_version=$(node -p "require('./package.json').version")
             build_ref="$GITHUB_SHA_VALUE"
@@ -119,10 +127,15 @@ jobs:
                 fi
                 echo "Retrying production v${production_version} for ${GITHUB_SHA_VALUE}."
               fi
+              # The merged pull request bumped the version, so its reviewer
+              # approved this exact release.
               publish_production=true
             elif ! git show-ref --verify --quiet "refs/tags/v${production_version}"; then
               echo "Production v${production_version} has no tag; retrying the failed release."
               publish_production=true
+              # This merge did not change the version, so its reviewer approved a
+              # change, not a release.
+              requires_approval=true
             else
               echo "Package version is unchanged at ${production_version}; only beta will advance."
             fi
@@ -138,8 +151,10 @@ jobs:
           echo "production_version=$production_version" >> "$GITHUB_OUTPUT"
           echo "publish_beta=$publish_beta" >> "$GITHUB_OUTPUT"
           echo "publish_production=$publish_production" >> "$GITHUB_OUTPUT"
+          echo "requires_approval=$requires_approval" >> "$GITHUB_OUTPUT"
           echo "Build ref: $build_ref"
           echo "Production: $publish_production ${production_version:+v${production_version}}"
+          echo "Requires release approval: $requires_approval"
           echo "Beta: $publish_beta ${beta_version:+v${beta_version}}"
 
   standalone:
@@ -367,10 +382,11 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs: [release-context, build, validate-macos]
-    # Production publication writes the stable channel, latest.json and install.sh,
-    # so it waits for a reviewer in the protected `release` environment. Beta-only
-    # runs use the unprotected `beta-publish` environment and never wait.
-    environment: ${{ needs.release-context.outputs.publish_production == 'true' && 'release' || 'beta-publish' }}
+    # Releases that no merged pull request approved - pushed tags, manual
+    # dispatches and retries that ride on an unrelated merge - wait for a reviewer
+    # in the protected `release` environment. A merge that bumps the version was
+    # already approved in its pull request and publishes without waiting.
+    environment: ${{ needs.release-context.outputs.requires_approval == 'true' && 'release' || 'beta-publish' }}
     permissions:
       contents: write
     env:
