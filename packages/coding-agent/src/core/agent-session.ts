@@ -55,6 +55,7 @@ import {
 	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	formatAgentSessionNameUnavailable,
 	isAgentSessionMessage,
+	isAgentSessionMessageId,
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
@@ -793,14 +794,15 @@ function isHumanInputSource(source: InputSource | "internal"): boolean {
 /**
  * Only input a person submits outranks the rest of the queue. Agent-to-agent prompts carry an
  * agent message id, and every machine-generated turn (bash completions, heartbeats, continuations,
- * restored internal input) is either a custom message or admitted from a non-human source.
+ * restored internal input) is either a custom message or admitted from a non-human source. Ids
+ * callers mint to await their own prompt are not agent traffic and keep human priority.
  */
 function sessionActionPriorityFor(
 	humanSource: boolean,
 	message: QueuedAgentMessage | undefined,
 	agentMessageId: string | undefined,
 ): SessionActionPriority {
-	if (!humanSource || agentMessageId !== undefined) return "background";
+	if (!humanSource || isAgentSessionMessageId(agentMessageId)) return "background";
 	return message === undefined || message.role === "user" ? "user" : "background";
 }
 

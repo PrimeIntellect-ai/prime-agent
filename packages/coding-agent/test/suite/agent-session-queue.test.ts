@@ -2039,9 +2039,10 @@ describe("AgentSession queue characterization", () => {
 		gatePreparation = false;
 		expect(pause).toBeDefined();
 
+		// The prompt without an agent message id is human input, so it queues ahead.
 		expect(harness.session.clearQueue()).toEqual({
 			steering: [],
-			followUp: ["clear first while preparing", "clear second while preparing"],
+			followUp: ["clear second while preparing", "clear first while preparing"],
 		});
 		pause?.release();
 		await firstCompletionRejection;

@@ -1,5 +1,5 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
 import { conversationMessages, createHarness, getMessageText, type Harness } from "../harness.js";
 import { createWaitingHarness } from "../scheduling.js";
@@ -62,6 +62,27 @@ describe("#6158 human messages outrank agent messages in the queue", () => {
 			.map((message) => getMessageText(message).split("\n").pop())
 			.filter((text): text is string => text !== undefined && /^(human|agent) /.test(text));
 		expect(delivered).toEqual(["human one", "human two", "agent one", "agent two", "agent three"]);
+	});
+
+	it("keeps a prompt that waits for its own completion at human priority", async () => {
+		const waiting = await createWaitingHarness();
+		harnesses.push(waiting.harness);
+		const session = waiting.harness.session;
+		waiting.harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			...Array.from({ length: 4 }, (_, index) => fauxAssistantMessage(`reply ${index}`)),
+		]);
+		await waiting.waitForToolStart;
+
+		await queueAgentMessage(waiting.harness, "agentmsg_wait", "agent wait");
+		const pending = session.promptAndWait("human wait", { streamingBehavior: "steer", queueIfBusy: true });
+		await vi.waitFor(() => expect(session.getSteeringMessages()).toHaveLength(2));
+
+		expect(session.getSteeringMessages()[0]).toBe("human wait");
+
+		waiting.releaseToolExecution();
+		await pending;
+		await session.waitForIdle();
 	});
 
 	it("keeps an agent message ahead of a human follow-up the user deferred to its own lane", async () => {
