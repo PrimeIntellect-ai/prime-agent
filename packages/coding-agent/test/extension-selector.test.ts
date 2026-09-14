@@ -18,6 +18,25 @@ describe("ExtensionSelectorComponent", () => {
 		initTheme("dark");
 	});
 
+	it("renders every line of a multiline prompt in inline mode", () => {
+		const selector = new ExtensionSelectorComponent(
+			"Choose an account\nSign in with the account you want to use with Prime Agent.",
+			["Personal", "Business"],
+			vi.fn(),
+			vi.fn(),
+			{ getRows: () => 24, inline: true },
+		);
+
+		const output = stripAnsi(selector.render(88).join("\n"));
+		const lines = output.split("\n");
+		const titleIndex = lines.findIndex((line) => line.includes("Choose an account"));
+
+		expect(titleIndex).toBe(0);
+		expect(lines[titleIndex + 1]).toContain("Sign in with the account you want to use with Prime Agent.");
+		expect(output).toContain("Personal");
+		expect(output).toContain("Business");
+	});
+
 	it("renders a multiline prompt with compact option rows", () => {
 		const selector = new ExtensionSelectorComponent(
 			[

@@ -67,6 +67,25 @@ describe("MenuPanel", () => {
 		expect(withoutRule.join("")).not.toContain("─");
 	});
 
+	it("renders the subtitle under the title in inline panels", () => {
+		const panel = new MenuPanel({
+			title: "Choose an account",
+			subtitle: "Sign in with the account you want to use.",
+			inline: true,
+		});
+		panel.addChild(new StaticComponent());
+
+		const lines = panel.render(60);
+		const output = lines.map((line) => stripAnsi(line));
+
+		expect(output[0]?.trim()).toBe("Choose an account");
+		expect(output[1]?.trim()).toBe("Sign in with the account you want to use.");
+		expect(output[2]?.trim()).toBe("first");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBe(60);
+		}
+	});
+
 	it("renders search fields without the shell prompt", () => {
 		const field = new MenuSearchInput("Search models");
 		const output = stripAnsi(field.render(24).join("\n"));

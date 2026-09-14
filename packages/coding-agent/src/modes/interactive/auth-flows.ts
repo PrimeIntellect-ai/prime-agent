@@ -385,7 +385,7 @@ export class ProviderAuthFlows {
 					close?.();
 					resolve(undefined);
 				},
-				{ getRows: () => this.host.getAuthPanelRows(), inline: true },
+				{ getRows: () => this.host.getAuthPanelRows() },
 			);
 			close = this.host.showAuthPanel(selector);
 		});
@@ -728,7 +728,6 @@ export class ProviderAuthFlows {
 				prompt.message,
 				labels,
 				(optionLabel) => {
-					// Unmounting the selector restores the login dialog underneath it.
 					close?.();
 					resolve(prompt.options.find((option) => option.label === optionLabel)?.id);
 				},

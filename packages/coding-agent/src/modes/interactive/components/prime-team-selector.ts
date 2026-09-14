@@ -1,4 +1,4 @@
-import { Container, type Focusable, fuzzyFilter, getKeybindings, Spacer, TruncatedText } from "@earendil-works/pi-tui";
+import { Container, type Focusable, fuzzyFilter, getKeybindings, TruncatedText } from "@earendil-works/pi-tui";
 import type { PrimeTeam } from "../../../core/prime-inference-auth.js";
 import { theme } from "../theme/theme.js";
 import {
@@ -15,10 +15,6 @@ type PrimeTeamOption = {
 	team: PrimeTeam | null;
 };
 
-interface PrimeTeamSelectorOptions extends MenuViewportProvider {
-	inline?: boolean;
-}
-
 const PREFERRED_VISIBLE_TEAMS = 8;
 const TEAM_LIST_RESERVED_ROWS = 7;
 const TEAM_SCROLL_INDICATOR_ROWS = 1;
@@ -31,7 +27,6 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 	private selectedIndex = 0;
 	private searchQuery = "";
 	private _focused = false;
-	private readonly inline: boolean;
 	private listLayout = getMenuListLayout({
 		preferredVisibleItems: PREFERRED_VISIBLE_TEAMS,
 		reservedRows: TEAM_LIST_RESERVED_ROWS,
@@ -44,22 +39,22 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 		private readonly currentTeamId: string | undefined,
 		private readonly onSelect: (team: PrimeTeam | null) => void,
 		private readonly onCancel: () => void,
-		private readonly options: PrimeTeamSelectorOptions = {},
+		private readonly viewport: MenuViewportProvider = {},
 	) {
 		super();
 
 		this.allOptions = [{ type: "personal", team: null }, ...teams.map((team) => ({ type: "team" as const, team }))];
 		this.filteredOptions = this.allOptions;
-		this.inline = options.inline === true;
 
+		// Rendered inline under the chat alongside the other auth pickers.
 		const panel = new MenuPanel({
-			title: "Prime Team",
+			title: "Select a Prime Team:",
 			subtitle: "Choose which account pays for Prime Inference usage.",
-			inline: this.inline,
+			inline: true,
 		});
 		this.addChild(panel);
 
-		this.searchInput = new MenuSearchInput("Search teams", this.inline);
+		this.searchInput = new MenuSearchInput("Search teams", true);
 		this.searchInput.onSubmit = () => {
 			const selected = this.filteredOptions[this.selectedIndex];
 			if (selected) {
@@ -67,9 +62,8 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 			}
 		};
 		panel.addChild(this.searchInput);
-		if (!this.inline) panel.addChild(new Spacer(1));
 
-		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: this.inline });
+		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: true });
 		panel.addChild(this.listContainer);
 		this.filterOptions("");
 	}
@@ -137,7 +131,7 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 					secondary: this.getSecondary(option),
 					meta: this.getMeta(option),
 					selected: i === this.selectedIndex,
-					inline: this.inline,
+					inline: true,
 				}),
 			);
 		}
@@ -199,7 +193,7 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 
 	private updateLayout(): void {
 		this.listLayout = getMenuListLayout({
-			getRows: this.options.getRows,
+			getRows: this.viewport.getRows,
 			preferredVisibleItems: PREFERRED_VISIBLE_TEAMS,
 			totalItems: this.filteredOptions.length,
 			reservedRows: TEAM_LIST_RESERVED_ROWS,
