@@ -123,7 +123,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
 		case "remove":
 			return `${APP_NAME} package remove <source> [--local]`;
 		case "update":
-			return `${APP_NAME} update [--force] [--rollback] [--beta|--stable] or ${APP_NAME} package update [source]`;
+			return `${APP_NAME} update [--force] [--rollback] [--nightly|--stable] or ${APP_NAME} package update [source]`;
 		case "list":
 			return `${APP_NAME} package list`;
 	}
@@ -176,7 +176,7 @@ Options:
   --extension <source>    Update one package only
   --force                 Reinstall ${APP_NAME} even if the current version is latest
   --rollback              Restore the previous compiled release
-  --beta                  Switch updates to the beta channel (unreleased builds, may be broken)
+  --nightly               Switch updates to the nightly channel (unreleased builds, may be broken)
   --stable                Return updates to the stable channel
   --daemon-socket <path>  Restart the daemon listening on this exact socket
 
@@ -277,14 +277,14 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			continue;
 		}
 
-		if (arg === "--beta" || arg === "--stable") {
+		if (arg === "--nightly" || arg === "--stable") {
 			if (command !== "update") {
 				invalidOption = invalidOption ?? arg;
 				continue;
 			}
-			const requested: UpdateChannel = arg === "--beta" ? "beta" : "stable";
+			const requested: UpdateChannel = arg === "--nightly" ? "nightly" : "stable";
 			if (channel && channel !== requested) {
-				conflictingOptions = conflictingOptions ?? "--beta and --stable cannot be combined";
+				conflictingOptions = conflictingOptions ?? "--nightly and --stable cannot be combined";
 			}
 			channel = requested;
 			continue;
@@ -402,7 +402,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	if (rollback && (extensionsFlag || extensionFlagSource || (source && !isSelfUpdateSource(source))))
 		conflictingOptions = "--rollback only applies to Prime Agent itself";
 	if (channel && (extensionsFlag || extensionFlagSource || (source && !isSelfUpdateSource(source))))
-		conflictingOptions = conflictingOptions ?? "--beta and --stable only apply to Prime Agent itself";
+		conflictingOptions = conflictingOptions ?? "--nightly and --stable only apply to Prime Agent itself";
 	return {
 		command,
 		source,
@@ -481,10 +481,10 @@ function setSelfUpdateAbortedExitCode(): void {
 	process.exitCode = process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : 1;
 }
 
-function betaReleaseUnavailablePlan(): SelfUpdatePlan {
+function nightlyReleaseUnavailablePlan(): SelfUpdatePlan {
 	console.error(
 		chalk.red(
-			"Could not resolve a beta release from the release manifest. Nothing was installed and the update channel was not changed.",
+			"Could not resolve a nightly release from the release manifest. Nothing was installed and the update channel was not changed.",
 		),
 	);
 	return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false, unavailable: true };
@@ -502,15 +502,16 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 			if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
 			return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
 		} catch (error) {
-			if (channel === "beta" && error instanceof NativeReleaseUnavailableError) return betaReleaseUnavailablePlan();
+			if (channel === "nightly" && error instanceof NativeReleaseUnavailableError)
+				return nightlyReleaseUnavailablePlan();
 			throw error;
 		}
 	}
 	if (rollback) throw new Error("Rollback is only available for managed compiled installations.");
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION, { channel });
-		// The registry default resolves to the stable package, so a missing beta manifest must not fall through to it.
-		if (!latestRelease && channel === "beta") return betaReleaseUnavailablePlan();
+		// The registry default resolves to the stable package, so a missing nightly manifest must not fall through to it.
+		if (!latestRelease && channel === "nightly") return nightlyReleaseUnavailablePlan();
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
 		const installSpec = latestRelease?.installSpec ?? packageName;
 		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
@@ -523,7 +524,7 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}
 	} catch {
-		if (channel === "beta") return betaReleaseUnavailablePlan();
+		if (channel === "nightly") return nightlyReleaseUnavailablePlan();
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
 	}
 
@@ -1629,21 +1630,23 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 				const includesSelf = updateTargetIncludesSelf(target);
 				const persistedChannel = settingsManager.getUpdateChannel();
 				// Warn and confirm before any update work so declining changes nothing, not even extensions.
-				if (includesSelf && options.channel === "beta" && persistedChannel !== "beta") {
+				if (includesSelf && options.channel === "nightly" && persistedChannel !== "nightly") {
 					console.log(
 						chalk.yellow(
-							`Beta releases are unreleased ${APP_NAME} builds. They can be broken, and a broken update can leave ${APP_NAME} unusable until you roll back or reinstall.`,
+							`Nightly releases are unreleased ${APP_NAME} builds. They can be broken, and a broken update can leave ${APP_NAME} unusable until you roll back or reinstall.`,
 						),
 					);
 					if (!options.force) {
 						if (!process.stdin.isTTY) {
 							console.error(
-								chalk.red("Switching to the beta channel needs confirmation. Re-run with --force to proceed."),
+								chalk.red(
+									"Switching to the nightly channel needs confirmation. Re-run with --force to proceed.",
+								),
 							);
 							setSelfUpdateAbortedExitCode();
 							return true;
 						}
-						if (!(await promptYesNo("Switch to the beta channel and continue with the update?"))) {
+						if (!(await promptYesNo("Switch to the nightly channel and continue with the update?"))) {
 							console.log(chalk.dim("Update cancelled. Nothing was changed."));
 							setSelfUpdateAbortedExitCode();
 							return true;

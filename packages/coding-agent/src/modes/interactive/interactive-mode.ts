@@ -4959,10 +4959,10 @@ export class InteractiveMode {
 					await this.handleReloadCommand();
 					return;
 				}
-				if (commandName === "beta") {
+				if (commandName === "nightly") {
 					this.editor.setText("");
-					const betaArg = commandArgs?.trim().toLowerCase();
-					if (betaArg === "status") {
+					const nightlyArg = commandArgs?.trim().toLowerCase();
+					if (nightlyArg === "status") {
 						const channel = resolveUpdateChannel(this.version, this.settingsManager.getUpdateChannel());
 						const source = this.settingsManager.getUpdateChannel()
 							? "set in settings"
@@ -4970,24 +4970,24 @@ export class InteractiveMode {
 						this.showStatus(`Updates follow the ${channel} channel (${source}). v${this.version} installed.`);
 						return;
 					}
-					if (betaArg === "off" || betaArg === "stable") {
+					if (nightlyArg === "off" || nightlyArg === "stable") {
 						this.settingsManager.setUpdateChannel("stable");
 						this.showStatus(
 							"Updates now follow the stable channel. Run /update to install the latest stable release.",
 						);
 						return;
 					}
-					if (betaArg && betaArg !== "on") {
-						this.showError("Usage: /beta [on|off|status]");
+					if (nightlyArg && nightlyArg !== "on") {
+						this.showError("Usage: /nightly [on|off|status]");
 						return;
 					}
 					if (this.isAgentCompacting() || this.isAgentStreaming() || this.isBashRunning()) {
 						this.showWarning("Wait for the current work to finish before updating.");
 						return;
 					}
-					// The update command owns the beta warning, the channel switch, and the
+					// The update command owns the nightly warning, the channel switch, and the
 					// busy-session confirmation, so declining either leaves settings untouched.
-					await this.handleUpdateCommand("--self --beta");
+					await this.handleUpdateCommand("--self --nightly");
 					return;
 				}
 				if (commandName === "update") {

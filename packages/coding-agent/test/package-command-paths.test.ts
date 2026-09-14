@@ -151,29 +151,29 @@ describe("package commands", () => {
 		}
 	});
 
-	it("rejects combining --beta and --stable", async () => {
+	it("rejects combining --nightly and --stable", async () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		try {
-			await expect(main(["update", "--beta", "--stable"])).resolves.toBeUndefined();
+			await expect(main(["update", "--nightly", "--stable"])).resolves.toBeUndefined();
 
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stderr).toContain("--beta and --stable cannot be combined");
+			expect(stderr).toContain("--nightly and --stable cannot be combined");
 			expect(process.exitCode).toBe(1);
 		} finally {
 			errorSpy.mockRestore();
 		}
 	});
 
-	it("refuses to switch to the beta channel without a TTY or --force and changes nothing", async () => {
+	it("refuses to switch to the nightly channel without a TTY or --force and changes nothing", async () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
 		try {
-			await expect(main(["update", "--beta"])).resolves.toBeUndefined();
+			await expect(main(["update", "--nightly"])).resolves.toBeUndefined();
 
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stderr).toContain("Switching to the beta channel needs confirmation");
+			expect(stderr).toContain("Switching to the nightly channel needs confirmation");
 			expect(process.exitCode).toBe(1);
 			const settingsPath = join(agentDir, "settings.json");
 			if (existsSync(settingsPath)) {
@@ -185,14 +185,14 @@ describe("package commands", () => {
 		}
 	});
 
-	it("rejects --beta for extension-only updates instead of silently ignoring it", async () => {
+	it("rejects --nightly for extension-only updates instead of silently ignoring it", async () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		try {
-			await expect(handlePackageCommand(["update", "--extensions", "--beta"])).resolves.toBe(true);
+			await expect(handlePackageCommand(["update", "--extensions", "--nightly"])).resolves.toBe(true);
 
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stderr).toContain("--beta and --stable only apply to Prime Agent itself");
+			expect(stderr).toContain("--nightly and --stable only apply to Prime Agent itself");
 			expect(process.exitCode).toBe(1);
 		} finally {
 			errorSpy.mockRestore();

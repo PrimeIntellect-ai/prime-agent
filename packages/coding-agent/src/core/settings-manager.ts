@@ -194,7 +194,7 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	subagentDefaultModel?: string; // "provider/id" for rlm.spawn without a pinned model; unset inherits the parent model
-	updateChannel?: "stable" | "beta"; // release channel for self-updates; unset follows the running version
+	updateChannel?: "stable" | "nightly"; // release channel for self-updates; unset follows the running version
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
 	// "provider/id" for background LLM passes (refinement review and planning);
 	// unset falls back to the session model. Routing these to a different model
@@ -861,12 +861,12 @@ export class SettingsManager {
 	}
 
 	/** A per-user preference: read from global settings only, and ignore anything but the two known values. */
-	getUpdateChannel(): "stable" | "beta" | undefined {
+	getUpdateChannel(): "stable" | "nightly" | undefined {
 		const channel = this.globalSettings.updateChannel;
-		return channel === "stable" || channel === "beta" ? channel : undefined;
+		return channel === "stable" || channel === "nightly" ? channel : undefined;
 	}
 
-	setUpdateChannel(channel: "stable" | "beta"): void {
+	setUpdateChannel(channel: "stable" | "nightly"): void {
 		this.globalSettings.updateChannel = channel;
 		this.markModified("updateChannel");
 		this.save();

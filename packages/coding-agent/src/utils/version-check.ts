@@ -5,7 +5,7 @@ const STABLE_VERSION_MANIFEST_PATH = "latest.json";
 const BETA_VERSION_MANIFEST_PATH = "beta.json";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
-export type UpdateChannel = "stable" | "beta";
+export type UpdateChannel = "stable" | "nightly";
 
 export interface LatestPiRelease {
 	version: string;
@@ -105,11 +105,14 @@ function normalizeReleaseVersion(version: string): string {
 	return version.trim().replace(/^v/, "");
 }
 
-/** A preferred channel wins; otherwise a beta build stays on beta and anything else follows stable. */
+/**
+ * A preferred channel wins; otherwise a build tagged `-beta` stays on nightly and anything else
+ * follows stable. Nightly builds are what the release bucket publishes as beta.
+ */
 export function resolveUpdateChannel(currentVersion: string, preferred?: UpdateChannel): UpdateChannel {
 	if (preferred) return preferred;
 	const prerelease = parsePackageVersion(currentVersion)?.prerelease;
-	return prerelease?.match(/^beta(?:\.|$)/) ? "beta" : "stable";
+	return prerelease?.match(/^beta(?:\.|$)/) ? "nightly" : "stable";
 }
 
 /**
@@ -135,7 +138,7 @@ export function isReleaseUpdateCandidate(
 }
 
 function getReleaseManifestPath(currentVersion: string, channel?: UpdateChannel): string {
-	return resolveUpdateChannel(currentVersion, channel) === "beta"
+	return resolveUpdateChannel(currentVersion, channel) === "nightly"
 		? BETA_VERSION_MANIFEST_PATH
 		: STABLE_VERSION_MANIFEST_PATH;
 }

@@ -101,17 +101,17 @@ describe("version checks", () => {
 describe("update channel preference", () => {
 	it("infers the channel from the running version when none is preferred", () => {
 		expect(resolveUpdateChannel("1.2.4")).toBe("stable");
-		expect(resolveUpdateChannel("1.2.4-beta.123.1.1234567")).toBe("beta");
+		expect(resolveUpdateChannel("1.2.4-beta.123.1.1234567")).toBe("nightly");
 		expect(resolveUpdateChannel("1.2.4-beta.123.1.1234567", "stable")).toBe("stable");
-		expect(resolveUpdateChannel("1.2.4", "beta")).toBe("beta");
+		expect(resolveUpdateChannel("1.2.4", "nightly")).toBe("nightly");
 	});
 
-	it("follows a preferred beta channel from a stable installation", async () => {
+	it("follows a preferred nightly channel from a stable installation", async () => {
 		delete process.env.PI_SKIP_VERSION_CHECK;
 		delete process.env.PI_OFFLINE;
 		const fetchMock = vi.fn(async () => Response.json({ version: "v1.2.5-beta.130.1.abcdef0" }));
 		vi.stubGlobal("fetch", fetchMock);
-		await expect(getLatestPiVersion("1.2.4", { channel: "beta" })).resolves.toBe("1.2.5-beta.130.1.abcdef0");
+		await expect(getLatestPiVersion("1.2.4", { channel: "nightly" })).resolves.toBe("1.2.5-beta.130.1.abcdef0");
 		expect(fetchMock).toHaveBeenCalledWith(`${defaultPrimeAgentDownloadBaseUrl}/beta.json`, expect.any(Object));
 	});
 
@@ -124,42 +124,42 @@ describe("update channel preference", () => {
 		expect(fetchMock).toHaveBeenCalledWith(`${defaultPrimeAgentDownloadBaseUrl}/latest.json`, expect.any(Object));
 	});
 
-	it("lets a stable installation move onto the current beta when beta is preferred", () => {
-		expect(isReleaseUpdateCandidate("1.2.3-beta.5.1.abcdef0", "1.2.3", "beta")).toBe(true);
+	it("lets a stable installation move onto the current beta build when nightly is preferred", () => {
+		expect(isReleaseUpdateCandidate("1.2.3-beta.5.1.abcdef0", "1.2.3", "nightly")).toBe(true);
 		expect(isReleaseUpdateCandidate("1.2.3-beta.5.1.abcdef0", "1.2.3")).toBe(false);
 		expect(isReleaseUpdateCandidate("1.2.3-beta.5.1.abcdef0", "1.2.3", "stable")).toBe(false);
 	});
 
 	it("never downgrades the base version when switching channels", () => {
-		expect(isReleaseUpdateCandidate("1.2.2-beta.9.1.abcdef0", "1.2.3", "beta")).toBe(false);
+		expect(isReleaseUpdateCandidate("1.2.2-beta.9.1.abcdef0", "1.2.3", "nightly")).toBe(false);
 		expect(isReleaseUpdateCandidate("1.2.2", "1.2.3-beta.5.1.abcdef0", "stable")).toBe(false);
 		expect(isReleaseUpdateCandidate("1.2.3", "1.2.3-beta.5.1.abcdef0", "stable")).toBe(true);
 	});
 
 	it("keeps same-channel updates strictly newer", () => {
-		expect(isReleaseUpdateCandidate("1.2.3-beta.5.1.abcdef0", "1.2.3-beta.5.1.abcdef0", "beta")).toBe(false);
-		expect(isReleaseUpdateCandidate("1.2.3-beta.4.1.abcdef0", "1.2.3-beta.5.1.abcdef0", "beta")).toBe(false);
-		expect(isReleaseUpdateCandidate("1.2.3-beta.6.1.abcdef0", "1.2.3-beta.5.1.abcdef0", "beta")).toBe(true);
+		expect(isReleaseUpdateCandidate("1.2.3-beta.5.1.abcdef0", "1.2.3-beta.5.1.abcdef0", "nightly")).toBe(false);
+		expect(isReleaseUpdateCandidate("1.2.3-beta.4.1.abcdef0", "1.2.3-beta.5.1.abcdef0", "nightly")).toBe(false);
+		expect(isReleaseUpdateCandidate("1.2.3-beta.6.1.abcdef0", "1.2.3-beta.5.1.abcdef0", "nightly")).toBe(true);
 	});
 
-	it("reports the current beta from a stable installation once beta is preferred", async () => {
+	it("reports the current beta build from a stable installation once nightly is preferred", async () => {
 		delete process.env.PI_SKIP_VERSION_CHECK;
 		delete process.env.PI_OFFLINE;
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ version: "v1.2.3-beta.5.1.abcdef0" })),
 		);
-		await expect(checkForNewPiVersion("1.2.3", "beta")).resolves.toBe("1.2.3-beta.5.1.abcdef0");
+		await expect(checkForNewPiVersion("1.2.3", "nightly")).resolves.toBe("1.2.3-beta.5.1.abcdef0");
 		await expect(checkForNewPiVersion("1.2.3")).resolves.toBeUndefined();
 	});
 
-	it("reports a newer beta when the channel is preferred", async () => {
+	it("reports a newer beta build when nightly is preferred", async () => {
 		delete process.env.PI_SKIP_VERSION_CHECK;
 		delete process.env.PI_OFFLINE;
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ version: "v1.2.5-beta.1.1.abcdef0" })),
 		);
-		await expect(checkForNewPiVersion("1.2.4", "beta")).resolves.toBe("1.2.5-beta.1.1.abcdef0");
+		await expect(checkForNewPiVersion("1.2.4", "nightly")).resolves.toBe("1.2.5-beta.1.1.abcdef0");
 	});
 });
