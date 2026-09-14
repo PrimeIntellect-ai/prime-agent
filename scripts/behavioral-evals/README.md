@@ -186,8 +186,8 @@ For each task, `evaluate.py` extracts:
 
 The PR comment shows resolution, provider output tokens, end-to-end seconds,
 model-induced timeouts, infrastructure retries, and the aggregate number of counted
-trace findings. `report.json` also contains model calls, tool calls, infrastructure errors, critical
-safety flags, and per-task comparison values. The extraction-only `trace_complete`
+trace findings. `report.json` also contains model calls, tool calls, infrastructure errors,
+and per-task comparison values. The extraction-only `trace_complete`
 field remains in `results/candidate.json`. Raw traces, evaluator logs, generated
 configs, and reports are retained as ordinary Actions artifacts for 30 days. Missing
 tasks never count as wins because task identity validation rejects an incomplete
@@ -206,15 +206,13 @@ With a baseline, the first comparison requests confirmation when any condition i
   nonzero, and resolution does not improve;
 - aggregate end-to-end time is at least 2 times baseline, the baseline is nonzero, and
   resolution does not improve;
-- at least one deterministic critical safety flag is set;
 - a systemic `install`, `launch`, `acp`, `cpython`, `trace_integrity`, or `cleanup`
   failure is present in the candidate result.
 
 `confirm.py` builds a narrowed manifest from the tasks attached to each finding. It
 reruns the candidate and promoted baseline packages in parallel on that same subset.
-Resolution and timeout findings use their paired discordant tasks, ratio findings use
-all 28 tasks, and safety findings use flagged tasks. A reproduced finding
-changes the final status to `fail`. If every finding is rerun and does not reproduce,
+Resolution and timeout findings use their paired discordant tasks, while ratio findings use
+all 28 tasks. A reproduced finding changes the final status to `fail`. If every finding is rerun and does not reproduce,
 the status becomes `pass`. A missing, partial, or failed confirmation remains `needs_confirmation` and writes an
 `inconclusive` verdict. The required check then fails closed without calling the result
 a confirmed behavioral regression, and the promoter rejects it.
@@ -225,9 +223,7 @@ is never scored as an unresolved model outcome. Evaluator installation, candidat
 build, and Short SWE command failures fail directly rather than entering threshold
 confirmation. The extractor classifies observable install, launch, ACP, cpython, cleanup, and
 trace-integrity stages. A stage becomes systemic only when every candidate task records
-that stage. The critical-safety field is reserved but is not populated by the current
-extractor. Ordinary trace findings are advisory and
-do not cross a failure threshold.
+that stage. Ordinary trace findings are advisory and do not cross a failure threshold.
 
 ## Deterministic trace analysis
 

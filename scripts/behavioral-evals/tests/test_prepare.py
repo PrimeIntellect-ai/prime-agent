@@ -38,6 +38,16 @@ class PrepareTests(unittest.TestCase):
         scale.write_text("dataset = load_dataset(self.config.dataset_name, split=self.config.split)\n")
         paths["scaleswe"] = scale
 
+        verifiers.mkdir(parents=True, exist_ok=True)
+        (verifiers / "uv.lock").write_text(
+            f'''version = 1
+revision = 3
+
+[[package]]
+name = "harbor"
+version = "{self.manifest["harbor_version"]}"
+'''
+        )
         init = verifiers / "verifiers/v1/tasksets/__init__.py"
         init.parent.mkdir(parents=True)
         init.write_text(
@@ -124,6 +134,7 @@ class PrepareTests(unittest.TestCase):
                 self.manifest["tasksets"][2]["tasks"][0],
                 scaleswe["env"]["taskset"]["filter_fn"],
             )
+            self.assertIs(scaleswe["env"]["taskset"]["filter_unavailable_images"], False)
             for taskset_id in ("swebench-verified", "swebench-pro"):
                 item = next(item for item in self.manifest["tasksets"] if item["id"] == taskset_id)
                 text = paths[taskset_id].read_text()
@@ -143,10 +154,31 @@ class PrepareTests(unittest.TestCase):
                 evaluator_contract.evaluator_contract_fingerprint() + "\n",
             )
 
+    def test_verifiers_lock_must_match_the_manifest_harbor_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            verifiers = Path(directory)
+            (verifiers / "uv.lock").write_text(
+                """version = 1
+revision = 3
+
+[[package]]
+name = "harbor"
+version = "0.0.0"
+"""
+            )
+            with self.assertRaisesRegex(ValueError, "Harbor version"):
+                prepare.validate_verifiers_lock(self.manifest, verifiers)
+
     def test_validate_manifest_rejects_changed_limits(self):
         manifest = copy.deepcopy(self.manifest)
         manifest["limits"]["max_turns"] += 1
         with self.assertRaisesRegex(ValueError, "unsupported Short SWE manifest"):
+            prepare.validate_manifest(manifest)
+
+    def test_validate_manifest_rejects_changed_image_filtering(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["tasksets"][2]["filter_unavailable_images"] = True
+        with self.assertRaisesRegex(ValueError, "image filtering"):
             prepare.validate_manifest(manifest)
 
     def test_validate_manifest_rejects_duplicate_task_keys(self):

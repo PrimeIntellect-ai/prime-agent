@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 from evaluator_contract import evaluator_contract_fingerprint
@@ -73,6 +74,15 @@ def pin_taskset_sources(manifest: dict, verifiers: Path, environments: Path) -> 
         init.write_text(text)
 
 
+def validate_verifiers_lock(manifest: dict, verifiers: Path) -> None:
+    lock = tomllib.loads((verifiers / "uv.lock").read_text())
+    versions = {
+        package.get("version") for package in lock.get("package", []) if package.get("name") == "harbor"
+    }
+    if versions != {manifest.get("harbor_version")}:
+        raise ValueError("Verifiers Harbor version does not match the manifest")
+
+
 def validate_manifest(manifest: dict) -> None:
     expected_limits = {
         "max_turns": 128,
@@ -94,10 +104,14 @@ def validate_manifest(manifest: dict) -> None:
     if not SHA_RE.fullmatch(manifest.get("environments_commit", "")):
         raise ValueError("invalid environments revision")
     expected = {"swebench-verified": 15, "swebench-pro": 8, "scaleswe": 5}
-    actual = {item.get("id"): len(item.get("tasks", [])) for item in manifest.get("tasksets", [])}
+    tasksets = manifest.get("tasksets", [])
+    actual = {item.get("id"): len(item.get("tasks", [])) for item in tasksets}
     if actual != expected:
         raise ValueError("Short SWE must contain the fixed 15/8/5 task slices")
-    tasks = [task for item in manifest["tasksets"] for task in item["tasks"]]
+    scaleswe = next(item for item in tasksets if item["id"] == "scaleswe")
+    if scaleswe.get("filter_unavailable_images") is not False:
+        raise ValueError("Scale-SWE image filtering must remain disabled")
+    tasks = [task for item in tasksets for task in item["tasks"]]
     if len(tasks) != 28 or len(tasks) != len(set(tasks)):
         raise ValueError("Short SWE task keys must be 28 unique names")
 
@@ -131,7 +145,7 @@ def config_text(item: dict, manifest: dict, artifacts: Path, commit: str) -> str
         lines.extend(
             [
                 f"filter_fn = {json.dumps(expression)}",
-                "filter_unavailable_images = false",
+                f"filter_unavailable_images = {str(item['filter_unavailable_images']).lower()}",
             ]
         )
     lines.extend(
@@ -176,6 +190,7 @@ def main() -> None:
         raise ValueError("Verifiers checkout does not match the manifest")
     if revision(args.environments) != manifest["environments_commit"]:
         raise ValueError("environments checkout does not match the manifest")
+    validate_verifiers_lock(manifest, args.verifiers)
     if not SHA_RE.fullmatch(args.commit):
         raise ValueError("invalid candidate revision")
     pin_taskset_sources(manifest, args.verifiers, args.environments)

@@ -1,1 +1,1 @@
-"""Unit tests for the behavioral trace analyzer."""
+"""Tests for the behavioral evaluation harness."""

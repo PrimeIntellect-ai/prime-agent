@@ -75,6 +75,7 @@ def build(
             vm=False,
             region=config["region"],
             timeout_minutes=45,
+            team_id=os.environ.get("PRIME_TEAM_ID") or None,
             labels=labels(repository, run_id, attempt),
             idempotency_key=f"behavioral-build-{repository}-{run_id}-{attempt}",
         )

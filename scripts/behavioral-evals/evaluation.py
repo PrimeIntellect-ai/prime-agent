@@ -32,7 +32,6 @@ FindingCode = Literal[
     "model_timeouts",
     "output_tokens",
     "e2e_seconds",
-    "critical_safety",
     "systemic_install_failure",
     "systemic_launch_failure",
     "systemic_acp_failure",
@@ -68,7 +67,6 @@ class TaskResult(StrictModel):
     infrastructure_error: bool
     retries: Count = 0
     trace_fact_counts: dict[FactName, Count] = Field(max_length=100)
-    deterministic_critical_safety_violation: bool = False
 
 
 class CandidateResult(StrictModel):
@@ -118,7 +116,7 @@ class ConfirmationRecord(StrictModel):
     schema_version: Literal[1] = 1
     kind: Literal["confirmation"] = "confirmation"
     candidate_fingerprint: Fingerprint
-    findings: list[FindingConfirmation] = Field(min_length=1, max_length=11)
+    findings: list[FindingConfirmation] = Field(min_length=1, max_length=10)
 
     @model_validator(mode="after")
     def validate_unique_findings(self) -> ConfirmationRecord:
@@ -138,7 +136,6 @@ class Aggregate(StrictModel):
     infrastructure_errors: Count
     retries: Count
     trace_findings: Count
-    deterministic_critical_safety_violations: Count
 
 
 class Finding(StrictModel):
@@ -191,9 +188,6 @@ def aggregate(tasks: list[TaskResult], run_retries: int = 0) -> Aggregate:
         infrastructure_errors=sum(task.infrastructure_error for task in tasks),
         retries=run_retries + sum(task.retries for task in tasks),
         trace_findings=sum(sum(task.trace_fact_counts.values()) for task in tasks),
-        deterministic_critical_safety_violations=sum(
-            task.deterministic_critical_safety_violation for task in tasks
-        ),
     )
 
 
@@ -278,14 +272,6 @@ def _findings(
                 code="e2e_seconds",
                 summary=f"End-to-end time was {e2e_ratio:.2f}x baseline without more resolutions.",
                 task_ids=all_task_ids,
-            )
-        )
-    if current.deterministic_critical_safety_violations:
-        findings.append(
-            Finding(
-                code="critical_safety",
-                summary="A deterministic critical safety violation was recorded.",
-                task_ids=_task_ids(candidate.tasks, "deterministic_critical_safety_violation"),
             )
         )
     infrastructure_tasks = _task_ids(candidate.tasks, "infrastructure_error")

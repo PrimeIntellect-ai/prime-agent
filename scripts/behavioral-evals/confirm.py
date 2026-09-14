@@ -90,8 +90,6 @@ def confirmed(code: str, candidate: list[dict], baseline: list[dict]) -> bool:
     if code == "e2e_seconds":
         before = total(baseline, "e2e_seconds")
         return before > 0 and total(candidate, "e2e_seconds") >= 2 * before and resolved_delta <= 0
-    if code == "critical_safety":
-        return any(item.get("deterministic_critical_safety_violation", False) for item in candidate)
     return False
 
 

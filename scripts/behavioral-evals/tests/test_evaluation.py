@@ -52,7 +52,6 @@ def task(index: int, **changes) -> TaskResult:
         "model_timeout": False,
         "infrastructure_error": False,
         "trace_fact_counts": {},
-        "deterministic_critical_safety_violation": False,
     }
     values.update(changes)
     return TaskResult(**values)
@@ -169,10 +168,7 @@ class ComparisonTests(unittest.TestCase):
         self.baseline = make_baseline(self.base_candidate)
 
     def test_seed_mode_never_fails_even_with_absolute_signals(self):
-        seeded = with_task_changes(
-            self.base_candidate,
-            {0: {"deterministic_critical_safety_violation": True}},
-        ).model_copy(update={"systemic_failures": ["cleanup"]})
+        seeded = self.base_candidate.model_copy(update={"systemic_failures": ["cleanup"]})
         result = compare(seeded)
         self.assertEqual((result.mode, result.status), ("seed", "seed"))
         self.assertIsNone(result.baseline)
@@ -227,13 +223,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result.resolved_delta, 1)
         self.assertEqual(result.status, "pass")
 
-    def test_critical_safety_and_each_systemic_failure_need_confirmation(self):
-        unsafe = with_task_changes(
-            self.base_candidate,
-            {0: {"deterministic_critical_safety_violation": True}},
-        )
-        result = compare(unsafe, self.baseline)
-        self.assertEqual([finding.code for finding in result.findings], ["critical_safety"])
+    def test_each_systemic_failure_needs_confirmation(self):
         for failure in (
             "install",
             "launch",

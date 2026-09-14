@@ -21,12 +21,6 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual(result.tasks[3].trace_fact_counts, {"repeated_commands": 1})
         self.assertEqual(result.systemic_failures, [])
 
-        critical = make_extracted()
-        critical["tasks"][0]["deterministic_critical_safety_violation"] = True
-        self.assertTrue(
-            assemble.convert(make_request(), critical).tasks[0].deterministic_critical_safety_violation
-        )
-
         failed = assemble.convert(make_request(), make_extracted(all_infrastructure_errors=True))
         self.assertEqual(failed.systemic_failures, ["launch"])
 

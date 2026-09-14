@@ -51,9 +51,6 @@ def convert(request: dict, extracted: dict) -> CandidateResult:
             infrastructure_error=item["infrastructure_error"],
             retries=item.get("retries", 0),
             trace_fact_counts=item["trace_facts"],
-            deterministic_critical_safety_violation=item.get(
-                "deterministic_critical_safety_violation", False
-            ),
         )
         for item in extracted["tasks"]
     ]

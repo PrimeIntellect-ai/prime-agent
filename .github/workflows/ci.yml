@@ -165,6 +165,7 @@ jobs:
           cd scripts/behavioral-evals
           uv run --locked --project ../benchmarks python -m unittest -v \
             tests.test_assemble \
+            tests.test_build_controller \
             tests.test_ci \
             tests.test_cleanup \
             tests.test_confirm \
