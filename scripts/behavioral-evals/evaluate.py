@@ -174,6 +174,24 @@ def tool_result_event(message: dict) -> dict:
     }
 
 
+def active_branch_nodes(trace: dict) -> list[dict]:
+    """Return the ancestry that produced the final committed model response."""
+    nodes = trace.get("nodes") or []
+    calls = trace.get("calls") or []
+    node_id = calls[-1].get("node") if calls else None
+    if not isinstance(node_id, int) or isinstance(node_id, bool) or not 0 <= node_id < len(nodes):
+        return nodes
+    path = []
+    seen = set()
+    while node_id is not None:
+        if node_id in seen or not isinstance(node_id, int) or not 0 <= node_id < len(nodes):
+            raise ValueError("invalid trace node ancestry")
+        seen.add(node_id)
+        path.append(nodes[node_id])
+        node_id = nodes[node_id].get("parent")
+    return list(reversed(path))
+
+
 def analyzer_input(trace: dict) -> dict:
     events = []
     advertised = [item.get("name") for item in trace.get("tools", []) if item.get("name")]
@@ -322,11 +340,16 @@ def trace_record(episode: dict, taskset: str) -> dict:
         infrastructure = True
     usage = usage_tokens(trace)
     facts = analyze_trace(analyzer_input(trace), ANALYZER_LIMITS)
-    meta = facts.get("meta") if isinstance(facts.get("meta"), dict) else {}
-    unanswered = int(meta.get("unanswered_calls") or 0)
+    active_facts = analyze_trace(
+        analyzer_input({**trace, "nodes": active_branch_nodes(trace)}), ANALYZER_LIMITS
+    )
+    active_meta = active_facts.get("meta") if isinstance(active_facts.get("meta"), dict) else {}
+    unanswered = int(active_meta.get("unanswered_calls") or 0)
     limit_stop = trace.get("stop_condition") in FRAMEWORK_LIMIT_STOPS
     deadline_timeout = rollout_deadline_timeout(trace)
-    integrity_issues = analyzer_integrity_issues(facts, allow_unanswered=limit_stop or deadline_timeout)
+    integrity_issues = analyzer_integrity_issues(facts, allow_unanswered=True)
+    if not (limit_stop or deadline_timeout):
+        integrity_issues += unanswered
     fact_counts = {
         key: value["count"]
         for key, value in facts.items()

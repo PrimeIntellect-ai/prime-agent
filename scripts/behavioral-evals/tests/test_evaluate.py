@@ -184,6 +184,48 @@ class TraceConversionTests(unittest.TestCase):
             ],
         )
 
+    def test_active_branch_excludes_abandoned_tool_call_forks(self):
+        trace = {
+            "tools": [{"name": "ipython"}],
+            "nodes": [
+                {"parent": None, "sampled": False, "message": {"role": "user", "content": "go"}},
+                {
+                    "parent": 0,
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "abandoned", "name": "ipython", "arguments": {}}],
+                    },
+                },
+                {
+                    "parent": 0,
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "active", "name": "ipython", "arguments": {}}],
+                    },
+                },
+                {
+                    "parent": 2,
+                    "sampled": False,
+                    "message": {"role": "tool", "tool_call_id": "active", "content": "done"},
+                },
+                {
+                    "parent": 3,
+                    "sampled": True,
+                    "message": {"role": "assistant", "content": "finished"},
+                },
+            ],
+            "calls": [{"node": 1}, {"node": 4}],
+        }
+        full = evaluate.analyze_trace(evaluate.analyzer_input(trace), evaluate.ANALYZER_LIMITS)
+        active = evaluate.analyze_trace(
+            evaluate.analyzer_input({**trace, "nodes": evaluate.active_branch_nodes(trace)}),
+            evaluate.ANALYZER_LIMITS,
+        )
+        self.assertEqual(full["meta"]["unanswered_calls"], 1)
+        self.assertEqual(active["meta"]["unanswered_calls"], 0)
+
     def test_analyzer_ignores_replayed_context_without_losing_late_results(self):
         trace = {
             "nodes": [
