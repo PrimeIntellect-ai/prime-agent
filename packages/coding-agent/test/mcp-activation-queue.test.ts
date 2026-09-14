@@ -908,6 +908,18 @@ describe("ENG-6108 guarded credential commit", () => {
 			} as unknown as ProviderAuthFlowsHost["modelRegistry"],
 			showStatus: (message: string) => showStatus(message),
 			showError: vi.fn(),
+			// #2331 inline-auth surface: the route host must mount auth panels
+			// inline; tracked like overlays so the test can inspect them.
+			showAuthPanel: (component: Component) => {
+				routeOverlays.push(component);
+				return () => {
+					const index = routeOverlays.lastIndexOf(component);
+					if (index !== -1) {
+						routeOverlays.splice(index, 1);
+					}
+				};
+			},
+			getAuthPanelRows: () => 24,
 			getAvailableModels: async () => [],
 			onMcpAccountLogout: (providerId) =>
 				(
