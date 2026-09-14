@@ -176,6 +176,8 @@ Options:
   --extension <source>    Update one package only
   --force                 Reinstall ${APP_NAME} even if the current version is latest
   --rollback              Restore the previous compiled release
+  --beta                  Switch updates to the beta channel (unreleased builds, may be broken)
+  --stable                Return updates to the stable channel
   --daemon-socket <path>  Restart the daemon listening on this exact socket
 
 Commands:
@@ -468,6 +470,22 @@ interface SelfUpdatePlan {
 	shouldRun: boolean;
 	targetVersion?: string;
 	command?: SelfUpdateCommand;
+	/** The requested channel could not be resolved; nothing was installed and nothing should be persisted. */
+	unavailable?: boolean;
+}
+
+/** A cancelled or refused self-update: the interactive parent must not relaunch, a shell caller gets a failure. */
+function setSelfUpdateAbortedExitCode(): void {
+	process.exitCode = process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : 1;
+}
+
+function betaReleaseUnavailablePlan(): SelfUpdatePlan {
+	console.error(
+		chalk.red(
+			"Could not resolve a beta release from the release manifest. Nothing was installed and the update channel was not changed.",
+		),
+	);
+	return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false, unavailable: true };
 }
 
 function setSelfUpdateNoChangeExitCode(): void {
@@ -484,6 +502,8 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 	if (rollback) throw new Error("Rollback is only available for managed compiled installations.");
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION, { channel });
+		// The registry default resolves to the stable package, so a missing beta manifest must not fall through to it.
+		if (!latestRelease && channel === "beta") return betaReleaseUnavailablePlan();
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
 		const installSpec = latestRelease?.installSpec ?? packageName;
 		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
@@ -496,6 +516,7 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}
 	} catch {
+		if (channel === "beta") return betaReleaseUnavailablePlan();
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
 	}
 
@@ -1598,6 +1619,30 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 
 			case "update": {
 				const target = options.updateTarget ?? { type: "all" };
+				const includesSelf = updateTargetIncludesSelf(target);
+				const persistedChannel = settingsManager.getUpdateChannel();
+				// Warn and confirm before any update work so declining changes nothing, not even extensions.
+				if (includesSelf && options.channel === "beta" && persistedChannel !== "beta") {
+					console.log(
+						chalk.yellow(
+							`Beta releases are unreleased ${APP_NAME} builds. They can be broken, and a broken update can leave ${APP_NAME} unusable until you roll back or reinstall.`,
+						),
+					);
+					if (!options.force) {
+						if (!process.stdin.isTTY) {
+							console.error(
+								chalk.red("Switching to the beta channel needs confirmation. Re-run with --force to proceed."),
+							);
+							setSelfUpdateAbortedExitCode();
+							return true;
+						}
+						if (!(await promptYesNo("Switch to the beta channel and continue with the update?"))) {
+							console.log(chalk.dim("Update cancelled. Nothing was changed."));
+							setSelfUpdateAbortedExitCode();
+							return true;
+						}
+					}
+				}
 				if (updateTargetIncludesExtensions(target)) {
 					const updateSource = target.type === "extensions" ? target.source : undefined;
 					await packageManager.update(updateSource);
@@ -1607,37 +1652,21 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						console.log(chalk.green("Updated packages"));
 					}
 				}
-				if (updateTargetIncludesSelf(target)) {
-					if (options.channel === "beta" && settingsManager.getUpdateChannel() !== "beta") {
-						console.log(
-							chalk.yellow(
-								`Beta releases are unreleased ${APP_NAME} builds. They can be broken, and a broken update can leave ${APP_NAME} unusable until you roll back or reinstall.`,
-							),
-						);
-						if (!options.force) {
-							if (!process.stdin.isTTY) {
-								console.error(
-									chalk.red(
-										"Switching to the beta channel needs confirmation. Re-run with --force to proceed.",
-									),
-								);
-								process.exitCode = 1;
-								return true;
-							}
-							if (!(await promptYesNo("Switch to the beta channel and continue with the update?"))) {
-								console.log(chalk.dim("Update cancelled. The update channel was not changed."));
-								process.exitCode = 1;
-								return true;
-							}
+				if (includesSelf) {
+					const updateChannel = options.channel ?? persistedChannel;
+					const commitChannel = () => {
+						if (options.channel && options.channel !== persistedChannel) {
+							settingsManager.setUpdateChannel(options.channel);
+							console.log(chalk.dim(`Updates now follow the ${options.channel} channel.`));
 						}
-					}
-					if (options.channel) {
-						settingsManager.setUpdateChannel(options.channel);
-						console.log(chalk.dim(`Updates now follow the ${options.channel} channel.`));
-					}
-					const updateChannel = options.channel ?? settingsManager.getUpdateChannel();
+					};
 					const selfUpdatePlan = await getSelfUpdatePlan(options.force, options.rollback, updateChannel);
+					if (selfUpdatePlan.unavailable) {
+						setSelfUpdateAbortedExitCode();
+						return true;
+					}
 					if (!selfUpdatePlan.shouldRun) {
+						commitChannel();
 						setSelfUpdateNoChangeExitCode();
 						return true;
 					}
@@ -1665,9 +1694,10 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						if (process.stdin.isTTY) {
 							console.log(chalk.dim("Update cancelled."));
 						}
-						process.exitCode = 1;
+						setSelfUpdateAbortedExitCode();
 						return true;
 					}
+					commitChannel();
 					try {
 						await runSelfUpdate(selfUpdateCommand);
 					} catch (error: unknown) {

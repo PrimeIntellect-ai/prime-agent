@@ -150,6 +150,40 @@ describe("package commands", () => {
 		}
 	});
 
+	it("rejects combining --beta and --stable", async () => {
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(main(["update", "--beta", "--stable"])).resolves.toBeUndefined();
+
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("--beta and --stable cannot be combined");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("refuses to switch to the beta channel without a TTY or --force and changes nothing", async () => {
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		try {
+			await expect(main(["update", "--beta"])).resolves.toBeUndefined();
+
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("Switching to the beta channel needs confirmation");
+			expect(process.exitCode).toBe(1);
+			const settingsPath = join(agentDir, "settings.json");
+			if (existsSync(settingsPath)) {
+				expect(JSON.parse(readFileSync(settingsPath, "utf8")).updateChannel).toBeUndefined();
+			}
+		} finally {
+			errorSpy.mockRestore();
+			logSpy.mockRestore();
+		}
+	});
+
 	it("treats -l as an unknown option for package update", async () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
