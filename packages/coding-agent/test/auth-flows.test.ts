@@ -234,17 +234,17 @@ describe("ProviderAuthFlows", () => {
 			expires: Date.now() + 3600_000,
 			endpoint: "https://mcp.acme.test/mcp",
 		});
-		const { host, overlays, statusMessages, errorMessages } = createHost(authStorage);
+		const { host, panels, statusMessages, errorMessages } = createHost(authStorage);
 		const logout = vi.spyOn(authStorage, "logout");
 		const delegated = vi.fn(async () => "removed" as McpRemoveAccountResult);
 		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = delegated;
 
 		const logoutResult = new ProviderAuthFlows(host).runLogout();
-		expect(overlays).toHaveLength(1);
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
 		for (const char of "acme-2") {
-			overlays[0]?.handleInput?.(char);
+			panels[0]?.handleInput?.(char);
 		}
-		overlays[0]?.handleInput?.("\r");
+		panels[0]?.handleInput?.("\r");
 		await expect(logoutResult).resolves.toBe("mcp:acme-2");
 		// The route never touched auth directly for the MCP id: the host-owned
 		// critical section (store->auth) did everything.
@@ -263,17 +263,17 @@ describe("ProviderAuthFlows", () => {
 			expires: Date.now() + 3600_000,
 			endpoint: "https://mcp.acme.test/mcp",
 		});
-		const { host, overlays, statusMessages, errorMessages } = createHost(authStorage);
+		const { host, panels, statusMessages, errorMessages } = createHost(authStorage);
 		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = vi.fn(
 			async () => "failed" as McpRemoveAccountResult,
 		);
 
 		const logoutResult = new ProviderAuthFlows(host).runLogout();
-		expect(overlays).toHaveLength(1);
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
 		for (const char of "acme-2") {
-			overlays[0]?.handleInput?.(char);
+			panels[0]?.handleInput?.(char);
 		}
-		overlays[0]?.handleInput?.("\r");
+		panels[0]?.handleInput?.("\r");
 		await expect(logoutResult).resolves.toBeNull();
 		expect(errorMessages.join("\n")).toContain("Logout failed");
 		expect(statusMessages.join("\n")).not.toContain("Logged out of acme-2");
@@ -288,17 +288,17 @@ describe("ProviderAuthFlows", () => {
 			expires: Date.now() + 3600_000,
 			endpoint: "https://mcp.acme.test/mcp",
 		});
-		const { host, overlays, statusMessages } = createHost(authStorage);
+		const { host, panels, statusMessages } = createHost(authStorage);
 		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = vi.fn(
 			async () => "logged-out" as McpRemoveAccountResult,
 		);
 
 		const logoutResult = new ProviderAuthFlows(host).runLogout();
-		expect(overlays).toHaveLength(1);
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
 		for (const char of "acme-2") {
-			overlays[0]?.handleInput?.(char);
+			panels[0]?.handleInput?.(char);
 		}
-		overlays[0]?.handleInput?.("\r");
+		panels[0]?.handleInput?.("\r");
 		await expect(logoutResult).resolves.toBe("mcp:acme-2");
 		expect(statusMessages.join("\n")).toContain("Logged out of acme-2");
 		expect(statusMessages.join("\n")).toContain("could not be saved");
@@ -373,17 +373,17 @@ describe("ProviderAuthFlows", () => {
 			expires: Date.now() + 3600_000,
 			endpoint: "https://mcp.acme.test/mcp",
 		});
-		const { host, overlays, statusMessages } = createHost(authStorage);
+		const { host, panels, statusMessages } = createHost(authStorage);
 		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = vi.fn(
 			async () => "refused" as McpRemoveAccountResult,
 		);
 
 		const logoutResult = new ProviderAuthFlows(host).runLogout();
-		expect(overlays).toHaveLength(1);
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
 		for (const char of "acme-2") {
-			overlays[0]?.handleInput?.(char);
+			panels[0]?.handleInput?.(char);
 		}
-		overlays[0]?.handleInput?.("\r");
+		panels[0]?.handleInput?.("\r");
 		await expect(logoutResult).resolves.toBe("mcp:acme-2--attempt-1");
 		const messages = statusMessages.join("\n");
 		// State-neutral: no success claim, no Connected claim from token presence.
@@ -396,17 +396,17 @@ describe("ProviderAuthFlows", () => {
 	it("non-MCP logouts stay unchanged: the route removes them directly", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
 		authStorage.set("anthropic", { type: "api_key", key: "sk-ant-test" });
-		const { host, overlays, statusMessages } = createHost(authStorage);
+		const { host, panels, statusMessages } = createHost(authStorage);
 		const delegated = vi.fn(async () => "removed" as McpRemoveAccountResult);
 		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = delegated;
 		const logout = vi.spyOn(authStorage, "logout");
 
 		const logoutResult = new ProviderAuthFlows(host).runLogout();
-		expect(overlays).toHaveLength(1);
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
 		for (const char of "anthropic") {
-			overlays[0]?.handleInput?.(char);
+			panels[0]?.handleInput?.(char);
 		}
-		overlays[0]?.handleInput?.("\r");
+		panels[0]?.handleInput?.("\r");
 		await expect(logoutResult).resolves.toBe("anthropic");
 		expect(delegated).not.toHaveBeenCalled();
 		expect(logout).toHaveBeenCalledWith("anthropic");
