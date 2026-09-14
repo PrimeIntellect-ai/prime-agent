@@ -5,7 +5,6 @@ import {
 	type HttpOptions,
 	ResourceScope,
 	type ThinkingConfig,
-	ThinkingLevel,
 } from "@google/genai";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
@@ -13,7 +12,6 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
-	ThinkingLevel as PiThinkingLevel,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -28,15 +26,19 @@ import {
 	recordStreamFailure,
 	streamFailureFromStopReason,
 } from "../utils/stream-failure.js";
-import type { GoogleThinkingLevel } from "./google-shared.js";
+import type { ClampedThinkingLevel, GoogleThinkingLevel } from "./google-shared.js";
 import {
 	convertMessages,
 	convertTools,
+	getDisabledThinkingConfig,
 	getGoogleThinkingBudget,
+	getGoogleThinkingLevel,
+	isGeminiThinkingLevelModel,
 	isThinkingPart,
 	mapStopReason,
 	mapToolChoice,
 	retainThoughtSignature,
+	THINKING_LEVEL_MAP,
 } from "./google-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
@@ -53,14 +55,6 @@ export interface GoogleVertexOptions extends StreamOptions {
 
 const API_VERSION = "v1";
 const GCP_VERTEX_CREDENTIALS_MARKER = "gcp-vertex-credentials";
-
-const THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, ThinkingLevel> = {
-	THINKING_LEVEL_UNSPECIFIED: ThinkingLevel.THINKING_LEVEL_UNSPECIFIED,
-	MINIMAL: ThinkingLevel.MINIMAL,
-	LOW: ThinkingLevel.LOW,
-	MEDIUM: ThinkingLevel.MEDIUM,
-	HIGH: ThinkingLevel.HIGH,
-};
 
 let toolCallCounter = 0;
 
@@ -314,14 +308,13 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
 	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
-	const geminiModel = model as unknown as Model<"google-generative-ai">;
 
-	if (isGemini3ProModel(geminiModel) || isGemini3FlashModel(geminiModel)) {
+	if (isGeminiThinkingLevelModel(model)) {
 		return streamGoogleVertex(model, context, {
 			...base,
 			thinking: {
 				enabled: true,
-				level: getGemini3ThinkingLevel(effort, geminiModel),
+				level: getGoogleThinkingLevel(effort, model),
 			},
 		} satisfies GoogleVertexOptions);
 	}
@@ -330,7 +323,7 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 		...base,
 		thinking: {
 			enabled: true,
-			budgetTokens: getGoogleThinkingBudget(geminiModel.id, effort, options.thinkingBudgets),
+			budgetTokens: getGoogleThinkingBudget(model.id, effort, options.thinkingBudgets),
 		},
 	} satisfies GoogleVertexOptions);
 };
@@ -488,56 +481,4 @@ function buildParams(
 	};
 
 	return params;
-}
-
-type ClampedThinkingLevel = Exclude<PiThinkingLevel, "xhigh" | "max">;
-
-function isGemini3ProModel(model: Model<"google-generative-ai">): boolean {
-	return /gemini-3(?:\.\d+)?-pro/.test(model.id.toLowerCase());
-}
-
-function isGemini3FlashModel(model: Model<"google-generative-ai">): boolean {
-	return /gemini-3(?:\.\d+)?-flash/.test(model.id.toLowerCase());
-}
-
-function getDisabledThinkingConfig(model: Model<"google-vertex">): ThinkingConfig {
-	// Google docs: Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite
-	// do not support full thinking-off either. For Gemini 3 models, use the lowest supported
-	// thinkingLevel without includeThoughts so hidden thinking remains invisible to pi.
-	const geminiModel = model as unknown as Model<"google-generative-ai">;
-	if (isGemini3ProModel(geminiModel)) {
-		return { thinkingLevel: ThinkingLevel.LOW };
-	}
-	if (isGemini3FlashModel(geminiModel)) {
-		return { thinkingLevel: ThinkingLevel.MINIMAL };
-	}
-
-	// Gemini 2.x supports disabling via thinkingBudget = 0.
-	return { thinkingBudget: 0 };
-}
-
-function getGemini3ThinkingLevel(
-	effort: ClampedThinkingLevel,
-	model: Model<"google-generative-ai">,
-): GoogleThinkingLevel {
-	if (isGemini3ProModel(model)) {
-		switch (effort) {
-			case "minimal":
-			case "low":
-				return "LOW";
-			case "medium":
-			case "high":
-				return "HIGH";
-		}
-	}
-	switch (effort) {
-		case "minimal":
-			return "MINIMAL";
-		case "low":
-			return "LOW";
-		case "medium":
-			return "MEDIUM";
-		case "high":
-			return "HIGH";
-	}
 }

@@ -1,0 +1,1 @@
+- Fixed Google Vertex and Google AI thinking level mapping and conversation replay for Gemini 3 Flash, Flash-Lite, and Pro models.

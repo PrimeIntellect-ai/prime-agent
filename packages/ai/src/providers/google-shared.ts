@@ -1,7 +1,24 @@
 /** Shared utilities for Google Generative AI and Vertex providers. */
 
-import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.js";
+import {
+	type Content,
+	FinishReason,
+	FunctionCallingConfigMode,
+	type Part,
+	type ThinkingConfig,
+	ThinkingLevel,
+} from "@google/genai";
+import type {
+	Api,
+	Context,
+	ImageContent,
+	Model,
+	ThinkingLevel as PiThinkingLevel,
+	StopReason,
+	TextContent,
+	ThinkingBudgets,
+	Tool,
+} from "../types.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -9,6 +26,16 @@ type GoogleApiType = "google-generative-ai" | "google-vertex";
 
 /** Thinking level values accepted by Gemini 3 models. */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+
+export type ClampedThinkingLevel = Exclude<PiThinkingLevel, "xhigh" | "max">;
+
+export const THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, ThinkingLevel> = {
+	THINKING_LEVEL_UNSPECIFIED: ThinkingLevel.THINKING_LEVEL_UNSPECIFIED,
+	MINIMAL: ThinkingLevel.MINIMAL,
+	LOW: ThinkingLevel.LOW,
+	MEDIUM: ThinkingLevel.MEDIUM,
+	HIGH: ThinkingLevel.HIGH,
+};
 
 type GoogleBudgetThinkingLevel = "minimal" | "low" | "medium" | "high";
 
@@ -88,10 +115,87 @@ export function requiresToolCallId(modelId: string): boolean {
 	return modelId.startsWith("claude-") || modelId.startsWith("gpt-oss-");
 }
 
-function getGeminiMajorVersion(modelId: string): number | undefined {
-	const match = modelId.toLowerCase().match(/^gemini(?:-live)?-(\d+)/);
+export function getGeminiMajorVersion(modelId: string): number | undefined {
+	const match = modelId.toLowerCase().match(/(?:^|\/|models\/)gemini(?:-live)?-(\d+)/);
 	if (!match) return undefined;
 	return Number.parseInt(match[1], 10);
+}
+
+export function isGemini3ProModel(model: Pick<Model<Api>, "id">): boolean {
+	return /gemini-3(?:\.\d+)?-pro/.test(model.id.toLowerCase());
+}
+
+export function isGemini3FlashModel(model: Pick<Model<Api>, "id">): boolean {
+	return /gemini-3(?:\.\d+)?-flash(?!-lite)/.test(model.id.toLowerCase());
+}
+
+export function isGemini3FlashLiteModel(model: Pick<Model<Api>, "id">): boolean {
+	return /gemini-3(?:\.\d+)?-flash-lite/.test(model.id.toLowerCase());
+}
+
+export function isGemma4Model(model: Pick<Model<Api>, "id">): boolean {
+	return /gemma-?4/.test(model.id.toLowerCase());
+}
+
+export function isGeminiThinkingLevelModel(model: Pick<Model<Api>, "id">): boolean {
+	return (getGeminiMajorVersion(model.id) ?? 0) >= 3 || isGemma4Model(model);
+}
+
+export function getDisabledThinkingConfig(model: Pick<Model<Api>, "id">): ThinkingConfig {
+	if (isGemini3FlashLiteModel(model) || isGemma4Model(model)) {
+		return { thinkingLevel: ThinkingLevel.MINIMAL };
+	}
+	if ((getGeminiMajorVersion(model.id) ?? 0) >= 3) {
+		return { thinkingLevel: ThinkingLevel.LOW };
+	}
+	return { thinkingBudget: 0 };
+}
+
+export function getGoogleThinkingLevel(
+	effort: ClampedThinkingLevel,
+	model: Pick<Model<Api>, "id">,
+): GoogleThinkingLevel {
+	if (isGemini3ProModel(model)) {
+		switch (effort) {
+			case "minimal":
+			case "low":
+				return "LOW";
+			case "medium":
+			case "high":
+				return "HIGH";
+		}
+	}
+	if (isGemini3FlashModel(model)) {
+		switch (effort) {
+			case "minimal":
+			case "low":
+				return "LOW";
+			case "medium":
+				return "MEDIUM";
+			case "high":
+				return "HIGH";
+		}
+	}
+	if (isGemma4Model(model)) {
+		switch (effort) {
+			case "minimal":
+			case "low":
+				return "MINIMAL";
+			case "medium":
+			case "high":
+				return "HIGH";
+		}
+	}
+	switch (effort) {
+		case "minimal":
+			return "MINIMAL";
+		case "low":
+			return "LOW";
+		case "medium":
+			return "MEDIUM";
+		case "high":
+			return "HIGH";
+	}
 }
 
 function supportsMultimodalFunctionResponse(modelId: string): boolean {
@@ -114,30 +218,27 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
-			if (typeof msg.content === "string") {
-				contents.push({
-					role: "user",
-					parts: [{ text: sanitizeSurrogates(msg.content) }],
-				});
-			} else {
-				const parts: Part[] = msg.content.map((item) => {
-					if (item.type === "text") {
-						return { text: sanitizeSurrogates(item.text) };
-					} else {
-						return {
-							inlineData: {
-								mimeType: item.mimeType,
-								data: item.data,
-							},
-						};
-					}
-				});
-				if (parts.length === 0) continue;
-				contents.push({
-					role: "user",
-					parts,
-				});
-			}
+			const parts: Part[] =
+				typeof msg.content === "string"
+					? [{ text: sanitizeSurrogates(msg.content) }]
+					: msg.content.map((item) => {
+							if (item.type === "text") {
+								return { text: sanitizeSurrogates(item.text) };
+							} else {
+								return {
+									inlineData: {
+										mimeType: item.mimeType,
+										data: item.data,
+									},
+								};
+							}
+						});
+			if (parts.length === 0) continue;
+
+			contents.push({
+				role: "user",
+				parts,
+			});
 		} else if (msg.role === "assistant") {
 			const parts: Part[] = [];
 			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
@@ -181,6 +282,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			}
 
 			if (parts.length === 0) continue;
+
 			contents.push({
 				role: "model",
 				parts,

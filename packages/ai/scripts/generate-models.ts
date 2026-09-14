@@ -247,7 +247,11 @@ function isGemini3ProModel(modelId: string): boolean {
 }
 
 function isGemini3FlashModel(modelId: string): boolean {
-	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
+	return /gemini-3(?:\.\d+)?-flash(?!-lite)/.test(modelId.toLowerCase());
+}
+
+function isGemini3FlashLiteModel(modelId: string): boolean {
+	return /gemini-3(?:\.\d+)?-flash-lite/.test(modelId.toLowerCase());
 }
 
 function isGemma4Model(modelId: string): boolean {
@@ -323,6 +327,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" });
 	}
 	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
+		mergeThinkingLevelMap(model, { off: null, minimal: null });
+	}
+	if (isGoogleThinkingApi(model) && isGemini3FlashLiteModel(model.id)) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
