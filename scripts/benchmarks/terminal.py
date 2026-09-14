@@ -126,6 +126,13 @@ class Terminal:
         while time.perf_counter() < deadline:
             self.pump()
 
+    def until(self, predicate: Callable[[Display], bool], seconds: float) -> None:
+        deadline = time.perf_counter() + seconds
+        while not predicate(self.display):
+            if time.perf_counter() >= deadline:
+                raise TimeoutError("Timed out waiting for terminal display")
+            self.pump()
+
     def ready(self, seconds: float = 30) -> float:
         deadline = time.perf_counter() + seconds
         probes: list[str] = []

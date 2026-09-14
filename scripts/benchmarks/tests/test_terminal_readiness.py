@@ -127,6 +127,18 @@ class ReadinessTests(unittest.TestCase):
         patch("terminal.secrets.token_hex", side_effect=(f"{i:08x}" for i in range(1000))).start()
         return terminal, child, clock
 
+    def test_until_pumps_until_the_display_matches(self):
+        terminal, editor, clock = self.launch()
+        editor.schedule(clock.now + 0.03, "target")
+        terminal.until(lambda display: "target" in display.text(), 0.1)
+        self.assertIn("target", terminal.display.text())
+
+    def test_until_times_out_when_the_display_never_matches(self):
+        terminal, _, clock = self.launch()
+        with self.assertRaisesRegex(TimeoutError, "terminal display"):
+            terminal.until(lambda display: "missing" in display.text(), 0.1)
+        self.assertLess(clock.now - 4.0, 0.11)
+
     def test_changed_absent_and_stale_labels_do_not_gate_input(self):
         for label in ("agents/resume", "manage", "sessions / continue", "", "benchready"):
             with self.subTest(label=label):
