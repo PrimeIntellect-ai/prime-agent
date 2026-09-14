@@ -10,6 +10,9 @@ import build_controller
 
 
 class BuildControllerTests(unittest.TestCase):
+    def test_build_command_respects_the_production_api_timeout_limit(self):
+        self.assertEqual(build_controller.MAX_COMMAND_TIMEOUT_SECONDS, 900)
+
     def test_builder_sandbox_uses_the_configured_team(self):
         with (
             tempfile.TemporaryDirectory() as directory,

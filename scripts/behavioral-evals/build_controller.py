@@ -27,6 +27,7 @@ EXPECTED = {
     f"prime-agent-tui-{VERSION}.tgz",
 }
 MAX_ARTIFACT_BYTES = 20_000_000
+MAX_COMMAND_TIMEOUT_SECONDS = 900
 
 
 def labels(repository: str, run_id: int, attempt: int) -> list[str]:
@@ -101,7 +102,7 @@ def build(
                 sha,
             ]
         )
-        result = client.execute_command(sandbox.id, command, timeout=1800)
+        result = client.execute_command(sandbox.id, command, timeout=MAX_COMMAND_TIMEOUT_SECONDS)
         client.execute_command(sandbox.id, "pkill -KILL -u builder || true", timeout=30)
         output.mkdir(parents=True, exist_ok=True)
         tail = client.execute_command(
