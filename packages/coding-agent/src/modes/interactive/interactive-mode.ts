@@ -433,6 +433,8 @@ export interface BrandSplashHeaderOptions {
 	topPadding?: boolean;
 	getModelId?: () => string | undefined;
 	getExtraMetadata?: () => readonly BrandSplashMetadataLine[];
+	/** Suppress the header entirely, e.g. while inline onboarding owns the top rows. */
+	getHidden?: () => boolean;
 }
 
 export class BrandSplashHeader implements Component {
@@ -455,6 +457,9 @@ export class BrandSplashHeader implements Component {
 	}
 
 	render(width: number): string[] {
+		if (this.options.getHidden?.()) {
+			return [];
+		}
 		const safeWidth = Math.max(1, width);
 		const paddingX = safeWidth > 1 ? 1 : 0;
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
@@ -1116,6 +1121,9 @@ export class InteractiveMode {
 
 	private builtInHeader: Component | undefined = undefined;
 
+	/** True while the inline onboarding block owns the top rows (header stays hidden). */
+	private onboardingUiActive = false;
+
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private getLocalSessionHost(): InteractiveModeLocalSessionHost {
@@ -1476,6 +1484,7 @@ export class InteractiveMode {
 			this.builtInHeader = new BrandSplashHeader(this.version, () => this.getCurrentCwd(), verboseInstructions, {
 				topPadding: true,
 				getModelId: () => this.getCurrentModelId(),
+				getHidden: () => this.onboardingUiActive,
 			});
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
@@ -8826,6 +8835,8 @@ export class InteractiveMode {
 				dismissed = true;
 				selector?.dispose();
 				handle?.hide();
+				this.onboardingUiActive = false;
+				this.builtInHeader?.invalidate();
 				this.ui.requestRender();
 			};
 			selector = new PrimeOnboardingSplashComponent(
@@ -8846,6 +8857,11 @@ export class InteractiveMode {
 					...(continueActionLabel ? { continueActionLabel } : {}),
 				},
 			);
+			// Inline block: anchored top-left and only as tall as its own content, so
+			// the editor and footer stay visible. The brand header hides while it is
+			// mounted so the two marks never stack.
+			this.onboardingUiActive = true;
+			this.builtInHeader?.invalidate();
 			handle = this.ui.showOverlay(selector, {
 				width: "100%",
 				maxHeight: "100%",

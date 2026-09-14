@@ -4,7 +4,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { PrimeOnboardingSplashComponent } from "../src/modes/interactive/components/prime-onboarding-splash.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
-import { PRIME_BUTTERFLY_LOGO } from "../src/themes/prime-logo.js";
+import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../src/themes/prime-logo.js";
+
+const logoLines = PRIME_COMPACT_BUTTERFLY_LOGO.split("\n");
+const firstLogoLine = logoLines[0]?.trim() ?? "";
 
 describe("PrimeOnboardingSplashComponent", () => {
 	beforeAll(() => {
@@ -19,50 +22,108 @@ describe("PrimeOnboardingSplashComponent", () => {
 		vi.useRealTimers();
 	});
 
-	it("renders a minimal first-run login action", () => {
+	it("renders the brand mark with the welcome line beneath it", () => {
 		const component = new PrimeOnboardingSplashComponent(
 			() => {},
 			() => {},
 			{ getRows: () => 36 },
 		);
 		const lines = component.render(100);
-		const output = stripAnsi(lines.join("\n"));
+		const rendered = lines.map((line) => stripAnsi(line));
+		const output = rendered.join("\n");
 
-		expect(lines).toHaveLength(36);
+		expect(output).toContain(firstLogoLine);
 		expect(output).toContain("Welcome to PRIME Agent");
-		expect(output).toContain("Press Enter to login with Prime Intellect");
-		expect(output).toContain("·");
-		expect(output).not.toContain("prime agent");
-		expect(output).not.toContain("Research and infrastructure assistant for high-context work.");
-		expect(output).not.toContain("• Inspect logs, evals, training runs, and environments.");
-		expect(output).not.toContain("• Keep context alive in Python state and artifacts.");
-		expect(output).not.toContain("• Delegate focused work through recursive RLM calls.");
-		expect(output).not.toContain("long-context coding tasks");
-		expect(output).not.toContain("Login with Prime Intellect");
-		expect(output).not.toContain("████▀▀▀██▄");
-		expect(output).not.toContain("Get Started");
-		expect(output).not.toContain("One account for models, inference, and coding sessions.");
-		expect(output).not.toContain("Choose your model and start building.");
-		expect(output).not.toContain("╭───╮");
-		expect(output).not.toContain("PRIME INTELLECT");
-		expect(output).not.toContain("cancel");
-		expect(output).not.toContain("A coding agent connected to Prime Intellect.");
-		expect(output).not.toContain("Continue with Prime Intellect");
-		expect(output).not.toContain("Use one account for managed inference, model access, and usage.");
-		expect(output).not.toContain("/* BUILD */");
-		expect(output).not.toContain("/* EVALUATE */");
-		expect(output).not.toContain("/* TRAIN */");
-		expect(output).not.toContain("/* DEPLOY */");
-		expect(output).not.toContain("required for first-time setup");
-		expect(output).not.toContain("Start with your Prime Intellect account.");
-		expect(output).not.toContain("Log in with Prime Intellect");
-		expect(output).not.toContain("→");
-		expect(output).not.toContain("Use a subscription");
-		expect(output).not.toContain("Use an API key");
-		expect(output).toContain(PRIME_BUTTERFLY_LOGO.split("\n")[0].trim());
+		expect(output).toContain("Log in with Prime Intellect");
+		expect(output).toContain("Continue later");
+
+		const lastLogoRow = rendered.findIndex((line) => line.includes(logoLines[logoLines.length - 1]?.trim() ?? ""));
+		const brandRow = rendered.findIndex((line) => line.includes("Welcome to PRIME Agent"));
+		const actionRow = rendered.findIndex((line) => line.includes("Log in with Prime Intellect"));
+		expect(brandRow).toBeGreaterThan(lastLogoRow);
+		expect(actionRow).toBeGreaterThan(brandRow);
+	});
+
+	it("sizes to its content, and covers the pane when a row count is given", () => {
+		const compact = new PrimeOnboardingSplashComponent(
+			() => {},
+			() => {},
+			{},
+		);
+		expect(compact.render(100).length).toBeLessThanOrEqual(logoLines.length + 6);
+
+		const covering = new PrimeOnboardingSplashComponent(
+			() => {},
+			() => {},
+			{ getRows: () => 40 },
+		);
+		const lines = covering.render(100);
+		expect(lines).toHaveLength(40);
 		for (const line of lines) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(100);
+			expect(visibleWidth(line)).toBe(100);
 		}
+	});
+
+	it("left aligns the mark, the welcome line and the actions", () => {
+		const component = new PrimeOnboardingSplashComponent(
+			() => {},
+			() => {},
+			{ getRows: () => 40 },
+		);
+		const rendered = component.render(100).map((line) => stripAnsi(line));
+		const output = rendered.join("\n");
+
+		expect(output).not.toContain("Enter");
+		expect(output).not.toContain("Esc");
+
+		const brandLine = rendered.find((line) => line.includes("Welcome to PRIME Agent"));
+		const actionLine = rendered.find((line) => line.includes("Log in with Prime Intellect"));
+		const laterLine = rendered.find((line) => line.includes("Continue later"));
+		// One shared left edge for the welcome line and both action labels.
+		expect(brandLine?.indexOf("Welcome")).toBe(actionLine?.indexOf(">"));
+		expect(laterLine?.indexOf("Continue")).toBe(actionLine?.indexOf("Log") ?? 0);
+		// Everything hugs the left edge; only the animated field spans the pane.
+		expect(brandLine?.search(/\S/)).toBeLessThanOrEqual(2);
+		// The mark is indented a little further right than the text column, but is
+		// still left aligned rather than centred (the field spans the pane, so the
+		// mark's own glyphs pin its position rather than leading whitespace).
+		const wingGlyphs = "\u259f\u2588\u2588\u2599";
+		const markLine = rendered.find((line) => line.includes(wingGlyphs));
+		expect(markLine).toBeDefined();
+		const markColumn = markLine?.indexOf(wingGlyphs) ?? -1;
+		expect(markColumn).toBeGreaterThan(brandLine?.search(/\S/) ?? 0);
+		expect(markColumn).toBeLessThanOrEqual(16);
+	});
+
+	it("marks the active action with a caret and a selection background", () => {
+		const component = new PrimeOnboardingSplashComponent(
+			() => {},
+			() => {},
+			{ getRows: () => 36 },
+		);
+		const lines = component.render(100);
+		const selected = lines.find((line) => stripAnsi(line).includes("Log in with Prime Intellect"));
+		const unselected = lines.find((line) => stripAnsi(line).includes("Continue later"));
+
+		expect(stripAnsi(selected ?? "")).toContain("> Log in with Prime Intellect");
+		expect(stripAnsi(unselected ?? "")).not.toContain(">");
+		expect(selected ?? "").toMatch(/\x1b\[(4[0-9]|10[0-7]|48[;:])/);
+		expect(unselected ?? "").not.toMatch(/\x1b\[(4[0-9]|10[0-7]|48[;:])/);
+	});
+
+	it("moves the selection background with the arrow keys", () => {
+		const component = new PrimeOnboardingSplashComponent(
+			() => {},
+			() => {},
+			{ getRows: () => 36 },
+		);
+
+		component.handleInput("\x1b[B");
+		const lines = component.render(100);
+		const later = lines.find((line) => stripAnsi(line).includes("Continue later"));
+
+		expect(stripAnsi(later ?? "")).toContain("> Continue later");
+		expect(later ?? "").toMatch(/\x1b\[(4[0-9]|10[0-7]|48[;:])/);
 	});
 
 	it("starts Prime login on confirm", () => {
@@ -79,6 +140,27 @@ describe("PrimeOnboardingSplashComponent", () => {
 		expect(selected).toBe(true);
 	});
 
+	it("continues later when the second action is confirmed", () => {
+		const onSelect = vi.fn();
+		const onCancel = vi.fn();
+		const component = new PrimeOnboardingSplashComponent(onSelect, onCancel);
+
+		component.handleInput("\x1b[B");
+		component.handleInput("\r");
+
+		expect(onSelect).not.toHaveBeenCalled();
+		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
+	it("continues later on cancel", () => {
+		const onCancel = vi.fn();
+		const component = new PrimeOnboardingSplashComponent(() => {}, onCancel);
+
+		component.handleInput("\x1b");
+
+		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
 	it("renders a model selection action when auth is already available", () => {
 		const component = new PrimeOnboardingSplashComponent(
 			() => {},
@@ -87,8 +169,9 @@ describe("PrimeOnboardingSplashComponent", () => {
 		);
 		const output = stripAnsi(component.render(100).join("\n"));
 
-		expect(output).toContain("Press Enter to choose a model");
-		expect(output).not.toContain("Press Enter to login with Prime Intellect");
+		expect(output).toContain("Choose a model");
+		expect(output).not.toContain("Log in with Prime Intellect");
+		expect(output).toContain("Continue later");
 	});
 
 	it("shows progress and ignores input while onboarding advances", () => {
@@ -102,12 +185,12 @@ describe("PrimeOnboardingSplashComponent", () => {
 
 		const output = stripAnsi(component.render(100).join("\n"));
 		expect(output).toContain("Preparing models...");
-		expect(output).not.toContain("Press Enter");
+		expect(output).not.toContain("Continue later");
 		expect(onSelect).not.toHaveBeenCalled();
 		expect(onCancel).not.toHaveBeenCalled();
 	});
 
-	it("animates the splash at an interactive cadence", () => {
+	it("animates the mark at an interactive cadence", () => {
 		vi.useFakeTimers();
 		let renderRequests = 0;
 		const component = new PrimeOnboardingSplashComponent(
@@ -130,22 +213,5 @@ describe("PrimeOnboardingSplashComponent", () => {
 		expect(renderRequests).toBe(3);
 		expect(secondRender).not.toBe(firstRender);
 		expect(secondRender).toContain("Welcome to PRIME Agent");
-		expect(secondRender).toContain("Press Enter to login with Prime Intellect");
-	});
-
-	it("centers stacked content in narrow terminals", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 40 },
-		);
-		const rendered = component.render(60).map((line) => stripAnsi(line));
-		const logoLine = rendered.find((line) => line.includes(PRIME_BUTTERFLY_LOGO.split("\n")[0].trim()));
-		const brandLine = rendered.find((line) => line.includes("Welcome to PRIME Agent"));
-		const hintLine = rendered.find((line) => line.includes("Press Enter to login with Prime Intellect"));
-
-		expect(logoLine?.search(/\S/)).toBeGreaterThan(0);
-		expect(brandLine?.search(/\S/)).toBeGreaterThan(0);
-		expect(hintLine?.search(/\S/)).toBeGreaterThan(0);
 	});
 });

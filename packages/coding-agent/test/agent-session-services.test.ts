@@ -64,6 +64,7 @@ describe("createAgentSessionFromServices", () => {
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
 		const settingsManager = SettingsManager.inMemory();
+		settingsManager.setOnboardingShown(true);
 
 		const services = await createAgentSessionServices({
 			cwd: tempDir,
@@ -77,6 +78,30 @@ describe("createAgentSessionFromServices", () => {
 			expect.objectContaining({ type: "info", message: expect.stringContaining("pseudonymous usage") }),
 		);
 		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
+	});
+
+	it("defers the telemetry disclosure on the first launch", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		const tempDir = join(tmpdir(), `pi-session-telemetry-first-run-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		// A settings profile that has never seen onboarding: the notice would land
+		// on the welcome screen, so it waits for the next launch.
+		const settingsManager = SettingsManager.inMemory();
+
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			settingsManager,
+			noBuiltinHerdrReporter: true,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+
+		expect(services.diagnostics).not.toContainEqual(
+			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
+		);
+		expect(settingsManager.getTelemetryNoticeShown()).toBe(false);
 	});
 
 	it("honors an explicit daemon-carried telemetry opt-out", async () => {

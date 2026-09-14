@@ -186,6 +186,9 @@ export async function createAgentSessionServices(
 	if (
 		!options.telemetryDisabled &&
 		isTelemetryEnabled(settingsManager) &&
+		// The first launch belongs to onboarding: the notice would land on the
+		// welcome screen. Leave it unshown so it surfaces on the next launch.
+		settingsManager.getOnboardingShown() &&
 		!settingsManager.getTelemetryNoticeShown()
 	) {
 		diagnostics.push({
