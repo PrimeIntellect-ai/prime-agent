@@ -203,7 +203,16 @@ def observed_branch_nodes(trace: dict) -> list[dict]:
         message = node.get("message") or node
         if message.get("role") == "tool":
             retain_ancestry(node_id)
-    return [node for node_id, node in enumerate(nodes) if node_id in retained]
+    ordered = sorted(retained)
+    remapped = {node_id: index for index, node_id in enumerate(ordered)}
+    result = []
+    for node_id in ordered:
+        node = dict(nodes[node_id])
+        parent = node.get("parent")
+        if parent is not None:
+            node["parent"] = remapped[parent]
+        result.append(node)
+    return result
 
 
 def analyzer_input(trace: dict) -> dict:
@@ -212,12 +221,42 @@ def analyzer_input(trace: dict) -> dict:
     nodes = trace.get("nodes", [])
     result_by_call = {}
     result_by_node = {}
+    sampled_pending: dict[str, int] = {}
+    unsampled_pending: dict[str, int] = {}
     for index, node in enumerate(nodes):
         message = node.get("message") or node
+        if message.get("role") == "assistant":
+            pending = unsampled_pending if node.get("sampled") is False else sampled_pending
+            for call in message.get("tool_calls") or []:
+                call_id = call.get("id")
+                if isinstance(call_id, str):
+                    pending[call_id] = pending.get(call_id, 0) + 1
+            continue
         if message.get("role") != "tool":
             continue
         result = tool_result_event(message)
-        previous = result_by_call.get(result["call_id"])
+        call_id = result["call_id"]
+        parent = node.get("parent")
+        if isinstance(parent, int) and not isinstance(parent, bool) and 0 <= parent < len(nodes):
+            parent_node = nodes[parent]
+            parent_message = parent_node.get("message") or parent_node
+            parent_calls = {call.get("id") for call in parent_message.get("tool_calls") or []}
+            if parent_message.get("role") == "assistant" and call_id in parent_calls:
+                parent_pending = unsampled_pending if parent_node.get("sampled") is False else sampled_pending
+                parent_pending[call_id] = max(parent_pending.get(call_id, 1) - 1, 0)
+                if parent_node.get("sampled") is False:
+                    continue
+            elif sampled_pending.get(call_id, 0):
+                sampled_pending[call_id] -= 1
+            elif unsampled_pending.get(call_id, 0):
+                unsampled_pending[call_id] -= 1
+                continue
+        elif sampled_pending.get(call_id, 0):
+            sampled_pending[call_id] -= 1
+        elif unsampled_pending.get(call_id, 0):
+            unsampled_pending[call_id] -= 1
+            continue
+        previous = result_by_call.get(call_id)
         if previous is None:
             result_by_call[result["call_id"]] = result
             result_by_node[index] = result
@@ -285,11 +324,11 @@ def failure_stage(trace: dict) -> str | None:
         f"{item.get('type', '')} {item.get('message', '')}" for item in errors if isinstance(item, dict)
     ).lower()
     stages = (
+        ("cleanup", ("cleanup", "finalize")),
         ("acp", ("acp", "agent client protocol")),
         ("cpython", ("cpython", "ipython", "kernel bootstrap", "kernel process")),
         ("install", ("install", "npm", "bootstrap")),
         ("launch", ("provision", "launch", "sandbox", "connect rpc")),
-        ("cleanup", ("cleanup", "finalize")),
     )
     for stage, markers in stages:
         if any(marker in detail for marker in markers):
@@ -311,11 +350,16 @@ def rollout_deadline_timeout(trace: dict) -> bool:
 
 def error_flags(trace: dict) -> tuple[bool, bool]:
     errors = trace.get("errors") or []
-    detail = " ".join(
-        f"{item.get('type', '')} {item.get('message', '')}" for item in errors if isinstance(item, dict)
-    ).lower()
     calls = len(trace.get("calls") or [])
-    timeout = calls > 0 and any(word in detail for word in ("timeout", "timed out", "nontermination"))
+    timeout = False
+    if calls > 0:
+        for error in errors:
+            if not isinstance(error, dict) or failure_stage({"errors": [error]}) == "cleanup":
+                continue
+            detail = f"{error.get('type', '')} {error.get('message', '')}".lower()
+            if any(word in detail for word in ("timeout", "timed out", "nontermination")):
+                timeout = True
+                break
     infrastructure = bool(errors) and calls == 0
     return timeout, infrastructure
 

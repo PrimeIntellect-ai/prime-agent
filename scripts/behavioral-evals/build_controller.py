@@ -27,7 +27,13 @@ EXPECTED = {
     f"prime-agent-tui-{VERSION}.tgz",
 }
 MAX_ARTIFACT_BYTES = 20_000_000
-MAX_COMMAND_TIMEOUT_SECONDS = 900
+BUILD_SANDBOX_TIMEOUT_MINUTES = 120
+PROVISION_TIMEOUT_SECONDS = 300
+SETUP_TIMEOUT_SECONDS = 180
+MAX_BUILD_SECONDS = 4_800
+CONTROL_COMMAND_TIMEOUT_SECONDS = 30
+COMMAND_TIMEOUT_LIMIT_SECONDS = 900
+BUILD_POLL_SECONDS = 10
 
 
 def labels(repository: str, run_id: int, attempt: int) -> list[str]:
@@ -40,7 +46,11 @@ def labels(repository: str, run_id: int, attempt: int) -> list[str]:
     ]
 
 
-def wait_running(client: SandboxClient, sandbox_id: str, timeout: int = 300) -> None:
+def wait_running(
+    client: SandboxClient,
+    sandbox_id: str,
+    timeout: int = PROVISION_TIMEOUT_SECONDS,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = client.get(sandbox_id).status
@@ -50,6 +60,43 @@ def wait_running(client: SandboxClient, sandbox_id: str, timeout: int = 300) -> 
             raise RuntimeError("candidate build sandbox failed during provisioning")
         time.sleep(2)
     raise TimeoutError("candidate build sandbox provisioning timed out")
+
+
+def run_builder(client: SandboxClient, sandbox_id: str, command: str) -> int:
+    results = f"{REMOTE}/results"
+    exit_path = f"{results}/build.exit"
+    controller_log = f"{results}/controller.log"
+    script = f"{command}; code=$?; printf '%s\\n' \"$code\" > {exit_path}.tmp; mv {exit_path}.tmp {exit_path}"
+    deadline = time.monotonic() + MAX_BUILD_SECONDS
+    start = client.execute_command(
+        sandbox_id,
+        f"mkdir -p {results}; rm -f {exit_path} {exit_path}.tmp; "
+        f"nohup sh -c {shlex.quote(script)} > {controller_log} 2>&1 </dev/null &",
+        timeout=CONTROL_COMMAND_TIMEOUT_SECONDS,
+    )
+    if start.exit_code:
+        raise RuntimeError("candidate release build could not start")
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 124
+        status = client.execute_command(
+            sandbox_id,
+            f"if test -f {exit_path}; then cat {exit_path}; else echo running; fi",
+            timeout=min(CONTROL_COMMAND_TIMEOUT_SECONDS, max(1, int(remaining))),
+        )
+        if status.exit_code:
+            raise RuntimeError("candidate release build status check failed")
+        value = status.stdout.strip()
+        if value != "running":
+            if not re.fullmatch(r"[0-9]{1,3}", value):
+                raise RuntimeError("candidate release build returned an invalid status")
+            return int(value)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 124
+        time.sleep(min(BUILD_POLL_SECONDS, remaining))
 
 
 def build(
@@ -75,7 +122,7 @@ def build(
             disk_size_gb=config["disk_gb"],
             vm=False,
             region=config["region"],
-            timeout_minutes=45,
+            timeout_minutes=BUILD_SANDBOX_TIMEOUT_MINUTES,
             team_id=os.environ.get("PRIME_TEAM_ID") or None,
             labels=labels(repository, run_id, attempt),
             idempotency_key=f"behavioral-build-{repository}-{run_id}-{attempt}",
@@ -88,7 +135,7 @@ def build(
             "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git util-linux; "
             f"mkdir -p {REMOTE}; useradd --create-home --uid 1500 --shell /bin/bash builder"
         )
-        result = client.execute_command(sandbox.id, setup, timeout=180)
+        result = client.execute_command(sandbox.id, setup, timeout=SETUP_TIMEOUT_SECONDS)
         if result.exit_code:
             raise RuntimeError("candidate build sandbox setup failed")
         client.upload_file(sandbox.id, f"{REMOTE}/builder.py", str(ROOT / "builder.py"))
@@ -102,13 +149,19 @@ def build(
                 sha,
             ]
         )
-        result = client.execute_command(sandbox.id, command, timeout=MAX_COMMAND_TIMEOUT_SECONDS)
-        client.execute_command(sandbox.id, "pkill -KILL -u builder || true", timeout=30)
+        exit_code = run_builder(client, sandbox.id, command)
+        client.execute_command(
+            sandbox.id,
+            "pkill -KILL -u builder || true",
+            timeout=CONTROL_COMMAND_TIMEOUT_SECONDS,
+        )
         output.mkdir(parents=True, exist_ok=True)
         tail = client.execute_command(
             sandbox.id,
-            f"tail -c 1000000 -- {REMOTE}/results/build.log > {REMOTE}/results/build-tail.log",
-            timeout=30,
+            f"(tail -c 900000 -- {REMOTE}/results/build.log 2>/dev/null || true; "
+            f"tail -c 100000 -- {REMOTE}/results/controller.log 2>/dev/null || true) "
+            f"> {REMOTE}/results/build-tail.log",
+            timeout=CONTROL_COMMAND_TIMEOUT_SECONDS,
         )
         if tail.exit_code == 0:
             client.download_file(
@@ -116,7 +169,7 @@ def build(
                 f"{REMOTE}/results/build-tail.log",
                 str(output / "build.log"),
             )
-        if result.exit_code:
+        if exit_code:
             raise RuntimeError("candidate release build failed; see the build log artifact")
         client.download_file(
             sandbox.id,

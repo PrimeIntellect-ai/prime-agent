@@ -296,6 +296,74 @@ class TraceConversionTests(unittest.TestCase):
         )
         self.assertEqual(evaluate.tool_call_count(trace), 2)
 
+    def test_analyzer_ignores_unsampled_prefix_results_but_preserves_orphans(self):
+        trace = {
+            "nodes": [
+                {
+                    "sampled": False,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "example", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {
+                    "parent": 0,
+                    "message": {"role": "tool", "tool_call_id": "example", "content": "example result"},
+                },
+                {"message": {"role": "tool", "tool_call_id": "example", "content": "later orphan"}},
+                {"message": {"role": "tool", "tool_call_id": "orphan", "content": "lost call"}},
+            ]
+        }
+
+        results = [
+            event["call_id"]
+            for event in evaluate.analyzer_input(trace)["events"]
+            if event["type"] == "tool_result"
+        ]
+
+        self.assertEqual(results, ["example", "orphan"])
+
+    def test_observed_branches_remap_parents_for_unsampled_result_pairing(self):
+        trace = {
+            "nodes": [
+                {"parent": None, "sampled": False, "message": {"role": "user", "content": "go"}},
+                {
+                    "parent": 0,
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "shared", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {"parent": 0, "sampled": True, "message": {"role": "assistant", "content": "abandoned"}},
+                {
+                    "parent": 1,
+                    "sampled": False,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "shared", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {
+                    "parent": 3,
+                    "sampled": False,
+                    "message": {"role": "tool", "tool_call_id": "shared", "content": "replayed"},
+                },
+                {"parent": 4, "sampled": True, "message": {"role": "assistant", "content": "done"}},
+            ],
+            "calls": [{"node": 2}, {"node": 5}],
+        }
+
+        observed = evaluate.observed_branch_nodes(trace)
+        results = [
+            event
+            for event in evaluate.analyzer_input({**trace, "nodes": observed})["events"]
+            if event["type"] == "tool_result"
+        ]
+
+        self.assertEqual([node["parent"] for node in observed], [None, 0, 1, 2, 3])
+        self.assertEqual(results, [])
+
     def test_analyzer_keeps_duplicate_sampled_call_ids_visible(self):
         trace = {
             "nodes": [
@@ -420,6 +488,35 @@ class TraceConversionTests(unittest.TestCase):
         self.assertFalse(record["resolved"])
         self.assertEqual(record["trace_facts"]["pending_calls_at_timeout"], 1)
         self.assertNotIn("trace_integrity_issues", record["trace_facts"])
+
+    def test_cleanup_timeout_is_not_counted_as_a_model_timeout(self):
+        trace = {
+            "calls": [{}],
+            "errors": [{"type": "SandboxError", "message": "sandbox cleanup timed out"}],
+        }
+
+        timeout, infrastructure = evaluate.error_flags(trace)
+
+        self.assertEqual(evaluate.failure_stage(trace), "cleanup")
+        self.assertFalse(timeout)
+        self.assertFalse(infrastructure)
+
+    def test_cleanup_timeout_does_not_hide_a_rollout_timeout(self):
+        trace = {
+            "calls": [{}],
+            "errors": [
+                {
+                    "type": "HarnessError",
+                    "message": "agent timeout: rollout exceeded its 3600s budget",
+                },
+                {"type": "SandboxError", "message": "sandbox cleanup timed out"},
+            ],
+        }
+
+        timeout, infrastructure = evaluate.error_flags(trace)
+
+        self.assertTrue(timeout)
+        self.assertFalse(infrastructure)
 
     def test_trace_record_marks_errors_before_any_model_call_as_infrastructure(self):
         episode = {
