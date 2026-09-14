@@ -890,14 +890,15 @@ describe("ENG-6108 guarded credential commit", () => {
 			unfocus: vi.fn(),
 			isFocused: () => true,
 		});
+		const routeShowOverlay = vi.fn((component: Component) => {
+			routeOverlays.push(component);
+			return overlayHandle();
+		});
 		const routeHost: ProviderAuthFlowsHost = {
 			ui: {
 				terminal: { columns: 80, rows: 24 },
 				requestRender: vi.fn(),
-				showOverlay: vi.fn((component: Component) => {
-					routeOverlays.push(component);
-					return overlayHandle();
-				}),
+				showOverlay: routeShowOverlay,
 			} as unknown as TUI,
 			modelRegistry: {
 				authStorage: clientB,
@@ -950,6 +951,9 @@ describe("ENG-6108 guarded credential commit", () => {
 		};
 		await callAddAccount(fake);
 		await routePromise;
+		// #2331 inline-auth surface: the route mounted its selector through
+		// showAuthPanel (tracked in routeOverlays), never an overlay popup.
+		expect(routeShowOverlay).not.toHaveBeenCalled();
 		// The route's logout is NEVER defeated: no credential at the account key.
 		const fresh = AuthStorage.create(authPath);
 		expect(fresh.get("mcp:acme-2")).toBeUndefined();
