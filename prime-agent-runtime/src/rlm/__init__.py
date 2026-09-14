@@ -486,7 +486,9 @@ __all__ = [
     "HarnessEntry",
     "HarnessScope",
     "HarnessState",
+    "McpIntegration",
     "McpToolError",
+    "NotEnabled",
     "RLMCreateSessionHandle",
     "RLMModel",
     "RLMSpawnHandle",
@@ -505,16 +507,16 @@ __all__ = [
     "spawn",
 ]
 
-# Lazily re-export the generic MCP error type. Kept lazy so `import rlm` never
-# requires the optional `mcp` SDK — only modules that call into it do.
-_LAZY_MCP = {"McpToolError"}
+# Lazily re-export the MCP base class. Kept lazy so `import rlm` never requires
+# the optional `mcp` SDK — only integration packages that subclass it do.
+_LAZY_MCP = {"McpIntegration", "McpToolError", "NotEnabled"}
 
 
 def __getattr__(name: str) -> Any:  # noqa: D401 - module-level lazy attr hook
     if name in _LAZY_MCP:
-        from . import mcp
+        from . import mcp_base
 
-        return getattr(mcp, name)
+        return getattr(mcp_base, name)
     if name == "run":
         raise AttributeError(_RENAMED_RUN_MESSAGE)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
