@@ -11,8 +11,13 @@ import { getLatestPiRelease, isReleaseUpdateCandidate, type UpdateChannel } from
 
 /** The release manifest for the requested channel could not be resolved; the installed version was kept. */
 export class NativeReleaseUnavailableError extends Error {
-	constructor() {
-		super("Could not resolve a compiled release. The installed version was kept.");
+	constructor(cause?: unknown) {
+		super(
+			cause instanceof Error
+				? `Could not resolve a compiled release: ${cause.message}. The installed version was kept.`
+				: "Could not resolve a compiled release. The installed version was kept.",
+			cause instanceof Error ? { cause } : undefined,
+		);
 		this.name = "NativeReleaseUnavailableError";
 	}
 }
@@ -73,7 +78,13 @@ export async function getNativeUpdatePlan(options: {
 		version = previous.version;
 		previousTarget = relative(join(installation.root, "bin"), previous.executable);
 	} else {
-		const release = await getLatestPiRelease(current.version, { baseUrl, channel: options.channel });
+		let release: Awaited<ReturnType<typeof getLatestPiRelease>>;
+		try {
+			release = await getLatestPiRelease(current.version, { baseUrl, channel: options.channel });
+		} catch (error) {
+			// Network, timeout, and malformed-manifest failures all mean the same thing here: nothing to install.
+			throw new NativeReleaseUnavailableError(error);
+		}
 		if (!release || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(release.version))
 			throw new NativeReleaseUnavailableError();
 		if (active && !options.force && !isReleaseUpdateCandidate(release.version, current.version, options.channel))

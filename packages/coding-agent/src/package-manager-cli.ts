@@ -1686,6 +1686,8 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 							selfUpdatePlan.packageName,
 						);
 					if (!selfUpdateCommand) {
+						// The channel switch was already confirmed; keep it even though this install must be updated by hand.
+						commitChannel();
 						printSelfUpdateUnavailable(
 							selfUpdateNpmCommand,
 							selfUpdatePlan.installSpec,
