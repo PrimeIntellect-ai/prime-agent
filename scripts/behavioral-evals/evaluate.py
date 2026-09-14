@@ -170,16 +170,24 @@ def tool_result_event(message: dict) -> dict:
 def analyzer_input(trace: dict) -> dict:
     events = []
     advertised = [item.get("name") for item in trace.get("tools", []) if item.get("name")]
+    nodes = trace.get("nodes", [])
     result_by_call = {}
-    for node in trace.get("nodes", []):
+    result_by_node = {}
+    for index, node in enumerate(nodes):
         message = node.get("message") or node
-        if message.get("role") == "tool":
-            result = tool_result_event(message)
+        if message.get("role") != "tool":
+            continue
+        result = tool_result_event(message)
+        previous = result_by_call.get(result["call_id"])
+        if previous is None:
             result_by_call[result["call_id"]] = result
-    for node in trace.get("nodes", []):
+            result_by_node[index] = result
+        elif result != previous:
+            result_by_node[index] = result
+    for index, node in enumerate(nodes):
         message = node.get("message") or node
         role = message.get("role")
-        if role == "assistant":
+        if role == "assistant" and node.get("sampled") is not False:
             text = message.get("content")
             if isinstance(text, str) and text:
                 events.append({"type": "message", "role": "assistant", "text": text})
@@ -205,8 +213,8 @@ def analyzer_input(trace: dict) -> dict:
                             result.get("exit_code"),
                         )
                     )
-        elif role == "tool":
-            events.append(tool_result_event(message))
+        elif role == "tool" and index in result_by_node:
+            events.append(result_by_node[index])
     supported = [
         *(advertised or ["cpython", "ipython"]),
         "cpython_bash",
@@ -265,6 +273,8 @@ def error_flags(trace: dict) -> tuple[bool, bool]:
 def tool_call_count(trace: dict) -> int:
     count = 0
     for node in trace.get("nodes", []):
+        if node.get("sampled") is False:
+            continue
         message = node.get("message") or node
         count += len(message.get("tool_calls") or [])
     return count

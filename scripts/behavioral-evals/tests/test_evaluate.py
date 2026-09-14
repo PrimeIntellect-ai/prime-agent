@@ -167,6 +167,82 @@ class TraceConversionTests(unittest.TestCase):
             ],
         )
 
+    def test_analyzer_ignores_replayed_context_without_losing_late_results(self):
+        trace = {
+            "nodes": [
+                {
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "first", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {"message": {"role": "tool", "tool_call_id": "first", "content": "one"}},
+                {
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "second", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {
+                    "sampled": False,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "first", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {"message": {"role": "tool", "tool_call_id": "first", "content": "one"}},
+                {
+                    "sampled": False,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "second", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {"message": {"role": "tool", "tool_call_id": "second", "content": "two"}},
+            ]
+        }
+
+        events = evaluate.analyzer_input(trace)["events"]
+
+        self.assertEqual(
+            [event.get("id") for event in events if event["type"] == "tool_call"],
+            ["first", "second"],
+        )
+        self.assertEqual(
+            [event.get("call_id") for event in events if event["type"] == "tool_result"],
+            ["first", "second"],
+        )
+        self.assertEqual(evaluate.tool_call_count(trace), 2)
+
+    def test_analyzer_keeps_duplicate_sampled_call_ids_visible(self):
+        trace = {
+            "nodes": [
+                {
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "shared", "name": "cpython", "arguments": {}}],
+                    },
+                },
+                {
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "shared", "name": "cpython", "arguments": {}}],
+                    },
+                },
+            ]
+        }
+
+        events = evaluate.analyzer_input(trace)["events"]
+
+        self.assertEqual(
+            [event.get("id") for event in events if event["type"] == "tool_call"],
+            ["shared", "shared"],
+        )
+
     def test_trace_record_rejects_analyzer_structural_loss(self):
         trace = {
             "task": {"data": {"name": "task-three"}},
