@@ -783,6 +783,17 @@ function primaryDeliveryRecord(action: QueuedSessionAction): DeliveryRecord {
 	return record;
 }
 
+function isCancellableExtensionTurn(action: QueuedSessionAction): action is SessionAction<PreparedTurnPayload> {
+	return (
+		action.payload.kind === "turn" &&
+		action.extensionDeliveryState === "cancellable" &&
+		(action.lifecycle.state === "queued" ||
+			action.lifecycle.state === "selected" ||
+			action.lifecycle.state === "preparing" ||
+			action.lifecycle.state === "committing")
+	);
+}
+
 function normalizeMessageContent(content: string | (TextContent | ImageContent)[]): {
 	text: string;
 	images?: ImageContent[];
@@ -2045,7 +2056,10 @@ export class AgentSession {
 				ticket.settleDelivered({ status: "not_applicable" });
 			}
 			ticket.settleCompleted(error);
-			const dispatched = previousStates.get(action.id) === "committing" && action.payload.kind === "turn";
+			const dispatched =
+				previousStates.get(action.id) === "committing" &&
+				action.payload.kind === "turn" &&
+				action.extensionDeliveryState !== "cancellable";
 			if (action.payload.kind === "turn") {
 				const payload = action.payload;
 				const restorable = payload.records
@@ -6092,6 +6106,8 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			extensionOwner?: object;
+			extensionDeliveryState?: "cancellable" | "delivering";
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -6145,6 +6161,8 @@ export class AgentSession {
 			payload,
 			lifecycle: { state: "queued" },
 			queueKey: options.queueKey,
+			extensionOwner: options.extensionOwner,
+			extensionDeliveryState: options.extensionDeliveryState,
 			agentMessageId: options.agentMessageId,
 			suppressAutonomousContinuation: options.suppressAutonomousContinuation,
 		};
@@ -6178,6 +6196,7 @@ export class AgentSession {
 			.find(
 				(candidate) =>
 					candidate.queueKey === action.queueKey &&
+					candidate.extensionOwner === action.extensionOwner &&
 					(candidate.lifecycle.state === "queued" ||
 						candidate.lifecycle.state === "selected" ||
 						candidate.lifecycle.state === "preparing"),
@@ -6697,16 +6716,12 @@ export class AgentSession {
 					);
 					const firstPrimaryIndex = turns[0].payload.records.indexOf(primaryDeliveryRecord(turns[0]));
 					turns[0].payload.records.splice(firstPrimaryIndex, 0, ...contextRecords);
-					const preparedMessages: AgentMessage[] = turns.flatMap((action) =>
-						action.payload.records.map((record) => record.message),
-					);
 					for (const action of turns) {
 						if (action.suppressAutonomousContinuation) {
 							this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 						}
 					}
 					if (executionPolicy.runBeforeAgentStart) {
-						this._appendBeforeAgentStartMessages(preparedMessages, prepared?.result);
 						this._applyPreparedSystemPrompt(prepared, executionPolicy.preserveEmptyExtensionPrompt);
 					} else if (executionPolicy.nextTurnContextTiming !== "skip") {
 						this.agent.state.systemPrompt = this._baseSystemPrompt;
@@ -6714,9 +6729,26 @@ export class AgentSession {
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
-					return turns.some((action) => action.suppressAutonomousContinuation)
-						? this._runWithAutonomousContinuationSuppressed(() => this.agent.prompt(preparedMessages))
-						: this.agent.prompt(preparedMessages);
+					// Extension follow-ups remain cancellable through the public committing
+					// checkpoint. Close only their private fence immediately before delivery.
+					// Delivery records retain their original message_start semantics.
+					const deliveringTurns = turns.filter((action) => action.lifecycle.state === "committing");
+					for (const action of deliveringTurns) {
+						if (action.extensionDeliveryState === "cancellable") {
+							action.extensionDeliveryState = "delivering";
+						}
+					}
+					const preparedMessages: AgentMessage[] = deliveringTurns.flatMap((action) =>
+						action.payload.records.map((record) => record.message),
+					);
+					if (executionPolicy.runBeforeAgentStart) {
+						this._appendBeforeAgentStartMessages(preparedMessages, prepared?.result);
+					}
+					if (deliveringTurns.length === 0) return Promise.resolve();
+					const runPrompt = () => this.agent.prompt(preparedMessages);
+					return deliveringTurns.some((action) => action.suppressAutonomousContinuation)
+						? this._runWithAutonomousContinuationSuppressed(runPrompt)
+						: runPrompt();
 				});
 			} finally {
 				commitFence.release();
@@ -6967,6 +6999,82 @@ export class AgentSession {
 			source: "extension",
 			resumeIfIdle: true,
 		});
+	}
+
+	async queueExtensionFollowUp(
+		owner: object,
+		key: string,
+		content: string | (TextContent | ImageContent)[],
+		options?: { signal?: AbortSignal },
+	): Promise<{ actionId: string; disposition: "starts_when_admitted" | "queued" | "coalesced" }> {
+		if (!key) throw new Error("Extension follow-up key must not be empty.");
+		throwIfPromptAdmissionCancelled(options?.signal);
+		const normalized = normalizeMessageContent(content);
+		const existing = this._actionStore
+			.unfinishedActions()
+			.find(
+				(action) =>
+					action.extensionOwner === owner &&
+					action.queueKey === key &&
+					action.delivery === "when_run_idle" &&
+					(action.lifecycle.state === "queued" ||
+						action.lifecycle.state === "selected" ||
+						action.lifecycle.state === "preparing"),
+			);
+		if (existing) return { actionId: existing.id, disposition: "coalesced" };
+		throwIfPromptAdmissionCancelled(options?.signal);
+		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+			content: typeof content === "string" ? undefined : content,
+			queueKey: key,
+			extensionOwner: owner,
+			extensionDeliveryState: "cancellable",
+			resumeIfIdle: true,
+			source: "extension",
+			queueVisible: true,
+		});
+		const result = this._admitSessionInput(action, {
+			immediatelyEligible: this._canStartSessionActionImmediately(),
+		});
+		if (!result.accepted || !result.ticket) {
+			const coalesced = this._coalescedFollowUpOwner(action);
+			if (!coalesced) throw new Error("Extension follow-up was not admitted.");
+			return { actionId: coalesced.id, disposition: "coalesced" };
+		}
+		if (options?.signal) {
+			const cancel = () => {
+				if (!isCancellableExtensionTurn(action)) return;
+				const error = new Error("Extension-owned follow-up was aborted before delivery.");
+				const removed = this._cancelSessionActions((candidate) => candidate === action, error, [action]);
+				if (removed.length > 0) this._emitQueueUpdate();
+			};
+			options.signal.addEventListener("abort", cancel, { once: true });
+			void result.ticket.completed.then(
+				() => options.signal?.removeEventListener("abort", cancel),
+				() => options.signal?.removeEventListener("abort", cancel),
+			);
+			if (options.signal.aborted) cancel();
+		}
+		return { actionId: action.id, disposition: result.disposition };
+	}
+	cancelExtensionFollowUp(owner: object, key?: string): boolean {
+		const matching = this._actionStore
+			.ownedActions()
+			.filter(
+				(action) =>
+					action.extensionOwner === owner &&
+					action.delivery === "when_run_idle" &&
+					(key === undefined || action.queueKey === key) &&
+					isCancellableExtensionTurn(action),
+			);
+		if (matching.length === 0) return false;
+		const ids = new Set(matching.map((action) => action.id));
+		this._cancelSessionActions(
+			(action) => ids.has(action.id),
+			new Error("Extension-owned follow-up was cancelled before delivery."),
+			matching,
+		);
+		this._emitQueueUpdate();
+		return true;
 	}
 
 	clearQueue(): { steering: string[]; followUp: string[] } {
@@ -9767,6 +9875,9 @@ export class AgentSession {
 						});
 					});
 				},
+				queueExtensionFollowUp: (owner, key, content, options) =>
+					this.queueExtensionFollowUp(owner, key, content, options),
+				cancelExtensionFollowUp: (owner, key) => this.cancelExtensionFollowUp(owner, key),
 				appendEntry: (customType, data) => {
 					this.sessionManager.appendCustomEntry(customType, data);
 				},
