@@ -139,14 +139,16 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(lines[1]).toContain("Search MCP connections");
 		expect(lines[2]).toBe("─".repeat(80));
 		expect(lines[3]).toMatch(/^› Acme\s+Connect$/);
-		expect(lines).toHaveLength(7);
-		expect(lines[5]).toContain("Selected detail");
-		expect(lines[6]).toContain("↑/↓ navigate");
-		expect(lines[6]).toContain("Enter connect");
+		// One fixed description line about the selected connector with the
+		// shortcuts underneath — no blank separator, no viewport-driven resize.
+		expect(lines).toHaveLength(6);
+		expect(lines[4]).toContain("Selected detail");
+		expect(lines[5]).toContain("↑/↓ navigate");
+		expect(lines[5]).toContain("Enter connect");
 	});
 
 	it.each([24, 40, 80, 120])(
-		"bounds Unicode rows/details at width %s and shrinks detail in short viewports",
+		"bounds Unicode rows at width %s and fits ultra-short viewports by dropping the description line",
 		(width) => {
 			let rows = 14;
 			const picker = new ServiceCatalogPickerComponent(
@@ -191,12 +193,14 @@ describe("ServiceCatalogPickerComponent", () => {
 			{ getRows: () => 14 },
 		);
 		picker.render(80);
+		// The fixed one-line description frees a row for the list, so a page
+		// step at 14 rows now moves by the full 8 visible items.
 		picker.handleInput("\x04");
 		picker.handleInput("\x19");
-		expect(selected).toEqual(["svc-7"]);
+		expect(selected).toEqual(["svc-8"]);
 		picker.handleInput("\x15");
 		picker.handleInput("\x19");
-		expect(selected).toEqual(["svc-7", "svc-0"]);
+		expect(selected).toEqual(["svc-8", "svc-0"]);
 		const output = stripAnsi(picker.render(80).join("\n"));
 		expect(output).toContain("Ctrl+Y connect");
 		expect(output).toContain("Ctrl+X close");
@@ -313,5 +317,135 @@ describe("ServiceCatalogPickerComponent", () => {
 			expect(output).toContain("Esc close");
 		}
 		expect(calls).toBe(0);
+	});
+
+	it("keeps a single selection and no duplicated rows when navigating up to the first row then down", () => {
+		const picker = new ServiceCatalogPickerComponent(
+			Array.from({ length: 77 }, (_, i) => viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` })),
+			() => {},
+			() => {},
+			{ getRows: () => 24 },
+		);
+		const renderState = () => {
+			const lines = picker.render(100).map(stripAnsi);
+			return {
+				selected: lines.filter((line) => line.includes("›")),
+				rows: lines.filter((line) => /Service \d/.test(line)).map((line) => (line.match(/Service \d+/) ?? [""])[0]),
+				counter: lines.find((line) => /\(\d+\/\d+\)/.test(line)),
+			};
+		};
+		// Up at the top boundary clamps at the first row without wrapping.
+		picker.handleInput("\x1b[A");
+		picker.handleInput("\x1b[A");
+		let state = renderState();
+		expect(state.selected).toHaveLength(1);
+		expect(new Set(state.rows).size).toBe(state.rows.length);
+		expect(state.rows[0]).toBe("Service 0");
+		expect(state.counter).toContain("(1/77)");
+		// Scrolling back down shifts the window forward one row per step: the
+		// first connector renders once and exactly one row stays selected.
+		for (let step = 0; step < 6; step++) picker.handleInput("\x1b[B");
+		state = renderState();
+		expect(state.selected).toHaveLength(1);
+		expect(new Set(state.rows).size).toBe(state.rows.length);
+		expect(state.counter).toContain("(7/77)");
+		// Returning to the boundary behaves the same on the way back up.
+		for (let step = 0; step < 8; step++) picker.handleInput("\x1b[A");
+		state = renderState();
+		expect(state.selected).toHaveLength(1);
+		expect(new Set(state.rows).size).toBe(state.rows.length);
+		expect(state.counter).toContain("(1/77)");
+	});
+
+	it("renders byte-identical frames while nothing changes", () => {
+		const picker = new ServiceCatalogPickerComponent(
+			Array.from({ length: 77 }, (_, i) => viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` })),
+			() => {},
+			() => {},
+			{ getRows: () => 24 },
+		);
+		picker.handleInput("\x1b[B");
+		picker.handleInput("\x1b[B");
+		expect(picker.render(100)).toEqual(picker.render(100));
+		expect(picker.render(100)).toEqual(picker.render(100));
+	});
+
+	it("shows one fixed description line with the shortcuts underneath, never resizing for the description", () => {
+		const services = [
+			viewFixture({
+				serviceId: "canva",
+				label: "Canva",
+				connectionStatus: "connected",
+				connectionIds: ["canva"],
+				toolCount: 34,
+				description: "Design and publish social content.",
+			}),
+			...Array.from({ length: 76 }, (_, i) =>
+				viewFixture({
+					serviceId: `svc-${i}`,
+					label: `Service ${i}`,
+					description: `Description ${i} long enough to need truncation at narrow widths for the single detail line.`,
+				}),
+			),
+		];
+		const picker = new ServiceCatalogPickerComponent(
+			services,
+			() => {},
+			() => {},
+			{ getRows: () => 24 },
+		);
+		const frame = () => picker.render(100).map(stripAnsi);
+		let lines = frame();
+		const detailIndex = lines.findIndex((line) => line.includes("Design and publish social content."));
+		expect(detailIndex).toBeGreaterThan(0);
+		// Exactly ONE description line, the counter directly above it, the
+		// shortcuts directly underneath, no blank separator rows, and the hint
+		// is the panel's last line.
+		expect(lines[detailIndex - 1].trim()).toMatch(/\(\d+\/\d+\)/);
+		expect(lines[detailIndex + 1]).toContain("↑/↓ navigate");
+		expect(lines[detailIndex + 1]).toContain("Enter manage accounts");
+		expect(lines[lines.length - 1]).toContain("Esc close");
+		const heightAtFirst = lines.length;
+		// Navigating swaps the description text but never the panel height.
+		picker.handleInput("\x1b[B");
+		picker.handleInput("\x1b[B");
+		lines = frame();
+		expect(lines).toHaveLength(heightAtFirst);
+		// Two downs move to svc-1 (index 2, after Canva): the description line
+		// swaps to that connector without changing the panel height.
+		expect(lines.some((line) => line.includes("Description 1"))).toBe(true);
+		// The one-line contract holds at narrow widths too.
+		expect(picker.render(40).map(stripAnsi)).toHaveLength(heightAtFirst);
+	});
+
+	it("counts exactly the rows it renders, including pinned installed connections", () => {
+		// Kevin's live /mcp read (1/77) against the 75-entry catalog: the two
+		// extra rows are his installed figma/huggingface-skills connections
+		// pinned from records after the catalog cut. The counter counts the
+		// rendered list — 77 unique rows — and follows the search filter.
+		const services = [
+			...Array.from({ length: 75 }, (_, i) => viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` })),
+			viewFixture({ serviceId: "figma", label: "Figma" }),
+			viewFixture({ serviceId: "huggingface-skills", label: "Hugging Face" }),
+		];
+		const picker = new ServiceCatalogPickerComponent(
+			services,
+			() => {},
+			() => {},
+			{ getRows: () => 24 },
+		);
+		const counterLine = () =>
+			picker
+				.render(100)
+				.map(stripAnsi)
+				.find((line) => /\(\d+\/\d+\)/.test(line));
+		expect(counterLine()).toContain("(1/77)");
+		picker.handleInput("service");
+		expect(counterLine()).toContain("(1/75)");
+		// A filtered list that fits on screen drops the scroll counter entirely.
+		for (let i = 0; i < 7; i++) picker.handleInput("\x7f");
+		picker.handleInput("hugg");
+		expect(counterLine()).toBeUndefined();
+		expect(stripAnsi(picker.render(100).join("\n"))).toContain("Hugging Face");
 	});
 });

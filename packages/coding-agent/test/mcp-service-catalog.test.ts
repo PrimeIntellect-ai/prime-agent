@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { McpServiceEntry } from "@earendil-works/pi-ai/mcp";
-import { createMcpOAuthProvider } from "@earendil-works/pi-ai/mcp";
+import { createMcpOAuthProvider, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -1468,5 +1468,55 @@ describe("resolveMcpServiceCatalog", () => {
 		expect(kept).toContain("notion");
 		expect(kept.filter((id) => id.startsWith("bulk-"))).toEqual([]);
 		expect(capped.diagnostics.some((line) => line.includes("retained inventory alone exceeded the cap"))).toBe(true);
+	});
+});
+
+describe("/mcp and /plugins picker row counts", () => {
+	it("ships exactly 75 catalog services after the ENG-6108 one-click/token-key cut", () => {
+		// The live /mcp picker counter read /77 against this shipped 75: the two
+		// extra rows are installed connections pinned from records (below), never
+		// catalog growth or duplicated rows. Pin the shipped length so silent
+		// re-growth changes the counter loudly.
+		expect(SERVICE_CATALOG.length).toBe(75);
+	});
+
+	it("counts rows as the shipped catalog plus pinned installed connections — unique, no off-by-N", () => {
+		// Kevin's live state: figma and huggingface-skills were cut from the
+		// shipped catalog but their connections are installed, so their records
+		// pin durable descriptors and the picker legitimately lists 75 + 2 = 77
+		// rows. Every row is unique — the counter matches the rendered list.
+		const catalogIds = new Set(SERVICE_CATALOG.map((entry) => entry.server));
+		expect(catalogIds.has("figma")).toBe(false);
+		expect(catalogIds.has("huggingface-skills")).toBe(false);
+		const now = Date.now();
+		const tempDir = mkdtempSync(join(tmpdir(), "svc-catalog-count-"));
+		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		try {
+			for (const id of ["figma", "huggingface-skills"]) {
+				store.upsert({
+					connectionId: id,
+					serviceId: id,
+					endpoint: `https://${id}.example.test/mcp`,
+					label: id,
+					status: "pending",
+					createdAt: now,
+					updatedAt: now,
+				});
+			}
+			const resolution = resolveMcpServiceCatalog({ records: store.records() });
+			expect(resolution.diagnostics).toEqual([]);
+			expect(resolution.descriptors).toHaveLength(SERVICE_CATALOG.length + 2);
+			expect(resolution.descriptors.filter((descriptor) => descriptor.pinnedFromRecord)).toHaveLength(2);
+			const views = buildPluginViews({
+				services: resolution.descriptors,
+				userServers: {},
+				authStorage: AuthStorage.inMemory(),
+				connectionStore: store,
+			});
+			expect(views).toHaveLength(SERVICE_CATALOG.length + 2);
+			expect(new Set(views.map((view) => view.serviceId)).size).toBe(SERVICE_CATALOG.length + 2);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });

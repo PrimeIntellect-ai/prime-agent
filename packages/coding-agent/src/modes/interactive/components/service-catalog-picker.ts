@@ -32,6 +32,14 @@ export interface ServiceCatalogPickerOptions extends MenuViewportProvider {
 const PREFERRED_VISIBLE_SERVICES = 8;
 const SEARCH_AND_FOOTER_ROWS = 4;
 const SCROLL_INDICATOR_ROWS = 1;
+/** The one fixed line under the list describing the selected connector. */
+const DETAIL_ROWS = 1;
+/**
+ * Viewports below this height cannot fit the search box, one result row, the
+ * counter, the description, and the hint; the description line drops instead
+ * of overflowing the terminal. Real terminals never reach this boundary.
+ */
+const MIN_ROWS_FOR_DETAIL = SEARCH_AND_FOOTER_ROWS + DETAIL_ROWS + 2;
 
 /**
  * Inline catalog/account picker on the same menu primitives as models/providers.
@@ -132,16 +140,13 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	}
 
 	override render(width: number): string[] {
-		const previousLayout = this.listLayout;
-		const previousDetailRows = this.detailRows;
-		this.updateLayout();
-		if (
-			this.listLayout.compact !== previousLayout.compact ||
-			this.listLayout.visibleItems !== previousLayout.visibleItems ||
-			this.detailRows !== previousDetailRows
-		) {
-			this.updateList();
-		}
+		// Pure projection: rebuild the visible window from the CURRENT selection,
+		// filter, and viewport on every render. The old layout-change heuristic
+		// kept stale row children whenever a rebuild was skipped, so frames
+		// rendered at unusual times (resizes, host re-renders) could disagree
+		// about which rows were visible or selected. Rebuilding here makes
+		// consecutive frames with unchanged state render byte-identical output.
+		this.updateList();
 		const selected = this.filteredServices[this.selectedIndex];
 		const confirm = keyText("tui.select.confirm", { primaryOnly: true });
 		const cancel = keyText("tui.select.cancel", { primaryOnly: true });
@@ -157,6 +162,9 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		this.updateLayout();
 		this.listContainer.clear();
 
+		// Centered window over the selection, clamped to the list bounds: at the
+		// top boundary the window starts at row 0 and moving down only ever
+		// shifts it forward — rows never wrap around or repeat.
 		const maxVisible = this.listLayout.visibleItems;
 		const startIndex = Math.max(
 			0,
@@ -186,10 +194,12 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			const message = this.allServices.length === 0 ? "No external services available" : "No matching services";
 			this.listContainer.addChild(new TruncatedText(theme.fg("muted", message), 1, 0));
 		} else if (this.detailRows > 0) {
+			// ONE fixed line about the selected connector — never a growing
+			// description block — with the shortcuts row underneath from render().
+			// updateLayout() budgets the line, so the panel never resizes to fit it.
 			const selected = this.filteredServices[this.selectedIndex];
 			this.listContainer.addChild({
 				render: (width) => [
-					"",
 					truncateToWidth(
 						theme.fg(
 							"muted",
@@ -288,7 +298,12 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	}
 
 	private updateLayout(): void {
-		this.detailRows = (this.viewport.getRows?.() ?? Number.POSITIVE_INFINITY) >= 9 + this.contextRows ? 2 : 0;
+		// The description is ONE fixed line (no appearance-driven resize); it
+		// only drops in terminals too short to fit the panel skeleton at all.
+		this.detailRows =
+			(this.viewport.getRows?.() ?? Number.POSITIVE_INFINITY) >= MIN_ROWS_FOR_DETAIL + this.contextRows
+				? DETAIL_ROWS
+				: 0;
 		this.listLayout = getMenuListLayout({
 			getRows: this.viewport.getRows,
 			preferredVisibleItems: PREFERRED_VISIBLE_SERVICES,
